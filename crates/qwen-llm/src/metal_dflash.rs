@@ -48,15 +48,15 @@ use crate::metal::{
     kernel_trace_take_delta,
 };
 use crate::metal_forward::{
-    ATTN_V4_MAX_NWG, MetalBlock, MetalForward, MetalModel, MetalMoeFfn, MetalSession, RMS_EPS,
-    checked_u64_add, checked_u64_double, checked_u64_mul, checked_u64_mul3, checked_u64_mul4,
-    encode_mat_mat_dispatch, encode_mat_vec_dispatch, encode_scatter_offset_f32,
-    weight_dtype_kept_native,
+    ATTN_V4_MAX_NWG, LmHeadTail, LmHeadTailEvidence, MetalBlock, MetalForward, MetalModel,
+    MetalMoeFfn, MetalSession, MfError, RMS_EPS, checked_u64_add, checked_u64_double,
+    checked_u64_mul, checked_u64_mul3, checked_u64_mul4, encode_mat_mat_dispatch,
+    encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native,
 };
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
 use std::cell::Cell;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -1861,10 +1861,11 @@ enum PrefillGdnSplitMode {
     PrepStepOut,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PrefillTailMode {
+#[derive(Clone, Copy)]
+enum PrefillTailMode<'a> {
     ReadLogits,
     SkipTail,
+    Supplied(LmHeadTail<'a>),
 }
 
 impl PrefillGdnSplitMode {
@@ -3942,6 +3943,65 @@ pub struct MetalDFlashLayerMajorScratch {
 }
 
 impl MetalDFlashLayerMajorScratch {
+    fn aliases_mutable_buffer(&self, candidate: &MetalTensor) -> bool {
+        let same = |tensor: &MetalTensor| {
+            Retained::as_ptr(&candidate.buffer) == Retained::as_ptr(&tensor.buffer)
+        };
+        [
+            &self.x_pack,
+            &self.h_pack,
+            &self.mixer_out_pack,
+            &self.attn_qkv_fused_pack,
+            &self.attn_q_full_pack,
+            &self.attn_q_pack,
+            &self.attn_gate_pack,
+            &self.attn_q_normed_pack,
+            &self.attn_k_now_pack,
+            &self.attn_v_now_pack,
+            &self.attn_k_normed_pack,
+            &self.attn_o_pack,
+            &self.attn_prefill_v4_o_partial_pack,
+            &self.attn_prefill_v4_ml_partial_pack,
+            &self.attn_matrix_scores_pack,
+            &self.attn_matrix_scores_h_pack,
+            &self.attn_matrix_ml_pack,
+            &self.attn_matrix_vt_pack,
+            &self.ffn_gate_pack,
+            &self.ffn_up_pack,
+            &self.ffn_inner_pack,
+            &self.ffn_out_pack,
+            &self.moe_topk_idx_pack,
+            &self.moe_router_probs_pack,
+            &self.moe_topk_weight_pack,
+            &self.moe_shared_gate_pack,
+            &self.moe_inner_pack,
+            &self.moe_expert_out_pack,
+            &self.moe_group_slot_idx_pack,
+            &self.moe_group_count_pack,
+            &self.moe_group_ids_pack,
+            &self.moe_group_token_idx_pack,
+            &self.moe_group_weight_pack,
+            &self.moe_group_inner_pack,
+            &self.moe_group_out_pack,
+            &self.moe_shared_ffn_gate_pack,
+            &self.moe_shared_ffn_up_pack,
+            &self.moe_shared_ffn_inner_pack,
+            &self.moe_shared_ffn_out_pack,
+            &self.final_logits_pack,
+            &self.gdn_qkv_pack,
+            &self.gdn_z_pack,
+            &self.gdn_beta_pack,
+            &self.gdn_alpha_pack,
+            &self.gdn_q_norm_pack,
+            &self.gdn_k_norm_pack,
+            &self.gdn_v_pack,
+            &self.gdn_out_pack,
+            &self.gdn_normed_pack,
+        ]
+        .into_iter()
+        .any(same)
+    }
+
     fn fresh_inner(
         ctx: &MetalContext,
         target_model: &crate::metal_forward::MetalModel,
@@ -7055,7 +7115,7 @@ pub fn prefill_tokens_with_multi_hidden_profiled(
     target_layer_ids: &[u32],
     hidden_dst: Option<&MetalTensor>,
 ) -> Result<(Vec<f32>, f64), DFlashError> {
-    let (logits, gpu_ms) = prefill_tokens_with_multi_hidden_profiled_inner(
+    let (logits, gpu_ms, _) = prefill_tokens_with_multi_hidden_profiled_inner(
         base,
         token_ids,
         start_position,
@@ -7082,7 +7142,7 @@ pub fn prefill_tokens_prompt_only_profiled(
     target_session: &mut MetalSession,
     layer_scratch: &mut MetalDFlashLayerMajorScratch,
 ) -> Result<f64, DFlashError> {
-    let (_, gpu_ms) = prefill_tokens_with_multi_hidden_profiled_inner(
+    let (_, gpu_ms, _) = prefill_tokens_with_multi_hidden_profiled_inner(
         base,
         token_ids,
         start_position,
@@ -7096,6 +7156,37 @@ pub fn prefill_tokens_prompt_only_profiled(
     Ok(gpu_ms)
 }
 
+#[doc(hidden)]
+pub fn prefill_tokens_profiled_with_tail(
+    base: &MetalForward<'_>,
+    token_ids: &[i32],
+    start_position: u32,
+    target_session: &mut MetalSession,
+    layer_scratch: &mut MetalDFlashLayerMajorScratch,
+    tail: LmHeadTail<'_>,
+) -> Result<(f64, LmHeadTailEvidence), DFlashError> {
+    let (_, gpu_ms, evidence) = prefill_tokens_with_multi_hidden_profiled_inner(
+        base,
+        token_ids,
+        start_position,
+        target_session,
+        layer_scratch,
+        &[],
+        None,
+        PrefillTailMode::Supplied(tail),
+        None,
+    )?;
+    Ok((
+        gpu_ms,
+        evidence.ok_or_else(|| {
+            DFlashError::Metal(MetalError::BadShape {
+                kernel: "prefill_tokens_profiled_with_tail",
+                detail: "supplied tail returned no evidence".into(),
+            })
+        })?,
+    ))
+}
+
 /// Bench-only prefill entry point. The ordinary prefill wrappers always pass no capture.
 pub fn prefill_tokens_attention_capture(
     base: &MetalForward<'_>,
@@ -7105,7 +7196,7 @@ pub fn prefill_tokens_attention_capture(
     layer_scratch: &mut MetalDFlashLayerMajorScratch,
     capture: &mut AttentionCapture,
 ) -> Result<f64, DFlashError> {
-    let (_, gpu_ms) = prefill_tokens_with_multi_hidden_profiled_inner(
+    let (_, gpu_ms, _) = prefill_tokens_with_multi_hidden_profiled_inner(
         base,
         token_ids,
         start_position,
@@ -7120,7 +7211,7 @@ pub fn prefill_tokens_attention_capture(
     Ok(gpu_ms)
 }
 
-fn prefill_tokens_with_multi_hidden_profiled_inner(
+fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
     base: &MetalForward<'_>,
     token_ids: &[i32],
     start_position: u32,
@@ -7128,15 +7219,30 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
     layer_scratch: &mut MetalDFlashLayerMajorScratch,
     target_layer_ids: &[u32],
     hidden_dst: Option<&MetalTensor>,
-    tail_mode: PrefillTailMode,
+    tail_mode: PrefillTailMode<'a>,
     mut attention_capture: Option<&mut AttentionCapture>,
-) -> Result<(Option<Vec<f32>>, f64), DFlashError> {
+) -> Result<(Option<Vec<f32>>, f64, Option<LmHeadTailEvidence>), DFlashError> {
     let arch = &base.model.arch;
     let total_n = token_ids.len();
     let h = arch.hidden_size as usize;
     let f = arch.intermediate_size as usize;
     let v = arch.vocab_size as usize;
     let k_target = target_layer_ids.len();
+    let mut tail_evidence = match tail_mode {
+        PrefillTailMode::Supplied(tail) => {
+            if let LmHeadTail::CompactQ6K { weight, output } = tail
+                && (layer_scratch.aliases_mutable_buffer(weight)
+                    || layer_scratch.aliases_mutable_buffer(output))
+            {
+                return Err(DFlashError::Metal(MetalError::BadShape {
+                    kernel: "prefill_lm_head_tail",
+                    detail: "compact tail aliases mutable packed-prefill scratch".into(),
+                }));
+            }
+            Some(base.validate_lm_head_tail(target_session, tail)?)
+        }
+        PrefillTailMode::ReadLogits | PrefillTailMode::SkipTail => None,
+    };
     let p_max = layer_scratch.n as usize;
 
     // ---- Public-entry validation ----
@@ -11743,7 +11849,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
         // (single-token scratch); we copy x_pack[chunk_p-1, :] into
         // session.h via final norm directly, skipping the session.x copy.
         if is_last_chunk {
-            if matches!(tail_mode, PrefillTailMode::ReadLogits) {
+            if !matches!(tail_mode, PrefillTailMode::SkipTail) {
                 let enc = KernelEncoder::begin(&cmd_buf);
                 let x_last = x_pack_p.view_subrange(((chunk_p - 1) * h) as u64, vec![h as u64]);
                 encode_rms_norm_mul_f32(
@@ -11754,15 +11860,12 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     &target_session.h,
                     RMS_EPS,
                 )?;
-                encode_mat_vec_dispatch(
-                    base.ctx,
-                    &enc,
-                    &base.model.lm_head,
-                    &target_session.h,
-                    &target_session.logits,
-                    h,
-                    v,
-                )?;
+                let tail = match tail_mode {
+                    PrefillTailMode::ReadLogits => LmHeadTail::Resident,
+                    PrefillTailMode::Supplied(tail) => tail,
+                    PrefillTailMode::SkipTail => unreachable!("skip tail was excluded"),
+                };
+                base.encode_lm_head_tail(&enc, target_session, tail)?;
                 enc.end();
             }
             emit_prefill_count_phase(trace_counts, chunk_idx, chunk_start, 0, "chunk", "tail");
@@ -11773,6 +11876,18 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
             let after_wait = Instant::now();
             let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
             prefill_gpu_total_ms += chunk_gpu_ms;
+            if let Some(evidence) = tail_evidence.as_mut() {
+                let status = cmd_buf.status();
+                let error = cmd_buf.error();
+                evidence.command_completed = status == MTLCommandBufferStatus::Completed;
+                evidence.command_error_none = error.is_none();
+                if !evidence.command_completed || !evidence.command_error_none {
+                    return Err(DFlashError::MetalForward(MfError::CommandBuffer {
+                        status: format!("{status:?}"),
+                        error: format!("{error:?}"),
+                    }));
+                }
+            }
             let mut tail_readback_ms = 0.0f64;
             let result_logits = if matches!(tail_mode, PrefillTailMode::ReadLogits) {
                 let readback_start = Instant::now();
@@ -11806,10 +11921,10 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     chunk_idx,
                     chunk_start,
                     chunk_p,
-                    if matches!(tail_mode, PrefillTailMode::ReadLogits) {
-                        "read"
-                    } else {
-                        "skip"
+                    match tail_mode {
+                        PrefillTailMode::ReadLogits => "read",
+                        PrefillTailMode::SkipTail => "skip",
+                        PrefillTailMode::Supplied(_) => "supplied",
                     },
                     (chunk_encode_start - chunk_wall).as_secs_f64() * 1e3,
                     (before_commit - chunk_encode_start).as_secs_f64() * 1e3,
@@ -11824,7 +11939,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner(
                     prefill_gpu_total_ms,
                 );
             }
-            return Ok((result_logits, prefill_gpu_total_ms));
+            return Ok((result_logits, prefill_gpu_total_ms, tail_evidence));
         }
 
         // Non-last chunk: just commit + wait (no tail).

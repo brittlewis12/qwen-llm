@@ -1123,8 +1123,8 @@ fn t9_ffn_capture_slots_for_current_call() -> Option<(MetalTensor, MetalTensor)>
 }
 
 use objc2_metal::{
-    MTLBuffer, MTLCPUCacheMode, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState,
-    MTLDevice, MTLHazardTrackingMode, MTLResource, MTLStorageMode,
+    MTLBuffer, MTLCPUCacheMode, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue,
+    MTLComputePipelineState, MTLDevice, MTLHazardTrackingMode, MTLResource, MTLStorageMode,
 };
 
 #[cfg(test)]
@@ -1205,12 +1205,91 @@ pub enum MfError {
     LoadPolicy(String),
     #[error("snapshot validation: {0}")]
     Snapshot(#[from] SnapshotValidationError),
+    #[error("Metal command buffer failed: status={status} error={error}")]
+    CommandBuffer { status: String, error: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ArgmaxReduction {
     SpeculativeLowest,
     GreedyTotal,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub enum LmHeadTail<'a> {
+    Resident,
+    CompactQ6K {
+        weight: &'a MetalTensor,
+        output: &'a MetalTensor,
+    },
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LmHeadTailKind {
+    Resident,
+    CompactQ6K,
+}
+
+impl LmHeadTailKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Resident => "resident",
+            Self::CompactQ6K => "compact_q6_k",
+        }
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LmHeadTailEvidence {
+    pub kind: LmHeadTailKind,
+    pub n_in: usize,
+    pub n_out: usize,
+    pub weight_offset: u64,
+    pub output_offset: u64,
+    pub tail_dispatches: u32,
+    pub full_head_dispatches: u32,
+    pub command_completed: bool,
+    pub command_error_none: bool,
+}
+
+fn lm_head_tail_error(detail: impl Into<String>) -> MfError {
+    MfError::Metal(MetalError::BadShape {
+        kernel: "lm_head_tail",
+        detail: detail.into(),
+    })
+}
+
+fn checked_tail_range(
+    tensor: &MetalTensor,
+    logical_bytes: usize,
+    label: &str,
+) -> Result<(usize, usize), MfError> {
+    let start = usize::try_from(tensor.offset)
+        .map_err(|_| lm_head_tail_error(format!("{label} offset does not fit usize")))?;
+    let end = start
+        .checked_add(logical_bytes)
+        .ok_or_else(|| lm_head_tail_error(format!("{label} endpoint overflow")))?;
+    if end > tensor.buffer.length() {
+        return Err(lm_head_tail_error(format!(
+            "{label} range [{start}..{end}) exceeds buffer length {}",
+            tensor.buffer.length()
+        )));
+    }
+    Ok((start, end))
+}
+
+fn tail_ranges_overlap(
+    left: &MetalTensor,
+    left_range: (usize, usize),
+    right: &MetalTensor,
+    right_range: (usize, usize),
+) -> bool {
+    Retained::as_ptr(&left.buffer) == Retained::as_ptr(&right.buffer)
+        && left_range.0 < right_range.1
+        && right_range.0 < left_range.1
 }
 
 fn encode_argmax_reduction(
@@ -4979,6 +5058,57 @@ pub struct MetalSession {
 }
 
 impl MetalSession {
+    pub(crate) fn aliases_mutable_buffer(&self, candidate: &MetalTensor) -> bool {
+        let same = |tensor: &MetalTensor| {
+            Retained::as_ptr(&candidate.buffer) == Retained::as_ptr(&tensor.buffer)
+        };
+        self.gdn_conv.iter().any(&same)
+            || self.gdn_state.iter().any(&same)
+            || self.kv_k.iter().any(&same)
+            || self.kv_v.iter().any(&same)
+            || [
+                &self.x,
+                &self.h,
+                &self.ffn_gate,
+                &self.ffn_up,
+                &self.ffn_inner,
+                &self.ffn_out,
+                &self.gdn_qkv,
+                &self.gdn_qkv_conv,
+                &self.gdn_z,
+                &self.gdn_b,
+                &self.gdn_beta,
+                &self.gdn_a,
+                &self.gdn_alpha,
+                &self.gdn_q_norm,
+                &self.gdn_k_norm,
+                &self.gdn_out,
+                &self.gdn_normed,
+                &self.mixer_out,
+                &self.attn_q_full,
+                &self.attn_q,
+                &self.attn_gate,
+                &self.attn_q_normed,
+                &self.attn_k_now,
+                &self.attn_v_now,
+                &self.attn_k_normed,
+                &self.attn_o,
+                &self.attn_v4_o_partial,
+                &self.attn_v4_ml_partial,
+                &self.logits,
+                &self.argmax_tok,
+                &self.moe_router_probs,
+                &self.moe_topk_idx,
+                &self.moe_topk_weight,
+                &self.moe_shared_gate,
+                &self.moe_inner,
+                &self.moe_expert_out,
+                &self.ids_buf,
+            ]
+            .into_iter()
+            .any(same)
+    }
+
     pub fn fresh(
         ctx: &MetalContext,
         model: &MetalModel,
@@ -7344,32 +7474,167 @@ impl<'a> MetalForward<'a> {
         ))
     }
 
-    pub fn single_token_profiled_concurrent_gdn_moe(
+    fn resident_lm_head_tail_evidence(&self, session: &MetalSession) -> LmHeadTailEvidence {
+        LmHeadTailEvidence {
+            kind: LmHeadTailKind::Resident,
+            n_in: self.model.arch.hidden_size as usize,
+            n_out: self.model.arch.vocab_size as usize,
+            weight_offset: self.model.lm_head.offset,
+            output_offset: session.logits.offset,
+            tail_dispatches: 1,
+            full_head_dispatches: 1,
+            command_completed: false,
+            command_error_none: false,
+        }
+    }
+
+    pub(crate) fn validate_lm_head_tail(
         &self,
-        token_id: i32,
+        session: &MetalSession,
+        tail: LmHeadTail<'_>,
+    ) -> Result<LmHeadTailEvidence, MfError> {
+        let h = self.model.arch.hidden_size as usize;
+        let vocab = self.model.arch.vocab_size as usize;
+        match tail {
+            LmHeadTail::Resident => {
+                if self.model.lm_head.shape.as_slice() != [h as u64, vocab as u64] {
+                    return Err(lm_head_tail_error("resident head shape mismatch"));
+                }
+                if session.logits.dtype != GgmlType::F32
+                    || session.logits.shape.as_slice() != [vocab as u64]
+                    || !session.logits.is_writable()
+                {
+                    return Err(lm_head_tail_error("resident logits shape mismatch"));
+                }
+                let output_bytes = vocab
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| lm_head_tail_error("resident logits bytes overflow"))?;
+                checked_tail_range(&session.logits, output_bytes, "resident logits")?;
+                Ok(self.resident_lm_head_tail_evidence(session))
+            }
+            LmHeadTail::CompactQ6K { weight, output } => {
+                if weight.dtype != GgmlType::Q6_K
+                    || weight.shape.len() != 2
+                    || weight.shape[0] != h as u64
+                    || weight.shape[1] == 0
+                    || weight.shape[1] > 17
+                    || weight.provenance() != MetalTensorProvenance::OwnedWeightReadOnly
+                    || weight.is_writable()
+                {
+                    return Err(lm_head_tail_error("compact Q6_K weight contract mismatch"));
+                }
+                let n_out = usize::try_from(weight.shape[1])
+                    .map_err(|_| lm_head_tail_error("compact width does not fit usize"))?;
+                if h % 256 != 0 {
+                    return Err(lm_head_tail_error(
+                        "compact input width is not Q6_K block aligned",
+                    ));
+                }
+                if output.dtype != GgmlType::F32
+                    || output.shape.as_slice() != [n_out as u64]
+                    || !output.is_writable()
+                    || output.offset % std::mem::align_of::<f32>() as u64 != 0
+                    || weight.offset % 32 != 0
+                {
+                    return Err(lm_head_tail_error("compact output contract mismatch"));
+                }
+                if session.h.dtype != GgmlType::F32
+                    || session.h.shape.as_slice() != [h as u64]
+                    || !session.h.is_writable()
+                    || session.h.offset % std::mem::align_of::<f32>() as u64 != 0
+                    || session.x.dtype != GgmlType::F32
+                    || session.x.shape.as_slice() != [h as u64]
+                    || !session.x.is_writable()
+                    || session.x.offset % std::mem::align_of::<f32>() as u64 != 0
+                {
+                    return Err(lm_head_tail_error("session hidden contract mismatch"));
+                }
+                if session.aliases_mutable_buffer(weight) {
+                    return Err(lm_head_tail_error(
+                        "compact weight aliases mutable session storage",
+                    ));
+                }
+                if session.aliases_mutable_buffer(output) {
+                    return Err(lm_head_tail_error(
+                        "compact output aliases mutable session storage",
+                    ));
+                }
+                let weight_bytes = h
+                    .checked_div(256)
+                    .and_then(|blocks| blocks.checked_mul(210))
+                    .and_then(|row| row.checked_mul(n_out))
+                    .ok_or_else(|| lm_head_tail_error("compact weight bytes overflow"))?;
+                let output_bytes = n_out
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| lm_head_tail_error("compact output bytes overflow"))?;
+                let hidden_bytes = h
+                    .checked_mul(std::mem::size_of::<f32>())
+                    .ok_or_else(|| lm_head_tail_error("hidden bytes overflow"))?;
+                let weight_range = checked_tail_range(weight, weight_bytes, "compact weight")?;
+                let output_range = checked_tail_range(output, output_bytes, "compact output")?;
+                let hidden_range = checked_tail_range(&session.h, hidden_bytes, "session.h")?;
+                let residual_range = checked_tail_range(&session.x, hidden_bytes, "session.x")?;
+                if tail_ranges_overlap(weight, weight_range, output, output_range)
+                    || tail_ranges_overlap(&session.h, hidden_range, output, output_range)
+                    || tail_ranges_overlap(&session.x, residual_range, output, output_range)
+                {
+                    return Err(lm_head_tail_error("compact tail buffers overlap"));
+                }
+                Ok(LmHeadTailEvidence {
+                    kind: LmHeadTailKind::CompactQ6K,
+                    n_in: h,
+                    n_out,
+                    weight_offset: weight.offset,
+                    output_offset: output.offset,
+                    tail_dispatches: 1,
+                    full_head_dispatches: 0,
+                    command_completed: false,
+                    command_error_none: false,
+                })
+            }
+        }
+    }
+
+    pub(crate) fn encode_lm_head_tail(
+        &self,
+        enc: &KernelEncoder,
+        session: &MetalSession,
+        tail: LmHeadTail<'_>,
+    ) -> Result<(), MfError> {
+        let h = self.model.arch.hidden_size as usize;
+        match tail {
+            LmHeadTail::Resident => encode_mat_vec_dispatch(
+                self.ctx,
+                enc,
+                &self.model.lm_head,
+                &session.h,
+                &session.logits,
+                h,
+                self.model.arch.vocab_size as usize,
+            )?,
+            LmHeadTail::CompactQ6K { weight, output } => encode_mat_vec_dispatch(
+                self.ctx,
+                enc,
+                weight,
+                &session.h,
+                output,
+                h,
+                usize::try_from(weight.shape[1])
+                    .map_err(|_| lm_head_tail_error("compact width does not fit usize"))?,
+            )?,
+        }
+        Ok(())
+    }
+
+    fn encode_single_token_concurrent_gdn_moe_body(
+        &self,
+        cmd_buf: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         position: u32,
         session: &mut MetalSession,
-    ) -> Result<(Vec<f32>, TokenProfile), MfError> {
-        let arch = &self.model.arch;
-        if arch.kind != ArchKind::Moe {
-            return Err(MfError::UnsupportedMoe);
-        }
-        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
-            return Err(MfError::BadToken(token_id, arch.vocab_size));
-        }
-        let h = arch.hidden_size as usize;
-        let t_total = std::time::Instant::now();
-
-        unsafe {
-            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
-            *ptr = token_id;
-        }
-
-        let t_encode = std::time::Instant::now();
-        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
-
+    ) -> Result<(), MfError> {
+        let h = self.model.arch.hidden_size as usize;
         {
-            let enc = KernelEncoder::begin(&cmd_buf);
+            let enc = KernelEncoder::begin(cmd_buf);
             encode_get_rows_f32(
                 self.ctx,
                 &enc,
@@ -7391,7 +7656,7 @@ impl<'a> MetalForward<'a> {
                     gdn_idx += 1;
                     let moe = g.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
                     {
-                        let enc = KernelEncoder::begin(&cmd_buf);
+                        let enc = KernelEncoder::begin(cmd_buf);
                         encode_rms_norm_mul_f32(
                             self.ctx,
                             &enc,
@@ -7403,12 +7668,12 @@ impl<'a> MetalForward<'a> {
                         enc.end();
                     }
                     {
-                        let enc = KernelEncoder::begin_concurrent(&cmd_buf);
+                        let enc = KernelEncoder::begin_concurrent(cmd_buf);
                         self.encode_gdn_front_projections(&enc, g, session)?;
                         enc.end();
                     }
                     {
-                        let enc = KernelEncoder::begin(&cmd_buf);
+                        let enc = KernelEncoder::begin(cmd_buf);
                         self.encode_gdn_after_projections(&enc, g, i, session)?;
                         encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
                         encode_rms_norm_mul_f32(
@@ -7434,7 +7699,7 @@ impl<'a> MetalForward<'a> {
                     }
                     if concurrent_shared_moe_decode_enabled() {
                         self.encode_moe_ffn_apply_gpu_concurrent_shared(
-                            &cmd_buf,
+                            cmd_buf,
                             session,
                             &g.ffn_gate,
                             &g.ffn_up,
@@ -7446,7 +7711,7 @@ impl<'a> MetalForward<'a> {
                 MetalBlock::Attn(a) => {
                     let slot = MixerSlot::Attn(attn_idx);
                     attn_idx += 1;
-                    let enc = KernelEncoder::begin(&cmd_buf);
+                    let enc = KernelEncoder::begin(cmd_buf);
                     self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
                     let moe = a.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
                     self.encode_moe_route_prepare(&enc, session, moe)?;
@@ -7463,7 +7728,7 @@ impl<'a> MetalForward<'a> {
                     enc.end();
                     if concurrent_shared_moe_decode_enabled() {
                         self.encode_moe_ffn_apply_gpu_concurrent_shared(
-                            &cmd_buf,
+                            cmd_buf,
                             session,
                             &a.ffn_gate,
                             &a.ffn_up,
@@ -7474,7 +7739,44 @@ impl<'a> MetalForward<'a> {
                 }
             }
         }
+        Ok(())
+    }
 
+    fn single_token_profiled_concurrent_gdn_moe_tail_inner(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        tail: LmHeadTail<'_>,
+        require_completed_command: bool,
+    ) -> Result<(TokenProfile, LmHeadTailEvidence, std::time::Instant), MfError> {
+        let arch = &self.model.arch;
+        if arch.kind != ArchKind::Moe {
+            return Err(MfError::UnsupportedMoe);
+        }
+        if token_id < 0 || (token_id as u32) >= arch.vocab_size {
+            return Err(MfError::BadToken(token_id, arch.vocab_size));
+        }
+        let mut evidence = if require_completed_command {
+            self.validate_lm_head_tail(session, tail)?
+        } else {
+            if !matches!(tail, LmHeadTail::Resident) {
+                return Err(lm_head_tail_error(
+                    "unchecked tail execution is resident-only",
+                ));
+            }
+            self.resident_lm_head_tail_evidence(session)
+        };
+        let t_total = std::time::Instant::now();
+
+        unsafe {
+            let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
+            *ptr = token_id;
+        }
+
+        let t_encode = std::time::Instant::now();
+        let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
+        self.encode_single_token_concurrent_gdn_moe_body(&cmd_buf, position, session)?;
         {
             let enc = KernelEncoder::begin(&cmd_buf);
             encode_rms_norm_mul_f32(
@@ -7485,15 +7787,7 @@ impl<'a> MetalForward<'a> {
                 &session.h,
                 RMS_EPS,
             )?;
-            encode_mat_vec_dispatch(
-                self.ctx,
-                &enc,
-                &self.model.lm_head,
-                &session.h,
-                &session.logits,
-                h,
-                arch.vocab_size as usize,
-            )?;
+            self.encode_lm_head_tail(&enc, session, tail)?;
             enc.end();
         }
 
@@ -7503,24 +7797,70 @@ impl<'a> MetalForward<'a> {
         cmd_buf.waitUntilCompleted();
         let cpu_to_gpu_complete_ms = t_gpu.elapsed().as_secs_f64() * 1e3;
         let gpu_kernel_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
-
-        let mut out = vec![0.0f32; arch.vocab_size as usize];
-        unsafe {
-            let src = session.logits.buffer.contents().as_ptr() as *const f32;
-            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
+        if require_completed_command {
+            let status = cmd_buf.status();
+            let error = cmd_buf.error();
+            evidence.command_completed = status == MTLCommandBufferStatus::Completed;
+            evidence.command_error_none = error.is_none();
+            if !evidence.command_completed || !evidence.command_error_none {
+                return Err(MfError::CommandBuffer {
+                    status: format!("{status:?}"),
+                    error: format!("{error:?}"),
+                });
+            }
         }
-        let total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+
         Ok((
-            out,
             TokenProfile {
                 cpu_encode_ms,
                 cpu_to_gpu_complete_ms,
                 gpu_kernel_ms,
-                total_ms,
+                total_ms: t_total.elapsed().as_secs_f64() * 1e3,
                 moe_cpu_route_ms: 0.0,
                 moe_cmd_count: 1,
             },
+            evidence,
+            t_total,
         ))
+    }
+
+    #[doc(hidden)]
+    pub fn single_token_profiled_concurrent_gdn_moe_with_tail(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        tail: LmHeadTail<'_>,
+    ) -> Result<(TokenProfile, LmHeadTailEvidence), MfError> {
+        let (profile, evidence, _) = self.single_token_profiled_concurrent_gdn_moe_tail_inner(
+            token_id, position, session, tail, true,
+        )?;
+        Ok((profile, evidence))
+    }
+
+    pub fn single_token_profiled_concurrent_gdn_moe(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(Vec<f32>, TokenProfile), MfError> {
+        let (mut profile, evidence, t_total) = self
+            .single_token_profiled_concurrent_gdn_moe_tail_inner(
+                token_id,
+                position,
+                session,
+                LmHeadTail::Resident,
+                false,
+            )?;
+        debug_assert_eq!(evidence.kind, LmHeadTailKind::Resident);
+        let mut out = vec![0.0f32; self.model.arch.vocab_size as usize];
+        unsafe {
+            let src = (session.logits.buffer.contents().as_ptr() as *const u8)
+                .add(session.logits.offset as usize) as *const f32;
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
+        }
+        profile.total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((out, profile))
     }
 
     pub fn single_token_argmax_profiled_concurrent_gdn_moe(
@@ -9509,121 +9849,10 @@ impl<'a> MetalForward<'a> {
         let cmd_buf = self.ctx.queue.commandBuffer().expect("command buffer");
 
         if arch.kind == ArchKind::Moe && concurrent_gdn_moe_decode_enabled() {
-            // D1 fix (2026-07-20, packets w0b/w0c-econ): encode MoE blocks
-            // with the SAME organization as production decode
-            // (`single_token_moe` -> concurrent GDN split + flag-selected
-            // concurrent-shared FFN apply). This path previously hard-used
-            // the plain organization; the resulting ~1e-5/token FFN
-            // accumulation difference seeded recurrent-state divergence in
-            // every MoE MTP session built on this prefill (component D1 of
-            // the v0.556 A3B contract failure). The mirrored loop below
-            // must stay organization-identical to
-            // `single_token_profiled_concurrent_gdn_moe`.
-            {
-                let enc = KernelEncoder::begin(&cmd_buf);
-                encode_get_rows_f32(
-                    self.ctx,
-                    &enc,
-                    &self.model.token_embd,
-                    &session.ids_buf,
-                    &session.x,
-                    1,
-                    h,
-                )?;
-                enc.end();
-            }
-            let mut gdn_idx = 0usize;
-            let mut attn_idx = 0usize;
-            for block in &self.model.blocks {
-                match block {
-                    MetalBlock::Gdn(g) => {
-                        let i = gdn_idx;
-                        gdn_idx += 1;
-                        let moe = g.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
-                        {
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            encode_rms_norm_mul_f32(
-                                self.ctx,
-                                &enc,
-                                &session.x,
-                                &g.attn_norm,
-                                &session.h,
-                                RMS_EPS,
-                            )?;
-                            enc.end();
-                        }
-                        {
-                            let enc = KernelEncoder::begin_concurrent(&cmd_buf);
-                            self.encode_gdn_front_projections(&enc, g, session)?;
-                            enc.end();
-                        }
-                        {
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            self.encode_gdn_after_projections(&enc, g, i, session)?;
-                            encode_add_inplace_f32(self.ctx, &enc, &session.x, &session.mixer_out)?;
-                            encode_rms_norm_mul_f32(
-                                self.ctx,
-                                &enc,
-                                &session.x,
-                                &g.post_attn_norm,
-                                &session.h,
-                                RMS_EPS,
-                            )?;
-                            self.encode_moe_route_prepare(&enc, session, moe)?;
-                            if !concurrent_shared_moe_decode_enabled() {
-                                self.encode_moe_ffn_apply_gpu(
-                                    &enc,
-                                    session,
-                                    &g.ffn_gate,
-                                    &g.ffn_up,
-                                    &g.ffn_down,
-                                    moe,
-                                )?;
-                            }
-                            enc.end();
-                        }
-                        if concurrent_shared_moe_decode_enabled() {
-                            self.encode_moe_ffn_apply_gpu_concurrent_shared(
-                                &cmd_buf,
-                                session,
-                                &g.ffn_gate,
-                                &g.ffn_up,
-                                &g.ffn_down,
-                                moe,
-                            )?;
-                        }
-                    }
-                    MetalBlock::Attn(a) => {
-                        let slot = MixerSlot::Attn(attn_idx);
-                        attn_idx += 1;
-                        let enc = KernelEncoder::begin(&cmd_buf);
-                        self.encode_moe_mixer_prep(&enc, block, slot, position, session)?;
-                        let moe = a.ffn_moe.as_ref().ok_or(MfError::UnsupportedMoe)?;
-                        self.encode_moe_route_prepare(&enc, session, moe)?;
-                        if !concurrent_shared_moe_decode_enabled() {
-                            self.encode_moe_ffn_apply_gpu(
-                                &enc,
-                                session,
-                                &a.ffn_gate,
-                                &a.ffn_up,
-                                &a.ffn_down,
-                                moe,
-                            )?;
-                        }
-                        enc.end();
-                        if concurrent_shared_moe_decode_enabled() {
-                            self.encode_moe_ffn_apply_gpu_concurrent_shared(
-                                &cmd_buf,
-                                session,
-                                &a.ffn_gate,
-                                &a.ffn_up,
-                                &a.ffn_down,
-                                moe,
-                            )?;
-                        }
-                    }
-                }
-            }
+            // D1 fix (2026-07-20, packets w0b/w0c-econ): this path must use
+            // the same encoder organization as production A3B decode. Keep
+            // that invariant structurally by sharing the production body.
+            self.encode_single_token_concurrent_gdn_moe_body(&cmd_buf, position, session)?;
             let enc = KernelEncoder::begin(&cmd_buf);
             encode_rms_norm_mul_f32(
                 self.ctx,

@@ -1077,21 +1077,19 @@ GPU, wait/readback, allocation, copy, and selection wall before reusable
 workspaces; do not import greedy GPU-argmax evidence or call the allocation
 material in advance.
 
-1. **Grammar-row lm-head charged floor**: this is now the active branch. v0.654
-   closes forced-run fast-forward for its exact 36-string response-shape cell:
-   all 616 productive states are reachable, 129 states are singleton, maximum
-   forced suffix is only one, and all 36 canonical paths have zero forced
-   positions. The same cell admits at most 17 vocabulary rows at any state,
-   branch p50/p90/p95 `3/5/6`, only 223 unique rows globally, and only 1,468
-   branch-state row incidences. Against the authenticated dense Q6_K head, a
-   duplicated contiguous state-major branch bank has `6,165,600` bytes of
-   unpadded Q6_K payload; physical alignment, padding, offset tables, and token
-   maps remain unpriced.
-   Build one bench-only exact row-bank floor before a grammar runtime: charge
-   construction against TTFT, preserve constrained selected logits and
-   greedy/seeded sampling, remove `>=70%` of head wall, and project `>=5%`
-   whole-token gain. Contract-exact, belief medium, difficulty S-M floor/M-L
-   product.
+1. **One A3B integrated grammar-row packet**: v0.655 clears the exact charged
+   primitive floor. A3B moves `0.992333 -> 0.150366 ms`, removes `84.8472%` of
+   head wall, projects `9.03398%` whole-token saving, and retains a minimum
+   `+8.047171 ms` net across all 36 paths after `7.099042 ms` setup. Every width,
+   selected-logit, sampler-v1, guard, bank, and command gate passes. The dense
+   guard moves `2.240866 -> 0.160238 ms` and projects `5.38758%`, strengthening
+   primitive transfer without authorizing dense integration.
+   Preregister and execute the one authorized A3B real-hidden product packet.
+   Charge grammar-state tracking, branch lookup, bank setup in TTFT,
+   singleton/terminal handling, constrained sampling, decode, and total request
+   wall. Keep the response-shape grammar, tokenizer policy, A3B profile, and
+   state-major Q6_K organization frozen. Do not build a general grammar engine
+   under this authority. Contract-exact, belief medium-high, difficulty M-L.
 2. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
    sole packet unsealed before the first durable child launch. The no-payload
    headroom probe passed, but ordered hashing of all three shards followed by a
@@ -1130,7 +1128,7 @@ work and remains serialized. A direct-restore codec/population floor is CPU-only
 only while it issues no GPU command; product continuation remains serialized and
 reuse-only. `MTLIO` is a conditional fresh-load population primitive whose timed
 floor remains serialized; without a live A10B baseline it does not preempt the
-grammar oracle.
+integrated grammar-row packet.
 
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
@@ -1139,9 +1137,9 @@ independent memory or changed-representation case. Repack-on-load needs a named
 current-kernel instruction attribution; global allocators and tokenizer automata
 need new independent cases. Adaptive MoE top-k also falls below the active queue:
 router mass is diffuse and ideal k8-to-k6 removal is only about `4.55%` before
-overhead or quality loss. v0.654 clears only the topology prerequisite for exact
-grammar-row restriction; generic norm-certified lm-head screening remains a
-separate lane.
+overhead or quality loss. v0.655 clears only the exact response-shape direct-row
+primitive and one A3B integrated packet; generic norm-certified lm-head
+screening remains a separate lane.
 
 Blocked cold follow-ons remain conditional. v0.602 satisfies the first
 prerequisite for async retained-to-copied promotion, but command-buffer-safe
@@ -1206,10 +1204,12 @@ control. It is no longer an active experiment; keep `decode` as the default.
    timing inference, do not retry its global full-residency method, and park A10B
    loading until a changed-premise phase-local I/O oracle becomes deployment-
    relevant.
-4. v0.654 kills forced-run fast-forward in its exact response-shape cell and
-   exposes a strong exact row-restriction signal. Execute only the bench-local
-   contiguous state-major Q6_K head floor next; do not build general grammar
-   parsing, masking, sampling, or product integration before its charged gate.
+4. v0.654 kills forced-run fast-forward in its exact response-shape cell;
+   v0.655 clears the charged direct-row floor on A3B and the dense guard. Execute
+   the one authorized A3B integrated packet next. Keep the exact grammar,
+   tokenizer, model, Q6_K bank, and sampler-v1 contract fixed; charge real-hidden
+   state tracking, TTFT setup, decode, and total request wall. Do not widen into a
+   general grammar runtime or dense product path first.
 5. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
@@ -1331,12 +1331,13 @@ control. It is no longer an active experiment; keep `decode` as the default.
   Then add production dequant/accumulation error and require about `70%` charged
   head-wall removal plus `>=5%` whole-token projection. The claim is exact selected
   argmax, not bitwise full-logit equivalence. Exact grammar-row restriction is a
-  separate direct-row contract and does not require norm screening. v0.654 clears
-  its topology screen with at most 17 rows per state and 223 rows across the whole
-  grammar. Its first floor must use one prebuilt contiguous state-major quantized
-  bank, charge bank construction and state lookup, reproduce selected logits, and
-  clear the same `70%` head-wall / `5%` whole-token gates before grammar-runtime
-  work. Seeded sampling must preserve the declared grammar-masked distribution.
+  separate direct-row contract and does not require norm screening. v0.655 clears
+  its state-major Q6_K floor at `84.85%` A3B and `92.85%` dense head-wall removal,
+  with `9.03%` and `5.39%` frozen-denominator projections. This authorizes exactly
+  one A3B integrated packet. It must charge setup, real grammar-state lookup,
+  singleton/terminal handling, real-hidden execution, decode, and request wall;
+  seeded sampling must preserve the declared grammar-masked distribution. Dense
+  integration and general grammar transfer require independent authority.
 - **Prompt lookup**: use actual charged replay, not a mean-acceptance surrogate.
   Require median decode `>=1.10x` over the prompt fixture triad, no important row
   below `0.98x`, TTFT `<=1.03x`, and proposal CPU cost below 1% of decode wall.

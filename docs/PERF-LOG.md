@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-31 - v0.655 Grammar-Row Lm-Head Charged Floor
+
+Status: `GO` on the A3B primary and conditional dense guard. The exact
+state-major Q6_K branch bank authorizes one later A3B integrated packet for the
+frozen response-shape cell. Dense has primitive-transfer authority only.
+
+- Clean build/runtime/source identity matches at `c0b8289`; the frozen manifest
+  SHA-256 is `2a349e61...46d0`. Both stderr logs are empty. Four exact hidden
+  fixtures execute four full-head and 1,804 compact-state dispatches per profile;
+  all 5,872 selected logits are bit-identical. Sampler-v1, poison, guards,
+  source rows, complete bank bytes, command status, and one-dispatch seals pass.
+- A3B charged head wall moves `0.992333 -> 0.150366 ms`, removing `84.8472%`.
+  The frozen whole-token projection is `9.03398%`; all nine width medians save
+  `0.816271-0.873709 ms`. Incremental setup is `7.099042 ms`, and the weakest
+  of 36 exact path nets remains `+8.047171 ms` after that full charge.
+- Dense charged wall moves `2.240866 -> 0.160238 ms`, removing `92.8493%`.
+  Its frozen transition projection is `5.38758%`, `0.38758 pp` above gate; every
+  width saves `2.076792-2.085875 ms`. Setup is `13.705458 ms`, and minimum path
+  net is `+23.744962 ms`. AB/BA halves, acquisition halves, leave-one-round-out,
+  and GPU-clock diagnostics remain above 5%; those are robustness diagnostics,
+  not new gates.
+- Acquisition was AC-powered with no thermal or performance warnings before or
+  after, and no competing qwen, llama, or Metal benchmark. Persistent
+  Spotlight/media-analysis work remained while the host was about 87%
+  CPU-idle. Counterbalancing limits temporal drift but does not prove absence
+  of arm-dependent contention. The setup charge may be
+  conservatively inflated; this is one preregistered acquisition, not CI
+  authority.
+- Advance exactly once to an A3B integrated packet that charges real grammar
+  state tracking, lookup, bank setup in TTFT, singleton/terminal handling,
+  real-hidden execution, constrained sampler semantics, and request wall. This
+  result grants no general grammar runtime, dense integration, product speedup,
+  real-hidden result, or broad schema/tokenizer/model transfer.
+
+Artifacts: `target/profiles/v0655-grammar-lm-head-row-floor/a3b.json` SHA-256
+`1e37f4882be856fc8043a98a00bfeaa3a7ff8a726ab0f73a99a9e98d707c689c` and
+`dense.json` SHA-256
+`3b57c94b97e599e0c29b9f919cfea9db55d7a8b8ec238ea72f9d5e44b86adbea`.
+Summary: `docs/bench/v0655-grammar-lm-head-row-floor-result.md`. Independent
+review: `cx` session `019fb694-8a53-7482-b65b-7592f729be32`.
+
 ## 2026-07-31 - v0.654 Grammar Topology Oracle
 
 Status: complete CPU-only oracle. Forced-run fast-forward is killed for the

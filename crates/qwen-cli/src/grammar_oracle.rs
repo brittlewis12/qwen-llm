@@ -16,6 +16,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 const OUTPUT_SCHEMA: &str = "grammar-trace-oracle/v1";
+const BRANCH_MANIFEST_SCHEMA: &str = "grammar-lm-head-row-banks/v1";
 const MAX_LANGUAGE_STRINGS: usize = 4096;
 const MAX_LANGUAGE_STRING_BYTES: usize = 64 * 1024;
 const FAST_FORWARD_MIN_RUN: usize = 4;
@@ -39,6 +40,10 @@ struct Args {
     /// Write pretty JSON here instead of stdout.
     #[arg(long)]
     output: Option<PathBuf>,
+    /// Optionally write the deterministic branch-bank manifest used by a
+    /// later bench-only restricted-head floor.
+    #[arg(long)]
+    branch_manifest_output: Option<PathBuf>,
     /// Measured dense-27B serial transition cost.
     #[arg(long)]
     serial_transition_ms: f64,
@@ -170,6 +175,53 @@ struct OutputDocument {
     canonical_paths: Value,
     real_trace_weighting: Value,
     counterfactual_fixed_n8_screen: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct BranchBankManifest {
+    schema: &'static str,
+    claim_scope: &'static str,
+    grammar_id: String,
+    fingerprints: Value,
+    counts: Value,
+    row_count_histogram: BTreeMap<usize, usize>,
+    representative_bank_state_by_width: BTreeMap<usize, usize>,
+    states: Vec<ManifestState>,
+    canonical_width_histogram: BTreeMap<usize, usize>,
+    canonical_paths: Vec<ManifestCanonicalPath>,
+    trace_width_histogram: BTreeMap<usize, usize>,
+    trace_stratum_width_histograms: BTreeMap<String, BTreeMap<usize, usize>>,
+    trace_records: Vec<ManifestTraceRecord>,
+    trace_source: TraceSource,
+}
+
+#[derive(Debug, Serialize)]
+struct ManifestState {
+    bank_state_index: usize,
+    topology_state_index: usize,
+    prefix_bytes: usize,
+    prefix_hex: String,
+    prefix_sha256: String,
+    token_ids: Vec<i32>,
+    token_ids_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ManifestCanonicalPath {
+    path_index: usize,
+    text_sha256: String,
+    choices: Vec<FieldChoice>,
+    token_ids: Vec<i32>,
+    bank_state_indices: Vec<usize>,
+    topology_state_indices: Vec<usize>,
+    widths: Vec<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ManifestTraceRecord {
+    item_id: String,
+    branch: String,
+    canonical_path_index: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -705,6 +757,45 @@ fn token_id_set_digest(tokens: &BTreeSet<i32>) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn token_id_slice_digest(tokens: &[i32]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"grammar-token-id-slice/v1\0");
+    for token in tokens {
+        hasher.update(token.to_le_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn canonical_state_path(
+    path: &CanonicalPath,
+    index: &TokenIndex,
+    topology: &TopologyAnalysis,
+) -> Result<(Vec<usize>, Vec<usize>)> {
+    let mut prefix = Vec::new();
+    let mut state_indices = Vec::with_capacity(path.token_ids.len());
+    let mut widths = Vec::with_capacity(path.token_ids.len());
+    for &token in &path.token_ids {
+        let &state_index = topology
+            .by_prefix
+            .get(&prefix)
+            .context("canonical manifest path left grammar state graph")?;
+        let state = &topology.states[state_index];
+        ensure!(state.reachable, "canonical manifest state is unreachable");
+        ensure!(
+            state.admissible.binary_search(&token).is_ok(),
+            "canonical manifest token {token} is inadmissible"
+        );
+        state_indices.push(state_index);
+        widths.push(state.admissible.len());
+        prefix.extend_from_slice(
+            index
+                .piece(token)
+                .context("canonical manifest token is absent from index")?,
+        );
+    }
+    Ok((state_indices, widths))
+}
+
 fn required_transitions(run_tokens: usize, case: CursorCase) -> usize {
     match case {
         CursorCase::AlignedNonterminal => run_tokens,
@@ -1090,7 +1181,181 @@ fn build_output(
     })
 }
 
-fn run(args: &Args) -> Result<OutputDocument> {
+fn build_branch_manifest(
+    grammar: &GrammarSpec,
+    grammar_bytes: &[u8],
+    traces: &TraceFixture,
+    trace_bytes: &[u8],
+    inventory: &TokenInventory,
+    members: &[LanguageMember],
+    topology: &TopologyAnalysis,
+    canonical_paths: &[CanonicalPath],
+) -> Result<BranchBankManifest> {
+    let branch_states: Vec<(usize, &StateAnalysis)> = topology
+        .states
+        .iter()
+        .enumerate()
+        .filter(|(_, state)| state.reachable && !state.terminal && state.admissible.len() > 1)
+        .collect();
+    let branch_refs: Vec<&StateAnalysis> = branch_states.iter().map(|(_, state)| *state).collect();
+    let branch_incidences: usize = branch_states
+        .iter()
+        .map(|(_, state)| state.admissible.len())
+        .sum();
+    let unique_branch_tokens: BTreeSet<i32> = branch_states
+        .iter()
+        .flat_map(|(_, state)| state.admissible.iter().copied())
+        .collect();
+    let row_count_histogram = histogram(
+        branch_states
+            .iter()
+            .map(|(_, state)| state.admissible.len()),
+    );
+    let mut representative_bank_state_by_width = BTreeMap::new();
+    let topology_to_bank: BTreeMap<usize, usize> = branch_states
+        .iter()
+        .enumerate()
+        .map(|(bank_state_index, (topology_state_index, _))| {
+            (*topology_state_index, bank_state_index)
+        })
+        .collect();
+    let states: Vec<ManifestState> = branch_states
+        .iter()
+        .enumerate()
+        .map(|(bank_state_index, (topology_state_index, state))| {
+            representative_bank_state_by_width
+                .entry(state.admissible.len())
+                .or_insert(bank_state_index);
+            ManifestState {
+                bank_state_index,
+                topology_state_index: *topology_state_index,
+                prefix_bytes: state.prefix.len(),
+                prefix_hex: bytes_hex(&state.prefix),
+                prefix_sha256: sha256_hex(&state.prefix),
+                token_ids: state.admissible.clone(),
+                token_ids_sha256: token_id_slice_digest(&state.admissible),
+            }
+        })
+        .collect();
+
+    let mut canonical_widths = Vec::new();
+    let mut manifest_paths = Vec::with_capacity(canonical_paths.len());
+    let mut path_by_text = BTreeMap::new();
+    for (path_index, path) in canonical_paths.iter().enumerate() {
+        let (topology_state_indices, widths) =
+            canonical_state_path(path, &inventory.index, topology)?;
+        ensure!(
+            widths.iter().all(|&width| width > 1),
+            "branch manifest canonical path contains a non-branch state"
+        );
+        let bank_state_indices = topology_state_indices
+            .iter()
+            .map(|topology_state_index| {
+                topology_to_bank
+                    .get(topology_state_index)
+                    .copied()
+                    .with_context(|| {
+                        format!(
+                            "canonical topology state {topology_state_index} is absent from branch bank"
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        canonical_widths.extend_from_slice(&widths);
+        ensure!(
+            path_by_text
+                .insert(path.text.as_str(), path_index)
+                .is_none(),
+            "duplicate canonical path text"
+        );
+        manifest_paths.push(ManifestCanonicalPath {
+            path_index,
+            text_sha256: path.text_sha256.clone(),
+            choices: path.choices.clone(),
+            token_ids: path.token_ids.clone(),
+            bank_state_indices,
+            topology_state_indices,
+            widths,
+        });
+    }
+
+    let mut trace_widths = Vec::new();
+    let mut trace_stratum_widths: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut manifest_trace_records = Vec::with_capacity(traces.records.len());
+    for record in &traces.records {
+        let &path_index = path_by_text
+            .get(record.gen_text.as_str())
+            .context("trace record has no canonical manifest path")?;
+        let widths = &manifest_paths[path_index].widths;
+        trace_widths.extend_from_slice(widths);
+        trace_stratum_widths
+            .entry(record.branch.clone())
+            .or_default()
+            .extend_from_slice(widths);
+        manifest_trace_records.push(ManifestTraceRecord {
+            item_id: record.item_id.clone(),
+            branch: record.branch.clone(),
+            canonical_path_index: path_index,
+        });
+    }
+    let trace_stratum_width_histograms = trace_stratum_widths
+        .into_iter()
+        .map(|(branch, widths)| (branch, histogram(widths)))
+        .collect();
+
+    ensure!(states.len() == 451, "expected 451 branch states");
+    ensure!(branch_incidences == 1468, "expected 1468 branch incidences");
+    ensure!(
+        unique_branch_tokens.len() == 222,
+        "expected 222 unique branch rows"
+    );
+    ensure!(
+        canonical_widths.len() == 648,
+        "expected 648 canonical branch incidences"
+    );
+    ensure!(
+        trace_widths.len() == 360,
+        "expected 360 trace branch incidences"
+    );
+
+    Ok(BranchBankManifest {
+        schema: BRANCH_MANIFEST_SCHEMA,
+        claim_scope: "bench-only exact branch topology; no grammar runtime or performance authority",
+        grammar_id: grammar.grammar_id.clone(),
+        fingerprints: json!({
+            "grammar_file_sha256": sha256_hex(grammar_bytes),
+            "trace_file_sha256": sha256_hex(trace_bytes),
+            "grammar_piece_policy_sha256": inventory.grammar_piece_policy_sha256,
+            "finite_language_sha256": language_digest(members),
+            "state_sha256": topology.state_sha256,
+            "branch_state_sha256": state_subset_digest(&branch_refs),
+            "unique_branch_token_rows_sha256": token_id_set_digest(&unique_branch_tokens),
+            "canonical_path_sha256": canonical_path_digest(canonical_paths),
+        }),
+        counts: json!({
+            "vocab_rows": inventory.index.by_id.len(),
+            "productive_states": topology.states.len(),
+            "branch_states": states.len(),
+            "branch_state_token_incidences": branch_incidences,
+            "unique_branch_token_rows": unique_branch_tokens.len(),
+            "canonical_paths": manifest_paths.len(),
+            "canonical_branch_incidences": canonical_widths.len(),
+            "trace_records": manifest_trace_records.len(),
+            "trace_branch_incidences": trace_widths.len(),
+        }),
+        row_count_histogram,
+        representative_bank_state_by_width,
+        states,
+        canonical_width_histogram: histogram(canonical_widths),
+        canonical_paths: manifest_paths,
+        trace_width_histogram: histogram(trace_widths),
+        trace_stratum_width_histograms,
+        trace_records: manifest_trace_records,
+        trace_source: traces.source.clone(),
+    })
+}
+
+fn run(args: &Args) -> Result<(OutputDocument, Option<BranchBankManifest>)> {
     ensure!(
         args.serial_transition_ms.is_finite() && args.serial_transition_ms > 0.0,
         "--serial-transition-ms must be finite and positive"
@@ -1120,7 +1385,7 @@ fn run(args: &Args) -> Result<OutputDocument> {
     let topology = analyze_topology(&members, &inventory.index)?;
     let canonical_paths =
         analyze_canonical_paths(&members, &tokenizer, &inventory.index, &topology)?;
-    build_output(
+    let output = build_output(
         args,
         &grammar,
         &grammar_bytes,
@@ -1131,26 +1396,60 @@ fn run(args: &Args) -> Result<OutputDocument> {
         &members,
         &topology,
         &canonical_paths,
-    )
+    )?;
+    let manifest = args
+        .branch_manifest_output
+        .as_ref()
+        .map(|_| {
+            build_branch_manifest(
+                &grammar,
+                &grammar_bytes,
+                &traces,
+                &trace_bytes,
+                &inventory,
+                &members,
+                &topology,
+                &canonical_paths,
+            )
+        })
+        .transpose()?;
+    Ok((output, manifest))
+}
+
+fn write_pretty_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    let file = File::create(path).with_context(|| format!("create {path:?}"))?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer_pretty(&mut writer, value)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    Ok(())
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let output = run(&args)?;
+    if let (Some(output), Some(manifest)) = (&args.output, &args.branch_manifest_output) {
+        ensure!(
+            output != manifest,
+            "output and branch manifest paths must differ"
+        );
+    }
+    let (output, manifest) = run(&args)?;
     match &args.output {
-        Some(path) => {
-            let file = File::create(path).with_context(|| format!("create {path:?}"))?;
-            let mut writer = BufWriter::new(file);
-            serde_json::to_writer_pretty(&mut writer, &output)?;
-            writer.write_all(b"\n")?;
-            writer.flush()?;
-        }
+        Some(path) => write_pretty_json(path, &output)?,
         None => {
             let stdout = std::io::stdout();
             let mut writer = BufWriter::new(stdout.lock());
             serde_json::to_writer_pretty(&mut writer, &output)?;
             writer.write_all(b"\n")?;
         }
+    }
+    if let Some(path) = &args.branch_manifest_output {
+        write_pretty_json(
+            path,
+            manifest
+                .as_ref()
+                .context("branch manifest was not constructed")?,
+        )?;
     }
     Ok(())
 }
@@ -1282,6 +1581,10 @@ mod tests {
             .expect("analyze canonical path");
         assert_eq!(path.admissible_rows_before_token, vec![2, 1, 1, 2]);
         assert_eq!(path.forced_runs, vec![2]);
+        let (state_indices, widths) =
+            canonical_state_path(&path, &index, &topology).expect("manifest state path");
+        assert_eq!(widths, vec![2, 1, 1, 2]);
+        assert_eq!(state_indices.len(), path.token_ids.len());
     }
 
     #[test]

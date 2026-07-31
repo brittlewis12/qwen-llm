@@ -20,11 +20,11 @@ mod attn_capture;
 mod attn_stage_floor;
 mod gguf_arena_floor;
 mod grammar_lm_head_row_floor;
-#[cfg(test)]
 mod grammar_row_runtime;
+mod host_validity;
+mod integrated_grammar_row;
 mod messages;
 mod q4_mma_ceiling;
-#[cfg(test)]
 mod response_shape_runtime;
 #[path = "../source_identity.rs"]
 mod source_identity;
@@ -519,6 +519,8 @@ enum Cmd {
     Q4MmaCeiling(q4_mma_ceiling::Q4MmaCeilingArgs),
     /// Measure the charged exact grammar-row Q6_K lm-head floor.
     GrammarLmHeadRowFloor(grammar_lm_head_row_floor::GrammarLmHeadRowFloorArgs),
+    /// Measure one exact A3B request with integrated grammar-row heads.
+    IntegratedGrammarRow(integrated_grammar_row::IntegratedGrammarRowArgs),
     /// Report Metal counter-set availability for in-process counter probes.
     MetalCounters(MetalCountersArgs),
     /// Report Metal compute-pipeline resource hints for hot kernels.
@@ -2776,6 +2778,11 @@ fn main() -> Result<()> {
             q4_mma_ceiling::run(a, serde_json::to_value(recorded_build_identity())?)
         }
         Cmd::GrammarLmHeadRowFloor(a) => grammar_lm_head_row_floor::run(
+            a,
+            serde_json::to_value(recorded_build_identity())?,
+            capture_qwen_env(),
+        ),
+        Cmd::IntegratedGrammarRow(a) => integrated_grammar_row::run(
             a,
             serde_json::to_value(recorded_build_identity())?,
             capture_qwen_env(),

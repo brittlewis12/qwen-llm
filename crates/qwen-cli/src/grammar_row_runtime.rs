@@ -42,6 +42,10 @@ pub(crate) enum BankKey {
 pub(crate) struct GrammarState(u32);
 
 impl GrammarState {
+    pub(crate) fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+
     pub(crate) fn index(self) -> u32 {
         self.0
     }

@@ -161,6 +161,7 @@ impl RuntimeFingerprints {
 }
 
 impl ResponseShapeRuntime {
+    #[allow(dead_code)]
     pub(crate) fn seal(mut self) -> Result<Self> {
         ensure!(
             self.semantic_runtime_table_sha256.is_empty(),

@@ -20,8 +20,12 @@ mod attn_capture;
 mod attn_stage_floor;
 mod gguf_arena_floor;
 mod grammar_lm_head_row_floor;
+#[cfg(test)]
+mod grammar_row_runtime;
 mod messages;
 mod q4_mma_ceiling;
+#[cfg(test)]
+mod response_shape_runtime;
 #[path = "../source_identity.rs"]
 mod source_identity;
 

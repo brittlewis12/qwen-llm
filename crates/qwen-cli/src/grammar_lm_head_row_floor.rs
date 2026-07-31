@@ -139,7 +139,7 @@ struct ProfileSpec {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ManifestDocument {
+pub(crate) struct ManifestDocument {
     schema: String,
     claim_scope: String,
     grammar_id: String,
@@ -233,7 +233,7 @@ struct ManifestTraceSource {
 }
 
 #[derive(Clone, Debug)]
-struct ValidatedState {
+pub(crate) struct ValidatedState {
     bank_state_index: usize,
     topology_state_index: usize,
     prefix: Vec<u8>,
@@ -247,7 +247,7 @@ struct ValidatedPath {
 }
 
 #[derive(Debug)]
-struct ValidatedManifest {
+pub(crate) struct ValidatedManifest {
     states: Vec<ValidatedState>,
     representative_by_width: BTreeMap<usize, usize>,
     row_histogram: BTreeMap<usize, usize>,
@@ -397,7 +397,7 @@ fn expected_trace_histogram() -> BTreeMap<usize, usize> {
     ])
 }
 
-fn validate_manifest(document: ManifestDocument) -> Result<ValidatedManifest> {
+pub(crate) fn validate_manifest(document: ManifestDocument) -> Result<ValidatedManifest> {
     ensure!(
         document.schema == MANIFEST_SCHEMA,
         "manifest schema mismatch"
@@ -710,6 +710,30 @@ fn validate_manifest(document: ManifestDocument) -> Result<ValidatedManifest> {
         counts: document.counts,
         trace_source: document.trace_source,
     })
+}
+
+impl ValidatedState {
+    pub(crate) fn bank_state_index(&self) -> usize {
+        self.bank_state_index
+    }
+
+    pub(crate) fn topology_state_index(&self) -> usize {
+        self.topology_state_index
+    }
+
+    pub(crate) fn prefix(&self) -> &[u8] {
+        &self.prefix
+    }
+
+    pub(crate) fn token_ids(&self) -> &[i32] {
+        &self.token_ids
+    }
+}
+
+impl ValidatedManifest {
+    pub(crate) fn states(&self) -> &[ValidatedState] {
+        &self.states
+    }
 }
 
 fn checked_align_up(value: usize, alignment: usize) -> Result<usize> {

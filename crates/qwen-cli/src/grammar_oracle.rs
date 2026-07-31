@@ -3,10 +3,17 @@
 //! The oracle analyzes exact decoded token bytes. It does not load model
 //! weights, execute Metal work, or estimate model probabilities.
 
+mod response_shape_runtime;
+
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::tokenizer::NativeTokenizer;
+use response_shape_runtime::{
+    CLAIM_SCOPE as RUNTIME_CLAIM_SCOPE, ResponseShapeRuntime, RuntimeCanonicalPath, RuntimeCounts,
+    RuntimeEdge, RuntimeFingerprints, RuntimeState, RuntimeStateKind, SCHEMA as RUNTIME_SCHEMA,
+    derive_path_bounds,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -44,6 +51,9 @@ struct Args {
     /// later bench-only restricted-head floor.
     #[arg(long)]
     branch_manifest_output: Option<PathBuf>,
+    /// Optionally write the exact compiled response-shape runtime table.
+    #[arg(long)]
+    response_shape_runtime_output: Option<PathBuf>,
     /// Measured dense-27B serial transition cost.
     #[arg(long)]
     serial_transition_ms: f64,
@@ -1355,7 +1365,248 @@ fn build_branch_manifest(
     })
 }
 
-fn run(args: &Args) -> Result<(OutputDocument, Option<BranchBankManifest>)> {
+fn pretty_json_bytes(value: &impl Serialize) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn build_response_shape_runtime(
+    grammar: &GrammarSpec,
+    grammar_bytes: &[u8],
+    trace_bytes: &[u8],
+    stop_token_ids: &[i32],
+    inventory: &TokenInventory,
+    members: &[LanguageMember],
+    topology: &TopologyAnalysis,
+    canonical_paths: &[CanonicalPath],
+    branch_manifest: &BranchBankManifest,
+) -> Result<ResponseShapeRuntime> {
+    let manifest_bytes = pretty_json_bytes(branch_manifest)?;
+    let branch_manifest_file_sha256 = sha256_hex(&manifest_bytes);
+    ensure!(
+        branch_manifest_file_sha256
+            == "2a349e612d9cbec271b25c2afdc82f28d79b29015f755b5efc4a98af7f3846d0",
+        "generated branch manifest does not match the frozen v0.655 artifact"
+    );
+
+    let reachable: Vec<(usize, &StateAnalysis)> = topology
+        .states
+        .iter()
+        .enumerate()
+        .filter(|(_, state)| state.reachable)
+        .collect();
+    ensure!(reachable.len() == 616, "expected 616 reachable states");
+    let mut topology_to_runtime = vec![None; topology.states.len()];
+    for (runtime_index, (topology_index, _)) in reachable.iter().enumerate() {
+        topology_to_runtime[*topology_index] = Some(u32::try_from(runtime_index)?);
+    }
+
+    let mut branch_bank_by_topology = BTreeMap::new();
+    for state in &branch_manifest.states {
+        ensure!(
+            branch_bank_by_topology
+                .insert(
+                    state.topology_state_index,
+                    (state.bank_state_index, state.token_ids.as_slice()),
+                )
+                .is_none(),
+            "duplicate topology state in branch manifest"
+        );
+    }
+    ensure!(
+        branch_bank_by_topology.len() == 451,
+        "expected 451 branch-bank states"
+    );
+
+    let mut states = Vec::with_capacity(reachable.len());
+    let mut edges = Vec::new();
+    let mut singleton_bank_index = 0usize;
+    for (runtime_index, (topology_index, state)) in reachable.iter().enumerate() {
+        let edge_start = edges.len();
+        let (kind, bank_state_index) = if state.terminal {
+            ensure!(
+                state.admissible.is_empty(),
+                "terminal state has admissible tokens"
+            );
+            (RuntimeStateKind::Terminal, None)
+        } else if state.admissible.len() == 1 {
+            let index = singleton_bank_index;
+            singleton_bank_index += 1;
+            (RuntimeStateKind::Singleton, Some(u32::try_from(index)?))
+        } else {
+            ensure!(
+                state.admissible.len() > 1,
+                "reachable nonterminal has no admissible tokens"
+            );
+            let &(bank_index, manifest_tokens) = branch_bank_by_topology
+                .get(topology_index)
+                .context("runtime branch state is absent from branch manifest")?;
+            ensure!(
+                manifest_tokens == state.admissible,
+                "runtime branch tokens differ from branch manifest"
+            );
+            (RuntimeStateKind::Branch, Some(u32::try_from(bank_index)?))
+        };
+
+        for &token_id in &state.admissible {
+            let piece = inventory
+                .index
+                .piece(token_id)
+                .context("runtime edge token is absent from token index")?;
+            let mut successor_prefix = state.prefix.clone();
+            successor_prefix.extend_from_slice(piece);
+            let &successor_topology = topology
+                .by_prefix
+                .get(&successor_prefix)
+                .context("runtime edge does not reach a productive prefix")?;
+            let successor_state_index = topology_to_runtime[successor_topology]
+                .context("runtime edge reaches an unreachable topology state")?;
+            edges.push(RuntimeEdge {
+                source_state_index: u32::try_from(runtime_index)?,
+                token_id,
+                piece_bytes: u32::try_from(piece.len())?,
+                piece_hex: bytes_hex(piece),
+                successor_state_index,
+            });
+        }
+        states.push(RuntimeState {
+            state_index: u32::try_from(runtime_index)?,
+            kind,
+            prefix_bytes: u32::try_from(state.prefix.len())?,
+            prefix_hex: bytes_hex(&state.prefix),
+            bank_state_index,
+            edge_start: u32::try_from(edge_start)?,
+            edge_count: u32::try_from(edges.len() - edge_start)?,
+        });
+    }
+    ensure!(
+        singleton_bank_index == 129,
+        "expected 129 singleton-bank states"
+    );
+    ensure!(edges.len() == 1_597, "expected 1597 runtime edges");
+
+    let root_topology = *topology
+        .by_prefix
+        .get(&Vec::new())
+        .context("runtime language has no root")?;
+    let root_state_index =
+        topology_to_runtime[root_topology].context("runtime root topology state is unreachable")?;
+    ensure!(root_state_index == 0, "runtime root is not state zero");
+
+    let terminal_state_indices: Vec<u32> = states
+        .iter()
+        .filter(|state| state.kind == RuntimeStateKind::Terminal)
+        .map(|state| state.state_index)
+        .collect();
+    ensure!(
+        terminal_state_indices.len() == 36,
+        "expected 36 runtime terminals"
+    );
+
+    let mut runtime_paths = Vec::with_capacity(canonical_paths.len());
+    for (path_index, path) in canonical_paths.iter().enumerate() {
+        let mut current = root_state_index;
+        let mut state_indices = vec![current];
+        let mut decoded = Vec::new();
+        for &token_id in &path.token_ids {
+            let state = &states[usize::try_from(current)?];
+            let start = usize::try_from(state.edge_start)?;
+            let end = start + usize::try_from(state.edge_count)?;
+            let edge_index = edges[start..end]
+                .binary_search_by_key(&token_id, |edge| edge.token_id)
+                .map_err(|_| anyhow::anyhow!("canonical token is absent from runtime edges"))?;
+            let edge = &edges[start + edge_index];
+            decoded.extend_from_slice(
+                inventory
+                    .index
+                    .piece(token_id)
+                    .context("canonical runtime token is absent from token index")?,
+            );
+            current = edge.successor_state_index;
+            state_indices.push(current);
+        }
+        ensure!(
+            decoded == path.text.as_bytes(),
+            "canonical runtime path does not reproduce target bytes"
+        );
+        ensure!(
+            terminal_state_indices.binary_search(&current).is_ok(),
+            "canonical runtime path does not end at a terminal"
+        );
+        runtime_paths.push(RuntimeCanonicalPath {
+            path_index: u32::try_from(path_index)?,
+            target_bytes: u32::try_from(decoded.len())?,
+            target_hex: bytes_hex(&decoded),
+            target_sha256: path.text_sha256.clone(),
+            token_ids: path.token_ids.clone(),
+            state_indices,
+            terminal_state_index: current,
+        });
+    }
+    ensure!(runtime_paths.len() == 36, "expected 36 runtime paths");
+
+    let mut sorted_stop_token_ids = stop_token_ids.to_vec();
+    sorted_stop_token_ids.sort_unstable();
+    let stop_count = sorted_stop_token_ids.len();
+    sorted_stop_token_ids.dedup();
+    ensure!(
+        sorted_stop_token_ids.len() == stop_count,
+        "declared stop tokens contain duplicates"
+    );
+
+    let path_bounds = derive_path_bounds(&states, &edges)?;
+    ResponseShapeRuntime {
+        schema: RUNTIME_SCHEMA.into(),
+        claim_scope: RUNTIME_CLAIM_SCOPE.into(),
+        grammar_id: grammar.grammar_id.clone(),
+        vocab_rows: u32::try_from(inventory.index.by_id.len())?,
+        root_state_index,
+        stop_token_ids: sorted_stop_token_ids,
+        fingerprints: RuntimeFingerprints {
+            grammar_file_sha256: sha256_hex(grammar_bytes),
+            trace_file_sha256: sha256_hex(trace_bytes),
+            branch_manifest_file_sha256,
+            grammar_piece_policy_sha256: inventory.grammar_piece_policy_sha256.clone(),
+            finite_language_sha256: language_digest(members),
+            state_sha256: topology.state_sha256.clone(),
+            canonical_path_sha256: canonical_path_digest(canonical_paths),
+        },
+        counts: RuntimeCounts {
+            states: u32::try_from(states.len())?,
+            branch_states: u32::try_from(
+                states
+                    .iter()
+                    .filter(|state| state.kind == RuntimeStateKind::Branch)
+                    .count(),
+            )?,
+            singleton_states: u32::try_from(
+                states
+                    .iter()
+                    .filter(|state| state.kind == RuntimeStateKind::Singleton)
+                    .count(),
+            )?,
+            terminal_states: u32::try_from(terminal_state_indices.len())?,
+            edges: u32::try_from(edges.len())?,
+            canonical_paths: u32::try_from(runtime_paths.len())?,
+        },
+        states,
+        edges,
+        terminal_state_indices,
+        canonical_paths: runtime_paths,
+        path_bounds,
+        semantic_runtime_table_sha256: String::new(),
+    }
+    .seal()
+}
+
+fn run(
+    args: &Args,
+) -> Result<(
+    OutputDocument,
+    Option<BranchBankManifest>,
+    Option<ResponseShapeRuntime>,
+)> {
     ensure!(
         args.serial_transition_ms.is_finite() && args.serial_transition_ms > 0.0,
         "--serial-transition-ms must be finite and positive"
@@ -1397,23 +1648,45 @@ fn run(args: &Args) -> Result<(OutputDocument, Option<BranchBankManifest>)> {
         &topology,
         &canonical_paths,
     )?;
-    let manifest = args
-        .branch_manifest_output
-        .as_ref()
-        .map(|_| {
-            build_branch_manifest(
-                &grammar,
-                &grammar_bytes,
-                &traces,
-                &trace_bytes,
-                &inventory,
-                &members,
-                &topology,
-                &canonical_paths,
-            )
-        })
-        .transpose()?;
-    Ok((output, manifest))
+    let need_manifest =
+        args.branch_manifest_output.is_some() || args.response_shape_runtime_output.is_some();
+    let manifest = if need_manifest {
+        Some(build_branch_manifest(
+            &grammar,
+            &grammar_bytes,
+            &traces,
+            &trace_bytes,
+            &inventory,
+            &members,
+            &topology,
+            &canonical_paths,
+        )?)
+    } else {
+        None
+    };
+    let runtime = if args.response_shape_runtime_output.is_some() {
+        ensure!(
+            sha256_hex(&pretty_json_bytes(&output)?)
+                == "98c5c51296f4580b3dd6d7d4122c3d6dfd175ae36a90801f728fbc514b57c4fe",
+            "ordinary topology output does not match the frozen v0.655 artifact"
+        );
+        Some(build_response_shape_runtime(
+            &grammar,
+            &grammar_bytes,
+            &trace_bytes,
+            &stop_token_ids,
+            &inventory,
+            &members,
+            &topology,
+            &canonical_paths,
+            manifest
+                .as_ref()
+                .context("runtime output requires a branch manifest")?,
+        )?)
+    } else {
+        None
+    };
+    Ok((output, manifest, runtime))
 }
 
 fn write_pretty_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -1427,13 +1700,19 @@ fn write_pretty_json(path: &Path, value: &impl Serialize) -> Result<()> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    if let (Some(output), Some(manifest)) = (&args.output, &args.branch_manifest_output) {
-        ensure!(
-            output != manifest,
-            "output and branch manifest paths must differ"
-        );
+    let output_paths = [
+        args.output.as_ref(),
+        args.branch_manifest_output.as_ref(),
+        args.response_shape_runtime_output.as_ref(),
+    ];
+    for left in 0..output_paths.len() {
+        for right in left + 1..output_paths.len() {
+            if let (Some(left_path), Some(right_path)) = (output_paths[left], output_paths[right]) {
+                ensure!(left_path != right_path, "all output paths must differ");
+            }
+        }
     }
-    let (output, manifest) = run(&args)?;
+    let (output, manifest, runtime) = run(&args)?;
     match &args.output {
         Some(path) => write_pretty_json(path, &output)?,
         None => {
@@ -1449,6 +1728,14 @@ fn main() -> Result<()> {
             manifest
                 .as_ref()
                 .context("branch manifest was not constructed")?,
+        )?;
+    }
+    if let Some(path) = &args.response_shape_runtime_output {
+        write_pretty_json(
+            path,
+            runtime
+                .as_ref()
+                .context("response-shape runtime was not constructed")?,
         )?;
     }
     Ok(())

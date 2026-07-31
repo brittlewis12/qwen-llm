@@ -1,11 +1,22 @@
 # v0.653 A10B Topology-Preserving Parallel-Pread Floor
 
-Status: implementation preregistration. The sole stage-0 metadata describe and
-exact profile freeze are complete. The implementation now admits only the exact
-A10B copied and W4 parallel-pread arms and adds the frozen counter, headroom,
-descriptor-stamp, allocation, and no-GPU-command seals. No payload observation
-may precede a clean implementation commit, sealed runner, and separate pre-run
-review against this contract.
+Status: implementation and runner complete; no payload observation has run. The
+sole stage-0 metadata describe and exact profile freeze are complete. The
+implementation admits only the exact A10B copied and W4 parallel-pread arms and
+adds the frozen counter, headroom, descriptor-stamp, allocation, and
+no-GPU-command seals. This change must land cleanly, the release binary must be
+rebuilt from that commit, and a separate pre-run identity review must pass before
+any payload observation.
+
+The frozen standalone runner is
+`scripts/profile/v0653_a10b_parallel_pread_floor.py`. Its CPU-only synthetic
+check is:
+
+```sh
+uv run scripts/profile/v0653_a10b_parallel_pread_floor.py --self-test
+```
+
+That mode must not inspect the model or launch `qwen-bench`.
 
 ## Intent
 
@@ -233,33 +244,40 @@ This creates one AB pair and one BA pair. Processes never overlap. There are no
 retries, replacements, extra arms, or pooled predecessor observations. A child
 attempt begins when its launch event is durably recorded before spawn.
 
-Before every child:
+The literal runner sequence is:
 
-1. Require AC power, no thermal/performance warning, normal memory pressure, no
-   competing model process, and no positive swap-occupancy growth.
-2. Emit `recommendedMaxWorkingSetSize`, `currentAllocatedSize`, and their checked
-   difference. Require
-   `recommendedMaxWorkingSetSize - currentAllocatedSize >= 85,608,931,328`.
-   Require `process_limit_remaining_bytes` to be a parsed JSON integer. Missing,
-   null, non-integer, or negative values are invalid. Zero is accepted only as
-   the API's omitted-limit sentinel; every positive value must be at least
-   `85,608,931,328`. Apply this before packet reservation and repeat it inside
-   each child immediately before timing/allocation.
-3. Capture VM, compressor, process, source pathname, and complete path-bound file
-   stamps: device, inode, size, `mtime_sec`, `mtime_nsec`, `ctime_sec`, and
-   `ctime_nsec`.
-4. Wait at least 120 seconds after prior packet activity.
-5. Read and SHA-256 all three exact path-bound shard files, require the frozen
-   hashes, then require exact `mincore` page totals and complete launch residency
-   for every shard.
-6. Recheck path-bound stamps and launch within five seconds of the residency
-   proof.
+1. Validate clean source/build/binary/runner/contract/describe identity without
+   inspecting a model path.
+2. Run the sole bounded headroom probe. Only after it succeeds, create and
+   durably fsync the packet reservation and prior-activity record.
+3. Capture the three model pathname stamps. Any failure after reservation but
+   before one complete attempt ledger leaves the packet permanently unsealed.
+4. Before each launch, wait at least 120 seconds from reservation activity or
+   the prior terminal attempt. Then run bounded identity again.
+5. Require AC power, no thermal/performance warning, at least 50 percent normal
+   memory pressure, no competing model process, and valid VM/compressor/swap
+   counters. Capture complete path-bound stamps: device, inode, size,
+   `mtime_sec`, `mtime_nsec`, `ctime_sec`, and `ctime_nsec`.
+6. Read and SHA-256 all three exact nofollow descriptor files, require the
+   frozen hashes, then require exact `mincore` page totals and all pages resident.
+7. Recheck host, VM, and pathname stamps. Durably fsync conditioning and launch
+   evidence, block operator signals across the launch race, and acquire the
+   authenticated child within the inclusive five-second residency boundary.
+8. The child repeats the exact `85,608,931,328`-byte admission immediately before
+   timing/allocation. Complete postflight and the immutable attempt ledger. A
+   terminal ledger ends the packet; otherwise continue the exact ABBA plan.
+9. Only after four valid ledgers or one terminal ledger, run bounded final
+   identity and the final signal cutoff, replay all evidence, and publish the
+   completion marker last.
 
-This freeze authorizes one separate non-payload live headroom probe, or an
-equivalent runner-local Metal query,
-immediately before packet reservation. It is distinct from the sole stage-0
-describe, is not an attempt, allocates no payload, and is retained in the
-aggregate seal.
+The runner invokes exactly one separate `gguf-arena-floor --headroom-probe`
+immediately before packet reservation. The probe requires JSON, default
+policy/W4, and no profile or arm. It creates a Metal context, reports the raw
+signals plus the exact A10B admission decision, and opens no GGUF, allocates no
+model payload, and issues no GPU command. It is distinct from the sole stage-0
+describe, is not an attempt, and is retained in the aggregate seal. Its positive
+PID/PGID, timestamps, and error-free group-absence observation must fit inside
+the exact bounded process interval.
 
 Full shard residency is a launch condition, not a simultaneous-residency promise.
 The kernel may reclaim consumed source-cache pages while the 77 GB destination is
@@ -277,6 +295,38 @@ The child environment removes every inherited `QWEN_*`, `METAL_*`, `MTL_*`, and
 override. Source, runtime, and release-build identities must be clean and equal.
 The runner, contract, executable, model identities, command, environment, host
 facts, attempts, output, and seals are content-addressed.
+
+The runner uses a frozen allowlist rather than passing the ambient environment.
+It may retain only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, `SHELL`, `LANG`,
+`LC_ALL`, `LC_CTYPE`, and `LC_MESSAGES` when present. It drops and records every
+other inherited name, including every `DYLD_*`, allocator, thread-count,
+performance-control, `QWEN_*`, `METAL_*`, `MTL_*`, and `RUST_LOG` name. The
+record contains only removed names plus the exact resulting allowlisted
+environment and its digest; it does not retain unrelated inherited values. The
+probe and every child receive exactly that resulting environment.
+
+The separate headroom probe has a frozen 300-second deadline. Each timed child
+has a frozen 1,800-second deadline. Output is bounded to 4 MiB per stream, and
+pipe joins are bounded to two seconds. Timeout, output overflow, drain failure,
+`SIGINT`, or `SIGTERM` triggers authenticated process-group `SIGKILL`, bounded
+reaping, and an error-free final group-absence proof. Cleanup actions, signals,
+targets, reasons, timestamps, and errors are sealed. Such measured execution or
+containment failures are inconclusive; malformed lifecycle evidence is a
+contract defect.
+
+The defect parser recognizes only frozen Rust prefixes for `getrusage` and
+`proc_pid_rusage` capture, time conversion, counter delta overflow or
+regression, proc counter regression, duration conversion, and phase
+reconciliation. Missing or unparsable controlling counters are defects.
+Unrelated nonzero child exits remain inconclusive, as do correctly measured
+positive timer-local block input or swap counts.
+
+Every `build-info` identity child has a frozen 300-second deadline and uses the
+same bounded, authenticated process-group containment. Per-attempt identity runs
+after the 120-second cooldown and immediately before host/source conditioning.
+Final identity uses the same bounded path. A timeout, malformed identity, dirty
+source, or source/build/binary mismatch before a complete attempt ledger leaves
+the packet unsealed. Final-identity failure also leaves it unsealed.
 
 Capture controlling system samples immediately before conditioning, immediately
 before spawn, and immediately after child exit. Evaluate the preconditioning and
@@ -321,14 +371,16 @@ Two pairs are an engineering floor and order-reversal guard, not a powered effec
 estimate or confidence interval. Report both pairs and their descriptive median;
 do not infer product first-byte movement from the floor.
 
-Apply exclusive precedence:
+The runner seals exactly two evidence forms: four complete valid ABBA ledgers,
+or a valid ABBA prefix ending in one complete terminal launched-slot ledger.
+Apply exclusive precedence within those forms:
 
 1. Malformed, missing, regressing, or nonreconciling counters, or any profile,
    source, schedule, topology, byte, timing, or implementation mismatch:
    implementation/contract defect with no performance authority.
-2. Correctly measured block input, swaps, pressure growth, failed conditioning,
-   host invalidity, spawn/execution failure, or publication failure: inconclusive
-   with no authority.
+2. Correctly measured block input, swaps, pressure growth, postlaunch host
+   invalidity, or spawn/execution failure in a complete terminal ledger:
+   inconclusive with no authority.
 3. Complete valid packet missing the CPU, RSS, footprint, or 1.5-second gate:
    KILL this exact A10B copied-versus-W4-pread floor and advance to grammar.
 4. Complete conjunction: GO with the narrow authority below.
@@ -338,18 +390,67 @@ motivate a separately ranked successor preregistration, but v0.653 neither
 authorizes that successor nor permits a replay or replacement attempt.
 
 Any preflight headroom failure means this copied A10B floor is economically
-infeasible on the host and returns the active queue to grammar without allocating
-the payload. An in-child headroom failure after its durable launch record is
-invalid, receives no retry, and returns the queue to grammar. Any repair after a
-launched packet requires a new successor preregistration; v0.653 itself is never
-replayed.
+infeasible on the host and returns the active queue to grammar without reserving
+a packet or allocating the payload. After reservation, any failure before a
+complete attempt ledger, during final identity or cutoff, or before the valid
+completion marker leaves the packet permanently unsealed with no authority and
+no retry. An
+in-child headroom failure after its durable launch record is a complete terminal
+inconclusive attempt when its ledger can be finished. Any repair requires a new
+successor preregistration; v0.653 itself is never replayed.
 
-The sealed packet requires at least six logical content-addressed records: one
-raw metadata describe, four immutable attempt bundles, and one aggregate
-decision/completion seal. Each attempt bundle contains or references its launch
-lifecycle, command/environment, conditioning and host samples, raw stdout,
-`/usr/bin/time -l` stderr, parsed row, and content hashes. No physical-file count
-is a validity gate.
+The complete ABBA packet contains one raw metadata describe, four immutable
+attempt bundles, and one aggregate decision/completion seal. A terminal packet
+contains the exact valid prefix through its terminal attempt. Each attempt bundle
+contains or references its launch lifecycle, command/environment, conditioning
+and host samples, raw stdout, `/usr/bin/time -l` stderr, parsed row, and content
+hashes. No physical-file count is a validity gate.
+
+Before inventory and completion publication, the runner strictly reopens every
+permitted direct packet and work member, rejects missing or orphan members,
+replays raw JSON and `/usr/bin/time` parsing, cross-links lifecycle and process
+identity, and recomputes attempt validity, pair scores, disposition, and
+authority. It snapshots both roots before semantic validation and after durable
+inventory publication and proves every preexisting member unchanged. The
+inventory is direct and nonrecursive and excludes itself and the completion
+record.
+
+Reservation durably records the first prior-activity timestamp. Each later
+cooldown binds to the preceding terminal-attempt activity timestamp. Semantic
+replay recomputes cooldown arithmetic, raw host validity, all three ordered
+source hashes, descriptor and pathname stamps, full residency, launch distance,
+and the complete cross-attempt timeline. No attempt may overlap its predecessor.
+The threat model is one cooperative local runner with no concurrent process
+attempting a transient replace-validate-restore attack on packet files. Every
+JSON and raw-stream parse uses a nofollow descriptor with before/after stamp
+checks. Digest cross-links may reopen cooperative local pathnames; persistent
+replacement or mutation is rejected by root snapshots and inventory.
+
+A signal controller captures `SIGINT` and `SIGTERM`, blocks them across the
+durable-launch/acquisition race, and seals exact per-attempt slices.
+After final identity it blocks both signals, snapshots delivered and pending
+signals, and durably writes the final cutoff. That cutoff is the explicit signal
+authority boundary: any delivered or pending signal through it must belong to a
+complete attempt ledger, while later blocked signals do not revise the sealed
+experiment. Signals contained by a complete launched attempt make that terminal
+attempt inconclusive.
+
+Publication uses exclusive creation plus file and directory `fsync`; it is not
+described as rename-atomic. Any cleanup action, including a successful forced
+group cleanup, makes the attempt inconclusive. Initial group-disposition
+evidence must exactly equal the mandatory error-free final absence proof. A
+failed first proof followed by a second containment pass leaves the packet
+unsealed rather than adding another terminal evidence form.
+
+Publication rereads decision and inventory through stable nofollow descriptors,
+exact-compares canonical content, and recomputes final membership and aggregate
+hashes after every hook window. It writes `packet-complete.json` only after all
+other checks and prerequisite fsyncs, then fsyncs the marker file and packet
+directory. That valid final marker is the sole grant of packet authority. Marker
+validity and replay, not the runner's final return code, define the commit point;
+a failure before a valid marker is unsealed, while a valid marker cannot be
+revoked by a later reporting or directory-fsync error. The reserved roots remain
+durable no-retry evidence in either case.
 
 ## Authority
 
@@ -364,3 +465,6 @@ claims, serving, concurrency, MTLIO, no-copy storage, or energy-efficiency claim
 
 Adversarial design review: `cx ask` session
 `019fb49b-9b59-7fe0-a969-a3496c17ee82`.
+
+Adversarial runner review: `cx ask` session
+`019fb54e-f61b-77b0-b30a-34bd7f0c3ce1`.

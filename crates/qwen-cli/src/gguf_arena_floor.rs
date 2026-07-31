@@ -619,14 +619,25 @@ pub(crate) struct GgufArenaFloorArgs {
     #[arg(short = 'm', long)]
     model: PathBuf,
     /// Exact authenticated materialization profile.
-    #[arg(long, value_enum, required_unless_present = "describe")]
+    #[arg(
+        long,
+        value_enum,
+        required_unless_present_any = ["describe", "headroom_probe"]
+    )]
     profile: Option<FloorProfileId>,
     /// Materialization arm.
-    #[arg(long, value_enum, required_unless_present = "describe")]
+    #[arg(
+        long,
+        value_enum,
+        required_unless_present_any = ["describe", "headroom_probe"]
+    )]
     arm: Option<ArenaFloorArm>,
     /// Emit authenticated geometry without touching payload bytes.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "headroom_probe")]
     describe: bool,
+    /// Report Metal memory admission without opening or allocating the model.
+    #[arg(long, conflicts_with = "describe")]
+    headroom_probe: bool,
     /// Token-embedding policy used to derive the direct request inventory.
     #[arg(long, value_enum, default_value = "production-auto")]
     embedding_policy: FloorEmbeddingPolicy,
@@ -636,6 +647,46 @@ pub(crate) struct GgufArenaFloorArgs {
     /// `text` or `json`.
     #[arg(short = 'o', long, value_enum, default_value = "json")]
     output: OutputFormat,
+}
+
+fn validate_headroom_probe_scope(args: &GgufArenaFloorArgs) -> Result<()> {
+    if args.output != OutputFormat::Json
+        || args.profile.is_some()
+        || args.arm.is_some()
+        || args.embedding_policy != FloorEmbeddingPolicy::ProductionAuto
+        || args.workers != FROZEN_PARALLEL_COPY_WORKERS
+    {
+        return Err(anyhow!(
+            "headroom probe requires JSON, default policy/W4, and no profile or arm"
+        ));
+    }
+    Ok(())
+}
+
+fn run_headroom_probe(args: &GgufArenaFloorArgs, build_identity: Value) -> Result<()> {
+    validate_headroom_probe_scope(args)?;
+    let ctx = MetalContext::new()?;
+    let admission = evaluate_metal_memory_admission(
+        A10B_REQUIRED_HEADROOM_BYTES,
+        0,
+        ctx.memory_signals(),
+        true,
+    );
+    let row = json!({
+        "schema_version": 1,
+        "mode": "metal-memory-headroom-probe",
+        "model_label": args.model,
+        "endpoint": "metal-memory-headroom/no-model-open/no-GPU-command",
+        "model_opened": false,
+        "payload_allocated": false,
+        "device_name": ctx.device.name().to_string(),
+        "unified_memory": ctx.device.hasUnifiedMemory(),
+        "max_buffer_length": ctx.max_buffer_length(),
+        "memory_admission": memory_admission_json(admission),
+        "build_identity": build_identity,
+    });
+    println!("{}", serde_json::to_string_pretty(&row)?);
+    Ok(())
 }
 
 fn parse_worker_count(value: &str) -> std::result::Result<usize, String> {
@@ -2407,6 +2458,9 @@ fn verify_materialized(
 }
 
 pub(crate) fn run(args: GgufArenaFloorArgs, build_identity: Value) -> Result<()> {
+    if args.headroom_probe {
+        return run_headroom_probe(&args, build_identity);
+    }
     validate_worker_scope(args.workers, args.describe, args.arm, args.profile)?;
     validate_output_scope(args.describe, args.profile, args.output)?;
     validate_embedding_policy_scope(
@@ -3196,8 +3250,9 @@ mod tests {
         parse_worker_count, profile_materialization_supported, resolve_embedding_selection,
         source_order, uses_a10b_execution_schema, validate_describe_worker_scope,
         validate_embedding_environment, validate_embedding_policy_scope,
-        validate_execution_row_projection, validate_output_scope, validate_parallel_copy_schedule,
-        validate_profile_materialization_arm, validate_worker_scope,
+        validate_execution_row_projection, validate_headroom_probe_scope, validate_output_scope,
+        validate_parallel_copy_schedule, validate_profile_materialization_arm,
+        validate_worker_scope,
     };
     use crate::OutputFormat;
     use clap::Parser;
@@ -3277,6 +3332,43 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn headroom_probe_is_nonmaterializing_and_json_only() {
+        let probe = GgufArenaFloorArgs::try_parse_from([
+            "qwen",
+            "--model",
+            "fixture.gguf",
+            "--headroom-probe",
+        ])
+        .expect("headroom probe arguments");
+        assert!(probe.headroom_probe);
+        assert!(!probe.describe);
+        assert!(probe.profile.is_none());
+        assert!(probe.arm.is_none());
+        validate_headroom_probe_scope(&probe).expect("canonical headroom probe");
+
+        let text = GgufArenaFloorArgs::try_parse_from([
+            "qwen",
+            "--model",
+            "fixture.gguf",
+            "--headroom-probe",
+            "--output",
+            "text",
+        ])
+        .expect("text probe parses before scope validation");
+        assert!(validate_headroom_probe_scope(&text).is_err());
+        assert!(
+            GgufArenaFloorArgs::try_parse_from([
+                "qwen",
+                "--model",
+                "fixture.gguf",
+                "--headroom-probe",
+                "--describe",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -17,7 +17,8 @@ use qwen_llm::metal_dflash::{
     plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
 };
 use qwen_llm::metal_forward::{
-    LogitsReadbackProfile, MetalForward, MfError, SnapshotValidationError, TokenProfile,
+    LogitsReadbackProfile, MetalForward, MfError, SnapshotValidationError, StructuralRowEvidence,
+    TokenProfile,
 };
 use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
@@ -26,7 +27,8 @@ use qwen_llm::runtime::{
     SequenceConfig,
 };
 use qwen_llm::sampling::{
-    GreedySelection, SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig, SamplingPhaseProfile,
+    BoundedTopKEvidence, GreedySelection, SAMPLER_ALGORITHM_VERSION, SampledToken, Sampler,
+    SamplingConfig, SamplingError, SamplingPhaseProfile,
 };
 use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;
@@ -252,6 +254,20 @@ struct Args {
     )]
     sampling_attribution: bool,
 
+    /// Use bounded top-k over synchronized resident logits for sampled decode.
+    #[arg(
+        long,
+        hide = true,
+        conflicts_with_all = [
+            "requests_jsonl",
+            "request_timing_warm_followup",
+            "prompt_lookup",
+            "sampling_attribution",
+            "durable_prefix_cache"
+        ]
+    )]
+    sampled_structural: bool,
+
     /// Do not ask the tokenizer to add model-defined special tokens.
     #[arg(long)]
     no_special_tokens: bool,
@@ -471,6 +487,145 @@ struct SamplingTelemetry {
     min_p: f32,
     effective_seed: u64,
     draws: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SampledStructuralTelemetry {
+    version: u32,
+    algorithm_version: u32,
+    path: &'static str,
+    prompt_owned_bounded_calls: u64,
+    borrowed_transition_calls: u64,
+    resident_head_wait_calls: u64,
+    validated_shared_row_calls: u64,
+    fallback_calls: u64,
+    input_logits_total: u64,
+    input_logits_min: u64,
+    input_logits_max: u64,
+    retained_top_k_total: u64,
+    retained_top_k_min: u64,
+    retained_top_k_max: u64,
+    max_heap_len: u64,
+    max_heap_capacity: u64,
+    full_candidate_vector_allocations: u64,
+    transition_logits_copy_bytes: u64,
+    extra_command_buffers: u64,
+    gpu_sampling_dispatches: u64,
+}
+
+impl Default for SampledStructuralTelemetry {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            algorithm_version: SAMPLER_ALGORITHM_VERSION,
+            path: "bounded_topk_borrowed_transitions",
+            prompt_owned_bounded_calls: 0,
+            borrowed_transition_calls: 0,
+            resident_head_wait_calls: 0,
+            validated_shared_row_calls: 0,
+            fallback_calls: 0,
+            input_logits_total: 0,
+            input_logits_min: 0,
+            input_logits_max: 0,
+            retained_top_k_total: 0,
+            retained_top_k_min: 0,
+            retained_top_k_max: 0,
+            max_heap_len: 0,
+            max_heap_capacity: 0,
+            full_candidate_vector_allocations: 0,
+            transition_logits_copy_bytes: 0,
+            extra_command_buffers: 0,
+            gpu_sampling_dispatches: 0,
+        }
+    }
+}
+
+impl SampledStructuralTelemetry {
+    fn record_bounded(&mut self, evidence: BoundedTopKEvidence, prompt: bool) -> Result<()> {
+        let calls = self
+            .prompt_owned_bounded_calls
+            .checked_add(self.borrowed_transition_calls)
+            .context("sampled structural call count overflow")?;
+        if prompt {
+            self.prompt_owned_bounded_calls = self
+                .prompt_owned_bounded_calls
+                .checked_add(1)
+                .context("prompt bounded-call count overflow")?;
+        } else {
+            self.borrowed_transition_calls = self
+                .borrowed_transition_calls
+                .checked_add(1)
+                .context("borrowed transition count overflow")?;
+        }
+        if !evidence.used_bounded_path {
+            self.fallback_calls = self
+                .fallback_calls
+                .checked_add(1)
+                .context("sampled structural fallback count overflow")?;
+        }
+        let input = u64::try_from(evidence.input_logits).context("input logits do not fit u64")?;
+        let retained =
+            u64::try_from(evidence.retained_top_k).context("retained top-k does not fit u64")?;
+        let heap_len =
+            u64::try_from(evidence.max_heap_len).context("heap length does not fit u64")?;
+        let heap_capacity =
+            u64::try_from(evidence.heap_capacity).context("heap capacity does not fit u64")?;
+        self.input_logits_total = self
+            .input_logits_total
+            .checked_add(input)
+            .context("input logits total overflow")?;
+        self.retained_top_k_total = self
+            .retained_top_k_total
+            .checked_add(retained)
+            .context("retained top-k total overflow")?;
+        if calls == 0 {
+            self.input_logits_min = input;
+            self.input_logits_max = input;
+            self.retained_top_k_min = retained;
+            self.retained_top_k_max = retained;
+        } else {
+            self.input_logits_min = self.input_logits_min.min(input);
+            self.input_logits_max = self.input_logits_max.max(input);
+            self.retained_top_k_min = self.retained_top_k_min.min(retained);
+            self.retained_top_k_max = self.retained_top_k_max.max(retained);
+        }
+        self.max_heap_len = self.max_heap_len.max(heap_len);
+        self.max_heap_capacity = self.max_heap_capacity.max(heap_capacity);
+        Ok(())
+    }
+
+    fn record_prompt(&mut self, evidence: BoundedTopKEvidence) -> Result<()> {
+        self.record_bounded(evidence, true)
+    }
+
+    fn record_transition(
+        &mut self,
+        bounded: BoundedTopKEvidence,
+        row: StructuralRowEvidence,
+    ) -> Result<()> {
+        self.record_bounded(bounded, false)?;
+        self.resident_head_wait_calls = self
+            .resident_head_wait_calls
+            .checked_add(row.resident_head_wait_calls)
+            .context("resident-head wait count overflow")?;
+        self.validated_shared_row_calls = self
+            .validated_shared_row_calls
+            .checked_add(row.validated_shared_row_calls)
+            .context("validated Shared-row count overflow")?;
+        self.transition_logits_copy_bytes = self
+            .transition_logits_copy_bytes
+            .checked_add(row.transition_logits_copy_bytes)
+            .context("transition logits-copy byte count overflow")?;
+        self.extra_command_buffers = self
+            .extra_command_buffers
+            .checked_add(row.extra_command_buffers)
+            .context("extra command-buffer count overflow")?;
+        self.gpu_sampling_dispatches = self
+            .gpu_sampling_dispatches
+            .checked_add(row.gpu_sampling_dispatches)
+            .context("GPU sampling-dispatch count overflow")?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -954,6 +1109,8 @@ struct RequestTimingRow {
     sampling: Option<SamplingTelemetry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sampling_attribution: Option<SamplingAttribution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sampled_structural: Option<SampledStructuralTelemetry>,
     terminal_token_target_transition_consumed: bool,
     no_special_tokens: bool,
     prefill_chunk_requested: PrefillChunkArg,
@@ -1419,6 +1576,86 @@ fn validate_sampling_attribution_row(row: &RequestTimingRow) -> Result<()> {
     Ok(())
 }
 
+fn validate_sampled_structural_row(row: &RequestTimingRow) -> Result<()> {
+    let Some(structural) = row.sampled_structural.as_ref() else {
+        ensure!(
+            row.schema_version != 12,
+            "schema 12 requires sampled structural telemetry"
+        );
+        return Ok(());
+    };
+    let sampling = row
+        .sampling
+        .as_ref()
+        .context("sampled structural telemetry requires sampling telemetry")?;
+    ensure!(
+        SAMPLER_ALGORITHM_VERSION == 1
+            && structural.algorithm_version == 1
+            && sampling.algorithm_version == 1,
+        "sampled structural requires sampler algorithm version 1"
+    );
+    ensure!(
+        row.schema_version == 12
+            && row.sampling_attribution.is_none()
+            && row.decode_policy == "sampled_cpu"
+            && sampling.draws == row.generated_tokens,
+        "sampled structural schema or sampling contract changed"
+    );
+    ensure!(
+        structural.version == 1 && structural.path == "bounded_topk_borrowed_transitions",
+        "sampled structural version or path changed"
+    );
+    ensure!(
+        structural.prompt_owned_bounded_calls == 1
+            && structural.borrowed_transition_calls
+                == u64::try_from(row.transition_count)
+                    .context("transition count does not fit u64")?
+            && structural.resident_head_wait_calls == structural.borrowed_transition_calls
+            && structural.validated_shared_row_calls == structural.borrowed_transition_calls
+            && structural.fallback_calls == 0,
+        "sampled structural call accounting changed"
+    );
+    let calls = structural
+        .prompt_owned_bounded_calls
+        .checked_add(structural.borrowed_transition_calls)
+        .context("sampled structural call count overflow")?;
+    let generated_tokens =
+        u64::try_from(row.generated_tokens).context("generated token count does not fit u64")?;
+    let sampling_top_k =
+        u64::try_from(sampling.top_k).context("sampling top-k does not fit u64")?;
+    ensure!(
+        calls == generated_tokens
+            && structural.input_logits_min > 0
+            && structural.input_logits_min == structural.input_logits_max
+            && structural.retained_top_k_min > 0
+            && structural.retained_top_k_min == structural.retained_top_k_max
+            && structural.retained_top_k_min == sampling_top_k,
+        "sampled structural support summaries changed"
+    );
+    ensure!(
+        structural.input_logits_total
+            == calls
+                .checked_mul(structural.input_logits_min)
+                .context("sampled structural input-logits product overflow")?
+            && structural.retained_top_k_total
+                == calls
+                    .checked_mul(structural.retained_top_k_min)
+                    .context("sampled structural retained-top-k product overflow")?
+            && structural.max_heap_len == structural.retained_top_k_max
+            && structural.max_heap_capacity >= structural.max_heap_len
+            && structural.max_heap_capacity < structural.input_logits_min,
+        "sampled structural heap or total accounting changed"
+    );
+    ensure!(
+        structural.full_candidate_vector_allocations == 0
+            && structural.transition_logits_copy_bytes == 0
+            && structural.extra_command_buffers == 0
+            && structural.gpu_sampling_dispatches == 0,
+        "sampled structural path added excluded work"
+    );
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct RequestOutput {
     id: String,
@@ -1527,6 +1764,7 @@ fn main() -> Result<()> {
     );
     validate_request_timing_mode(&args)?;
     validate_sampling_attribution_mode(&args)?;
+    validate_sampled_structural_mode(&args)?;
     validate_durable_prefix_cache_mode(&args)?;
 
     if args.info {
@@ -1637,6 +1875,38 @@ fn validate_sampling_attribution_mode(args: &Args) -> Result<()> {
     ensure!(
         qwen_environment.is_empty(),
         "--sampling-attribution rejects inherited non-build QWEN_* variables"
+    );
+    Ok(())
+}
+
+fn validate_sampled_structural_mode(args: &Args) -> Result<()> {
+    if !args.sampled_structural {
+        return Ok(());
+    }
+    ensure!(
+        args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some(),
+        "--sampled-structural requires one single-turn prompt"
+    );
+    ensure!(
+        args.requests_jsonl.is_none()
+            && !args.request_timing_warm_followup
+            && !args.prompt_lookup
+            && !args.sampling_attribution
+            && args.durable_prefix_cache.is_none(),
+        concat!(
+            "--sampled-structural is incompatible with JSONL, warm follow-up, ",
+            "prompt lookup, sampling attribution, and durable cache"
+        )
+    );
+    ensure!(
+        args.temperature > 0.0 && args.top_k > 0,
+        "--sampled-structural requires positive temperature and top-k"
+    );
+    ensure!(
+        args.prefix_cache_max_mib == 0
+            && args.cache_prefix_tokens.is_none()
+            && args.cache_prefix_auto_min_tokens == 0,
+        "--sampled-structural requires zero RAM prefix-cache admission"
     );
     Ok(())
 }
@@ -1783,8 +2053,11 @@ fn request_schema_version(
     has_scratch_overlay: bool,
     sampled: bool,
     sampling_attribution: bool,
+    sampled_structural: bool,
 ) -> u32 {
-    if sampling_attribution {
+    if sampled_structural {
+        12
+    } else if sampling_attribution {
         11
     } else if sampled {
         10
@@ -2538,6 +2811,25 @@ fn run_single_turn(
             "--sampling-attribution requires the frozen Qwen3.6 35B A3B profile"
         );
     }
+    if args.sampled_structural {
+        let vocab = usize::try_from(loaded.arch().vocab_size)
+            .context("sampled structural vocabulary does not fit usize")?;
+        ensure!(
+            sampling.top_k < vocab,
+            "--sampled-structural requires top-k smaller than vocabulary"
+        );
+        ensure!(
+            loaded.gguf().get_str("general.base_model.0.name") == Some("Qwen3.6 35B A3B")
+                && loaded.gguf().get_u64("general.file_type") == Some(15)
+                && std::fs::metadata(model_path)
+                    .is_ok_and(|metadata| metadata.len() == 22_134_528_992),
+            "--sampled-structural requires the frozen Qwen3.6 35B A3B Q4_K_M profile"
+        );
+        loaded
+            .forward()
+            .ensure_sampled_structural_supported()
+            .context("validate sampled structural decode organization")?;
+    }
     let greedy_gpu_mode = configured_greedy_gpu_argmax_mode();
     let runtime_and_model_load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     if timing_enabled {
@@ -2831,6 +3123,11 @@ fn execute_single_turn_request(
     let after_scratch_allocated = timing_enabled.then_some(allocated.after_scratch_allocated);
     let after_sequence_allocated = timing_enabled.then_some(allocated.after_sequence_allocated);
     let forward = loaded.forward();
+    if args.sampled_structural {
+        forward
+            .ensure_sampled_structural_session_supported(sequence.metal_session())
+            .context("validate sampled structural session row before prefill")?;
+    }
 
     let pipeline_cache_prefill_entry =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());
@@ -2999,7 +3296,9 @@ fn execute_single_turn_request(
     let greedy_gpu_decision =
         resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
     let use_gpu_greedy = greedy_gpu_decision.enabled;
-    let (generation, prompt_lookup_stats, sampling_attribution) = if args.prompt_lookup {
+    let (generation, prompt_lookup_stats, sampling_attribution, sampled_structural) = if args
+        .prompt_lookup
+    {
         let result = generate_prompt_lookup(
             loaded,
             &forward,
@@ -3022,7 +3321,7 @@ fn execute_single_turn_request(
             },
         )?;
         sequence = result.sequence;
-        (result.generation, Some(result.stats), None)
+        (result.generation, Some(result.stats), None, None)
     } else {
         let mut on_token = |token| {
             let callback_t0 = Instant::now();
@@ -3036,7 +3335,7 @@ fn execute_single_turn_request(
             }
             Ok(())
         };
-        let (generation, sampling_attribution) = if args.sampling_attribution {
+        let (generation, sampling_attribution, sampled_structural) = if args.sampling_attribution {
             let (generation, sampler_attribution, transition_attribution) =
                 generate_serial_attributed(
                     logits,
@@ -3068,7 +3367,40 @@ fn execute_single_turn_request(
                 generation.transition_ms,
                 generation.wall_ms,
             );
-            (generation, Some(attribution))
+            (generation, Some(attribution), None)
+        } else if args.sampled_structural {
+            let (generation, telemetry) = generate_sampled_structural(
+                logits,
+                args.tokens,
+                &stop_tokens,
+                &mut sampler,
+                &mut on_token,
+                |token, trial, trial_telemetry| {
+                    let position = sequence.position();
+                    let (sampled, _profile, row) = forward
+                        .single_token_sampled_structural(
+                            token,
+                            u32::try_from(position).context("position does not fit u32")?,
+                            unsafe { sequence.metal_session_mut() },
+                            trial,
+                        )
+                        .context("decode token with sampled structural path")?;
+                    let state = match sampled {
+                        Ok((sampled, evidence)) => {
+                            ensure!(
+                                evidence.used_bounded_path,
+                                "sampled structural transition selection fell back"
+                            );
+                            trial_telemetry.record_transition(evidence, row)?;
+                            SampledStructuralDecodeState::Selected(Ok(sampled))
+                        }
+                        Err(error) => SampledStructuralDecodeState::Selected(Err(error)),
+                    };
+                    sequence.advance_by(1)?;
+                    Ok(state)
+                },
+            )?;
+            (generation, None, Some(telemetry))
         } else if use_gpu_greedy {
             (
                 generate_gpu_greedy(
@@ -3090,6 +3422,7 @@ fn execute_single_turn_request(
                         Ok(next)
                     },
                 )?,
+                None,
                 None,
             )
         } else {
@@ -3114,9 +3447,10 @@ fn execute_single_turn_request(
                     },
                 )?,
                 None,
+                None,
             )
         };
-        (generation, None, sampling_attribution)
+        (generation, None, sampling_attribution, sampled_structural)
     };
     let mut inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     let pipeline_cache_generation_exit =
@@ -3329,6 +3663,7 @@ fn execute_single_turn_request(
                 prefill_scratch_overlay.is_some(),
                 sampling_config.temperature > 0.0,
                 args.sampling_attribution,
+                args.sampled_structural,
             ),
             request_epoch,
             request_index,
@@ -3360,6 +3695,7 @@ fn execute_single_turn_request(
             decode_policy: decode_policy_label(sampling_config, args.prompt_lookup, use_gpu_greedy),
             sampling: SamplingTelemetry::sampled(sampling_config, sampler.draws()),
             sampling_attribution,
+            sampled_structural,
             terminal_token_target_transition_consumed: false,
             no_special_tokens: !prompt_add_special_tokens(args, prompt_source),
             prefill_chunk_requested: args.prefill_chunk,
@@ -3406,6 +3742,7 @@ fn execute_single_turn_request(
             row.transition_count,
         )?;
         validate_sampling_attribution_row(row)?;
+        validate_sampled_structural_row(row)?;
     }
     Ok(SingleTurnResult {
         row,
@@ -3924,6 +4261,7 @@ fn run_jsonl_request(
             prefill_scratch_overlay.is_some(),
             sampling_config.temperature > 0.0,
             false,
+            false,
         ),
         id: id.to_string(),
         line: prepared.line,
@@ -4148,18 +4486,126 @@ where
     )
 }
 
+#[derive(Debug)]
+enum SampledStructuralDecodeState {
+    PromptLogits(Vec<f32>),
+    Selected(std::result::Result<SampledToken, SamplingError>),
+}
+
+struct SampledStructuralContext<'a> {
+    sampler: &'a mut Sampler,
+    telemetry: SampledStructuralTelemetry,
+}
+
+fn with_transactional_sampled_structural_context<R, F>(
+    context: &mut SampledStructuralContext<'_>,
+    operation: F,
+) -> Result<R>
+where
+    F: FnOnce(&mut Sampler, &mut SampledStructuralTelemetry) -> Result<R>,
+{
+    let mut trial_sampler = context.sampler.clone();
+    let mut trial_telemetry = context.telemetry.clone();
+    let result = operation(&mut trial_sampler, &mut trial_telemetry)?;
+    *context.sampler = trial_sampler;
+    context.telemetry = trial_telemetry;
+    Ok(result)
+}
+
+fn generate_sampled_structural<OnToken, Transition>(
+    logits: Vec<f32>,
+    max_tokens: usize,
+    stop_tokens: &[i32],
+    sampler: &mut Sampler,
+    on_token: OnToken,
+    mut transition: Transition,
+) -> Result<(GenerationResult, SampledStructuralTelemetry)>
+where
+    OnToken: FnMut(i32) -> Result<()>,
+    Transition: FnMut(
+        i32,
+        &mut Sampler,
+        &mut SampledStructuralTelemetry,
+    ) -> Result<SampledStructuralDecodeState>,
+{
+    ensure!(
+        sampler.config().temperature > 0.0 && sampler.config().top_k > 0,
+        "sampled structural generation requires positive temperature and top-k"
+    );
+    let mut context = SampledStructuralContext {
+        sampler,
+        telemetry: SampledStructuralTelemetry::default(),
+    };
+    let generation = generate_serial_state_with_context(
+        SampledStructuralDecodeState::PromptLogits(logits),
+        max_tokens,
+        stop_tokens,
+        &mut context,
+        |context, state| match state {
+            SampledStructuralDecodeState::PromptLogits(logits) => {
+                with_transactional_sampled_structural_context(context, |sampler, telemetry| {
+                    let (sampled, evidence) = sampler.sample_bounded_top_k(logits)?;
+                    ensure!(
+                        evidence.used_bounded_path,
+                        "sampled structural prompt selection fell back"
+                    );
+                    telemetry.record_prompt(evidence)?;
+                    Ok(sampled.token)
+                })
+            }
+            SampledStructuralDecodeState::Selected(result) => match result {
+                Ok(sampled) => Ok(sampled.token),
+                Err(error) => Err(anyhow::Error::new(error.clone())),
+            },
+        },
+        on_token,
+        |context, token| {
+            with_transactional_sampled_structural_context(context, |sampler, telemetry| {
+                transition(token, sampler, telemetry)
+            })
+        },
+    )?;
+    Ok((generation, context.telemetry))
+}
+
 fn generate_serial_state<State, Select, OnToken, Transition>(
-    mut state: State,
+    state: State,
     max_tokens: usize,
     stop_tokens: &[i32],
     mut select: Select,
-    mut on_token: OnToken,
+    on_token: OnToken,
     mut transition: Transition,
 ) -> Result<GenerationResult>
 where
     Select: FnMut(&State) -> Result<i32>,
     OnToken: FnMut(i32) -> Result<()>,
     Transition: FnMut(i32) -> Result<State>,
+{
+    let mut context = ();
+    generate_serial_state_with_context(
+        state,
+        max_tokens,
+        stop_tokens,
+        &mut context,
+        |_, state| select(state),
+        on_token,
+        |_, token| transition(token),
+    )
+}
+
+fn generate_serial_state_with_context<Context, State, Select, OnToken, Transition>(
+    mut state: State,
+    max_tokens: usize,
+    stop_tokens: &[i32],
+    context: &mut Context,
+    mut select: Select,
+    mut on_token: OnToken,
+    mut transition: Transition,
+) -> Result<GenerationResult>
+where
+    Select: FnMut(&mut Context, &State) -> Result<i32>,
+    OnToken: FnMut(i32) -> Result<()>,
+    Transition: FnMut(&mut Context, i32) -> Result<State>,
 {
     ensure!(max_tokens > 0, "max_tokens must be >= 1");
     let wall_t0 = Instant::now();
@@ -4174,7 +4620,7 @@ where
 
     while tokens.len() < max_tokens {
         let selection_t0 = Instant::now();
-        let token = select(&state)?;
+        let token = select(context, &state)?;
         first_token_selection_ms.get_or_insert_with(|| selection_t0.elapsed().as_secs_f64() * 1e3);
         first_token_ready_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
         tokens.push(token);
@@ -4191,7 +4637,7 @@ where
         }
 
         let transition_t0 = Instant::now();
-        state = transition(token)?;
+        state = transition(context, token)?;
         let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
         transition_ms += elapsed_ms;
         first_transition_ms.get_or_insert(elapsed_ms);
@@ -4896,6 +5342,7 @@ fn print_model_info(model_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
 
@@ -5077,6 +5524,37 @@ mod tests {
         logits
     }
 
+    fn fake_structural_row_evidence() -> StructuralRowEvidence {
+        StructuralRowEvidence {
+            resident_head_wait_calls: 1,
+            validated_shared_row_calls: 1,
+            transition_logits_copy_bytes: 0,
+            extra_command_buffers: 0,
+            gpu_sampling_dispatches: 0,
+        }
+    }
+
+    fn fake_structural_transition<Advance>(
+        trial: &mut Sampler,
+        telemetry: &mut SampledStructuralTelemetry,
+        logits: &[f32],
+        advance: Advance,
+    ) -> Result<SampledStructuralDecodeState>
+    where
+        Advance: FnOnce() -> Result<()>,
+    {
+        let sampled = trial.sample_bounded_top_k(logits);
+        let state = match sampled {
+            Ok((sampled, evidence)) => {
+                telemetry.record_transition(evidence, fake_structural_row_evidence())?;
+                SampledStructuralDecodeState::Selected(Ok(sampled))
+            }
+            Err(error) => SampledStructuralDecodeState::Selected(Err(error)),
+        };
+        advance()?;
+        Ok(state)
+    }
+
     fn prepared(id: &str, tokens: &[i32]) -> PreparedJsonlRequest {
         PreparedJsonlRequest {
             request: JsonlRequest {
@@ -5197,6 +5675,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
             ),
             7
         );
@@ -5204,6 +5683,7 @@ mod tests {
             request_schema_version(
                 PrefillChunkArg::Fixed(1024),
                 true,
+                false,
                 false,
                 false,
                 false,
@@ -5219,15 +5699,24 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
             ),
             8
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Auto, false, false, false, false, false),
+            request_schema_version(
+                PrefillChunkArg::Auto,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             9
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Auto, true, true, true, false, false),
+            request_schema_version(PrefillChunkArg::Auto, true, true, true, false, false, false,),
             9
         );
         assert_eq!(
@@ -5237,6 +5726,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 false,
             ),
             10
@@ -5249,8 +5739,21 @@ mod tests {
                 false,
                 true,
                 true,
+                false,
             ),
             11
+        );
+        assert_eq!(
+            request_schema_version(
+                PrefillChunkArg::Fixed(1024),
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+            ),
+            12
         );
     }
 
@@ -5332,6 +5835,151 @@ mod tests {
             .is_err(),
             "warm follow-up must conflict at clap parsing"
         );
+    }
+
+    #[test]
+    fn sampled_structural_cli_is_hidden_bounded_and_fail_closed() {
+        let mut help = Vec::new();
+        Args::command().write_long_help(&mut help).unwrap();
+        assert!(
+            !String::from_utf8(help)
+                .unwrap()
+                .contains("sampled-structural")
+        );
+
+        let exact = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt-file",
+            "prompt.txt",
+            "--temp",
+            "0.7",
+            "--top-k",
+            "200",
+            "--prefix-cache-max-mib",
+            "0",
+            "--cache-prefix-auto-min-tokens",
+            "0",
+            "--request-timings",
+            "timing.jsonl",
+            "--sampled-structural",
+        ])
+        .unwrap();
+        assert!(validate_sampled_structural_mode(&exact).is_ok());
+
+        let without_timings = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--temp",
+            "0.7",
+            "--top-k",
+            "200",
+            "--prefix-cache-max-mib",
+            "0",
+            "--cache-prefix-auto-min-tokens",
+            "0",
+            "--sampled-structural",
+        ])
+        .unwrap();
+        assert!(validate_sampled_structural_mode(&without_timings).is_ok());
+
+        let default_cache = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--temp",
+            "0.7",
+            "--top-k",
+            "200",
+            "--request-timings",
+            "timing.jsonl",
+            "--sampled-structural",
+        ])
+        .unwrap();
+        assert!(
+            validate_sampled_structural_mode(&default_cache)
+                .unwrap_err()
+                .to_string()
+                .contains("zero RAM prefix-cache admission")
+        );
+
+        let unbounded = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--temp",
+            "0.7",
+            "--top-k",
+            "0",
+            "--prefix-cache-max-mib",
+            "0",
+            "--cache-prefix-auto-min-tokens",
+            "0",
+            "--request-timings",
+            "timing.jsonl",
+            "--sampled-structural",
+        ])
+        .unwrap();
+        assert!(
+            validate_sampled_structural_mode(&unbounded)
+                .unwrap_err()
+                .to_string()
+                .contains("positive temperature and top-k")
+        );
+
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "--model",
+                "model.gguf",
+                "--prompt",
+                "hello",
+                "--request-timings",
+                "timing.jsonl",
+                "--sampling-attribution",
+                "--sampled-structural",
+            ])
+            .is_err(),
+            "sampling attribution must conflict at clap parsing"
+        );
+    }
+
+    #[test]
+    fn sampled_structural_telemetry_has_the_frozen_key_set() {
+        let value = serde_json::to_value(SampledStructuralTelemetry::default()).unwrap();
+        let object = value.as_object().expect("structural telemetry object");
+        let actual: std::collections::BTreeSet<_> = object.keys().map(String::as_str).collect();
+        let expected = std::collections::BTreeSet::from([
+            "version",
+            "algorithm_version",
+            "path",
+            "prompt_owned_bounded_calls",
+            "borrowed_transition_calls",
+            "resident_head_wait_calls",
+            "validated_shared_row_calls",
+            "fallback_calls",
+            "input_logits_total",
+            "input_logits_min",
+            "input_logits_max",
+            "retained_top_k_total",
+            "retained_top_k_min",
+            "retained_top_k_max",
+            "max_heap_len",
+            "max_heap_capacity",
+            "full_candidate_vector_allocations",
+            "transition_logits_copy_bytes",
+            "extra_command_buffers",
+            "gpu_sampling_dispatches",
+        ]);
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -6756,6 +7404,329 @@ mod tests {
         assert_eq!(telemetry.algorithm_version, SAMPLER_ALGORITHM_VERSION);
         assert_eq!(telemetry.effective_seed, config.seed);
         assert_eq!(telemetry.draws, 4);
+    }
+
+    #[test]
+    fn sampled_structural_generation_preserves_transaction_boundaries() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 1,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 42,
+        };
+
+        let mut ordinary_one_sampler = Sampler::new(config).unwrap();
+        let ordinary_one = generate_serial(
+            logits_with_argmax(1),
+            1,
+            &[],
+            &mut ordinary_one_sampler,
+            |_| Ok(()),
+            |_| -> Result<Vec<f32>> { panic!("one-token output must not transition") },
+        )
+        .unwrap();
+        let mut one_sampler = Sampler::new(config).unwrap();
+        let (one, one_telemetry) = generate_sampled_structural(
+            logits_with_argmax(1),
+            1,
+            &[],
+            &mut one_sampler,
+            |_| Ok(()),
+            |_, _, _| -> Result<_> { panic!("one-token output must not transition") },
+        )
+        .unwrap();
+        assert_eq!(one.tokens, [1]);
+        assert_eq!(one.tokens, ordinary_one.tokens);
+        assert_eq!(one.stop_reason, StopReason::TokenLimit);
+        assert_eq!(one.stop_reason, ordinary_one.stop_reason);
+        assert_eq!(one.transitions, 0);
+        assert_eq!(one.transitions, ordinary_one.transitions);
+        assert_eq!(one_sampler.draws(), 1);
+        assert_eq!(one_sampler.draws(), ordinary_one_sampler.draws());
+        assert_eq!(one_telemetry.prompt_owned_bounded_calls, 1);
+        assert_eq!(one_telemetry.borrowed_transition_calls, 0);
+
+        let ordinary_callbacks = RefCell::new(Vec::new());
+        let mut ordinary_sampler = Sampler::new(config).unwrap();
+        let ordinary = generate_serial(
+            logits_with_argmax(1),
+            3,
+            &[],
+            &mut ordinary_sampler,
+            |token| {
+                ordinary_callbacks.borrow_mut().push(token);
+                Ok(())
+            },
+            |token| {
+                Ok(logits_with_argmax(match token {
+                    1 => 2,
+                    2 => 0,
+                    _ => panic!("unexpected ordinary token {token}"),
+                }))
+            },
+        )
+        .unwrap();
+        let structural_callbacks = RefCell::new(Vec::new());
+        let structural_advances = Cell::new(0usize);
+        let mut structural_sampler = Sampler::new(config).unwrap();
+        let (structural, structural_telemetry) = generate_sampled_structural(
+            logits_with_argmax(1),
+            3,
+            &[],
+            &mut structural_sampler,
+            |token| {
+                structural_callbacks.borrow_mut().push(token);
+                Ok(())
+            },
+            |token, trial, telemetry| {
+                let logits = logits_with_argmax(match token {
+                    1 => 2,
+                    2 => 0,
+                    _ => panic!("unexpected structural token {token}"),
+                });
+                fake_structural_transition(trial, telemetry, &logits, || {
+                    structural_advances.set(structural_advances.get() + 1);
+                    Ok(())
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(structural.tokens, ordinary.tokens);
+        assert_eq!(structural.stop_reason, ordinary.stop_reason);
+        assert_eq!(structural.transitions, ordinary.transitions);
+        assert_eq!(structural_sampler.draws(), ordinary_sampler.draws());
+        assert_eq!(structural_advances.get(), ordinary.transitions);
+        assert_eq!(
+            structural_callbacks.into_inner(),
+            ordinary_callbacks.into_inner()
+        );
+        assert_eq!(structural_telemetry.prompt_owned_bounded_calls, 1);
+        assert_eq!(structural_telemetry.borrowed_transition_calls, 2);
+        assert_eq!(structural_telemetry.resident_head_wait_calls, 2);
+        assert_eq!(structural_telemetry.validated_shared_row_calls, 2);
+        assert_eq!(structural_telemetry.input_logits_total, 12);
+        assert_eq!(structural_telemetry.retained_top_k_total, 3);
+        assert_eq!(structural_telemetry.max_heap_len, 1);
+        assert!(structural_telemetry.max_heap_capacity >= 1);
+        assert!(structural_telemetry.max_heap_capacity < 4);
+        let ordinary_boundary = derive_completed_checkpoint_boundary(
+            10,
+            &ordinary.tokens,
+            ordinary.transitions,
+            10 + ordinary.transitions,
+        )
+        .unwrap();
+        let structural_boundary = derive_completed_checkpoint_boundary(
+            10,
+            &structural.tokens,
+            structural.transitions,
+            10 + structural.transitions,
+        )
+        .unwrap();
+        assert_eq!(
+            structural_boundary.consumed_prefix_len,
+            ordinary_boundary.consumed_prefix_len
+        );
+        assert_eq!(
+            structural_boundary.pending_token,
+            ordinary_boundary.pending_token
+        );
+
+        for (stop_tokens, expected_tokens, expected_callbacks, expected_transitions) in [
+            (vec![1], vec![1], vec![], 0),
+            (vec![2], vec![1, 2], vec![1], 1),
+        ] {
+            let ordinary_callbacks = RefCell::new(Vec::new());
+            let mut ordinary_sampler = Sampler::new(config).unwrap();
+            let ordinary = generate_serial(
+                logits_with_argmax(1),
+                4,
+                &stop_tokens,
+                &mut ordinary_sampler,
+                |token| {
+                    ordinary_callbacks.borrow_mut().push(token);
+                    Ok(())
+                },
+                |_| Ok(logits_with_argmax(2)),
+            )
+            .unwrap();
+            let callbacks = RefCell::new(Vec::new());
+            let mut sampler = Sampler::new(config).unwrap();
+            let (generation, telemetry) = generate_sampled_structural(
+                logits_with_argmax(1),
+                4,
+                &stop_tokens,
+                &mut sampler,
+                |token| {
+                    callbacks.borrow_mut().push(token);
+                    Ok(())
+                },
+                |_, trial, telemetry| {
+                    fake_structural_transition(trial, telemetry, &logits_with_argmax(2), || Ok(()))
+                },
+            )
+            .unwrap();
+            assert_eq!(generation.tokens, ordinary.tokens);
+            assert_eq!(generation.tokens, expected_tokens);
+            assert_eq!(generation.stop_reason, ordinary.stop_reason);
+            assert_eq!(generation.stop_reason, StopReason::Eos);
+            assert_eq!(generation.transitions, ordinary.transitions);
+            assert_eq!(generation.transitions, expected_transitions);
+            assert_eq!(sampler.draws(), ordinary_sampler.draws());
+            assert_eq!(
+                callbacks.borrow().as_slice(),
+                ordinary_callbacks.borrow().as_slice()
+            );
+            assert_eq!(callbacks.into_inner(), expected_callbacks);
+            assert_eq!(
+                telemetry.borrowed_transition_calls,
+                expected_transitions as u64
+            );
+        }
+
+        let callback_transitions = Cell::new(0usize);
+        let mut ordinary_callback_sampler = Sampler::new(config).unwrap();
+        let ordinary_callback_error = generate_serial(
+            logits_with_argmax(1),
+            2,
+            &[],
+            &mut ordinary_callback_sampler,
+            |_| bail!("callback failed"),
+            |_| unreachable!("callback failure must prevent transition"),
+        )
+        .unwrap_err();
+        let mut callback_sampler = Sampler::new(config).unwrap();
+        let callback_error = generate_sampled_structural(
+            logits_with_argmax(1),
+            2,
+            &[],
+            &mut callback_sampler,
+            |_| bail!("callback failed"),
+            |_, _, _| {
+                callback_transitions.set(callback_transitions.get() + 1);
+                unreachable!("callback failure must prevent transition")
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            callback_error.to_string(),
+            ordinary_callback_error.to_string()
+        );
+        assert!(callback_error.to_string().contains("callback failed"));
+        assert_eq!(callback_transitions.get(), 0);
+        assert_eq!(callback_sampler.draws(), 1);
+        assert_eq!(callback_sampler.draws(), ordinary_callback_sampler.draws());
+
+        let mut ordinary_transition_sampler = Sampler::new(config).unwrap();
+        let ordinary_transition_error = generate_serial(
+            logits_with_argmax(1),
+            2,
+            &[],
+            &mut ordinary_transition_sampler,
+            |_| Ok(()),
+            |_| bail!("transition failed"),
+        )
+        .unwrap_err();
+        let mut transition_sampler = Sampler::new(config).unwrap();
+        let transition_error = generate_sampled_structural(
+            logits_with_argmax(1),
+            2,
+            &[],
+            &mut transition_sampler,
+            |_| Ok(()),
+            |_, _, _| bail!("transition failed"),
+        )
+        .unwrap_err();
+        assert_eq!(
+            transition_error.to_string(),
+            ordinary_transition_error.to_string()
+        );
+        assert!(transition_error.to_string().contains("transition failed"));
+        assert_eq!(transition_sampler.draws(), 1);
+        assert_eq!(
+            transition_sampler.draws(),
+            ordinary_transition_sampler.draws()
+        );
+
+        let nan_logits = vec![0.0, f32::NAN, 2.0, 1.0];
+        let ordinary_position = Cell::new(0usize);
+        let mut ordinary_sampler = Sampler::new(config).unwrap();
+        let ordinary_error = generate_serial(
+            logits_with_argmax(1),
+            2,
+            &[],
+            &mut ordinary_sampler,
+            |_| Ok(()),
+            |_| {
+                ordinary_position.set(ordinary_position.get() + 1);
+                Ok(nan_logits.clone())
+            },
+        )
+        .unwrap_err();
+        let structural_position = Cell::new(0usize);
+        let mut structural_sampler = Sampler::new(config).unwrap();
+        let structural_error = generate_sampled_structural(
+            logits_with_argmax(1),
+            2,
+            &[],
+            &mut structural_sampler,
+            |_| Ok(()),
+            |_, trial, telemetry| {
+                fake_structural_transition(trial, telemetry, &nan_logits, || {
+                    structural_position.set(structural_position.get() + 1);
+                    Ok(())
+                })
+            },
+        )
+        .unwrap_err();
+        assert_eq!(structural_error.to_string(), ordinary_error.to_string());
+        assert_eq!(structural_position.get(), ordinary_position.get());
+        assert_eq!(structural_position.get(), 1);
+        assert_eq!(structural_sampler.draws(), ordinary_sampler.draws());
+        assert_eq!(structural_sampler.draws(), 1);
+
+        let advance_attempts = Cell::new(0usize);
+        let mut advance_sampler = Sampler::new(config).unwrap();
+        let advance_error = generate_sampled_structural(
+            logits_with_argmax(1),
+            2,
+            &[],
+            &mut advance_sampler,
+            |_| Ok(()),
+            |_, trial, telemetry| {
+                fake_structural_transition(trial, telemetry, &logits_with_argmax(2), || {
+                    advance_attempts.set(advance_attempts.get() + 1);
+                    bail!("advance failed")
+                })
+            },
+        )
+        .unwrap_err();
+        assert!(advance_error.to_string().contains("advance failed"));
+        assert_eq!(advance_attempts.get(), 1);
+        assert_eq!(
+            advance_sampler.draws(),
+            1,
+            "failed advance must not commit the trial RNG draw"
+        );
+
+        let mut accounting_sampler = Sampler::new(config).unwrap();
+        let mut context = SampledStructuralContext {
+            sampler: &mut accounting_sampler,
+            telemetry: SampledStructuralTelemetry {
+                prompt_owned_bounded_calls: u64::MAX,
+                ..SampledStructuralTelemetry::default()
+            },
+        };
+        let accounting_error =
+            with_transactional_sampled_structural_context(&mut context, |trial, telemetry| {
+                let (_, evidence) = trial.sample_bounded_top_k(&logits_with_argmax(1))?;
+                telemetry.record_prompt(evidence)
+            })
+            .unwrap_err();
+        assert!(accounting_error.to_string().contains("count overflow"));
+        assert_eq!(context.sampler.draws(), 0);
+        assert_eq!(context.telemetry.prompt_owned_bounded_calls, u64::MAX);
     }
 
     fn fake_attributed_transition(

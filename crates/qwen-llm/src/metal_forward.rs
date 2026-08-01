@@ -61,7 +61,7 @@ use crate::metal::{
     plan_retained_storage,
 };
 use crate::model::{Arch, ArchKind};
-use crate::sampling::GreedySelection;
+use crate::sampling::{BoundedTopKEvidence, GreedySelection, SampledToken, Sampler, SamplingError};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use sha2::{Digest, Sha256};
@@ -7928,6 +7928,143 @@ impl<'a> MetalForward<'a> {
         ))
     }
 
+    /// Validate the architecture and decode organization required by scoped
+    /// resident-logit sampling before a request starts prefill.
+    pub fn ensure_sampled_structural_supported(&self) -> Result<(), MfError> {
+        let arch = &self.model.arch;
+        if arch.kind != ArchKind::Moe
+            || arch.n_layer != 40
+            || arch.hidden_size != 2_048
+            || arch.vocab_size != 248_320
+            || arch.n_q_heads != 16
+            || arch.n_kv_heads != 2
+            || arch.attn_head_dim != 256
+            || arch.full_attention_interval != 4
+            || arch.partial_rotary_factor.to_bits() != 0.25f32.to_bits()
+            || arch.gdn_n_k_heads != 16
+            || arch.gdn_n_v_heads != 32
+            || arch.gdn_head_dim != 128
+            || arch.gdn_conv_kernel != 4
+            || arch.expert_count != 256
+            || arch.expert_used_count != 8
+            || arch.expert_feed_forward_length != 512
+            || arch.expert_shared_feed_forward_length != 512
+            || arch.mtp_n_hidden_layers != 0
+            || self.model.blocks.len() != arch.n_layer as usize
+            || self.model.lm_head.dtype != GgmlType::Q6_K
+            || self.model.lm_head.shape.as_slice() != [2_048, 248_320]
+        {
+            return Err(MfError::Metal(MetalError::BadShape {
+                kernel: "sampled_structural",
+                detail: "requires the frozen Qwen3.6 35B A3B resident-head geometry".into(),
+            }));
+        }
+        if !concurrent_gdn_moe_decode_enabled() {
+            return Err(MfError::Metal(MetalError::BadShape {
+                kernel: "sampled_structural",
+                detail: "requires the production concurrent-GDN MoE decode path".into(),
+            }));
+        }
+        Ok(())
+    }
+
+    /// Validate the exact session-row contract before a flagged request starts
+    /// prompt prefill.
+    pub fn ensure_sampled_structural_session_supported(
+        &self,
+        session: &MetalSession,
+    ) -> Result<(), MfError> {
+        self.ensure_sampled_structural_supported()?;
+        self.validate_sampled_structural_logits(session)?;
+        Ok(())
+    }
+
+    /// Execute the production concurrent-MoE transition and expose its
+    /// synchronized Shared logits row only to the bounded CPU sampler.
+    pub fn single_token_sampled_structural(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        sampler: &mut Sampler,
+    ) -> Result<
+        (
+            Result<(SampledToken, BoundedTopKEvidence), SamplingError>,
+            TokenProfile,
+            StructuralRowEvidence,
+        ),
+        MfError,
+    > {
+        self.single_token_sampled_structural_scoped(token_id, position, session, |row| {
+            sampler.sample_bounded_top_k(row)
+        })
+    }
+
+    fn single_token_sampled_structural_scoped<R, F>(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+        consume: F,
+    ) -> Result<(R, TokenProfile, StructuralRowEvidence), MfError>
+    where
+        F: for<'row> FnOnce(&'row [f32]) -> R,
+    {
+        self.ensure_sampled_structural_supported()?;
+        let (mut profile, evidence, t_total) = self
+            .single_token_profiled_concurrent_gdn_moe_tail_inner(
+                token_id,
+                position,
+                session,
+                LmHeadTail::Resident,
+                false,
+            )?;
+        debug_assert_eq!(evidence.kind, LmHeadTailKind::Resident);
+        let mut structural_evidence = StructuralRowEvidence::default();
+        structural_evidence.resident_head_wait_calls = 1;
+        let validated = self.validate_sampled_structural_logits(session)?;
+        structural_evidence.validated_shared_row_calls = 1;
+        let row = unsafe { std::slice::from_raw_parts(validated.source.as_ptr(), validated.len) };
+        let result = consume(row);
+        profile.total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((result, profile, structural_evidence))
+    }
+
+    fn validate_sampled_structural_logits(
+        &self,
+        session: &MetalSession,
+    ) -> Result<ValidatedSharedLogits, MfError> {
+        let vocab = usize::try_from(self.model.arch.vocab_size)
+            .map_err(|_| lm_head_tail_error("sampled logits vocabulary does not fit usize"))?;
+        if session.logits.dtype != GgmlType::F32
+            || session.logits.shape != [self.model.arch.vocab_size as u64]
+            || session.logits.provenance() != MetalTensorProvenance::OwnedWritable
+            || session.logits.buffer.storageMode() != MTLStorageMode::Shared
+        {
+            return Err(lm_head_tail_error(
+                "sampled structural logits require exact writable Shared F32 [vocab] storage",
+            ));
+        }
+        let bytes = vocab
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| lm_head_tail_error("sampled structural logits byte size overflow"))?;
+        let (source_start, _) =
+            checked_tail_range(&session.logits, bytes, "sampled structural logits")?;
+        let base = std::ptr::NonNull::new(session.logits.buffer.contents().as_ptr() as *mut u8)
+            .ok_or_else(|| {
+                lm_head_tail_error("sampled structural logits have null host contents")
+            })?;
+        let source = unsafe { base.as_ptr().add(source_start) };
+        if (source as usize) % std::mem::align_of::<f32>() != 0 {
+            return Err(lm_head_tail_error(
+                "sampled structural logits source is not aligned for F32 access",
+            ));
+        }
+        let source = std::ptr::NonNull::new(source.cast::<f32>())
+            .ok_or_else(|| lm_head_tail_error("sampled structural logits have null F32 source"))?;
+        Ok(ValidatedSharedLogits { source, len: vocab })
+    }
+
     pub fn single_token_argmax_profiled_concurrent_gdn_moe(
         &self,
         token_id: i32,
@@ -12384,6 +12521,20 @@ pub struct LogitsReadbackProfile {
     pub copy_ms: f64,
 }
 
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+pub struct StructuralRowEvidence {
+    pub resident_head_wait_calls: u64,
+    pub validated_shared_row_calls: u64,
+    pub transition_logits_copy_bytes: u64,
+    pub extra_command_buffers: u64,
+    pub gpu_sampling_dispatches: u64,
+}
+
+struct ValidatedSharedLogits {
+    source: std::ptr::NonNull<f32>,
+    len: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct DecodeStageTiming {
     pub family: String,
@@ -13551,6 +13702,7 @@ mod tests {
     use crate::forward::Forward;
     use crate::gguf::GgufFile;
     use crate::loader::Model;
+    use crate::sampling::{Sampler, SamplingConfig};
 
     fn metal_test_context() -> Option<MetalContext> {
         match MetalContext::new() {
@@ -16944,6 +17096,281 @@ mod tests {
             profiled_snapshot.gdn_state_arena
         );
         eprintln!("[sampling-attribution-a3b] exact-state PASS");
+    }
+
+    #[test]
+    #[ignore = "requires the 22 GB A3B fixture, frozen prompt, and Metal GPU"]
+    fn metal_sampled_structural_matches_copied_a3b() {
+        use crate::metal_dflash::{
+            MetalDFlashLayerMajorScratch, PrefillScratchConfig,
+            plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
+        };
+
+        let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        let metadata = std::fs::metadata(model_path).expect("required A3B fixture is missing");
+        assert_eq!(metadata.len(), 22_134_528_992, "A3B fixture size changed");
+        let mut file = std::fs::File::open(model_path).expect("open A3B for authentication");
+        let mut digest = Sha256::new();
+        let mut bytes = vec![0u8; 16 * 1024 * 1024];
+        loop {
+            let count =
+                std::io::Read::read(&mut file, &mut bytes).expect("hash authenticated A3B fixture");
+            if count == 0 {
+                break;
+            }
+            digest.update(&bytes[..count]);
+        }
+        assert_eq!(
+            format!("{:x}", digest.finalize()),
+            "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61",
+            "A3B fixture SHA-256 changed"
+        );
+
+        let prompt_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/bench/tokenizer-prompts/current-reva-n8-interactive-qwen36.txt");
+        let prompt = std::fs::read_to_string(&prompt_path).expect("read frozen Reva prompt");
+        assert_eq!(prompt.len(), 1_891, "frozen prompt length changed");
+        assert_eq!(
+            format!("{:x}", Sha256::digest(prompt.as_bytes())),
+            "e265de9742d1b22e566fc108ae26331ccf46166c6f071e73f211e0a1a7e8b474",
+            "frozen prompt SHA-256 changed"
+        );
+
+        let ctx = MetalContext::new().expect("Metal context");
+        let gguf = GgufFile::open(model_path).expect("open A3B");
+        let model = Model::from_gguf(&gguf).expect("parse A3B");
+        let metal = MetalModel::load(&ctx, &gguf, &model).expect("load A3B");
+        let tokenizer = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
+        let ids = tokenizer
+            .encode(&prompt, true)
+            .expect("tokenize frozen prompt");
+        assert_eq!(ids.len(), 419, "frozen prompt token count changed");
+        let mut token_digest = Sha256::new();
+        for token in &ids {
+            token_digest.update(token.to_le_bytes());
+        }
+        assert_eq!(
+            format!("{:x}", token_digest.finalize()),
+            "fb4bbb4dc66ca7d219099e2974e787ef976f80789cde3e48b8a905dceece1f9f",
+            "frozen prompt token identity changed"
+        );
+
+        let forward = MetalForward::new(&ctx, &metal);
+        forward
+            .ensure_sampled_structural_supported()
+            .expect("sampled structural support");
+        let capacity = 1_024;
+        let mut ordinary = MetalSession::fresh(&ctx, &metal, capacity).expect("ordinary session");
+        let mut structural =
+            MetalSession::fresh(&ctx, &metal, capacity).expect("structural session");
+        forward
+            .ensure_sampled_structural_session_supported(&ordinary)
+            .expect("ordinary session row support");
+        forward
+            .ensure_sampled_structural_session_supported(&structural)
+            .expect("structural session row support");
+        let mut invalid = MetalSession::fresh(&ctx, &metal, capacity).expect("validation session");
+        let valid_logits = invalid.logits.clone();
+        invalid.logits.dtype = GgmlType::F16;
+        assert!(
+            forward
+                .ensure_sampled_structural_session_supported(&invalid)
+                .is_err(),
+            "wrong logits dtype must fail preflight"
+        );
+        invalid.logits = valid_logits.clone();
+        invalid.logits.shape = vec![248_319];
+        assert!(
+            forward
+                .ensure_sampled_structural_session_supported(&invalid)
+                .is_err(),
+            "wrong logits shape must fail preflight"
+        );
+        invalid.logits = valid_logits.clone();
+        invalid.logits.provenance = MetalTensorProvenance::OwnedWeightReadOnly;
+        assert!(
+            forward
+                .ensure_sampled_structural_session_supported(&invalid)
+                .is_err(),
+            "read-only logits provenance must fail preflight"
+        );
+        invalid.logits = valid_logits.clone();
+        invalid.logits.offset = std::mem::size_of::<f32>() as u64;
+        assert!(
+            forward
+                .ensure_sampled_structural_session_supported(&invalid)
+                .is_err(),
+            "out-of-bounds logits range must fail preflight"
+        );
+        let mut misaligned = MetalTensor::zeros_f32(&ctx, vec![248_321])
+            .expect("oversized logits alignment fixture");
+        misaligned.shape = vec![248_320];
+        misaligned.offset = 1;
+        invalid.logits = misaligned;
+        assert!(
+            forward
+                .ensure_sampled_structural_session_supported(&invalid)
+                .is_err(),
+            "misaligned logits address must fail preflight"
+        );
+        let plan = plan_prefill_scratch_with_matrix_max_pos_configured(
+            &metal,
+            1_024,
+            capacity,
+            PrefillScratchConfig::default(),
+        )
+        .expect("prefill scratch plan");
+        let mut ordinary_scratch =
+            MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(&ctx, &metal, plan.clone())
+                .expect("ordinary prefill scratch");
+        let mut structural_scratch =
+            MetalDFlashLayerMajorScratch::fresh_prefill_from_plan(&ctx, &metal, plan)
+                .expect("structural prefill scratch");
+        let ordinary_prompt_logits = prefill_tokens_with_multi_hidden(
+            &forward,
+            &ids,
+            0,
+            &mut ordinary,
+            &mut ordinary_scratch,
+            &[],
+            None,
+        )
+        .expect("ordinary prompt prefill");
+        let structural_prompt_logits = prefill_tokens_with_multi_hidden(
+            &forward,
+            &ids,
+            0,
+            &mut structural,
+            &mut structural_scratch,
+            &[],
+            None,
+        )
+        .expect("structural prompt prefill");
+        assert_generic_retained_f32_bits(
+            "sampled structural prompt logits",
+            &ordinary_prompt_logits,
+            &structural_prompt_logits,
+        );
+
+        let config = SamplingConfig::qwen_chat(42);
+        assert_eq!(config.temperature.to_bits(), 0.7f32.to_bits());
+        assert_eq!(config.top_k, 200);
+        assert_eq!(config.top_p.to_bits(), 1.0f32.to_bits());
+        assert_eq!(config.min_p.to_bits(), 0.05f32.to_bits());
+        assert_eq!(config.seed, 42);
+        let mut ordinary_sampler = Sampler::new(config).expect("ordinary sampler");
+        let mut structural_sampler = ordinary_sampler.clone();
+        let ordinary_initial = ordinary_sampler
+            .sample(&ordinary_prompt_logits)
+            .expect("ordinary prompt sample");
+        let (structural_initial, prompt_evidence) = structural_sampler
+            .sample_bounded_top_k(&structural_prompt_logits)
+            .expect("structural prompt sample");
+        assert!(prompt_evidence.used_bounded_path);
+        assert_eq!(ordinary_initial, structural_initial);
+        assert_eq!(ordinary_sampler.draws(), structural_sampler.draws());
+
+        let mut current = ordinary_initial;
+        let mut consumed = ids.clone();
+        let mut resident_head_wait_calls = 0u64;
+        let mut validated_shared_row_calls = 0u64;
+        for step in 0..127usize {
+            let position = ids.len() + step;
+            let (ordinary_logits, _) = forward
+                .single_token_profiled_concurrent_gdn_moe(
+                    current.token,
+                    position as u32,
+                    &mut ordinary,
+                )
+                .expect("ordinary sampled transition");
+            let ordinary_next = ordinary_sampler
+                .sample(&ordinary_logits)
+                .expect("ordinary transition sample");
+            let (structural_next, _, evidence) = forward
+                .single_token_sampled_structural_scoped(
+                    current.token,
+                    position as u32,
+                    &mut structural,
+                    |row| {
+                        assert_generic_retained_f32_bits(
+                            "sampled structural transition logits",
+                            &ordinary_logits,
+                            row,
+                        );
+                        structural_sampler.sample_bounded_top_k(row)
+                    },
+                )
+                .expect("structural sampled transition");
+            let (structural_next, bounded) = structural_next.expect("structural transition sample");
+            assert!(bounded.used_bounded_path);
+            assert_eq!(evidence.resident_head_wait_calls, 1);
+            assert_eq!(evidence.validated_shared_row_calls, 1);
+            assert_eq!(evidence.transition_logits_copy_bytes, 0);
+            assert_eq!(evidence.extra_command_buffers, 0);
+            assert_eq!(evidence.gpu_sampling_dispatches, 0);
+            assert_eq!(ordinary_next, structural_next, "sample mismatch at {step}");
+            assert_eq!(
+                ordinary_sampler.draws(),
+                structural_sampler.draws(),
+                "draw mismatch at {step}"
+            );
+            resident_head_wait_calls += evidence.resident_head_wait_calls;
+            validated_shared_row_calls += evidence.validated_shared_row_calls;
+            consumed.push(current.token);
+            current = ordinary_next;
+        }
+        assert_eq!(resident_head_wait_calls, 127);
+        assert_eq!(validated_shared_row_calls, 127);
+        assert_eq!(consumed.len(), ids.len() + 127);
+
+        let identity = ordinary.snapshot_identity(0x660, 0x660);
+        let ordinary_snapshot = ordinary
+            .snapshot(identity.clone(), consumed.clone(), None)
+            .expect("ordinary sampled snapshot");
+        let structural_snapshot = structural
+            .snapshot(identity.clone(), consumed.clone(), None)
+            .expect("structural sampled snapshot");
+        assert_generic_retained_snapshot(
+            "sampled structural state",
+            &ordinary_snapshot,
+            &structural_snapshot,
+        );
+
+        let continuation_position = consumed.len() as u32;
+        let ordinary_continuation = forward
+            .single_token_profiled_concurrent_gdn_moe(
+                current.token,
+                continuation_position,
+                &mut ordinary,
+            )
+            .expect("ordinary continuation")
+            .0;
+        let structural_continuation = forward
+            .single_token_profiled_concurrent_gdn_moe(
+                current.token,
+                continuation_position,
+                &mut structural,
+            )
+            .expect("structural continuation")
+            .0;
+        assert_generic_retained_f32_bits(
+            "sampled structural continuation logits",
+            &ordinary_continuation,
+            &structural_continuation,
+        );
+        consumed.push(current.token);
+        let ordinary_snapshot = ordinary
+            .snapshot(identity.clone(), consumed.clone(), None)
+            .expect("ordinary continuation snapshot");
+        let structural_snapshot = structural
+            .snapshot(identity, consumed, None)
+            .expect("structural continuation snapshot");
+        assert_generic_retained_snapshot(
+            "sampled structural continuation state",
+            &ordinary_snapshot,
+            &structural_snapshot,
+        );
+        eprintln!("[sampled-structural-a3b] exact rows/state PASS");
     }
 
     #[test]

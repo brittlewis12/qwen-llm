@@ -7,6 +7,7 @@
 //! interrupted generation additionally requires the request-local draw count.
 
 use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::time::Instant;
 
 /// Bump when candidate filtering, probability arithmetic, tie-breaking, or the
@@ -75,6 +76,15 @@ pub struct SampledToken {
     pub candidate_index: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BoundedTopKEvidence {
+    pub input_logits: usize,
+    pub retained_top_k: usize,
+    pub max_heap_len: usize,
+    pub heap_capacity: usize,
+    pub used_bounded_path: bool,
+}
+
 /// Opt-in wall attribution for one positive-temperature sampler-v1 call.
 ///
 /// This is diagnostic only. The ordinary [`Sampler::sample`] path remains
@@ -129,7 +139,7 @@ impl GreedySelection {
     }
 }
 
-#[derive(Debug, thiserror::Error, PartialEq)]
+#[derive(Clone, Debug, thiserror::Error, PartialEq)]
 pub enum SamplingError {
     #[error("sampling requires a non-empty logits row")]
     EmptyLogits,
@@ -266,6 +276,127 @@ impl Sampler {
             token: candidates[candidate_index].token,
             candidate_index,
         })
+    }
+
+    /// Execute sampler-v1 while retaining only the configured top-k candidates.
+    ///
+    /// Positive-temperature requests with `0 < top_k < logits.len()` use the
+    /// bounded path. Other configurations preserve the ordinary sampler and
+    /// report fallback evidence; product callers can reject that evidence.
+    pub fn sample_bounded_top_k(
+        &mut self,
+        logits: &[f32],
+    ) -> Result<(SampledToken, BoundedTopKEvidence), SamplingError> {
+        if self.config.temperature == 0.0
+            || self.config.top_k == 0
+            || self.config.top_k >= logits.len()
+        {
+            let sampled = self.sample(logits)?;
+            return Ok((
+                sampled,
+                BoundedTopKEvidence {
+                    input_logits: logits.len(),
+                    ..BoundedTopKEvidence::default()
+                },
+            ));
+        }
+
+        validate_logits_shape(logits)?;
+        let top_k = self.config.top_k;
+        let mut heap = BinaryHeap::with_capacity(top_k);
+        let mut max_heap_len = 0usize;
+        for (token, &logit) in logits.iter().enumerate() {
+            if logit.is_nan() {
+                return Err(SamplingError::NanLogit { token });
+            }
+            let candidate = HeapCandidate(Candidate {
+                token: token as i32,
+                logit: f64::from(logit),
+            });
+            if heap.len() < top_k {
+                heap.push(candidate);
+                max_heap_len = max_heap_len.max(heap.len());
+            } else if candidate_better(&candidate.0, &heap.peek().expect("full heap").0) {
+                heap.pop();
+                heap.push(candidate);
+            }
+        }
+        let heap_capacity = heap.capacity();
+        let mut candidates: Vec<Candidate> = heap.into_iter().map(|entry| entry.0).collect();
+        candidates.sort_unstable_by(candidate_order);
+
+        if self.config.min_p > 0.0 {
+            let max_logit = candidates[0].logit;
+            if max_logit.is_finite() {
+                let threshold = max_logit + f64::from(self.config.min_p).ln();
+                candidates.retain(|candidate| candidate.logit >= threshold);
+            }
+        }
+        if candidates.is_empty() {
+            return Err(SamplingError::NoCandidates);
+        }
+
+        if candidates[0].logit == f64::INFINITY {
+            candidates.retain(|candidate| candidate.logit == f64::INFINITY);
+        }
+
+        let temperature = f64::from(self.config.temperature);
+        for candidate in &mut candidates {
+            candidate.logit /= temperature;
+        }
+        let mut weights = probability_weights(&candidates)?;
+
+        if self.config.top_p < 1.0 {
+            let total: f64 = weights.iter().sum();
+            let target = total * f64::from(self.config.top_p);
+            let mut cumulative = 0.0;
+            let mut keep = 0usize;
+            for weight in &weights {
+                cumulative += *weight;
+                keep += 1;
+                if cumulative >= target {
+                    break;
+                }
+            }
+            candidates.truncate(keep.max(1));
+            weights.truncate(candidates.len());
+        }
+
+        let total: f64 = weights.iter().sum();
+        if !(total.is_finite() && total > 0.0) {
+            return Err(SamplingError::NoCandidates);
+        }
+        let evidence = BoundedTopKEvidence {
+            input_logits: logits.len(),
+            retained_top_k: top_k,
+            max_heap_len,
+            heap_capacity,
+            used_bounded_path: true,
+        };
+        self.draws += 1;
+        let target = self.rng.next_unit_f64() * total;
+        let mut cumulative = 0.0;
+        for (candidate_index, (candidate, weight)) in candidates.iter().zip(&weights).enumerate() {
+            cumulative += *weight;
+            if target < cumulative {
+                return Ok((
+                    SampledToken {
+                        token: candidate.token,
+                        candidate_index,
+                    },
+                    evidence,
+                ));
+            }
+        }
+
+        let candidate_index = candidates.len() - 1;
+        Ok((
+            SampledToken {
+                token: candidates[candidate_index].token,
+                candidate_index,
+            },
+            evidence,
+        ))
     }
 
     /// Run the exact sampler-v1 chain with opt-in phase attribution.
@@ -459,6 +590,44 @@ fn elapsed_ms(start: Instant) -> f64 {
 struct Candidate {
     token: i32,
     logit: f64,
+}
+
+fn candidate_order(a: &Candidate, b: &Candidate) -> Ordering {
+    match b.logit.total_cmp(&a.logit) {
+        Ordering::Equal => a.token.cmp(&b.token),
+        order => order,
+    }
+}
+
+fn candidate_better(a: &Candidate, b: &Candidate) -> bool {
+    candidate_order(a, b) == Ordering::Less
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HeapCandidate(Candidate);
+
+impl PartialEq for HeapCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.token == other.0.token && self.0.logit.to_bits() == other.0.logit.to_bits()
+    }
+}
+
+impl Eq for HeapCandidate {}
+
+impl PartialOrd for HeapCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HeapCandidate {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.0.logit.total_cmp(&other.0.logit) {
+            Ordering::Less => Ordering::Greater,
+            Ordering::Greater => Ordering::Less,
+            Ordering::Equal => self.0.token.cmp(&other.0.token),
+        }
+    }
 }
 
 fn validate_logits_shape(logits: &[f32]) -> Result<(), SamplingError> {
@@ -915,6 +1084,234 @@ mod tests {
                 let partial = sorted_candidates(&logits, k).unwrap();
                 assert_eq!(partial, full[..k], "len={len} k={k}");
             }
+        }
+    }
+
+    fn assert_bounded_equivalent(config: SamplingConfig, logits: &[f32], continuation: &[f32]) {
+        assert!(config.temperature > 0.0);
+        assert!(config.top_k > 0 && config.top_k < logits.len());
+        assert!(config.top_k < continuation.len());
+        let mut ordinary = sampler(config);
+        let mut bounded = sampler(config);
+        let ordinary_result = ordinary.sample(logits);
+        let bounded_result = bounded
+            .sample_bounded_top_k(logits)
+            .map(|(sampled, evidence)| {
+                assert!(evidence.used_bounded_path);
+                assert_eq!(evidence.input_logits, logits.len());
+                assert_eq!(evidence.retained_top_k, config.top_k);
+                assert_eq!(evidence.max_heap_len, config.top_k);
+                assert!(evidence.heap_capacity >= config.top_k);
+                assert!(evidence.heap_capacity < logits.len());
+                sampled
+            });
+        assert_eq!(bounded_result, ordinary_result);
+        assert_eq!(bounded.draws(), ordinary.draws());
+
+        let ordinary_next = ordinary.sample(&continuation);
+        let bounded_next =
+            bounded
+                .sample_bounded_top_k(&continuation)
+                .map(|(sampled, evidence)| {
+                    assert!(evidence.used_bounded_path);
+                    sampled
+                });
+        assert_eq!(bounded_next, ordinary_next);
+        assert_eq!(bounded.draws(), ordinary.draws());
+    }
+
+    #[test]
+    fn bounded_top_k_matches_sampler_v1() {
+        let seeds = [0, 1, 42, u64::MAX];
+        let lengths = [2usize, 17, 201, 257, 1024];
+        let continuation: Vec<f32> = (0..1025)
+            .map(|index| ((index * 17 % 257) as f32 - 128.0) / 31.0)
+            .collect();
+        for seed in seeds {
+            for len in lengths {
+                let mut ks = vec![1, 199, 200, 201, len - 1];
+                ks.retain(|&top_k| top_k < len);
+                ks.sort_unstable();
+                ks.dedup();
+                let mut generator = SplitMix64(seed);
+                for case in 0..24 {
+                    let logits: Vec<f32> = (0..len)
+                        .map(|_| {
+                            let mut bits = generator.next() as u32;
+                            if case < 16 && bits & 0x7f80_0000 == 0x7f80_0000 {
+                                bits &= !0x0080_0000;
+                            }
+                            f32::from_bits(bits)
+                        })
+                        .collect();
+                    for &top_k in &ks {
+                        for (temperature, top_p, min_p) in [(0.7, 1.0, 0.05), (1.3, 0.8, 0.0)] {
+                            assert_bounded_equivalent(
+                                SamplingConfig {
+                                    temperature,
+                                    top_k,
+                                    top_p,
+                                    min_p,
+                                    seed,
+                                },
+                                &logits,
+                                &continuation,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        for len in [2usize, 17, 201] {
+            let mut ks = vec![1, 199, 200, 201, len - 1];
+            ks.retain(|&top_k| top_k < len);
+            ks.sort_unstable();
+            ks.dedup();
+            for payload in [0x7fc0_0000, 0x7f80_0001, 0xffc0_0001] {
+                for nan_token in 0..len {
+                    for &top_k in &ks {
+                        let mut logits = vec![0.0; len];
+                        logits[nan_token] = f32::from_bits(payload);
+                        assert_bounded_equivalent(
+                            SamplingConfig {
+                                temperature: 0.7,
+                                top_k,
+                                top_p: 1.0,
+                                min_p: 0.05,
+                                seed: 42,
+                            },
+                            &logits,
+                            &continuation,
+                        );
+                    }
+                }
+            }
+        }
+
+        for logits in [
+            vec![0.0, -0.0, 0.0, -0.0, 1.0],
+            vec![2.0, 2.0, 2.0, 2.0, 1.0],
+            vec![f32::INFINITY, 1.0, f32::INFINITY, f32::NEG_INFINITY],
+            vec![f32::NEG_INFINITY; 5],
+        ] {
+            assert_bounded_equivalent(
+                SamplingConfig {
+                    temperature: 0.7,
+                    top_k: 3,
+                    top_p: 1.0,
+                    min_p: 0.05,
+                    seed: 42,
+                },
+                &logits,
+                &continuation,
+            );
+        }
+
+        for (config, logits) in [
+            (
+                SamplingConfig {
+                    temperature: 1.0,
+                    top_k: 3,
+                    top_p: 1.0,
+                    min_p: 0.0,
+                    seed: 0x1234_5678_9abc_def0,
+                },
+                vec![2.0, 1.5, 1.0, 0.5],
+            ),
+            (
+                SamplingConfig {
+                    temperature: 2.0,
+                    top_k: 2,
+                    top_p: 1.0,
+                    min_p: 0.5,
+                    seed: 1,
+                },
+                vec![0.0, -1.0, -2.0],
+            ),
+            (
+                SamplingConfig {
+                    temperature: 2.0,
+                    top_k: 2,
+                    top_p: 0.7,
+                    min_p: 0.0,
+                    seed: 1,
+                },
+                vec![0.0, -1.0, -2.0],
+            ),
+            (
+                SamplingConfig {
+                    temperature: 1.0,
+                    top_k: 2,
+                    top_p: 1.0,
+                    min_p: 0.0,
+                    seed: 9,
+                },
+                vec![2.0, 2.0, 2.0],
+            ),
+            (
+                SamplingConfig {
+                    temperature: 1.0,
+                    top_k: 3,
+                    top_p: 1.0,
+                    min_p: 0.0,
+                    seed: 11,
+                },
+                vec![f32::INFINITY, 1000.0, f32::INFINITY, -1000.0],
+            ),
+            (
+                SamplingConfig {
+                    temperature: 1.0,
+                    top_k: 3,
+                    top_p: 1.0,
+                    min_p: 0.0,
+                    seed: 11,
+                },
+                vec![0.0, f32::NEG_INFINITY, -1000.0, f32::NEG_INFINITY],
+            ),
+        ] {
+            let mut ordinary = sampler(config);
+            let mut bounded = sampler(config);
+            for _ in 0..64 {
+                let expected = ordinary.sample(&logits);
+                let actual = bounded
+                    .sample_bounded_top_k(&logits)
+                    .map(|(sampled, evidence)| {
+                        assert!(evidence.used_bounded_path);
+                        sampled
+                    });
+                assert_eq!(actual, expected);
+                assert_eq!(bounded.draws(), ordinary.draws());
+
+                let expected_next = ordinary.sample(&continuation);
+                let actual_next =
+                    bounded
+                        .sample_bounded_top_k(&continuation)
+                        .map(|(sampled, evidence)| {
+                            assert!(evidence.used_bounded_path);
+                            sampled
+                        });
+                assert_eq!(actual_next, expected_next);
+                assert_eq!(bounded.draws(), ordinary.draws());
+            }
+        }
+
+        for (len, top_k) in [(4, 0), (4, 4), (4, 5)] {
+            let config = SamplingConfig {
+                temperature: 0.7,
+                top_k,
+                top_p: 1.0,
+                min_p: 0.05,
+                seed: 42,
+            };
+            let logits = vec![0.0; len];
+            let mut ordinary = sampler(config);
+            let mut dispatched = sampler(config);
+            let expected = ordinary.sample(&logits);
+            let (actual, evidence) = dispatched.sample_bounded_top_k(&logits).unwrap();
+            assert_eq!(Ok(actual), expected);
+            assert!(!evidence.used_bounded_path);
+            assert_eq!(ordinary.draws(), dispatched.draws());
         }
     }
 

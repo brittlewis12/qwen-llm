@@ -59,6 +59,22 @@ METAL_BENCHMARK_MARKERS = (
     "metal-capture",
     "metal_capture",
 )
+CHILD_ENV_ALLOWLIST = {
+    "CARGO_HOME",
+    "COMMAND_MODE",
+    "DEVELOPER_DIR",
+    "HOME",
+    "LANG",
+    "LOGNAME",
+    "MACOSX_DEPLOYMENT_TARGET",
+    "PATH",
+    "RUSTUP_HOME",
+    "SDKROOT",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "USER",
+}
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 RUNTIME_ID_RE = re.compile(r"[0-9a-f]{16}\Z")
 CPU_IDLE_RE = re.compile(r"CPU usage:.*?([0-9]+(?:\.[0-9]+)?)% idle")
@@ -175,6 +191,16 @@ def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def environment_commitments(environment: dict[str, str]) -> dict[str, dict[str, Any]]:
+    return {
+        key: {
+            "value_bytes": len(value.encode()),
+            "value_sha256": sha256_bytes(value.encode()),
+        }
+        for key, value in sorted(environment.items())
+    }
+
+
 def write_json(path: Path, value: Any) -> None:
     payload = (
         json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
@@ -260,6 +286,23 @@ def runner_contract_checks() -> dict[str, bool]:
         nonfinite_rejected = True
     require(duplicate_rejected, "strict JSON parser accepted a duplicate key")
     require(nonfinite_rejected, "strict JSON parser accepted a non-finite value")
+    committed_environment = environment_commitments({"API_KEY": "secret-value"})
+    require(
+        "secret-value" not in json.dumps(committed_environment),
+        "environment commitments retained a plaintext value",
+    )
+    require(
+        "secret-value" not in concat_command_failure(["helper"], 1, "secret-value"),
+        "command failure retained plaintext output",
+    )
+    require(
+        all(
+            (key in CHILD_ENV_ALLOWLIST or key.startswith("LC_"))
+            and not key.startswith("QWEN_")
+            for key in child_env()
+        ),
+        "child environment escaped the frozen allowlist",
+    )
     require(
         failure_disposition("candidate", True) == "KILL"
         and failure_disposition("environment", True) == "INVALID"
@@ -324,6 +367,7 @@ def runner_contract_checks() -> dict[str, bool]:
         "nonfinite_json_rejected": nonfinite_rejected,
         "failure_dispositions_checked": True,
         "authority_partitions_checked": True,
+        "environment_redaction_checked": True,
     }
 
 
@@ -331,14 +375,26 @@ def run_text(argv: list[str], *, timeout: int = 120) -> str:
     result = subprocess.run(
         argv,
         cwd=ROOT,
+        env=child_env(),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         timeout=timeout,
         check=False,
     )
-    require(result.returncode == 0, f"command failed {argv!r}:\n{result.stdout}")
+    require(
+        result.returncode == 0,
+        concat_command_failure(argv, result.returncode, result.stdout),
+    )
     return result.stdout
+
+
+def concat_command_failure(argv: list[str], returncode: int, output: str) -> str:
+    encoded = output.encode()
+    return (
+        f"command failed {argv!r}: returncode={returncode} "
+        f"output_bytes={len(encoded)} output_sha256={sha256_bytes(encoded)}"
+    )
 
 
 def static_checks() -> dict[str, Any]:
@@ -355,7 +411,10 @@ def static_checks() -> dict[str, Any]:
     qwen_env = {
         key: value for key, value in os.environ.items() if key.startswith("QWEN_")
     }
-    require(not qwen_env, f"inherited QWEN_* environment must be empty: {qwen_env}")
+    require(
+        not qwen_env,
+        f"inherited QWEN_* environment must be empty: keys={sorted(qwen_env)}",
+    )
     build = parse_json(run_text([str(QWEN_BENCH), "build-info", "--output", "json"]))
     require(build.get("status") == "match", f"build identity mismatch: {build}")
     require(build.get("build_dirty") is False, "build is dirty")
@@ -378,7 +437,8 @@ def static_checks() -> dict[str, Any]:
         "qwen_bench_binary_sha256": sha256_file(QWEN_BENCH),
         "build_identity": build,
         "runner_contract_checks": runner_contract_checks(),
-        "environment": dict(sorted(os.environ.items())),
+        "parent_environment_commitments": environment_commitments(dict(os.environ)),
+        "child_environment_commitments": environment_commitments(child_env()),
     }
 
 
@@ -427,8 +487,9 @@ def vm_snapshot() -> dict[str, Any]:
     }
 
 
-def process_census() -> tuple[str, list[dict[str, Any]]]:
+def process_census() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     text = run_text(["ps", "-axo", "pid=,comm=,args="])
+    census: list[dict[str, Any]] = []
     competitors: list[dict[str, Any]] = []
     for line in text.splitlines():
         fields = line.strip().split(None, 2)
@@ -443,6 +504,15 @@ def process_census() -> tuple[str, list[dict[str, Any]]]:
             argv = args.split()
         names = {comm}
         names.update(Path(token).name for token in argv)
+        argv0 = Path(argv[0]).name if argv else comm
+        observation = {
+            "pid": pid,
+            "comm": comm,
+            "argv0": argv0,
+            "args_bytes": len(args.encode()),
+            "args_sha256": sha256_bytes(args.encode()),
+        }
+        census.append(observation)
         python_module = any(
             token == "-m"
             and index + 1 < len(argv)
@@ -460,8 +530,8 @@ def process_census() -> tuple[str, list[dict[str, Any]]]:
             or metal_benchmark
             or any(name.startswith(("qwen-", "llama-")) for name in names)
         ):
-            competitors.append({"pid": pid, "comm": comm, "args": args})
-    return text, competitors
+            competitors.append(observation)
+    return census, competitors
 
 
 def cpu_idle_sample() -> float:
@@ -479,6 +549,7 @@ def host_capture(label: str) -> dict[str, Any]:
     require(memory_match is not None, "cannot parse memory_pressure")
     idle = [cpu_idle_sample() for _ in range(3)]
     census, competitors = process_census()
+    census_bytes = json.dumps(census, sort_keys=True, separators=(",", ":")).encode()
     result = {
         "label": label,
         "pmset_batt": batt,
@@ -488,7 +559,7 @@ def host_capture(label: str) -> dict[str, Any]:
         "cpu_idle_samples": idle,
         "cpu_idle_median_percent": statistics.median(idle),
         "process_census": census,
-        "process_census_sha256": sha256_bytes(census.encode()),
+        "process_census_sha256": sha256_bytes(census_bytes),
         "competitors": competitors,
         "ac_power": "AC Power" in batt,
         "thermal_warning": "No thermal warning level has been recorded" not in therm,
@@ -524,7 +595,10 @@ def rusage_delta(
 
 def child_env() -> dict[str, str]:
     return {
-        key: value for key, value in os.environ.items() if not key.startswith("QWEN_")
+        key: value
+        for key, value in os.environ.items()
+        if (key in CHILD_ENV_ALLOWLIST or key.startswith("LC_"))
+        and not key.startswith("QWEN_")
     }
 
 

@@ -47,8 +47,11 @@ probability arithmetic, and prompt prefill receive no avoidable-work credit.
   stdout.
 - Process: one fresh process and one request per observation. The model file may
   be cache-warm; file-cache state does not enter the decode attribution.
-- Environment: archive the complete inherited environment and require no
-  `QWEN_*` variables. Do not silently force a decode branch.
+- Environment: archive every inherited variable name plus the byte length and
+  SHA-256 commitment of its value, never plaintext values. Require no `QWEN_*`
+  variables. Children receive only the frozen non-secret process allowlist;
+  archive the same commitments for that exact child environment. Do not
+  silently force a decode branch.
 
 The direct product command is:
 

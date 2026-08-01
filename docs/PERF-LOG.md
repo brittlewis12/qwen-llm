@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-01 - v0.661 Lm-Head Screening Oracle Invalid
+
+Status: `INVALID` with `authority=[]`. The sole packet stopped during the first
+authenticated opened-GGUF parse. No runtime, Metal model, capture, screening,
+exact survivor, or byte-ledger observation exists.
+
+- Clean commit `b4b4210` launched the frozen command. The packet itself cannot
+  authenticate that association because failure preceded capture-manifest
+  publication; this is operator provenance only.
+- All pre-model arithmetic, ledger, malformed-artifact, floating-environment,
+  and prophecy-firewall self-tests passed and sealed.
+- Complete hashing left the shared open-file-description cursor at EOF.
+  `from_opened_file` mapped and prevalidated independently, then gave its
+  streaming parser an unrewound clone. The first four-byte `read_exact` failed
+  with `decode: failed to fill whole buffer`.
+- The packet contains only one inventoried nonterminal file. Its false mechanism
+  flags are INVALID defaults, not observed passes.
+- Do not rerun v0.661. v0.662 may add only an explicit parser rewind, an
+  EOF-positioned regression, and early persisted build/executable provenance
+  under a new schema/root; all mechanism gates remain frozen.
+
+Artifacts:
+`target/profiles/v0661-generic-lm-head-screening-oracle-a3b-p1/`.
+Decision SHA-256:
+`d4628a76ed85d84018d6e0b4e53d5805bfb5b41398448d6bef13825f82397cbc`.
+Summary:
+`docs/bench/v0661-generic-lm-head-screening-oracle-result.md`.
+Post-acquisition review: `cx` session
+`019fbf34-6270-72a3-b583-299d15505a88`.
+
 ## 2026-08-01 - v0.660 Structural Sampled Decode GO
 
 Status: `GO` with `authority=["exact-frozen-fixture-policy-review"]`. The

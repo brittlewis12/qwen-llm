@@ -1080,16 +1080,18 @@ default-off exact-profile switch. The generation gate clears by only `0.002899`
 percentage points, so do not claim robust per-run `>=5%`, uniform TTFT
 nonregression, default admission, broader transfer, or another timing packet.
 
-1. **Generic certified lm-head screening oracle**: in the frozen integrated
-   cell, v0.656's compact-tail arm reduces transition-command wall by
-   `14.197064 ms`, about `0.835 ms` per transition; v0.655, not v0.656, supplies
-   isolated primitive authority. Run only the existing optimistic screening
-   bound first. Every primary capture must safely prune `>=80%` of rows while
-   touching `<=30%` of baseline bytes. A production successor must remove about
-   70% of charged head wall and project `>=5%` whole-token saving after metadata,
-   screening, survivors, and any second pass. This is exact argmax and
-   greedy-only, not positive-temperature distribution authority. Belief
-   medium-low, prize medium, difficulty M-H.
+1. **Generic certified lm-head screening oracle**: v0.661 is sealed `INVALID`
+   before `Runtime::metal`, model construction, or execution and contains no
+   mechanism observation. Complete hashing left a shared descriptor at EOF; the
+   opened-GGUF streaming parser did not rewind before its first `read_exact`.
+   Run only the preregistered v0.662 parser repair under a new root, preserving
+   every screening gate. In the frozen integrated cell, v0.656's compact tail
+   removes `14.197064 ms` of transition-command wall, while v0.655 supplies
+   isolated primitive authority.
+   Every capture must prune `>=80%` of rows while charging `<=30%` of baseline
+   bytes. A production successor must remove about 70% of charged head wall and
+   project `>=5%` whole-token saving after all screening work. This is exact
+   argmax and greedy-only. Belief medium-low, prize medium, difficulty M-H.
 2. **Direct-to-session checkpoint-restore floor**: this is exact process-cold
    continuation, not fresh-prompt acceleration. Preregister `>=60 ms` restore
    saving on the frozen `582,854,188`-byte record. Populate a disposable session

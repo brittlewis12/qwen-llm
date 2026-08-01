@@ -1,5 +1,5 @@
 //! `qwen-tok` — vocab-only tokenizer utility. Cheap (no model weights
-//! loaded, no Metal context, no kernel JIT). Reads a Qwen GGUF's
+//! loaded, no Metal context, no kernel JIT). Reads a supported GGUF's
 //! tokenizer and reports token count + optionally the token ids.
 //!
 //! Usage:
@@ -19,10 +19,10 @@ use std::path::PathBuf;
 #[command(
     name = "qwen-tok",
     version,
-    about = "tokenize text with a Qwen GGUF's vocab"
+    about = "tokenize text with a supported GGUF's vocab"
 )]
 struct Args {
-    /// Path to a Qwen GGUF (any quant; we only read the vocab section).
+    /// Path to a supported GGUF (any quant; only tokenizer metadata is used).
     #[arg(short = 'm', long)]
     model: PathBuf,
     /// Inline prompt text (mutually exclusive with --file).

@@ -1,8 +1,8 @@
-//! Qwen2 byte-level BPE tokenizer.
+//! Native byte-level BPE tokenizers for supported model families.
 //!
-//! Vocab size: 248,320 (padded; real tokens go up to ~248,077). Special
-//! tokens occupy the high range starting at 248,044
-//! (`<|endoftext|>`, `<|im_start|>`, `<|im_end|>`, vision/audio pads, etc).
+//! Qwen 3.5/3.6 uses the Qwen35 pretokenizer and a 248,320-entry vocabulary.
+//! DeepSeek V4 uses the JoyAI/DeepSeek-V3 pretokenizer and a 129,280-entry
+//! vocabulary. Both consume token, type, and merge arrays directly from GGUF.
 //!
 //! ## Implementation choice
 //!
@@ -14,13 +14,13 @@
 //!
 //! | option | byte-perfect w/ llama-cli oracle | drops llama-cpp link | LOC |
 //! |---|---|---|---|
-//! | **native GGUF Qwen35 path (default)** | yes — differentially tested | no | in-tree |
+//! | **native GGUF family paths (default)** | yes - differentially tested | no | in-tree |
 //! | **`llama-cpp-sys-2` oracle backend** | yes — shared codepath | no | ~50 |
 //! | **`tokenizers` (huggingface) crate** | not guaranteed (BPE tie-break edges) | yes | ~30 |
 //!
-//! The default path is now the in-tree native GGUF tokenizer for the Qwen
-//! 3.5/3.6 family. The llama.cpp-backed backend remains available as an oracle
-//! for differential testing and benchmarking.
+//! The llama.cpp-backed backend remains available as a Qwen oracle. DeepSeek
+//! V4 uses an in-tree JoyAI path because the currently linked llama.cpp
+//! revision predates the `deepseek4` model architecture.
 
 use crate::gguf::GgufFile;
 use rustc_hash::FxHashMap as HashMap;
@@ -423,6 +423,12 @@ impl Drop for LlamaCppTokenizer {
 pub type Tokenizer = NativeTokenizer;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PretokenizerKind {
+    Qwen35,
+    JoyAi,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TokenAttr {
     Undefined,
     Normal,
@@ -470,13 +476,11 @@ struct SpecialToken {
     id: i32,
 }
 
-/// Pure-Rust GGUF tokenizer for the Qwen 3.5 / 3.6 family.
+/// Pure-Rust byte-level BPE tokenizer for supported GGUF model families.
 ///
-/// This is intentionally not a universal GGUF tokenizer. It accepts only the
-/// tokenizer metadata shape shipped by Qwen 3.5/3.6 GGUFs:
-/// `tokenizer.ggml.model = "gpt2"` and `tokenizer.ggml.pre = "qwen35"`.
-/// The llama.cpp-backed [`Tokenizer`] remains the default/oracle until this
-/// backend has exhaustive parity coverage.
+/// This is intentionally not universal. Architecture and pretokenizer
+/// combinations are accepted through a closed dispatch so malformed Qwen
+/// metadata cannot silently select another model family's rules.
 pub struct NativeTokenizer {
     id_to_token: Vec<NativeToken>,
     pair_merges: HashMap<u64, MergeInfo>,
@@ -487,6 +491,7 @@ pub struct NativeTokenizer {
     eos: Option<i32>,
     add_bos: bool,
     add_eos: bool,
+    pretokenizer: PretokenizerKind,
 }
 
 impl NativeTokenizer {
@@ -498,12 +503,17 @@ impl NativeTokenizer {
     pub fn from_gguf(g: &GgufFile) -> Result<Self, TokError> {
         let model = required_str(g, "tokenizer.ggml.model")?;
         let pre = required_str(g, "tokenizer.ggml.pre")?;
-        if model != "gpt2" || pre != "qwen35" {
-            return Err(TokError::UnsupportedNativeTokenizer {
-                model: model.to_string(),
-                pre: pre.to_string(),
-            });
-        }
+        let architecture = g.architecture();
+        let pretokenizer = match (architecture.as_deref(), model, pre) {
+            (Some("qwen35" | "qwen35moe"), "gpt2", "qwen35") => PretokenizerKind::Qwen35,
+            (Some("deepseek4"), "gpt2", "joyai-llm") => PretokenizerKind::JoyAi,
+            _ => {
+                return Err(TokError::UnsupportedNativeTokenizer {
+                    model: model.to_string(),
+                    pre: pre.to_string(),
+                });
+            }
+        };
 
         let token_texts = required_string_array(g, "tokenizer.ggml.tokens")?;
         let token_types = required_i64_array(g, "tokenizer.ggml.token_type")?;
@@ -587,19 +597,23 @@ impl NativeTokenizer {
             }
         }
 
-        // llama.cpp's GPT-2/BPE tokenizer defaults both BOS and EOS to 11,
-        // then lets GGUF metadata override them. Qwen35 GGUFs commonly omit
-        // BOS but do declare EOS.
-        let bos = optional_token_id(g, "tokenizer.ggml.bos_token_id")?.or(Some(11));
-        let eos = optional_token_id(g, "tokenizer.ggml.eos_token_id")?.or(Some(11));
+        let default_special = match pretokenizer {
+            PretokenizerKind::Qwen35 => Some(11),
+            PretokenizerKind::JoyAi => None,
+        };
+        let bos = optional_token_id(g, "tokenizer.ggml.bos_token_id")?.or(default_special);
+        let eos = optional_token_id(g, "tokenizer.ggml.eos_token_id")?.or(default_special);
         validate_optional_token_id("tokenizer.ggml.bos_token_id", bos, id_to_token.len())?;
         validate_optional_token_id("tokenizer.ggml.eos_token_id", eos, id_to_token.len())?;
         let add_bos = optional_bool(g, "tokenizer.ggml.add_bos_token")?.unwrap_or(false);
         let add_eos = optional_bool(g, "tokenizer.ggml.add_eos_token")?.unwrap_or(false);
+        validate_special_addition_config(pretokenizer, bos, eos, add_bos, add_eos)?;
 
         let mut special_tokens = Vec::new();
         for (id, token) in id_to_token.iter().enumerate() {
-            if token.attr.is_partition_special() || is_qwen_control_text(&token.text) {
+            if token.attr.is_partition_special()
+                || (pretokenizer == PretokenizerKind::Qwen35 && is_qwen_control_text(&token.text))
+            {
                 special_tokens.push(SpecialToken {
                     text: token.text.clone(),
                     id: id_to_i32("tokenizer.ggml.tokens", id)?,
@@ -626,6 +640,7 @@ impl NativeTokenizer {
             eos,
             add_bos,
             add_eos,
+            pretokenizer,
         })
     }
 
@@ -673,7 +688,11 @@ impl NativeTokenizer {
     }
 
     fn encode_raw(&self, text: &str, out: &mut Vec<i32>) -> Result<(), TokError> {
-        for piece in qwen35_pretokenize(text) {
+        let pieces = match self.pretokenizer {
+            PretokenizerKind::Qwen35 => qwen35_pretokenize(text),
+            PretokenizerKind::JoyAi => joyai_pretokenize(text),
+        };
+        for piece in pieces {
             self.encode_bpe_piece(piece.as_bytes(), out);
         }
         Ok(())
@@ -998,6 +1017,7 @@ struct CharFlags {
     is_number: bool,
     is_letter: bool,
     is_accent_mark: bool,
+    is_punct_or_symbol: bool,
     is_whitespace: bool,
     any: bool,
 }
@@ -1025,6 +1045,20 @@ impl CharFlags {
                 GeneralCategory::NonspacingMark
                     | GeneralCategory::SpacingMark
                     | GeneralCategory::EnclosingMark
+            ),
+            is_punct_or_symbol: matches!(
+                category,
+                GeneralCategory::ConnectorPunctuation
+                    | GeneralCategory::DashPunctuation
+                    | GeneralCategory::OpenPunctuation
+                    | GeneralCategory::ClosePunctuation
+                    | GeneralCategory::InitialPunctuation
+                    | GeneralCategory::FinalPunctuation
+                    | GeneralCategory::OtherPunctuation
+                    | GeneralCategory::MathSymbol
+                    | GeneralCategory::CurrencySymbol
+                    | GeneralCategory::ModifierSymbol
+                    | GeneralCategory::OtherSymbol
             ),
             is_whitespace: ch.is_whitespace(),
             any: true,
@@ -1157,6 +1191,153 @@ fn qwen35_pretokenize(text: &str) -> Vec<&str> {
         push_token(text, &chars, &mut out, &mut prev, pos);
     }
     out
+}
+
+/// DeepSeek V3/V4 and JoyAI apply three isolated regex splits in sequence:
+/// numbers in groups of at most three, fixed CJK/kana runs, then the main
+/// letter/punctuation/whitespace expression. This scalar implementation keeps
+/// number and CJK regions as hard boundaries while applying the final split.
+fn joyai_pretokenize(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let chars: Vec<CharInfo> = text
+        .char_indices()
+        .map(|(start, ch)| CharInfo {
+            ch,
+            start,
+            flags: CharFlags::for_char(ch),
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut prev = 0usize;
+    let mut pos = 0usize;
+    while pos < chars.len() {
+        let end = if chars[pos].flags.is_number {
+            let mut end = pos + 1;
+            while end < chars.len() && end - pos < 3 && chars[end].flags.is_number {
+                end += 1;
+            }
+            end
+        } else {
+            let cjk_region = is_joyai_cjk(chars[pos].ch);
+            let mut region_end = pos + 1;
+            while region_end < chars.len()
+                && !chars[region_end].flags.is_number
+                && is_joyai_cjk(chars[region_end].ch) == cjk_region
+            {
+                region_end += 1;
+            }
+            joyai_main_token_end(&chars, pos, region_end)
+        };
+        push_token(text, &chars, &mut out, &mut prev, end);
+        pos = end;
+    }
+    out
+}
+
+fn joyai_main_token_end(chars: &[CharInfo], pos: usize, region_end: usize) -> usize {
+    let current = chars[pos];
+
+    if current.ch.is_ascii_punctuation()
+        && pos + 1 < region_end
+        && chars[pos + 1].ch.is_ascii_alphabetic()
+    {
+        let mut end = pos + 2;
+        while end < region_end && chars[end].ch.is_ascii_alphabetic() {
+            end += 1;
+        }
+        return end;
+    }
+
+    if is_letter_or_mark(current.flags) {
+        return scan_joyai_letters_and_marks(chars, pos + 1, region_end);
+    }
+    if current.ch != '\r'
+        && current.ch != '\n'
+        && !current.flags.is_letter
+        && !current.flags.is_punct_or_symbol
+        && pos + 1 < region_end
+        && is_letter_or_mark(chars[pos + 1].flags)
+    {
+        return scan_joyai_letters_and_marks(chars, pos + 2, region_end);
+    }
+
+    let punct_start =
+        if current.ch == ' ' && pos + 1 < region_end && chars[pos + 1].flags.is_punct_or_symbol {
+            Some(pos + 1)
+        } else if current.flags.is_punct_or_symbol {
+            Some(pos)
+        } else {
+            None
+        };
+    if let Some(punct_start) = punct_start {
+        let mut end = punct_start + 1;
+        while end < region_end && chars[end].flags.is_punct_or_symbol {
+            end += 1;
+        }
+        while end < region_end && matches!(chars[end].ch, '\r' | '\n') {
+            end += 1;
+        }
+        return end;
+    }
+
+    if current.flags.is_whitespace {
+        return joyai_whitespace_end(chars, pos, region_end);
+    }
+
+    let mut end = pos + 1;
+    while end < region_end && joyai_is_gap_char(chars[end].flags) {
+        if end + 1 < region_end && is_letter_or_mark(chars[end + 1].flags) {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+fn scan_joyai_letters_and_marks(chars: &[CharInfo], mut pos: usize, region_end: usize) -> usize {
+    while pos < region_end && is_letter_or_mark(chars[pos].flags) {
+        pos += 1;
+    }
+    pos
+}
+
+fn joyai_whitespace_end(chars: &[CharInfo], pos: usize, region_end: usize) -> usize {
+    let mut end = pos;
+    let mut last_newline_end = None;
+    while end < region_end && chars[end].flags.is_whitespace {
+        end += 1;
+        if matches!(chars[end - 1].ch, '\r' | '\n') {
+            last_newline_end = Some(end);
+        }
+    }
+    if let Some(last_newline_end) = last_newline_end {
+        return last_newline_end;
+    }
+    if end == region_end {
+        return end;
+    }
+    if end - pos > 1 {
+        return end - 1;
+    }
+    end
+}
+
+fn is_letter_or_mark(flags: CharFlags) -> bool {
+    flags.is_letter || flags.is_accent_mark
+}
+
+fn joyai_is_gap_char(flags: CharFlags) -> bool {
+    !flags.is_number
+        && !flags.is_letter
+        && !flags.is_accent_mark
+        && !flags.is_punct_or_symbol
+        && !flags.is_whitespace
+}
+
+fn is_joyai_cjk(ch: char) -> bool {
+    matches!(ch as u32, 0x4e00..=0x9fa5 | 0x3040..=0x30ff)
 }
 
 fn push_token<'a>(
@@ -1361,6 +1542,31 @@ fn value_to_i32(value: &Value, key: &str) -> Result<i32, TokError> {
         .map_err(|_| TokError::BadMetadata(format!("metadata key {key:?} value {n} exceeds i32")))
 }
 
+fn validate_special_addition_config(
+    pretokenizer: PretokenizerKind,
+    bos: Option<i32>,
+    eos: Option<i32>,
+    add_bos: bool,
+    add_eos: bool,
+) -> Result<(), TokError> {
+    if pretokenizer == PretokenizerKind::JoyAi && (bos.is_none() || eos.is_none()) {
+        return Err(TokError::BadMetadata(
+            "JoyAI tokenizer requires explicit BOS and EOS token ids".into(),
+        ));
+    }
+    if add_bos && bos.is_none() {
+        return Err(TokError::BadMetadata(
+            "tokenizer enables BOS insertion without a BOS token id".into(),
+        ));
+    }
+    if add_eos && eos.is_none() {
+        return Err(TokError::BadMetadata(
+            "tokenizer enables EOS insertion without an EOS token id".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn id_to_i32(key: &str, id: usize) -> Result<i32, TokError> {
     i32::try_from(id).map_err(|_| TokError::BadMetadata(format!("{key} index {id} exceeds i32")))
 }
@@ -1389,7 +1595,10 @@ fn parse_hex_byte_token(text: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fancy_regex::Regex;
     use proptest::prelude::*;
+
+    const DS4_0731_IQ3: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 
     #[test]
     fn raw_i32le_token_digest_matches_frozen_vectors() {
@@ -1442,6 +1651,35 @@ mod tests {
 
     fn fixture() -> Option<&'static str> {
         fixtures().into_iter().next()
+    }
+
+    fn joyai_reference_tokens(text: &str) -> Vec<String> {
+        const PATTERNS: [&str; 3] = [
+            r"\p{N}{1,3}",
+            "[\u{4e00}-\u{9fa5}\u{3040}-\u{309f}\u{30a0}-\u{30ff}]+",
+            r##"[!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"##,
+        ];
+        let mut pieces = vec![text.to_string()];
+        for pattern in PATTERNS {
+            let regex = Regex::new(pattern).expect("compile JoyAI reference regex");
+            let mut split = Vec::new();
+            for piece in pieces {
+                let mut last = 0usize;
+                for matched in regex.find_iter(&piece) {
+                    let matched = matched.expect("match JoyAI reference regex");
+                    if matched.start() > last {
+                        split.push(piece[last..matched.start()].to_string());
+                    }
+                    split.push(matched.as_str().to_string());
+                    last = matched.end();
+                }
+                if last < piece.len() {
+                    split.push(piece[last..].to_string());
+                }
+            }
+            pieces = split;
+        }
+        pieces
     }
 
     fn adversarial_prompts() -> &'static [&'static str] {
@@ -1696,6 +1934,26 @@ mod tests {
     }
 
     #[test]
+    fn special_insertion_requires_declared_token_ids() {
+        assert!(
+            validate_special_addition_config(PretokenizerKind::Qwen35, None, Some(1), true, false)
+                .is_err()
+        );
+        assert!(
+            validate_special_addition_config(PretokenizerKind::Qwen35, Some(0), None, false, true)
+                .is_err()
+        );
+        assert!(
+            validate_special_addition_config(PretokenizerKind::Qwen35, None, None, false, false)
+                .is_ok()
+        );
+        assert!(
+            validate_special_addition_config(PretokenizerKind::JoyAi, None, Some(1), false, false)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn rejects_invalid_decode_token() {
         let Some(path) = fixture() else { return };
         let tok = Tokenizer::open(path).expect("open tokenizer");
@@ -1754,6 +2012,15 @@ mod tests {
                     add_special,
                 );
             }
+        }
+
+        #[test]
+        fn joyai_pretokenizer_matches_regex_property_fuzz(prompt in fuzz_prompt_strategy()) {
+            let actual = joyai_pretokenize(&prompt)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            prop_assert_eq!(actual, joyai_reference_tokens(&prompt));
         }
     }
 
@@ -1973,6 +2240,109 @@ mod tests {
     fn qwen35_pretokenizer_keeps_combining_marks_with_letters() {
         let parts = qwen35_pretokenize("e\u{301} cafe\u{301}!");
         assert_eq!(parts, vec!["e\u{301}", " cafe\u{301}", "!"]);
+    }
+
+    #[test]
+    fn joyai_pretokenizer_matches_sequential_regex_reference() {
+        let cases = [
+            "",
+            "Hello, world!",
+            "digits 1 12 123 1234 １２３４ ①Ⅻ",
+            "中文かなカナ mixed 123 punctuation!!!\r\nnext",
+            "e\u{301} cafe\u{301} \u{309b}\u{309c}\u{30a0}\u{30fb}",
+            "spaces   before and trailing   ",
+            "\t\r\n\n  next",
+            "emoji 👨‍👩‍👧‍👦 symbols ❤\u{fe0f}",
+            "unicode16: a\u{105c0}b digits \u{11bf0}\u{11bf1}\u{11bf2}\u{11bf3}",
+            "boundaries: \u{303f}\u{3040}\u{309f}\u{30a0}\u{30ff}\u{3100}\u{4dff}\u{4e00}\u{9fa5}\u{9fa6}",
+            "control:\u{0000}abc\u{200b}def",
+        ];
+        for case in cases {
+            let actual = joyai_pretokenize(case)
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, joyai_reference_tokens(case), "case={case:?}");
+        }
+    }
+
+    #[test]
+    fn tokenizer_unicode_policy_is_pinned_to_unicode_16() {
+        assert_eq!(unicode_general_category::UNICODE_VERSION, (16, 0, 0));
+        assert!(CharFlags::for_char('\u{105c0}').is_letter);
+        assert!(CharFlags::for_char('\u{11bf0}').is_number);
+        assert_eq!(joyai_pretokenize("a\u{105c0}b"), ["a\u{105c0}b"]);
+    }
+
+    #[test]
+    #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+    fn deepseek_v4_0731_native_tokenizer_smoke() {
+        assert!(Path::new(DS4_0731_IQ3).exists(), "missing DS4 fixture");
+        let tokenizer = NativeTokenizer::open(DS4_0731_IQ3).expect("open DS4 tokenizer");
+        assert_eq!(tokenizer.pretokenizer, PretokenizerKind::JoyAi);
+        assert_eq!(tokenizer.n_vocab(), 129_280);
+        assert_eq!(tokenizer.bos(), Some(0));
+        assert_eq!(tokenizer.eos(), Some(1));
+        let hello = tokenizer
+            .encode("Hello, world!", false)
+            .expect("encode DS4 greeting");
+        assert_eq!(hello, [19_923, 14, 2_058, 3]);
+        assert_eq!(
+            tokenizer
+                .encode("Hello, world!", true)
+                .expect("encode DS4 greeting with specials"),
+            hello
+        );
+        assert_eq!(tokenizer.decode(&hello), "Hello, world!");
+        assert_eq!(
+            tokenizer.encode("<｜User｜>", false).expect("encode role"),
+            [128_803]
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local DeepSeek V4 fixture and current llama.cpp tokenizer binary"]
+    fn deepseek_v4_native_matches_current_llama_cpp_cli() {
+        const LLAMA_TOKENIZE: &str = "/Users/tito/code/llama.cpp/build/bin/llama-tokenize";
+        assert!(Path::new(DS4_0731_IQ3).exists(), "missing DS4 fixture");
+        assert!(
+            Path::new(LLAMA_TOKENIZE).exists(),
+            "missing llama-tokenize oracle"
+        );
+        let tokenizer = NativeTokenizer::open(DS4_0731_IQ3).expect("open DS4 tokenizer");
+        let prompts = [
+            "Hello, world!",
+            "digits 1 12 123 1234 １２３４ ①Ⅻ",
+            "中文かなカナ mixed 123 punctuation!!!\r\nnext",
+            "e\u{301} cafe\u{301} 👨‍👩‍👧‍👦",
+            "spaces   before and trailing   ",
+            "a\u{105c0}b \u{11bf0}\u{11bf1}\u{11bf2}\u{11bf3}",
+            "<｜User｜>hello<｜Assistant｜>",
+        ];
+        for prompt in prompts {
+            let output = std::process::Command::new(LLAMA_TOKENIZE)
+                .args([
+                    "-m",
+                    DS4_0731_IQ3,
+                    "--ids",
+                    "--no-bos",
+                    "--no-escape",
+                    "--log-disable",
+                    "-p",
+                    prompt,
+                ])
+                .output()
+                .expect("run llama-tokenize");
+            assert!(
+                output.status.success(),
+                "llama-tokenize failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let oracle: Vec<i32> =
+                serde_json::from_slice(&output.stdout).expect("parse llama token ids");
+            let native = tokenizer.encode(prompt, false).expect("native encode");
+            assert_eq!(native, oracle, "prompt={prompt:?}");
+        }
     }
 
     #[test]

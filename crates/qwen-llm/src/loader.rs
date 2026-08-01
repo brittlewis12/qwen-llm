@@ -61,6 +61,10 @@ pub enum LoadError {
     },
     #[error("architecture not supported: {0:?}")]
     UnsupportedArch(Option<String>),
+    #[error(
+        "DeepSeek V4 generation is not implemented; this spike supports strict schema inspection, native tokenization, and CPU semantic oracles only"
+    )]
+    DeepSeek4InspectionOnly,
     #[error("metadata key {0:?} missing or wrong type")]
     BadMetadata(&'static str),
     #[error("metadata says {key:?} = {got}, but Arch expects {expected}")]
@@ -366,6 +370,9 @@ impl<'a> Model<'a> {
         let Some(arch_name) = arch_str.as_deref() else {
             return Err(LoadError::UnsupportedArch(arch_str));
         };
+        if arch_name == "deepseek4" {
+            return Err(LoadError::DeepSeek4InspectionOnly);
+        }
         if arch_name != "qwen35" && arch_name != "qwen35moe" {
             return Err(LoadError::UnsupportedArch(Some(arch_name.to_string())));
         }

@@ -41,7 +41,9 @@ parking_lot.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+fancy-regex = "0.14"
 proptest = "1"
+serde.workspace = true
 
 [build-dependencies]
 anyhow.workspace = true

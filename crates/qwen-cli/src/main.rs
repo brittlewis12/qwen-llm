@@ -7,6 +7,7 @@ use clap::Parser;
 use messages::{load_messages_prompt_with_policy, messages_thinking_mode};
 use qwen_llm::checkpoint_identity::IdentityCacheOutcome;
 use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedIntegrityMode};
+use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
 use qwen_llm::metal::{
     MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
     MetalPipelineCacheMetrics, evaluate_metal_memory_admission,
@@ -21,6 +22,7 @@ use qwen_llm::metal_forward::{
     TokenProfile,
 };
 use qwen_llm::model::{Arch, ArchKind};
+use qwen_llm::model_family::ModelFamily;
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
 use qwen_llm::runtime::{
     LoadedModel, LoadedModelConfig, PreparedCheckpoint, Runtime, RuntimeError, Sequence,
@@ -118,7 +120,7 @@ fn resolve_greedy_gpu_decision(
 #[derive(Parser, Debug)]
 #[command(name = "qwen", version, about = "qwen-llm inference CLI")]
 struct Args {
-    /// Path to a GGUF file (Qwen 3.5 / 3.6 family).
+    /// Path to a GGUF file (Qwen generation; DeepSeek V4 inspection only).
     #[arg(short = 'm', long)]
     model: Option<std::path::PathBuf>,
 
@@ -5265,6 +5267,10 @@ fn print_model_info(model_path: &Path) -> Result<()> {
         gguf.primary_shard().tensor_data_start,
     );
 
+    if ModelFamily::detect(&gguf) == Some(ModelFamily::DeepSeek4) {
+        return print_deepseek_v4_info(&gguf);
+    }
+
     // Group tensors by layer index. The GDN-layer test is "has ssm_* tensor",
     // the full-attn-layer test is "has attn_q/k/v/o.weight" (NOT attn_qkv,
     // which is GDN's combined input projection in this naming scheme).
@@ -5328,6 +5334,74 @@ fn print_model_info(model_path: &Path) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn print_deepseek_v4_info(gguf: &qwen_llm::gguf::GgufFile) -> Result<()> {
+    use std::collections::BTreeSet;
+
+    let model = DeepSeekV4Model::from_gguf_flash_0731(gguf)
+        .context("bind strict DeepSeek V4 Flash-0731 schema")?;
+    let config = &model.config;
+    let (local, csa, hca) = config.attention_counts();
+    let hash_layers = model
+        .blocks
+        .iter()
+        .filter(|block| matches!(block.moe.router, RouterWeights::TokenHash { .. }))
+        .count();
+    let csa_layers = model
+        .blocks
+        .iter()
+        .filter(|block| matches!(block.attention.lane, AttentionLane::CompressedSparse { .. }))
+        .count();
+    let gate_up_types = model
+        .blocks
+        .iter()
+        .flat_map(|block| [block.moe.gate_experts.dtype, block.moe.up_experts.dtype])
+        .map(|dtype| dtype.to_string())
+        .collect::<BTreeSet<_>>();
+    let down_types = model
+        .blocks
+        .iter()
+        .map(|block| block.moe.down_experts.dtype.to_string())
+        .collect::<BTreeSet<_>>();
+
+    println!(
+        "deepseek4 target: {} layers, hidden={}, vocab={}, context={}",
+        config.layer_count, config.hidden_size, config.vocab_size, config.context_length
+    );
+    println!(
+        "attention: {local} local, {csa} CSA ratio-4, {hca} HCA ratio-128; heads={} shared-KV={}x{} local-window={} index-topk={}",
+        config.attention_head_count,
+        config.kv_head_count,
+        config.key_length,
+        config.sliding_window,
+        config.indexer_top_k,
+    );
+    println!(
+        "mHC: streams={} sinkhorn-iters={} epsilon={}; MoE: experts={} topk={} hash-layers={hash_layers}",
+        config.hyper_connection_count,
+        config.sinkhorn_iterations,
+        config.hyper_connection_epsilon,
+        config.expert_count,
+        config.expert_used_count,
+    );
+    println!(
+        "tokenizer: {}/{} bos={:?} eos={:?} pad={:?}",
+        config.tokenizer_model,
+        config.tokenizer_pre,
+        config.bos_token_id,
+        config.eos_token_id,
+        config.padding_token_id,
+    );
+    println!(
+        "trailing compression-ratio entries={} (target-only GGUF); routed gate/up types={gate_up_types:?}, down types={down_types:?}",
+        config.compress_ratio_tail.len(),
+    );
+    println!(
+        "strict tensor schema: validated all {} tensors; CSA indexers={csa_layers}",
+        model.source_tensor_count
+    );
     Ok(())
 }
 

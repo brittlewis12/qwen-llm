@@ -5,7 +5,7 @@ members = ["crates/qwen-llm", "crates/qwen-cli"]
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Britt Lewis"]
 
@@ -45,7 +45,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"
 blake3 = { version = "1", features = ["rayon"] }
-unicode-general-category = "0.6"
+unicode-general-category = "=1.1.0"
 rustc-hash = "2"
 
 # dequant codec for tooling / re-pack-on-load (see docs/PLAN.md weight-format role table)

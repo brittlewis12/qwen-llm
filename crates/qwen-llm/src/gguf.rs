@@ -456,6 +456,39 @@ impl GgufFile {
         self.model.metadata().get(key).and_then(|v| v.as_str())
     }
 
+    /// Convenience: lookup a floating-point metadata value by key.
+    pub fn get_f64(&self, key: &str) -> Result<Option<f64>, GgufError> {
+        let Some(value) = self.model.metadata().get(key) else {
+            return Ok(None);
+        };
+        value
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| GgufError::Decode(format!("metadata key {key:?} is not numeric")))
+    }
+
+    /// Convenience: lookup a boolean metadata value by key.
+    pub fn get_bool(&self, key: &str) -> Result<Option<bool>, GgufError> {
+        let Some(value) = self.model.metadata().get(key) else {
+            return Ok(None);
+        };
+        value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| GgufError::Decode(format!("metadata key {key:?} is not a boolean")))
+    }
+
+    /// Return the length of an array metadata value without cloning it.
+    pub fn get_array_len(&self, key: &str) -> Result<Option<usize>, GgufError> {
+        let Some(value) = self.model.metadata().get(key) else {
+            return Ok(None);
+        };
+        value
+            .as_array()
+            .map(|values| Some(values.len()))
+            .ok_or_else(|| GgufError::Decode(format!("metadata key {key:?} is not an array")))
+    }
+
     /// Convenience: lookup an array-of-u64 typed metadata value by key.
     /// Returns `Ok(None)` if the key is missing, and `Err` if the key exists
     /// but is not a pure array of u64 values.
@@ -470,6 +503,26 @@ impl GgufFile {
         for (idx, value) in arr.iter().enumerate() {
             let parsed = value.as_u64().ok_or_else(|| {
                 GgufError::Decode(format!("metadata key {key:?}[{idx}] is not a u64"))
+            })?;
+            out.push(parsed);
+        }
+        Ok(Some(out))
+    }
+
+    /// Convenience: lookup an array-of-floating-point metadata value by key.
+    /// Returns `Ok(None)` if the key is missing, and `Err` if the key exists
+    /// but contains a non-numeric value.
+    pub fn get_f64_array(&self, key: &str) -> Result<Option<Vec<f64>>, GgufError> {
+        let Some(value) = self.model.metadata().get(key) else {
+            return Ok(None);
+        };
+        let arr = value
+            .as_array()
+            .ok_or_else(|| GgufError::Decode(format!("metadata key {key:?} is not an array")))?;
+        let mut out = Vec::with_capacity(arr.len());
+        for (idx, value) in arr.iter().enumerate() {
+            let parsed = value.as_f64().ok_or_else(|| {
+                GgufError::Decode(format!("metadata key {key:?}[{idx}] is not numeric"))
             })?;
             out.push(parsed);
         }

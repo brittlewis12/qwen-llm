@@ -1072,20 +1072,28 @@ scans remain mandatory for eviction, publication, budgeting, and integrity.
 Positive-temperature product decode also deserves one attribution profile:
 current execution allocates and copies a full-vocabulary logits `Vec`, constructs
 a full-vocabulary candidate vector before top-k truncation, and then allocates
-probability weights for the retained candidates on every transition. Measure
-GPU, wait/readback, allocation, copy, and selection wall before reusable
-workspaces; do not import greedy GPU-argmax evidence or call the allocation
-material in advance.
+probability weights for the retained candidates on every transition. v0.657
+built the exact opt-in attribution and passed its CPU/CLI conformance, but its
+first model-facing host gate found a foreign `cargo test -p qwen-llm --lib`
+process. It stopped before model conformance, the product reference, or any
+profiled child with `CONSUMED_NO_AUTHORITY`. No phase value or candidate result
+exists. Measure GPU, wait/readback, allocation, copy, and selection wall before
+reusable workspaces; do not import greedy GPU-argmax evidence or call the
+allocation material in advance.
 
-1. **Positive-temperature sampling attribution**: measure the current
+1. **Positive-temperature sampling attribution successor**: v0.657 is consumed
+   without model-backed or profiled observation and must not be rerun. Under a
+   separately preregistered version and packet root, measure the current
    full-vocabulary GPU head, wait/readback, logits copy, candidate construction,
    retained-candidate weights, allocation, and selection wall separately on one
    named 128-output product request. This is a fresh-prompt, distribution-exact
    diagnostic; greedy GPU-argmax savings do not transfer. Authorize reusable
    workspaces only if avoidable allocation, copy, and vector construction project
    to both `>=5%` decode and `>=5 ms` request-wall saving while preserving
-   sampler-v1 ordering, RNG draws, errors, and seeded output exactly. Belief high
-   on decisiveness, unknown on prize, difficulty S-M.
+   sampler-v1 ordering, RNG draws, errors, and seeded output exactly. Run a cheap
+   competitor preflight before CPU conformance, then retain the full host gates
+   before model conformance and every timed child. Belief high on decisiveness,
+   unknown on prize, difficulty S-M.
 2. **Generic certified lm-head screening oracle**: in the frozen integrated
    cell, v0.656's compact-tail arm reduces transition-command wall by
    `14.197064 ms`, about `0.835 ms` per transition; v0.655, not v0.656, supplies
@@ -1223,8 +1231,12 @@ control. It is no longer an active experiment; keep `decode` as the default.
    `7.662 ms` total request and regresses TTFT `15.100 ms`. Schedule no repair or
    rerun. A grammar successor needs a changed bank-lifetime, lazy-organization,
    or materially longer constrained-workload premise.
-5. Run the positive-temperature sampling attribution next. Advance reusable
-   workspaces only through its fresh 128-output request gate. Then run the
+5. v0.657 is consumed before model or profile observation because its first
+   model-facing host gate found a foreign cargo test. Record no phase-size,
+   speed, model-backed or product correctness, or candidate inference and do
+   not rerun it. After that process is gone, preregister a new-root successor
+   with an early competitor preflight and retain the fresh 128-output request
+   gate. Positive-temperature attribution remains first; then run the
    optimistic generic lm-head screening oracle before any production screener.
 6. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind

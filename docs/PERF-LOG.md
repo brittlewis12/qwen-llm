@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-31 - v0.657 Sampling Attribution Consumed
+
+Status: `CONSUMED_NO_AUTHORITY` before model conformance, the product
+reference, or any profiled child. The packet contains no attribution
+measurement and neither authorizes nor kills a sampling optimization.
+
+- Clean build/runtime/source identity matches at `79943b3`; static model and
+  prompt files, binaries, source-bound token/command expectations, and
+  sanitized-environment gates pass. Runtime token/model fields are unobserved.
+- The instrumentation conformance commands pass 16 sampler tests and 57 CLI
+  tests with zero timeouts, process-group leaks, or forced terminations. These
+  are CPU/CLI conformance evidence only; terminal authority is empty and
+  model-backed conformance did not run.
+- The first model-facing host gate found foreign PID `68030`, an extant
+  `cargo test -p qwen-llm --lib` process outside the packet process groups. The
+  frozen pre-profile environment rule stopped without launching a model or
+  observing a W/B/C/S value.
+- A pre-acquisition security amendment replaced plaintext inherited-environment
+  capture with names, lengths, and SHA-256 commitments, restricted children to
+  a non-secret allowlist, and redacted helper/process details. The sealed packet
+  contains no plaintext environment values.
+- Do not rerun or repair v0.657. Positive-temperature attribution remains first
+  in the queue because no candidate observation exists. A separately
+  preregistered successor needs a new root, a quiet host, and an early cheap
+  competitor preflight before CPU conformance.
+
+Artifacts:
+`target/profiles/v0657-positive-temperature-sampling-attribution-p1/`.
+Summary:
+`docs/bench/v0657-positive-temperature-sampling-attribution-result.md`.
+Independent review: `cx` session
+`019fb694-8a53-7482-b65b-7592f729be32`.
+
 ## 2026-07-31 - v0.656 Integrated Grammar-Row KILL
 
 Status: mechanically `KILL` on the exact A3B response-shape request. The

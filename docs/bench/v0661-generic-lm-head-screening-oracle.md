@@ -60,11 +60,18 @@ selection through `Sampler` at temperature zero, each transition through
 `MetalForward::single_token_greedy` with `GreedyTotal`, and logical advancement
 through `Sequence::advance_by(1)`. Advance the sequence by all 419 prompt tokens
 immediately after prefill, exactly as the production path does. Preserve the
-ordinary no-op callback and exact per-call order:
+ordinary no-op callback and production control order:
 
 ```text
 select -> append -> stop check -> callback -> token-limit check -> transition
 ```
+
+The observational capture is not a callback or model command. On a non-stop
+call, insert it after the token-limit check and before the resulting branch or
+transition. Producer EOS short-circuits the callback and token-limit check; if
+that call is named, capture after the stop check and before taking the stop
+branch. Record which checks completed rather than claiming the non-stop suffix
+on an EOS call. This insertion must add no command-status query or forward.
 
 Call zero selects `gen[0]` from prompt token index 418 at sequence position 419.
 For `j > 0`, call `j` sees the state after consuming `gen[j-1]` at input
@@ -193,9 +200,16 @@ integer `125,153,280` bytes.
 
 Only persistent construction of weight block-norm metadata is excluded. Report
 its complete head read/hash, metadata population, bytes, and wall separately.
-Exact-dyadic norm validation and full-logit capture are oracle fixture work;
-report their traffic, allocator high-water, and wall separately. Neither
-exclusion grants a production lifecycle or validation-cost premise.
+Run exact-dyadic block-norm containment as a second complete head pass and
+report its traffic and wall separately from metadata population. Full-logit
+capture reports hidden/logit copy traffic and wall separately.
+
+Stable Rust exposes no scoped allocator high-water without replacing the
+process-global allocator. For excluded fixture work, report exact owned `Vec`
+requested-capacity high-water plus BigInt significant-bit and rounded-limb
+payload high-water proxies. Label them as payload proxies that exclude allocator
+metadata, spare BigInt capacity, and allocator overhead. This correction grants
+no production memory or wall-time premise.
 
 Every conceptual resource has base offset zero and its own 128-byte-aligned
 allocation:
@@ -345,6 +359,13 @@ terminal `decision.json`. The decision embeds the exact artifact-manifest
 SHA-256. Rehash and restat every inventoried file after manifest construction and
 immediately before terminal publication. A crash or unsealed root consumes
 v0.661; any successor needs a new preregistration and root.
+
+A complete mechanism decision requires the full file set above. A producer-EOS
+coverage decision instead inventories only complete named capture groups reached
+before the stop plus typed skipped-analysis JSON; it must not fabricate missing
+raw captures or block-norm metadata. A recoverable `INVALID` may inventory only
+successfully committed evidence. Any write, seal, or publication failure leaves
+the root consumed and unsealed rather than publishing a manifest-less decision.
 
 Independent design review: `cx` session
 `019fbdd2-77fc-7db2-a960-93efffd0ad14`.

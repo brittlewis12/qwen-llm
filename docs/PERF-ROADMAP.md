@@ -1080,11 +1080,11 @@ default-off exact-profile switch. The generation gate clears by only `0.002899`
 percentage points, so do not claim robust per-run `>=5%`, uniform TTFT
 nonregression, default admission, broader transfer, or another timing packet.
 
-1. **Generic certified lm-head screening oracle**: v0.661 is sealed `INVALID`
-   before `Runtime::metal`, model construction, or execution and contains no
-   mechanism observation. Complete hashing left a shared descriptor at EOF; the
-   opened-GGUF streaming parser did not rewind before its first `read_exact`.
-   Run only the preregistered v0.662 parser repair under a new root, preserving
+1. **Generic certified lm-head screening oracle**: v0.662 is sealed authenticated
+   `INVALID` with no mechanism observation. Its synthetic and real-file parser
+   repair cleared, then CPU model identity validation selected
+   `general.basename` for the spaced `general.base_model.0.name` value. Run only
+   the preregistered v0.663 dual-key identity repair under a new root, preserving
    every screening gate. In the frozen integrated cell, v0.656's compact tail
    removes `14.197064 ms` of transition-command wall, while v0.655 supplies
    isolated primitive authority.

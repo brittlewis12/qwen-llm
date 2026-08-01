@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-01 - v0.662 Lm-Head Identity-Key Invalid
+
+Status: authenticated `INVALID` with `authority=[]`. The parser repair cleared
+its synthetic and real-file gates, but the sole packet stopped on a frozen
+metadata-key transcription error before any mechanism observation.
+
+- Readiness binds clean commit `70e999e`, the release executable, exact command,
+  operator attestation, and v0.661 predecessor.
+- All eleven pre-model tests passed, including the archived EOF-positioned,
+  absent-path opened-GGUF regression.
+- Complete model hashing, repaired real-file parsing, retained identity, stop
+  vector, CPU model binding, architecture, untied-head, and zero-MTP checks
+  passed.
+- The runner compared spaced `Qwen3.6 35B A3B` against `general.basename`.
+  Path-associated v0.403 evidence records that value under
+  `general.base_model.0.name`; the basename is `Qwen3.6-35B-A3B`.
+- Failure preceded `general.file_type`, `output.bias` absence, explicit Q6_K
+  dtype/shard/offset/extent checks, complete head hashing, the second parse,
+  `Runtime::metal`, Metal work, capture, screening, exact survivors, and the byte
+  ledger. CPU model binding had already selected the untied head and its shape.
+  False mechanism flags are INVALID defaults.
+- Do not rerun v0.662. v0.663 may repair only the two explicit metadata-key
+  bindings under a new schema/root; all mechanism gates stay frozen.
+
+Artifacts:
+`target/profiles/v0662-generic-lm-head-screening-oracle-a3b-p1/`.
+Decision SHA-256:
+`a457ae97a9f51ef62e2d01ff4c30f8f012421f6fab7c336cf44d536d6ac32c80`.
+Summary:
+`docs/bench/v0662-generic-lm-head-screening-parser-repair-result.md`.
+Post-acquisition review: `cx` session
+`019fbf34-6270-72a3-b583-299d15505a88`.
+
 ## 2026-08-01 - v0.661 Lm-Head Screening Oracle Invalid
 
 Status: `INVALID` with `authority=[]`. The sole packet stopped during the first

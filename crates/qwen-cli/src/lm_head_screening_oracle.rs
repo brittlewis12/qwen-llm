@@ -31,7 +31,7 @@ use std::time::Instant;
 
 use crate::host_validity::HostSnapshot;
 
-const SCHEMA: &str = "qwen-lm-head-screening-oracle/v0661";
+const SCHEMA: &str = "qwen-lm-head-screening-oracle/v0662";
 const MODEL_PATH: &str = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
 const MODEL_BYTES: u64 = 22_134_528_992;
 const MODEL_SHA256: &str = "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61";
@@ -55,7 +55,9 @@ const PROMPT_TOKENS: usize = 419;
 const PRUNING_FLOOR: usize = 198_656;
 const BYTE_LIMIT: u64 = 125_153_280;
 const DOT_EXP: i32 = -173;
-const PACKET_PATH: &str = "target/profiles/v0661-generic-lm-head-screening-oracle-a3b-p1";
+const PACKET_PATH: &str = "target/profiles/v0662-generic-lm-head-screening-oracle-a3b-p1";
+const PREDECESSOR_DECISION_SHA256: &str =
+    "d4628a76ed85d84018d6e0b4e53d5805bfb5b41398448d6bef13825f82397cbc";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,6 +81,28 @@ pub struct LmHeadScreeningOracleArgs {
     packet_dir: PathBuf,
     #[arg(long)]
     attest_no_other_user_gpu_workload: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReadinessCommandArguments {
+    model: String,
+    prompt_file: String,
+    tokens: usize,
+    capture_calls: Vec<usize>,
+    packet_dir: String,
+    attest_no_other_user_gpu_workload: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReadinessArtifact {
+    schema: String,
+    build_identity: super::BuildIdentity,
+    executable_identity: ExecutableIdentity,
+    operator_attestation: bool,
+    command_arguments: ReadinessCommandArguments,
+    predecessor_decision_sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -631,10 +655,7 @@ fn validate_args(args: &LmHeadScreeningOracleArgs) -> Result<()> {
         !args.packet_dir.as_os_str().is_empty() && !args.packet_dir.is_absolute(),
         "packet root must be the preregistered relative path"
     );
-    ensure!(
-        args.packet_dir
-            == Path::new("target/profiles/v0661-generic-lm-head-screening-oracle-a3b-p1")
-    );
+    ensure!(args.packet_dir == Path::new(PACKET_PATH));
     ensure!(
         args.packet_dir
             .components()
@@ -646,13 +667,117 @@ fn validate_args(args: &LmHeadScreeningOracleArgs) -> Result<()> {
 fn validate_build(build: &super::BuildIdentity) -> Result<()> {
     ensure!(
         !cfg!(debug_assertions),
-        "v0.661 requires a release binary without debug assertions"
+        "v0.662 requires a release binary without debug assertions"
     );
+    validate_clean_build_identity(build)
+}
+
+fn validate_clean_build_identity(build: &super::BuildIdentity) -> Result<()> {
+    ensure!(build.schema_version == 2);
+    ensure!(super::source_identity::full_object_id(&build.build_commit));
+    ensure!(
+        build.build_commit == build.build_commit.to_ascii_lowercase()
+            && build.build_commit_short == build.build_commit[..9]
+    );
+    let build_source_state = build
+        .build_source_state
+        .as_deref()
+        .context("clean build identity lacks source state")?;
+    ensure!(super::source_identity::valid_source_state(
+        build_source_state
+    ));
+    let runtime_commit = build
+        .runtime_commit
+        .as_deref()
+        .context("clean build identity lacks runtime commit")?;
+    let runtime_source_state = build
+        .runtime_source_state
+        .as_deref()
+        .context("clean build identity lacks runtime source state")?;
+    ensure!(
+        runtime_commit == build.build_commit
+            && runtime_source_state == build_source_state
+            && super::source_identity::valid_source_state(runtime_source_state)
+    );
+    ensure!(matches!(
+        build.stamp_source.as_str(),
+        "git" | "environment-verified"
+    ));
+    ensure!(build.stamp_error.is_none());
     ensure!(build.status == "match");
     ensure!(build.build_dirty == Some(false));
     ensure!(build.runtime_dirty == Some(false));
     ensure!(build.problems.is_empty());
     ensure!(build.overrides.is_empty());
+    Ok(())
+}
+
+fn readiness_command_arguments(
+    args: &LmHeadScreeningOracleArgs,
+) -> Result<ReadinessCommandArguments> {
+    Ok(ReadinessCommandArguments {
+        model: args
+            .model
+            .to_str()
+            .context("model argument is not UTF-8")?
+            .to_string(),
+        prompt_file: args
+            .prompt_file
+            .to_str()
+            .context("prompt argument is not UTF-8")?
+            .to_string(),
+        tokens: args.tokens,
+        capture_calls: args.capture_calls.clone(),
+        packet_dir: args
+            .packet_dir
+            .to_str()
+            .context("packet argument is not UTF-8")?
+            .to_string(),
+        attest_no_other_user_gpu_workload: args.attest_no_other_user_gpu_workload,
+    })
+}
+
+fn readiness_payload(
+    args: &LmHeadScreeningOracleArgs,
+    build_identity: &super::BuildIdentity,
+    executable_identity: &ExecutableIdentity,
+) -> Result<ReadinessArtifact> {
+    Ok(ReadinessArtifact {
+        schema: SCHEMA.to_string(),
+        build_identity: build_identity.clone(),
+        executable_identity: executable_identity.clone(),
+        operator_attestation: args.attest_no_other_user_gpu_workload,
+        command_arguments: readiness_command_arguments(args)?,
+        predecessor_decision_sha256: PREDECESSOR_DECISION_SHA256.to_string(),
+    })
+}
+
+fn validate_readiness_constants(readiness: &ReadinessArtifact) -> Result<()> {
+    ensure!(readiness.schema == SCHEMA);
+    validate_clean_build_identity(&readiness.build_identity)?;
+    validate_sha256(
+        &readiness.executable_identity.sha256,
+        "readiness executable SHA-256",
+    )?;
+    ensure!(!readiness.executable_identity.debug_assertions);
+    ensure!(readiness.operator_attestation);
+    ensure!(
+        readiness.command_arguments
+            == ReadinessCommandArguments {
+                model: MODEL_PATH.to_string(),
+                prompt_file: PROMPT_PATH.to_string(),
+                tokens: TOKENS,
+                capture_calls: CALLS.to_vec(),
+                packet_dir: PACKET_PATH.to_string(),
+                attest_no_other_user_gpu_workload: true,
+            },
+        "readiness command arguments differ from preregistration"
+    );
+    validate_sha256(
+        &readiness.predecessor_decision_sha256,
+        "predecessor decision SHA-256",
+    )?;
+    ensure!(readiness.predecessor_decision_sha256 == PREDECESSOR_DECISION_SHA256);
     Ok(())
 }
 
@@ -868,6 +993,11 @@ impl Packet {
         open_directory_nofollow(&self.root)?
             .sync_all()
             .map_err(Into::into)
+    }
+
+    fn readiness_published(&self) -> bool {
+        self.written.contains(Path::new("readiness.json"))
+            && self.commitments.contains_key(Path::new("readiness.json"))
     }
 
     fn validate_root(&self) -> Result<()> {
@@ -1309,6 +1439,17 @@ struct SelfTestObservations {
     ledger_total_charged_bytes_64_128_256: [u64; 3],
     compact_fixture_survivors: Vec<u32>,
     reduce_fixture_less_equal_greater: [usize; 3],
+    opened_gguf_rewind: OpenedGgufRewindObservation,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct OpenedGgufRewindObservation {
+    fixture_bytes: usize,
+    shared_cursor_position_before_parse: u64,
+    diagnostic_path_absent_before_parse: bool,
+    parsed_tensor_count: usize,
+    parsed_tensor_name: String,
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -1328,7 +1469,7 @@ unsafe extern "C" {
 fn floating_environment_self_test() -> Result<(u64, i32, u64, u32, u64, [u32; 2])> {
     #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
     return Err(anyhow!(
-        "v0.661 floating-environment gate requires aarch64 macOS"
+        "v0.662 floating-environment gate requires aarch64 macOS"
     ));
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -1476,6 +1617,7 @@ fn self_tests() -> Result<SelfTestArtifact> {
     ensure!(reduced.greater_than_winner_count == 1);
     runtime_ledger_self_test()?;
     runtime_artifact_self_test()?;
+    let opened_gguf_rewind = runtime_opened_gguf_rewind_self_test()?;
     Ok(SelfTestArtifact {
         schema: SCHEMA.to_string(),
         suite: "in-process-pre-model".to_string(),
@@ -1491,6 +1633,7 @@ fn self_tests() -> Result<SelfTestArtifact> {
             "ledger_for_hard_coded_64_128_256_streams_totals_constants_and_overlap",
             "malformed_symlink_hardlink_foreign_traversal_schema_json_and_raw_size",
             "prophecy_firewall_exact_positive_capabilities",
+            "opened_gguf_shared_eof_cursor_rewind_without_diagnostic_path_reopen",
         ]
         .into_iter()
         .map(str::to_string)
@@ -1518,8 +1661,84 @@ fn self_tests() -> Result<SelfTestArtifact> {
                 reduced.tie_count,
                 reduced.greater_than_winner_count,
             ],
+            opened_gguf_rewind,
         },
     })
+}
+
+fn runtime_opened_gguf_rewind_self_test() -> Result<OpenedGgufRewindObservation> {
+    const MAGIC: u32 = 0x4655_4747;
+    let mut fixture = Vec::new();
+    fixture.extend_from_slice(&MAGIC.to_le_bytes());
+    fixture.extend_from_slice(&3u32.to_le_bytes());
+    fixture.extend_from_slice(&1u64.to_le_bytes());
+    fixture.extend_from_slice(&0u64.to_le_bytes());
+    fixture.extend_from_slice(&1u64.to_le_bytes());
+    fixture.push(b't');
+    fixture.extend_from_slice(&1u32.to_le_bytes());
+    fixture.extend_from_slice(&1u64.to_le_bytes());
+    fixture.extend_from_slice(&0u32.to_le_bytes());
+    fixture.extend_from_slice(&0u64.to_le_bytes());
+    while fixture.len() % 32 != 0 {
+        fixture.push(0);
+    }
+    fixture.extend_from_slice(&1.0f32.to_le_bytes());
+
+    let root = std::env::temp_dir().join(format!(
+        "qwen-v0662-opened-gguf-self-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let diagnostic = root.join("diagnostic.gguf");
+    let retained = root.join("retained.gguf");
+    std::fs::create_dir(&root)?;
+    let result = (|| -> Result<OpenedGgufRewindObservation> {
+        let mut writer = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&diagnostic)?;
+        writer.write_all(&fixture)?;
+        writer.sync_all()?;
+        drop(writer);
+
+        let mut file = File::open(&diagnostic)?;
+        let mut shared_cursor = file.try_clone()?;
+        let eof = shared_cursor.seek(SeekFrom::End(0))?;
+        ensure!(eof == fixture.len() as u64 && file.stream_position()? == eof);
+        std::fs::rename(&diagnostic, &retained)?;
+        ensure!(
+            std::fs::symlink_metadata(&diagnostic)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "diagnostic path remained resolvable during opened-GGUF self-test"
+        );
+
+        let gguf = qwen_llm::gguf::GgufFile::from_opened_file(file, &diagnostic)?;
+        ensure!(gguf.shard_count() == 1 && gguf.total_mapped_len() == fixture.len());
+        let tensor = gguf
+            .find("t")
+            .context("opened-GGUF fixture tensor missing")?;
+        ensure!(
+            gguf.tensors.len() == 1
+                && tensor.dtype == GgmlType::F32
+                && tensor.shape.as_slice() == [1]
+                && gguf.try_slice(tensor)? == 1.0f32.to_le_bytes(),
+            "opened-GGUF fixture parsed incorrectly"
+        );
+        Ok(OpenedGgufRewindObservation {
+            fixture_bytes: fixture.len(),
+            shared_cursor_position_before_parse: eof,
+            diagnostic_path_absent_before_parse: true,
+            parsed_tensor_count: gguf.tensors.len(),
+            parsed_tensor_name: tensor.name.clone(),
+        })
+    })();
+    let _ = std::fs::remove_file(&diagnostic);
+    let _ = std::fs::remove_file(&retained);
+    let _ = std::fs::remove_dir(&root);
+    result
 }
 
 fn runtime_ledger_self_test() -> Result<()> {
@@ -1594,7 +1813,7 @@ fn runtime_artifact_self_test() -> Result<()> {
     }
 
     let root = std::env::temp_dir().join(format!(
-        "qwen-v0661-self-test-{}-{}",
+        "qwen-v0662-self-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -2852,7 +3071,11 @@ fn strict_reparse_json(path: &Path, relative: &Path) -> Result<()> {
         "JSON artifact lacks canonical newline"
     );
     bytes.pop();
-    let canonical = if relative == Path::new("self-tests.json") {
+    let canonical = if relative == Path::new("readiness.json") {
+        let parsed: ReadinessArtifact = serde_json::from_slice(&bytes)?;
+        validate_readiness_constants(&parsed)?;
+        serde_json::to_vec(&parsed)?
+    } else if relative == Path::new("self-tests.json") {
         let parsed: SelfTestArtifact = serde_json::from_slice(&bytes)?;
         ensure!(parsed.schema == SCHEMA);
         for bits in parsed
@@ -2879,6 +3102,17 @@ fn strict_reparse_json(path: &Path, relative: &Path) -> Result<()> {
         for bits in &parsed.observations.f64_to_f32_midpoint_ties_even_bits {
             validate_f32_bits(bits, "self-test F64-to-F32 midpoint bits")?;
         }
+        ensure!(
+            parsed.observations.opened_gguf_rewind
+                == OpenedGgufRewindObservation {
+                    fixture_bytes: 68,
+                    shared_cursor_position_before_parse: 68,
+                    diagnostic_path_absent_before_parse: true,
+                    parsed_tensor_count: 1,
+                    parsed_tensor_name: "t".to_string(),
+                },
+            "opened-GGUF runtime self-test observation changed"
+        );
         serde_json::to_vec(&parsed)?
     } else if relative == Path::new("artifact-manifest.json") {
         let parsed: ArtifactManifest = serde_json::from_slice(&bytes)?;
@@ -2984,6 +3218,7 @@ fn validate_raw_artifact_size(relative: &Path, bytes: u64) -> Result<()> {
 
 fn complete_expected_artifacts() -> BTreeSet<PathBuf> {
     let mut expected = BTreeSet::from([
+        PathBuf::from("readiness.json"),
         PathBuf::from("self-tests.json"),
         PathBuf::from("capture-manifest.json"),
         PathBuf::from("metadata/block-norm.f32le"),
@@ -3025,6 +3260,29 @@ fn load_json_nofollow<T: DeserializeOwned>(path: &Path) -> Result<T> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+fn validate_readiness_and_capture_binding(
+    root: &Path,
+    capture_manifest_present: bool,
+) -> Result<ReadinessArtifact> {
+    let readiness: ReadinessArtifact = load_json_nofollow(&root.join("readiness.json"))?;
+    validate_readiness_constants(&readiness)?;
+    if capture_manifest_present {
+        let capture: CaptureManifestArtifact =
+            load_json_nofollow(&root.join("capture-manifest.json"))?;
+        validate_capture_manifest_constants(&capture)?;
+        ensure!(
+            serde_json::to_vec(&capture.build_identity)?
+                == serde_json::to_vec(&readiness.build_identity)?,
+            "capture and readiness build identities differ"
+        );
+        ensure!(
+            capture.executable_identity == readiness.executable_identity,
+            "capture and readiness executable identities differ"
+        );
+    }
+    Ok(readiness)
+}
+
 fn load_raw_f32_nofollow(path: &Path, elements: usize) -> Result<(Vec<u8>, Vec<f32>)> {
     let mut bytes = Vec::new();
     open_nofollow_regular(path)?.read_to_end(&mut bytes)?;
@@ -3036,6 +3294,7 @@ fn semantic_packet_cross_check(
     root: &Path,
     complete_analysis: bool,
 ) -> Result<CaptureManifestArtifact> {
+    validate_readiness_and_capture_binding(root, true)?;
     let manifest: CaptureManifestArtifact =
         load_json_nofollow(&root.join("capture-manifest.json"))?;
     validate_capture_manifest_constants(&manifest)?;
@@ -3286,6 +3545,7 @@ fn semantic_packet_cross_check(
 
 fn coverage_expected_artifacts(capture_calls: &[usize]) -> BTreeSet<PathBuf> {
     let mut expected = BTreeSet::from([
+        PathBuf::from("readiness.json"),
         PathBuf::from("self-tests.json"),
         PathBuf::from("capture-manifest.json"),
         PathBuf::from("metadata-manifest.json"),
@@ -3399,6 +3659,20 @@ fn seal(packet: &mut Packet, outcome: &TerminalOutcome) -> Result<()> {
     paths.sort();
     let actual: BTreeSet<_> = paths.iter().cloned().collect();
     validate_inventory_set(&actual, &packet.written)?;
+    ensure!(
+        packet.readiness_published() && actual.contains(Path::new("readiness.json")),
+        "terminal packet lacks authenticated readiness"
+    );
+    let readiness = validate_readiness_and_capture_binding(
+        &packet.root,
+        actual.contains(Path::new("capture-manifest.json")),
+    )?;
+    if let Some(expected) = &packet.executable_commitment {
+        ensure!(
+            readiness.executable_identity == *expected,
+            "readiness differs from executable commitment"
+        );
+    }
     if outcome.require_complete_inventory {
         validate_inventory_set(&actual, &complete_expected_artifacts())?;
     }
@@ -4308,28 +4582,37 @@ pub fn run(args: LmHeadScreeningOracleArgs) -> Result<()> {
     }));
     let outcome = match acquired {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(error)) => TerminalOutcome {
-            disposition: Disposition::Invalid,
-            any_pruning_failure: false,
-            any_byte_failure: false,
-            any_ideal_mismatch: false,
-            coverage_eos_call: None,
-            failure: Some(format!("{error:#}")),
-            require_complete_inventory: false,
-        },
-        Err(payload) => TerminalOutcome {
-            disposition: Disposition::Invalid,
-            any_pruning_failure: false,
-            any_byte_failure: false,
-            any_ideal_mismatch: false,
-            coverage_eos_call: None,
-            failure: Some(format!("panic: {}", panic_message(payload))),
-            require_complete_inventory: false,
-        },
+        Ok(Err(error)) if packet.readiness_published() => invalid_outcome(format!("{error:#}")),
+        Ok(Err(error)) => {
+            return Err(anyhow!(
+                "packet root was consumed before authenticated readiness: {error:#}"
+            ));
+        }
+        Err(payload) if packet.readiness_published() => {
+            invalid_outcome(format!("panic: {}", panic_message(payload)))
+        }
+        Err(payload) => {
+            return Err(anyhow!(
+                "packet root was consumed before authenticated readiness: panic: {}",
+                panic_message(payload)
+            ));
+        }
     };
     seal(&mut packet, &outcome)?;
     println!("{}", outcome.disposition.label());
     Ok(())
+}
+
+fn invalid_outcome(failure: String) -> TerminalOutcome {
+    TerminalOutcome {
+        disposition: Disposition::Invalid,
+        any_pruning_failure: false,
+        any_byte_failure: false,
+        any_ideal_mismatch: false,
+        coverage_eos_call: None,
+        failure: Some(failure),
+        require_complete_inventory: false,
+    }
 }
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
@@ -4346,23 +4629,26 @@ fn run_reserved(
     build_identity: super::BuildIdentity,
     qwen_env: BTreeMap<String, String>,
 ) -> Result<TerminalOutcome> {
-    for directory in ["captures", "winner-evidence", "analyzer-input", "metadata"] {
-        packet.mkdir(Path::new(directory))?;
-    }
     validate_args(&args)?;
     validate_build(&build_identity)?;
     ensure!(
         qwen_env.is_empty(),
-        "v0.661 forbids every inherited QWEN_* control"
+        "v0.662 forbids every inherited QWEN_* control"
     );
     let executable = executable_identity()?;
     packet.executable_commitment = Some(executable.clone());
+    let readiness = readiness_payload(&args, &build_identity, &executable)?;
+    validate_readiness_constants(&readiness)?;
+    packet.json_strict("readiness.json", &readiness)?;
+    for directory in ["captures", "winner-evidence", "analyzer-input", "metadata"] {
+        packet.mkdir(Path::new(directory))?;
+    }
     let tests = self_tests()?;
     packet.json_strict("self-tests.json", &tests)?;
 
-    let host_before_raw = HostSnapshot::capture("v0661_before_model")?;
+    let host_before_raw = HostSnapshot::capture("v0662_before_model")?;
     host_before_raw.validate()?;
-    let host_before = host_evidence("v0661_before_model", &host_before_raw)?;
+    let host_before = host_evidence("v0662_before_model", &host_before_raw)?;
     let AuthenticatedModel {
         file: authenticated_file,
         gguf: authenticated_gguf,
@@ -4387,9 +4673,9 @@ fn run_reserved(
     ensure!(stamp_retained_gguf(loaded.gguf())? == authenticated_stamp);
     drop(loaded);
     drop(runtime);
-    let host_after_raw = HostSnapshot::capture("v0661_after_capture")?;
+    let host_after_raw = HostSnapshot::capture("v0662_after_capture")?;
     host_after_raw.validate()?;
-    let host_after = host_evidence("v0661_after_capture", &host_after_raw)?;
+    let host_after = host_evidence("v0662_after_capture", &host_after_raw)?;
 
     for capture in &generation.captures {
         persist_capture(packet, capture, &prompt_ids)?;
@@ -4412,6 +4698,15 @@ fn run_reserved(
         &host_before,
         &host_after,
         &authentication_telemetry,
+    );
+    ensure!(
+        serde_json::to_vec(&capture_manifest.build_identity)?
+            == serde_json::to_vec(&readiness.build_identity)?,
+        "capture and readiness build identities differ before publication"
+    );
+    ensure!(
+        capture_manifest.executable_identity == readiness.executable_identity,
+        "capture and readiness executable identities differ before publication"
     );
     packet.json_strict("capture-manifest.json", &capture_manifest)?;
 
@@ -4942,7 +5237,7 @@ mod tests {
     #[test]
     fn artifact_inventory_rejects_symlink_hardlink_and_foreign_file() {
         let root = std::env::temp_dir().join(format!(
-            "qwen-v0661-inventory-{}-{}",
+            "qwen-v0662-inventory-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -4988,7 +5283,7 @@ mod tests {
     #[test]
     fn invalid_terminalization_is_exclusive_and_atomic_visible() {
         let root = std::env::temp_dir().join(format!(
-            "qwen-v0661-terminal-{}-{}",
+            "qwen-v0662-terminal-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5005,24 +5300,57 @@ mod tests {
             terminalized: false,
             executable_commitment: None,
         };
-        seal(
-            &mut packet,
-            &TerminalOutcome {
-                disposition: Disposition::Invalid,
-                any_pruning_failure: false,
-                any_byte_failure: false,
-                any_ideal_mismatch: false,
-                coverage_eos_call: None,
-                failure: Some("synthetic".to_string()),
-                require_complete_inventory: false,
+        let outcome = invalid_outcome("synthetic".to_string());
+        assert!(seal(&mut packet, &outcome).is_err());
+        let source_state = format!(
+            "{}{}",
+            super::super::source_identity::SOURCE_STATE_PREFIX,
+            "0".repeat(64)
+        );
+        let build_identity = super::super::BuildIdentity {
+            schema_version: 2,
+            build_commit: "0".repeat(40),
+            build_commit_short: "0".repeat(9),
+            build_dirty: Some(false),
+            build_source_state: Some(source_state.clone()),
+            stamp_source: "git".to_string(),
+            stamp_error: None,
+            runtime_commit: Some("0".repeat(40)),
+            runtime_dirty: Some(false),
+            runtime_source_state: Some(source_state),
+            status: "match".to_string(),
+            problems: vec![],
+            overrides: vec![],
+        };
+        let executable_identity = ExecutableIdentity {
+            path: "/synthetic/target/release/qwen-bench".to_string(),
+            sha256: "0".repeat(64),
+            stamp: FileStamp::from_metadata(&metadata),
+            debug_assertions: false,
+        };
+        let readiness = ReadinessArtifact {
+            schema: SCHEMA.to_string(),
+            build_identity,
+            executable_identity,
+            operator_attestation: true,
+            command_arguments: ReadinessCommandArguments {
+                model: MODEL_PATH.to_string(),
+                prompt_file: PROMPT_PATH.to_string(),
+                tokens: TOKENS,
+                capture_calls: CALLS.to_vec(),
+                packet_dir: PACKET_PATH.to_string(),
+                attest_no_other_user_gpu_workload: true,
             },
-        )
-        .unwrap();
+            predecessor_decision_sha256: PREDECESSOR_DECISION_SHA256.to_string(),
+        };
+        packet.json_strict("readiness.json", &readiness).unwrap();
+        seal(&mut packet, &outcome).unwrap();
         assert!(root.join("decision.json").is_file());
         assert!(!root.join(".decision.json.tmp").exists());
         assert!(publish_decision_exclusive(&packet, b"{}\n").is_err());
         std::fs::remove_file(root.join("decision.json")).unwrap();
         std::fs::remove_file(root.join("artifact-manifest.json")).unwrap();
+        std::fs::remove_file(root.join("readiness.json")).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
 }

@@ -26,7 +26,7 @@ use gguf_rs::{GGUFContainer, GGUFModel};
 use memmap2::Mmap;
 use serde_json::Value;
 use std::fs::File;
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Seek, SeekFrom};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -611,7 +611,12 @@ fn open_one_shard_file(
     // Parse through a duplicate of the exact open file description backing the
     // mmap. Re-resolving the path here could bind metadata and tensor bytes to
     // different vnodes if the path were atomically replaced during load.
-    let parse_file = file.try_clone()?;
+    let mut parse_file = file.try_clone()?;
+    // `File::try_clone` duplicates the descriptor but preserves the shared
+    // open-file-description cursor on Darwin. Callers may have consumed a
+    // clone while authenticating the file, so the streaming parser must own
+    // its starting-position contract rather than inheriting that cursor.
+    parse_file.seek(SeekFrom::Start(0))?;
     let mut container = GGUFContainer::new(
         Box::new(BufReader::with_capacity(64 * 1024, parse_file)),
         u64::MAX,
@@ -1745,6 +1750,31 @@ mod tests {
         assert_ne!(std::fs::metadata(&path).unwrap().ino(), opened_inode);
 
         std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(moved).unwrap();
+    }
+
+    #[test]
+    fn opened_file_constructor_rewinds_shared_cursor_without_reopening_path() {
+        use std::io::{Seek, SeekFrom};
+
+        let bytes = build_minimal_gguf();
+        let path = write_temp(&bytes);
+        let moved = path.with_extension("opened-retained.gguf");
+        let file = File::open(&path).unwrap();
+        let mut shared_cursor = file.try_clone().unwrap();
+        assert_eq!(
+            shared_cursor.seek(SeekFrom::End(0)).unwrap(),
+            bytes.len() as u64
+        );
+        std::fs::rename(&path, &moved).unwrap();
+        assert!(!path.exists());
+
+        let gguf = GgufFile::from_opened_file(file, &path).unwrap();
+        assert_eq!(gguf.tensors.len(), 1);
+        assert_eq!(gguf.tensors[0].name, "t");
+        assert_eq!(gguf.shard_count(), 1);
+        assert_eq!(&gguf.primary_shard().mmap[..4], &GGUF_MAGIC.to_le_bytes());
+
         std::fs::remove_file(moved).unwrap();
     }
 

@@ -6,15 +6,15 @@
 """Generate deterministic DeepSeek V4 operation fixtures.
 
 The NumPy cases are manual equation transcriptions from the pinned references.
-An additional harness compiles and executes DwarfStar's actual scalar helpers,
+Additional harnesses execute pinned DwarfStar and llama.cpp CPU implementations,
 so those cases are external differential vectors rather than sibling formulas.
 The fixture stays small enough for normal CPU CI and never loads model weights.
 """
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import math
 import os
 import struct
@@ -33,6 +33,19 @@ DWARFSTAR_REVISION = "54b36ed9ba42da31b24f2d1a5feb075c2475dbb1"
 DWARFSTAR_SOURCE_SHA256 = (
     "af5df58420632c453657ffdfc2c7cb84e75135bbcc20deaca3fedf970c13930c"
 )
+LLAMA_CPP_REVISION = "876a4321163249c43ca4e986818fab5ab081f282"
+LLAMA_CPP_TREE = "b127fd3e9b45bef820e6e6914f53f71270a9a6f9"
+LLAMA_CPP_SOURCE_SHA256 = {
+    "ggml/include/ggml.h": (
+        "c65c30fdb4dce95eac71c26bb38ae8423fbc80d79db91d2b2ffaea8c4e46276a"
+    ),
+    "ggml/src/ggml.c": (
+        "9e40ad07323c7925f06a105119dfb07c1d4a21d3263a9e9bd0bd21792c42e1e4"
+    ),
+    "ggml/src/ggml-cpu/ops.cpp": (
+        "dd7265a7402515002d4679f18d5d1d423456e87f256f7cc11af3bbb4148bf773"
+    ),
+}
 
 
 def f(value: float | np.floating) -> np.float32:
@@ -920,6 +933,374 @@ def routing_fixture() -> dict[str, object]:
     }
 
 
+def require_json_object(value: object, name: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{name} must be a JSON object")
+    return value
+
+
+def reject_non_finite_json(value: str) -> object:
+    raise ValueError(f"non-finite JSON constant {value}")
+
+
+def require_exact_keys(value: dict[str, object], expected: set[str], name: str) -> None:
+    actual = set(value)
+    if actual != expected:
+        raise RuntimeError(
+            f"{name} keys mismatch: expected {sorted(expected)}, got {sorted(actual)}"
+        )
+
+
+def require_shape(
+    value: dict[str, object], key: str, expected: list[int], name: str
+) -> None:
+    actual = value.get(key)
+    if (
+        not isinstance(actual, list)
+        or any(type(dimension) is not int for dimension in actual)
+        or actual != expected
+    ):
+        raise RuntimeError(f"{name}.{key} mismatch: expected {expected}, got {actual}")
+
+
+def require_integer(
+    value: dict[str, object], key: str, expected: int, name: str
+) -> None:
+    actual = value.get(key)
+    if type(actual) is not int or actual != expected:
+        raise RuntimeError(f"{name}.{key} mismatch: expected {expected}, got {actual}")
+
+
+def require_string(
+    value: dict[str, object], key: str, expected: str, name: str
+) -> None:
+    actual = value.get(key)
+    if type(actual) is not str or actual != expected:
+        raise RuntimeError(
+            f"{name}.{key} mismatch: expected {expected!r}, got {actual!r}"
+        )
+
+
+def require_numeric_array(
+    value: dict[str, object], key: str, expected_length: int, name: str
+) -> list[int | float]:
+    array = value.get(key)
+    if not isinstance(array, list) or len(array) != expected_length:
+        actual = len(array) if isinstance(array, list) else type(array).__name__
+        raise RuntimeError(
+            f"{name}.{key} length mismatch: expected {expected_length}, got {actual}"
+        )
+    if any(
+        isinstance(item, bool)
+        or not isinstance(item, (int, float))
+        or not math.isfinite(item)
+        for item in array
+    ):
+        raise RuntimeError(f"{name}.{key} must contain only finite numbers")
+    return array
+
+
+def validate_llama_cpp_vectors(value: object) -> dict[str, object]:
+    vectors = require_json_object(value, "llama.cpp output")
+    require_exact_keys(
+        vectors,
+        {
+            "status",
+            "backend",
+            "thread_count",
+            "tensor_layout",
+            "hc_comb",
+            "hc_pre",
+            "hc_post",
+        },
+        "llama.cpp output",
+    )
+    require_string(vectors, "status", "success", "llama.cpp output")
+    require_string(vectors, "backend", "ggml-cpu-reference", "llama.cpp output")
+    require_integer(vectors, "thread_count", 1, "llama.cpp output")
+    require_string(
+        vectors,
+        "tensor_layout",
+        "flat GGML ne[0]-fastest",
+        "llama.cpp output",
+    )
+
+    combination = require_json_object(vectors["hc_comb"], "llama.cpp hc_comb")
+    require_exact_keys(
+        combination,
+        {
+            "connection_count",
+            "token_count",
+            "mixes_shape",
+            "mixes",
+            "scale_shape",
+            "scale",
+            "base_shape",
+            "base",
+            "epsilon",
+            "iterations",
+            "output_shape",
+            "output",
+        },
+        "llama.cpp hc_comb",
+    )
+    require_integer(combination, "connection_count", 4, "llama.cpp hc_comb")
+    require_integer(combination, "token_count", 3, "llama.cpp hc_comb")
+    require_integer(combination, "iterations", 20, "llama.cpp hc_comb")
+    epsilon = combination["epsilon"]
+    if (
+        isinstance(epsilon, bool)
+        or not isinstance(epsilon, (int, float))
+        or not math.isfinite(epsilon)
+        or not math.isclose(epsilon, 1.0e-6, rel_tol=0.0, abs_tol=1.0e-12)
+    ):
+        raise RuntimeError("llama.cpp hc_comb controls changed")
+    require_shape(combination, "mixes_shape", [24, 3], "llama.cpp hc_comb")
+    require_numeric_array(combination, "mixes", 72, "llama.cpp hc_comb")
+    require_shape(combination, "scale_shape", [3], "llama.cpp hc_comb")
+    require_numeric_array(combination, "scale", 3, "llama.cpp hc_comb")
+    require_shape(combination, "base_shape", [24], "llama.cpp hc_comb")
+    require_numeric_array(combination, "base", 24, "llama.cpp hc_comb")
+    require_shape(combination, "output_shape", [4, 4, 3], "llama.cpp hc_comb")
+    combination_output = require_numeric_array(
+        combination, "output", 48, "llama.cpp hc_comb"
+    )
+
+    pre = require_json_object(vectors["hc_pre"], "llama.cpp hc_pre")
+    require_exact_keys(
+        pre,
+        {
+            "hidden_size",
+            "connection_count",
+            "token_count",
+            "residual_shape",
+            "residual",
+            "weights_shape",
+            "weights",
+            "output_shape",
+            "output",
+        },
+        "llama.cpp hc_pre",
+    )
+    require_integer(pre, "hidden_size", 7, "llama.cpp hc_pre")
+    require_integer(pre, "connection_count", 4, "llama.cpp hc_pre")
+    require_integer(pre, "token_count", 3, "llama.cpp hc_pre")
+    require_shape(pre, "residual_shape", [7, 4, 3], "llama.cpp hc_pre")
+    pre_residual = require_numeric_array(pre, "residual", 84, "llama.cpp hc_pre")
+    require_shape(pre, "weights_shape", [4, 3], "llama.cpp hc_pre")
+    require_numeric_array(pre, "weights", 12, "llama.cpp hc_pre")
+    require_shape(pre, "output_shape", [7, 3], "llama.cpp hc_pre")
+    require_numeric_array(pre, "output", 21, "llama.cpp hc_pre")
+
+    post = require_json_object(vectors["hc_post"], "llama.cpp hc_post")
+    require_exact_keys(
+        post,
+        {
+            "hidden_size",
+            "connection_count",
+            "token_count",
+            "block_output_shape",
+            "block_output",
+            "residual_shape",
+            "residual",
+            "weights_shape",
+            "weights",
+            "combination_shape",
+            "combination",
+            "output_shape",
+            "output",
+        },
+        "llama.cpp hc_post",
+    )
+    require_integer(post, "hidden_size", 7, "llama.cpp hc_post")
+    require_integer(post, "connection_count", 4, "llama.cpp hc_post")
+    require_integer(post, "token_count", 3, "llama.cpp hc_post")
+    require_shape(post, "block_output_shape", [7, 3], "llama.cpp hc_post")
+    require_numeric_array(post, "block_output", 21, "llama.cpp hc_post")
+    require_shape(post, "residual_shape", [7, 4, 3], "llama.cpp hc_post")
+    post_residual = require_numeric_array(post, "residual", 84, "llama.cpp hc_post")
+    require_shape(post, "weights_shape", [4, 3], "llama.cpp hc_post")
+    require_numeric_array(post, "weights", 12, "llama.cpp hc_post")
+    require_shape(post, "combination_shape", [4, 4, 3], "llama.cpp hc_post")
+    post_combination = require_numeric_array(
+        post, "combination", 48, "llama.cpp hc_post"
+    )
+    require_shape(post, "output_shape", [7, 4, 3], "llama.cpp hc_post")
+    require_numeric_array(post, "output", 84, "llama.cpp hc_post")
+    if post_residual != pre_residual or post_combination != combination_output:
+        raise RuntimeError(
+            "llama.cpp fused primitive inputs are not internally coherent"
+        )
+    return vectors
+
+
+def llama_cpp_cpu_fixture() -> dict[str, object]:
+    llama_cpp = Path(
+        os.environ.get("DSV4_LLAMA_CPP_DIR", Path.home() / "code" / "llama.cpp")
+    ).resolve()
+    if not (llama_cpp / "ggml" / "CMakeLists.txt").is_file():
+        raise RuntimeError(
+            f"llama.cpp checkout not found at {llama_cpp}; set DSV4_LLAMA_CPP_DIR"
+        )
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=llama_cpp,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if revision != LLAMA_CPP_REVISION:
+        raise RuntimeError(
+            f"llama.cpp revision mismatch: expected {LLAMA_CPP_REVISION}, got {revision}"
+        )
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=llama_cpp,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if tree != LLAMA_CPP_TREE:
+        raise RuntimeError(
+            f"llama.cpp tree mismatch: expected {LLAMA_CPP_TREE}, got {tree}"
+        )
+    tracked_changes = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        cwd=llama_cpp,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if tracked_changes:
+        raise RuntimeError(
+            "llama.cpp has tracked worktree changes; direct vectors require a clean "
+            f"pinned checkout:\n{tracked_changes}"
+        )
+
+    source_files = []
+    for relative, expected_sha256 in LLAMA_CPP_SOURCE_SHA256.items():
+        source = llama_cpp / relative
+        actual_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"llama.cpp {relative} content mismatch: expected {expected_sha256}, "
+                f"got {actual_sha256}"
+            )
+        source_files.append({"path": relative, "sha256": actual_sha256})
+
+    reference_dir = Path(__file__).parent
+    harness = reference_dir / "dsv4_llama_cpp_cpu_oracle.cpp"
+    build_project = reference_dir / "CMakeLists.txt"
+    cmake = os.environ.get("CMAKE", "cmake")
+    with tempfile.TemporaryDirectory(prefix="dsv4-llama-cpp-oracle-") as temporary:
+        build = Path(temporary) / "build"
+        commands = [
+            [
+                cmake,
+                "-S",
+                str(reference_dir),
+                "-B",
+                str(build),
+                "-DCMAKE_BUILD_TYPE=Release",
+                f"-DLLAMA_CPP_DIR={llama_cpp}",
+            ],
+            [
+                cmake,
+                "--build",
+                str(build),
+                "--target",
+                "dsv4_llama_cpp_cpu_oracle",
+                "--parallel",
+                "--config",
+                "Release",
+            ],
+        ]
+        for command in commands:
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"llama.cpp oracle command failed: {command}\n"
+                    f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+                )
+        toolchain_file = build / "dsv4-reference-toolchain.txt"
+        toolchain = {}
+        for line in toolchain_file.read_text().splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or not key or key in toolchain:
+                raise RuntimeError(
+                    f"invalid llama.cpp toolchain metadata line: {line!r}"
+                )
+            toolchain[key] = value
+        expected_toolchain_keys = {
+            "cmake_version",
+            "generator",
+            "c_compiler",
+            "c_compiler_id",
+            "c_compiler_target",
+            "c_compiler_version",
+            "c_flags",
+            "c_flags_release",
+            "cxx_compiler",
+            "cxx_compiler_id",
+            "cxx_compiler_target",
+            "cxx_compiler_version",
+            "cxx_flags",
+            "cxx_flags_release",
+            "exe_linker_flags",
+            "exe_linker_flags_release",
+            "osx_architectures",
+            "osx_deployment_target",
+            "osx_sysroot",
+            "system_name",
+            "system_processor",
+            "system_version",
+        }
+        if set(toolchain) != expected_toolchain_keys or any(
+            not value for value in toolchain.values()
+        ):
+            raise RuntimeError(f"invalid llama.cpp toolchain metadata: {toolchain}")
+        executable = (
+            build
+            / "bin"
+            / (
+                "dsv4_llama_cpp_cpu_oracle.exe"
+                if sys.platform == "win32"
+                else "dsv4_llama_cpp_cpu_oracle"
+            )
+        )
+        result = subprocess.run([str(executable)], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"llama.cpp oracle execution failed\nstdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}"
+            )
+    try:
+        vectors = json.loads(result.stdout, parse_constant=reject_non_finite_json)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError(f"invalid llama.cpp oracle JSON: {error}") from error
+
+    return {
+        "revision": revision,
+        "tree": tree,
+        "repository": "https://github.com/ggml-org/llama.cpp",
+        "license": "MIT",
+        "tracked_worktree_clean": True,
+        "source_files": source_files,
+        "harness_path": str(harness.relative_to(ROOT)),
+        "harness_sha256": hashlib.sha256(harness.read_bytes()).hexdigest(),
+        "build_project_path": str(build_project.relative_to(ROOT)),
+        "build_project_sha256": hashlib.sha256(build_project.read_bytes()).hexdigest(),
+        "build_toolchain": toolchain,
+        "configuration": "static CPU-only GGML, one thread, reference compute plan",
+        "symbols": [
+            "ggml_dsv4_hc_comb",
+            "ggml_dsv4_hc_pre",
+            "ggml_dsv4_hc_post",
+        ],
+        "vectors": validate_llama_cpp_vectors(vectors),
+    }
+
+
 def dwarfstar_direct_fixture() -> dict[str, object]:
     dwarfstar = Path(
         os.environ.get("DSV4_DWARFSTAR_DIR", Path.home() / "code" / "ds4")
@@ -1011,7 +1392,7 @@ def dwarfstar_direct_fixture() -> dict[str, object]:
 def main() -> None:
     fixture = {
         "schema_version": 1,
-        "generator_version": 3,
+        "generator_version": 4,
         "sources": {
             "vllm": "b40d859c7b07ae244bcd8c6eecdcdbd9a3afaa07",
             "sglang": "58974ca16ca2a4bb2f02f9ceb9622a0fd2ccf7f8",
@@ -1069,6 +1450,7 @@ def main() -> None:
         "indexer": indexer_fixture(),
         "routing": routing_fixture(),
         "cache_roundtrip": cache_roundtrip_fixture(),
+        "llama_cpp_cpu": llama_cpp_cpu_fixture(),
         "dwarfstar_direct": dwarfstar_direct_fixture(),
     }
     serialized = json.dumps(fixture, indent=2, sort_keys=True) + "\n"

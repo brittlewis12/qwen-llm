@@ -2,7 +2,7 @@ use qwen_llm::deepseek_v4_oracle::{
     CompressorState, HyperConnectionControls, RopeDirection, RopeParameters,
     attention_fp8_nope_bf16_rope_roundtrip_in_place, bf16_roundtrip_in_place, clamped_swiglu,
     compressor_pool, grouped_low_rank_output, grouped_low_rank_projection, hash_route,
-    hyper_connection_head, hyper_connection_post, hyper_connection_pre,
+    hyper_connection_collapse, hyper_connection_head, hyper_connection_post, hyper_connection_pre,
     indexer_qat_roundtrip_in_place, indexer_scores, learned_route, rope_tail_in_place,
     shared_kv_attention, shared_kv_projection, split_sinkhorn, sqrt_softplus_scores, top_k_indices,
 };
@@ -28,6 +28,7 @@ struct Fixture {
     indexer: IndexerFixture,
     routing: RoutingFixture,
     cache_roundtrip: CacheRoundtripFixture,
+    llama_cpp_cpu: LlamaCppCpuFixture,
     dwarfstar_direct: DwarfstarDirectFixture,
 }
 
@@ -81,6 +82,120 @@ struct DwarfstarVectors {
     router_selected: Vec<usize>,
     router_weights: Vec<f32>,
     swiglu: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LlamaCppCpuFixture {
+    revision: String,
+    tree: String,
+    repository: String,
+    license: String,
+    tracked_worktree_clean: bool,
+    source_files: Vec<SourceFile>,
+    harness_path: String,
+    harness_sha256: String,
+    build_project_path: String,
+    build_project_sha256: String,
+    build_toolchain: BuildToolchain,
+    configuration: String,
+    symbols: Vec<String>,
+    vectors: LlamaCppVectors,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceFile {
+    path: String,
+    sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildToolchain {
+    cmake_version: String,
+    generator: String,
+    c_compiler: String,
+    c_compiler_id: String,
+    c_compiler_target: String,
+    c_compiler_version: String,
+    c_flags: String,
+    c_flags_release: String,
+    cxx_compiler: String,
+    cxx_compiler_id: String,
+    cxx_compiler_target: String,
+    cxx_compiler_version: String,
+    cxx_flags: String,
+    cxx_flags_release: String,
+    exe_linker_flags: String,
+    exe_linker_flags_release: String,
+    osx_architectures: String,
+    osx_deployment_target: String,
+    osx_sysroot: String,
+    system_name: String,
+    system_processor: String,
+    system_version: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LlamaCppVectors {
+    status: String,
+    backend: String,
+    thread_count: usize,
+    tensor_layout: String,
+    hc_comb: LlamaCppHcComb,
+    hc_pre: LlamaCppHcPre,
+    hc_post: LlamaCppHcPost,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LlamaCppHcComb {
+    connection_count: usize,
+    token_count: usize,
+    mixes_shape: Vec<usize>,
+    mixes: Vec<f32>,
+    scale_shape: Vec<usize>,
+    scale: Vec<f32>,
+    base_shape: Vec<usize>,
+    base: Vec<f32>,
+    epsilon: f32,
+    iterations: usize,
+    output_shape: Vec<usize>,
+    output: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LlamaCppHcPre {
+    hidden_size: usize,
+    connection_count: usize,
+    token_count: usize,
+    residual_shape: Vec<usize>,
+    residual: Vec<f32>,
+    weights_shape: Vec<usize>,
+    weights: Vec<f32>,
+    output_shape: Vec<usize>,
+    output: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LlamaCppHcPost {
+    hidden_size: usize,
+    connection_count: usize,
+    token_count: usize,
+    block_output_shape: Vec<usize>,
+    block_output: Vec<f32>,
+    residual_shape: Vec<usize>,
+    residual: Vec<f32>,
+    weights_shape: Vec<usize>,
+    weights: Vec<f32>,
+    combination_shape: Vec<usize>,
+    combination: Vec<f32>,
+    output_shape: Vec<usize>,
+    output: Vec<f32>,
 }
 
 #[derive(Deserialize)]
@@ -292,11 +407,11 @@ fn assert_snapshot(actual: &[f32], expected: &[Option<f32>], tolerance: f32) {
 fn fixture_provenance_is_pinned() {
     assert_eq!(
         format!("{:x}", Sha256::digest(FIXTURE_JSON.as_bytes())),
-        "20b57ae4a1ac083dfccc2093787ad1ac9ff6bb416b6ff04f148fcef30bcec17f"
+        "aa6a41c24663d7703c77bfdb6750fda8ba828125256e73cbe446059a955c4c3a"
     );
     let fixture = fixture();
     assert_eq!(fixture.schema_version, 1);
-    assert_eq!(fixture.generator_version, 3);
+    assert_eq!(fixture.generator_version, 4);
     assert_eq!(
         fixture.sources.vllm,
         "b40d859c7b07ae244bcd8c6eecdcdbd9a3afaa07"
@@ -332,6 +447,95 @@ fn fixture_provenance_is_pinned() {
             .iter()
             .any(|symbol| symbol == "hc_split_sinkhorn_one")
     );
+    let llama_cpp = &fixture.llama_cpp_cpu;
+    assert_eq!(llama_cpp.revision, fixture.sources.llama_cpp);
+    assert_eq!(llama_cpp.tree, "b127fd3e9b45bef820e6e6914f53f71270a9a6f9");
+    assert_eq!(
+        llama_cpp.repository,
+        "https://github.com/ggml-org/llama.cpp"
+    );
+    assert_eq!(llama_cpp.license, "MIT");
+    assert!(llama_cpp.tracked_worktree_clean);
+    assert_eq!(
+        llama_cpp.harness_path,
+        "scripts/reference/dsv4_llama_cpp_cpu_oracle.cpp"
+    );
+    assert_eq!(
+        llama_cpp.harness_sha256,
+        "dca503457c43eb730db0fa6b5d69b58928f8d9ce8d7fc7c1248dbe3680d3c8ca"
+    );
+    assert_eq!(
+        llama_cpp.build_project_path,
+        "scripts/reference/CMakeLists.txt"
+    );
+    assert_eq!(
+        llama_cpp.build_project_sha256,
+        "f5ac07964737c142624d36033392afe5ae72ca867f5c72ce9b242379d3c4925a"
+    );
+    assert_eq!(llama_cpp.build_toolchain.cmake_version, "4.2.1");
+    assert_eq!(llama_cpp.build_toolchain.generator, "Unix Makefiles");
+    assert_eq!(llama_cpp.build_toolchain.c_compiler, "/usr/bin/cc");
+    assert_eq!(llama_cpp.build_toolchain.c_compiler_id, "AppleClang");
+    assert_eq!(llama_cpp.build_toolchain.c_compiler_target, "<default>");
+    assert_eq!(
+        llama_cpp.build_toolchain.c_compiler_version,
+        "17.0.0.17000603"
+    );
+    assert_eq!(llama_cpp.build_toolchain.c_flags, "<default>");
+    assert_eq!(llama_cpp.build_toolchain.c_flags_release, "-O3 -DNDEBUG");
+    assert_eq!(llama_cpp.build_toolchain.cxx_compiler, "/usr/bin/c++");
+    assert_eq!(llama_cpp.build_toolchain.cxx_compiler_id, "AppleClang");
+    assert_eq!(llama_cpp.build_toolchain.cxx_compiler_target, "<default>");
+    assert_eq!(
+        llama_cpp.build_toolchain.cxx_compiler_version,
+        "17.0.0.17000603"
+    );
+    assert_eq!(llama_cpp.build_toolchain.cxx_flags, "<default>");
+    assert_eq!(llama_cpp.build_toolchain.cxx_flags_release, "-O3 -DNDEBUG");
+    assert_eq!(llama_cpp.build_toolchain.exe_linker_flags, "<default>");
+    assert_eq!(
+        llama_cpp.build_toolchain.exe_linker_flags_release,
+        "<default>"
+    );
+    assert_eq!(llama_cpp.build_toolchain.osx_architectures, "<default>");
+    assert_eq!(llama_cpp.build_toolchain.osx_deployment_target, "<default>");
+    assert_eq!(llama_cpp.build_toolchain.osx_sysroot, "<default>");
+    assert_eq!(llama_cpp.build_toolchain.system_name, "Darwin");
+    assert_eq!(llama_cpp.build_toolchain.system_processor, "arm64");
+    assert_eq!(llama_cpp.build_toolchain.system_version, "24.6.0");
+    assert_eq!(
+        llama_cpp.configuration,
+        "static CPU-only GGML, one thread, reference compute plan"
+    );
+    let expected_sources = [
+        (
+            "ggml/include/ggml.h",
+            "c65c30fdb4dce95eac71c26bb38ae8423fbc80d79db91d2b2ffaea8c4e46276a",
+        ),
+        (
+            "ggml/src/ggml.c",
+            "9e40ad07323c7925f06a105119dfb07c1d4a21d3263a9e9bd0bd21792c42e1e4",
+        ),
+        (
+            "ggml/src/ggml-cpu/ops.cpp",
+            "dd7265a7402515002d4679f18d5d1d423456e87f256f7cc11af3bbb4148bf773",
+        ),
+    ];
+    assert_eq!(llama_cpp.source_files.len(), expected_sources.len());
+    for (source, (expected_path, expected_sha256)) in
+        llama_cpp.source_files.iter().zip(expected_sources)
+    {
+        assert_eq!(source.path, expected_path);
+        assert_eq!(source.sha256, expected_sha256);
+    }
+    assert_eq!(
+        llama_cpp.symbols,
+        ["ggml_dsv4_hc_comb", "ggml_dsv4_hc_pre", "ggml_dsv4_hc_post",]
+    );
+    assert_eq!(llama_cpp.vectors.status, "success");
+    assert_eq!(llama_cpp.vectors.backend, "ggml-cpu-reference");
+    assert_eq!(llama_cpp.vectors.thread_count, 1);
+    assert_eq!(llama_cpp.vectors.tensor_layout, "flat GGML ne[0]-fastest");
     assert!(fixture.transcription_provenance.iter().all(|entry| {
         !entry.cases.is_empty() && entry.sources.iter().all(|source| source.contains(':'))
     }));
@@ -344,7 +548,7 @@ fn fixture_provenance_is_pinned() {
 }
 
 #[test]
-#[ignore = "requires uv, clang, and the pinned external DwarfStar checkout"]
+#[ignore = "requires uv, CMake, a C++ compiler, and pinned llama.cpp/DwarfStar checkouts"]
 fn fixture_regeneration_has_no_drift() {
     let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -481,6 +685,115 @@ fn direct_dwarfstar_scalar_helpers_match() {
     let swiglu =
         clamped_swiglu(&[-20.0, -0.5, 2.0, 20.0], &[-20.0, 0.25, -3.0, 20.0], 10.0).unwrap();
     assert_close(&swiglu, &fixture.swiglu, 3e-6);
+}
+
+#[test]
+fn direct_llama_cpp_cpu_mhc_primitives_match() {
+    let vectors = fixture().llama_cpp_cpu.vectors;
+    let combination = vectors.hc_comb;
+    let parameter_count = combination.connection_count * (combination.connection_count + 2);
+    let matrix_size = combination.connection_count * combination.connection_count;
+    assert_eq!(
+        combination.mixes_shape,
+        vec![parameter_count, combination.token_count]
+    );
+    assert_eq!(combination.scale_shape, vec![3]);
+    assert_eq!(combination.base_shape, vec![parameter_count]);
+    assert_eq!(
+        combination.output_shape,
+        vec![
+            combination.connection_count,
+            combination.connection_count,
+            combination.token_count,
+        ]
+    );
+    for token in 0..combination.token_count {
+        let mixes = &combination.mixes[token * parameter_count..(token + 1) * parameter_count];
+        let expected = &combination.output[token * matrix_size..(token + 1) * matrix_size];
+        let actual = split_sinkhorn(
+            mixes,
+            &combination.scale,
+            &combination.base,
+            combination.connection_count,
+            combination.iterations,
+            combination.epsilon,
+        )
+        .unwrap();
+        assert_close(&actual.combination, expected, 4e-6);
+    }
+
+    let pre = vectors.hc_pre;
+    let residual_size = pre.hidden_size * pre.connection_count;
+    assert_eq!(
+        pre.residual_shape,
+        vec![pre.hidden_size, pre.connection_count, pre.token_count]
+    );
+    assert_eq!(
+        pre.weights_shape,
+        vec![pre.connection_count, pre.token_count]
+    );
+    assert_eq!(pre.output_shape, vec![pre.hidden_size, pre.token_count]);
+    for token in 0..pre.token_count {
+        let residual = &pre.residual[token * residual_size..(token + 1) * residual_size];
+        let weights =
+            &pre.weights[token * pre.connection_count..(token + 1) * pre.connection_count];
+        let expected = &pre.output[token * pre.hidden_size..(token + 1) * pre.hidden_size];
+        let actual =
+            hyper_connection_collapse(residual, weights, pre.hidden_size, pre.connection_count)
+                .unwrap();
+        assert_close(&actual, expected, 3e-7);
+    }
+
+    let post = vectors.hc_post;
+    let residual_size = post.hidden_size * post.connection_count;
+    let matrix_size = post.connection_count * post.connection_count;
+    assert_eq!(
+        post.block_output_shape,
+        vec![post.hidden_size, post.token_count]
+    );
+    assert_eq!(
+        post.residual_shape,
+        vec![post.hidden_size, post.connection_count, post.token_count]
+    );
+    assert_eq!(
+        post.weights_shape,
+        vec![post.connection_count, post.token_count]
+    );
+    assert_eq!(
+        post.combination_shape,
+        vec![
+            post.connection_count,
+            post.connection_count,
+            post.token_count
+        ]
+    );
+    assert_eq!(
+        post.output_shape,
+        vec![post.hidden_size, post.connection_count, post.token_count]
+    );
+    assert_eq!(post.residual, pre.residual);
+    assert_eq!(post.combination, combination.output);
+    for token in 0..post.token_count {
+        let block_output =
+            &post.block_output[token * post.hidden_size..(token + 1) * post.hidden_size];
+        let residual = &post.residual[token * residual_size..(token + 1) * residual_size];
+        let controls = HyperConnectionControls {
+            pre: Vec::new(),
+            post: post.weights[token * post.connection_count..(token + 1) * post.connection_count]
+                .to_vec(),
+            combination: post.combination[token * matrix_size..(token + 1) * matrix_size].to_vec(),
+        };
+        let expected = &post.output[token * residual_size..(token + 1) * residual_size];
+        let actual = hyper_connection_post(
+            block_output,
+            residual,
+            &controls,
+            post.hidden_size,
+            post.connection_count,
+        )
+        .unwrap();
+        assert_close(&actual, expected, 4e-6);
+    }
 }
 
 #[test]

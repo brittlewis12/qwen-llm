@@ -295,6 +295,32 @@ pub fn split_sinkhorn(
     })
 }
 
+pub fn hyper_connection_collapse(
+    residual: &[f32],
+    weights: &[f32],
+    hidden_size: usize,
+    connection_count: usize,
+) -> OracleResult<Vec<f32>> {
+    if hidden_size == 0 || connection_count == 0 {
+        return invalid("hyper-connection pre shape", "dimensions must be nonzero");
+    }
+    let residual_len = checked_mul(hidden_size, connection_count, "hyper-connection residual")?;
+    require_len("hyper-connection residual", residual, residual_len)?;
+    require_len("hyper-connection pre gates", weights, connection_count)?;
+    require_finite("hyper-connection residual", residual)?;
+    require_finite("hyper-connection pre gates", weights)?;
+
+    let mut output = vec![0.0; hidden_size];
+    for stream in 0..connection_count {
+        let stream_values = &residual[stream * hidden_size..(stream + 1) * hidden_size];
+        for (output, &value) in output.iter_mut().zip(stream_values) {
+            *output += value * weights[stream];
+        }
+    }
+    require_finite("hyper-connection pre output", &output)?;
+    Ok(output)
+}
+
 pub fn hyper_connection_pre(
     residual: &[f32],
     hidden_size: usize,
@@ -325,15 +351,7 @@ pub fn hyper_connection_pre(
         hc_eps,
     )?;
 
-    let mut input = vec![0.0; hidden_size];
-    for stream in 0..connection_count {
-        let stream_values = &residual[stream * hidden_size..(stream + 1) * hidden_size];
-        let weight = controls.pre[stream];
-        for (output, &value) in input.iter_mut().zip(stream_values) {
-            *output += value * weight;
-        }
-    }
-    require_finite("hyper-connection pre output", &input)?;
+    let input = hyper_connection_collapse(residual, &controls.pre, hidden_size, connection_count)?;
 
     Ok(HyperConnectionPre {
         input,

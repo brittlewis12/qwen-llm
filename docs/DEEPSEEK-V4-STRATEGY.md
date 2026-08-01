@@ -254,7 +254,7 @@ machines, cache-format round trips, indexer scoring/top-k, routing, and clamped
 SwiGLU. Normal tests use checked-in operation vectors and compare compressor
 state at every ratio-4 token plus the ratio-128 127/128 and 255/256 boundaries.
 
-The fixture generator has two deliberately distinguished sources of evidence:
+The fixture generator has three deliberately distinguished sources of evidence:
 
 - NumPy equation transcriptions record the pinned vLLM, SGLang, llama.cpp, and
   DwarfStar source locations. These are reproducible cross-language vectors,
@@ -264,22 +264,38 @@ The fixture generator has two deliberately distinguished sources of evidence:
   compressor-pooling, indexer-QAT, routing-helper, and SwiGLU paths. It does not
   yet execute complete compressor transitions or a standard-GGUF model.
   Generation fails on revision drift.
+- `scripts/reference/dsv4_llama_cpp_cpu_oracle.cpp` builds against pinned,
+  CPU-only static baseline GGML and directly executes `ggml_dsv4_hc_comb`,
+  `ggml_dsv4_hc_pre`, and `ggml_dsv4_hc_post` as one three-token reference
+  graph. Its self-contained vectors exercise nontrivial token strides and the
+  exact `[destination, source, token]` combination layout. This is executable
+  fused-primitive evidence, not yet a claim that llama.cpp's complete mHC
+  projection/gating composition ran.
 
 Run `uv run scripts/reference/generate_dsv4_oracle.py` from the repository root
-with DwarfStar at `~/code/ds4`, or set `DSV4_DWARFSTAR_DIR`. Python 3.14 and
-NumPy 2.5.1 are pinned by the script metadata. Use the same command with
-`--check` for a byte-for-byte drift gate; the ignored
+with DwarfStar at `~/code/ds4` and llama.cpp at `~/code/llama.cpp`, or set
+`DSV4_DWARFSTAR_DIR` and `DSV4_LLAMA_CPP_DIR`. Python 3.14 and NumPy 2.5.1 are
+pinned by the script metadata; the llama.cpp lane additionally requires CMake
+and a C++17 compiler. Use the same command with `--check` for a captured-
+toolchain byte-for-byte drift gate; the ignored
 `fixture_regeneration_has_no_drift` test exposes that external-checkout gate to
-the Rust harness. Both DwarfStar commit and `ds4.c` content hash are pinned.
+the Rust harness. Revisions, tracked-worktree state, semantic source hashes,
+harness/build hashes, build toolchain, one-thread reference mode, and tensor
+shapes are all recorded or enforced. CMake, C/C++ compilers, effective base and
+release flags, linker flags, and system/SDK context are captured but not
+hermetically pinned; the runtime math library is not independently pinned.
+Cross-toolchain `expf` last-bit drift therefore requires explicit numerical
+review rather than a silent fixture update.
 
 S1 is not promoted yet because direct executable coverage is incomplete, not
-because a remote accelerator is missing. The current DwarfStar harness directly
-covers selected scalar helpers while shared-KV attention/output, complete mHC
-composition, indexer scoring, and token-by-token compressor transitions still
-rely on transparent NumPy transcriptions. The next evidence step is a pinned
-llama.cpp CPU fixture harness plus broader DwarfStar scalar calls. Both use
-small synthetic tensors and require neither a model download nor DwarfStar's
-custom quant metadata.
+because a remote accelerator is missing. The current DwarfStar and llama.cpp
+harnesses directly cover selected scalar helpers and the three fused mHC CPU
+primitives, while shared-KV attention/output, complete mHC projection/gating,
+indexer scoring, and token-by-token compressor transitions still rely on
+transparent NumPy transcriptions. The next evidence step is broader DwarfStar
+transition coverage, followed by locally executable shared-KV/indexer seams.
+All use small synthetic tensors and require neither a model download nor
+DwarfStar's custom quant metadata.
 
 The typed cache prerequisite is now implemented separately in
 `deepseek_v4_cache`. It is still CPU-oracle infrastructure, not generation

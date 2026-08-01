@@ -15,6 +15,304 @@ static void print_float_array(const float *values, size_t count) {
     putchar(']');
 }
 
+typedef struct {
+    uint8_t *map;
+    ds4_model model;
+    ds4_tensor wkv;
+    ds4_tensor wgate;
+    ds4_tensor ape;
+    ds4_tensor norm;
+} compressor_tensor_fixture;
+
+typedef struct {
+    const char *name;
+    uint32_t seed;
+    uint32_t input_dim;
+    uint32_t head_dim;
+    uint32_t ratio;
+    uint32_t layer;
+    uint32_t positions;
+} compressor_case;
+
+static size_t oracle_align_up(size_t value, size_t alignment) {
+    return (value + alignment - 1u) & ~(alignment - 1u);
+}
+
+static ds4_tensor make_tensor(
+        const char *name,
+        uint32_t type,
+        uint32_t ndim,
+        uint64_t dim0,
+        uint64_t dim1,
+        uint64_t offset) {
+    const uint64_t elements = dim0 * (ndim == 2 ? dim1 : 1u);
+    const uint64_t bytes = elements * (type == DS4_TENSOR_F16 ? 2u : 4u);
+    ds4_tensor tensor = {
+        .name = {.ptr = name, .len = strlen(name)},
+        .ndim = ndim,
+        .dim = {dim0, dim1},
+        .type = type,
+        .rel_offset = offset,
+        .abs_offset = offset,
+        .elements = elements,
+        .bytes = bytes,
+    };
+    return tensor;
+}
+
+static float compressor_recipe_value(
+        uint64_t value,
+        uint32_t modulus,
+        int32_t center,
+        float denominator) {
+    return (float)((int32_t)(value % modulus) - center) / denominator;
+}
+
+static float compressor_input_value(uint32_t seed, uint32_t position, uint32_t column) {
+    static const int8_t numerators[8] = {-4, -3, -2, -1, 1, 2, 3, 4};
+    const uint64_t index = (uint64_t)seed * 31u +
+                           (uint64_t)position * 5u +
+                           (uint64_t)column * 7u;
+    return (float)numerators[index % 8u] / 4.0f;
+}
+
+static float compressor_signed_weight(
+        uint64_t value,
+        uint32_t base,
+        uint32_t span,
+        float denominator) {
+    const float magnitude = (float)(base + (uint32_t)((value >> 1) % span)) / denominator;
+    return (value & 1u) != 0 ? -magnitude : magnitude;
+}
+
+static float compressor_kv_weight(uint32_t seed, uint32_t row, uint32_t column) {
+    const uint64_t value = (uint64_t)seed * 17u +
+                           (uint64_t)row * 5u +
+                           (uint64_t)column * 13u;
+    return compressor_signed_weight(value, 500u, 1001u, 1000.0f);
+}
+
+static float compressor_gate_weight(uint32_t seed, uint32_t row, uint32_t column) {
+    const uint64_t value = (uint64_t)seed * 23u +
+                           (uint64_t)row * 11u +
+                           (uint64_t)column * 19u;
+    return compressor_signed_weight(value, 250u, 751u, 997.0f);
+}
+
+static float compressor_ape_value(uint32_t seed, uint32_t position, uint32_t row) {
+    return compressor_recipe_value((uint64_t)seed * 29u +
+                                   (uint64_t)position * 13u +
+                                   (uint64_t)row * 3u,
+                                   257u, 128, 1000.0f);
+}
+
+static float compressor_norm_value(uint32_t seed, uint32_t row) {
+    return 0.75f + (float)(((uint64_t)seed * 5u + (uint64_t)row * 7u) % 101u) / 1000.0f;
+}
+
+static compressor_tensor_fixture make_compressor_tensors(
+        uint32_t seed,
+        uint32_t input_dim,
+        uint32_t head_dim,
+        uint32_t ratio) {
+    const uint32_t width = (ratio == 4 ? 2u : 1u) * head_dim;
+    const size_t matrix_elements = (size_t)input_dim * width;
+    const size_t wkv_offset = 0;
+    const size_t wgate_offset = oracle_align_up(wkv_offset + matrix_elements * 2u, 4u);
+    const size_t ape_offset = oracle_align_up(wgate_offset + matrix_elements * 2u, 4u);
+    const size_t norm_offset = oracle_align_up(ape_offset + (size_t)width * ratio * 2u, 4u);
+    const size_t map_size = norm_offset + (size_t)head_dim * sizeof(float);
+    uint8_t *map = xcalloc(1, map_size);
+
+    compressor_tensor_fixture fixture = {
+        .map = map,
+        .model = {
+            .fd = -1,
+            .map = map,
+            .size = map_size,
+            .n_tensors = 4,
+            .alignment = 4,
+        },
+        .wkv = make_tensor("synthetic.comp.wkv", DS4_TENSOR_F16, 2, input_dim, width, wkv_offset),
+        .wgate = make_tensor("synthetic.comp.wgate", DS4_TENSOR_F16, 2, input_dim, width, wgate_offset),
+        .ape = make_tensor("synthetic.comp.ape", DS4_TENSOR_F16, 2, width, ratio, ape_offset),
+        .norm = make_tensor("synthetic.comp.norm", DS4_TENSOR_F32, 1, head_dim, 1, norm_offset),
+    };
+
+    uint16_t *wkv = (uint16_t *)(void *)(map + wkv_offset);
+    uint16_t *wgate = (uint16_t *)(void *)(map + wgate_offset);
+    uint16_t *ape = (uint16_t *)(void *)(map + ape_offset);
+    float *norm = (float *)(void *)(map + norm_offset);
+    for (uint32_t row = 0; row < width; row++) {
+        for (uint32_t column = 0; column < input_dim; column++) {
+            const uint64_t offset = (uint64_t)row * input_dim + column;
+            wkv[offset] = f32_to_f16(compressor_kv_weight(seed, row, column));
+            wgate[offset] = f32_to_f16(compressor_gate_weight(seed, row, column));
+        }
+    }
+    for (uint32_t position = 0; position < ratio; position++) {
+        for (uint32_t row = 0; row < width; row++) {
+            ape[(uint64_t)position * width + row] =
+                f32_to_f16(compressor_ape_value(seed, position, row));
+        }
+    }
+    for (uint32_t row = 0; row < head_dim; row++) {
+        norm[row] = compressor_norm_value(seed, row);
+    }
+    return fixture;
+}
+
+static uint64_t compressor_state_hash(const float *values, size_t count, bool scores) {
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (size_t index = 0; index < count; index++) {
+        uint32_t bits;
+        if (scores && values[index] <= DS4_NEG_INF * 0.5f) {
+            bits = UINT32_C(0xff800000);
+        } else {
+            memcpy(&bits, values + index, sizeof(bits));
+            if ((bits & UINT32_C(0x7fffffff)) == 0) bits = 0;
+        }
+        for (uint32_t byte = 0; byte < 4; byte++) {
+            hash ^= (bits >> (byte * 8u)) & 0xffu;
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    return hash;
+}
+
+static void print_compressor_case(const compressor_case *spec) {
+    const uint32_t coefficient = spec->ratio == 4 ? 2u : 1u;
+    const uint32_t width = coefficient * spec->head_dim;
+    const uint32_t rows = coefficient * spec->ratio;
+    const size_t state_count = (size_t)width * rows;
+    compressor_tensor_fixture tensors =
+        make_compressor_tensors(spec->seed, spec->input_dim, spec->head_dim, spec->ratio);
+    float *state_kv = xcalloc(state_count, sizeof(float));
+    float *state_score = xmalloc(state_count * sizeof(float));
+    float *output = xmalloc((size_t)spec->head_dim * sizeof(float));
+    for (size_t index = 0; index < state_count; index++) {
+        state_score[index] = DS4_NEG_INF;
+    }
+
+    printf("{");
+    printf("\"name\":\"%s\"", spec->name);
+    printf(",\"seed\":%u", spec->seed);
+    printf(",\"input_dim\":%u", spec->input_dim);
+    printf(",\"head_dim\":%u", spec->head_dim);
+    printf(",\"ratio\":%u", spec->ratio);
+    printf(",\"layer\":%u", spec->layer);
+    printf(",\"positions\":%u", spec->positions);
+    printf(",\"projection_type\":\"f16\"");
+    printf(",\"state_rows\":%u", rows);
+    printf(",\"state_width\":%u", width);
+    printf(",\"records\":[");
+    for (uint32_t position = 0; position < spec->positions; position++) {
+        float *input = xmalloc((size_t)spec->input_dim * sizeof(float));
+        for (uint32_t column = 0; column < spec->input_dim; column++) {
+            input[column] = compressor_input_value(spec->seed, position, column);
+        }
+        for (uint32_t index = 0; index < spec->head_dim; index++) {
+            output[index] = 12345.0f;
+        }
+        const bool emitted = compressor_decode_one(output,
+                                                   &tensors.model,
+                                                   &tensors.wkv,
+                                                   &tensors.wgate,
+                                                   &tensors.ape,
+                                                   &tensors.norm,
+                                                   input,
+                                                   state_kv,
+                                                   state_score,
+                                                   spec->head_dim,
+                                                   spec->ratio,
+                                                   spec->layer,
+                                                   position);
+        free(input);
+        const bool expected_emission = ((position + 1u) % spec->ratio) == 0;
+        if (emitted != expected_emission) ds4_die("synthetic compressor emission phase mismatch");
+        if (!emitted) {
+            for (uint32_t index = 0; index < spec->head_dim; index++) {
+                if (output[index] != 12345.0f) {
+                    ds4_die("synthetic compressor modified output off boundary");
+                }
+            }
+        } else {
+            for (uint32_t index = 0; index < spec->head_dim; index++) {
+                if (!isfinite(output[index])) ds4_die("synthetic compressor emitted non-finite output");
+            }
+            if (spec->ratio == 4) {
+                const size_t bank_count = (size_t)spec->ratio * width;
+                if (memcmp(state_kv, state_kv + bank_count, bank_count * sizeof(float)) != 0 ||
+                    memcmp(state_score, state_score + bank_count, bank_count * sizeof(float)) != 0) {
+                    ds4_die("synthetic ratio-4 compressor banks did not mirror after emission");
+                }
+            }
+        }
+
+        if (position != 0) putchar(',');
+        printf("{\"position\":%u", position);
+        printf(",\"emitted\":%s", emitted ? "true" : "false");
+        printf(",\"kv_hash\":\"%016" PRIx64 "\"",
+               compressor_state_hash(state_kv, state_count, false));
+        printf(",\"score_hash\":\"%016" PRIx64 "\"",
+               compressor_state_hash(state_score, state_count, true));
+        if (emitted) {
+            printf(",\"start_position\":%u", position + 1u - spec->ratio);
+            printf(",\"output\":");
+            print_float_array(output, spec->head_dim);
+        }
+        putchar('}');
+    }
+    printf("]}");
+
+    free(output);
+    free(state_score);
+    free(state_kv);
+    free(tensors.map);
+}
+
+static void print_compressor_transitions(void) {
+    const compressor_case cases[] = {
+        {.name = "ratio4_attention", .seed = 1, .input_dim = 17,
+         .head_dim = 512, .ratio = 4,
+         .layer = 2, .positions = 9},
+        {.name = "ratio4_indexer", .seed = 2, .input_dim = 17,
+         .head_dim = 128, .ratio = 4,
+         .layer = 2, .positions = 9},
+        {.name = "ratio128_attention", .seed = 3, .input_dim = 17,
+         .head_dim = 512, .ratio = 128,
+         .layer = 3, .positions = 257},
+    };
+    g_ds4_shape = DS4_SHAPE_FLASH;
+    memset(g_ds4_compress_ratios, 0, sizeof(g_ds4_compress_ratios));
+    g_ds4_compress_ratios[2] = 4;
+    g_ds4_compress_ratios[3] = 128;
+
+    printf("{");
+    printf("\"hash_algorithm\":\"fnv1a64-f32-le; signed zero and score sentinel canonicalized\"");
+    printf(",\"rms_epsilon\":%.9g", DS4_RMS_EPS);
+    printf(",\"rotary_dim\":%u", DS4_N_ROT);
+    printf(",\"rope_theta\":%.9g", DS4_COMPRESS_ROPE_FREQ_BASE);
+    printf(",\"rope_scale_factor\":%.9g", DS4_ROPE_SCALE_FACTOR);
+    printf(",\"original_context_length\":%" PRIu64, DS4_ROPE_ORIG_CTX);
+    printf(",\"beta_fast\":%.9g", DS4_ROPE_YARN_BETA_FAST);
+    printf(",\"beta_slow\":%.9g", DS4_ROPE_YARN_BETA_SLOW);
+    printf(",\"recipes\":{");
+    printf("\"input\":\"[-4,-3,-2,-1,1,2,3,4][(seed*31+position*5+column*7)%%8]/4\"");
+    printf(",\"kv_weight\":\"value=seed*17+row*5+column*13; (value%%2?-1:1)*(500+((value>>1)%%1001))/1000\"");
+    printf(",\"gate_weight\":\"value=seed*23+row*11+column*19; (value%%2?-1:1)*(250+((value>>1)%%751))/997\"");
+    printf(",\"ape\":\"((seed*29+position*13+row*3)%%257-128)/1000\"");
+    printf(",\"norm\":\"3/4+((seed*5+row*7)%%101)/1000\"");
+    printf("}");
+    printf(",\"cases\":[");
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index++) {
+        if (index != 0) putchar(',');
+        print_compressor_case(&cases[index]);
+    }
+    printf("]}");
+    ds4_threads_shutdown();
+}
+
 int main(void) {
     float mixes[24];
     float base[24];
@@ -118,6 +416,7 @@ int main(void) {
     printf(",\"router_selected\":[%d,%d,%d]", selected[0], selected[1], selected[2]);
     printf(",\"router_weights\":"); print_float_array(selected_weights, 3);
     printf(",\"swiglu\":"); print_float_array(swiglu_output, 4);
+    printf(",\"compressor_transitions\":"); print_compressor_transitions();
     printf("}\n");
     return 0;
 }

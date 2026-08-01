@@ -1124,6 +1124,35 @@ pub fn attention_fp8_nope_bf16_rope_roundtrip_in_place(
     Ok(())
 }
 
+pub fn attention_fp8_nope_roundtrip_in_place(
+    values: &mut [f32],
+    rotary_dim: usize,
+) -> OracleResult<()> {
+    if values.is_empty() || rotary_dim == 0 || rotary_dim > values.len() {
+        return invalid(
+            "attention cache rotary dimension",
+            "must be nonzero and no larger than the row width",
+        );
+    }
+    let nope_dim = values.len() - rotary_dim;
+    if !nope_dim.is_multiple_of(64) {
+        return invalid("attention cache NoPE dimension", "must be divisible by 64");
+    }
+    require_finite("attention cache row", values)?;
+    let mut output = values.to_vec();
+    for block in output[..nope_dim].chunks_exact_mut(64) {
+        let mut maximum = block.iter().map(|value| value.abs()).fold(0.0, f32::max);
+        maximum = maximum.max(1.0e-4);
+        let scale = power_of_two_ceiling(maximum / 448.0);
+        for value in block {
+            *value = e4m3fn_roundtrip((*value / scale).clamp(-448.0, 448.0)) * scale;
+        }
+    }
+    require_finite("attention cache output", &output)?;
+    values.copy_from_slice(&output);
+    Ok(())
+}
+
 pub fn hadamard_128_in_place(values: &mut [f32]) -> OracleResult<()> {
     require_len("Hadamard input", values, 128)?;
     require_finite("Hadamard input", values)?;
@@ -1895,6 +1924,7 @@ mod tests {
         assert!(mat_vec(&[], 0, 1, &[]).is_err());
         assert!(head_rms_norm_in_place(&mut [], 1, 0, 1e-6).is_err());
         assert!(indexer_scores(&[], &[], &[], 0, 128).is_err());
+        assert!(attention_fp8_nope_roundtrip_in_place(&mut [], 64).is_err());
     }
 
     #[test]
@@ -1973,5 +2003,11 @@ mod tests {
         let original_heads = heads;
         assert!(head_rms_norm_in_place(&mut heads, 2, 2, 1e-6).is_err());
         assert_eq!(heads, original_heads);
+
+        let mut attention = [0.0; 128];
+        attention[0] = f32::INFINITY;
+        let original_attention = attention;
+        assert!(attention_fp8_nope_roundtrip_in_place(&mut attention, 64).is_err());
+        assert_eq!(attention, original_attention);
     }
 }

@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "crates/qwen-llm/tests/fixtures/deepseek_v4_oracle_v1.json"
 F = np.float32
 DWARFSTAR_REVISION = "54b36ed9ba42da31b24f2d1a5feb075c2475dbb1"
+DWARFSTAR_TREE = "5807bbe362672ccd02251ba70c043ce311bc4737"
 DWARFSTAR_SOURCE_SHA256 = (
     "af5df58420632c453657ffdfc2c7cb84e75135bbcc20deaca3fedf970c13930c"
 )
@@ -981,6 +982,23 @@ def require_string(
         )
 
 
+def require_number(
+    value: dict[str, object],
+    key: str,
+    expected: float,
+    name: str,
+    tolerance: float = 0.0,
+) -> None:
+    actual = value.get(key)
+    if (
+        isinstance(actual, bool)
+        or not isinstance(actual, (int, float))
+        or not math.isfinite(actual)
+        or not math.isclose(actual, expected, rel_tol=0.0, abs_tol=tolerance)
+    ):
+        raise RuntimeError(f"{name}.{key} mismatch: expected {expected}, got {actual}")
+
+
 def require_numeric_array(
     value: dict[str, object], key: str, expected_length: int, name: str
 ) -> list[int | float]:
@@ -1301,6 +1319,197 @@ def llama_cpp_cpu_fixture() -> dict[str, object]:
     }
 
 
+def validate_dwarfstar_vectors(value: object) -> dict[str, object]:
+    vectors = require_json_object(value, "DwarfStar output")
+    require_exact_keys(
+        vectors,
+        {
+            "sinkhorn",
+            "hc_post",
+            "rope_local",
+            "rope_yarn",
+            "rope_yarn_inverse",
+            "ratio4_pool",
+            "ratio128_pool",
+            "indexer_qat",
+            "router_scores",
+            "router_selected",
+            "router_weights",
+            "swiglu",
+            "compressor_transitions",
+        },
+        "DwarfStar output",
+    )
+    for key, length in {
+        "sinkhorn": 24,
+        "hc_post": 12,
+        "rope_local": 8,
+        "rope_yarn": 8,
+        "rope_yarn_inverse": 8,
+        "ratio4_pool": 4,
+        "ratio128_pool": 2,
+        "indexer_qat": 128,
+        "router_scores": 8,
+        "router_weights": 3,
+        "swiglu": 4,
+    }.items():
+        require_numeric_array(vectors, key, length, "DwarfStar output")
+    selected = vectors["router_selected"]
+    if (
+        not isinstance(selected, list)
+        or len(selected) != 3
+        or any(type(expert) is not int for expert in selected)
+    ):
+        raise RuntimeError("DwarfStar router_selected must contain three integers")
+
+    transitions = require_json_object(
+        vectors["compressor_transitions"], "DwarfStar compressor transitions"
+    )
+    require_exact_keys(
+        transitions,
+        {
+            "hash_algorithm",
+            "rms_epsilon",
+            "rotary_dim",
+            "rope_theta",
+            "rope_scale_factor",
+            "original_context_length",
+            "beta_fast",
+            "beta_slow",
+            "recipes",
+            "cases",
+        },
+        "DwarfStar compressor transitions",
+    )
+    require_string(
+        transitions,
+        "hash_algorithm",
+        "fnv1a64-f32-le; signed zero and score sentinel canonicalized",
+        "DwarfStar compressor transitions",
+    )
+    require_number(
+        transitions,
+        "rms_epsilon",
+        1.0e-6,
+        "DwarfStar compressor transitions",
+        1.0e-12,
+    )
+    require_integer(transitions, "rotary_dim", 64, "DwarfStar compressor transitions")
+    require_number(
+        transitions, "rope_theta", 160_000.0, "DwarfStar compressor transitions"
+    )
+    require_number(
+        transitions, "rope_scale_factor", 16.0, "DwarfStar compressor transitions"
+    )
+    require_integer(
+        transitions,
+        "original_context_length",
+        65_536,
+        "DwarfStar compressor transitions",
+    )
+    require_number(transitions, "beta_fast", 32.0, "DwarfStar compressor transitions")
+    require_number(transitions, "beta_slow", 1.0, "DwarfStar compressor transitions")
+
+    recipes = require_json_object(
+        transitions["recipes"], "DwarfStar compressor recipes"
+    )
+    expected_recipes = {
+        "input": "[-4,-3,-2,-1,1,2,3,4][(seed*31+position*5+column*7)%8]/4",
+        "kv_weight": "value=seed*17+row*5+column*13; (value%2?-1:1)*(500+((value>>1)%1001))/1000",
+        "gate_weight": "value=seed*23+row*11+column*19; (value%2?-1:1)*(250+((value>>1)%751))/997",
+        "ape": "((seed*29+position*13+row*3)%257-128)/1000",
+        "norm": "3/4+((seed*5+row*7)%101)/1000",
+    }
+    require_exact_keys(recipes, set(expected_recipes), "DwarfStar compressor recipes")
+    for key, expected in expected_recipes.items():
+        require_string(recipes, key, expected, "DwarfStar compressor recipes")
+
+    cases = transitions["cases"]
+    expected_cases = [
+        ("ratio4_attention", 1, 512, 4, 2, 9),
+        ("ratio4_indexer", 2, 128, 4, 2, 9),
+        ("ratio128_attention", 3, 512, 128, 3, 257),
+    ]
+    if not isinstance(cases, list) or len(cases) != len(expected_cases):
+        raise RuntimeError("DwarfStar compressor transition case count changed")
+    for case_value, expected in zip(cases, expected_cases, strict=True):
+        case = require_json_object(case_value, "DwarfStar compressor case")
+        require_exact_keys(
+            case,
+            {
+                "name",
+                "seed",
+                "input_dim",
+                "head_dim",
+                "ratio",
+                "layer",
+                "positions",
+                "projection_type",
+                "state_rows",
+                "state_width",
+                "records",
+            },
+            "DwarfStar compressor case",
+        )
+        name, seed, head_dim, ratio, layer, positions = expected
+        require_string(case, "name", name, "DwarfStar compressor case")
+        require_integer(case, "seed", seed, "DwarfStar compressor case")
+        require_integer(case, "input_dim", 17, "DwarfStar compressor case")
+        require_integer(case, "head_dim", head_dim, "DwarfStar compressor case")
+        require_integer(case, "ratio", ratio, "DwarfStar compressor case")
+        require_integer(case, "layer", layer, "DwarfStar compressor case")
+        require_integer(case, "positions", positions, "DwarfStar compressor case")
+        require_string(case, "projection_type", "f16", "DwarfStar compressor case")
+        coefficient = 2 if ratio == 4 else 1
+        require_integer(
+            case, "state_rows", coefficient * ratio, "DwarfStar compressor case"
+        )
+        require_integer(
+            case,
+            "state_width",
+            coefficient * head_dim,
+            "DwarfStar compressor case",
+        )
+        records = case["records"]
+        if not isinstance(records, list) or len(records) != positions:
+            raise RuntimeError(f"DwarfStar {name} transition record count changed")
+        for position, record_value in enumerate(records):
+            record = require_json_object(record_value, f"DwarfStar {name} record")
+            emitted = (position + 1) % ratio == 0
+            expected_keys = {"position", "emitted", "kv_hash", "score_hash"}
+            if emitted:
+                expected_keys.update({"start_position", "output"})
+            require_exact_keys(record, expected_keys, f"DwarfStar {name} record")
+            require_integer(record, "position", position, f"DwarfStar {name} record")
+            if type(record["emitted"]) is not bool or record["emitted"] is not emitted:
+                raise RuntimeError(
+                    f"DwarfStar {name} emission phase changed at {position}"
+                )
+            for hash_key in ("kv_hash", "score_hash"):
+                state_hash = record[hash_key]
+                if (
+                    type(state_hash) is not str
+                    or len(state_hash) != 16
+                    or any(
+                        character not in "0123456789abcdef" for character in state_hash
+                    )
+                ):
+                    raise RuntimeError(
+                        f"DwarfStar {name} {hash_key} is not lowercase FNV64"
+                    )
+            if emitted:
+                require_integer(
+                    record,
+                    "start_position",
+                    position + 1 - ratio,
+                    f"DwarfStar {name} record",
+                )
+                require_numeric_array(
+                    record, "output", head_dim, f"DwarfStar {name} record"
+                )
+    return vectors
+
+
 def dwarfstar_direct_fixture() -> dict[str, object]:
     dwarfstar = Path(
         os.environ.get("DSV4_DWARFSTAR_DIR", Path.home() / "code" / "ds4")
@@ -1320,6 +1529,17 @@ def dwarfstar_direct_fixture() -> dict[str, object]:
     if revision != DWARFSTAR_REVISION:
         raise RuntimeError(
             f"DwarfStar revision mismatch: expected {DWARFSTAR_REVISION}, got {revision}"
+        )
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=dwarfstar,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if tree != DWARFSTAR_TREE:
+        raise RuntimeError(
+            f"DwarfStar tree mismatch: expected {DWARFSTAR_TREE}, got {tree}"
         )
     tracked_changes = subprocess.run(
         ["git", "status", "--porcelain", "--untracked-files=no"],
@@ -1341,58 +1561,92 @@ def dwarfstar_direct_fixture() -> dict[str, object]:
         )
 
     harness = Path(__file__).with_name("dsv4_dwarfstar_oracle.c")
+    compiler = os.environ.get("CC", "clang")
+    compiler_result = subprocess.run(
+        [compiler, "--version"], capture_output=True, text=True
+    )
+    if compiler_result.returncode != 0:
+        raise RuntimeError(
+            f"DwarfStar compiler version query failed: {compiler_result.stderr}"
+        )
+    compiler_version = "\n".join(compiler_result.stdout.strip().splitlines()[:3])
     with tempfile.TemporaryDirectory(prefix="dsv4-dwarfstar-oracle-") as temporary:
         executable = Path(temporary) / "dsv4-dwarfstar-oracle"
         dead_strip = (
             "-Wl,-dead_strip" if sys.platform == "darwin" else "-Wl,--gc-sections"
         )
-        subprocess.run(
-            [
-                os.environ.get("CC", "clang"),
-                "-std=c11",
-                "-O0",
-                "-ffunction-sections",
-                "-fdata-sections",
-                f'-DDSV4_DWARFSTAR_SOURCE="{source}"',
-                f"-I{dwarfstar}",
-                str(harness),
-                "-o",
-                str(executable),
-                dead_strip,
-                "-lm",
-                "-lpthread",
-            ],
-            check=True,
+        compile_flags = [
+            "-std=c11",
+            "-O0",
+            "-ffunction-sections",
+            "-fdata-sections",
+            dead_strip,
+            "-lm",
+            "-lpthread",
+        ]
+        command = [
+            compiler,
+            *compile_flags[:4],
+            f'-DDSV4_DWARFSTAR_SOURCE="{source}"',
+            f"-I{dwarfstar}",
+            str(harness),
+            "-o",
+            str(executable),
+            *compile_flags[4:],
+        ]
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"DwarfStar oracle compilation failed: {command}\n"
+                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+        result = subprocess.run([str(executable)], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"DwarfStar oracle execution failed\nstdout:\n{result.stdout}\n"
+                f"stderr:\n{result.stderr}"
+            )
+    try:
+        vectors = json.loads(
+            result.stdout,
+            parse_constant=reject_non_finite_json,
         )
-        output = subprocess.run(
-            [str(executable)], check=True, capture_output=True, text=True
-        ).stdout
-    vectors = json.loads(output)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise RuntimeError(f"invalid DwarfStar oracle JSON: {error}") from error
     return {
         "revision": revision,
+        "tree": tree,
         "repository": "https://github.com/antirez/ds4",
         "license": "MIT",
         "source_path": "ds4.c",
         "source_sha256": source_sha256,
         "tracked_worktree_clean": True,
+        "harness_path": str(harness.relative_to(ROOT)),
+        "harness_sha256": hashlib.sha256(harness.read_bytes()).hexdigest(),
+        "compiler": compiler,
+        "compiler_version": compiler_version,
+        "compile_flags": compile_flags,
+        "platform": sys.platform,
+        "configuration": "C11 O0 DS4_NO_GPU direct source include",
         "symbols": [
             "hc_split_sinkhorn_one",
             "hc_post_one",
             "rope_tail_ext_inplace",
             "compressor_pool_decode_state",
+            "compressor_decode_one",
             "dsv4_indexer_qat_row_inplace_cpu",
             "softplus_stable",
             "topk_desc",
             "swiglu",
         ],
-        "vectors": vectors,
+        "vectors": validate_dwarfstar_vectors(vectors),
     }
 
 
 def main() -> None:
     fixture = {
         "schema_version": 1,
-        "generator_version": 4,
+        "generator_version": 5,
         "sources": {
             "vllm": "b40d859c7b07ae244bcd8c6eecdcdbd9a3afaa07",
             "sglang": "58974ca16ca2a4bb2f02f9ceb9622a0fd2ccf7f8",

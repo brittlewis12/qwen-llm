@@ -1,10 +1,12 @@
+use half::f16;
 use qwen_llm::deepseek_v4_oracle::{
     CompressorState, HyperConnectionControls, RopeDirection, RopeParameters,
-    attention_fp8_nope_bf16_rope_roundtrip_in_place, bf16_roundtrip_in_place, clamped_swiglu,
-    compressor_pool, grouped_low_rank_output, grouped_low_rank_projection, hash_route,
-    hyper_connection_collapse, hyper_connection_head, hyper_connection_post, hyper_connection_pre,
-    indexer_qat_roundtrip_in_place, indexer_scores, learned_route, rope_tail_in_place,
-    shared_kv_attention, shared_kv_projection, split_sinkhorn, sqrt_softplus_scores, top_k_indices,
+    attention_fp8_nope_bf16_rope_roundtrip_in_place, attention_fp8_nope_roundtrip_in_place,
+    bf16_roundtrip_in_place, clamped_swiglu, compressor_pool, grouped_low_rank_output,
+    grouped_low_rank_projection, hash_route, hyper_connection_collapse, hyper_connection_head,
+    hyper_connection_post, hyper_connection_pre, indexer_qat_roundtrip_in_place, indexer_scores,
+    learned_route, rope_tail_in_place, shared_kv_attention, shared_kv_projection, split_sinkhorn,
+    sqrt_softplus_scores, top_k_indices,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -58,11 +60,19 @@ struct KnownReferenceDifferences {
 #[serde(deny_unknown_fields)]
 struct DwarfstarDirectFixture {
     revision: String,
+    tree: String,
     repository: String,
     license: String,
     source_path: String,
     source_sha256: String,
     tracked_worktree_clean: bool,
+    harness_path: String,
+    harness_sha256: String,
+    compiler: String,
+    compiler_version: String,
+    compile_flags: Vec<String>,
+    platform: String,
+    configuration: String,
     symbols: Vec<String>,
     vectors: DwarfstarVectors,
 }
@@ -82,6 +92,59 @@ struct DwarfstarVectors {
     router_selected: Vec<usize>,
     router_weights: Vec<f32>,
     swiglu: Vec<f32>,
+    compressor_transitions: DwarfstarCompressorTransitions,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DwarfstarCompressorTransitions {
+    hash_algorithm: String,
+    rms_epsilon: f32,
+    rotary_dim: usize,
+    rope_theta: f32,
+    rope_scale_factor: f32,
+    original_context_length: u32,
+    beta_fast: f32,
+    beta_slow: f32,
+    recipes: DwarfstarCompressorRecipes,
+    cases: Vec<DwarfstarCompressorCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DwarfstarCompressorRecipes {
+    input: String,
+    kv_weight: String,
+    gate_weight: String,
+    ape: String,
+    norm: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DwarfstarCompressorCase {
+    name: String,
+    seed: u32,
+    input_dim: usize,
+    head_dim: usize,
+    ratio: usize,
+    layer: usize,
+    positions: usize,
+    projection_type: String,
+    state_rows: usize,
+    state_width: usize,
+    records: Vec<DwarfstarCompressorRecord>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DwarfstarCompressorRecord {
+    position: u32,
+    emitted: bool,
+    kv_hash: String,
+    score_hash: String,
+    start_position: Option<u32>,
+    output: Option<Vec<f32>>,
 }
 
 #[derive(Deserialize)]
@@ -403,15 +466,73 @@ fn assert_snapshot(actual: &[f32], expected: &[Option<f32>], tolerance: f32) {
     }
 }
 
+fn compressor_recipe_value(value: u64, modulus: u64, center: i64, denominator: f32) -> f32 {
+    ((value % modulus) as i64 - center) as f32 / denominator
+}
+
+fn compressor_input_value(seed: u32, position: u32, column: usize) -> f32 {
+    const NUMERATORS: [i8; 8] = [-4, -3, -2, -1, 1, 2, 3, 4];
+    let index = u64::from(seed) * 31 + u64::from(position) * 5 + column as u64 * 7;
+    f32::from(NUMERATORS[index as usize % NUMERATORS.len()]) / 4.0
+}
+
+fn compressor_signed_weight(value: u64, base: u64, span: u64, denominator: f32) -> f32 {
+    let magnitude = (base + ((value >> 1) % span)) as f32 / denominator;
+    if value & 1 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
+
+fn compressor_kv_weight(seed: u32, row: usize, column: usize) -> f32 {
+    let value = u64::from(seed) * 17 + row as u64 * 5 + column as u64 * 13;
+    compressor_signed_weight(value, 500, 1001, 1000.0)
+}
+
+fn compressor_gate_weight(seed: u32, row: usize, column: usize) -> f32 {
+    let value = u64::from(seed) * 23 + row as u64 * 11 + column as u64 * 19;
+    compressor_signed_weight(value, 250, 751, 997.0)
+}
+
+fn compressor_ape_value(seed: u32, position: usize, row: usize) -> f32 {
+    compressor_recipe_value(
+        u64::from(seed) * 29 + position as u64 * 13 + row as u64 * 3,
+        257,
+        128,
+        1000.0,
+    )
+}
+
+fn compressor_norm_value(seed: u32, row: usize) -> f32 {
+    0.75 + ((u64::from(seed) * 5 + row as u64 * 7) % 101) as f32 / 1000.0
+}
+
+fn f16_roundtrip(value: f32) -> f32 {
+    f16::from_f32(value).to_f32()
+}
+
+fn f32_state_hash(values: &[f32]) -> String {
+    let mut hash = 14_695_981_039_346_656_037u64;
+    for value in values {
+        let bits = if *value == 0.0 { 0 } else { value.to_bits() };
+        for byte in bits.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+    }
+    format!("{hash:016x}")
+}
+
 #[test]
 fn fixture_provenance_is_pinned() {
     assert_eq!(
         format!("{:x}", Sha256::digest(FIXTURE_JSON.as_bytes())),
-        "aa6a41c24663d7703c77bfdb6750fda8ba828125256e73cbe446059a955c4c3a"
+        "e1da4713e3a259d86fbede552fcff0f8f151d39e7a637b219c7d5f9826b9a4a5"
     );
     let fixture = fixture();
     assert_eq!(fixture.schema_version, 1);
-    assert_eq!(fixture.generator_version, 4);
+    assert_eq!(fixture.generator_version, 5);
     assert_eq!(
         fixture.sources.vllm,
         "b40d859c7b07ae244bcd8c6eecdcdbd9a3afaa07"
@@ -430,6 +551,10 @@ fn fixture_provenance_is_pinned() {
     );
     assert_eq!(fixture.dwarfstar_direct.revision, fixture.sources.dwarfstar);
     assert_eq!(
+        fixture.dwarfstar_direct.tree,
+        "5807bbe362672ccd02251ba70c043ce311bc4737"
+    );
+    assert_eq!(
         fixture.dwarfstar_direct.repository,
         "https://github.com/antirez/ds4"
     );
@@ -440,12 +565,49 @@ fn fixture_provenance_is_pinned() {
         "af5df58420632c453657ffdfc2c7cb84e75135bbcc20deaca3fedf970c13930c"
     );
     assert!(fixture.dwarfstar_direct.tracked_worktree_clean);
+    assert_eq!(
+        fixture.dwarfstar_direct.harness_path,
+        "scripts/reference/dsv4_dwarfstar_oracle.c"
+    );
+    assert_eq!(
+        fixture.dwarfstar_direct.harness_sha256,
+        "8651249cb995385d3fe27f7b801141e7eb1aaa001649c991270c1f9cddcd2950"
+    );
+    assert_eq!(fixture.dwarfstar_direct.compiler, "clang");
+    assert_eq!(
+        fixture.dwarfstar_direct.compiler_version,
+        "Apple clang version 17.0.0 (clang-1700.6.3.2)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix"
+    );
+    assert_eq!(
+        fixture.dwarfstar_direct.compile_flags,
+        [
+            "-std=c11",
+            "-O0",
+            "-ffunction-sections",
+            "-fdata-sections",
+            "-Wl,-dead_strip",
+            "-lm",
+            "-lpthread",
+        ]
+    );
+    assert_eq!(fixture.dwarfstar_direct.platform, "darwin");
+    assert_eq!(
+        fixture.dwarfstar_direct.configuration,
+        "C11 O0 DS4_NO_GPU direct source include"
+    );
     assert!(
         fixture
             .dwarfstar_direct
             .symbols
             .iter()
             .any(|symbol| symbol == "hc_split_sinkhorn_one")
+    );
+    assert!(
+        fixture
+            .dwarfstar_direct
+            .symbols
+            .iter()
+            .any(|symbol| symbol == "compressor_decode_one")
     );
     let llama_cpp = &fixture.llama_cpp_cpu;
     assert_eq!(llama_cpp.revision, fixture.sources.llama_cpp);
@@ -685,6 +847,141 @@ fn direct_dwarfstar_scalar_helpers_match() {
     let swiglu =
         clamped_swiglu(&[-20.0, -0.5, 2.0, 20.0], &[-20.0, 0.25, -3.0, 20.0], 10.0).unwrap();
     assert_close(&swiglu, &fixture.swiglu, 3e-6);
+}
+
+#[test]
+fn direct_dwarfstar_compressor_transitions_match() {
+    let transitions = fixture().dwarfstar_direct.vectors.compressor_transitions;
+    assert_eq!(
+        transitions.hash_algorithm,
+        "fnv1a64-f32-le; signed zero and score sentinel canonicalized"
+    );
+    assert_eq!(
+        transitions.recipes.input,
+        "[-4,-3,-2,-1,1,2,3,4][(seed*31+position*5+column*7)%8]/4"
+    );
+    assert_eq!(
+        transitions.recipes.kv_weight,
+        "value=seed*17+row*5+column*13; (value%2?-1:1)*(500+((value>>1)%1001))/1000"
+    );
+    assert_eq!(
+        transitions.recipes.gate_weight,
+        "value=seed*23+row*11+column*19; (value%2?-1:1)*(250+((value>>1)%751))/997"
+    );
+    assert_eq!(
+        transitions.recipes.ape,
+        "((seed*29+position*13+row*3)%257-128)/1000"
+    );
+    assert_eq!(transitions.recipes.norm, "3/4+((seed*5+row*7)%101)/1000");
+    assert_eq!(transitions.cases.len(), 3);
+
+    let rope = RopeParameters::yarn(
+        transitions.rotary_dim,
+        transitions.rope_theta,
+        transitions.rope_scale_factor,
+        transitions.original_context_length,
+        transitions.beta_fast,
+        transitions.beta_slow,
+    );
+    for case in transitions.cases {
+        let expected = match case.name.as_str() {
+            "ratio4_attention" => (1, 512, 4, 2, 9),
+            "ratio4_indexer" => (2, 128, 4, 2, 9),
+            "ratio128_attention" => (3, 512, 128, 3, 257),
+            name => panic!("unexpected DwarfStar compressor case {name}"),
+        };
+        assert_eq!(
+            (
+                case.seed,
+                case.head_dim,
+                case.ratio,
+                case.layer,
+                case.positions
+            ),
+            expected
+        );
+        assert_eq!(case.input_dim, 17);
+        assert_eq!(case.projection_type, "f16");
+        let coefficient = if case.ratio == 4 { 2 } else { 1 };
+        assert_eq!(case.state_rows, coefficient * case.ratio);
+        assert_eq!(case.state_width, coefficient * case.head_dim);
+        assert_eq!(case.records.len(), case.positions);
+
+        let mut state = CompressorState::new(case.ratio, case.head_dim).unwrap();
+        let ape = (0..case.ratio)
+            .flat_map(|position| {
+                (0..case.state_width)
+                    .map(move |row| f16_roundtrip(compressor_ape_value(case.seed, position, row)))
+            })
+            .collect::<Vec<_>>();
+        let norm = (0..case.head_dim)
+            .map(|row| compressor_norm_value(case.seed, row))
+            .collect::<Vec<_>>();
+
+        for record in case.records {
+            assert_eq!(record.position as usize, state.next_position() as usize);
+            let input = (0..case.input_dim)
+                .map(|column| compressor_input_value(case.seed, record.position, column))
+                .collect::<Vec<_>>();
+            let projected_kv = (0..case.state_width)
+                .map(|row| {
+                    input
+                        .iter()
+                        .enumerate()
+                        .map(|(column, &input)| {
+                            f16_roundtrip(compressor_kv_weight(case.seed, row, column)) * input
+                        })
+                        .sum::<f32>()
+                })
+                .collect::<Vec<_>>();
+            let projected_scores = (0..case.state_width)
+                .map(|row| {
+                    input
+                        .iter()
+                        .enumerate()
+                        .map(|(column, &input)| {
+                            f16_roundtrip(compressor_gate_weight(case.seed, row, column)) * input
+                        })
+                        .sum::<f32>()
+                })
+                .collect::<Vec<_>>();
+            let emitted = state
+                .push_projected(
+                    record.position,
+                    &projected_kv,
+                    &projected_scores,
+                    &ape,
+                    &norm,
+                    transitions.rms_epsilon,
+                    rope,
+                )
+                .unwrap();
+            assert_eq!(f32_state_hash(state.kv_state()), record.kv_hash);
+            assert_eq!(f32_state_hash(state.score_state()), record.score_hash);
+            assert_eq!(emitted.is_some(), record.emitted);
+
+            match (emitted, record.start_position, record.output) {
+                (Some(mut emitted), Some(start_position), Some(expected_output)) => {
+                    assert_eq!(emitted.start_position, start_position);
+                    if case.head_dim == 512 {
+                        attention_fp8_nope_roundtrip_in_place(
+                            &mut emitted.value,
+                            transitions.rotary_dim,
+                        )
+                        .unwrap();
+                    } else {
+                        indexer_qat_roundtrip_in_place(&mut emitted.value).unwrap();
+                    }
+                    assert_close(&emitted.value, &expected_output, 6e-5);
+                }
+                (None, None, None) => {}
+                _ => panic!(
+                    "incoherent DwarfStar compressor emission at position {}",
+                    record.position
+                ),
+            }
+        }
+    }
 }
 
 #[test]

@@ -261,9 +261,17 @@ The fixture generator has three deliberately distinguished sources of evidence:
   not claims that those runtimes were executed.
 - `scripts/reference/dsv4_dwarfstar_oracle.c` is compiled against the pinned
   DwarfStar checkout and directly executes selected scalar mHC, RoPE,
-  compressor-pooling, indexer-QAT, routing-helper, and SwiGLU paths. It does not
-  yet execute complete compressor transitions or a standard-GGUF model.
-  Generation fails on revision drift.
+  compressor-pooling, indexer-QAT, routing-helper, and SwiGLU paths. It also
+  executes complete synthetic F16-projection compressor transitions at
+  production output widths: ratio-4 attention and indexer through position 8,
+  plus ratio-128 attention through position 256. Seventeen-wide projections
+  exercise row stride, vector-plus-tail accumulation, and non-exact F16 weight
+  and APE rounding without claiming the production 4,096-wide projection cost.
+  Every post-token KV/score state is checked by a canonical F32 digest, and all
+  six boundary outputs cover RMSNorm, compressed RoPE, attention E4M3, or
+  indexer Hadamard/E2M1 QAT as applicable. It does not yet execute complete mHC
+  projection/gating or a standard-GGUF model. Revision, tree, or source drift
+  fails generation; harness drift fails the pinned fixture `--check` gate.
 - `scripts/reference/dsv4_llama_cpp_cpu_oracle.cpp` builds against pinned,
   CPU-only static baseline GGML and directly executes `ggml_dsv4_hc_comb`,
   `ggml_dsv4_hc_pre`, and `ggml_dsv4_hc_post` as one three-token reference
@@ -289,13 +297,21 @@ review rather than a silent fixture update.
 
 S1 is not promoted yet because direct executable coverage is incomplete, not
 because a remote accelerator is missing. The current DwarfStar and llama.cpp
-harnesses directly cover selected scalar helpers and the three fused mHC CPU
-primitives, while shared-KV attention/output, complete mHC projection/gating,
-indexer scoring, and token-by-token compressor transitions still rely on
-transparent NumPy transcriptions. The next evidence step is broader DwarfStar
-transition coverage, followed by locally executable shared-KV/indexer seams.
-All use small synthetic tensors and require neither a model download nor
+harnesses directly cover selected scalar helpers, all three fused mHC CPU
+primitives, and complete token-by-token compressor transitions. Shared-KV
+attention/output, complete mHC projection/gating, and indexer scoring still
+rely on transparent NumPy transcriptions. The next evidence step is complete
+DwarfStar mHC composition, followed by locally executable shared-KV/indexer
+seams. All use small synthetic tensors and require neither a model download nor
 DwarfStar's custom quant metadata.
+
+The DwarfStar transition differential compares `compressor_decode_one` at its
+function boundary. Attention rows therefore include NoPE E4M3 simulation while
+the RoPE tail remains F32; DwarfStar's caller-side F16 cache append is outside
+that boundary. The separate typed-cache tests retain the intended mixed
+FP8/BF16 storage contract. State digests canonicalize signed zero and map
+DwarfStar's finite `-1e30` empty-score sentinel to negative infinity so they
+compare semantics rather than representation-only sentinel choices.
 
 The typed cache prerequisite is now implemented separately in
 `deepseek_v4_cache`. It is still CPU-oracle infrastructure, not generation

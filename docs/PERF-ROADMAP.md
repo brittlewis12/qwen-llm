@@ -1081,23 +1081,18 @@ result exists. Measure GPU, wait/readback, allocation, copy, and selection wall
 before reusable workspaces; do not import greedy GPU-argmax evidence or call the
 allocation material in advance.
 
-1. **Positive-temperature sampling attribution parser successor**: v0.657 and
-   v0.658 are consumed and must not be rerun. v0.658 observed no profile or
-   candidate value; its observed stopping failure is a deterministic parser
-   expectation for an optional field that the exact fixture validly omits.
-   Under a separately preregistered v0.659 and new packet root, require
-   `prefill_attention_query` absent in both reference and profiles, then measure
-   the current full-vocabulary GPU head, wait/readback, logits copy, candidate
-   construction, retained-candidate weights, allocation, and selection wall on one
-   named 128-output product request. This is a fresh-prompt, distribution-exact
-   diagnostic; greedy GPU-argmax savings do not transfer. Authorize reusable
-   workspaces only if the adjusted candidate-specific bound is `>=5 ms` and
-   `>=5%` of complete `generation_ms` in the median and five of six children,
-   while preserving sampler-v1 ordering, RNG draws, errors, and seeded output
-   exactly. Run a cheap
-   competitor preflight before CPU conformance, then retain every full host and
-   correctness gate. Import no v0.658 reference or conformance result. Belief
-   high on decisiveness, unknown on prize, difficulty S-M.
+1. **Exact bounded top-k plus borrowed transition logits**: v0.659 grants one
+   structural implementation packet. Workspace, borrowed-logit-only, and their
+   nonstructural combination clear `0/6` and are closed in this exact cell. The
+   structural bound clears `6/6` at adjusted median `81.400598 ms`, or
+   `6.545897%` of complete generation. Build one exact bounded top-k scan over
+   every logit, retain and order 200 candidates under sampler-v1 total order,
+   and sample decode transitions from a scoped completed Shared F32 row without
+   full allocation/copy. Keep prompt logits owned and preserve all filter, RNG,
+   error, callback, stop, state, and pending-token semantics. Gate on paired
+   generation `>=5%`, model-ready request saving `>=5 ms`, five of six wins in
+   both, positive AB/BA strata, TTFT regression `<=10 ms`, and nonregressive
+   spawn-to-exit wall. Prize medium, belief medium-high, difficulty M.
 2. **Generic certified lm-head screening oracle**: in the frozen integrated
    cell, v0.656's compact-tail arm reduces transition-command wall by
    `14.197064 ms`, about `0.835 ms` per transition; v0.655, not v0.656, supplies
@@ -1235,14 +1230,12 @@ control. It is no longer an active experiment; keep `decode` as the default.
    `7.662 ms` total request and regresses TTFT `15.100 ms`. Schedule no repair or
    rerun. A grammar successor needs a changed bank-lifetime, lazy-organization,
    or materially longer constrained-workload premise.
-5. v0.657 is consumed before model observation; v0.658 is consumed after model
-   conformance and its ordinary reference but before any profile. Record no
-   phase-size, speed, candidate, or product-performance inference from either
-   and do not rerun them. Preregister a parser-only v0.659 under a new root:
-   retain the early competitor preflight and every inherited gate, but require
-   optional `prefill_attention_query` absent for this exact fixture.
-   Positive-temperature attribution remains first; then run the optimistic
-   generic lm-head screening oracle before any production screener.
+5. v0.659 clears only the structural sampling bound and authorizes one exact
+   combined implementation packet. Do not build workspace-only, borrowed-only,
+   GPU-sampling, or prompt-borrowing variants. Run the bounded-top-k plus scoped
+   transition-logits packet next under its complete generation/request gates;
+   then run the optimistic generic lm-head screening oracle before any
+   production screener.
 6. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
@@ -1379,6 +1372,11 @@ control. It is no longer an active experiment; keep `decode` as the default.
   `generation_ms` in the median and five of six children. Preserve sampler-v1
   candidate order, RNG draws, error behavior, and seeded output exactly.
   Mandatory full-logit or probability work receives no avoidable-work credit.
+  On the exact v0.659 fixture and current mechanism, v0.659 closes W/B/C and
+  clears only S at `81.400598 ms` / `6.545897%`, 6/6. Its one successor must
+  combine exact bounded top-k with scoped transition-row consumption and clear
+  paired `>=5%` generation plus `>=5 ms` absolute request saving without TTFT or
+  spawn-to-exit regression.
 - **Prompt lookup**: use actual charged replay, not a mean-acceptance surrogate.
   Require median decode `>=1.10x` over the prompt fixture triad, no important row
   below `0.98x`, TTFT `<=1.03x`, and proposal CPU cost below 1% of decode wall.

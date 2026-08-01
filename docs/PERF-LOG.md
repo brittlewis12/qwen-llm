@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-31 - v0.659 Sampling Attribution Structural GO
+
+Status: `GO_BOUNDED_IMPLEMENTATION` with `authority=["structural"]` and one
+successor packet. Only borrowed logits plus replacement of full-vocabulary
+candidate construction/current top-k ordering clears.
+
+- Clean identity matches at `ba2871a`. Early readiness reports zero competitors;
+  nine subsequent full host gates pass. CPU, model, schema, exact-output,
+  callback/terminal, VM, timer-count, and additive reconciliation gates pass.
+- Workspace adjusted median is `2.794766 ms` / `0.222851%` generation;
+  borrowed logits is `6.705743 ms` / `0.534794%`; workspace plus borrowed is
+  `6.719675 ms` / `0.535834%`. All clear `0/6` and are closed in this cell.
+- The structural bound clears `6/6`: adjusted median `81.400598 ms`, or
+  `6.545897%` of complete generation, with range `79.746811-82.383260 ms`.
+- Candidate fill and current top-k order dominate at median `39.324` and
+  `35.383 ms`; candidate allocation is only `0.013 ms`. The optimistic ceiling
+  is concentrated in candidate organization, not allocation.
+- The structural number is an optimistic removal bound and only about `4.99%`
+  of profiled complete request wall before replacement cost. Advance one exact
+  combined packet with `>=5%` generation and `>=5 ms` absolute request gates;
+  do not require a predetermined-failing 5% request fraction.
+
+Artifacts:
+`target/profiles/v0659-positive-temperature-sampling-parser-repair-p1/`.
+Summary: `docs/bench/v0659-positive-temperature-sampling-result.md`.
+Independent review: `cx` session
+`019fb694-8a53-7482-b65b-7592f729be32`.
+
 ## 2026-07-31 - v0.658 Sampling Attribution Consumed
 
 Status: `CONSUMED_NO_AUTHORITY` at reference validation. CPU and model

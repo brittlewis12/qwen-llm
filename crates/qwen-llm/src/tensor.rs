@@ -96,6 +96,42 @@ impl GgmlType {
             _ => Self::Unknown,
         }
     }
+
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::F32 => "F32",
+            Self::F16 => "F16",
+            Self::Q4_0 => "Q4_0",
+            Self::Q4_1 => "Q4_1",
+            Self::Q5_0 => "Q5_0",
+            Self::Q5_1 => "Q5_1",
+            Self::Q8_0 => "Q8_0",
+            Self::Q8_1 => "Q8_1",
+            Self::Q2_K => "Q2_K",
+            Self::Q3_K => "Q3_K",
+            Self::Q4_K => "Q4_K",
+            Self::Q5_K => "Q5_K",
+            Self::Q6_K => "Q6_K",
+            Self::Q8_K => "Q8_K",
+            Self::IQ2_XXS => "IQ2_XXS",
+            Self::IQ2_XS => "IQ2_XS",
+            Self::IQ3_XXS => "IQ3_XXS",
+            Self::IQ1_S => "IQ1_S",
+            Self::IQ4_NL => "IQ4_NL",
+            Self::IQ3_S => "IQ3_S",
+            Self::IQ2_S => "IQ2_S",
+            Self::IQ4_XS => "IQ4_XS",
+            Self::I8 => "I8",
+            Self::I16 => "I16",
+            Self::I32 => "I32",
+            Self::I64 => "I64",
+            Self::F64 => "F64",
+            Self::IQ1_M => "IQ1_M",
+            Self::BF16 => "BF16",
+            Self::MXFP4 => "MXFP4",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
 }
 
 pub(crate) fn ggml_type_layout_raw(raw: u32) -> Option<(u64, u64)> {
@@ -208,5 +244,48 @@ mod tests {
         assert_eq!(ggml_type_layout(GgmlType::MXFP4), ggml_type_layout_raw(39));
         assert_eq!(ggml_type_layout(GgmlType::F32), ggml_type_layout_raw(0));
         assert_eq!(ggml_type_layout(GgmlType::Unknown), None);
+    }
+
+    #[test]
+    fn ggml_wire_names_are_explicit() {
+        let cases = [
+            (0, GgmlType::F32, "F32"),
+            (1, GgmlType::F16, "F16"),
+            (2, GgmlType::Q4_0, "Q4_0"),
+            (3, GgmlType::Q4_1, "Q4_1"),
+            (6, GgmlType::Q5_0, "Q5_0"),
+            (7, GgmlType::Q5_1, "Q5_1"),
+            (8, GgmlType::Q8_0, "Q8_0"),
+            (9, GgmlType::Q8_1, "Q8_1"),
+            (10, GgmlType::Q2_K, "Q2_K"),
+            (11, GgmlType::Q3_K, "Q3_K"),
+            (12, GgmlType::Q4_K, "Q4_K"),
+            (13, GgmlType::Q5_K, "Q5_K"),
+            (14, GgmlType::Q6_K, "Q6_K"),
+            (15, GgmlType::Q8_K, "Q8_K"),
+            (16, GgmlType::IQ2_XXS, "IQ2_XXS"),
+            (17, GgmlType::IQ2_XS, "IQ2_XS"),
+            (18, GgmlType::IQ3_XXS, "IQ3_XXS"),
+            (19, GgmlType::IQ1_S, "IQ1_S"),
+            (20, GgmlType::IQ4_NL, "IQ4_NL"),
+            (21, GgmlType::IQ3_S, "IQ3_S"),
+            (22, GgmlType::IQ2_S, "IQ2_S"),
+            (23, GgmlType::IQ4_XS, "IQ4_XS"),
+            (24, GgmlType::I8, "I8"),
+            (25, GgmlType::I16, "I16"),
+            (26, GgmlType::I32, "I32"),
+            (27, GgmlType::I64, "I64"),
+            (28, GgmlType::F64, "F64"),
+            (29, GgmlType::IQ1_M, "IQ1_M"),
+            (30, GgmlType::BF16, "BF16"),
+            (39, GgmlType::MXFP4, "MXFP4"),
+        ];
+        for (raw, dtype, wire_name) in cases {
+            assert_eq!(GgmlType::from_raw(raw), dtype);
+            assert_eq!(dtype as i32, raw as i32);
+            assert_eq!(dtype.wire_name(), wire_name);
+        }
+        assert_eq!(GgmlType::Unknown.wire_name(), "UNKNOWN");
+        assert_eq!(GgmlType::Unknown.to_string(), "Unknown");
     }
 }

@@ -24,6 +24,7 @@ half.workspace = true
 bytemuck.workspace = true
 gguf-rs.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 unicode-general-category.workspace = true
 rustc-hash.workspace = true
 sha2.workspace = true
@@ -43,7 +44,6 @@ parking_lot.workspace = true
 criterion.workspace = true
 fancy-regex = "0.14"
 proptest = "1"
-serde.workspace = true
 
 [build-dependencies]
 anyhow.workspace = true

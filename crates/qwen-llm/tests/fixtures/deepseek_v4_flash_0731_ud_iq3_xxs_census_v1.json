@@ -1,0 +1,1712 @@
+{
+  "manifest_schema_version": 1,
+  "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs",
+  "shards": [
+    {
+      "index": 0,
+      "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+      "file_bytes": 5257664,
+      "sha256": "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a"
+    },
+    {
+      "index": 1,
+      "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00002-of-00004.gguf",
+      "file_bytes": 49485728288,
+      "sha256": "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd"
+    },
+    {
+      "index": 2,
+      "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00003-of-00004.gguf",
+      "file_bytes": 49437886752,
+      "sha256": "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca"
+    },
+    {
+      "index": 3,
+      "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf",
+      "file_bytes": 4071015712,
+      "sha256": "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
+    }
+  ],
+  "census_sha256": "f4397fae14a6df04786324006ce41ea0489d4b246f68e742207446098684e4fc",
+  "census": {
+    "schema_version": 1,
+    "profile": "deepseek-v4-flash-0731",
+    "shards": [
+      {
+        "index": 0,
+        "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+        "file_bytes": 5257664,
+        "tensor_count": 0,
+        "tensor_bytes": 0
+      },
+      {
+        "index": 1,
+        "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00002-of-00004.gguf",
+        "file_bytes": 49485728288,
+        "tensor_count": 632,
+        "tensor_bytes": 49485686772
+      },
+      {
+        "index": 2,
+        "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00003-of-00004.gguf",
+        "file_bytes": 49437886752,
+        "tensor_count": 650,
+        "tensor_bytes": 49437843640
+      },
+      {
+        "index": 3,
+        "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf",
+        "file_bytes": 4071015712,
+        "tensor_count": 46,
+        "tensor_bytes": 4071012528
+      }
+    ],
+    "totals": {
+      "shard_count": 4,
+      "file_bytes": 102999888416,
+      "tensor_count": 1328,
+      "element_count": 284334567511,
+      "tensor_bytes": 102994542940
+    },
+    "dtypes": [
+      {
+        "dtype": "F32",
+        "dtype_tag": 0,
+        "tensor_count": 662,
+        "element_count": 41266775,
+        "storage_bytes": 165067100
+      },
+      {
+        "dtype": "Q8_0",
+        "dtype_tag": 8,
+        "tensor_count": 321,
+        "element_count": 4928307200,
+        "storage_bytes": 5236326400
+      },
+      {
+        "dtype": "Q6_K",
+        "dtype_tag": 14,
+        "tensor_count": 170,
+        "element_count": 2292187136,
+        "storage_bytes": 1880309760
+      },
+      {
+        "dtype": "IQ3_XXS",
+        "dtype_tag": 18,
+        "tensor_count": 41,
+        "element_count": 88046829568,
+        "storage_bytes": 33705426944
+      },
+      {
+        "dtype": "IQ3_S",
+        "dtype_tag": 21,
+        "tensor_count": 2,
+        "element_count": 4294967296,
+        "storage_bytes": 1845493760
+      },
+      {
+        "dtype": "IQ2_S",
+        "dtype_tag": 22,
+        "tensor_count": 84,
+        "element_count": 180388626432,
+        "storage_bytes": 57780731904
+      },
+      {
+        "dtype": "I32",
+        "dtype_tag": 26,
+        "tensor_count": 3,
+        "element_count": 2327040,
+        "storage_bytes": 9308160
+      },
+      {
+        "dtype": "BF16",
+        "dtype_tag": 30,
+        "tensor_count": 43,
+        "element_count": 45088768,
+        "storage_bytes": 90177536
+      },
+      {
+        "dtype": "MXFP4",
+        "dtype_tag": 39,
+        "tensor_count": 2,
+        "element_count": 4294967296,
+        "storage_bytes": 2281701376
+      }
+    ],
+    "roles": [
+      {
+        "role": "token_embedding",
+        "role_id": 0,
+        "storage": [
+          {
+            "dtype": "Q6_K",
+            "dtype_tag": 14,
+            "tensor_count": 1,
+            "element_count": 529530880,
+            "storage_bytes": 434380800
+          }
+        ]
+      },
+      {
+        "role": "output_norm",
+        "role_id": 1,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 1,
+            "element_count": 4096,
+            "storage_bytes": 16384
+          }
+        ]
+      },
+      {
+        "role": "output",
+        "role_id": 2,
+        "storage": [
+          {
+            "dtype": "Q6_K",
+            "dtype_tag": 14,
+            "tensor_count": 1,
+            "element_count": 529530880,
+            "storage_bytes": 434380800
+          }
+        ]
+      },
+      {
+        "role": "output_hc_function",
+        "role_id": 3,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 1,
+            "element_count": 65536,
+            "storage_bytes": 262144
+          }
+        ]
+      },
+      {
+        "role": "output_hc_scale",
+        "role_id": 4,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 1,
+            "element_count": 1,
+            "storage_bytes": 4
+          }
+        ]
+      },
+      {
+        "role": "output_hc_base",
+        "role_id": 5,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 1,
+            "element_count": 4,
+            "storage_bytes": 16
+          }
+        ]
+      },
+      {
+        "role": "attention_norm",
+        "role_id": 6,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 176128,
+            "storage_bytes": 704512
+          }
+        ]
+      },
+      {
+        "role": "attention_sinks",
+        "role_id": 7,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 2752,
+            "storage_bytes": 11008
+          }
+        ]
+      },
+      {
+        "role": "attention_q_a",
+        "role_id": 8,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 1,
+            "element_count": 4194304,
+            "storage_bytes": 4456448
+          },
+          {
+            "dtype": "Q6_K",
+            "dtype_tag": 14,
+            "tensor_count": 42,
+            "element_count": 176160768,
+            "storage_bytes": 144506880
+          }
+        ]
+      },
+      {
+        "role": "attention_q_a_norm",
+        "role_id": 9,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 44032,
+            "storage_bytes": 176128
+          }
+        ]
+      },
+      {
+        "role": "attention_q_b",
+        "role_id": 10,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 43,
+            "element_count": 1442840576,
+            "storage_bytes": 1533018112
+          }
+        ]
+      },
+      {
+        "role": "attention_kv",
+        "role_id": 11,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 43,
+            "element_count": 90177536,
+            "storage_bytes": 95813632
+          }
+        ]
+      },
+      {
+        "role": "attention_kv_norm",
+        "role_id": 12,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 22016,
+            "storage_bytes": 88064
+          }
+        ]
+      },
+      {
+        "role": "attention_output_a",
+        "role_id": 13,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 43,
+            "element_count": 1442840576,
+            "storage_bytes": 1533018112
+          }
+        ]
+      },
+      {
+        "role": "attention_output_b",
+        "role_id": 14,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 43,
+            "element_count": 1442840576,
+            "storage_bytes": 1533018112
+          }
+        ]
+      },
+      {
+        "role": "attention_compressor_kv",
+        "role_id": 15,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 41,
+            "element_count": 130023424,
+            "storage_bytes": 138149888
+          }
+        ]
+      },
+      {
+        "role": "attention_compressor_gate",
+        "role_id": 16,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 41,
+            "element_count": 130023424,
+            "storage_bytes": 138149888
+          }
+        ]
+      },
+      {
+        "role": "attention_compressor_ape",
+        "role_id": 17,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 41,
+            "element_count": 1396736,
+            "storage_bytes": 5586944
+          }
+        ]
+      },
+      {
+        "role": "attention_compressor_norm",
+        "role_id": 18,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 41,
+            "element_count": 20992,
+            "storage_bytes": 83968
+          }
+        ]
+      },
+      {
+        "role": "indexer_q",
+        "role_id": 19,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 21,
+            "element_count": 176160768,
+            "storage_bytes": 187170816
+          }
+        ]
+      },
+      {
+        "role": "indexer_projection",
+        "role_id": 20,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 21,
+            "element_count": 5505024,
+            "storage_bytes": 22020096
+          }
+        ]
+      },
+      {
+        "role": "indexer_compressor_kv",
+        "role_id": 21,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 21,
+            "element_count": 22020096,
+            "storage_bytes": 23396352
+          }
+        ]
+      },
+      {
+        "role": "indexer_compressor_gate",
+        "role_id": 22,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 21,
+            "element_count": 22020096,
+            "storage_bytes": 23396352
+          }
+        ]
+      },
+      {
+        "role": "indexer_compressor_ape",
+        "role_id": 23,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 21,
+            "element_count": 21504,
+            "storage_bytes": 86016
+          }
+        ]
+      },
+      {
+        "role": "indexer_compressor_norm",
+        "role_id": 24,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 21,
+            "element_count": 2688,
+            "storage_bytes": 10752
+          }
+        ]
+      },
+      {
+        "role": "attention_hc_function",
+        "role_id": 25,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 16908288,
+            "storage_bytes": 67633152
+          }
+        ]
+      },
+      {
+        "role": "attention_hc_scale",
+        "role_id": 26,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 129,
+            "storage_bytes": 516
+          }
+        ]
+      },
+      {
+        "role": "attention_hc_base",
+        "role_id": 27,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 1032,
+            "storage_bytes": 4128
+          }
+        ]
+      },
+      {
+        "role": "ffn_norm",
+        "role_id": 28,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 176128,
+            "storage_bytes": 704512
+          }
+        ]
+      },
+      {
+        "role": "routed_gate_input",
+        "role_id": 29,
+        "storage": [
+          {
+            "dtype": "BF16",
+            "dtype_tag": 30,
+            "tensor_count": 43,
+            "element_count": 45088768,
+            "storage_bytes": 90177536
+          }
+        ]
+      },
+      {
+        "role": "routed_gate",
+        "role_id": 30,
+        "storage": [
+          {
+            "dtype": "IQ3_S",
+            "dtype_tag": 21,
+            "tensor_count": 1,
+            "element_count": 2147483648,
+            "storage_bytes": 922746880
+          },
+          {
+            "dtype": "IQ2_S",
+            "dtype_tag": 22,
+            "tensor_count": 42,
+            "element_count": 90194313216,
+            "storage_bytes": 28890365952
+          }
+        ]
+      },
+      {
+        "role": "routed_up",
+        "role_id": 31,
+        "storage": [
+          {
+            "dtype": "IQ3_S",
+            "dtype_tag": 21,
+            "tensor_count": 1,
+            "element_count": 2147483648,
+            "storage_bytes": 922746880
+          },
+          {
+            "dtype": "IQ2_S",
+            "dtype_tag": 22,
+            "tensor_count": 42,
+            "element_count": 90194313216,
+            "storage_bytes": 28890365952
+          }
+        ]
+      },
+      {
+        "role": "routed_down",
+        "role_id": 32,
+        "storage": [
+          {
+            "dtype": "IQ3_XXS",
+            "dtype_tag": 18,
+            "tensor_count": 41,
+            "element_count": 88046829568,
+            "storage_bytes": 33705426944
+          },
+          {
+            "dtype": "MXFP4",
+            "dtype_tag": 39,
+            "tensor_count": 2,
+            "element_count": 4294967296,
+            "storage_bytes": 2281701376
+          }
+        ]
+      },
+      {
+        "role": "shared_gate",
+        "role_id": 33,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 1,
+            "element_count": 8388608,
+            "storage_bytes": 8912896
+          },
+          {
+            "dtype": "Q6_K",
+            "dtype_tag": 14,
+            "tensor_count": 42,
+            "element_count": 352321536,
+            "storage_bytes": 289013760
+          }
+        ]
+      },
+      {
+        "role": "shared_up",
+        "role_id": 34,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 1,
+            "element_count": 8388608,
+            "storage_bytes": 8912896
+          },
+          {
+            "dtype": "Q6_K",
+            "dtype_tag": 14,
+            "tensor_count": 42,
+            "element_count": 352321536,
+            "storage_bytes": 289013760
+          }
+        ]
+      },
+      {
+        "role": "shared_down",
+        "role_id": 35,
+        "storage": [
+          {
+            "dtype": "Q8_0",
+            "dtype_tag": 8,
+            "tensor_count": 1,
+            "element_count": 8388608,
+            "storage_bytes": 8912896
+          },
+          {
+            "dtype": "Q6_K",
+            "dtype_tag": 14,
+            "tensor_count": 42,
+            "element_count": 352321536,
+            "storage_bytes": 289013760
+          }
+        ]
+      },
+      {
+        "role": "hash_router",
+        "role_id": 36,
+        "storage": [
+          {
+            "dtype": "I32",
+            "dtype_tag": 26,
+            "tensor_count": 3,
+            "element_count": 2327040,
+            "storage_bytes": 9308160
+          }
+        ]
+      },
+      {
+        "role": "router_correction_bias",
+        "role_id": 37,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 40,
+            "element_count": 10240,
+            "storage_bytes": 40960
+          }
+        ]
+      },
+      {
+        "role": "ffn_hc_function",
+        "role_id": 38,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 16908288,
+            "storage_bytes": 67633152
+          }
+        ]
+      },
+      {
+        "role": "ffn_hc_scale",
+        "role_id": 39,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 129,
+            "storage_bytes": 516
+          }
+        ]
+      },
+      {
+        "role": "ffn_hc_base",
+        "role_id": 40,
+        "storage": [
+          {
+            "dtype": "F32",
+            "dtype_tag": 0,
+            "tensor_count": 43,
+            "element_count": 1032,
+            "storage_bytes": 4128
+          }
+        ]
+      }
+    ],
+    "layers": [
+      {
+        "layer": 0,
+        "attention": "local",
+        "router": "hash",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 1,
+        "attention": "local",
+        "router": "hash",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 2,
+        "attention": "csa",
+        "router": "hash",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 3,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 4,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 5,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 6,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 7,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 8,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 9,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 10,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 11,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 12,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 13,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 14,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 15,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 16,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 17,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 18,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 19,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 20,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 21,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 22,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 23,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 24,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 25,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 26,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ3_S",
+          "dtype_tag": 21,
+          "element_count": 2147483648,
+          "storage_bytes": 922746880
+        },
+        "routed_up": {
+          "dtype": "IQ3_S",
+          "dtype_tag": 21,
+          "element_count": 2147483648,
+          "storage_bytes": 922746880
+        },
+        "routed_down": {
+          "dtype": "MXFP4",
+          "dtype_tag": 39,
+          "element_count": 2147483648,
+          "storage_bytes": 1140850688
+        }
+      },
+      {
+        "layer": 27,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 28,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 29,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 30,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 31,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 32,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 33,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 34,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 35,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 36,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 37,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 38,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 39,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 40,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 41,
+        "attention": "hca",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
+          "element_count": 2147483648,
+          "storage_bytes": 822083584
+        }
+      },
+      {
+        "layer": 42,
+        "attention": "csa",
+        "router": "learned",
+        "routed_gate": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_up": {
+          "dtype": "IQ2_S",
+          "dtype_tag": 22,
+          "element_count": 2147483648,
+          "storage_bytes": 687865856
+        },
+        "routed_down": {
+          "dtype": "MXFP4",
+          "dtype_tag": 39,
+          "element_count": 2147483648,
+          "storage_bytes": 1140850688
+        }
+      }
+    ]
+  }
+}

@@ -8,6 +8,7 @@ use messages::{load_messages_prompt_with_policy, messages_thinking_mode};
 use qwen_llm::checkpoint_identity::IdentityCacheOutcome;
 use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedIntegrityMode};
 use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
+use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
 use qwen_llm::metal::{
     MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
     MetalPipelineCacheMetrics, evaluate_metal_memory_admission,
@@ -127,6 +128,14 @@ struct Args {
     /// Print device info and exit.
     #[arg(long)]
     info: bool,
+
+    /// Print the deterministic DeepSeek V4 schema/quant census as JSON.
+    #[arg(
+        long,
+        requires = "model",
+        conflicts_with_all = ["info", "prompt", "prompt_file", "messages", "requests_jsonl"]
+    )]
+    deepseek_census_json: bool,
 
     /// Raw prompt text for a single-turn greedy generation.
     #[arg(short = 'p', long, conflicts_with_all = ["prompt_file", "messages"])]
@@ -1759,16 +1768,10 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let staged_integrity = configured_checkpoint_staged_integrity()?;
-    ensure!(
-        staged_integrity.is_none() || args.durable_prefix_cache.is_some(),
-        "{CHECKPOINT_STAGED_INTEGRITY_ENV} requires --durable-prefix-cache"
-    );
     validate_request_timing_mode(&args)?;
     validate_sampling_attribution_mode(&args)?;
     validate_sampled_structural_mode(&args)?;
     validate_durable_prefix_cache_mode(&args)?;
-
     if args.info {
         let runtime = Runtime::metal()?;
         println!("device: {}", runtime.describe());
@@ -1782,6 +1785,23 @@ fn main() -> Result<()> {
         std::process::exit(2);
     };
 
+    if args.deepseek_census_json {
+        return print_deepseek_v4_census(model_path);
+    }
+
+    if args.prompt.is_none()
+        && args.prompt_file.is_none()
+        && args.messages.is_none()
+        && args.requests_jsonl.is_none()
+    {
+        return print_model_info(model_path);
+    }
+
+    let staged_integrity = configured_checkpoint_staged_integrity()?;
+    ensure!(
+        staged_integrity.is_none() || args.durable_prefix_cache.is_some(),
+        "{CHECKPOINT_STAGED_INTEGRITY_ENV} requires --durable-prefix-cache"
+    );
     if args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some() {
         return run_single_turn(model_path, &args, staged_integrity);
     }
@@ -1790,7 +1810,7 @@ fn main() -> Result<()> {
         return run_requests_jsonl(model_path, path, &args);
     }
 
-    print_model_info(model_path)
+    unreachable!("request mode was validated above")
 }
 
 fn validate_request_timing_mode(args: &Args) -> Result<()> {
@@ -5402,6 +5422,20 @@ fn print_deepseek_v4_info(gguf: &qwen_llm::gguf::GgufFile) -> Result<()> {
         "strict tensor schema: validated all {} tensors; CSA indexers={csa_layers}",
         model.source_tensor_count
     );
+    Ok(())
+}
+
+fn print_deepseek_v4_census(model_path: &Path) -> Result<()> {
+    let gguf = qwen_llm::gguf::GgufFile::open(model_path)
+        .with_context(|| format!("open DeepSeek V4 model {}", model_path.display()))?;
+    ensure!(
+        ModelFamily::detect(&gguf) == Some(ModelFamily::DeepSeek4),
+        "--deepseek-census-json requires general.architecture=deepseek4"
+    );
+    let census = DeepSeekV4CensusV1::from_gguf_flash_0731(&gguf)
+        .context("construct DeepSeek V4 schema/quant census")?;
+    serde_json::to_writer_pretty(std::io::stdout().lock(), &census)?;
+    println!();
     Ok(())
 }
 

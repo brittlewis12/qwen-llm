@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-07-31 - v0.658 Sampling Attribution Consumed
+
+Status: `CONSUMED_NO_AUTHORITY` at reference validation. CPU and model
+conformance plus the ordinary reference completed, but no profiled child
+launched and no sampling-attribution value exists.
+
+- Clean build/runtime/source identity matches at `f3ce16c`; the early readiness
+  census and full gates before model conformance and reference pass with zero
+  competitors.
+- The packet passes 16 sampler tests, 57 CLI tests, and the release A3B exact
+  model-conformance test. Its ordinary reference exits zero and produces 128
+  tokens with `token_limit` under `sampled_cpu`.
+- The runner then expects mandatory schema-10 key
+  `prefill_attention_query`. The product validly omits that optional field for
+  the exact fixed-chunk fixture. Post-stop comparison is `extra=[]` and
+  `missing=[prefill_attention_query]`.
+- This is a fail-closed runner-parser defect, not schema drift, model failure,
+  or candidate evidence. Do not use the ordinary reference timing row, infer a
+  W/B/C/S bound, or rerun v0.658.
+- Attribution remains first because no profile or candidate result exists. A
+  separately preregistered v0.659 may correct only the exact-fixture absence
+  rule under a new root and must rerun every inherited gate.
+
+Artifacts:
+`target/profiles/v0658-positive-temperature-sampling-attribution-p1/`.
+Summary:
+`docs/bench/v0658-positive-temperature-sampling-attribution-result.md`.
+Independent review: `cx` session
+`019fb694-8a53-7482-b65b-7592f729be32`.
+
 ## 2026-07-31 - v0.657 Sampling Attribution Consumed
 
 Status: `CONSUMED_NO_AUTHORITY` before model conformance, the product

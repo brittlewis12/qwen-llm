@@ -1073,27 +1073,31 @@ Positive-temperature product decode also deserves one attribution profile:
 current execution allocates and copies a full-vocabulary logits `Vec`, constructs
 a full-vocabulary candidate vector before top-k truncation, and then allocates
 probability weights for the retained candidates on every transition. v0.657
-built the exact opt-in attribution and passed its CPU/CLI conformance, but its
-first model-facing host gate found a foreign `cargo test -p qwen-llm --lib`
-process. It stopped before model conformance, the product reference, or any
-profiled child with `CONSUMED_NO_AUTHORITY`. No phase value or candidate result
-exists. Measure GPU, wait/readback, allocation, copy, and selection wall before
-reusable workspaces; do not import greedy GPU-argmax evidence or call the
+stopped before model work on a foreign process. Its independently preregistered
+v0.658 successor passed CPU and model conformance and completed the ordinary
+reference, then failed closed because the runner treated optional absent
+`prefill_attention_query` as mandatory. No profile, phase value, or candidate
+result exists. Measure GPU, wait/readback, allocation, copy, and selection wall
+before reusable workspaces; do not import greedy GPU-argmax evidence or call the
 allocation material in advance.
 
-1. **Positive-temperature sampling attribution successor**: v0.657 is consumed
-   without model-backed or profiled observation and must not be rerun. Under a
-   separately preregistered version and packet root, measure the current
-   full-vocabulary GPU head, wait/readback, logits copy, candidate construction,
-   retained-candidate weights, allocation, and selection wall separately on one
+1. **Positive-temperature sampling attribution parser successor**: v0.657 and
+   v0.658 are consumed and must not be rerun. v0.658 observed no profile or
+   candidate value; its observed stopping failure is a deterministic parser
+   expectation for an optional field that the exact fixture validly omits.
+   Under a separately preregistered v0.659 and new packet root, require
+   `prefill_attention_query` absent in both reference and profiles, then measure
+   the current full-vocabulary GPU head, wait/readback, logits copy, candidate
+   construction, retained-candidate weights, allocation, and selection wall on one
    named 128-output product request. This is a fresh-prompt, distribution-exact
    diagnostic; greedy GPU-argmax savings do not transfer. Authorize reusable
-   workspaces only if avoidable allocation, copy, and vector construction project
-   to both `>=5%` decode and `>=5 ms` request-wall saving while preserving
-   sampler-v1 ordering, RNG draws, errors, and seeded output exactly. Run a cheap
-   competitor preflight before CPU conformance, then retain the full host gates
-   before model conformance and every timed child. Belief high on decisiveness,
-   unknown on prize, difficulty S-M.
+   workspaces only if the adjusted candidate-specific bound is `>=5 ms` and
+   `>=5%` of complete `generation_ms` in the median and five of six children,
+   while preserving sampler-v1 ordering, RNG draws, errors, and seeded output
+   exactly. Run a cheap
+   competitor preflight before CPU conformance, then retain every full host and
+   correctness gate. Import no v0.658 reference or conformance result. Belief
+   high on decisiveness, unknown on prize, difficulty S-M.
 2. **Generic certified lm-head screening oracle**: in the frozen integrated
    cell, v0.656's compact-tail arm reduces transition-command wall by
    `14.197064 ms`, about `0.835 ms` per transition; v0.655, not v0.656, supplies
@@ -1231,13 +1235,14 @@ control. It is no longer an active experiment; keep `decode` as the default.
    `7.662 ms` total request and regresses TTFT `15.100 ms`. Schedule no repair or
    rerun. A grammar successor needs a changed bank-lifetime, lazy-organization,
    or materially longer constrained-workload premise.
-5. v0.657 is consumed before model or profile observation because its first
-   model-facing host gate found a foreign cargo test. Record no phase-size,
-   speed, model-backed or product correctness, or candidate inference and do
-   not rerun it. After that process is gone, preregister a new-root successor
-   with an early competitor preflight and retain the fresh 128-output request
-   gate. Positive-temperature attribution remains first; then run the
-   optimistic generic lm-head screening oracle before any production screener.
+5. v0.657 is consumed before model observation; v0.658 is consumed after model
+   conformance and its ordinary reference but before any profile. Record no
+   phase-size, speed, candidate, or product-performance inference from either
+   and do not rerun them. Preregister a parser-only v0.659 under a new root:
+   retain the early competitor preflight and every inherited gate, but require
+   optional `prefill_attention_query` absent for this exact fixture.
+   Positive-temperature attribution remains first; then run the optimistic
+   generic lm-head screening oracle before any production screener.
 6. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
@@ -1370,10 +1375,10 @@ control. It is no longer an active experiment; keep `decode` as the default.
 - **Positive-temperature sampling**: attribute full-head GPU wall, completion and
   readback, full-logit copy, candidate construction, retained-candidate weight
   allocation, and selection separately. Kill reusable workspace work unless
-  avoidable allocation/copy/vector construction projects to `>=5%` decode and
-  `>=5 ms` on the named 128-output request. Preserve sampler-v1 candidate order,
-  RNG draws, error behavior, and seeded output exactly. Mandatory full-logit or
-  probability work receives no avoidable-work credit.
+  its adjusted candidate-specific bound is `>=5 ms` and `>=5%` of complete
+  `generation_ms` in the median and five of six children. Preserve sampler-v1
+  candidate order, RNG draws, error behavior, and seeded output exactly.
+  Mandatory full-logit or probability work receives no avoidable-work credit.
 - **Prompt lookup**: use actual charged replay, not a mean-acceptance surrogate.
   Require median decode `>=1.10x` over the prompt fixture triad, no important row
   below `0.98x`, TTFT `<=1.03x`, and proposal CPU cost below 1% of decode wall.

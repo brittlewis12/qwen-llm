@@ -23,6 +23,7 @@ mod grammar_lm_head_row_floor;
 mod grammar_row_runtime;
 mod host_validity;
 mod integrated_grammar_row;
+mod lm_head_screening_oracle;
 mod messages;
 mod q4_mma_ceiling;
 mod response_shape_runtime;
@@ -521,6 +522,8 @@ enum Cmd {
     GrammarLmHeadRowFloor(grammar_lm_head_row_floor::GrammarLmHeadRowFloorArgs),
     /// Measure one exact A3B request with integrated grammar-row heads.
     IntegratedGrammarRow(integrated_grammar_row::IntegratedGrammarRowArgs),
+    /// Acquire the frozen v0.661 A3B lm-head screening packet.
+    LmHeadScreeningOracle(lm_head_screening_oracle::LmHeadScreeningOracleArgs),
     /// Report Metal counter-set availability for in-process counter probes.
     MetalCounters(MetalCountersArgs),
     /// Report Metal compute-pipeline resource hints for hot kernels.
@@ -1930,7 +1933,8 @@ fn fresh_prefill_scratch_for_prompt(
     .context("prefill scratch")
 }
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 struct BuildIdentity {
     schema_version: u32,
     build_commit: String,
@@ -2737,7 +2741,7 @@ fn main() -> Result<()> {
         allow_unverifiable: args.allow_unverifiable_build,
     };
     let _ = BUILD_IDENTITY_POLICY.set(policy);
-    if !matches!(&args.cmd, Cmd::BuildInfo(_)) {
+    if !matches!(&args.cmd, Cmd::BuildInfo(_) | Cmd::LmHeadScreeningOracle(_)) {
         validate_build_identity(qwen_build_identity_packet(), policy)?;
     }
     match args.cmd {
@@ -2787,6 +2791,7 @@ fn main() -> Result<()> {
             serde_json::to_value(recorded_build_identity())?,
             capture_qwen_env(),
         ),
+        Cmd::LmHeadScreeningOracle(a) => lm_head_screening_oracle::run(a),
         Cmd::MetalCounters(a) => run_metal_counters(a),
         Cmd::MetalPipelines(a) => run_metal_pipelines(a),
         Cmd::TopologyProbe(a) => run_topology_probe(a),

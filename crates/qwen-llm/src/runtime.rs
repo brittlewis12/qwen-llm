@@ -145,6 +145,33 @@ impl Runtime {
         self.load_model_with_intent(path, config, ModelLoadIntent::ForceOnly)
     }
 
+    /// Bind and load an already-opened GGUF without resolving its path again.
+    ///
+    /// `diagnostic_path` labels telemetry and snapshots only. All metadata,
+    /// tensor bytes, retained file descriptors, and mappings come from `gguf`.
+    pub fn load_opened_gguf(
+        &self,
+        gguf: GgufFile,
+        diagnostic_path: impl Into<PathBuf>,
+    ) -> Result<LoadedModel, RuntimeError> {
+        self.load_opened_gguf_with_config(gguf, diagnostic_path, LoadedModelConfig::default())
+    }
+
+    /// Configured form of [`Runtime::load_opened_gguf`].
+    pub fn load_opened_gguf_with_config(
+        &self,
+        gguf: GgufFile,
+        diagnostic_path: impl Into<PathBuf>,
+        config: LoadedModelConfig,
+    ) -> Result<LoadedModel, RuntimeError> {
+        self.load_opened_gguf_with_intent(
+            gguf,
+            diagnostic_path.into(),
+            config,
+            ModelLoadIntent::ForceOnly,
+        )
+    }
+
     /// Load for a disposable single-turn request, permitting authenticated
     /// cold-load policies that remain disabled for reusable model instances.
     pub fn load_model_for_disposable_single_turn_with_config(
@@ -163,6 +190,16 @@ impl Runtime {
     ) -> Result<LoadedModel, RuntimeError> {
         let path = path.as_ref();
         let gguf = GgufFile::open(path)?;
+        self.load_opened_gguf_with_intent(gguf, path.to_path_buf(), config, intent)
+    }
+
+    fn load_opened_gguf_with_intent(
+        &self,
+        gguf: GgufFile,
+        diagnostic_path: PathBuf,
+        config: LoadedModelConfig,
+        intent: ModelLoadIntent,
+    ) -> Result<LoadedModel, RuntimeError> {
         let bound = Model::from_gguf(&gguf)?;
         let prepared = MetalModel::prepare_load_with_options(
             self.context(),
@@ -171,11 +208,11 @@ impl Runtime {
             intent.metal_options(),
         )?;
         let prefetch_outcome = apply_prefetch_policy(&gguf, &config, prepared.prefetch_advice());
-        let identity_shards = snapshot_shard_identity_inputs(&gguf);
+        let identity_shards = snapshot_shard_identity_inputs(&gguf)?;
         let metal_model = MetalModel::load_prepared(prepared)?;
         Ok(LoadedModel {
             runtime: self.clone(),
-            path: path.to_path_buf(),
+            path: diagnostic_path,
             gguf,
             metal_model,
             identity_shards,
@@ -406,6 +443,24 @@ fn apply_shard_prefetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opened_gguf_load_seam_consumes_owned_object() {
+        fn accepts_owned_opened_seam(
+            _method: for<'a> fn(
+                &'a Runtime,
+                GgufFile,
+                PathBuf,
+            ) -> Result<LoadedModel, RuntimeError>,
+        ) {
+        }
+        let method: for<'a> fn(
+            &'a Runtime,
+            GgufFile,
+            PathBuf,
+        ) -> Result<LoadedModel, RuntimeError> = Runtime::load_opened_gguf;
+        accepts_owned_opened_seam(method);
+    }
 
     #[test]
     fn model_owner_tokens_reject_cross_model_state() {
@@ -1471,22 +1526,28 @@ fn hash_value(h: &mut u64, value: &Value) {
     }
 }
 
-fn snapshot_shard_identity_inputs(gguf: &GgufFile) -> Vec<SnapshotShardIdentityInput> {
-    gguf.shards
+fn snapshot_shard_identity_inputs(
+    gguf: &GgufFile,
+) -> Result<Vec<SnapshotShardIdentityInput>, RuntimeError> {
+    let stamps = gguf.revalidate_retained_shard_stamps()?;
+    Ok(gguf
+        .shards
         .iter()
-        .map(|shard| {
-            let metadata = std::fs::metadata(&shard.path).ok();
-            SnapshotShardIdentityInput {
-                path: shard.path.display().to_string(),
-                mapped_len: shard.mmap.len() as u64,
-                file_len: metadata.as_ref().map(std::fs::Metadata::len),
-                modified_nanos: metadata
-                    .and_then(|value| value.modified().ok())
-                    .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|value| value.as_nanos() as u64),
-            }
+        .zip(stamps)
+        .map(|(shard, stamp)| SnapshotShardIdentityInput {
+            path: shard.path.display().to_string(),
+            mapped_len: shard.mmap.len() as u64,
+            file_len: Some(stamp.size),
+            modified_nanos: u64::try_from(stamp.mtime_sec)
+                .ok()
+                .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+                .and_then(|base| {
+                    u64::try_from(stamp.mtime_nsec)
+                        .ok()
+                        .and_then(|nanos| base.checked_add(nanos))
+                }),
         })
-        .collect()
+        .collect())
 }
 
 fn snapshot_identity_parts(

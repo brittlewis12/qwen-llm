@@ -231,6 +231,30 @@ impl GgufFile {
         })
     }
 
+    /// Parse an already-opened single-shard GGUF.
+    ///
+    /// `diagnostic_path` is never resolved; it is retained only for errors and
+    /// diagnostics. Both the mmap and metadata parser are bound to `file`.
+    pub fn from_opened_file(
+        file: File,
+        diagnostic_path: impl Into<PathBuf>,
+    ) -> Result<Self, GgufError> {
+        let diagnostic_path = diagnostic_path.into();
+        let loaded = open_one_shard_file(file, &diagnostic_path, 0)?;
+        let split_count = metadata_u64(&loaded.model, SPLIT_COUNT_KEY).unwrap_or(0);
+        if split_count > 1 {
+            return Err(GgufError::Decode(format!(
+                "opened-file constructor requires one shard, but split.count is {split_count} in {}",
+                diagnostic_path.display()
+            )));
+        }
+        Ok(Self {
+            shards: vec![loaded.shard],
+            tensors: loaded.tensors,
+            model: loaded.model,
+        })
+    }
+
     pub fn primary_shard(&self) -> &GgufShard {
         &self.shards[0]
     }
@@ -548,8 +572,16 @@ fn token_id_to_i32(key: &'static str, value: u64) -> Result<i32, GgufError> {
 }
 
 fn open_one_shard(path: &Path, shard_idx: usize) -> Result<LoadedShard, GgufError> {
-    // Open + mmap the file. mmap is the source of truth for tensor data.
-    let file = Arc::new(File::open(path)?);
+    open_one_shard_file(File::open(path)?, path, shard_idx)
+}
+
+fn open_one_shard_file(
+    file: File,
+    path: &Path,
+    shard_idx: usize,
+) -> Result<LoadedShard, GgufError> {
+    // mmap is the source of truth for tensor data.
+    let file = Arc::new(file);
     let baseline_source_stamp = source_stamp(file.as_ref()).map_err(GgufError::Io)?;
     // SAFETY: regular file held for the lifetime of `Self`. Memory mapping a
     // file handed to us by the user is the standard path; if the file is
@@ -1681,6 +1713,57 @@ mod tests {
         drop(g);
         assert_eq!(&retained[..4], &GGUF_MAGIC.to_le_bytes());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn opened_file_constructor_uses_supplied_file_identity() {
+        use std::os::unix::fs::MetadataExt;
+
+        let original = build_minimal_gguf();
+        let path = write_temp(&original);
+        let moved = path.with_extension("opened-original.gguf");
+        let file = File::open(&path).unwrap();
+        let opened_inode = file.metadata().unwrap().ino();
+        std::fs::rename(&path, &moved).unwrap();
+        write_file(
+            &path,
+            &build_test_gguf(
+                &[],
+                &[TestTensor {
+                    name: "replacement",
+                    value: 2.0,
+                }],
+            ),
+        );
+
+        let gguf = GgufFile::from_opened_file(file, &path).unwrap();
+        assert_eq!(gguf.tensors[0].name, "t");
+        assert_eq!(
+            gguf.revalidate_retained_shard_stamps().unwrap()[0].inode,
+            opened_inode
+        );
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), opened_inode);
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(moved).unwrap();
+    }
+
+    #[test]
+    fn opened_file_constructor_rejects_split_metadata() {
+        let path = write_temp(&build_split_shard(
+            0,
+            2,
+            1,
+            &[TestTensor {
+                name: "t",
+                value: 1.0,
+            }],
+        ));
+        let error = GgufFile::from_opened_file(File::open(&path).unwrap(), &path)
+            .err()
+            .expect("split metadata must be rejected");
+        assert!(error.to_string().contains("requires one shard"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

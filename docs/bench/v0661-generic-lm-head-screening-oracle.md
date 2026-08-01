@@ -211,6 +211,13 @@ payload high-water proxies. Label them as payload proxies that exclude allocator
 metadata, spare BigInt capacity, and allocator overhead. This correction grants
 no production memory or wall-time premise.
 
+The owned-`Vec` proxy covers explicit raw-capture and analyzer work-unit vectors
+through construction of the analyzer result. It excludes `String`, Serde/JSON,
+hash, manifest, semantic-reread, and sealing codec allocations, whose capacities
+are library implementation details rather than candidate working state. Raw F32
+capture and block-norm persistence must borrow the existing little-endian slices
+so this exclusion cannot hide another full payload staging copy.
+
 Every conceptual resource has base offset zero and its own 128-byte-aligned
 allocation:
 

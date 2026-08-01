@@ -17370,7 +17370,10 @@ mod tests {
             &ordinary_snapshot,
             &structural_snapshot,
         );
-        eprintln!("[sampled-structural-a3b] exact rows/state PASS");
+        eprintln!(
+            "[sampled-structural-a3b] exact rows/state PASS \
+             prompt_token_sha256=fb4bbb4dc66ca7d219099e2974e787ef976f80789cde3e48b8a905dceece1f9f"
+        );
     }
 
     #[test]

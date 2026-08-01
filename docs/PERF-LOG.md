@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-01 - v0.660 Structural Sampled Decode GO
+
+Status: `GO` with `authority=["exact-frozen-fixture-policy-review"]`. The
+bounded-top-k plus borrowed-transition-logits force path clears every frozen
+gate. Policy retains the hidden, default-off exact-A3B path; no default
+admission, broader sampling claim, or second timing packet is authorized.
+
+- Clean build/runtime/source identity matches at `e34906e`. The 17-test sampler
+  suite, 60-test CLI suite, and exact A3B row/state/continuation test pass.
+- Median paired generation saving is `5.002899%`, with 6/6 positive pairs.
+  AB/BA medians are `4.937845%` and `5.232855%`; the headline gate clears by
+  only `0.002899` percentage points.
+- Median model-ready request saving is `61.094834 ms`, with 6/6 positive pairs.
+  AB/BA medians are `60.782459` and `61.844625 ms`.
+- Median TTFT delta is `+1.962104 ms`; median spawn-to-exit saving is
+  `46.533751 ms`. Pair 2 reaches `+15.610708 ms` TTFT, so do not claim uniform
+  TTFT nonregression.
+- Every B child executes 127 validated borrowed transitions with zero transition
+  logits-copy bytes, full candidate-vector allocations, fallbacks, extra command
+  buffers, or GPU sampling dispatches. All 12 outputs and terminal semantics
+  agree.
+- All 14 host gates pass. VM occupancy has no fatal growth, and all 79
+  nonterminal inventory entries match the sole canonical decision.
+
+Artifacts: `target/profiles/v0660-a3b-sampled-structural-product-p1/`.
+Decision SHA-256:
+`293edd588337cd14119315703344ed4a292ddf6e7debf291fe54112dd96a8c47`.
+Summary:
+`docs/bench/v0660-a3b-sampled-structural-product-result.md`.
+Post-acquisition independent review: `cx` session
+`019fbd7c-16da-7103-93ab-4a034d14cd76`.
+
 ## 2026-07-31 - v0.659 Sampling Attribution Structural GO
 
 Status: `GO_BOUNDED_IMPLEMENTATION` with `authority=["structural"]` and one

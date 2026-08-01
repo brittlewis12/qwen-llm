@@ -1069,31 +1069,18 @@ Two narrow follow-ons survive. Replace the misleading
 `has_managed_blobs` accounting scan only with a separately documented may-exist
 hint that may short-circuit on the first recognized nofollow regular blob; full
 scans remain mandatory for eviction, publication, budgeting, and integrity.
-Positive-temperature product decode also deserves one attribution profile:
-current execution allocates and copies a full-vocabulary logits `Vec`, constructs
-a full-vocabulary candidate vector before top-k truncation, and then allocates
-probability weights for the retained candidates on every transition. v0.657
-stopped before model work on a foreign process. Its independently preregistered
-v0.658 successor passed CPU and model conformance and completed the ordinary
-reference, then failed closed because the runner treated optional absent
-`prefill_attention_query` as mandatory. No profile, phase value, or candidate
-result exists. Measure GPU, wait/readback, allocation, copy, and selection wall
-before reusable workspaces; do not import greedy GPU-argmax evidence or call the
-allocation material in advance.
 
-1. **Exact bounded top-k plus borrowed transition logits**: v0.659 grants one
-   structural implementation packet. Workspace, borrowed-logit-only, and their
-   nonstructural combination clear `0/6` and are closed in this exact cell. The
-   structural bound clears `6/6` at adjusted median `81.400598 ms`, or
-   `6.545897%` of complete generation. Build one exact bounded top-k scan over
-   every logit, retain and order 200 candidates under sampler-v1 total order,
-   and sample decode transitions from a scoped completed Shared F32 row without
-   full allocation/copy. Keep prompt logits owned and preserve all filter, RNG,
-   error, callback, stop, state, and pending-token semantics. Gate on paired
-   generation `>=5%`, model-ready request saving `>=5 ms`, five of six wins in
-   both, positive AB/BA strata, TTFT regression `<=10 ms`, and nonregressive
-   spawn-to-exit wall. Prize medium, belief medium-high, difficulty M.
-2. **Generic certified lm-head screening oracle**: in the frozen integrated
+Positive-temperature product decode now has one realized structural result.
+v0.659 closes workspace-only, borrowed-only, and their nonstructural combination,
+then authorizes one combined packet. v0.660 consumes that packet and seals `GO`
+on the exact frozen A3B fixture: median generation saving `5.002899%` and request
+saving `61.094834 ms`, both with 6/6 positive pairs; median TTFT delta is
+`+1.962104 ms` and spawn saving is `46.533751 ms`. Policy retains the hidden,
+default-off exact-profile switch. The generation gate clears by only `0.002899`
+percentage points, so do not claim robust per-run `>=5%`, uniform TTFT
+nonregression, default admission, broader transfer, or another timing packet.
+
+1. **Generic certified lm-head screening oracle**: in the frozen integrated
    cell, v0.656's compact-tail arm reduces transition-command wall by
    `14.197064 ms`, about `0.835 ms` per transition; v0.655, not v0.656, supplies
    isolated primitive authority. Run only the existing optimistic screening
@@ -1103,14 +1090,14 @@ allocation material in advance.
    screening, survivors, and any second pass. This is exact argmax and
    greedy-only, not positive-temperature distribution authority. Belief
    medium-low, prize medium, difficulty M-H.
-3. **Direct-to-session checkpoint-restore floor**: this is exact process-cold
+2. **Direct-to-session checkpoint-restore floor**: this is exact process-cold
    continuation, not fresh-prompt acceleration. Preregister `>=60 ms` restore
    saving on the frozen `582,854,188`-byte record. Populate a disposable session
    through checked positional reads, hash canonical wire order before GPU use,
    and discard the whole candidate on any short read, EOF, shape, inode, or
    digest failure. The current `60-80 ms` band is non-causal sizing, not evidence.
    Belief medium, prize bounded, difficulty M.
-4. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
+3. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
    sole packet unsealed before the first durable child launch. The no-payload
    headroom probe passed, but ordered hashing of all three shards followed by a
    global full-residency check found shard 1 nonresident. A post-stop diagnostic
@@ -1118,7 +1105,7 @@ allocation material in advance.
    `1,671,006/1,671,038` resident pages in read order. This invalidates the exact
    conditioning method, not either population arm; no timing or effect estimate
    exists. Reopen only with current deployment relevance and a changed-premise,
-   phase-local physical-I/O oracle. It does not outrank items 1-3.
+   phase-local physical-I/O oracle. It does not outrank the active items above.
 
    v0.653 accepts v0.538's exact native-embedding stream/warm parity and v0.594's
    split-resource proof only as a benchmark-local force-native premise. Its sole
@@ -1132,7 +1119,7 @@ allocation material in advance.
    packet supplies no native default, runtime loader, product, or mechanism
    authority.
 
-5. **High-ceiling structural options**: true-long attention needs a source-free
+4. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different
@@ -1143,12 +1130,12 @@ v0.652 neither answers nor closes; it is intentionally deprioritized below the
 active queue on leverage.
 
 Checkpoint durability and the may-exist probe may run as CPU-only work without
-displacing items 1-5. Sampled-product attribution is conditional timed Metal
-work and remains serialized. A direct-restore codec/population floor is CPU-only
-only while it issues no GPU command; product continuation remains serialized and
-reuse-only. `MTLIO` is a conditional fresh-load population primitive whose timed
-floor remains serialized; without a live A10B baseline it does not preempt the
-active queue.
+displacing items 1-4. v0.660 consumes the sole sampled-product timing packet and
+completes its no-new-performance policy review; no sampled-product work remains.
+A direct-restore codec/population floor is CPU-only only while it issues no GPU
+command; product continuation remains serialized and reuse-only. `MTLIO` is a
+conditional fresh-load population primitive whose timed floor remains
+serialized; without a live A10B baseline it does not preempt the active queue.
 
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
@@ -1230,12 +1217,13 @@ control. It is no longer an active experiment; keep `decode` as the default.
    `7.662 ms` total request and regresses TTFT `15.100 ms`. Schedule no repair or
    rerun. A grammar successor needs a changed bank-lifetime, lazy-organization,
    or materially longer constrained-workload premise.
-5. v0.659 clears only the structural sampling bound and authorizes one exact
-   combined implementation packet. Do not build workspace-only, borrowed-only,
-   GPU-sampling, or prompt-borrowing variants. Run the bounded-top-k plus scoped
-   transition-logits packet next under its complete generation/request gates;
-   then run the optimistic generic lm-head screening oracle before any
-   production screener.
+5. v0.659 clears only the structural sampling bound; v0.660 consumes its sole
+   packet and clears the exact frozen fixture at `5.002899%` median generation
+   saving and `61.094834 ms` request saving, both 6/6 positive. Retain only the
+   hidden, default-off exact-A3B force path. Do not rerun, widen, automatically
+   admit, or build workspace-only, borrowed-only, GPU-sampling, or
+   prompt-borrowing variants. Run the optimistic generic lm-head screening
+   oracle next before any production screener.
 6. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.
@@ -1372,11 +1360,14 @@ control. It is no longer an active experiment; keep `decode` as the default.
   `generation_ms` in the median and five of six children. Preserve sampler-v1
   candidate order, RNG draws, error behavior, and seeded output exactly.
   Mandatory full-logit or probability work receives no avoidable-work credit.
-  On the exact v0.659 fixture and current mechanism, v0.659 closes W/B/C and
-  clears only S at `81.400598 ms` / `6.545897%`, 6/6. Its one successor must
-  combine exact bounded top-k with scoped transition-row consumption and clear
-  paired `>=5%` generation plus `>=5 ms` absolute request saving without TTFT or
-  spawn-to-exit regression.
+  On the exact fixture and current mechanism, v0.659 closes W/B/C and clears
+  only S at `81.400598 ms` / `6.545897%`, 6/6. v0.660 consumes the sole
+  successor and clears all frozen gates: median generation saving `5.002899%`,
+  request saving `61.094834 ms`, TTFT delta `+1.962104 ms`, and spawn saving
+  `46.533751 ms`, with 6/6 generation and request wins. The narrow headline
+  margin and one `+15.610708 ms` TTFT pair permit only the hidden default-off
+  exact-profile path, not default admission, broader transfer, or another
+  timing packet.
 - **Prompt lookup**: use actual charged replay, not a mean-acceptance surrogate.
   Require median decode `>=1.10x` over the prompt fixture triad, no important row
   below `0.98x`, TTFT `<=1.03x`, and proposal CPU cost below 1% of decode wall.

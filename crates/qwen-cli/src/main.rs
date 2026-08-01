@@ -16,14 +16,19 @@ use qwen_llm::metal_dflash::{
     PrefillScratchOverlayStats, PrefillScratchPlan, ensure_prompt_lookup_n8_supported,
     plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
 };
-use qwen_llm::metal_forward::{MetalForward, MfError, SnapshotValidationError};
+use qwen_llm::metal_forward::{
+    LogitsReadbackProfile, MetalForward, MfError, SnapshotValidationError, TokenProfile,
+};
 use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
 use qwen_llm::runtime::{
     LoadedModel, LoadedModelConfig, PreparedCheckpoint, Runtime, RuntimeError, Sequence,
     SequenceConfig,
 };
-use qwen_llm::sampling::{GreedySelection, SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig};
+use qwen_llm::sampling::{
+    GreedySelection, SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig, SamplingPhaseProfile,
+};
+use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::Tokenizer;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -233,6 +238,19 @@ struct Args {
     /// Run one identical warm follow-up for paired request timing.
     #[arg(long)]
     request_timing_warm_followup: bool,
+
+    /// Attribute sampler-v1 and full-logit host work on the frozen A3B request.
+    #[arg(
+        long,
+        requires = "request_timings",
+        conflicts_with_all = [
+            "requests_jsonl",
+            "request_timing_warm_followup",
+            "prompt_lookup",
+            "durable_prefix_cache"
+        ]
+    )]
+    sampling_attribution: bool,
 
     /// Do not ask the tokenizer to add model-defined special tokens.
     #[arg(long)]
@@ -455,6 +473,402 @@ struct SamplingTelemetry {
     draws: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct CountSummary {
+    total: u64,
+    min: u64,
+    max: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SamplingClockProbe {
+    batches: u32,
+    iterations_per_batch: u64,
+    pair_ns: [f64; 7],
+    upper_pair_ns: f64,
+    new_timer_spans: u64,
+    observer_upper_ms: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SamplerAttribution {
+    calls: u64,
+    timer_spans: u64,
+    input_logits_total: u64,
+    input_logits_min: u64,
+    input_logits_max: u64,
+    wall_ms: f64,
+    shape_validation_ms: f64,
+    candidate_alloc_ms: f64,
+    candidate_fill_ms: f64,
+    top_k_order_ms: f64,
+    min_p_ms: f64,
+    positive_infinity_ms: f64,
+    temperature_scale_ms: f64,
+    probability_weights_ms: f64,
+    top_p_ms: f64,
+    categorical_ms: f64,
+    residual_ms: f64,
+    candidate_capacity_bytes_total: u64,
+    candidate_capacity_bytes_peak: u64,
+    probability_capacity_bytes_total: u64,
+    probability_capacity_bytes_peak: u64,
+    after_top_k: CountSummary,
+    after_min_p: CountSummary,
+    after_positive_infinity: CountSummary,
+    after_top_p: CountSummary,
+    candidate_index: CountSummary,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct TransitionAttribution {
+    calls: u64,
+    new_timer_spans: u64,
+    logits_bytes_per_call: u64,
+    logits_bytes_total: u64,
+    outer_wall_ms: f64,
+    inner_wall_ms: f64,
+    cpu_encode_ms: f64,
+    completion_wait_ms: f64,
+    gpu_ms_nested: f64,
+    logits_alloc_zero_ms: f64,
+    logits_copy_ms: f64,
+    inner_residual_ms: f64,
+    outer_wrapper_advance_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct SamplingAttributionBounds {
+    observer_upper_ms: f64,
+    workspace_raw_ms: f64,
+    workspace_adjusted_ms: f64,
+    workspace_adjusted_fraction: f64,
+    borrowed_raw_ms: f64,
+    borrowed_adjusted_ms: f64,
+    borrowed_adjusted_fraction: f64,
+    combined_raw_ms: f64,
+    combined_adjusted_ms: f64,
+    combined_adjusted_fraction: f64,
+    structural_raw_ms: f64,
+    structural_adjusted_ms: f64,
+    structural_adjusted_fraction: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SamplingAttribution {
+    version: u32,
+    prompt_token_ids_sha256: String,
+    clock_probe: SamplingClockProbe,
+    sampler: SamplerAttribution,
+    transitions: TransitionAttribution,
+    bounds: SamplingAttributionBounds,
+}
+
+#[derive(Debug, Default)]
+struct CountAccumulator {
+    total: u64,
+    min: Option<u64>,
+    max: u64,
+}
+
+impl CountAccumulator {
+    fn record(&mut self, value: usize, label: &str) -> Result<()> {
+        let value = u64::try_from(value).with_context(|| format!("{label} does not fit u64"))?;
+        self.total = self
+            .total
+            .checked_add(value)
+            .with_context(|| format!("{label} total overflow"))?;
+        self.min = Some(self.min.map_or(value, |current| current.min(value)));
+        self.max = self.max.max(value);
+        Ok(())
+    }
+
+    fn finish(self) -> CountSummary {
+        CountSummary {
+            total: self.total,
+            min: self.min.unwrap_or(0),
+            max: self.max,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SamplerAttributionAccumulator {
+    calls: u64,
+    timer_spans: u64,
+    input_logits: CountAccumulator,
+    wall_ms: f64,
+    shape_validation_ms: f64,
+    candidate_alloc_ms: f64,
+    candidate_fill_ms: f64,
+    top_k_order_ms: f64,
+    min_p_ms: f64,
+    positive_infinity_ms: f64,
+    temperature_scale_ms: f64,
+    probability_weights_ms: f64,
+    top_p_ms: f64,
+    categorical_ms: f64,
+    residual_ms: f64,
+    candidate_capacity_bytes_total: u64,
+    candidate_capacity_bytes_peak: u64,
+    probability_capacity_bytes_total: u64,
+    probability_capacity_bytes_peak: u64,
+    after_top_k: CountAccumulator,
+    after_min_p: CountAccumulator,
+    after_positive_infinity: CountAccumulator,
+    after_top_p: CountAccumulator,
+    candidate_index: CountAccumulator,
+}
+
+impl SamplerAttributionAccumulator {
+    fn record(&mut self, profile: SamplingPhaseProfile) -> Result<()> {
+        ensure!(
+            profile.input_logits > 0
+                && profile.after_top_k > 0
+                && profile.after_top_k <= profile.input_logits
+                && profile.after_min_p > 0
+                && profile.after_min_p <= profile.after_top_k
+                && profile.after_positive_infinity > 0
+                && profile.after_positive_infinity <= profile.after_min_p
+                && profile.after_top_p > 0
+                && profile.after_top_p <= profile.after_positive_infinity
+                && profile.candidate_index < profile.after_top_p,
+            "profiled sampler support accounting is invalid"
+        );
+        self.calls = self.calls.checked_add(1).context("sampler call overflow")?;
+        self.timer_spans = self
+            .timer_spans
+            .checked_add(u64::from(profile.timer_spans))
+            .context("sampler timer-span overflow")?;
+        self.input_logits
+            .record(profile.input_logits, "input logits")?;
+        self.wall_ms += profile.total_ms;
+        self.shape_validation_ms += profile.shape_validation_ms;
+        self.candidate_alloc_ms += profile.candidate_alloc_ms;
+        self.candidate_fill_ms += profile.candidate_fill_ms;
+        self.top_k_order_ms += profile.top_k_order_ms;
+        self.min_p_ms += profile.min_p_ms;
+        self.positive_infinity_ms += profile.positive_infinity_ms;
+        self.temperature_scale_ms += profile.temperature_scale_ms;
+        self.probability_weights_ms += profile.probability_weights_ms;
+        self.top_p_ms += profile.top_p_ms;
+        self.categorical_ms += profile.categorical_ms;
+        self.residual_ms += profile.residual_ms;
+
+        let candidate_bytes = u64::try_from(profile.candidate_capacity_bytes)
+            .context("candidate capacity bytes do not fit u64")?;
+        self.candidate_capacity_bytes_total = self
+            .candidate_capacity_bytes_total
+            .checked_add(candidate_bytes)
+            .context("candidate capacity-byte total overflow")?;
+        self.candidate_capacity_bytes_peak =
+            self.candidate_capacity_bytes_peak.max(candidate_bytes);
+        let probability_bytes = u64::try_from(profile.probability_capacity_bytes)
+            .context("probability capacity bytes do not fit u64")?;
+        self.probability_capacity_bytes_total = self
+            .probability_capacity_bytes_total
+            .checked_add(probability_bytes)
+            .context("probability capacity-byte total overflow")?;
+        self.probability_capacity_bytes_peak =
+            self.probability_capacity_bytes_peak.max(probability_bytes);
+
+        self.after_top_k
+            .record(profile.after_top_k, "after top-k")?;
+        self.after_min_p
+            .record(profile.after_min_p, "after min-p")?;
+        self.after_positive_infinity.record(
+            profile.after_positive_infinity,
+            "after positive-infinity filter",
+        )?;
+        self.after_top_p
+            .record(profile.after_top_p, "after top-p")?;
+        self.candidate_index
+            .record(profile.candidate_index, "candidate index")?;
+        Ok(())
+    }
+
+    fn finish(self) -> SamplerAttribution {
+        SamplerAttribution {
+            calls: self.calls,
+            timer_spans: self.timer_spans,
+            input_logits_total: self.input_logits.total,
+            input_logits_min: self.input_logits.min.unwrap_or(0),
+            input_logits_max: self.input_logits.max,
+            wall_ms: self.wall_ms,
+            shape_validation_ms: self.shape_validation_ms,
+            candidate_alloc_ms: self.candidate_alloc_ms,
+            candidate_fill_ms: self.candidate_fill_ms,
+            top_k_order_ms: self.top_k_order_ms,
+            min_p_ms: self.min_p_ms,
+            positive_infinity_ms: self.positive_infinity_ms,
+            temperature_scale_ms: self.temperature_scale_ms,
+            probability_weights_ms: self.probability_weights_ms,
+            top_p_ms: self.top_p_ms,
+            categorical_ms: self.categorical_ms,
+            residual_ms: self.residual_ms,
+            candidate_capacity_bytes_total: self.candidate_capacity_bytes_total,
+            candidate_capacity_bytes_peak: self.candidate_capacity_bytes_peak,
+            probability_capacity_bytes_total: self.probability_capacity_bytes_total,
+            probability_capacity_bytes_peak: self.probability_capacity_bytes_peak,
+            after_top_k: self.after_top_k.finish(),
+            after_min_p: self.after_min_p.finish(),
+            after_positive_infinity: self.after_positive_infinity.finish(),
+            after_top_p: self.after_top_p.finish(),
+            candidate_index: self.candidate_index.finish(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct TransitionAttributionAccumulator {
+    calls: u64,
+    new_timer_spans: u64,
+    logits_bytes_per_call: Option<u64>,
+    logits_bytes_total: u64,
+    inner_wall_ms: f64,
+    cpu_encode_ms: f64,
+    completion_wait_ms: f64,
+    gpu_ms_nested: f64,
+    logits_alloc_zero_ms: f64,
+    logits_copy_ms: f64,
+    inner_residual_ms: f64,
+}
+
+impl TransitionAttributionAccumulator {
+    fn record(&mut self, token: TokenProfile, readback: LogitsReadbackProfile) -> Result<()> {
+        self.calls = self
+            .calls
+            .checked_add(1)
+            .context("transition attribution call overflow")?;
+        self.new_timer_spans = self
+            .new_timer_spans
+            .checked_add(u64::from(readback.timer_spans))
+            .context("transition timer-span overflow")?;
+        let bytes = u64::try_from(readback.bytes).context("logits bytes do not fit u64")?;
+        if let Some(expected) = self.logits_bytes_per_call {
+            ensure!(
+                bytes == expected,
+                "profiled transition logits bytes changed: {bytes} != {expected}"
+            );
+        } else {
+            self.logits_bytes_per_call = Some(bytes);
+        }
+        self.logits_bytes_total = self
+            .logits_bytes_total
+            .checked_add(bytes)
+            .context("transition logits-byte total overflow")?;
+        self.inner_wall_ms += token.total_ms;
+        self.cpu_encode_ms += token.cpu_encode_ms;
+        self.completion_wait_ms += token.cpu_to_gpu_complete_ms;
+        self.gpu_ms_nested += token.gpu_kernel_ms;
+        self.logits_alloc_zero_ms += readback.allocation_zero_fill_ms;
+        self.logits_copy_ms += readback.copy_ms;
+        self.inner_residual_ms += token.total_ms
+            - token.cpu_encode_ms
+            - token.cpu_to_gpu_complete_ms
+            - readback.allocation_zero_fill_ms
+            - readback.copy_ms;
+        Ok(())
+    }
+
+    fn finish(self, outer_wall_ms: f64) -> TransitionAttribution {
+        TransitionAttribution {
+            calls: self.calls,
+            new_timer_spans: self.new_timer_spans,
+            logits_bytes_per_call: self.logits_bytes_per_call.unwrap_or(0),
+            logits_bytes_total: self.logits_bytes_total,
+            outer_wall_ms,
+            inner_wall_ms: self.inner_wall_ms,
+            cpu_encode_ms: self.cpu_encode_ms,
+            completion_wait_ms: self.completion_wait_ms,
+            gpu_ms_nested: self.gpu_ms_nested,
+            logits_alloc_zero_ms: self.logits_alloc_zero_ms,
+            logits_copy_ms: self.logits_copy_ms,
+            inner_residual_ms: self.inner_residual_ms,
+            outer_wrapper_advance_ms: outer_wall_ms - self.inner_wall_ms,
+        }
+    }
+}
+
+fn measure_sampling_clock_probe() -> SamplingClockProbe {
+    const BATCHES: usize = 7;
+    const ITERATIONS: usize = 100_000;
+    const NEW_TIMER_SPANS: u64 = 1_662;
+    let mut pair_ns = [0.0; BATCHES];
+    for value in &mut pair_ns {
+        let batch_t0 = Instant::now();
+        for _ in 0..ITERATIONS {
+            let pair_t0 = Instant::now();
+            std::hint::black_box(pair_t0.elapsed());
+        }
+        *value = batch_t0.elapsed().as_secs_f64() * 1e9 / ITERATIONS as f64;
+    }
+    let upper_pair_ns = pair_ns.iter().copied().fold(0.0f64, f64::max).ceil();
+    SamplingClockProbe {
+        batches: BATCHES as u32,
+        iterations_per_batch: ITERATIONS as u64,
+        pair_ns,
+        upper_pair_ns,
+        new_timer_spans: NEW_TIMER_SPANS,
+        observer_upper_ms: upper_pair_ns * NEW_TIMER_SPANS as f64 / 1e6,
+    }
+}
+
+fn adjusted_bound(raw_ms: f64, observer_upper_ms: f64) -> f64 {
+    (raw_ms - observer_upper_ms).max(0.0)
+}
+
+fn bound_fraction(adjusted_ms: f64, generation_ms: f64) -> f64 {
+    if generation_ms > 0.0 {
+        adjusted_ms / generation_ms
+    } else {
+        0.0
+    }
+}
+
+fn finalize_sampling_attribution(
+    prompt_ids: &[i32],
+    clock_probe: SamplingClockProbe,
+    sampler: SamplerAttributionAccumulator,
+    transitions: TransitionAttributionAccumulator,
+    outer_transition_ms: f64,
+    generation_ms: f64,
+) -> SamplingAttribution {
+    let sampler = sampler.finish();
+    let transitions = transitions.finish(outer_transition_ms);
+    let observer_upper_ms = clock_probe.observer_upper_ms;
+    let workspace_raw_ms = transitions.logits_alloc_zero_ms + sampler.candidate_alloc_ms;
+    let borrowed_raw_ms = transitions.logits_alloc_zero_ms + transitions.logits_copy_ms;
+    let combined_raw_ms = borrowed_raw_ms + sampler.candidate_alloc_ms;
+    let structural_raw_ms = combined_raw_ms + sampler.candidate_fill_ms + sampler.top_k_order_ms;
+    let workspace_adjusted_ms = adjusted_bound(workspace_raw_ms, observer_upper_ms);
+    let borrowed_adjusted_ms = adjusted_bound(borrowed_raw_ms, observer_upper_ms);
+    let combined_adjusted_ms = adjusted_bound(combined_raw_ms, observer_upper_ms);
+    let structural_adjusted_ms = adjusted_bound(structural_raw_ms, observer_upper_ms);
+    SamplingAttribution {
+        version: 1,
+        prompt_token_ids_sha256: prompt_token_ids_sha256(prompt_ids),
+        clock_probe,
+        sampler,
+        transitions,
+        bounds: SamplingAttributionBounds {
+            observer_upper_ms,
+            workspace_raw_ms,
+            workspace_adjusted_ms,
+            workspace_adjusted_fraction: bound_fraction(workspace_adjusted_ms, generation_ms),
+            borrowed_raw_ms,
+            borrowed_adjusted_ms,
+            borrowed_adjusted_fraction: bound_fraction(borrowed_adjusted_ms, generation_ms),
+            combined_raw_ms,
+            combined_adjusted_ms,
+            combined_adjusted_fraction: bound_fraction(combined_adjusted_ms, generation_ms),
+            structural_raw_ms,
+            structural_adjusted_ms,
+            structural_adjusted_fraction: bound_fraction(structural_adjusted_ms, generation_ms),
+        },
+    }
+}
+
 impl SamplingTelemetry {
     fn sampled(config: SamplingConfig, draws: usize) -> Option<Self> {
         (config.temperature > 0.0).then_some(Self {
@@ -538,6 +952,8 @@ struct RequestTimingRow {
     decode_policy: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     sampling: Option<SamplingTelemetry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sampling_attribution: Option<SamplingAttribution>,
     terminal_token_target_transition_consumed: bool,
     no_special_tokens: bool,
     prefill_chunk_requested: PrefillChunkArg,
@@ -736,6 +1152,273 @@ fn validate_request_timing_invariants(
     Ok(())
 }
 
+fn ensure_close_ms(actual: f64, expected: f64, label: &str) -> Result<()> {
+    ensure!(
+        (actual - expected).abs() <= 0.001,
+        "{label} does not reconcile: actual={actual:.9} expected={expected:.9}"
+    );
+    Ok(())
+}
+
+fn validate_sampling_attribution_row(row: &RequestTimingRow) -> Result<()> {
+    let Some(attribution) = row.sampling_attribution.as_ref() else {
+        return Ok(());
+    };
+    let sampling = row
+        .sampling
+        .as_ref()
+        .context("sampling attribution requires sampling telemetry")?;
+    ensure!(
+        row.schema_version == 11,
+        "sampling attribution requires schema 11"
+    );
+    ensure!(
+        row.decode_policy == "sampled_cpu"
+            && row.stop_reason == StopReason::TokenLimit
+            && row.generated_tokens == 128
+            && row.transition_count == 127
+            && sampling.draws == 128
+            && row.runtime_model_id == "e6024ce53109fdf7"
+            && row.runtime_tokenizer_id == "a4b0b26f8a8c9917"
+            && row.greedy_gpu_selection_reason == "ineligible_request",
+        "sampling attribution request shape or terminal semantics changed"
+    );
+    ensure!(
+        sampling.algorithm_version == 1,
+        "sampling attribution requires sampler algorithm version 1"
+    );
+    ensure!(
+        attribution.version == 1
+            && attribution.prompt_token_ids_sha256
+                == "fb4bbb4dc66ca7d219099e2974e787ef976f80789cde3e48b8a905dceece1f9f",
+        "sampling attribution version or prompt-token identity changed"
+    );
+    let clock = &attribution.clock_probe;
+    ensure!(
+        clock.batches == 7
+            && clock.iterations_per_batch == 100_000
+            && clock.new_timer_spans == 1_662,
+        "sampling clock-probe shape changed"
+    );
+    for value in clock.pair_ns {
+        ensure!(
+            value.is_finite() && value >= 0.0,
+            "invalid clock-pair observation {value}"
+        );
+    }
+    let expected_upper = clock.pair_ns.iter().copied().fold(0.0f64, f64::max).ceil();
+    ensure_close_ms(
+        clock.upper_pair_ns / 1e6,
+        expected_upper / 1e6,
+        "clock upper bound",
+    )?;
+    ensure_close_ms(
+        clock.observer_upper_ms,
+        clock.upper_pair_ns * clock.new_timer_spans as f64 / 1e6,
+        "clock observer bound",
+    )?;
+
+    let sampler = &attribution.sampler;
+    ensure!(
+        sampler.calls == 128
+            && sampler.timer_spans == 1_408
+            && sampler.input_logits_total == 128 * 248_320
+            && sampler.input_logits_min == 248_320
+            && sampler.input_logits_max == 248_320,
+        "sampling attribution call, timer, or logits counts changed"
+    );
+    for (label, summary) in [
+        ("after_top_k", sampler.after_top_k),
+        ("after_min_p", sampler.after_min_p),
+        ("after_positive_infinity", sampler.after_positive_infinity),
+        ("after_top_p", sampler.after_top_p),
+        ("candidate_index", sampler.candidate_index),
+    ] {
+        let calls = sampler.calls;
+        ensure!(
+            summary.min <= summary.max
+                && summary.total >= calls.saturating_mul(summary.min)
+                && summary.total <= calls.saturating_mul(summary.max),
+            "invalid {label} count summary"
+        );
+    }
+    ensure!(
+        sampler.candidate_capacity_bytes_peak > 0
+            && sampler.candidate_capacity_bytes_total >= sampler.candidate_capacity_bytes_peak
+            && sampler.candidate_capacity_bytes_total
+                <= sampler
+                    .calls
+                    .saturating_mul(sampler.candidate_capacity_bytes_peak)
+            && sampler.probability_capacity_bytes_peak > 0
+            && sampler.probability_capacity_bytes_total >= sampler.probability_capacity_bytes_peak
+            && sampler.probability_capacity_bytes_total
+                <= sampler
+                    .calls
+                    .saturating_mul(sampler.probability_capacity_bytes_peak),
+        "invalid sampler capacity-byte accounting"
+    );
+    let sampler_non_residual = [
+        sampler.wall_ms,
+        sampler.shape_validation_ms,
+        sampler.candidate_alloc_ms,
+        sampler.candidate_fill_ms,
+        sampler.top_k_order_ms,
+        sampler.min_p_ms,
+        sampler.positive_infinity_ms,
+        sampler.temperature_scale_ms,
+        sampler.probability_weights_ms,
+        sampler.top_p_ms,
+        sampler.categorical_ms,
+    ];
+    ensure!(
+        sampler_non_residual
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+            && sampler.residual_ms.is_finite(),
+        "invalid sampler attribution duration"
+    );
+    let sampler_phase_sum = sampler.shape_validation_ms
+        + sampler.candidate_alloc_ms
+        + sampler.candidate_fill_ms
+        + sampler.top_k_order_ms
+        + sampler.min_p_ms
+        + sampler.positive_infinity_ms
+        + sampler.temperature_scale_ms
+        + sampler.probability_weights_ms
+        + sampler.top_p_ms
+        + sampler.categorical_ms
+        + sampler.residual_ms;
+    ensure_close_ms(sampler.wall_ms, sampler_phase_sum, "sampler phase sum")?;
+
+    let transitions = &attribution.transitions;
+    ensure!(
+        transitions.calls == 127
+            && transitions.new_timer_spans == 254
+            && transitions.logits_bytes_per_call == 993_280
+            && transitions.logits_bytes_total == 126_146_560,
+        "sampling attribution transition or logits-byte counts changed"
+    );
+    let transition_non_residual = [
+        transitions.outer_wall_ms,
+        transitions.inner_wall_ms,
+        transitions.cpu_encode_ms,
+        transitions.completion_wait_ms,
+        transitions.gpu_ms_nested,
+        transitions.logits_alloc_zero_ms,
+        transitions.logits_copy_ms,
+    ];
+    ensure!(
+        transition_non_residual
+            .iter()
+            .all(|value| value.is_finite() && *value >= 0.0)
+            && transitions.inner_residual_ms.is_finite()
+            && transitions.outer_wrapper_advance_ms.is_finite(),
+        "invalid transition attribution duration"
+    );
+    ensure_close_ms(
+        transitions.inner_wall_ms,
+        transitions.cpu_encode_ms
+            + transitions.completion_wait_ms
+            + transitions.logits_alloc_zero_ms
+            + transitions.logits_copy_ms
+            + transitions.inner_residual_ms,
+        "inner transition phase sum",
+    )?;
+    ensure_close_ms(
+        transitions.outer_wall_ms,
+        transitions.inner_wall_ms + transitions.outer_wrapper_advance_ms,
+        "outer transition phase sum",
+    )?;
+    ensure_close_ms(
+        transitions.outer_wall_ms,
+        row.transition_ms,
+        "request and attribution transition wall",
+    )?;
+    ensure!(
+        transitions.gpu_ms_nested <= transitions.completion_wait_ms + 0.001,
+        "nested GPU wall exceeds completion wait"
+    );
+
+    let bounds = attribution.bounds;
+    let expected_workspace = transitions.logits_alloc_zero_ms + sampler.candidate_alloc_ms;
+    let expected_borrowed = transitions.logits_alloc_zero_ms + transitions.logits_copy_ms;
+    let expected_combined = expected_borrowed + sampler.candidate_alloc_ms;
+    let expected_structural =
+        expected_combined + sampler.candidate_fill_ms + sampler.top_k_order_ms;
+    for (label, actual, expected) in [
+        ("workspace raw", bounds.workspace_raw_ms, expected_workspace),
+        ("borrowed raw", bounds.borrowed_raw_ms, expected_borrowed),
+        ("combined raw", bounds.combined_raw_ms, expected_combined),
+        (
+            "structural raw",
+            bounds.structural_raw_ms,
+            expected_structural,
+        ),
+    ] {
+        ensure_close_ms(actual, expected, label)?;
+    }
+    for (label, raw, adjusted, fraction) in [
+        (
+            "workspace",
+            bounds.workspace_raw_ms,
+            bounds.workspace_adjusted_ms,
+            bounds.workspace_adjusted_fraction,
+        ),
+        (
+            "borrowed",
+            bounds.borrowed_raw_ms,
+            bounds.borrowed_adjusted_ms,
+            bounds.borrowed_adjusted_fraction,
+        ),
+        (
+            "combined",
+            bounds.combined_raw_ms,
+            bounds.combined_adjusted_ms,
+            bounds.combined_adjusted_fraction,
+        ),
+        (
+            "structural",
+            bounds.structural_raw_ms,
+            bounds.structural_adjusted_ms,
+            bounds.structural_adjusted_fraction,
+        ),
+    ] {
+        let expected_adjusted = adjusted_bound(raw, bounds.observer_upper_ms);
+        ensure_close_ms(adjusted, expected_adjusted, &format!("{label} adjusted"))?;
+        let expected_fraction = bound_fraction(expected_adjusted, row.generation_ms);
+        ensure!(
+            (fraction - expected_fraction).abs() <= 1e-9,
+            "{label} adjusted fraction does not reconcile"
+        );
+    }
+    for value in [
+        bounds.observer_upper_ms,
+        bounds.workspace_raw_ms,
+        bounds.workspace_adjusted_ms,
+        bounds.workspace_adjusted_fraction,
+        bounds.borrowed_raw_ms,
+        bounds.borrowed_adjusted_ms,
+        bounds.borrowed_adjusted_fraction,
+        bounds.combined_raw_ms,
+        bounds.combined_adjusted_ms,
+        bounds.combined_adjusted_fraction,
+        bounds.structural_raw_ms,
+        bounds.structural_adjusted_ms,
+        bounds.structural_adjusted_fraction,
+    ] {
+        ensure!(
+            value.is_finite() && value >= 0.0,
+            "invalid sampling attribution bound"
+        );
+    }
+    ensure_close_ms(
+        bounds.observer_upper_ms,
+        clock.observer_upper_ms,
+        "bound observer overhead",
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 struct RequestOutput {
     id: String,
@@ -843,6 +1526,7 @@ fn main() -> Result<()> {
         "{CHECKPOINT_STAGED_INTEGRITY_ENV} requires --durable-prefix-cache"
     );
     validate_request_timing_mode(&args)?;
+    validate_sampling_attribution_mode(&args)?;
     validate_durable_prefix_cache_mode(&args)?;
 
     if args.info {
@@ -890,6 +1574,69 @@ fn validate_request_timing_mode(args: &Args) -> Result<()> {
     ensure!(
         path != Path::new("-"),
         "--request-timings requires a file path, not stdout"
+    );
+    Ok(())
+}
+
+fn validate_sampling_attribution_mode(args: &Args) -> Result<()> {
+    if !args.sampling_attribution {
+        return Ok(());
+    }
+    ensure!(
+        args.request_timings.is_some(),
+        "--sampling-attribution requires --request-timings"
+    );
+    ensure!(
+        args.prompt_file.is_some() && args.prompt.is_none() && args.messages.is_none(),
+        "--sampling-attribution requires one --prompt-file request"
+    );
+    ensure!(
+        args.requests_jsonl.is_none()
+            && !args.request_timing_warm_followup
+            && !args.prompt_lookup
+            && args.durable_prefix_cache.is_none(),
+        "--sampling-attribution is incompatible with JSONL, warm follow-up, prompt lookup, and durable cache"
+    );
+    ensure!(
+        args.tokens == 128,
+        "--sampling-attribution requires --tokens 128"
+    );
+    ensure!(
+        args.temperature.to_bits() == 0.7f32.to_bits()
+            && args.top_k == 200
+            && args.top_p.to_bits() == 1.0f32.to_bits()
+            && args.min_p.to_bits() == 0.05f32.to_bits()
+            && args.seed == 42,
+        "--sampling-attribution requires sampler-v1 qwen-chat parameters"
+    );
+    ensure!(
+        args.prefill_chunk == PrefillChunkArg::Fixed(1024) && args.max_context_tokens == Some(1024),
+        "--sampling-attribution requires chunk and context 1024"
+    );
+    ensure!(
+        args.prefix_cache_max_mib == 0
+            && args.cache_prefix_tokens.is_none()
+            && args.cache_prefix_auto_min_tokens == 0,
+        "--sampling-attribution requires zero prefix-cache admission"
+    );
+    ensure!(
+        !args.no_special_tokens,
+        "--sampling-attribution requires add_special_tokens=true"
+    );
+    ensure!(
+        !std::io::stdout().is_terminal(),
+        "--sampling-attribution requires redirected stdout"
+    );
+    let qwen_environment: Vec<_> = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key_text = key.to_string_lossy();
+            (key_text.starts_with("QWEN_") && !key_text.starts_with("QWEN_BUILD_"))
+                .then_some((key, value))
+        })
+        .collect();
+    ensure!(
+        qwen_environment.is_empty(),
+        "--sampling-attribution rejects inherited non-build QWEN_* variables"
     );
     Ok(())
 }
@@ -1035,8 +1782,11 @@ fn request_schema_version(
     has_query_topology: bool,
     has_scratch_overlay: bool,
     sampled: bool,
+    sampling_attribution: bool,
 ) -> u32 {
-    if sampled {
+    if sampling_attribution {
+        11
+    } else if sampled {
         10
     } else if prefill_chunk.is_auto() {
         9
@@ -1771,6 +2521,23 @@ fn run_single_turn(
     if args.prompt_lookup {
         ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(anyhow::Error::msg)?;
     }
+    if args.sampling_attribution {
+        let arch = loaded.arch();
+        let lm_head = &loaded.metal_model().lm_head;
+        ensure!(
+            arch.kind == ArchKind::Moe
+                && arch.n_layer == 40
+                && arch.hidden_size == 2048
+                && arch.vocab_size == 248_320
+                && loaded.gguf().get_str("general.base_model.0.name") == Some("Qwen3.6 35B A3B")
+                && loaded.gguf().get_u64("general.file_type") == Some(15)
+                && lm_head.dtype == GgmlType::Q6_K
+                && lm_head.shape.as_slice() == [2048, 248_320]
+                && std::fs::metadata(model_path)
+                    .is_ok_and(|metadata| metadata.len() == 22_134_528_992),
+            "--sampling-attribution requires the frozen Qwen3.6 35B A3B profile"
+        );
+    }
     let greedy_gpu_mode = configured_greedy_gpu_argmax_mode();
     let runtime_and_model_load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     if timing_enabled {
@@ -1788,6 +2555,7 @@ fn run_single_turn(
     } else {
         None
     };
+    let sampling_clock_probe = args.sampling_attribution.then(measure_sampling_clock_probe);
 
     ensure!(
         loaded.prefix_cache_stats().entries == 0,
@@ -1803,6 +2571,14 @@ fn run_single_turn(
     let (first_prompt, first_prompt_source, first_completed_checkpoint_eligible) =
         prompt_text(args)?;
     let first_prompt_acquisition_ms = prompt_t0.elapsed().as_secs_f64() * 1e3;
+    if args.sampling_attribution {
+        ensure!(
+            first_prompt.len() == 1_891
+                && format!("{:x}", Sha256::digest(first_prompt.as_bytes()))
+                    == "e265de9742d1b22e566fc108ae26331ccf46166c6f071e73f211e0a1a7e8b474",
+            "--sampling-attribution prompt byte identity changed"
+        );
+    }
     let tokenizer_t0 = Instant::now();
     let tokenizer = loaded.tokenizer().context("load tokenizer")?;
     let first_tokenizer_init_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
@@ -1814,6 +2590,14 @@ fn run_single_turn(
         )
         .context("tokenize prompt")?;
     let first_tokenization_ms = tokenization_t0.elapsed().as_secs_f64() * 1e3;
+    if args.sampling_attribution {
+        ensure!(
+            first_prompt_ids.len() == 419
+                && prompt_token_ids_sha256(&first_prompt_ids)
+                    == "fb4bbb4dc66ca7d219099e2974e787ef976f80789cde3e48b8a905dceece1f9f",
+            "--sampling-attribution prompt token identity changed"
+        );
+    }
     let first_prepared = PreparedRequest {
         request_start_unix_ms: first_request_start_unix_ms,
         request_t0: first_request_t0,
@@ -1843,6 +2627,7 @@ fn run_single_turn(
         stdout_sink,
         durable_store.as_ref(),
         durable_max_record_bytes,
+        sampling_clock_probe.as_ref(),
     )?;
     let mut results = vec![first];
 
@@ -1905,6 +2690,7 @@ fn run_single_turn(
             stdout_sink,
             durable_store.as_ref(),
             durable_max_record_bytes,
+            sampling_clock_probe.as_ref(),
         )?;
         let first_stop = results[0].row.as_ref().map(|row| row.stop_reason);
         let warm_stop = warm.row.as_ref().map(|row| row.stop_reason);
@@ -1994,6 +2780,7 @@ fn execute_single_turn_request(
     stdout_sink: &'static str,
     durable_store: Option<&DurableCheckpointStore>,
     durable_max_record_bytes: u64,
+    sampling_clock_probe: Option<&SamplingClockProbe>,
 ) -> Result<SingleTurnResult> {
     let PreparedRequest {
         request_start_unix_ms,
@@ -2212,7 +2999,7 @@ fn execute_single_turn_request(
     let greedy_gpu_decision =
         resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
     let use_gpu_greedy = greedy_gpu_decision.enabled;
-    let (generation, prompt_lookup_stats) = if args.prompt_lookup {
+    let (generation, prompt_lookup_stats, sampling_attribution) = if args.prompt_lookup {
         let result = generate_prompt_lookup(
             loaded,
             &forward,
@@ -2235,7 +3022,7 @@ fn execute_single_turn_request(
             },
         )?;
         sequence = result.sequence;
-        (result.generation, Some(result.stats))
+        (result.generation, Some(result.stats), None)
     } else {
         let mut on_token = |token| {
             let callback_t0 = Instant::now();
@@ -2249,48 +3036,87 @@ fn execute_single_turn_request(
             }
             Ok(())
         };
-        let generation = if use_gpu_greedy {
-            generate_gpu_greedy(
-                logits,
-                args.tokens,
-                &stop_tokens,
-                &mut sampler,
-                &mut on_token,
-                |token| {
-                    let position = sequence.position();
-                    let next = forward
-                        .single_token_greedy(
-                            token,
-                            u32::try_from(position).context("position does not fit u32")?,
-                            unsafe { sequence.metal_session_mut() },
-                        )
-                        .context("decode token with GPU greedy selection")?;
-                    sequence.advance_by(1)?;
-                    Ok(next)
-                },
-            )?
+        let (generation, sampling_attribution) = if args.sampling_attribution {
+            let (generation, sampler_attribution, transition_attribution) =
+                generate_serial_attributed(
+                    logits,
+                    args.tokens,
+                    &stop_tokens,
+                    &mut sampler,
+                    &mut on_token,
+                    |token| {
+                        let position = sequence.position();
+                        let next = forward
+                            .single_token_sampled_attribution(
+                                token,
+                                u32::try_from(position).context("position does not fit u32")?,
+                                unsafe { sequence.metal_session_mut() },
+                            )
+                            .context("decode token with sampling attribution")?;
+                        sequence.advance_by(1)?;
+                        Ok(next)
+                    },
+                )?;
+            let clock_probe = sampling_clock_probe
+                .context("sampling attribution clock probe was not prepared")?
+                .clone();
+            let attribution = finalize_sampling_attribution(
+                &prompt_ids,
+                clock_probe,
+                sampler_attribution,
+                transition_attribution,
+                generation.transition_ms,
+                generation.wall_ms,
+            );
+            (generation, Some(attribution))
+        } else if use_gpu_greedy {
+            (
+                generate_gpu_greedy(
+                    logits,
+                    args.tokens,
+                    &stop_tokens,
+                    &mut sampler,
+                    &mut on_token,
+                    |token| {
+                        let position = sequence.position();
+                        let next = forward
+                            .single_token_greedy(
+                                token,
+                                u32::try_from(position).context("position does not fit u32")?,
+                                unsafe { sequence.metal_session_mut() },
+                            )
+                            .context("decode token with GPU greedy selection")?;
+                        sequence.advance_by(1)?;
+                        Ok(next)
+                    },
+                )?,
+                None,
+            )
         } else {
-            generate_serial(
-                logits,
-                args.tokens,
-                &stop_tokens,
-                &mut sampler,
-                &mut on_token,
-                |token| {
-                    let position = sequence.position();
-                    let next = forward
-                        .single_token(
-                            token,
-                            u32::try_from(position).context("position does not fit u32")?,
-                            unsafe { sequence.metal_session_mut() },
-                        )
-                        .context("decode token")?;
-                    sequence.advance_by(1)?;
-                    Ok(next)
-                },
-            )?
+            (
+                generate_serial(
+                    logits,
+                    args.tokens,
+                    &stop_tokens,
+                    &mut sampler,
+                    &mut on_token,
+                    |token| {
+                        let position = sequence.position();
+                        let next = forward
+                            .single_token(
+                                token,
+                                u32::try_from(position).context("position does not fit u32")?,
+                                unsafe { sequence.metal_session_mut() },
+                            )
+                            .context("decode token")?;
+                        sequence.advance_by(1)?;
+                        Ok(next)
+                    },
+                )?,
+                None,
+            )
         };
-        (generation, None)
+        (generation, None, sampling_attribution)
     };
     let mut inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     let pipeline_cache_generation_exit =
@@ -2502,6 +3328,7 @@ fn execute_single_turn_request(
                 prefill_attention_query.is_some(),
                 prefill_scratch_overlay.is_some(),
                 sampling_config.temperature > 0.0,
+                args.sampling_attribution,
             ),
             request_epoch,
             request_index,
@@ -2532,6 +3359,7 @@ fn execute_single_turn_request(
             stop_reason,
             decode_policy: decode_policy_label(sampling_config, args.prompt_lookup, use_gpu_greedy),
             sampling: SamplingTelemetry::sampled(sampling_config, sampler.draws()),
+            sampling_attribution,
             terminal_token_target_transition_consumed: false,
             no_special_tokens: !prompt_add_special_tokens(args, prompt_source),
             prefill_chunk_requested: args.prefill_chunk,
@@ -2577,6 +3405,7 @@ fn execute_single_turn_request(
             row.generated_tokens,
             row.transition_count,
         )?;
+        validate_sampling_attribution_row(row)?;
     }
     Ok(SingleTurnResult {
         row,
@@ -3094,6 +3923,7 @@ fn run_jsonl_request(
             prefill_attention_query.is_some(),
             prefill_scratch_overlay.is_some(),
             sampling_config.temperature > 0.0,
+            false,
         ),
         id: id.to_string(),
         line: prepared.line,
@@ -3238,6 +4068,47 @@ where
         on_token,
         transition,
     )
+}
+
+fn generate_serial_attributed<OnToken, Transition>(
+    logits: Vec<f32>,
+    max_tokens: usize,
+    stop_tokens: &[i32],
+    sampler: &mut Sampler,
+    on_token: OnToken,
+    mut transition: Transition,
+) -> Result<(
+    GenerationResult,
+    SamplerAttributionAccumulator,
+    TransitionAttributionAccumulator,
+)>
+where
+    OnToken: FnMut(i32) -> Result<()>,
+    Transition: FnMut(i32) -> Result<(Vec<f32>, TokenProfile, LogitsReadbackProfile)>,
+{
+    ensure!(
+        sampler.config().temperature > 0.0,
+        "sampling attribution requires positive temperature"
+    );
+    let mut sampler_attribution = SamplerAttributionAccumulator::default();
+    let mut transition_attribution = TransitionAttributionAccumulator::default();
+    let generation = generate_serial_state(
+        logits,
+        max_tokens,
+        stop_tokens,
+        |logits| {
+            let (sampled, profile) = sampler.sample_profiled(logits)?;
+            sampler_attribution.record(profile)?;
+            Ok(sampled.token)
+        },
+        on_token,
+        |token| {
+            let (logits, token_profile, readback_profile) = transition(token)?;
+            transition_attribution.record(token_profile, readback_profile)?;
+            Ok(logits)
+        },
+    )?;
+    Ok((generation, sampler_attribution, transition_attribution))
 }
 
 #[derive(Debug)]
@@ -3878,6 +4749,14 @@ fn generated_token_sha256(tokens: &[i32]) -> String {
     format!("{:x}", digest.finalize())
 }
 
+fn prompt_token_ids_sha256(tokens: &[i32]) -> String {
+    let mut digest = Sha256::new();
+    for token in tokens {
+        digest.update(token.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
+
 fn open_append_file(path: &Path, label: &str) -> Result<std::fs::File> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -4311,28 +5190,147 @@ mod tests {
     #[test]
     fn request_schema_versions_include_exact_generation_telemetry() {
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Fixed(1024), false, false, false, false),
+            request_schema_version(
+                PrefillChunkArg::Fixed(1024),
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
             7
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Fixed(1024), true, false, false, false),
+            request_schema_version(
+                PrefillChunkArg::Fixed(1024),
+                true,
+                false,
+                false,
+                false,
+                false,
+            ),
             8
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Fixed(2048), false, true, true, false),
+            request_schema_version(
+                PrefillChunkArg::Fixed(2048),
+                false,
+                true,
+                true,
+                false,
+                false,
+            ),
             8
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Auto, false, false, false, false),
+            request_schema_version(PrefillChunkArg::Auto, false, false, false, false, false),
             9
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Auto, true, true, true, false),
+            request_schema_version(PrefillChunkArg::Auto, true, true, true, false, false),
             9
         );
         assert_eq!(
-            request_schema_version(PrefillChunkArg::Fixed(1024), false, false, false, true),
+            request_schema_version(
+                PrefillChunkArg::Fixed(1024),
+                false,
+                false,
+                false,
+                true,
+                false,
+            ),
             10
+        );
+        assert_eq!(
+            request_schema_version(
+                PrefillChunkArg::Fixed(1024),
+                false,
+                false,
+                false,
+                true,
+                true,
+            ),
+            11
+        );
+    }
+
+    #[test]
+    fn sampling_attribution_cli_is_narrow_and_fail_closed() {
+        let exact = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt-file",
+            "prompt.txt",
+            "--tokens",
+            "128",
+            "--temp",
+            "0.7",
+            "--top-k",
+            "200",
+            "--top-p",
+            "1.0",
+            "--min-p",
+            "0.05",
+            "--seed",
+            "42",
+            "--prefill-chunk",
+            "1024",
+            "--max-context-tokens",
+            "1024",
+            "--prefix-cache-max-mib",
+            "0",
+            "--cache-prefix-auto-min-tokens",
+            "0",
+            "--request-timings",
+            "timing.jsonl",
+            "--sampling-attribution",
+        ])
+        .unwrap();
+        assert!(validate_sampling_attribution_mode(&exact).is_ok());
+
+        let wrong_tokens = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt-file",
+            "prompt.txt",
+            "--tokens",
+            "127",
+            "--temp",
+            "0.7",
+            "--max-context-tokens",
+            "1024",
+            "--prefix-cache-max-mib",
+            "0",
+            "--cache-prefix-auto-min-tokens",
+            "0",
+            "--request-timings",
+            "timing.jsonl",
+            "--sampling-attribution",
+        ])
+        .unwrap();
+        assert!(
+            validate_sampling_attribution_mode(&wrong_tokens)
+                .unwrap_err()
+                .to_string()
+                .contains("--tokens 128")
+        );
+
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "--model",
+                "model.gguf",
+                "--prompt-file",
+                "prompt.txt",
+                "--request-timings",
+                "timing.jsonl",
+                "--request-timing-warm-followup",
+                "--sampling-attribution",
+            ])
+            .is_err(),
+            "warm follow-up must conflict at clap parsing"
         );
     }
 
@@ -5758,6 +6756,210 @@ mod tests {
         assert_eq!(telemetry.algorithm_version, SAMPLER_ALGORITHM_VERSION);
         assert_eq!(telemetry.effective_seed, config.seed);
         assert_eq!(telemetry.draws, 4);
+    }
+
+    fn fake_attributed_transition(
+        logits: Vec<f32>,
+    ) -> (Vec<f32>, TokenProfile, LogitsReadbackProfile) {
+        let bytes = logits.len() * std::mem::size_of::<f32>();
+        (
+            logits,
+            TokenProfile {
+                cpu_encode_ms: 0.1,
+                cpu_to_gpu_complete_ms: 0.7,
+                gpu_kernel_ms: 0.6,
+                total_ms: 1.0,
+                moe_cpu_route_ms: 0.0,
+                moe_cmd_count: 1,
+            },
+            LogitsReadbackProfile {
+                timer_spans: 2,
+                bytes,
+                allocation_zero_fill_ms: 0.05,
+                copy_ms: 0.1,
+            },
+        )
+    }
+
+    #[test]
+    fn attributed_generation_preserves_sampling_and_terminal_boundaries() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 1,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 42,
+        };
+        let first = vec![3.0, 2.0, 1.0, 0.0];
+        let next = vec![0.0, 3.0, 1.0, 2.0];
+
+        let mut ordinary_sampler = Sampler::new(config).unwrap();
+        let ordinary_callbacks = RefCell::new(Vec::new());
+        let ordinary = generate_serial(
+            first.clone(),
+            2,
+            &[],
+            &mut ordinary_sampler,
+            |token| {
+                ordinary_callbacks.borrow_mut().push(token);
+                Ok(())
+            },
+            |_| Ok(next.clone()),
+        )
+        .unwrap();
+
+        let mut profiled_sampler = Sampler::new(config).unwrap();
+        let profiled_callbacks = RefCell::new(Vec::new());
+        let (profiled, sampler_profile, transition_profile) = generate_serial_attributed(
+            first,
+            2,
+            &[],
+            &mut profiled_sampler,
+            |token| {
+                profiled_callbacks.borrow_mut().push(token);
+                Ok(())
+            },
+            |_| Ok(fake_attributed_transition(next.clone())),
+        )
+        .unwrap();
+        assert_eq!(profiled.tokens, ordinary.tokens);
+        assert_eq!(profiled.stop_reason, ordinary.stop_reason);
+        assert_eq!(profiled.transitions, ordinary.transitions);
+        assert_eq!(
+            profiled_callbacks.into_inner(),
+            ordinary_callbacks.into_inner()
+        );
+        assert_eq!(profiled_sampler.draws(), ordinary_sampler.draws());
+        assert_eq!(sampler_profile.calls, 2);
+        assert_eq!(sampler_profile.timer_spans, 22);
+        assert_eq!(transition_profile.calls, 1);
+        assert_eq!(transition_profile.new_timer_spans, 2);
+
+        let mut eos_sampler = Sampler::new(config).unwrap();
+        let (eos, sampler_profile, transition_profile) = generate_serial_attributed(
+            vec![3.0, 2.0],
+            4,
+            &[0],
+            &mut eos_sampler,
+            |_| -> Result<()> { panic!("EOS must not reach the callback") },
+            |_| -> Result<_> { panic!("EOS must not be transitioned") },
+        )
+        .unwrap();
+        assert_eq!(eos.tokens, [0]);
+        assert_eq!(eos.stop_reason, StopReason::Eos);
+        assert_eq!(eos.transitions, 0);
+        assert_eq!(sampler_profile.calls, 1);
+        assert_eq!(transition_profile.calls, 0);
+
+        let mut middle_eos_sampler = Sampler::new(config).unwrap();
+        let delivered = RefCell::new(Vec::new());
+        let (middle_eos, _, transition_profile) = generate_serial_attributed(
+            vec![3.0, 2.0],
+            4,
+            &[1],
+            &mut middle_eos_sampler,
+            |token| {
+                delivered.borrow_mut().push(token);
+                Ok(())
+            },
+            |_| Ok(fake_attributed_transition(vec![0.0, 3.0])),
+        )
+        .unwrap();
+        assert_eq!(middle_eos.tokens, [0, 1]);
+        assert_eq!(middle_eos.stop_reason, StopReason::Eos);
+        assert_eq!(middle_eos.transitions, 1);
+        assert_eq!(delivered.into_inner(), [0]);
+        assert_eq!(transition_profile.calls, 1);
+    }
+
+    #[test]
+    fn attributed_one_token_generation_has_no_transition() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 1,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 42,
+        };
+        let mut sampler = Sampler::new(config).unwrap();
+        let delivered = RefCell::new(Vec::new());
+        let (generation, sampler_profile, transition_profile) = generate_serial_attributed(
+            vec![0.0, 3.0],
+            1,
+            &[],
+            &mut sampler,
+            |token| {
+                delivered.borrow_mut().push(token);
+                Ok(())
+            },
+            |_| -> Result<_> { panic!("one-token output must not transition") },
+        )
+        .unwrap();
+        assert_eq!(generation.tokens, [1]);
+        assert_eq!(generation.stop_reason, StopReason::TokenLimit);
+        assert_eq!(generation.transitions, 0);
+        assert_eq!(delivered.into_inner(), [1]);
+        assert_eq!(sampler.draws(), 1);
+        assert_eq!(sampler_profile.calls, 1);
+        assert_eq!(transition_profile.calls, 0);
+    }
+
+    #[test]
+    fn attributed_generation_preserves_callback_and_transition_failures() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 1,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 42,
+        };
+        let mut callback_sampler = Sampler::new(config).unwrap();
+        let transitions = Cell::new(0usize);
+        let error = generate_serial_attributed(
+            vec![3.0, 2.0],
+            2,
+            &[],
+            &mut callback_sampler,
+            |_| bail!("callback failed"),
+            |_| {
+                transitions.set(transitions.get() + 1);
+                Ok(fake_attributed_transition(vec![3.0, 2.0]))
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("callback failed"));
+        assert_eq!(transitions.get(), 0);
+
+        let mut transition_sampler = Sampler::new(config).unwrap();
+        let callbacks = Cell::new(0usize);
+        let error = generate_serial_attributed(
+            vec![3.0, 2.0],
+            2,
+            &[],
+            &mut transition_sampler,
+            |_| {
+                callbacks.set(callbacks.get() + 1);
+                Ok(())
+            },
+            |_| bail!("transition failed"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("transition failed"));
+        assert_eq!(callbacks.get(), 1);
+    }
+
+    #[test]
+    fn sampling_clock_probe_and_prompt_digest_match_frozen_contract() {
+        let probe = measure_sampling_clock_probe();
+        assert_eq!(probe.batches, 7);
+        assert_eq!(probe.iterations_per_batch, 100_000);
+        assert_eq!(probe.new_timer_spans, 1_662);
+        assert!(probe.pair_ns.iter().all(|value| *value >= 0.0));
+        assert!(probe.upper_pair_ns >= probe.pair_ns.iter().copied().fold(0.0, f64::max));
+        assert_eq!(
+            prompt_token_ids_sha256(&[1, -2, 248_319]),
+            "3f37364bc87f9ff835c64d4bdb3d993fe35e530097697da8cbacb5e6f92119d5"
+        );
     }
 
     #[test]

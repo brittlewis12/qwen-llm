@@ -7863,6 +7863,71 @@ impl<'a> MetalForward<'a> {
         Ok((out, profile))
     }
 
+    /// Run the production concurrent-MoE full-logit transition with opt-in
+    /// attribution around only the existing host destination allocation and
+    /// Shared-buffer copy.
+    pub fn single_token_sampled_attribution(
+        &self,
+        token_id: i32,
+        position: u32,
+        session: &mut MetalSession,
+    ) -> Result<(Vec<f32>, TokenProfile, LogitsReadbackProfile), MfError> {
+        if !concurrent_gdn_moe_decode_enabled() {
+            return Err(MfError::Metal(MetalError::BadShape {
+                kernel: "sampling_attribution",
+                detail: "requires the production concurrent-GDN MoE decode path".into(),
+            }));
+        }
+        let (mut profile, evidence, t_total) = self
+            .single_token_profiled_concurrent_gdn_moe_tail_inner(
+                token_id,
+                position,
+                session,
+                LmHeadTail::Resident,
+                false,
+            )?;
+        debug_assert_eq!(evidence.kind, LmHeadTailKind::Resident);
+
+        let allocation_t0 = std::time::Instant::now();
+        let mut out = vec![0.0f32; self.model.arch.vocab_size as usize];
+        let allocation_zero_fill_ms = allocation_t0.elapsed().as_secs_f64() * 1e3;
+        if session.logits.dtype != GgmlType::F32 || session.logits.n_elements() < out.len() as u64 {
+            return Err(lm_head_tail_error(
+                "sampled logits readback requires a complete F32 logits row",
+            ));
+        }
+        let bytes = out
+            .len()
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| lm_head_tail_error("sampled logits byte size overflow"))?;
+        let (source_start, _) =
+            checked_tail_range(&session.logits, bytes, "sampled logits readback")?;
+        if source_start % std::mem::align_of::<f32>() != 0 {
+            return Err(lm_head_tail_error(
+                "sampled logits source is not aligned for F32 readback",
+            ));
+        }
+
+        let copy_t0 = std::time::Instant::now();
+        unsafe {
+            let src = (session.logits.buffer.contents().as_ptr() as *const u8).add(source_start)
+                as *const f32;
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), out.len());
+        }
+        let copy_ms = copy_t0.elapsed().as_secs_f64() * 1e3;
+        profile.total_ms = t_total.elapsed().as_secs_f64() * 1e3;
+        Ok((
+            out,
+            profile,
+            LogitsReadbackProfile {
+                timer_spans: 2,
+                bytes,
+                allocation_zero_fill_ms,
+                copy_ms,
+            },
+        ))
+    }
+
     pub fn single_token_argmax_profiled_concurrent_gdn_moe(
         &self,
         token_id: i32,
@@ -12309,6 +12374,14 @@ pub struct TokenProfile {
     pub total_ms: f64,
     pub moe_cpu_route_ms: f64,
     pub moe_cmd_count: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LogitsReadbackProfile {
+    pub timer_spans: u32,
+    pub bytes: usize,
+    pub allocation_zero_fill_ms: f64,
+    pub copy_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -16762,6 +16835,115 @@ mod tests {
             4,
             0.995,
         );
+    }
+
+    #[test]
+    #[ignore = "requires the 22 GB A3B fixture and Metal GPU"]
+    fn metal_sampled_attribution_matches_production_a3b() {
+        let model_path = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        let metadata = std::fs::metadata(model_path).expect("required A3B fixture is missing");
+        assert_eq!(metadata.len(), 22_134_528_992, "A3B fixture size changed");
+        let mut file = std::fs::File::open(model_path).expect("open A3B for authentication");
+        let mut digest = Sha256::new();
+        let mut bytes = vec![0u8; 16 * 1024 * 1024];
+        loop {
+            let count =
+                std::io::Read::read(&mut file, &mut bytes).expect("hash authenticated A3B fixture");
+            if count == 0 {
+                break;
+            }
+            digest.update(&bytes[..count]);
+        }
+        assert_eq!(
+            format!("{:x}", digest.finalize()),
+            "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61",
+            "A3B fixture SHA-256 changed"
+        );
+        let ctx = MetalContext::new().expect("Metal context");
+        let gguf = GgufFile::open(model_path).expect("open A3B");
+        let model = Model::from_gguf(&gguf).expect("parse A3B");
+        let metal = MetalModel::load(&ctx, &gguf, &model).expect("load A3B");
+        let tokenizer = crate::tokenizer::Tokenizer::open(model_path).expect("tokenizer");
+        let ids = tokenizer.encode("Hello", false).expect("tokenize");
+        assert_eq!(ids.len(), 1);
+
+        let forward = MetalForward::new(&ctx, &metal);
+        let mut ordinary = MetalSession::fresh(&ctx, &metal, 4).expect("ordinary session");
+        let mut profiled = MetalSession::fresh(&ctx, &metal, 4).expect("profiled session");
+        let (ordinary_logits, _) = forward
+            .single_token_profiled_concurrent_gdn_moe(ids[0], 0, &mut ordinary)
+            .expect("ordinary transition");
+        let (profiled_logits, _, readback) = forward
+            .single_token_sampled_attribution(ids[0], 0, &mut profiled)
+            .expect("profiled transition");
+        assert_eq!(readback.timer_spans, 2);
+        assert_eq!(
+            readback.bytes,
+            ordinary_logits.len() * std::mem::size_of::<f32>()
+        );
+        assert!(readback.allocation_zero_fill_ms >= 0.0 && readback.copy_ms >= 0.0);
+        assert!(
+            ordinary_logits
+                .iter()
+                .zip(&profiled_logits)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "attributed transition logits differ"
+        );
+
+        let identity = ordinary.snapshot_identity(1, 2);
+        let ordinary_snapshot = ordinary
+            .snapshot(identity.clone(), ids.clone(), None)
+            .expect("ordinary snapshot");
+        let profiled_snapshot = profiled
+            .snapshot(identity.clone(), ids.clone(), None)
+            .expect("profiled snapshot");
+        assert_eq!(ordinary_snapshot.kv_n_pos, profiled_snapshot.kv_n_pos);
+        assert_eq!(ordinary_snapshot.kv_k_arena, profiled_snapshot.kv_k_arena);
+        assert_eq!(ordinary_snapshot.kv_v_arena, profiled_snapshot.kv_v_arena);
+        assert_eq!(
+            ordinary_snapshot.gdn_conv_arena,
+            profiled_snapshot.gdn_conv_arena
+        );
+        assert_eq!(
+            ordinary_snapshot.gdn_state_arena,
+            profiled_snapshot.gdn_state_arena
+        );
+
+        let next = argmax_i32_local(&ordinary_logits);
+        let ordinary_continuation = forward
+            .single_token_profiled_concurrent_gdn_moe(next, 1, &mut ordinary)
+            .expect("ordinary continuation")
+            .0;
+        let profiled_continuation = forward
+            .single_token_profiled_concurrent_gdn_moe(next, 1, &mut profiled)
+            .expect("profiled continuation")
+            .0;
+        assert!(
+            ordinary_continuation
+                .iter()
+                .zip(&profiled_continuation)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "continuation logits differ"
+        );
+        let prefix = vec![ids[0], next];
+        let ordinary_snapshot = ordinary
+            .snapshot(identity.clone(), prefix.clone(), None)
+            .expect("ordinary continuation snapshot");
+        let profiled_snapshot = profiled
+            .snapshot(identity, prefix, None)
+            .expect("profiled continuation snapshot");
+        assert_eq!(ordinary_snapshot.kv_n_pos, profiled_snapshot.kv_n_pos);
+        assert_eq!(ordinary_snapshot.kv_k_arena, profiled_snapshot.kv_k_arena);
+        assert_eq!(ordinary_snapshot.kv_v_arena, profiled_snapshot.kv_v_arena);
+        assert_eq!(
+            ordinary_snapshot.gdn_conv_arena,
+            profiled_snapshot.gdn_conv_arena
+        );
+        assert_eq!(
+            ordinary_snapshot.gdn_state_arena,
+            profiled_snapshot.gdn_state_arena
+        );
+        eprintln!("[sampling-attribution-a3b] exact-state PASS");
     }
 
     #[test]

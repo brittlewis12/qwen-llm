@@ -7,6 +7,7 @@
 //! interrupted generation additionally requires the request-local draw count.
 
 use std::cmp::Ordering;
+use std::time::Instant;
 
 /// Bump when candidate filtering, probability arithmetic, tie-breaking, or the
 /// random-number generator changes.
@@ -71,6 +72,35 @@ pub struct SampledToken {
     pub token: i32,
     /// Zero-based position in descending-logit order after every filter. Tied
     /// logits use ascending token id in sampled mode.
+    pub candidate_index: usize,
+}
+
+/// Opt-in wall attribution for one positive-temperature sampler-v1 call.
+///
+/// This is diagnostic only. The ordinary [`Sampler::sample`] path remains
+/// uninstrumented, and all phase times include exactly the existing work.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SamplingPhaseProfile {
+    pub timer_spans: u32,
+    pub input_logits: usize,
+    pub total_ms: f64,
+    pub shape_validation_ms: f64,
+    pub candidate_alloc_ms: f64,
+    pub candidate_fill_ms: f64,
+    pub top_k_order_ms: f64,
+    pub min_p_ms: f64,
+    pub positive_infinity_ms: f64,
+    pub temperature_scale_ms: f64,
+    pub probability_weights_ms: f64,
+    pub top_p_ms: f64,
+    pub categorical_ms: f64,
+    pub residual_ms: f64,
+    pub candidate_capacity_bytes: usize,
+    pub probability_capacity_bytes: usize,
+    pub after_top_k: usize,
+    pub after_min_p: usize,
+    pub after_positive_infinity: usize,
+    pub after_top_p: usize,
     pub candidate_index: usize,
 }
 
@@ -237,6 +267,192 @@ impl Sampler {
             candidate_index,
         })
     }
+
+    /// Run the exact sampler-v1 chain with opt-in phase attribution.
+    ///
+    /// The implementation intentionally mirrors [`Self::sample`] rather than
+    /// routing the default path through timers. Equivalence tests pin outcomes,
+    /// errors, candidate indices, draw counts, and subsequent RNG state.
+    pub fn sample_profiled(
+        &mut self,
+        logits: &[f32],
+    ) -> Result<(SampledToken, SamplingPhaseProfile), SamplingError> {
+        if self.config.temperature == 0.0 {
+            return Ok((
+                SampledToken {
+                    token: greedy_token(logits)?,
+                    candidate_index: 0,
+                },
+                SamplingPhaseProfile {
+                    input_logits: logits.len(),
+                    ..SamplingPhaseProfile::default()
+                },
+            ));
+        }
+
+        let total_t0 = Instant::now();
+        let shape_t0 = Instant::now();
+        validate_logits_shape(logits)?;
+        let shape_validation_ms = elapsed_ms(shape_t0);
+
+        let alloc_t0 = Instant::now();
+        let mut candidates = Vec::with_capacity(logits.len());
+        let candidate_alloc_ms = elapsed_ms(alloc_t0);
+        let candidate_capacity_bytes = candidates
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Candidate>());
+
+        let fill_t0 = Instant::now();
+        for (token, &logit) in logits.iter().enumerate() {
+            if logit.is_nan() {
+                return Err(SamplingError::NanLogit { token });
+            }
+            candidates.push(Candidate {
+                token: token as i32,
+                logit: f64::from(logit),
+            });
+        }
+        let candidate_fill_ms = elapsed_ms(fill_t0);
+
+        let order_t0 = Instant::now();
+        let compare = |a: &Candidate, b: &Candidate| match b.logit.total_cmp(&a.logit) {
+            Ordering::Equal => a.token.cmp(&b.token),
+            order => order,
+        };
+        if self.config.top_k > 0 && self.config.top_k < candidates.len() {
+            candidates.select_nth_unstable_by(self.config.top_k, compare);
+            candidates.truncate(self.config.top_k);
+        }
+        candidates.sort_unstable_by(compare);
+        let top_k_order_ms = elapsed_ms(order_t0);
+        let after_top_k = candidates.len();
+
+        let min_p_t0 = Instant::now();
+        if self.config.min_p > 0.0 {
+            let max_logit = candidates[0].logit;
+            if max_logit.is_finite() {
+                let threshold = max_logit + f64::from(self.config.min_p).ln();
+                candidates.retain(|candidate| candidate.logit >= threshold);
+            }
+        }
+        let min_p_ms = elapsed_ms(min_p_t0);
+        let after_min_p = candidates.len();
+        if candidates.is_empty() {
+            return Err(SamplingError::NoCandidates);
+        }
+
+        let positive_infinity_t0 = Instant::now();
+        if candidates[0].logit == f64::INFINITY {
+            candidates.retain(|candidate| candidate.logit == f64::INFINITY);
+        }
+        let positive_infinity_ms = elapsed_ms(positive_infinity_t0);
+        let after_positive_infinity = candidates.len();
+
+        let temperature_t0 = Instant::now();
+        let temperature = f64::from(self.config.temperature);
+        for candidate in &mut candidates {
+            candidate.logit /= temperature;
+        }
+        let temperature_scale_ms = elapsed_ms(temperature_t0);
+
+        let probability_t0 = Instant::now();
+        let mut weights = probability_weights(&candidates)?;
+        let probability_weights_ms = elapsed_ms(probability_t0);
+        let probability_capacity_bytes = weights
+            .capacity()
+            .saturating_mul(std::mem::size_of::<f64>());
+
+        let top_p_t0 = Instant::now();
+        if self.config.top_p < 1.0 {
+            let total: f64 = weights.iter().sum();
+            let target = total * f64::from(self.config.top_p);
+            let mut cumulative = 0.0;
+            let mut keep = 0usize;
+            for weight in &weights {
+                cumulative += *weight;
+                keep += 1;
+                if cumulative >= target {
+                    break;
+                }
+            }
+            candidates.truncate(keep.max(1));
+            weights.truncate(candidates.len());
+        }
+        let top_p_ms = elapsed_ms(top_p_t0);
+        let after_top_p = candidates.len();
+
+        let categorical_t0 = Instant::now();
+        let total: f64 = weights.iter().sum();
+        if !(total.is_finite() && total > 0.0) {
+            return Err(SamplingError::NoCandidates);
+        }
+        self.draws += 1;
+        let target = self.rng.next_unit_f64() * total;
+        let mut cumulative = 0.0;
+        let mut sampled = None;
+        for (candidate_index, (candidate, weight)) in candidates.iter().zip(&weights).enumerate() {
+            cumulative += *weight;
+            if target < cumulative {
+                sampled = Some(SampledToken {
+                    token: candidate.token,
+                    candidate_index,
+                });
+                break;
+            }
+        }
+        let sampled = sampled.unwrap_or_else(|| {
+            let candidate_index = candidates.len() - 1;
+            SampledToken {
+                token: candidates[candidate_index].token,
+                candidate_index,
+            }
+        });
+        let categorical_ms = elapsed_ms(categorical_t0);
+        drop(weights);
+        drop(candidates);
+        let total_ms = elapsed_ms(total_t0);
+        let phase_sum_ms = shape_validation_ms
+            + candidate_alloc_ms
+            + candidate_fill_ms
+            + top_k_order_ms
+            + min_p_ms
+            + positive_infinity_ms
+            + temperature_scale_ms
+            + probability_weights_ms
+            + top_p_ms
+            + categorical_ms;
+
+        Ok((
+            sampled,
+            SamplingPhaseProfile {
+                timer_spans: 11,
+                input_logits: logits.len(),
+                total_ms,
+                shape_validation_ms,
+                candidate_alloc_ms,
+                candidate_fill_ms,
+                top_k_order_ms,
+                min_p_ms,
+                positive_infinity_ms,
+                temperature_scale_ms,
+                probability_weights_ms,
+                top_p_ms,
+                categorical_ms,
+                residual_ms: total_ms - phase_sum_ms,
+                candidate_capacity_bytes,
+                probability_capacity_bytes,
+                after_top_k,
+                after_min_p,
+                after_positive_infinity,
+                after_top_p,
+                candidate_index: sampled.candidate_index,
+            },
+        ))
+    }
+}
+
+fn elapsed_ms(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1e3
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -758,5 +974,149 @@ mod tests {
             sampler.sample(&[f32::NEG_INFINITY, f32::NEG_INFINITY]),
             Err(SamplingError::NoCandidates)
         );
+    }
+
+    fn assert_profiled_equivalent(config: SamplingConfig, logits: &[f32]) {
+        let mut ordinary = sampler(config);
+        let mut profiled = ordinary.clone();
+        let ordinary_result = ordinary.sample(logits);
+        let profiled_result = profiled.sample_profiled(logits);
+        match (ordinary_result, profiled_result) {
+            (Ok(expected), Ok((actual, profile))) => {
+                assert_eq!(actual, expected);
+                if config.temperature > 0.0 {
+                    assert_eq!(profile.timer_spans, 11);
+                    assert_eq!(profile.input_logits, logits.len());
+                    assert_eq!(profile.candidate_index, actual.candidate_index);
+                    assert!(profile.candidate_capacity_bytes > 0);
+                    assert!(profile.probability_capacity_bytes > 0);
+                    assert!(profile.after_top_k >= profile.after_min_p);
+                    assert!(profile.after_min_p >= profile.after_positive_infinity);
+                    assert!(profile.after_positive_infinity >= profile.after_top_p);
+                }
+            }
+            (Err(expected), Err(actual)) => assert_eq!(actual, expected),
+            (expected, actual) => panic!(
+                "ordinary/profiled sampler mismatch: ordinary={expected:?} profiled={actual:?}"
+            ),
+        }
+        assert_eq!(ordinary.draws(), profiled.draws());
+
+        let continuation = [2.0, 1.0, 0.0, -1.0];
+        assert_eq!(
+            ordinary.sample(&continuation),
+            profiled.sample(&continuation),
+            "profiled call changed subsequent RNG state"
+        );
+        assert_eq!(ordinary.draws(), profiled.draws());
+    }
+
+    #[test]
+    fn profiled_sampler_preserves_version_one_results_errors_and_rng() {
+        for seed in [0, 1, 42, u64::MAX] {
+            assert_profiled_equivalent(
+                SamplingConfig::qwen_chat(seed),
+                &[3.0, 2.0, 2.0, 1.0, -0.0, 0.0, f32::NEG_INFINITY],
+            );
+            assert_profiled_equivalent(
+                SamplingConfig {
+                    temperature: 2.0,
+                    top_k: 0,
+                    top_p: 0.7,
+                    min_p: 0.25,
+                    seed,
+                },
+                &[f32::INFINITY, 1000.0, f32::INFINITY, -10.0],
+            );
+            assert_profiled_equivalent(
+                SamplingConfig {
+                    temperature: 1.0,
+                    top_k: 1,
+                    top_p: 1.0,
+                    min_p: 0.0,
+                    seed,
+                },
+                &[0.0, 3.0, 1.0],
+            );
+            assert_profiled_equivalent(
+                SamplingConfig {
+                    temperature: 1.0,
+                    top_k: 0,
+                    top_p: 1.0,
+                    min_p: 0.0,
+                    seed,
+                },
+                &[f32::NEG_INFINITY, f32::NEG_INFINITY],
+            );
+            assert_profiled_equivalent(SamplingConfig::qwen_chat(seed), &[]);
+            for nan_position in 0..3 {
+                let mut logits = [2.0, 1.0, 0.0];
+                logits[nan_position] = f32::NAN;
+                assert_profiled_equivalent(SamplingConfig::qwen_chat(seed), &logits);
+            }
+        }
+
+        assert_profiled_equivalent(SamplingConfig::default(), &[1.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn profiled_sampler_matches_version_one_golden_stream() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 0x1234_5678_9abc_def0,
+        };
+        let logits = [2.0, 1.5, 1.0, 0.5];
+        let expected = [0, 1, 1, 1, 3, 1, 3, 0, 0, 3, 0, 0, 2, 0, 2, 1];
+        let mut ordinary = sampler(config);
+        let mut profiled = sampler(config);
+        for expected_token in expected {
+            let ordinary_token = ordinary.sample(&logits).unwrap();
+            let (profiled_token, profile) = profiled.sample_profiled(&logits).unwrap();
+            assert_eq!(ordinary_token, profiled_token);
+            assert_eq!(profiled_token.token, expected_token);
+            assert_eq!(profile.after_top_p, logits.len());
+        }
+        assert_eq!(ordinary.draws(), expected.len());
+        assert_eq!(profiled.draws(), expected.len());
+    }
+
+    #[test]
+    fn profiled_sampler_matches_finite_top_p_and_tied_top_k_boundaries() {
+        let finite_top_p = SamplingConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 0.7,
+            min_p: 0.0,
+            seed: 19,
+        };
+        let mut ordinary = sampler(finite_top_p);
+        let mut profiled = sampler(finite_top_p);
+        for _ in 0..16 {
+            let expected = ordinary.sample(&[3.0, 2.0, 1.0, 0.0]).unwrap();
+            let (actual, profile) = profiled.sample_profiled(&[3.0, 2.0, 1.0, 0.0]).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(profile.after_top_p, 2);
+        }
+
+        let tied_top_k = SamplingConfig {
+            temperature: 1.0,
+            top_k: 2,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 23,
+        };
+        let mut ordinary = sampler(tied_top_k);
+        let mut profiled = sampler(tied_top_k);
+        for _ in 0..16 {
+            let expected = ordinary.sample(&[2.0, 2.0, 2.0]).unwrap();
+            let (actual, profile) = profiled.sample_profiled(&[2.0, 2.0, 2.0]).unwrap();
+            assert_eq!(actual, expected);
+            assert!(matches!(actual.token, 0 | 1));
+            assert_eq!(profile.after_top_k, 2);
+        }
+        assert_eq!(ordinary.draws(), profiled.draws());
     }
 }

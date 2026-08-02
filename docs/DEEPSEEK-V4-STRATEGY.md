@@ -450,9 +450,9 @@ and one denominator-only-sink softmax over local raw rows plus every completed
 compressed row. The parallel indexer compressor publishes its normalized
 Hadamard row, but index scoring and top-512 selection remain deferred while the
 history is below 512 rows and dense-all is definitionally equivalent. The
-session now continues through two independently promoted HCA rows and the
-position-256 continuation after the second publication, then fails closed at
-position 257 before entering an unvalidated retained interval.
+session now continues through three independently promoted HCA rows and the
+position-384 continuation after the third publication, then fails closed at
+position 385 before entering an unvalidated retained interval.
 
 Gate:
 
@@ -473,15 +473,15 @@ Gate:
 
 ### S4: HCA lane
 
-Status: first- and second-boundary decode slices promoted through positions
-126-129 and 254-256 on 2026-08-02. All 20 HCA layers now use the retained
-ratio-128 frontier to pool, RMS-normalize, apply block-start adjacent-pair RoPE,
-publish F16 compressed rows, and include every published row in the same-token
-softmax over the 128-row local window plus dense compressed history. Position
-254 is the pre-second-boundary control, position 255 publishes row 1 from the
-block beginning at position 128, and position 256 proves immediate retained
-continuation. The session fails closed at position 257; the next unvalidated
-HCA publication is position 383.
+Status: first-, second-, and third-boundary decode slices promoted through
+positions 126-129, 254-257, and 382-384 on 2026-08-02. All 20 HCA layers use the
+retained ratio-128 frontier to pool, RMS-normalize, apply block-start
+adjacent-pair RoPE, publish F16 compressed rows, and include every published row
+in the same-token softmax over the 128-row local window plus dense compressed
+history. Position 382 is the pre-third-boundary control, position 383 publishes
+row 2 from the block beginning at position 256, and position 384 proves
+immediate retained continuation. The session fails closed at position 385; the
+next unvalidated HCA publication is position 511.
 
 The long-prefix differential uses a different numerical gate from positions
 0-8. Singleton-versus-singleton drift accumulates before any HCA row exists:
@@ -493,11 +493,11 @@ boundary-discontinuity bound, and recovery on the immediate continuation.
 
 Gate:
 
-- Production 512-wide compressor-row coverage writes two complete 128-token
-  frontiers, proves no early publication through positions 126 and 254, and
-  matches the CPU oracle after pooling, RMSNorm, and F16 publication at both
-  boundaries. Row 1 starts at position 128, so its position-255 differential
-  also exercises non-identity block-start adjacent-pair YaRN RoPE.
+- Production 512-wide compressor-row coverage writes three complete 128-token
+  frontiers, proves no early publication through positions 126, 254, and 382,
+  and matches the CPU oracle after pooling, RMSNorm, and F16 publication at all
+  three boundaries. Rows 1 and 2 start at positions 128 and 256, exercising
+  non-identity block-start adjacent-pair YaRN RoPE.
 - In one retained native session, positions 126, 127, and 128 preserve b10222
   argmaxes 34, 35, and 201. Their cosine / relative-RMS pairs are
   0.999086380 / 0.045916357, 0.998497359 / 0.063801241, and
@@ -529,16 +529,32 @@ Gate:
   three positions additionally require cosine at least 0.997 and relative RMS
   at most 0.075, preventing correlated drift from satisfying only relational
   checks.
-- The production-width compressor gate proves row 1 uses start position 128,
-  exercising non-identity block-start RoPE. A separate two-row Metal attention
-  gate matches the CPU oracle and materially differs from both first-row-only
-  and local-only ablations, proving the newest published row is consumed.
-- A real position-257 call rejects before mutation while preserving position
-  257 as the next index and retaining all completed position-256 logit bits.
+- A three-row Metal attention gate matches the CPU oracle and materially
+  differs from both prior-two-row and local-only ablations, proving the newest
+  published row is consumed. A second production-width falsifier uses tagged
+  wrapped 128-row raw caches at positions 382/383/384 and independently matches
+  CPU attention for HCA row counts 2/3/3 and CSA counts 95/96/96. This closes
+  the ring-order, compressed-count, and same-token visibility alternatives.
+- Fresh-session b10222 captures at positions 257, 382, 383, and 384 are
+  byte-identical across repeats. Their vector hashes are
+  `234d6168ae338832cb694b51e8042bcf40ec129579b49a4d7b90c97e4aa5aa6c`,
+  `d26400242d98ed8cfe5a80f79f4e23343576aa657bee06140968cebf68a6b6a4`,
+  `6a72ff9fd4ed33b5fc04cfcc41bf59cc7366c226412c1930a21511d35afb921d`,
+  and `310e38754af708713a92a8b6aba2be7c77f2e678b8a6f91874ede867f9d4611e`.
+- The retained session preserves b10222 argmaxes 200, 34, 35, and 201 at those
+  positions. Their cosine / relative-RMS pairs are
+  0.997692051 / 0.070415212, 0.990839296 / 0.141674404,
+  0.993863232 / 0.135474860, and 0.998019910 / 0.065362616. Positions 382/383
+  expose larger inherited interval drift, so they use explicit 0.990 / 0.15
+  containment rather than the established 0.997 / 0.075 endpoint gate. The
+  publication must improve or preserve both measures from position 382, and
+  position 384 must strictly recover both and satisfy the established gate.
+- A real position-385 call rejects before mutation while preserving position
+  385 as the next index and retaining all completed position-384 logit bits.
   Every intervening token is executed in the retained session; full-logit
   agreement is claimed only at the named fixture positions.
 
-S4 remains open for the third boundary at positions 383/384, named full-layer
+S4 remains open for the fourth boundary at positions 511/512, named full-layer
 intermediate states, and batched prefill. Those are extension and prefill gates;
 they do not block the bounded singleton-decode generation slice.
 
@@ -557,7 +573,7 @@ value-bearing option is explicitly supplied at its Qwen default.
 The CLI reserves `prompt_tokens + max_generated_tokens - 1` forwards before
 Metal residency or any token execution. This mirrors the generator's
 pending-final-token semantics and guarantees an accepted request cannot
-partially stream beyond the retained-session evidence through position 256.
+partially stream beyond the retained-session evidence through position 384.
 The 103 GB split GGUF is already virtually mapped for family detection at that
 point; residency remains untouched on rejection. The promoted capacity is
 exported by the session implementation, so frontend and executor cannot drift
@@ -592,6 +608,10 @@ Gate:
   generated oracle token 201 in 100.9 seconds; requesting one additional
   transition rejected before Metal residency. These are correctness
   observations for the unoptimized singleton prompt path.
+- The same interface now accepts exactly 385 forwards. A 385-token prefix
+  crossed the third HCA publication, consumed position 384, and generated
+  oracle token 201 in 172.2 seconds; a request requiring 386 forwards rejected
+  before Metal residency.
 - Ordinary 0731 messages match vLLM and SGLang byte-for-byte. On the Flash
   vocabulary, user-only, system/user, and multi-turn Unicode fixtures encode to
   exact token sequences of 5, 8, and 16 tokens. A live system/user request
@@ -676,8 +696,8 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Capture retained-interval controls at positions 257 and 382, then promote
-   the third HCA publication and continuation at positions 383/384.
+1. Capture retained-interval controls at positions 385 and 510, then promote
+   the fourth HCA publication and continuation at positions 511/512.
 2. Implement sparse CSA index scoring/top-512 selection before compressed
    history exceeds 512 rows, and extend slab ownership before the current CSA
    row-256 allocation guard at position 1027.

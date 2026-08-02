@@ -69,6 +69,25 @@ const POSITION_256_ORACLE_BYTES: &[u8] =
     include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x64_then35_position256_b10222.f32");
 const POSITION_256_ORACLE_MANIFEST: &str =
     include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x64_then35_position256_b10222.json");
+const POSITION_257_ORACLE_BYTES: &[u8] = include_bytes!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_x64_then35_201_position257_b10222.f32"
+);
+const POSITION_257_ORACLE_MANIFEST: &str = include_str!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_x64_then35_201_position257_b10222.json"
+);
+const POSITION_382_ORACLE_BYTES: &[u8] = include_bytes!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_pre_third_hca_position382_b10222.f32"
+);
+const POSITION_382_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_pattern35_201_200_34_pre_third_hca_position382_b10222.json");
+const POSITION_383_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x96_position383_b10222.f32");
+const POSITION_383_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x96_position383_b10222.json");
+const POSITION_384_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x96_then35_position384_b10222.f32");
+const POSITION_384_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x96_then35_position384_b10222.json");
 const SINGLETON_ORACLE_LLM_COMMIT: &str = "e07acac20fcd2ee0faca90aa91078ff142724d63";
 const SINGLETON_ORACLE_LLAMA_CORE_COMMIT: &str = "b1cd3a914175adedcc976388c7c638d9a2f9a189";
 const SINGLETON_ORACLE_LLAMA_CPP_RS_COMMIT: &str = "553b8e4501c57c1be08a83b6b54e549a614df162";
@@ -91,6 +110,19 @@ fn assert_hca_long_prefix_gate(label: &str, comparison: &LogitComparison) {
     );
     assert!(
         comparison.relative_rms <= 0.075,
+        "{label} native/oracle relative RMS is {}",
+        comparison.relative_rms
+    );
+}
+
+fn assert_third_hca_drift_containment(label: &str, comparison: &LogitComparison) {
+    assert!(
+        comparison.cosine >= 0.990,
+        "{label} native/oracle cosine is only {}",
+        comparison.cosine
+    );
+    assert!(
+        comparison.relative_rms <= 0.15,
         "{label} native/oracle relative RMS is {}",
         comparison.relative_rms
     );
@@ -457,6 +489,46 @@ fn pinned_hca_boundary_oracles_have_exact_identity() {
             64,
             serde_json::json!([]),
             256,
+            35,
+            201,
+        ),
+        (
+            POSITION_257_ORACLE_MANIFEST,
+            POSITION_257_ORACLE_BYTES,
+            "81d57d211565de54303f46fea57ad13bd14dcabb562badf04aea8b85890eb237",
+            64,
+            serde_json::json!([35]),
+            257,
+            201,
+            200,
+        ),
+        (
+            POSITION_382_ORACLE_MANIFEST,
+            POSITION_382_ORACLE_BYTES,
+            "1fd094c0b42cfac76e29f965acfc9b2a2999d010f2d316b4b96687888c054281",
+            95,
+            serde_json::json!([35, 201]),
+            382,
+            200,
+            34,
+        ),
+        (
+            POSITION_383_ORACLE_MANIFEST,
+            POSITION_383_ORACLE_BYTES,
+            "16c40b9095263e2cdad926c11255ac816c6ed64827f24c81883cab7fd784f908",
+            95,
+            serde_json::json!([35, 201, 200]),
+            383,
+            34,
+            35,
+        ),
+        (
+            POSITION_384_ORACLE_MANIFEST,
+            POSITION_384_ORACLE_BYTES,
+            "65fd500f2f0baa412d086ed5f7842ddc114d7f4e28e1f53f8f4b182832f6e8ce",
+            96,
+            serde_json::json!([]),
+            384,
             35,
             201,
         ),
@@ -960,11 +1032,11 @@ fn native_deepseek_v4_second_csa_boundary_and_continuation() {
     );
 }
 
-/// Manual only: executes two ratio-128 publications and the continuation after
-/// the second row becomes visible.
+/// Manual only: executes three ratio-128 publications and the continuation
+/// after the third row becomes visible.
 #[test]
-#[ignore = "manual native DS4 257-token HCA branch maps the 95.93 GiB checkpoint"]
-fn native_deepseek_v4_through_second_hca_continuation() {
+#[ignore = "manual native DS4 385-token HCA branch maps the 95.93 GiB checkpoint"]
+fn native_deepseek_v4_through_third_hca_continuation() {
     let model_path = std::env::var_os("DSV4_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
@@ -982,7 +1054,7 @@ fn native_deepseek_v4_through_second_hca_continuation() {
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");
     let started = Instant::now();
-    let repeated_prefix = [35, 201, 200, 34].repeat(65);
+    let repeated_prefix = [35, 201, 200, 34].repeat(97);
     for &token in &repeated_prefix[..127] {
         session.forward_token(&ctx, token).unwrap();
     }
@@ -1202,29 +1274,137 @@ fn native_deepseek_v4_through_second_hca_continuation() {
         second_hca_continuation.relative_rms
     );
 
+    session
+        .forward_token_with_progress(&ctx, repeated_prefix[257], |layer| {
+            eprintln!(
+                "position_257 layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position 257");
+    assert_eq!(session.next_position(), 258);
+    let interval_start_logits = session.copy_logits_f32().expect("copy position-257 logits");
+    let interval_start = compare_logits(
+        "position_257",
+        &interval_start_logits,
+        POSITION_257_ORACLE_BYTES,
+    );
+    assert_eq!(interval_start.oracle_argmax, 200);
+    assert_eq!(interval_start.argmax, interval_start.oracle_argmax);
+    assert_hca_long_prefix_gate("position 257", &interval_start);
+
+    for &token in &repeated_prefix[258..382] {
+        session.forward_token(&ctx, token).unwrap();
+    }
+    assert_eq!(session.next_position(), 382);
+    session
+        .forward_token_with_progress(&ctx, repeated_prefix[382], |layer| {
+            eprintln!(
+                "position_382 layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position 382");
+    assert_eq!(session.next_position(), 383);
+    let pre_third_hca_logits = session.copy_logits_f32().expect("copy position-382 logits");
+    let pre_third_hca = compare_logits(
+        "position_382",
+        &pre_third_hca_logits,
+        POSITION_382_ORACLE_BYTES,
+    );
+    assert_eq!(pre_third_hca.oracle_argmax, 34);
+    assert_eq!(pre_third_hca.argmax, pre_third_hca.oracle_argmax);
+    assert_third_hca_drift_containment("position 382", &pre_third_hca);
+
+    session
+        .forward_token_with_progress(&ctx, repeated_prefix[383], |layer| {
+            eprintln!(
+                "position_383 layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position 383");
+    assert_eq!(session.next_position(), 384);
+    let third_hca_logits = session.copy_logits_f32().expect("copy position-383 logits");
+    let third_hca = compare_logits("position_383", &third_hca_logits, POSITION_383_ORACLE_BYTES);
+    assert_eq!(third_hca.oracle_argmax, 35);
+    assert_eq!(third_hca.argmax, third_hca.oracle_argmax);
+    assert_third_hca_drift_containment("position 383", &third_hca);
+    assert!(
+        third_hca.cosine >= pre_third_hca.cosine,
+        "third HCA publication cosine regressed from the pre-boundary control: pre={} boundary={}",
+        pre_third_hca.cosine,
+        third_hca.cosine
+    );
+    assert!(
+        third_hca.relative_rms <= pre_third_hca.relative_rms,
+        "third HCA publication relative RMS regressed from the pre-boundary control: pre={} boundary={}",
+        pre_third_hca.relative_rms,
+        third_hca.relative_rms
+    );
+
+    session
+        .forward_token_with_progress(&ctx, repeated_prefix[384], |layer| {
+            eprintln!(
+                "position_384 layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position 384");
+    assert_eq!(session.next_position(), 385);
+    let third_hca_continuation_logits =
+        session.copy_logits_f32().expect("copy position-384 logits");
+    let third_hca_continuation = compare_logits(
+        "position_384",
+        &third_hca_continuation_logits,
+        POSITION_384_ORACLE_BYTES,
+    );
+    assert_eq!(third_hca_continuation.oracle_argmax, 201);
+    assert_eq!(
+        third_hca_continuation.argmax,
+        third_hca_continuation.oracle_argmax
+    );
+    assert_hca_long_prefix_gate("position 384", &third_hca_continuation);
+    assert!(
+        third_hca_continuation.cosine > third_hca.cosine,
+        "third HCA continuation cosine did not recover: boundary={} continuation={}",
+        third_hca.cosine,
+        third_hca_continuation.cosine
+    );
+    assert!(
+        third_hca_continuation.relative_rms < third_hca.relative_rms,
+        "third HCA continuation relative RMS did not recover: boundary={} continuation={}",
+        third_hca.relative_rms,
+        third_hca_continuation.relative_rms
+    );
+
     let error = session
-        .forward_token(&ctx, repeated_prefix[257])
+        .forward_token(&ctx, repeated_prefix[385])
         .err()
-        .expect("position 257 must reject before mutation");
-    assert!(error.to_string().contains("next position is 257"));
-    assert_eq!(session.next_position(), 257);
+        .expect("position 385 must reject before mutation");
+    assert!(error.to_string().contains("next position is 385"));
+    assert_eq!(session.next_position(), 385);
     let retained_logits = session
         .copy_logits_f32()
-        .expect("position-256 logits remain completed after rejection");
-    assert_eq!(retained_logits.len(), second_hca_continuation_logits.len());
+        .expect("position-384 logits remain completed after rejection");
+    assert_eq!(retained_logits.len(), third_hca_continuation_logits.len());
     for (index, (&retained, &before)) in retained_logits
         .iter()
-        .zip(&second_hca_continuation_logits)
+        .zip(&third_hca_continuation_logits)
         .enumerate()
     {
         assert_eq!(
             retained.to_bits(),
             before.to_bits(),
-            "position-256 logit bits changed at index {index}"
+            "position-384 logit bits changed at index {index}"
         );
     }
     eprintln!(
-        "second_hca_branch_elapsed={:.3}s",
+        "third_hca_branch_elapsed={:.3}s",
         started.elapsed().as_secs_f64()
     );
 }

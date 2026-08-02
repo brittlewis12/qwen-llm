@@ -2342,6 +2342,36 @@ mod tests {
                 .expect("encode position-257 CLI prefix"),
             position_257
         );
+        let mut position_382 = [35, 201, 200, 34].repeat(95);
+        position_382.extend([35, 201]);
+        assert_eq!(
+            tokenizer
+                .encode(&("A\n\t@".repeat(95) + "A\n"), false)
+                .expect("encode position-382 prefix"),
+            position_382
+        );
+        let mut position_383 = [35, 201, 200, 34].repeat(95);
+        position_383.extend([35, 201, 200]);
+        assert_eq!(
+            tokenizer
+                .encode(&("A\n\t@".repeat(95) + "A\n\t"), false)
+                .expect("encode position-383 prefix"),
+            position_383
+        );
+        assert_eq!(
+            tokenizer
+                .encode(&"A\n\t@".repeat(96), false)
+                .expect("encode third HCA boundary prefix"),
+            [35, 201, 200, 34].repeat(96)
+        );
+        let mut position_385 = [35, 201, 200, 34].repeat(96);
+        position_385.push(35);
+        assert_eq!(
+            tokenizer
+                .encode(&("A\n\t@".repeat(96) + "A"), false)
+                .expect("encode position-385 CLI prefix"),
+            position_385
+        );
     }
 
     #[test]

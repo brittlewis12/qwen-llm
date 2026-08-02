@@ -146,8 +146,22 @@ must be reviewed as tokenizer changes.
 Raw tokenization is only half of frontend support. The official 0731 release
 deliberately does not ship a Jinja template. Its Python encoder defines system,
 user, assistant, tool, developer, latest-reminder, reasoning-effort, DSML, and
-quick-task behavior. qwen-llm must port and fixture-test that encoder rather
-than assume llama.cpp's injected template is byte-identical.
+quick-task behavior. The ordinary chat subset is now ported from two
+independently maintained release-derived implementations: vLLM's V4 encoder and
+SGLang's encoder, whose source explicitly records release provenance. Both
+produce byte-identical user-only, system/user, and multi-turn Unicode prompts.
+
+The promoted subset accepts an optional leading system turn, alternating plain
+user/assistant history, and a final user turn. It emits BOS explicitly,
+attaches `<｜Assistant｜></think>` to each user turn, and terminates historical
+assistant content with EOS. Unknown per-message or wrapped top-level fields,
+developer/tool roles, reasoning records, non-alternating history, and Qwen
+thinking-policy flags fail closed. `--messages-max` applies after structural
+JSON deserialization, then role/order/extra-field semantics validate only the
+retained prefix; wrapper-level semantics are always rejected. Raw mode remains
+the exact reproduction interface. Rich V4 tools, reasoning, latest-reminder,
+response-format, and quick-task semantics remain separate fixture-gated
+extensions rather than approximations of the official encoder.
 
 ## What transfers from qwen-llm
 
@@ -542,16 +556,23 @@ Gate:
   continuation. Sequential 128-token prompt execution took 35.0 and 35.2
   seconds; the final transitions took 0.486 and 0.484 seconds. These are
   correctness observations for the unoptimized singleton prompt path.
+- Ordinary 0731 messages match vLLM and SGLang byte-for-byte. On the Flash
+  vocabulary, user-only, system/user, and multi-turn Unicode fixtures encode to
+  exact token sequences of 5, 8, and 16 tokens. A live system/user request
+  rendered to 11 tokens and qwen generated IDs `[46382, 15697, 11898, 1]`
+  (`ghiaccioli` then EOS); the b10222 `llm` singleton oracle produced the same
+  first-token argmax and complete greedy text.
 - Intermediate bisect can isolate any divergence to one layer and operation.
 - Repeated runs are deterministic under the same host-validity contract used
   by Qwen benchmarks.
 - IQ3 peak resident plus scratch memory passes M4 Max admission with explicit
   system headroom; no reliance on swap is allowed for the resident target.
 
-S5 remains open for the official prompt encoder subset, explicit peak-memory
-admission, and continuation evidence beyond position 128. The bounded raw slice
-now establishes first-class native inference through every full-session
-differential promoted so far without weakening those later gates.
+S5 remains open for explicit peak-memory admission and continuation evidence
+beyond position 128. The bounded raw and ordinary-message slices now establish
+first-class native inference through every full-session differential promoted
+so far. Rich tools/reasoning are product extensions, not prerequisites for the
+minimum ordinary prompt-encoder gate.
 
 ### S6: Metal performance promotion
 
@@ -619,13 +640,12 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Port and fixture the minimum official 0731 prompt-encoder path required for
-   ordinary system/user/assistant turns; keep raw mode available as the exact
-   reproducibility interface.
-2. Capture positions 129 and 254 as continuation checkpoints before requesting
+1. Capture positions 129 and 254 as continuation checkpoints before requesting
    promotion to the second HCA boundary.
-3. Capture positions 255 and 256 with singleton b10222 execution, promote the
+2. Capture positions 255 and 256 with singleton b10222 execution, promote the
    second HCA publication, and extend the dense HCA history gate.
-4. Implement sparse CSA index scoring/top-512 selection before compressed
+3. Implement sparse CSA index scoring/top-512 selection before compressed
    history exceeds 512 rows, and extend slab ownership before the current CSA
    row-256 allocation guard at position 1027.
+4. Extend the 0731 message encoder to reasoning and DSML tools only with exact
+   release-derived byte fixtures and an end-to-end tool-call workload.

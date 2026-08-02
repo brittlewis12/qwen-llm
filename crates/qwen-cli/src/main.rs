@@ -4,7 +4,9 @@ mod messages;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
-use messages::{load_messages_prompt_with_policy, messages_thinking_mode};
+use messages::{
+    load_deepseek_v4_0731_messages_prompt, load_messages_prompt_with_policy, messages_thinking_mode,
+};
 use qwen_llm::checkpoint_identity::IdentityCacheOutcome;
 use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedIntegrityMode};
 use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
@@ -149,7 +151,7 @@ struct Args {
     #[arg(long, conflicts_with_all = ["prompt", "messages"])]
     prompt_file: Option<PathBuf>,
 
-    /// Render a bare or wrapped JSON messages file with the Qwen chat template.
+    /// Render a bare or wrapped JSON messages file with the model-family encoder.
     #[arg(long, conflicts_with_all = ["prompt", "prompt_file", "requests_jsonl"])]
     messages: Option<PathBuf>,
 
@@ -1836,7 +1838,7 @@ fn main() -> Result<()> {
     let gguf = GgufFile::open(model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
     if ModelFamily::detect(&gguf) == Some(ModelFamily::DeepSeek4) {
-        return run_deepseek_v4_raw_single_turn(model_path, gguf, &args, explicit_options);
+        return run_deepseek_v4_single_turn(model_path, gguf, &args, explicit_options);
     }
 
     if args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some() {
@@ -2050,11 +2052,8 @@ fn prompt_add_special_tokens(args: &Args, source: PromptSource) -> bool {
     source != PromptSource::Messages && !args.no_special_tokens
 }
 
-fn validate_deepseek_v4_raw_mode(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
+fn validate_deepseek_v4_generation_mode(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
     let mut unsupported = Vec::new();
-    if args.messages.is_some() {
-        unsupported.push("--messages");
-    }
     if args.requests_jsonl.is_some() {
         unsupported.push("--requests-jsonl");
     }
@@ -2099,14 +2098,23 @@ fn validate_deepseek_v4_raw_mode(args: &Args, explicit: ExplicitCliOptions) -> R
     if args.request_timing_warm_followup {
         unsupported.push("--request-timing-warm-followup");
     }
+    if args.messages_preserve_thinking {
+        unsupported.push("--messages-preserve-thinking");
+    }
+    if args.messages_strip_thinking {
+        unsupported.push("--messages-strip-thinking");
+    }
+    if args.messages_no_generation_prompt {
+        unsupported.push("--messages-no-generation-prompt");
+    }
     ensure!(
         unsupported.is_empty(),
-        "DeepSeek V4 currently supports bounded raw single-turn generation only; unsupported options: {}",
+        "DeepSeek V4 currently supports bounded raw or ordinary-message single-turn generation only; unsupported options: {}",
         unsupported.join(", ")
     );
     ensure!(
-        args.prompt.is_some() || args.prompt_file.is_some(),
-        "DeepSeek V4 raw generation requires --prompt or --prompt-file"
+        args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some(),
+        "DeepSeek V4 generation requires --prompt, --prompt-file, or --messages"
     );
     Ok(())
 }
@@ -2154,21 +2162,30 @@ fn copy_deepseek_v4_logits(
     Ok(logits)
 }
 
-fn run_deepseek_v4_raw_single_turn(
+fn run_deepseek_v4_single_turn(
     model_path: &Path,
     gguf: GgufFile,
     args: &Args,
     explicit: ExplicitCliOptions,
 ) -> Result<()> {
-    validate_deepseek_v4_raw_mode(args, explicit)?;
+    validate_deepseek_v4_generation_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
     let sampling = cli_sampling_config(args)?;
     let arrival_ms = unix_epoch_ms()?;
-    let (prompt, prompt_source, _) = prompt_text(args)?;
-    ensure!(
-        prompt_source != PromptSource::Messages,
-        "DeepSeek V4 generation does not apply chat templates"
-    );
+    let (prompt, prompt_source) = if let Some(path) = args.messages.as_ref() {
+        (
+            load_deepseek_v4_0731_messages_prompt(path, args.messages_max)
+                .context("render DeepSeek V4 0731 messages")?,
+            PromptSource::Messages,
+        )
+    } else {
+        let (prompt, source, _) = prompt_text(args)?;
+        (prompt, source)
+    };
+    let prompt_kind = match prompt_source {
+        PromptSource::Inline | PromptSource::File => "raw",
+        PromptSource::Messages => "messages_0731_chat",
+    };
 
     let tokenizer_t0 = Instant::now();
     let tokenizer = Tokenizer::from_gguf(&gguf).context("load DeepSeek V4 tokenizer")?;
@@ -2193,8 +2210,9 @@ fn run_deepseek_v4_raw_single_turn(
     }
 
     eprintln!(
-        "deepseek_v4: loading {} for raw generation; prompt_tokens={} max_generated_tokens={} reserved_forwards={}/{}",
+        "deepseek_v4: loading {} for generation; prompt_kind={} prompt_tokens={} max_generated_tokens={} reserved_forwards={}/{}",
         model_path.display(),
+        prompt_kind,
         prompt_ids.len(),
         args.tokens,
         required_forwards,
@@ -2270,10 +2288,11 @@ fn run_deepseek_v4_raw_single_turn(
     };
     eprintln!(
         concat!(
-            "deepseek_v4 stats: prompt_tokens={} generated_tokens={} transitions={} ",
+            "deepseek_v4 stats: prompt_kind={} prompt_tokens={} generated_tokens={} transitions={} ",
             "stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} ",
             "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} generated_ids={:?}"
         ),
+        prompt_kind,
         prompt_ids.len(),
         generation.tokens.len(),
         generation.transitions,
@@ -5989,7 +6008,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v4_cli_accepts_only_bounded_raw_single_turn_surfaces() {
+    fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         let raw = Args::try_parse_from([
             "qwen",
             "--model",
@@ -6003,7 +6022,7 @@ mod tests {
             "--no-special-tokens",
         ])
         .unwrap();
-        validate_deepseek_v4_raw_mode(&raw, ExplicitCliOptions::default()).unwrap();
+        validate_deepseek_v4_generation_mode(&raw, ExplicitCliOptions::default()).unwrap();
 
         let unsupported = Args::try_parse_from([
             "qwen",
@@ -6022,9 +6041,10 @@ mod tests {
             "stats.jsonl",
         ])
         .unwrap();
-        let error = validate_deepseek_v4_raw_mode(&unsupported, ExplicitCliOptions::default())
-            .unwrap_err()
-            .to_string();
+        let error =
+            validate_deepseek_v4_generation_mode(&unsupported, ExplicitCliOptions::default())
+                .unwrap_err()
+                .to_string();
         for option in [
             "--prompt-lookup",
             "--prefill-chunk",
@@ -6043,11 +6063,44 @@ mod tests {
             "messages.json",
         ])
         .unwrap();
+        validate_deepseek_v4_generation_mode(&messages, ExplicitCliOptions::default()).unwrap();
+
+        let messages_with_qwen_policy = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--messages-preserve-thinking",
+            "--messages-no-generation-prompt",
+        ])
+        .unwrap();
+        let error = validate_deepseek_v4_generation_mode(
+            &messages_with_qwen_policy,
+            ExplicitCliOptions::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--messages-preserve-thinking"));
+        assert!(error.contains("--messages-no-generation-prompt"));
+
+        let messages_with_strip = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--messages-strip-thinking",
+        ])
+        .unwrap();
         assert!(
-            validate_deepseek_v4_raw_mode(&messages, ExplicitCliOptions::default())
-                .unwrap_err()
-                .to_string()
-                .contains("--messages")
+            validate_deepseek_v4_generation_mode(
+                &messages_with_strip,
+                ExplicitCliOptions::default(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("--messages-strip-thinking")
         );
 
         let jsonl = Args::try_parse_from([
@@ -6059,7 +6112,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            validate_deepseek_v4_raw_mode(&jsonl, ExplicitCliOptions::default())
+            validate_deepseek_v4_generation_mode(&jsonl, ExplicitCliOptions::default())
                 .unwrap_err()
                 .to_string()
                 .contains("--requests-jsonl")
@@ -6088,7 +6141,7 @@ mod tests {
             .unwrap();
         let explicit = ExplicitCliOptions::from_matches(&matches);
         let explicit_defaults = Args::from_arg_matches(&matches).unwrap();
-        let error = validate_deepseek_v4_raw_mode(&explicit_defaults, explicit)
+        let error = validate_deepseek_v4_generation_mode(&explicit_defaults, explicit)
             .unwrap_err()
             .to_string();
         for option in [
@@ -6101,6 +6154,55 @@ mod tests {
         ] {
             assert!(error.contains(option), "missing {option:?} from {error:?}");
         }
+    }
+
+    #[test]
+    #[ignore = "requires the local DeepSeek V4 Flash-0731 IQ3 fixture"]
+    fn deepseek_v4_0731_message_prompts_match_flash_vocab() {
+        const MODEL: &str = concat!(
+            "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/",
+            "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf"
+        );
+        fn message(role: &str, content: &str) -> messages::ChatMessage {
+            messages::ChatMessage {
+                role: role.into(),
+                content: content.into(),
+                extra: Default::default(),
+            }
+        }
+        fn render_ids(tokenizer: &Tokenizer, messages: &[messages::ChatMessage]) -> Vec<i32> {
+            let prompt = messages::render_deepseek_v4_0731_messages_prompt(messages).unwrap();
+            tokenizer.encode(&prompt, false).unwrap()
+        }
+
+        assert!(Path::new(MODEL).exists(), "missing DS4 fixture");
+        let tokenizer = Tokenizer::open(MODEL).expect("open DS4 tokenizer");
+        assert_eq!(
+            render_ids(&tokenizer, &[message("user", "Hello")]),
+            [0, 128_803, 19_923, 128_804, 128_822]
+        );
+        assert_eq!(
+            render_ids(
+                &tokenizer,
+                &[message("system", "Be exact."), message("user", "Hello")]
+            ),
+            [0, 7_153, 6_319, 16, 128_803, 19_923, 128_804, 128_822]
+        );
+        assert_eq!(
+            render_ids(
+                &tokenizer,
+                &[
+                    message("system", "Be exact."),
+                    message("user", "Hello"),
+                    message("assistant", "Hi!"),
+                    message("user", "上海 🙂"),
+                ]
+            ),
+            [
+                0, 7_153, 6_319, 16, 128_803, 19_923, 128_804, 128_822, 23_166, 3, 1, 128_803,
+                7_241, 68_139, 128_804, 128_822,
+            ]
+        );
     }
 
     #[test]

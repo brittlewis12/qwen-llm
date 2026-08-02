@@ -12,8 +12,8 @@ use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedI
 use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
 use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
 use qwen_llm::deepseek_v4_metal::{
-    DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples, DeepSeekV4MetalResidency,
-    DeepSeekV4Session,
+    DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples,
+    DeepSeekV4MetalResidency, DeepSeekV4Session,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
@@ -2273,22 +2273,28 @@ fn run_deepseek_v4_single_turn(
     );
 
     let prefill_t0 = Instant::now();
-    for (index, &token) in prompt_token_ids.iter().enumerate() {
+    let prefill_mode = if (2..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&prompt_token_ids.len()) {
         session
-            .forward_token(&ctx, token)
-            .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
-        if index == 0 {
-            let reconciliation = memory_plan
-                .reconcile(DeepSeekV4MemorySamples {
-                    before_residency_bytes,
-                    after_residency_bytes,
-                    after_session_bytes,
-                    after_first_forward_bytes: ctx.current_allocated_size(),
-                })
-                .context("reconcile admitted DeepSeek V4 Metal memory")?;
-            eprintln!("deepseek_v4: memory reconciliation; {reconciliation}");
+            .prefill_tokens(&ctx, &prompt_token_ids)
+            .context("prefill DeepSeek V4 prompt layer-major")?;
+        "layer_major_128"
+    } else {
+        for (index, &token) in prompt_token_ids.iter().enumerate() {
+            session
+                .forward_token(&ctx, token)
+                .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
         }
-    }
+        "singleton"
+    };
+    let reconciliation = memory_plan
+        .reconcile(DeepSeekV4MemorySamples {
+            before_residency_bytes,
+            after_residency_bytes,
+            after_session_bytes,
+            after_first_forward_bytes: ctx.current_allocated_size(),
+        })
+        .context("reconcile admitted DeepSeek V4 Metal memory")?;
+    eprintln!("deepseek_v4: memory reconciliation; {reconciliation}");
     let logits = copy_deepseek_v4_logits(&session, vocab_size, "prompt")?;
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
@@ -2332,11 +2338,12 @@ fn run_deepseek_v4_single_turn(
     };
     eprintln!(
         concat!(
-            "deepseek_v4 stats: prompt_kind={} prompt_tokens={} generated_tokens={} transitions={} ",
+            "deepseek_v4 stats: prompt_kind={} prefill_mode={} prompt_tokens={} generated_tokens={} transitions={} ",
             "stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} ",
             "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} generated_ids={:?}"
         ),
         prompt_kind,
+        prefill_mode,
         prompt_ids.len(),
         generation.tokens.len(),
         generation.transitions,

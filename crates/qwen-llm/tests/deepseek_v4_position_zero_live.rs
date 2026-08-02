@@ -767,16 +767,16 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         "memory planning must not realize Metal buffers"
     );
     let memory_plan = load_plan.memory_plan().clone();
-    assert_eq!(memory_plan.session_allocations().len(), 474);
-    assert_eq!(memory_plan.session_logical_bytes(), 31_962_388);
-    assert_eq!(memory_plan.session_priced_upper_bytes(), 31_962_388);
+    assert_eq!(memory_plan.session_allocations().len(), 520);
+    assert_eq!(memory_plan.session_logical_bytes(), 154_622_740);
+    assert_eq!(memory_plan.session_priced_upper_bytes(), 158_957_568);
     assert_eq!(memory_plan.residency_buffer_count(), 7);
     assert_eq!(memory_plan.residency_logical_bytes(), 102_994_608_640);
-    assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_608_640);
-    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_026_571_028);
+    assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_624_512);
+    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_153_582_080);
     assert_eq!(
         memory_plan.required_with_reserve_bytes().unwrap(),
-        103_563_441_940
+        103_690_452_992
     );
     assert_eq!(load_plan.residency_report().window_count, 3);
     assert_eq!(load_plan.residency_report().fallback_count, 4);
@@ -938,6 +938,214 @@ fn native_deepseek_v4_token_35_position_zero() {
         maximum_error.1 <= 0.05,
         "native/oracle max absolute error is {:?}",
         maximum_error
+    );
+}
+
+#[test]
+#[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+fn native_deepseek_v4_packed_n1_matches_position_zero_oracle() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(
+        model_path.exists(),
+        "missing DS4 model at {}",
+        model_path.display()
+    );
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
+    session
+        .prefill_tokens(&ctx, &[35])
+        .expect("execute one-token layer-major prefill");
+    assert_eq!(session.next_position(), 1);
+    let logits = session.copy_logits_f32().expect("copy packed N=1 logits");
+    assert_logits_match("packed position 0", &logits, ORACLE_BYTES, 201);
+}
+
+#[test]
+#[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+fn native_deepseek_v4_packed_n2_matches_local_continuation() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
+    session
+        .prefill_tokens(&ctx, &[35, 201])
+        .expect("execute two-token layer-major prefill");
+    let packed = session.copy_logits_f32().expect("copy packed N=2 logits");
+    assert_logits_match("packed position 1", &packed, POSITION_ONE_ORACLE_BYTES, 200);
+    session
+        .forward_token(&ctx, 200)
+        .expect("decode after packed N=2");
+    let continuation = session
+        .copy_logits_f32()
+        .expect("copy packed N=2 continuation logits");
+    assert_logits_match(
+        "packed N=2 continuation position 2",
+        &continuation,
+        POSITION_TWO_ORACLE_BYTES,
+        200,
+    );
+}
+
+#[test]
+#[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+fn native_deepseek_v4_packed_n4_preserves_csa_and_decode_continuation() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(
+        model_path.exists(),
+        "missing DS4 model at {}",
+        model_path.display()
+    );
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
+    session
+        .prefill_tokens(&ctx, &[35, 201, 200, 34])
+        .expect("execute four-token layer-major prefill");
+    assert_eq!(session.next_position(), 4);
+    let boundary = session
+        .copy_logits_f32()
+        .expect("copy packed CSA-boundary logits");
+    assert_logits_match(
+        "packed position 3",
+        &boundary,
+        POSITION_THREE_BRANCH_ORACLE_BYTES,
+        262,
+    );
+
+    session
+        .forward_token(&ctx, 262)
+        .expect("decode after packed CSA boundary");
+    assert_eq!(session.next_position(), 5);
+    let continuation = session
+        .copy_logits_f32()
+        .expect("copy packed continuation logits");
+    assert_logits_match(
+        "packed continuation position 4",
+        &continuation,
+        POSITION_FOUR_BRANCH_ORACLE_BYTES,
+        63_325,
+    );
+}
+
+#[test]
+#[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+fn native_deepseek_v4_packed_callback_unwind_poison_is_fail_stop() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = session.prefill_tokens_with_progress(&ctx, &[35, 201, 200, 34], |layer| {
+            if layer == 2 {
+                panic!("intentional packed prefill interruption");
+            }
+        });
+    }));
+    assert!(unwind.is_err(), "progress callback must interrupt prefill");
+    assert_eq!(session.next_position(), 0);
+    assert!(session.copy_logits_f32().is_err());
+    let error = match session.forward_token(&ctx, 35) {
+        Err(error) => error,
+        Ok(_) => panic!("poisoned session unexpectedly accepted a token"),
+    };
+    assert!(error.to_string().contains("poisoned"));
+}
+
+#[test]
+#[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+fn native_deepseek_v4_packed_n128_preserves_hca_and_wrapped_decode() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(
+        model_path.exists(),
+        "missing DS4 model at {}",
+        model_path.display()
+    );
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
+    let prompt = [35, 201, 200, 34].repeat(32);
+    let started = Instant::now();
+    session
+        .prefill_tokens(&ctx, &prompt)
+        .expect("execute 128-token layer-major prefill");
+    let packed_seconds = started.elapsed().as_secs_f64();
+    eprintln!("packed_n128_seconds={packed_seconds:.3}");
+    assert_eq!(session.next_position(), 128);
+    let boundary_logits = session
+        .copy_logits_f32()
+        .expect("copy packed first-HCA logits");
+    let boundary = compare_logits(
+        "packed_position_127",
+        &boundary_logits,
+        POSITION_127_ORACLE_BYTES,
+    );
+    assert_eq!(boundary.oracle_argmax, 35);
+    assert_eq!(boundary.argmax, boundary.oracle_argmax);
+    assert!(
+        boundary.cosine >= 0.998,
+        "packed position 127 cosine {}",
+        boundary.cosine
+    );
+    assert!(
+        boundary.relative_rms <= 0.07,
+        "packed position 127 relative RMS {}",
+        boundary.relative_rms
+    );
+
+    session
+        .forward_token(&ctx, 35)
+        .expect("decode after packed first-HCA boundary");
+    assert_eq!(session.next_position(), 129);
+    let continuation_logits = session
+        .copy_logits_f32()
+        .expect("copy wrapped packed continuation logits");
+    let continuation = compare_logits(
+        "packed_position_128",
+        &continuation_logits,
+        POSITION_128_ORACLE_BYTES,
+    );
+    assert_eq!(continuation.oracle_argmax, 201);
+    assert_eq!(continuation.argmax, continuation.oracle_argmax);
+    assert!(
+        continuation.cosine >= 0.998,
+        "packed position 128 cosine {}",
+        continuation.cosine
+    );
+    assert!(
+        continuation.relative_rms <= 0.06,
+        "packed position 128 relative RMS {}",
+        continuation.relative_rms
+    );
+    assert!(
+        continuation.relative_rms < boundary.relative_rms,
+        "packed continuation did not recover: boundary={} continuation={}",
+        boundary.relative_rms,
+        continuation.relative_rms
+    );
+    assert!(
+        packed_seconds < 17.5,
+        "packed prefill {packed_seconds:.3}s did not reach 2x the 35.0s singleton baseline"
     );
 }
 

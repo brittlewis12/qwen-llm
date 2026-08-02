@@ -56,6 +56,14 @@ struct ds4_local_attention_args {
     float scale;
 };
 
+struct ds4_packed_attention_args {
+    uint head_count;
+    uint head_dim;
+    uint n_tokens;
+    uint compression_ratio;
+    float scale;
+};
+
 struct ds4_compressor_frontier_args {
     uint width;
     uint row_offset;
@@ -70,6 +78,29 @@ struct ds4_compressor_pool_args {
 
 struct ds4_compressor_roll_args {
     uint width;
+};
+
+struct ds4_hc_batch_args {
+    uint hidden_size;
+    uint n_tokens;
+};
+
+struct ds4_hc_controls_batch_args {
+    uint n_tokens;
+    float eps;
+};
+
+struct ds4_group_pack_args {
+    uint n_tokens;
+    uint row_width;
+    uint group_width;
+    uint group;
+};
+
+struct ds4_hash_gather_args {
+    uint n_tokens;
+    uint top_k;
+    uint vocab_size;
 };
 
 static inline float ds4_bf16_roundtrip(float value) {
@@ -247,6 +278,67 @@ kernel void kernel_deepseek_v4_dense_sink_attention_f16(
     output[index] = value / denominator;
 }
 
+kernel void kernel_deepseek_v4_packed_dense_sink_attention_f16(
+        constant ds4_packed_attention_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * raw_cache [[buffer(2)]],
+        device const half * compressed_cache [[buffer(3)]],
+        device const float * sinks [[buffer(4)]],
+        device float * output [[buffer(5)]],
+        threadgroup float * masses [[threadgroup(0)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        uint tid [[thread_index_in_threadgroup]]) {
+    const uint token = group.x;
+    const uint head = group.y;
+    if (token >= args.n_tokens || head >= args.head_count) return;
+    const uint raw_count = token + 1u;
+    const uint compressed_count = args.compression_ratio == 0u
+        ? 0u
+        : (token + 1u) / args.compression_ratio;
+    const uint row_count = raw_count + compressed_count;
+    const uint query_start = (token * args.head_count + head) * args.head_dim;
+
+    if (tid < row_count) {
+        const bool compressed = tid >= raw_count;
+        const uint row = compressed ? tid - raw_count : tid;
+        device const half * cache = compressed ? compressed_cache : raw_cache;
+        const uint cache_start = row * args.head_dim;
+        float score = 0.0f;
+        for (uint dimension = 0u; dimension < args.head_dim; ++dimension) {
+            score += queries[query_start + dimension] * float(cache[cache_start + dimension]);
+        }
+        masses[tid] = score * args.scale;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0u) {
+        float maximum = sinks[head];
+        for (uint row = 0u; row < row_count; ++row) {
+            maximum = max(maximum, masses[row]);
+        }
+        float denominator = exp(sinks[head] - maximum);
+        for (uint row = 0u; row < row_count; ++row) {
+            const float mass = exp(masses[row] - maximum);
+            masses[row] = mass;
+            denominator += mass;
+        }
+        masses[row_count] = denominator;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid < args.head_dim) {
+        float value = 0.0f;
+        for (uint row = 0u; row < raw_count; ++row) {
+            value += float(raw_cache[row * args.head_dim + tid]) * masses[row];
+        }
+        for (uint row = 0u; row < compressed_count; ++row) {
+            value += float(compressed_cache[row * args.head_dim + tid])
+                * masses[raw_count + row];
+        }
+        output[query_start + tid] = value / masses[row_count];
+    }
+}
+
 kernel void kernel_deepseek_v4_compressor_frontier_write(
         constant ds4_compressor_frontier_args & args [[buffer(0)]],
         device const float * projected_kv [[buffer(1)]],
@@ -374,6 +466,19 @@ kernel void kernel_deepseek_v4_hc_repeat(
     residual[index] = embedding[index % hidden_size];
 }
 
+kernel void kernel_deepseek_v4_hc_repeat_batch(
+        constant ds4_hc_batch_args & args [[buffer(0)]],
+        device const float * embeddings [[buffer(1)]],
+        device float * residual [[buffer(2)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint residual_width = args.hidden_size * DS4_CONNECTIONS;
+    const uint total = args.n_tokens * residual_width;
+    if (index >= total) return;
+    const uint token = index / residual_width;
+    const uint dimension = index % args.hidden_size;
+    residual[index] = embeddings[token * args.hidden_size + dimension];
+}
+
 kernel void kernel_deepseek_v4_hc_controls(
         constant float & eps [[buffer(0)]],
         device const float * mix [[buffer(1)]],
@@ -446,6 +551,83 @@ kernel void kernel_deepseek_v4_hc_controls(
     }
 }
 
+kernel void kernel_deepseek_v4_hc_controls_batch(
+        constant ds4_hc_controls_batch_args & args [[buffer(0)]],
+        device const float * mix [[buffer(1)]],
+        device const float * scale [[buffer(2)]],
+        device const float * base [[buffer(3)]],
+        device float * pre [[buffer(4)]],
+        device float * post [[buffer(5)]],
+        device float * combination [[buffer(6)]],
+        uint token [[thread_position_in_grid]]) {
+    if (token >= args.n_tokens) return;
+    const uint mix_start = token * DS4_PARAMETERS;
+    const uint gate_start = token * DS4_CONNECTIONS;
+    const uint combination_start = token * DS4_CONNECTIONS * DS4_CONNECTIONS;
+    for (uint stream = 0; stream < DS4_CONNECTIONS; ++stream) {
+        pre[gate_start + stream] = 1.0f / (1.0f + exp(-(
+            mix[mix_start + stream] * scale[0] + base[stream]))) + args.eps;
+        post[gate_start + stream] = 2.0f / (1.0f + exp(-(
+            mix[mix_start + 4u + stream] * scale[1] + base[4u + stream])));
+    }
+
+    for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+        float row_max = -INFINITY;
+        for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+            const uint index = source * DS4_CONNECTIONS + destination;
+            const float value = mix[mix_start + 8u + index] * scale[2] + base[8u + index];
+            combination[combination_start + index] = value;
+            row_max = max(row_max, value);
+        }
+        float sum = 0.0f;
+        for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+            const uint index = source * DS4_CONNECTIONS + destination;
+            const uint offset = combination_start + index;
+            combination[offset] = exp(combination[offset] - row_max);
+            sum += combination[offset];
+        }
+        const float inverse = 1.0f / sum;
+        for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+            const uint index = source * DS4_CONNECTIONS + destination;
+            const uint offset = combination_start + index;
+            combination[offset] = combination[offset] * inverse + args.eps;
+        }
+    }
+
+    for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+        float sum = 0.0f;
+        for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+            sum += combination[combination_start + source * DS4_CONNECTIONS + destination];
+        }
+        const float inverse = 1.0f / (sum + args.eps);
+        for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+            combination[combination_start + source * DS4_CONNECTIONS + destination] *= inverse;
+        }
+    }
+    for (uint iteration = 1; iteration < DS4_SINKHORN_ITERATIONS; ++iteration) {
+        for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+            float sum = 0.0f;
+            for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+                sum += combination[combination_start + source * DS4_CONNECTIONS + destination];
+            }
+            const float inverse = 1.0f / (sum + args.eps);
+            for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+                combination[combination_start + source * DS4_CONNECTIONS + destination] *= inverse;
+            }
+        }
+        for (uint destination = 0; destination < DS4_CONNECTIONS; ++destination) {
+            float sum = 0.0f;
+            for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+                sum += combination[combination_start + source * DS4_CONNECTIONS + destination];
+            }
+            const float inverse = 1.0f / (sum + args.eps);
+            for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+                combination[combination_start + source * DS4_CONNECTIONS + destination] *= inverse;
+            }
+        }
+    }
+}
+
 kernel void kernel_deepseek_v4_hc_collapse(
         constant uint & hidden_size [[buffer(0)]],
         device const float * residual [[buffer(1)]],
@@ -458,6 +640,26 @@ kernel void kernel_deepseek_v4_hc_collapse(
         value += residual[source * hidden_size + dimension] * pre[source];
     }
     output[dimension] = value;
+}
+
+kernel void kernel_deepseek_v4_hc_collapse_batch(
+        constant ds4_hc_batch_args & args [[buffer(0)]],
+        device const float * residual [[buffer(1)]],
+        device const float * pre [[buffer(2)]],
+        device float * output [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint total = args.n_tokens * args.hidden_size;
+    if (index >= total) return;
+    const uint token = index / args.hidden_size;
+    const uint dimension = index % args.hidden_size;
+    const uint residual_start = token * DS4_CONNECTIONS * args.hidden_size;
+    const uint gate_start = token * DS4_CONNECTIONS;
+    float value = 0.0f;
+    for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+        value += residual[residual_start + source * args.hidden_size + dimension]
+            * pre[gate_start + source];
+    }
+    output[index] = value;
 }
 
 kernel void kernel_deepseek_v4_hc_post(
@@ -478,6 +680,73 @@ kernel void kernel_deepseek_v4_hc_post(
             * residual[source * hidden_size + dimension];
     }
     output[index] = value;
+}
+
+kernel void kernel_deepseek_v4_hc_post_batch(
+        constant ds4_hc_batch_args & args [[buffer(0)]],
+        device const float * block [[buffer(1)]],
+        device const float * residual [[buffer(2)]],
+        device const float * post [[buffer(3)]],
+        device const float * combination [[buffer(4)]],
+        device float * output [[buffer(5)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint residual_width = args.hidden_size * DS4_CONNECTIONS;
+    const uint total = args.n_tokens * residual_width;
+    if (index >= total) return;
+    const uint token = index / residual_width;
+    const uint within = index % residual_width;
+    const uint destination = within / args.hidden_size;
+    const uint dimension = within % args.hidden_size;
+    const uint combination_start = token * DS4_CONNECTIONS * DS4_CONNECTIONS;
+    float value = block[token * args.hidden_size + dimension]
+        * post[token * DS4_CONNECTIONS + destination];
+    for (uint source = 0; source < DS4_CONNECTIONS; ++source) {
+        value += combination[combination_start + source * DS4_CONNECTIONS + destination]
+            * residual[token * residual_width + source * args.hidden_size + dimension];
+    }
+    output[index] = value;
+}
+
+kernel void kernel_deepseek_v4_pack_attention_group(
+        constant ds4_group_pack_args & args [[buffer(0)]],
+        device const float * input [[buffer(1)]],
+        device float * output [[buffer(2)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint total = args.n_tokens * args.group_width;
+    if (index >= total) return;
+    const uint token = index / args.group_width;
+    const uint dimension = index % args.group_width;
+    output[index] = input[token * args.row_width + args.group * args.group_width + dimension];
+}
+
+kernel void kernel_deepseek_v4_scatter_low_rank_group(
+        constant ds4_group_pack_args & args [[buffer(0)]],
+        device const float * input [[buffer(1)]],
+        device float * output [[buffer(2)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint total = args.n_tokens * args.group_width;
+    if (index >= total) return;
+    const uint token = index / args.group_width;
+    const uint dimension = index % args.group_width;
+    output[token * args.row_width + args.group * args.group_width + dimension] = input[index];
+}
+
+kernel void kernel_deepseek_v4_hash_gather(
+        constant ds4_hash_gather_args & args [[buffer(0)]],
+        device const int * token_ids [[buffer(1)]],
+        device const int * token_to_expert [[buffer(2)]],
+        device int * output [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint total = args.n_tokens * args.top_k;
+    if (index >= total) return;
+    const uint token = index / args.top_k;
+    const uint slot = index % args.top_k;
+    const int token_id = token_ids[token];
+    if (token_id < 0 || uint(token_id) >= args.vocab_size) {
+        output[index] = -1;
+        return;
+    }
+    output[index] = token_to_expert[uint(token_id) * args.top_k + slot];
 }
 
 struct ds4_hc_head_args {

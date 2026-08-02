@@ -4,6 +4,8 @@
 //! GGUF weights remain in their exact storage without dtype conversion. The
 //! execution bodies deliberately have no dependency on the Qwen Metal model.
 
+mod prefill;
+
 use crate::deepseek_v4::{AttentionKind, DeepSeekV4Config, DeepSeekV4Error, DeepSeekV4Model};
 use crate::gguf::{GgufError, GgufFile};
 use crate::metal::{
@@ -24,6 +26,7 @@ pub const DEEPSEEK_V4_CONNECTION_COUNT: usize = 4;
 pub const DEEPSEEK_V4_HC_PARAMETER_COUNT: usize = 24;
 pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
 pub const DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+pub use prefill::DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 /// Number of token forwards traversed by the longest retained-session
 /// differential, through the position-512 fourth-HCA continuation. Callers use
 /// this to reject requests before streaming beyond the current evidence
@@ -649,6 +652,7 @@ pub struct DeepSeekV4Session {
     final_hidden: MetalTensor,
     final_normalized_hidden: MetalTensor,
     logits: MetalTensor,
+    prefill: prefill::DeepSeekV4PrefillScratch,
     next_position: u32,
     completed: bool,
     poisoned: bool,
@@ -713,6 +717,7 @@ impl DeepSeekV4Session {
                 vec![DEEPSEEK_V4_HIDDEN_SIZE as u64],
             )?,
             logits: MetalTensor::zeros_f32(ctx, vec![DEEPSEEK_V4_VOCAB_SIZE as u64])?,
+            prefill: prefill::DeepSeekV4PrefillScratch::new(ctx)?,
             next_position: 0,
             completed: false,
             poisoned: false,
@@ -723,8 +728,11 @@ impl DeepSeekV4Session {
         &self.residency
     }
 
-    pub fn logits(&self) -> &MetalTensor {
-        &self.logits
+    pub fn logits(&self) -> Result<&MetalTensor, DeepSeekV4MetalError> {
+        if !self.completed {
+            return invalid("DeepSeek V4 logits have not completed");
+        }
+        Ok(&self.logits)
     }
 
     pub fn final_normalized_hidden(&self) -> &MetalTensor {
@@ -741,10 +749,7 @@ impl DeepSeekV4Session {
 
     /// Copy completed logits out of shared Metal storage.
     pub fn copy_logits_f32(&self) -> Result<Vec<f32>, DeepSeekV4MetalError> {
-        if !self.completed {
-            return invalid("DeepSeek V4 logits have not completed");
-        }
-        host_read_f32(&self.logits, "completed DeepSeek V4 logits")
+        host_read_f32(self.logits()?, "completed DeepSeek V4 logits")
     }
 
     /// Compatibility entry point for the original position-zero differential.
@@ -1374,23 +1379,6 @@ impl DeepSeekV4CompressorFrontier {
             "published compressor rows",
         )?;
 
-        let following_position = position
-            .checked_add(1)
-            .ok_or_else(|| DeepSeekV4MetalError::Invalid("compressor position overflow".into()))?;
-        let boundary = (following_position as usize).is_multiple_of(self.ratio);
-        let published_row = if boundary {
-            let row = following_position as usize / self.ratio - 1;
-            if row >= DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS {
-                return invalid(format!(
-                    "compressor published row {row} exceeds the first {}-row slab",
-                    DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS
-                ));
-            }
-            Some(row)
-        } else {
-            None
-        };
-
         encode_projection(
             ctx,
             enc,
@@ -1411,6 +1399,110 @@ impl DeepSeekV4CompressorFrontier {
             self.width,
             "compressor score",
         )?;
+        self.encode_projected(
+            ctx,
+            enc,
+            &self.projected_kv,
+            &self.projected_score,
+            ape,
+            norm_weight,
+            position,
+            rope,
+            rms_eps,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_projected(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        projected_kv: &MetalTensor,
+        projected_score: &MetalTensor,
+        ape: &MetalTensor,
+        norm_weight: &MetalTensor,
+        position: u32,
+        rope: DeepSeekV4RopeParameters,
+        rms_eps: f32,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        require_serial(enc, "deepseek_v4_compressor_frontier_projected")?;
+        validate_f32(
+            projected_kv,
+            &[self.width as u64],
+            false,
+            "projected compressor KV",
+        )?;
+        validate_f32(
+            projected_score,
+            &[self.width as u64],
+            false,
+            "projected compressor score",
+        )?;
+        validate_f32(
+            ape,
+            &[self.width as u64, self.ratio as u64],
+            false,
+            "compressor APE",
+        )?;
+        validate_f32(
+            norm_weight,
+            &[self.head_dim as u64],
+            false,
+            "compressor norm weight",
+        )?;
+        validate_f32(
+            &self.kv_state,
+            &[self.width as u64, self.rows as u64],
+            true,
+            "compressor KV state",
+        )?;
+        validate_f32(
+            &self.score_state,
+            &[self.width as u64, self.rows as u64],
+            true,
+            "compressor score state",
+        )?;
+        validate_f32(
+            &self.pooled,
+            &[self.head_dim as u64],
+            true,
+            "pooled compressor row",
+        )?;
+        validate_f32(
+            &self.normalized,
+            &[self.head_dim as u64],
+            true,
+            "normalized compressor row",
+        )?;
+        validate_f16(
+            &self.published,
+            &[
+                self.head_dim as u64,
+                DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64,
+            ],
+            true,
+            "published compressor rows",
+        )?;
+        validate_ds4_rope(rope, self.head_dim, rope.rotary_dim)?;
+        validate_eps(rms_eps, "compressor RMSNorm epsilon")?;
+
+        let following_position = position
+            .checked_add(1)
+            .ok_or_else(|| DeepSeekV4MetalError::Invalid("compressor position overflow".into()))?;
+        let boundary = (following_position as usize).is_multiple_of(self.ratio);
+        let published_row = if boundary {
+            let row = following_position as usize / self.ratio - 1;
+            if row >= DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS {
+                return invalid(format!(
+                    "compressor published row {row} exceeds the first {}-row slab",
+                    DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS
+                ));
+            }
+            Some(row)
+        } else {
+            None
+        };
+
         let ape_row = ape.view_subrange(
             ((position as usize % self.ratio) * self.width) as u64,
             vec![self.width as u64],
@@ -1423,8 +1515,8 @@ impl DeepSeekV4CompressorFrontier {
         encode_compressor_frontier_write(
             ctx,
             enc,
-            &self.projected_kv,
-            &self.projected_score,
+            projected_kv,
+            projected_score,
             &ape_row,
             &self.kv_state,
             &self.score_state,
@@ -3271,7 +3363,14 @@ fn host_write_f32(
     values: &[f32],
     name: &str,
 ) -> Result<(), DeepSeekV4MetalError> {
-    validate_f32(tensor, &[values.len() as u64], true, name)?;
+    validate_f32(tensor, &tensor.shape, true, name)?;
+    if tensor.n_elements() != values.len() as u64 {
+        return invalid(format!(
+            "{name} has {} elements, host write has {}",
+            tensor.n_elements(),
+            values.len()
+        ));
+    }
     if values.iter().any(|value| !value.is_finite()) {
         return invalid(format!("{name} contains a non-finite value"));
     }
@@ -3293,7 +3392,14 @@ fn host_write_i32(
     values: &[i32],
     name: &str,
 ) -> Result<(), DeepSeekV4MetalError> {
-    validate_i32(tensor, &[values.len() as u64], true, name)?;
+    validate_i32(tensor, &tensor.shape, true, name)?;
+    if tensor.n_elements() != values.len() as u64 {
+        return invalid(format!(
+            "{name} has {} elements, host write has {}",
+            tensor.n_elements(),
+            values.len()
+        ));
+    }
     unsafe {
         let destination = tensor
             .buffer
@@ -4683,7 +4789,7 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
         routed_scale: 1.0,
     };
     moe.checked()?;
-    let mut requests = Vec::with_capacity(474);
+    let mut requests = Vec::with_capacity(520);
     let f32_bytes = std::mem::size_of::<f32>();
     let i32_bytes = std::mem::size_of::<i32>();
     let f16_bytes = std::mem::size_of::<u16>();
@@ -4843,6 +4949,7 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
         push_session_allocation(&mut requests, name, DEEPSEEK_V4_HIDDEN_SIZE, f32_bytes)?;
     }
     push_session_allocation(&mut requests, "logits", DEEPSEEK_V4_VOCAB_SIZE, f32_bytes)?;
+    prefill::append_session_allocation_requests(&mut requests)?;
     Ok(requests)
 }
 
@@ -4861,7 +4968,17 @@ fn price_shared_buffer(
             priced.size, priced.alignment
         ));
     }
-    Ok((priced.size, priced.alignment))
+    let allocation_alignment = priced.alignment.max(host_page_size_bytes()? as u64);
+    let priced_bytes = priced
+        .size
+        .checked_add(allocation_alignment - 1)
+        .map(|bytes| bytes / allocation_alignment * allocation_alignment)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "aligned Metal pricing for {name:?} overflows u64"
+            ))
+        })?;
+    Ok((priced_bytes, allocation_alignment))
 }
 
 fn build_memory_plan(
@@ -5148,13 +5265,13 @@ mod tests {
         kinds.extend(std::iter::repeat_n(AttentionKind::CompressedSparse, 21));
         kinds.extend(std::iter::repeat_n(AttentionKind::HeavilyCompressed, 20));
         let requests = deepseek_v4_session_allocation_requests_for_kinds(&kinds).unwrap();
-        assert_eq!(requests.len(), 474);
+        assert_eq!(requests.len(), 520);
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            31_962_388
+            154_622_740
         );
         let names = requests
             .iter()
@@ -5177,6 +5294,21 @@ mod tests {
                 .logical_bytes,
             5_636_096
         );
+    }
+
+    #[test]
+    fn shared_buffer_pricing_includes_host_page_granularity() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let page = host_page_size_bytes().unwrap() as u64;
+        let (priced, alignment) = price_shared_buffer(&ctx, 1, "one-byte probe").unwrap();
+        assert!(alignment >= page);
+        assert_eq!(priced, alignment);
+        let (priced, alignment) = price_shared_buffer(&ctx, page + 1, "cross-page probe").unwrap();
+        assert!(alignment >= page);
+        let expected = (page + alignment) / alignment * alignment;
+        assert_eq!(priced, expected);
     }
 
     #[test]

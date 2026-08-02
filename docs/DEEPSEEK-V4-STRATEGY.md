@@ -645,10 +645,12 @@ Gate:
 - Repeated runs are deterministic under the same host-validity contract used
   by Qwen benchmarks.
 - Allocation-free planning inventories 7 resident buffers (3 retained no-copy
-  windows and 4 final-page copies) at 102,994,608,640 priced bytes and 474
-  unique session buffers at 31,962,388 priced bytes. The total is
-  103,026,571,028 bytes; a 536,870,912-byte dynamic reserve makes the admission
-  requirement 103,563,441,940 bytes.
+  windows and 4 final-page copies) at 102,994,624,512 priced-upper bytes and
+  520 unique session buffers at 154,622,740 logical / 158,957,568 priced-upper
+  bytes. The session total includes the complete physical 128-token packed
+  scratch rather than charging it to reserve. The complete priced upper bound
+  is 103,153,582,080 bytes; a 536,870,912-byte dynamic reserve makes the
+  admission requirement 103,690,452,992 bytes.
 - The load plan freezes configuration plus every descriptor's name, shape,
   dtype, shard, offset, and byte length. Realization revalidates those values,
   fallback policy, all view/alias/window geometry, and a deterministic planner
@@ -658,11 +660,12 @@ Gate:
   The process signal was `Some(0)`, the established omitted-limit convention,
   so the explicit reason was `admitted_process_budget_omitted`.
 - Live phase reconciliation observed 102,994,608,128 residency bytes and
-  103,026,491,392 cumulative bytes after both session construction and first
-  forward. Residency and session must fit their priced inventories without the
-  reserve; only the first-forward endpoint gate may use the reserve. Residency
-  is reconciled inside realization, before an unaccounted resident handle can
-  be returned.
+  103,149,240,320 cumulative bytes after session construction. The packed CLI
+  endpoint reached 103,149,502,464 bytes after lazy pipeline state, still below
+  the 103,690,452,992-byte first-forward gate. Residency and session must fit
+  their priced inventories without the reserve; only the first-forward endpoint
+  gate may use the reserve. Residency is reconciled inside realization, before
+  an unaccounted resident handle can be returned.
 - A release `qwen -p A -n 1` run generated oracle ID 201 in 0.716 seconds of
   prompt execution. `vm_stat` pageouts, swapins, and swapouts were unchanged;
   `vm.swapusage` remained 1,825.94 MiB before and after; and `/usr/bin/time`
@@ -670,12 +673,16 @@ Gate:
   the host began swap-free.
 
 The pricing contract is validated on this Apple M4 Max using shared-buffer
-`heapBufferSizeAndAlign` results and the current no-copy mapping behavior; it is
-not yet a portable Metal guarantee. Reconciliation samples phase endpoints and
-therefore does not observe a transient allocation that is created and released
-between samples. Admission is also not an atomic reservation against another
-process allocating on the same device. The 512 MiB reserve and fail-closed
-phase checks are the current operational protection for those limits.
+`heapBufferSizeAndAlign`, rounded again to the 16 KiB host-page allocation
+granularity, plus the current no-copy mapping behavior. The packed scratch made
+the extra page rounding necessary: size/alignment pricing alone undercounted a
+live session by 8,940 bytes and was rejected before promotion. This remains a
+platform-specific upper bound, not a portable Metal guarantee. Reconciliation
+samples phase endpoints and therefore does not observe a transient allocation
+that is created and released between samples. Admission is also not an atomic
+reservation against another process allocating on the same device. The 512 MiB
+reserve and fail-closed phase checks are the current operational protection for
+those limits.
 
 The bounded raw and ordinary-message slices now establish first-class native
 inference and resident-memory admission through every full-session differential
@@ -684,14 +691,60 @@ for the minimum ordinary prompt-encoder gate.
 
 ### S6: Metal performance promotion
 
-After bounded S5 correctness and memory admission:
+Status: first layer-major prefill slice promoted for fresh prompts of 2-128
+tokens on 2026-08-02. The physical scratch is sized and admitted once for 128;
+short requests use exact prefix views. The CLI retains singleton execution for
+one-token and longer-than-128 prompts until retained chunking earns a separate
+cache-preservation gate.
+
+The packed path is DS4-owned and never calls `forward_token`. Its outer loop is
+43 layers over a token matrix. Embedding, mHC function projections and controls,
+Q/KV/compressor projections, attention output A/B, router, selected expert
+buckets, shared expert, and residual updates execute across the batch. Only
+position-dependent RoPE, raw-cache publication, and ratio-4/128 compressor
+transitions remain chronologically ordered. CPU routing reads one `[N,256]`
+matrix per layer, preserves top-k slot order, and groups selected rows by expert;
+the two MXFP4 routed-down outliers retain an explicit row fallback.
+
+The first packed attention implementation honestly preserved semantics but
+reused the singleton kernel, which recomputed every 512-wide score independently
+for all 512 output lanes. N=128 took 30.7 seconds and its ordinary continuation
+missed the established endpoint gate. Promotion did not relax either result.
+Persistent Q8_0 projections now use one token-axis GEMV dispatch with the exact
+singleton accumulation body, while a DS4 packed causal kernel computes each
+raw/compressed score once in scalar dimension order and shares the resulting
+mass across output lanes. Per-query counts preserve same-token publication and
+prevent future compressed rows from leaking.
+
+Gate:
+
+- Packed N=1 preserves position-zero argmax 201 at cosine 0.999999548 and
+  relative RMS 0.000951217 against the full b10222 vector.
+- Packed `[35, 201, 200, 34]` publishes the first CSA row and preserves argmax
+  262 at cosine 0.999999903 / relative RMS 0.000448886. Ordinary singleton
+  decode from that retained state preserves position-4 argmax 63,325 at
+  0.999999958 / 0.000290112.
+- Packed `[35, 201, 200, 34] * 32` publishes the first HCA row and preserves
+  position-127 argmax 35 at 0.998357518 / 0.057293913. Ordinary position-128
+  decode wraps raw slot zero, preserves argmax 201, and recovers to
+  0.998725888 / 0.050464456.
+- The optimized N=128 path takes 2.909-3.060 seconds versus the prior 35.0-35.2
+  second singleton prompt, an 11.4-12.0x improvement. The release CLI
+  independently reports 2,934.8 ms, `prefill_mode=layer_major_128`, and
+  generated IDs `[35, 201]` across the HCA boundary and continuation.
+- The packed causal attention kernel matches ordered singleton rows within two
+  F32 epsilons; token-axis Q8_0 GEMV is bitwise identical to successive
+  singleton dispatches. A callback unwind after a completed layer leaves the
+  batch at position zero with poison set, exposes no completed logits, and
+  rejects subsequent decode.
+
+Broader S6 work remains:
 
 - Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, shared-KV
   sparse attention, and high-value MoE boundaries.
-- Implement real layer-major batched prefill first, within the already-promoted
-  positions 0-512. Repeated single-token decode is correctness evidence, not an
-  acceptable prompt path.
+- Extend packed prefill beyond a fresh 128-token chunk only with explicit
+  pre-chunk ring preservation and absolute-position compressed visibility.
 
 Gates:
 
@@ -737,7 +790,7 @@ noise without reducing technical risk. Revisit after S5.
 
 | Risk | Response |
 |---|---|
-| IQ2_S routed gate/up has no production grouped path | Make it an explicit S2 deliverable and test against scalar dequantization |
+| IQ2_S routed gate/up has no production grouped path | Bucket selected rows by expert and use generic IQ2_S matmul; add a grouped kernel only if profiling justifies it |
 | Existing Qwen session becomes branch-heavy | Keep DS4 model/session/forward types separate |
 | CSA indexer dominates decode | Attribute full-history score and top-k before changing tile shapes |
 | Generic Metal fallback hides memory blowups | Require explicit scratch accounting and resident-memory gates |
@@ -749,14 +802,14 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Implement a real layer-major batched prefill path inside the promoted
-   positions 0-512, with singleton equivalence at named CSA/HCA boundaries and
-   the existing request-wide fail-closed capacity check.
-2. Generalize production-width HCA compressor, wrapped-ring, publication, and
+1. Generalize production-width HCA compressor, wrapped-ring, publication, and
    visibility coverage through row 7, then use one pinned full-model endpoint
    at position 1024 instead of collecting every intermediate boundary.
-3. Keep position 1027 fail-closed. Promote compressed-history slab growth as a
+2. Keep position 1027 fail-closed. Promote compressed-history slab growth as a
    separate ownership milestone, then implement sparse CSA index scoring and
    top-512 selection before history can exceed 512 rows.
+3. Extend packed prefill past a fresh 128-token chunk only after the
+   pre-existing raw ring and compressed-history prefix have explicit packed
+   visibility tests; do not hide retained chunking behind singleton replay.
 4. Extend the 0731 message encoder to reasoning and DSML tools only with exact
    release-derived byte fixtures and an end-to-end tool-call workload.

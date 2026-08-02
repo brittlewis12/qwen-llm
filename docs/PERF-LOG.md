@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-01 - v0.663 Lm-Head Prompt-Digest Invalid
+
+Status: authenticated `INVALID` with `authority=[]`. The identity-key repair and
+all pre-prompt model checks cleared; the sole packet stopped on an oracle-only
+prompt-digest contract mismatch before any model forward.
+
+- Readiness binds clean commit `78da21d`, the release executable, exact command,
+  operator attestation, and v0.662 predecessor.
+- The 196-byte shared dual-key fixture passed. Full model/head authentication,
+  both opened parses, `Runtime::metal`, resident model loading, tokenizer
+  construction, and prompt byte identity completed.
+- The sealed failure is a combined count-and-digest predicate. A
+  post-acquisition vocab-only diagnostic reproduced 419 IDs, production's
+  `fb4bbb4d...1f9f` raw-i32le digest, and the oracle's domain-prefixed
+  `28f8f41b...f931` digest.
+- `capture_request` was never entered. No sequence, prefill, forward, sampling,
+  logits, hidden state, capture, exact survivor, byte ledger, or analyzer result
+  exists. Neutral mechanism flags are INVALID defaults.
+- Do not rerun v0.663. v0.664 may centralize and apply the raw prompt-token
+  digest only; generated-stream digests and every mechanism gate stay frozen.
+
+Artifacts:
+`target/profiles/v0663-generic-lm-head-screening-oracle-a3b-p1/`.
+Decision SHA-256:
+`759750cfb5a8af2621e3c8c0dc9a8d120ad7a1df46ddeda223451f61e731dbcc`.
+Summary:
+`docs/bench/v0663-generic-lm-head-screening-identity-key-repair-result.md`.
+Post-acquisition review: `cx` session
+`019fbf34-6270-72a3-b583-299d15505a88`.
+
 ## 2026-08-01 - v0.662 Lm-Head Identity-Key Invalid
 
 Status: authenticated `INVALID` with `authority=[]`. The parser repair cleared

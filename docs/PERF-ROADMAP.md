@@ -1080,12 +1080,13 @@ default-off exact-profile switch. The generation gate clears by only `0.002899`
 percentage points, so do not claim robust per-run `>=5%`, uniform TTFT
 nonregression, default admission, broader transfer, or another timing packet.
 
-1. **Generic certified lm-head screening oracle**: v0.662 is sealed authenticated
-   `INVALID` with no mechanism observation. Its synthetic and real-file parser
-   repair cleared, then CPU model identity validation selected
-   `general.basename` for the spaced `general.base_model.0.name` value. Run only
-   the preregistered v0.663 dual-key identity repair under a new root, preserving
-   every screening gate. In the frozen integrated cell, v0.656's compact tail
+1. **Generic certified lm-head screening oracle**: v0.663 is sealed authenticated
+   `INVALID` with no mechanism observation. Parser, dual-name identity, complete
+   model/head authentication, resident loading, tokenizer construction, and
+   prompt bytes cleared. The oracle then compared a domain-prefixed token digest
+   against production's frozen raw-i32le digest. Run only the preregistered
+   v0.664 shared prompt-digest repair under a new root, preserving every
+   screening gate. In the frozen integrated cell, v0.656's compact tail
    removes `14.197064 ms` of transition-command wall, while v0.655 supplies
    isolated primitive authority.
    Every capture must prune `>=80%` of rows while charging `<=30%` of baseline

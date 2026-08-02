@@ -31,7 +31,7 @@ use std::time::Instant;
 
 use crate::host_validity::HostSnapshot;
 
-const SCHEMA: &str = "qwen-lm-head-screening-oracle/v0662";
+const SCHEMA: &str = "qwen-lm-head-screening-oracle/v0663";
 const MODEL_PATH: &str = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
 const MODEL_BYTES: u64 = 22_134_528_992;
 const MODEL_SHA256: &str = "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61";
@@ -40,6 +40,8 @@ const PROMPT_BYTES: usize = 1_891;
 const PROMPT_SHA256: &str = "e265de9742d1b22e566fc108ae26331ccf46166c6f071e73f211e0a1a7e8b474";
 const TOKEN_SHA256: &str = "fb4bbb4dc66ca7d219099e2974e787ef976f80789cde3e48b8a905dceece1f9f";
 const OUTPUT_SHA256: &str = "122386a599833ffec3a266e48dd8a90aedc65e24c31323ce2388f40d7cc7b30c";
+const BASE_MODEL_NAME: &str = "Qwen3.6 35B A3B";
+const BASENAME: &str = "Qwen3.6-35B-A3B";
 const OUTPUT_OFFSET: u64 = 10_990_048;
 const HIDDEN: usize = 2_048;
 const VOCAB: usize = 248_320;
@@ -55,9 +57,9 @@ const PROMPT_TOKENS: usize = 419;
 const PRUNING_FLOOR: usize = 198_656;
 const BYTE_LIMIT: u64 = 125_153_280;
 const DOT_EXP: i32 = -173;
-const PACKET_PATH: &str = "target/profiles/v0662-generic-lm-head-screening-oracle-a3b-p1";
+const PACKET_PATH: &str = "target/profiles/v0663-generic-lm-head-screening-oracle-a3b-p1";
 const PREDECESSOR_DECISION_SHA256: &str =
-    "d4628a76ed85d84018d6e0b4e53d5805bfb5b41398448d6bef13825f82397cbc";
+    "a457ae97a9f51ef62e2d01ff4c30f8f012421f6fab7c336cf44d536d6ac32c80";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -103,6 +105,13 @@ struct ReadinessArtifact {
     operator_attestation: bool,
     command_arguments: ReadinessCommandArguments,
     predecessor_decision_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ModelNameIdentity {
+    base_model_name: String,
+    basename: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -667,7 +676,7 @@ fn validate_args(args: &LmHeadScreeningOracleArgs) -> Result<()> {
 fn validate_build(build: &super::BuildIdentity) -> Result<()> {
     ensure!(
         !cfg!(debug_assertions),
-        "v0.662 requires a release binary without debug assertions"
+        "v0.663 requires a release binary without debug assertions"
     );
     validate_clean_build_identity(build)
 }
@@ -1271,7 +1280,8 @@ fn validate_capture_manifest_constants(manifest: &CaptureManifestArtifact) -> Re
             && model.bytes == MODEL_BYTES
             && model.sha256 == MODEL_SHA256
             && model.architecture == "qwen35moe"
-            && model.base_name == "Qwen3.6 35B A3B"
+            && model.base_model_name == BASE_MODEL_NAME
+            && model.basename == BASENAME
             && model.file_type == 15
             && model.layers == 40
             && model.hidden == HIDDEN
@@ -1450,6 +1460,7 @@ struct OpenedGgufRewindObservation {
     diagnostic_path_absent_before_parse: bool,
     parsed_tensor_count: usize,
     parsed_tensor_name: String,
+    model_names: ModelNameIdentity,
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -1469,7 +1480,7 @@ unsafe extern "C" {
 fn floating_environment_self_test() -> Result<(u64, i32, u64, u32, u64, [u32; 2])> {
     #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
     return Err(anyhow!(
-        "v0.662 floating-environment gate requires aarch64 macOS"
+        "v0.663 floating-environment gate requires aarch64 macOS"
     ));
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -1633,7 +1644,7 @@ fn self_tests() -> Result<SelfTestArtifact> {
             "ledger_for_hard_coded_64_128_256_streams_totals_constants_and_overlap",
             "malformed_symlink_hardlink_foreign_traversal_schema_json_and_raw_size",
             "prophecy_firewall_exact_positive_capabilities",
-            "opened_gguf_shared_eof_cursor_rewind_without_diagnostic_path_reopen",
+            "opened_gguf_shared_eof_cursor_rewind_and_typed_dual_name_extraction",
         ]
         .into_iter()
         .map(str::to_string)
@@ -1666,15 +1677,27 @@ fn self_tests() -> Result<SelfTestArtifact> {
     })
 }
 
-fn runtime_opened_gguf_rewind_self_test() -> Result<OpenedGgufRewindObservation> {
+fn push_self_test_gguf_string(output: &mut Vec<u8>, value: &str) {
+    output.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    output.extend_from_slice(value.as_bytes());
+}
+
+fn opened_gguf_identity_fixture() -> Vec<u8> {
     const MAGIC: u32 = 0x4655_4747;
     let mut fixture = Vec::new();
     fixture.extend_from_slice(&MAGIC.to_le_bytes());
     fixture.extend_from_slice(&3u32.to_le_bytes());
     fixture.extend_from_slice(&1u64.to_le_bytes());
-    fixture.extend_from_slice(&0u64.to_le_bytes());
-    fixture.extend_from_slice(&1u64.to_le_bytes());
-    fixture.push(b't');
+    fixture.extend_from_slice(&2u64.to_le_bytes());
+    for (key, value) in [
+        ("general.base_model.0.name", BASE_MODEL_NAME),
+        ("general.basename", BASENAME),
+    ] {
+        push_self_test_gguf_string(&mut fixture, key);
+        fixture.extend_from_slice(&8u32.to_le_bytes());
+        push_self_test_gguf_string(&mut fixture, value);
+    }
+    push_self_test_gguf_string(&mut fixture, "t");
     fixture.extend_from_slice(&1u32.to_le_bytes());
     fixture.extend_from_slice(&1u64.to_le_bytes());
     fixture.extend_from_slice(&0u32.to_le_bytes());
@@ -1683,9 +1706,14 @@ fn runtime_opened_gguf_rewind_self_test() -> Result<OpenedGgufRewindObservation>
         fixture.push(0);
     }
     fixture.extend_from_slice(&1.0f32.to_le_bytes());
+    fixture
+}
+
+fn runtime_opened_gguf_rewind_self_test() -> Result<OpenedGgufRewindObservation> {
+    let fixture = opened_gguf_identity_fixture();
 
     let root = std::env::temp_dir().join(format!(
-        "qwen-v0662-opened-gguf-self-test-{}-{}",
+        "qwen-v0663-opened-gguf-self-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -1727,12 +1755,22 @@ fn runtime_opened_gguf_rewind_self_test() -> Result<OpenedGgufRewindObservation>
                 && gguf.try_slice(tensor)? == 1.0f32.to_le_bytes(),
             "opened-GGUF fixture parsed incorrectly"
         );
+        let model_names = extract_model_name_identity(&gguf)?;
+        ensure!(
+            model_names
+                == ModelNameIdentity {
+                    base_model_name: BASE_MODEL_NAME.to_string(),
+                    basename: BASENAME.to_string(),
+                },
+            "shared model-name extractor selected the wrong GGUF metadata key"
+        );
         Ok(OpenedGgufRewindObservation {
             fixture_bytes: fixture.len(),
             shared_cursor_position_before_parse: eof,
             diagnostic_path_absent_before_parse: true,
             parsed_tensor_count: gguf.tensors.len(),
             parsed_tensor_name: tensor.name.clone(),
+            model_names,
         })
     })();
     let _ = std::fs::remove_file(&diagnostic);
@@ -1813,7 +1851,7 @@ fn runtime_artifact_self_test() -> Result<()> {
     }
 
     let root = std::env::temp_dir().join(format!(
-        "qwen-v0662-self-test-{}-{}",
+        "qwen-v0663-self-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -1988,7 +2026,8 @@ struct ModelIdentityRecord {
     bytes: u64,
     sha256: String,
     architecture: String,
-    base_name: String,
+    base_model_name: String,
+    basename: String,
     file_type: u64,
     layers: u32,
     hidden: usize,
@@ -2043,6 +2082,19 @@ fn stamp_retained_gguf(gguf: &qwen_llm::gguf::GgufFile) -> Result<FileStamp> {
     })
 }
 
+fn extract_model_name_identity(gguf: &qwen_llm::gguf::GgufFile) -> Result<ModelNameIdentity> {
+    Ok(ModelNameIdentity {
+        base_model_name: gguf
+            .get_str("general.base_model.0.name")
+            .context("GGUF lacks general.base_model.0.name")?
+            .to_string(),
+        basename: gguf
+            .get_str("general.basename")
+            .context("GGUF lacks general.basename")?
+            .to_string(),
+    })
+}
+
 fn validate_raw_gguf(
     gguf: &qwen_llm::gguf::GgufFile,
     expected_stamp: &FileStamp,
@@ -2054,7 +2106,15 @@ fn validate_raw_gguf(
     let model = Model::from_gguf(gguf)?;
     ensure!(model.arch == expected_arch() && !model.tied_embeddings && model.mtp.is_none());
     ensure!(gguf.get_str("general.architecture") == Some("qwen35moe"));
-    ensure!(gguf.get_str("general.basename") == Some("Qwen3.6 35B A3B"));
+    let model_names = extract_model_name_identity(gguf)?;
+    ensure!(
+        model_names
+            == ModelNameIdentity {
+                base_model_name: BASE_MODEL_NAME.to_string(),
+                basename: BASENAME.to_string(),
+            },
+        "GGUF model-name identity differs from the frozen profile"
+    );
     ensure!(gguf.get_u64("general.file_type") == Some(15));
     ensure!(gguf.tensors.iter().all(|t| t.name != "output.bias"));
     let desc = model.lm_head;
@@ -2072,7 +2132,8 @@ fn validate_raw_gguf(
         bytes: MODEL_BYTES,
         sha256: MODEL_SHA256.to_string(),
         architecture: "qwen35moe".to_string(),
-        base_name: "Qwen3.6 35B A3B".to_string(),
+        base_model_name: model_names.base_model_name,
+        basename: model_names.basename,
         file_type: 15,
         layers: 40,
         hidden: HIDDEN,
@@ -3102,14 +3163,19 @@ fn strict_reparse_json(path: &Path, relative: &Path) -> Result<()> {
         for bits in &parsed.observations.f64_to_f32_midpoint_ties_even_bits {
             validate_f32_bits(bits, "self-test F64-to-F32 midpoint bits")?;
         }
+        let opened_fixture_bytes = opened_gguf_identity_fixture().len();
         ensure!(
             parsed.observations.opened_gguf_rewind
                 == OpenedGgufRewindObservation {
-                    fixture_bytes: 68,
-                    shared_cursor_position_before_parse: 68,
+                    fixture_bytes: opened_fixture_bytes,
+                    shared_cursor_position_before_parse: opened_fixture_bytes as u64,
                     diagnostic_path_absent_before_parse: true,
                     parsed_tensor_count: 1,
                     parsed_tensor_name: "t".to_string(),
+                    model_names: ModelNameIdentity {
+                        base_model_name: BASE_MODEL_NAME.to_string(),
+                        basename: BASENAME.to_string(),
+                    },
                 },
             "opened-GGUF runtime self-test observation changed"
         );
@@ -4633,7 +4699,7 @@ fn run_reserved(
     validate_build(&build_identity)?;
     ensure!(
         qwen_env.is_empty(),
-        "v0.662 forbids every inherited QWEN_* control"
+        "v0.663 forbids every inherited QWEN_* control"
     );
     let executable = executable_identity()?;
     packet.executable_commitment = Some(executable.clone());
@@ -4646,9 +4712,9 @@ fn run_reserved(
     let tests = self_tests()?;
     packet.json_strict("self-tests.json", &tests)?;
 
-    let host_before_raw = HostSnapshot::capture("v0662_before_model")?;
+    let host_before_raw = HostSnapshot::capture("v0663_before_model")?;
     host_before_raw.validate()?;
-    let host_before = host_evidence("v0662_before_model", &host_before_raw)?;
+    let host_before = host_evidence("v0663_before_model", &host_before_raw)?;
     let AuthenticatedModel {
         file: authenticated_file,
         gguf: authenticated_gguf,
@@ -4673,9 +4739,9 @@ fn run_reserved(
     ensure!(stamp_retained_gguf(loaded.gguf())? == authenticated_stamp);
     drop(loaded);
     drop(runtime);
-    let host_after_raw = HostSnapshot::capture("v0662_after_capture")?;
+    let host_after_raw = HostSnapshot::capture("v0663_after_capture")?;
     host_after_raw.validate()?;
-    let host_after = host_evidence("v0662_after_capture", &host_after_raw)?;
+    let host_after = host_evidence("v0663_after_capture", &host_after_raw)?;
 
     for capture in &generation.captures {
         persist_capture(packet, capture, &prompt_ids)?;
@@ -4951,6 +5017,23 @@ mod tests {
         assert!(validate_authenticated_stop_ids(&[]).is_err());
         assert!(validate_authenticated_stop_ids(&[STOP_IDS[0], 1]).is_err());
         assert!(validate_authenticated_stop_ids(&[1, STOP_IDS[0]]).is_err());
+    }
+
+    #[test]
+    fn shared_model_name_extractor_distinguishes_both_identity_keys() {
+        let observation = runtime_opened_gguf_rewind_self_test().unwrap();
+        assert_eq!(
+            observation.model_names,
+            ModelNameIdentity {
+                base_model_name: BASE_MODEL_NAME.to_string(),
+                basename: BASENAME.to_string(),
+            }
+        );
+        assert!(observation.diagnostic_path_absent_before_parse);
+        assert_eq!(
+            observation.shared_cursor_position_before_parse,
+            observation.fixture_bytes as u64
+        );
     }
 
     #[test]
@@ -5237,7 +5320,7 @@ mod tests {
     #[test]
     fn artifact_inventory_rejects_symlink_hardlink_and_foreign_file() {
         let root = std::env::temp_dir().join(format!(
-            "qwen-v0662-inventory-{}-{}",
+            "qwen-v0663-inventory-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5283,7 +5366,7 @@ mod tests {
     #[test]
     fn invalid_terminalization_is_exclusive_and_atomic_visible() {
         let root = std::env::temp_dir().join(format!(
-            "qwen-v0662-terminal-{}-{}",
+            "qwen-v0663-terminal-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

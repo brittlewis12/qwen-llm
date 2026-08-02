@@ -30,6 +30,7 @@ rustc-hash.workspace = true
 sha2.workspace = true
 blake3.workspace = true
 libc.workspace = true
+mach2.workspace = true
 
 llama-cpp-sys-2.workspace = true
 

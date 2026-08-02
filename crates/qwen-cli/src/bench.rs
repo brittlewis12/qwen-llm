@@ -9383,9 +9383,9 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let m = Model::from_gguf(&g).context("parse model")?;
     const HD: usize = 256;
-    let N_Q: usize = m.arch.n_q_heads as usize;
-    let N_KV: usize = m.arch.n_kv_heads as usize;
-    let group_tile = match (N_Q, N_KV) {
+    let n_q: usize = m.arch.n_q_heads as usize;
+    let n_kv: usize = m.arch.n_kv_heads as usize;
+    let group_tile = match (n_q, n_kv) {
         (16, 2) => 2,
         (32, 2) => 4,
         _ => 0,
@@ -9393,8 +9393,8 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
     if group_tile == 0 {
         anyhow::bail!(
             "attn-prefill-micro unsupported shape n_q={} n_kv={}",
-            N_Q,
-            N_KV
+            n_q,
+            n_kv
         );
     }
     if m.arch.attn_head_dim as usize != HD {
@@ -9404,10 +9404,10 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         );
     }
     const TILE_C: usize = 64;
-    let kv_dim = N_KV * HD;
+    let kv_dim = n_kv * HD;
     let n_pos = base_pos + rows;
 
-    let q_rows: Vec<f32> = (0..rows * N_Q * HD)
+    let q_rows: Vec<f32> = (0..rows * n_q * HD)
         .map(|i| ((i % 31) as f32 - 15.0) * 1e-2)
         .collect();
     let k_f32: Vec<f32> = (0..n_pos * kv_dim)
@@ -9424,7 +9424,7 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
     let q_t = MetalTensor::from_bytes(
         &ctx,
         as_bytes(&q_rows),
-        vec![(rows * N_Q * HD) as u64],
+        vec![(rows * n_q * HD) as u64],
         GgmlType::F32,
     )?;
     let k_cache = MetalTensor::zeros_f16(&ctx, vec![(n_pos * kv_dim) as u64])?;
@@ -9444,25 +9444,25 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         cmd.waitUntilCompleted();
     }
 
-    let out_baseline = MetalTensor::zeros_f32(&ctx, vec![(rows * N_Q * HD) as u64])?;
-    let out_packed = MetalTensor::zeros_f32(&ctx, vec![(rows * N_Q * HD) as u64])?;
+    let out_baseline = MetalTensor::zeros_f32(&ctx, vec![(rows * n_q * HD) as u64])?;
+    let out_packed = MetalTensor::zeros_f32(&ctx, vec![(rows * n_q * HD) as u64])?;
     let o_partial_row =
-        MetalTensor::zeros_f32(&ctx, vec![(N_KV * nwg * (N_Q / N_KV) * HD) as u64])?;
+        MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * (n_q / n_kv) * HD) as u64])?;
     let ml_partial_row =
-        MetalTensor::zeros_f32(&ctx, vec![(N_KV * nwg * (N_Q / N_KV) * 2) as u64])?;
+        MetalTensor::zeros_f32(&ctx, vec![(n_kv * nwg * (n_q / n_kv) * 2) as u64])?;
     let o_partial_packed =
-        MetalTensor::zeros_f32(&ctx, vec![(rows * N_KV * nwg * (N_Q / N_KV) * HD) as u64])?;
+        MetalTensor::zeros_f32(&ctx, vec![(rows * n_kv * nwg * (n_q / n_kv) * HD) as u64])?;
     let ml_partial_packed =
-        MetalTensor::zeros_f32(&ctx, vec![(rows * N_KV * nwg * (N_Q / N_KV) * 2) as u64])?;
+        MetalTensor::zeros_f32(&ctx, vec![(rows * n_kv * nwg * (n_q / n_kv) * 2) as u64])?;
 
     let run_baseline = || -> Result<()> {
         let cmd = ctx.queue.commandBuffer().context("baseline cmd")?;
         let enc = KernelEncoder::begin(&cmd);
         with_attn_v4_group_tile_override(group_tile, || {
             for row in 0..rows {
-                let q_row = q_t.view_subrange((row * N_Q * HD) as u64, vec![(N_Q * HD) as u64]);
+                let q_row = q_t.view_subrange((row * n_q * HD) as u64, vec![(n_q * HD) as u64]);
                 let out_row =
-                    out_baseline.view_subrange((row * N_Q * HD) as u64, vec![(N_Q * HD) as u64]);
+                    out_baseline.view_subrange((row * n_q * HD) as u64, vec![(n_q * HD) as u64]);
                 encode_attn_decode_v4_f32(
                     &ctx,
                     &enc,
@@ -9472,8 +9472,8 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
                     &o_partial_row,
                     &ml_partial_row,
                     &out_row,
-                    N_Q,
-                    N_KV,
+                    n_q,
+                    n_kv,
                     HD,
                     base_pos + row + 1,
                     nwg,
@@ -9495,7 +9495,7 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
     let run_packed = || -> Result<()> {
         let cmd = ctx.queue.commandBuffer().context("packed cmd")?;
         let enc = KernelEncoder::begin(&cmd);
-        match (N_Q, N_KV, qt) {
+        match (n_q, n_kv, qt) {
             (16, 2, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32(
                 &ctx,
                 &enc,
@@ -9550,8 +9550,8 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
             )?,
             _ => anyhow::bail!(
                 "attn-prefill-micro unsupported shape n_q={} n_kv={} qt={}",
-                N_Q,
-                N_KV,
+                n_q,
+                n_kv,
                 qt
             ),
         }

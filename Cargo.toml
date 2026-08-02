@@ -66,6 +66,7 @@ parking_lot = "0.12"
 libc = "0.2"
 num-bigint = "0.4"
 num-traits = "0.2"
+mach2 = "0.6"
 
 [profile.release]
 lto = "fat"

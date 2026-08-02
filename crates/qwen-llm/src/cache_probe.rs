@@ -215,7 +215,7 @@ pub struct InvalidateReport {
 ///
 /// Errors surface any `host_statistics64` failure.
 pub fn available_memory_bytes() -> io::Result<u64> {
-    let host = unsafe { libc::mach_host_self() };
+    let host = unsafe { mach2::mach_init::mach_host_self() };
     // SAFETY: host is a valid mach port; we pass a properly sized and
     // aligned buffer for the requested flavor; count is initialized to
     // the required size in units of integer_t.

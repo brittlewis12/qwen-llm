@@ -12781,6 +12781,8 @@ pub fn encode_mat_vec_dispatch(
     }
 }
 
+crate::env_flag!(default_on matmat_smalln_table_enabled, "QWEN_MATMAT_SMALLN_TABLE");
+
 /// Mat-mat dispatch routing for the H5.3b layer-major path. Picks the
 /// right `kernel_mul_mm_*` lift based on weight dtype. Output is
 /// row-major `[n_query, n_out]` (codex H5.3b mid-impl review verified
@@ -12796,7 +12798,6 @@ pub fn encode_mat_vec_dispatch(
 ///   * Q6_K (ffn_down, lm_head)
 ///   * Q8_0 (DFlash drafter projections, lm_head — added by v0.73b.0)
 ///   * IQ4_NL/IQ4_XS (IQ quant compatibility)
-crate::env_flag!(default_on matmat_smalln_table_enabled, "QWEN_MATMAT_SMALLN_TABLE");
 
 pub fn encode_mat_mat_dispatch(
     ctx: &MetalContext,

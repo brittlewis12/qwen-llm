@@ -535,18 +535,23 @@ Gate:
 - An independent fresh-process repeat preserved all four IDs byte-for-byte;
   with the system Metal pipeline cache populated, prompt forward fell to 0.659
   seconds and retained decode rose to 15.68 tokens/second.
-- Exact greedy continuation token IDs through the first HCA boundary match the
-  pinned singleton llama.cpp oracle.
+- Raw prefix `"A\n\t@" * 32` tokenizes exactly to
+  `[35, 201, 200, 34] * 32`. Two independent release CLI sessions reserved all
+  129 promoted forwards and generated `[35, 201]`, matching the pinned b10222
+  argmaxes after the position-127 HCA publication and its position-128
+  continuation. Sequential 128-token prompt execution took 35.0 and 35.2
+  seconds; the final transitions took 0.486 and 0.484 seconds. These are
+  correctness observations for the unoptimized singleton prompt path.
 - Intermediate bisect can isolate any divergence to one layer and operation.
 - Repeated runs are deterministic under the same host-validity contract used
   by Qwen benchmarks.
 - IQ3 peak resident plus scratch memory passes M4 Max admission with explicit
   system headroom; no reliance on swap is allowed for the resident target.
 
-S5 remains open for a CLI continuation through the first HCA boundary, the
-official prompt encoder subset, long-prefix repeatability, and explicit peak
-memory admission. The bounded raw slice is sufficient to establish first-class
-native inference without weakening those promotion gates.
+S5 remains open for the official prompt encoder subset, explicit peak-memory
+admission, and continuation evidence beyond position 128. The bounded raw slice
+now establishes first-class native inference through every full-session
+differential promoted so far without weakening those later gates.
 
 ### S6: Metal performance promotion
 
@@ -614,17 +619,13 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Extend the bounded CLI differential from the exact position-3 greedy chain
-   through the retained position-127 HCA publication and position-128
-   continuation; keep the position-129 evidence guard visible rather than
-   hiding it with replay or delegation.
-2. Port and fixture the minimum official 0731 prompt-encoder path required for
+1. Port and fixture the minimum official 0731 prompt-encoder path required for
    ordinary system/user/assistant turns; keep raw mode available as the exact
    reproducibility interface.
-3. Capture positions 129 and 254 as continuation checkpoints before requesting
+2. Capture positions 129 and 254 as continuation checkpoints before requesting
    promotion to the second HCA boundary.
-4. Capture positions 255 and 256 with singleton b10222 execution, promote the
+3. Capture positions 255 and 256 with singleton b10222 execution, promote the
    second HCA publication, and extend the dense HCA history gate.
-5. Implement sparse CSA index scoring/top-512 selection before compressed
+4. Implement sparse CSA index scoring/top-512 selection before compressed
    history exceeds 512 rows, and extend slab ownership before the current CSA
    row-256 allocation guard at position 1027.

@@ -2298,6 +2298,12 @@ mod tests {
             tokenizer.encode("<｜User｜>", false).expect("encode role"),
             [128_803]
         );
+        assert_eq!(
+            tokenizer
+                .encode(&"A\n\t@".repeat(32), false)
+                .expect("encode first HCA boundary prefix"),
+            [35, 201, 200, 34].repeat(32)
+        );
     }
 
     #[test]

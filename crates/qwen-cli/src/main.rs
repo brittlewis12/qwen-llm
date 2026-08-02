@@ -3,12 +3,16 @@
 mod messages;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use messages::{load_messages_prompt_with_policy, messages_thinking_mode};
 use qwen_llm::checkpoint_identity::IdentityCacheOutcome;
 use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedIntegrityMode};
 use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
 use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
+use qwen_llm::deepseek_v4_metal::{
+    DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MetalResidency, DeepSeekV4Session,
+};
+use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
     MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
     MetalPipelineCacheMetrics, evaluate_metal_memory_admission,
@@ -121,7 +125,7 @@ fn resolve_greedy_gpu_decision(
 #[derive(Parser, Debug)]
 #[command(name = "qwen", version, about = "qwen-llm inference CLI")]
 struct Args {
-    /// Path to a GGUF file (Qwen generation; DeepSeek V4 inspection only).
+    /// Path to a Qwen or DeepSeek V4 GGUF file.
     #[arg(short = 'm', long)]
     model: Option<std::path::PathBuf>,
 
@@ -137,7 +141,7 @@ struct Args {
     )]
     deepseek_census_json: bool,
 
-    /// Raw prompt text for a single-turn greedy generation.
+    /// Raw prompt text for single-turn generation.
     #[arg(short = 'p', long, conflicts_with_all = ["prompt_file", "messages"])]
     prompt: Option<String>,
 
@@ -289,6 +293,30 @@ struct Args {
     /// --request-trace`: `arrival_ms tokens id ...`.
     #[arg(long)]
     trace_request: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ExplicitCliOptions {
+    prefill_chunk: bool,
+    prefix_cache_max_mib: bool,
+    cache_prefix_auto_min_tokens: bool,
+    durable_prefix_cache_max_mib: bool,
+    durable_prefix_cache_max_entry_mib: bool,
+    durable_prefix_cache_min_tokens: bool,
+}
+
+impl ExplicitCliOptions {
+    fn from_matches(matches: &clap::ArgMatches) -> Self {
+        let command_line = |id| matches.value_source(id) == Some(ValueSource::CommandLine);
+        Self {
+            prefill_chunk: command_line("prefill_chunk"),
+            prefix_cache_max_mib: command_line("prefix_cache_max_mib"),
+            cache_prefix_auto_min_tokens: command_line("cache_prefix_auto_min_tokens"),
+            durable_prefix_cache_max_mib: command_line("durable_prefix_cache_max_mib"),
+            durable_prefix_cache_max_entry_mib: command_line("durable_prefix_cache_max_entry_mib"),
+            durable_prefix_cache_min_tokens: command_line("durable_prefix_cache_min_tokens"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1767,7 +1795,9 @@ fn main() -> Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    let matches = Args::command().get_matches();
+    let explicit_options = ExplicitCliOptions::from_matches(&matches);
+    let args = Args::from_arg_matches(&matches).expect("validated clap arguments");
     validate_request_timing_mode(&args)?;
     validate_sampling_attribution_mode(&args)?;
     validate_sampled_structural_mode(&args)?;
@@ -1802,12 +1832,19 @@ fn main() -> Result<()> {
         staged_integrity.is_none() || args.durable_prefix_cache.is_some(),
         "{CHECKPOINT_STAGED_INTEGRITY_ENV} requires --durable-prefix-cache"
     );
+    validate_request_before_model_open(&args)?;
+    let gguf = GgufFile::open(model_path)
+        .with_context(|| format!("open model {}", model_path.display()))?;
+    if ModelFamily::detect(&gguf) == Some(ModelFamily::DeepSeek4) {
+        return run_deepseek_v4_raw_single_turn(model_path, gguf, &args, explicit_options);
+    }
+
     if args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some() {
-        return run_single_turn(model_path, &args, staged_integrity);
+        return run_single_turn(model_path, gguf, &args, staged_integrity);
     }
 
     if let Some(path) = args.requests_jsonl.as_ref() {
-        return run_requests_jsonl(model_path, path, &args);
+        return run_requests_jsonl(model_path, path, gguf, &args);
     }
 
     unreachable!("request mode was validated above")
@@ -1968,6 +2005,16 @@ fn validate_durable_prefix_cache_mode(args: &Args) -> Result<()> {
     Ok(())
 }
 
+fn validate_request_before_model_open(args: &Args) -> Result<()> {
+    args.prefill_chunk.validate()?;
+    ensure!(args.tokens > 0, "--tokens must be >= 1");
+    let sampling = cli_sampling_config(args)?;
+    if args.requests_jsonl.is_none() {
+        validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
+    }
+    Ok(())
+}
+
 fn prompt_text(args: &Args) -> Result<(String, PromptSource, bool)> {
     if let Some(prompt) = args.prompt.as_ref() {
         return Ok((prompt.clone(), PromptSource::Inline, false));
@@ -2001,6 +2048,248 @@ fn prompt_text(args: &Args) -> Result<(String, PromptSource, bool)> {
 
 fn prompt_add_special_tokens(args: &Args, source: PromptSource) -> bool {
     source != PromptSource::Messages && !args.no_special_tokens
+}
+
+fn validate_deepseek_v4_raw_mode(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
+    let mut unsupported = Vec::new();
+    if args.messages.is_some() {
+        unsupported.push("--messages");
+    }
+    if args.requests_jsonl.is_some() {
+        unsupported.push("--requests-jsonl");
+    }
+    if args.prompt_lookup {
+        unsupported.push("--prompt-lookup");
+    }
+    if explicit.prefill_chunk || args.prefill_chunk != PrefillChunkArg::Fixed(1024) {
+        unsupported.push("--prefill-chunk");
+    }
+    if args.max_context_tokens.is_some() {
+        unsupported.push("--max-context-tokens");
+    }
+    if explicit.prefix_cache_max_mib || args.prefix_cache_max_mib != 16 * 1024 {
+        unsupported.push("--prefix-cache-max-mib");
+    }
+    if args.cache_prefix_tokens.is_some() {
+        unsupported.push("--cache-prefix-tokens");
+    }
+    if explicit.cache_prefix_auto_min_tokens || args.cache_prefix_auto_min_tokens != 1024 {
+        unsupported.push("--cache-prefix-auto-min-tokens");
+    }
+    if args.durable_prefix_cache.is_some() {
+        unsupported.push("--durable-prefix-cache");
+    }
+    if explicit.durable_prefix_cache_max_mib || args.durable_prefix_cache_max_mib != 32 * 1024 {
+        unsupported.push("--durable-prefix-cache-max-mib");
+    }
+    if explicit.durable_prefix_cache_max_entry_mib
+        || args.durable_prefix_cache_max_entry_mib != 16 * 1024
+    {
+        unsupported.push("--durable-prefix-cache-max-entry-mib");
+    }
+    if explicit.durable_prefix_cache_min_tokens || args.durable_prefix_cache_min_tokens != 1024 {
+        unsupported.push("--durable-prefix-cache-min-tokens");
+    }
+    if args.request_stats.is_some() {
+        unsupported.push("--request-stats");
+    }
+    if args.request_timings.is_some() {
+        unsupported.push("--request-timings");
+    }
+    if args.request_timing_warm_followup {
+        unsupported.push("--request-timing-warm-followup");
+    }
+    ensure!(
+        unsupported.is_empty(),
+        "DeepSeek V4 currently supports bounded raw single-turn generation only; unsupported options: {}",
+        unsupported.join(", ")
+    );
+    ensure!(
+        args.prompt.is_some() || args.prompt_file.is_some(),
+        "DeepSeek V4 raw generation requires --prompt or --prompt-file"
+    );
+    Ok(())
+}
+
+fn deepseek_v4_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Result<usize> {
+    ensure!(prompt_tokens > 0, "prompt tokenized to zero tokens");
+    ensure!(max_tokens > 0, "--tokens must be >= 1");
+    let decode_transitions = max_tokens
+        .checked_sub(1)
+        .context("DeepSeek V4 decode transition count underflow")?;
+    let required = prompt_tokens
+        .checked_add(decode_transitions)
+        .context("DeepSeek V4 forward budget overflow")?;
+    ensure!(
+        required <= DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+        "DeepSeek V4 request requires {required} token forwards ({prompt_tokens} prompt + {decode_transitions} maximum decode transitions), but the native session is promoted for {} forwards; shorten the prompt or reduce --tokens",
+        DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+    );
+    Ok(required)
+}
+
+fn checked_deepseek_v4_token_id(token: i32, vocab_size: u32, purpose: &str) -> Result<u32> {
+    let token =
+        u32::try_from(token).with_context(|| format!("{purpose} token ID {token} is negative"))?;
+    ensure!(
+        token < vocab_size,
+        "{purpose} token ID {token} is outside vocabulary {vocab_size}"
+    );
+    Ok(token)
+}
+
+fn copy_deepseek_v4_logits(
+    session: &DeepSeekV4Session,
+    vocab_size: u32,
+    purpose: &str,
+) -> Result<Vec<f32>> {
+    let logits = session
+        .copy_logits_f32()
+        .with_context(|| format!("copy {purpose} DeepSeek V4 logits"))?;
+    ensure!(
+        logits.len() == vocab_size as usize,
+        "{purpose} DeepSeek V4 logits length {} differs from vocabulary {vocab_size}",
+        logits.len(),
+    );
+    Ok(logits)
+}
+
+fn run_deepseek_v4_raw_single_turn(
+    model_path: &Path,
+    gguf: GgufFile,
+    args: &Args,
+    explicit: ExplicitCliOptions,
+) -> Result<()> {
+    validate_deepseek_v4_raw_mode(args, explicit)?;
+    ensure!(args.tokens > 0, "--tokens must be >= 1");
+    let sampling = cli_sampling_config(args)?;
+    let arrival_ms = unix_epoch_ms()?;
+    let (prompt, prompt_source, _) = prompt_text(args)?;
+    ensure!(
+        prompt_source != PromptSource::Messages,
+        "DeepSeek V4 generation does not apply chat templates"
+    );
+
+    let tokenizer_t0 = Instant::now();
+    let tokenizer = Tokenizer::from_gguf(&gguf).context("load DeepSeek V4 tokenizer")?;
+    let tokenizer_ms = tokenizer_t0.elapsed().as_secs_f64() * 1e3;
+    let prompt_ids = tokenizer
+        .encode(&prompt, false)
+        .context("tokenize raw DeepSeek V4 prompt")?;
+    let required_forwards = deepseek_v4_required_forwards(prompt_ids.len(), args.tokens)?;
+    let vocab_size = tokenizer.n_vocab();
+    let prompt_token_ids = prompt_ids
+        .iter()
+        .enumerate()
+        .map(|(index, &token)| {
+            checked_deepseek_v4_token_id(token, vocab_size, &format!("prompt[{index}]"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let stop_tokens = gguf
+        .stop_token_ids()
+        .context("load producer-declared DeepSeek V4 stop tokens")?;
+    for &token in &stop_tokens {
+        checked_deepseek_v4_token_id(token, vocab_size, "stop")?;
+    }
+
+    eprintln!(
+        "deepseek_v4: loading {} for raw generation; prompt_tokens={} max_generated_tokens={} reserved_forwards={}/{}",
+        model_path.display(),
+        prompt_ids.len(),
+        args.tokens,
+        required_forwards,
+        DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+    );
+    let load_t0 = Instant::now();
+    let ctx = MetalContext::new().context("init Metal context for DeepSeek V4")?;
+    let residency = DeepSeekV4MetalResidency::load(&ctx, &gguf)
+        .context("load strict DeepSeek V4 Metal residency")?;
+    ensure!(
+        residency.config().vocab_size == vocab_size,
+        "DeepSeek V4 tokenizer vocabulary {} differs from resident model vocabulary {}",
+        vocab_size,
+        residency.config().vocab_size,
+    );
+    let residency_report = residency.report().clone();
+    let mut session =
+        DeepSeekV4Session::new(&ctx, residency).context("create DeepSeek V4 session")?;
+    let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
+    eprintln!(
+        "deepseek_v4: resident on {} in {:.1} ms; {}",
+        ctx.describe(),
+        load_ms,
+        residency_report,
+    );
+
+    let prefill_t0 = Instant::now();
+    for (index, &token) in prompt_token_ids.iter().enumerate() {
+        session
+            .forward_token(&ctx, token)
+            .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
+    }
+    let logits = copy_deepseek_v4_logits(&session, vocab_size, "prompt")?;
+    let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+
+    let mut sampler = Sampler::new(sampling).context("initialize DeepSeek V4 sampler")?;
+    let stdout_handle = std::io::stdout();
+    let mut stdout = stdout_handle.lock();
+    let generation = generate_serial(
+        logits,
+        args.tokens,
+        &stop_tokens,
+        &mut sampler,
+        |token| {
+            let piece = tokenizer
+                .try_decode_piece_bytes_exact(token)
+                .with_context(|| format!("decode DeepSeek V4 token {token}"))?;
+            stdout
+                .write_all(piece)
+                .with_context(|| format!("write DeepSeek V4 token {token}"))?;
+            stdout.flush().context("flush DeepSeek V4 token")?;
+            Ok(())
+        },
+        |token| {
+            let token = checked_deepseek_v4_token_id(token, vocab_size, "generated")?;
+            session
+                .forward_token(&ctx, token)
+                .context("forward generated DeepSeek V4 token")?;
+            copy_deepseek_v4_logits(&session, vocab_size, "continuing")
+        },
+    )?;
+    drop(stdout);
+
+    let decode_tps = if generation.wall_ms > 0.0 {
+        generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
+    } else {
+        0.0
+    };
+    let transition_tps = if generation.transition_ms > 0.0 {
+        generation.transitions as f64 / (generation.transition_ms / 1e3)
+    } else {
+        0.0
+    };
+    eprintln!(
+        concat!(
+            "deepseek_v4 stats: prompt_tokens={} generated_tokens={} transitions={} ",
+            "stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} ",
+            "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} generated_ids={:?}"
+        ),
+        prompt_ids.len(),
+        generation.tokens.len(),
+        generation.transitions,
+        generation.stop_reason.as_str(),
+        tokenizer_ms,
+        load_ms,
+        prefill_ms,
+        generation.wall_ms,
+        decode_tps,
+        transition_tps,
+        generation.tokens,
+    );
+    if let Some(path) = args.trace_request.as_ref() {
+        append_request_trace(path, arrival_ms, prompt_ids.len(), generation.tokens.len())?;
+    }
+    Ok(())
 }
 
 fn cli_sampling_config(args: &Args) -> Result<SamplingConfig> {
@@ -2781,6 +3070,7 @@ fn report_prefill_chunk_decision(decision: Option<&PrefillChunkDecision>, prompt
 
 fn run_single_turn(
     model_path: &Path,
+    gguf: GgufFile,
     args: &Args,
     staged_integrity: Option<StagedIntegrityMode>,
 ) -> Result<()> {
@@ -2805,8 +3095,8 @@ fn run_single_turn(
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
     let loaded = runtime
-        .load_model_for_disposable_single_turn_with_config(
-            model_path,
+        .load_open_model_for_disposable_single_turn_with_config(
+            gguf,
             LoadedModelConfig {
                 prefix_cache_max_bytes: prefix_cache_max_bytes(args)?,
                 ..LoadedModelConfig::default()
@@ -3782,7 +4072,12 @@ fn execute_single_turn_request(
     })
 }
 
-fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> Result<()> {
+fn run_requests_jsonl(
+    model_path: &Path,
+    requests_path: &Path,
+    gguf: GgufFile,
+    args: &Args,
+) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
     cli_sampling_config(args)?;
@@ -3790,8 +4085,8 @@ fn run_requests_jsonl(model_path: &Path, requests_path: &Path, args: &Args) -> R
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
     let loaded = runtime
-        .load_model_with_config(
-            model_path,
+        .load_open_model_with_config(
+            gguf,
             LoadedModelConfig {
                 prefix_cache_max_bytes: prefix_cache_max_bytes(args)?,
                 ..LoadedModelConfig::default()
@@ -5671,6 +5966,140 @@ mod tests {
             sampling: SamplingConfig::default(),
             auto_cache_prefix_tokens: None,
             auto_cache_future_hits: 0,
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_forward_budget_accounts_for_unconsumed_final_token() {
+        assert_eq!(
+            deepseek_v4_required_forwards(1, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY).unwrap(),
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY
+        );
+        assert_eq!(
+            deepseek_v4_required_forwards(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 1).unwrap(),
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY
+        );
+        assert!(
+            deepseek_v4_required_forwards(1, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY + 1).is_err()
+        );
+        assert!(deepseek_v4_required_forwards(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 2).is_err());
+        assert!(deepseek_v4_required_forwards(0, 1).is_err());
+        assert!(deepseek_v4_required_forwards(1, 0).is_err());
+        assert!(deepseek_v4_required_forwards(usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn deepseek_v4_cli_accepts_only_bounded_raw_single_turn_surfaces() {
+        let raw = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--temp",
+            "0.7",
+            "--trace-request",
+            "trace.txt",
+            "--no-special-tokens",
+        ])
+        .unwrap();
+        validate_deepseek_v4_raw_mode(&raw, ExplicitCliOptions::default()).unwrap();
+
+        let unsupported = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--prompt-lookup",
+            "--prefill-chunk",
+            "auto",
+            "--max-context-tokens",
+            "255",
+            "--cache-prefix-tokens",
+            "4",
+            "--request-stats",
+            "stats.jsonl",
+        ])
+        .unwrap();
+        let error = validate_deepseek_v4_raw_mode(&unsupported, ExplicitCliOptions::default())
+            .unwrap_err()
+            .to_string();
+        for option in [
+            "--prompt-lookup",
+            "--prefill-chunk",
+            "--max-context-tokens",
+            "--cache-prefix-tokens",
+            "--request-stats",
+        ] {
+            assert!(error.contains(option), "missing {option:?} from {error:?}");
+        }
+
+        let messages = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+        ])
+        .unwrap();
+        assert!(
+            validate_deepseek_v4_raw_mode(&messages, ExplicitCliOptions::default())
+                .unwrap_err()
+                .to_string()
+                .contains("--messages")
+        );
+
+        let jsonl = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--requests-jsonl",
+            "requests.jsonl",
+        ])
+        .unwrap();
+        assert!(
+            validate_deepseek_v4_raw_mode(&jsonl, ExplicitCliOptions::default())
+                .unwrap_err()
+                .to_string()
+                .contains("--requests-jsonl")
+        );
+
+        let matches = Args::command()
+            .try_get_matches_from([
+                "qwen",
+                "--model",
+                "model.gguf",
+                "--prompt",
+                "hello",
+                "--prefill-chunk",
+                "1024",
+                "--prefix-cache-max-mib",
+                "16384",
+                "--cache-prefix-auto-min-tokens",
+                "1024",
+                "--durable-prefix-cache-max-mib",
+                "32768",
+                "--durable-prefix-cache-max-entry-mib",
+                "16384",
+                "--durable-prefix-cache-min-tokens",
+                "1024",
+            ])
+            .unwrap();
+        let explicit = ExplicitCliOptions::from_matches(&matches);
+        let explicit_defaults = Args::from_arg_matches(&matches).unwrap();
+        let error = validate_deepseek_v4_raw_mode(&explicit_defaults, explicit)
+            .unwrap_err()
+            .to_string();
+        for option in [
+            "--prefill-chunk",
+            "--prefix-cache-max-mib",
+            "--cache-prefix-auto-min-tokens",
+            "--durable-prefix-cache-max-mib",
+            "--durable-prefix-cache-max-entry-mib",
+            "--durable-prefix-cache-min-tokens",
+        ] {
+            assert!(error.contains(option), "missing {option:?} from {error:?}");
         }
     }
 

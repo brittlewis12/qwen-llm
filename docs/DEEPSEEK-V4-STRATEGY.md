@@ -437,7 +437,9 @@ compressed row. The parallel indexer compressor publishes its normalized
 Hadamard row, but index scoring and top-512 selection remain deferred while the
 history is below 512 rows and dense-all is definitionally equivalent. The
 session now continues through the independently promoted first HCA row and
-fails closed before position 255, its second ratio-128 publication.
+its immediate position-128 continuation, then fails closed before position
+129. The second ratio-128 publication remains structurally guarded at position
+255 for its future differential.
 
 Gate:
 
@@ -496,6 +498,26 @@ prefill gates; they do not block a bounded singleton-decode generation slice.
 
 ### S5: full 0731 target generation
 
+Status: bounded raw CLI slice promoted on 2026-08-02. The release `qwen`
+binary now opens the split GGUF once, dispatches `deepseek4` outside the Qwen
+model binder, constructs the native JoyAI tokenizer and strict Metal residency,
+forwards every raw prompt token, and reuses the common sampler and
+producer-declared stop-token contract. Generated pieces are written as exact
+token bytes without a synthetic stdout newline. Chat templates, batched
+requests, prompt lookup, prefill controls, and prefix/checkpoint caches fail
+before residency rather than being silently ignored, including when a
+value-bearing option is explicitly supplied at its Qwen default.
+
+The CLI reserves `prompt_tokens + max_generated_tokens - 1` forwards before
+Metal residency or any token execution. This mirrors the generator's
+pending-final-token semantics and guarantees an accepted request cannot
+partially stream beyond the retained-session evidence through position 128.
+The 103 GB split GGUF is already virtually mapped for family detection at that
+point; residency remains untouched on rejection. The promoted capacity is
+exported by the session implementation, so frontend and executor cannot drift
+onto independent magic limits. The shared one-open handoff also passed a
+release one-token Qwen 3.5 0.8B smoke, preserving the existing family path.
+
 Expose the already-connected 43-layer session through first-class generation
 dispatch, then connect the native tokenizer, official prompt encoder subset,
 sampling, and stop handling. A bounded raw prompt path comes first so frontend
@@ -504,6 +526,15 @@ compression-ratio tail remains opaque metadata.
 
 Gate:
 
+- Raw prompt `A` (token 35) generated exact greedy IDs `[201, 200, 200, 1778]`
+  through the release `qwen` binary, matching the pinned b10222 singleton chain
+  and crossing the first CSA publication at position 3. The first cold forward,
+  including lazy pipeline construction, took 36.8 seconds; the three retained
+  decode transitions ran at 14.34 tokens/second. This is executable evidence,
+  not a delegated llama.cpp runner.
+- An independent fresh-process repeat preserved all four IDs byte-for-byte;
+  with the system Metal pipeline cache populated, prompt forward fell to 0.659
+  seconds and retained decode rose to 15.68 tokens/second.
 - Exact greedy continuation token IDs through the first HCA boundary match the
   pinned singleton llama.cpp oracle.
 - Intermediate bisect can isolate any divergence to one layer and operation.
@@ -511,6 +542,11 @@ Gate:
   by Qwen benchmarks.
 - IQ3 peak resident plus scratch memory passes M4 Max admission with explicit
   system headroom; no reliance on swap is allowed for the resident target.
+
+S5 remains open for a CLI continuation through the first HCA boundary, the
+official prompt encoder subset, long-prefix repeatability, and explicit peak
+memory admission. The bounded raw slice is sufficient to establish first-class
+native inference without weakening those promotion gates.
 
 ### S6: Metal performance promotion
 
@@ -578,14 +614,15 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Route a family-specific raw request into `DeepSeekV4Session`, native token
-   decode, greedy sampling, and stop handling. Keep the current position-255
-   guard visible to callers rather than hiding it with replay or delegation.
-2. Prove that bounded qwen-owned Metal generation matches the pinned singleton
-   oracle token by token through the first HCA publication.
-3. Port and fixture the minimum official 0731 prompt-encoder path required for
+1. Extend the bounded CLI differential from the exact position-3 greedy chain
+   through the retained position-127 HCA publication and position-128
+   continuation; keep the position-129 evidence guard visible rather than
+   hiding it with replay or delegation.
+2. Port and fixture the minimum official 0731 prompt-encoder path required for
    ordinary system/user/assistant turns; keep raw mode available as the exact
    reproducibility interface.
+3. Capture positions 129 and 254 as continuation checkpoints before requesting
+   promotion to the second HCA boundary.
 4. Capture positions 255 and 256 with singleton b10222 execution, promote the
    second HCA publication, and extend the dense HCA history gate.
 5. Implement sparse CSA index scoring/top-512 selection before compressed

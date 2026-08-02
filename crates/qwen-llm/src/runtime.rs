@@ -38,6 +38,8 @@ pub enum RuntimeError {
     Metal(#[from] MetalError),
     #[error("gguf load: {0}")]
     Gguf(#[from] GgufError),
+    #[error("opened GGUF has no backing shards")]
+    EmptyGgufShards,
     #[error("model bind: {0}")]
     Load(#[from] LoadError),
     #[error("metal model load: {0}")]
@@ -172,6 +174,16 @@ impl Runtime {
         )
     }
 
+    /// Bind and load an already-opened GGUF without mapping its shards again.
+    pub fn load_open_model_with_config(
+        &self,
+        gguf: GgufFile,
+        config: LoadedModelConfig,
+    ) -> Result<LoadedModel, RuntimeError> {
+        let diagnostic_path = opened_gguf_diagnostic_path(&gguf)?;
+        self.load_opened_gguf_with_intent(gguf, diagnostic_path, config, ModelLoadIntent::ForceOnly)
+    }
+
     /// Load for a disposable single-turn request, permitting authenticated
     /// cold-load policies that remain disabled for reusable model instances.
     pub fn load_model_for_disposable_single_turn_with_config(
@@ -180,6 +192,22 @@ impl Runtime {
         config: LoadedModelConfig,
     ) -> Result<LoadedModel, RuntimeError> {
         self.load_model_with_intent(path, config, ModelLoadIntent::DisposableSingleTurn)
+    }
+
+    /// Load an already-opened GGUF for one disposable request without mapping
+    /// its shards again.
+    pub fn load_open_model_for_disposable_single_turn_with_config(
+        &self,
+        gguf: GgufFile,
+        config: LoadedModelConfig,
+    ) -> Result<LoadedModel, RuntimeError> {
+        let diagnostic_path = opened_gguf_diagnostic_path(&gguf)?;
+        self.load_opened_gguf_with_intent(
+            gguf,
+            diagnostic_path,
+            config,
+            ModelLoadIntent::DisposableSingleTurn,
+        )
     }
 
     fn load_model_with_intent(
@@ -222,6 +250,13 @@ impl Runtime {
             prefetch_outcome,
         })
     }
+}
+
+fn opened_gguf_diagnostic_path(gguf: &GgufFile) -> Result<PathBuf, RuntimeError> {
+    gguf.shards
+        .first()
+        .map(|shard| shard.path.clone())
+        .ok_or(RuntimeError::EmptyGgufShards)
 }
 
 /// Runs the prefetch policy against the freshly-opened GGUF and returns

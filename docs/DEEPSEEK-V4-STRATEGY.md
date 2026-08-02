@@ -451,9 +451,8 @@ compressed row. The parallel indexer compressor publishes its normalized
 Hadamard row, but index scoring and top-512 selection remain deferred while the
 history is below 512 rows and dense-all is definitionally equivalent. The
 session now continues through the independently promoted first HCA row and
-its immediate position-128 continuation, then fails closed before position
-129. The second ratio-128 publication remains structurally guarded at position
-255 for its future differential.
+its retained continuation through the position-254 pre-boundary control, then
+fails closed before the second ratio-128 publication at position 255.
 
 Gate:
 
@@ -474,13 +473,15 @@ Gate:
 
 ### S4: HCA lane
 
-Status: first-boundary decode slice promoted through positions 126, 127, and
-128 on 2026-08-02. All 20 HCA layers now use the already-retained ratio-128
-frontier to pool, RMS-normalize, apply block-start adjacent-pair RoPE, publish
-an F16 compressed row, and include that row in the same-token softmax over the
-128-row local window plus dense compressed history. Position 128 proves that
-the row remains visible on continuation. The session fails closed at position
-255 before a second HCA row can be published.
+Status: first-boundary decode slice promoted through positions 126, 127, 128,
+129, and the position-254 pre-second-boundary control on 2026-08-02. All 20 HCA
+layers now use the already-retained ratio-128 frontier to pool, RMS-normalize,
+apply block-start adjacent-pair RoPE, publish an F16 compressed row, and include
+that row in the same-token softmax over the 128-row local window plus dense
+compressed history. Positions 128 and 129 prove immediate retained
+continuation; position 254 proves the state remains coherent across the full
+inter-boundary span. The session fails closed at position 255 before a second
+HCA row can be published.
 
 The long-prefix differential uses a different numerical gate from positions
 0-8. Singleton-versus-singleton drift accumulates before any HCA row exists:
@@ -505,6 +506,17 @@ Gate:
   relative RMS to 0.075390582 at position 127 and 0.128496492 at position 128.
   Same-token consumption is therefore both directionally correct and necessary
   for the continuation rather than an inert implementation detail.
+- Fresh-session b10222 captures at positions 129 and 254 are byte-identical
+  across repeats. Their vector hashes are
+  `8cb27e714a0ed478b9d19d08d5def339debff9ed7f73c4bcfb3642dbdd4eeab6`
+  and `0b959bcd97f045e4515190b035bed296002057fc587174d15b6aa6bd2c163159`.
+- The same retained native session preserves argmaxes 200 and 34 at positions
+  129 and 254. Their cosine / relative-RMS pairs are
+  0.997522039 / 0.070976029 and 0.998094070 / 0.061915705. Position 129 stays
+  within the explicit first-boundary allowance; position 254 recovers on both
+  measures rather than accumulating further drift. A real position-255 call
+  then rejects before mutation while preserving position 255 as the next index
+  and retaining the completed position-254 logits byte-for-byte.
 
 S4 remains open for the second boundary at positions 255/256, named
 full-layer intermediate states, and batched prefill. Those are extension and
@@ -525,7 +537,7 @@ value-bearing option is explicitly supplied at its Qwen default.
 The CLI reserves `prompt_tokens + max_generated_tokens - 1` forwards before
 Metal residency or any token execution. This mirrors the generator's
 pending-final-token semantics and guarantees an accepted request cannot
-partially stream beyond the retained-session evidence through position 128.
+partially stream beyond the retained-session evidence through position 254.
 The 103 GB split GGUF is already virtually mapped for family detection at that
 point; residency remains untouched on rejection. The promoted capacity is
 exported by the session implementation, so frontend and executor cannot drift
@@ -551,11 +563,14 @@ Gate:
   seconds and retained decode rose to 15.68 tokens/second.
 - Raw prefix `"A\n\t@" * 32` tokenizes exactly to
   `[35, 201, 200, 34] * 32`. Two independent release CLI sessions reserved all
-  129 promoted forwards and generated `[35, 201]`, matching the pinned b10222
-  argmaxes after the position-127 HCA publication and its position-128
+  then-promoted 129 forwards and generated `[35, 201]`, matching the pinned
+  b10222 argmaxes after the position-127 HCA publication and its position-128
   continuation. Sequential 128-token prompt execution took 35.0 and 35.2
-  seconds; the final transitions took 0.486 and 0.484 seconds. These are
-  correctness observations for the unoptimized singleton prompt path.
+  seconds; the final transitions took 0.486 and 0.484 seconds.
+- The release CLI now accepts exactly 255 forwards. A 255-token repeated-pattern
+  prompt consumed position 254 and generated oracle token 34 in 99.6 seconds;
+  requesting one additional transition rejected before Metal residency. These
+  are correctness observations for the unoptimized singleton prompt path.
 - Ordinary 0731 messages match vLLM and SGLang byte-for-byte. On the Flash
   vocabulary, user-only, system/user, and multi-turn Unicode fixtures encode to
   exact token sequences of 5, 8, and 16 tokens. A live system/user request
@@ -568,11 +583,11 @@ Gate:
 - IQ3 peak resident plus scratch memory passes M4 Max admission with explicit
   system headroom; no reliance on swap is allowed for the resident target.
 
-S5 remains open for explicit peak-memory admission and continuation evidence
-beyond position 128. The bounded raw and ordinary-message slices now establish
-first-class native inference through every full-session differential promoted
-so far. Rich tools/reasoning are product extensions, not prerequisites for the
-minimum ordinary prompt-encoder gate.
+S5 remains open for explicit peak-memory admission and the second HCA boundary.
+The bounded raw and ordinary-message slices now establish first-class native
+inference through every full-session differential promoted so far. Rich
+tools/reasoning are product extensions, not prerequisites for the minimum
+ordinary prompt-encoder gate.
 
 ### S6: Metal performance promotion
 
@@ -640,12 +655,10 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Capture positions 129 and 254 as continuation checkpoints before requesting
-   promotion to the second HCA boundary.
-2. Capture positions 255 and 256 with singleton b10222 execution, promote the
+1. Capture positions 255 and 256 with singleton b10222 execution, promote the
    second HCA publication, and extend the dense HCA history gate.
-3. Implement sparse CSA index scoring/top-512 selection before compressed
+2. Implement sparse CSA index scoring/top-512 selection before compressed
    history exceeds 512 rows, and extend slab ownership before the current CSA
    row-256 allocation guard at position 1027.
-4. Extend the 0731 message encoder to reasoning and DSML tools only with exact
+3. Extend the 0731 message encoder to reasoning and DSML tools only with exact
    release-derived byte fixtures and an end-to-end tool-call workload.

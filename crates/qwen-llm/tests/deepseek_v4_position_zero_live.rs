@@ -49,7 +49,22 @@ const POSITION_128_ORACLE_BYTES: &[u8] =
     include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x32_then35_position128_b10222.f32");
 const POSITION_128_ORACLE_MANIFEST: &str =
     include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x32_then35_position128_b10222.json");
+const POSITION_129_ORACLE_BYTES: &[u8] = include_bytes!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_x32_then35_201_position129_b10222.f32"
+);
+const POSITION_129_ORACLE_MANIFEST: &str = include_str!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_x32_then35_201_position129_b10222.json"
+);
+const POSITION_254_ORACLE_BYTES: &[u8] = include_bytes!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_pre_second_hca_position254_b10222.f32"
+);
+const POSITION_254_ORACLE_MANIFEST: &str = include_str!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_pre_second_hca_position254_b10222.json"
+);
 const SINGLETON_ORACLE_LLM_COMMIT: &str = "e07acac20fcd2ee0faca90aa91078ff142724d63";
+const SINGLETON_ORACLE_LLAMA_CORE_COMMIT: &str = "b1cd3a914175adedcc976388c7c638d9a2f9a189";
+const SINGLETON_ORACLE_LLAMA_CPP_RS_COMMIT: &str = "553b8e4501c57c1be08a83b6b54e549a614df162";
+const SINGLETON_ORACLE_LLAMA_CPP_COMMIT: &str = "8621ac725a0b6892ae44ea33377f14b6a7e0ebdf";
 
 struct LogitComparison {
     argmax: usize,
@@ -310,6 +325,27 @@ fn pinned_csa_boundary_oracles_have_exact_identity() {
             manifest["producer"]["llm_commit"],
             SINGLETON_ORACLE_LLM_COMMIT
         );
+        assert_eq!(
+            manifest["producer"]["llama_core_commit"],
+            SINGLETON_ORACLE_LLAMA_CORE_COMMIT
+        );
+        assert_eq!(
+            manifest["producer"]["llama_cpp_rs_commit"],
+            SINGLETON_ORACLE_LLAMA_CPP_RS_COMMIT
+        );
+        assert_eq!(
+            manifest["producer"]["llama_cpp_commit"],
+            SINGLETON_ORACLE_LLAMA_CPP_COMMIT
+        );
+        assert_eq!(
+            manifest["model_shards_sha256"],
+            serde_json::json!([
+                "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a",
+                "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd",
+                "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
+                "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
+            ])
+        );
         assert_eq!(manifest["request"]["prompt_decode_mode"], "singleton");
         assert_eq!(manifest["request"]["prompt_token_ids"], prompt);
         assert_eq!(manifest["request"]["injected_token_id"], injected);
@@ -326,6 +362,7 @@ fn pinned_csa_boundary_oracles_have_exact_identity() {
             manifest["reproducibility"]["repeat_vectors_byte_identical"],
             true
         );
+        assert_eq!(manifest["reproducibility"]["fresh_session_repeats"], 2);
     }
 }
 
@@ -362,6 +399,26 @@ fn pinned_hca_boundary_oracles_have_exact_identity() {
             35,
             201,
         ),
+        (
+            POSITION_129_ORACLE_MANIFEST,
+            POSITION_129_ORACLE_BYTES,
+            "df79dc5389cf1ce49b8d99f87322be02d6c1619cada993b324be2a2465512ec2",
+            32,
+            serde_json::json!([35]),
+            129,
+            201,
+            200,
+        ),
+        (
+            POSITION_254_ORACLE_MANIFEST,
+            POSITION_254_ORACLE_BYTES,
+            "6beced28b223259a28ffb510c1e0db01868b9fc7f3d92e6692691cdcb8b8f17e",
+            63,
+            serde_json::json!([35, 201]),
+            254,
+            200,
+            34,
+        ),
     ];
     for (
         manifest_source,
@@ -384,6 +441,27 @@ fn pinned_hca_boundary_oracles_have_exact_identity() {
         assert_eq!(
             manifest["producer"]["llm_commit"],
             SINGLETON_ORACLE_LLM_COMMIT
+        );
+        assert_eq!(
+            manifest["producer"]["llama_core_commit"],
+            SINGLETON_ORACLE_LLAMA_CORE_COMMIT
+        );
+        assert_eq!(
+            manifest["producer"]["llama_cpp_rs_commit"],
+            SINGLETON_ORACLE_LLAMA_CPP_RS_COMMIT
+        );
+        assert_eq!(
+            manifest["producer"]["llama_cpp_commit"],
+            SINGLETON_ORACLE_LLAMA_CPP_COMMIT
+        );
+        assert_eq!(
+            manifest["model_shards_sha256"],
+            serde_json::json!([
+                "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a",
+                "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd",
+                "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
+                "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
+            ])
         );
         assert_eq!(manifest["request"]["prompt_decode_mode"], "singleton");
         assert_eq!(
@@ -420,6 +498,7 @@ fn pinned_hca_boundary_oracles_have_exact_identity() {
             manifest["reproducibility"]["repeat_vectors_byte_identical"],
             true
         );
+        assert_eq!(manifest["reproducibility"]["fresh_session_repeats"], 2);
     }
 }
 
@@ -840,11 +919,11 @@ fn native_deepseek_v4_second_csa_boundary_and_continuation() {
     );
 }
 
-/// Manual only: executes the first ratio-128 publication and its immediate
-/// continuation from an exact repeated-token prefix.
+/// Manual only: executes the first ratio-128 publication and continues to the
+/// final token before the second ratio-128 publication.
 #[test]
-#[ignore = "manual native DS4 129-token HCA branch maps the 95.93 GiB checkpoint"]
-fn native_deepseek_v4_first_hca_boundary_and_continuation() {
+#[ignore = "manual native DS4 255-token HCA branch maps the 95.93 GiB checkpoint"]
+fn native_deepseek_v4_through_pre_second_hca_control() {
     let model_path = std::env::var_os("DSV4_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
@@ -862,7 +941,7 @@ fn native_deepseek_v4_first_hca_boundary_and_continuation() {
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");
     let started = Instant::now();
-    let repeated_prefix = [35, 201, 200, 34].repeat(32);
+    let repeated_prefix = [35, 201, 200, 34].repeat(64);
     for &token in &repeated_prefix[..127] {
         session.forward_token(&ctx, token).unwrap();
     }
@@ -951,8 +1030,95 @@ fn native_deepseek_v4_first_hca_boundary_and_continuation() {
         boundary.relative_rms,
         continuation.relative_rms
     );
+
+    session
+        .forward_token_with_progress(&ctx, repeated_prefix[129], |layer| {
+            eprintln!(
+                "position_129 layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position 129");
+    assert_eq!(session.next_position(), 130);
+    let post_hca_logits = session.copy_logits_f32().expect("copy position-129 logits");
+    let post_hca = compare_logits("position_129", &post_hca_logits, POSITION_129_ORACLE_BYTES);
+    assert_eq!(post_hca.oracle_argmax, 200);
+    assert_eq!(post_hca.argmax, post_hca.oracle_argmax);
+    assert!(
+        post_hca.cosine >= boundary.cosine - 0.002,
+        "post-HCA continuation cosine regressed beyond the boundary allowance: boundary={} post={}",
+        boundary.cosine,
+        post_hca.cosine
+    );
+    assert!(
+        post_hca.relative_rms <= boundary.relative_rms + 0.01,
+        "post-HCA continuation relative RMS regressed beyond the boundary allowance: boundary={} post={}",
+        boundary.relative_rms,
+        post_hca.relative_rms
+    );
+
+    for &token in &repeated_prefix[130..254] {
+        session.forward_token(&ctx, token).unwrap();
+    }
+    assert_eq!(session.next_position(), 254);
+    session
+        .forward_token_with_progress(&ctx, repeated_prefix[254], |layer| {
+            eprintln!(
+                "position_254 layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position 254");
+    assert_eq!(session.next_position(), 255);
+    let pre_second_hca_logits = session.copy_logits_f32().expect("copy position-254 logits");
+    let pre_second_hca = compare_logits(
+        "position_254",
+        &pre_second_hca_logits,
+        POSITION_254_ORACLE_BYTES,
+    );
+    assert_eq!(pre_second_hca.oracle_argmax, 34);
+    assert_eq!(pre_second_hca.argmax, pre_second_hca.oracle_argmax);
+    assert!(
+        pre_second_hca.cosine >= post_hca.cosine,
+        "pre-second-HCA control cosine did not recover: post={} pre_second={}",
+        post_hca.cosine,
+        pre_second_hca.cosine
+    );
+    assert!(
+        pre_second_hca.relative_rms <= post_hca.relative_rms,
+        "pre-second-HCA control relative RMS did not recover: post={} pre_second={}",
+        post_hca.relative_rms,
+        pre_second_hca.relative_rms
+    );
+    let error = session
+        .forward_token(&ctx, repeated_prefix[255])
+        .err()
+        .expect("position 255 must reject before mutation");
+    assert!(
+        error
+            .to_string()
+            .contains("HCA publication at position 255")
+    );
+    assert_eq!(session.next_position(), 255);
+    let retained_logits = session
+        .copy_logits_f32()
+        .expect("position-254 logits remain completed after rejection");
+    assert_eq!(retained_logits.len(), pre_second_hca_logits.len());
+    for (index, (&retained, &before)) in retained_logits
+        .iter()
+        .zip(&pre_second_hca_logits)
+        .enumerate()
+    {
+        assert_eq!(
+            retained.to_bits(),
+            before.to_bits(),
+            "position-254 logit bits changed at index {index}"
+        );
+    }
     eprintln!(
-        "first_hca_branch_elapsed={:.3}s",
+        "pre_second_hca_branch_elapsed={:.3}s",
         started.elapsed().as_secs_f64()
     );
 }

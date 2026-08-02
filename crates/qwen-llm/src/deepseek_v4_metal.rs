@@ -23,9 +23,9 @@ pub const DEEPSEEK_V4_CONNECTION_COUNT: usize = 4;
 pub const DEEPSEEK_V4_HC_PARAMETER_COUNT: usize = 24;
 pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
 /// Number of token forwards traversed by the longest retained-session
-/// differential, through the position-128 HCA continuation. Callers use this
-/// to reject requests before streaming beyond the current evidence boundary.
-pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 129;
+/// differential, through the position-254 pre-HCA control. Callers use this to
+/// reject requests before streaming beyond the current evidence boundary.
+pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 255;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeepSeekV4MetalError {
@@ -163,9 +163,7 @@ const DEEPSEEK_V4_VOCAB_SIZE: usize = 129_280;
 const DEEPSEEK_V4_LAYER_COUNT: usize = 43;
 const DEEPSEEK_V4_LOCAL_WINDOW: usize = 128;
 const DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS: usize = 256;
-const DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION: u32 =
-    DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32;
-const DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY: u32 = 255;
+const DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY: u32 = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32;
 const DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY: u32 =
     ((DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS + 1) * 4 - 1) as u32;
 
@@ -178,11 +176,6 @@ fn validate_promoted_session_position(position: u32) -> Result<(), DeepSeekV4Met
     if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY {
         return invalid(format!(
             "native session stops before unvalidated HCA publication at position {DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY}; next position is {position}"
-        ));
-    }
-    if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION {
-        return invalid(format!(
-            "native session stops after the promoted HCA continuation at position 128; next position is {position}"
         ));
     }
     Ok(())
@@ -202,9 +195,9 @@ pub enum DeepSeekV4AttentionCacheContract {
 
 /// Native qwen-owned DeepSeek V4 decode session.
 ///
-/// Dense-all CSA, the first HCA publication, and its immediate continuation are
-/// promoted. The session fails closed before position 129 until a longer
-/// retained continuation earns its own differential.
+/// Dense-all CSA and the first HCA row are promoted through the position-254
+/// pre-boundary control. The session fails closed before position 255, where a
+/// second HCA row requires its own full-session differential.
 pub struct DeepSeekV4Session {
     residency: DeepSeekV4MetalResidency,
     device_registry_id: u64,
@@ -4050,15 +4043,12 @@ mod tests {
     }
 
     #[test]
-    fn session_position_guard_stops_at_promoted_continuation_and_later_boundaries() {
-        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 129);
+    fn session_position_guard_stops_before_second_hca_and_unallocated_csa() {
+        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 255);
         validate_promoted_session_position((DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY - 1) as u32)
             .unwrap();
-        let continuation =
-            validate_promoted_session_position(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32)
-                .unwrap_err();
-        assert!(continuation.to_string().contains("position 128"));
-        let hca = validate_promoted_session_position(255).unwrap_err();
+        let hca = validate_promoted_session_position(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32)
+            .unwrap_err();
         assert!(hca.to_string().contains("HCA publication at position 255"));
         let csa = validate_promoted_session_position(1027).unwrap_err();
         assert!(csa.to_string().contains("CSA row 256 at position 1027"));

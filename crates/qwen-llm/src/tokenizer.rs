@@ -2304,6 +2304,30 @@ mod tests {
                 .expect("encode first HCA boundary prefix"),
             [35, 201, 200, 34].repeat(32)
         );
+        let mut position_129 = [35, 201, 200, 34].repeat(32);
+        position_129.push(35);
+        assert_eq!(
+            tokenizer
+                .encode(&("A\n\t@".repeat(32) + "A"), false)
+                .expect("encode position-129 prefix"),
+            position_129
+        );
+        let mut position_254 = [35, 201, 200, 34].repeat(63);
+        position_254.extend([35, 201]);
+        assert_eq!(
+            tokenizer
+                .encode(&("A\n\t@".repeat(63) + "A\n"), false)
+                .expect("encode position-254 prefix"),
+            position_254
+        );
+        let mut position_255 = [35, 201, 200, 34].repeat(63);
+        position_255.extend([35, 201, 200]);
+        assert_eq!(
+            tokenizer
+                .encode(&("A\n\t@".repeat(63) + "A\n\t"), false)
+                .expect("encode position-255 CLI prefix"),
+            position_255
+        );
     }
 
     #[test]

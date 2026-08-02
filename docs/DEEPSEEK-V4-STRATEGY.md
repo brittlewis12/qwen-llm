@@ -360,24 +360,69 @@ before packed-cache promotion; it does not create an accelerator requirement.
 
 ### S2: local-only Metal backbone
 
-Implement a separate `DeepSeekV4MetalModel`, `DeepSeekV4Session`, and forward
-loop for layers 0-1, including mHC, local shared-KV attention, MoE, and final HC
-head. Add IQ2_S grouped expert gate/up support rather than dequantizing the
-entire expert bank.
+Status: promoted for sequential positions 0 and 1 on 2026-08-02. The native
+`DeepSeekV4MetalResidency` and `DeepSeekV4Session` execute the local branch of
+all 43 layers, not a truncated model: embedding, both mHC surrounds, shared-KV
+attention, routed and shared MoE, final HC collapse, output norm, and the full
+129,280-row vocabulary head remain qwen-owned Rust and Metal execution.
+
+The continuing-session oracle also corrected two assumptions that position zero
+could not distinguish. Effective llama.cpp b10222 uses adjacent-pair partial
+RoPE for `deepseek4`, and `llama_core` leaves its cache at the llama.cpp default
+F16 type. The native session therefore stores partially rotated raw KV as F16;
+the mixed FP8-NoPE/BF16-RoPE operation oracle remains a separate packed-cache
+contract rather than being silently substituted for the maintained F16 oracle.
+
+Every CSA attention/indexer and HCA attention compressor projection now runs
+from position zero and writes its F32 KV plus APE-adjusted score frontier. No
+compressed row is published early. This makes position 3 implementable from
+retained state without replay, while the session fails closed before that first
+unsupported same-token publication boundary.
 
 Gate:
 
-- One local layer matches the CPU oracle at named intermediate boundaries.
-- Layer 0 hash expert IDs and weights match exactly.
-- No existing Qwen benchmark packet regresses by more than 2%.
+- Token 35 at position 0 matches b10222 with argmax 201, cosine 0.999999999,
+  relative RMS 0.000049306, mean absolute error 0.000145020, and max absolute
+  error 0.001245499 across all logits.
+- Exact token sequence `[35, 201]` matches the position-1 b10222 oracle with
+  argmax 200, cosine 0.999999998, relative RMS 0.000065605, mean absolute error
+  0.000233142, and max absolute error 0.001331806 across all logits.
+- Extending the exact sequence to `[35, 201, 200]` matches position 2 with
+  argmax 200, cosine 0.999999993, relative RMS 0.000124235, mean absolute error
+  0.000534181, and max absolute error 0.002157211. The next call fails closed at
+  position 3 until same-token CSA publication is implemented.
+- Focused release differentials cover adjacent local and scaled YaRN RoPE,
+  inverse RoPE, ordered F32-to-F16 same-token cache insertion, sink attention,
+  and ratio-4 frontier lane plus APE semantics.
+- No delegated llama.cpp runtime participates. Its full-vocabulary F32 vectors
+  are checked-in numerical evidence only.
 
-This is a layer-local correctness gate, not a claim that skipping later layers
-can produce meaningful model tokens.
+The existing Qwen paths are untouched. Broad benchmark recertification is
+deferred until DS4 integration changes shared hot-path code; it is not useful
+feedback for this family-isolated correctness checkpoint.
 
-### S3: HCA lane
+### S3: CSA lane
 
-Add ratio-128 compressor state, compressed-cache insertion, mixed local plus
-dense-compressed attention, and prefill planning.
+Complete ratio-4 overlap pooling from the retained frontier, compressed
+attention-cache insertion, the parallel indexer compressor, and dense-all CSA
+attention. The indexer score/top-512 path can follow after dense-all is correct;
+with one visible compressed row at position 3, selection is initially trivial.
+Before implementing that path, freeze b10222 full-vocabulary fixtures at
+positions 3 and 4. Position 3 empirically arbitrates same-token compressed-row
+visibility; position 4 proves the first post-publication continuation.
+
+Gate:
+
+- Overlap state matches across positions 3/4, 7/8, and snapshot restore.
+- The row completed by position 3 is visible to that same token and no earlier
+  token.
+- When compressed rows are at most 512, dense-all and selected paths agree.
+- Indexer scores and selected IDs match before comparing sparse attention.
+
+### S4: HCA lane
+
+Add ratio-128 pooling over the already-retained frontier, compressed-cache
+insertion, mixed local plus dense-compressed attention, and prefill planning.
 
 Gate:
 
@@ -386,18 +431,6 @@ Gate:
 - One HCA layer matches named intermediate states for decode and batched
   prefill.
 - Incomplete groups are never visible to attention.
-
-### S4: CSA lane
-
-Add ratio-4 overlap state, separate indexer compression, FP4 indexer path,
-full-history score, exact top-512, and mixed sparse attention.
-
-Gate:
-
-- Overlap state matches across positions 3/4, 7/8, and snapshot restore.
-- Indexer scores and selected IDs match before comparing attention output.
-- When compressed rows are at most 512, dense-all and selected paths agree.
-- Decode and batched prefill match the CPU oracle independently.
 
 ### S5: full 0731 target generation
 

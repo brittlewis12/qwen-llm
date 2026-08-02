@@ -33,6 +33,33 @@ struct ds4_attention_cache_roundtrip_args {
     uint rotary_dim;
 };
 
+struct ds4_rope_tail_args {
+    uint head_count;
+    uint head_dim;
+    uint rotary_dim;
+    uint position;
+    uint inverse;
+    uint yarn;
+    float theta;
+    float frequency_scale;
+    float correction_low;
+    float correction_high;
+};
+
+struct ds4_local_attention_args {
+    uint head_count;
+    uint head_dim;
+    uint window;
+    uint raw_count;
+    uint raw_start;
+    float scale;
+};
+
+struct ds4_compressor_frontier_args {
+    uint width;
+    uint row_offset;
+};
+
 static inline float ds4_bf16_roundtrip(float value) {
     uint bits = as_type<uint>(value);
     bits += 0x00007fffu + ((bits >> 16) & 1u);
@@ -112,6 +139,95 @@ kernel void kernel_deepseek_v4_attention_cache_roundtrip(
     for (uint dimension = nope_dim; dimension < args.width; ++dimension) {
         output[dimension] = ds4_bf16_roundtrip(input[dimension]);
     }
+}
+
+kernel void kernel_deepseek_v4_rope_tail_adjacent_in_place(
+        constant ds4_rope_tail_args & args [[buffer(0)]],
+        device float * values [[buffer(1)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint pairs_per_head = args.rotary_dim / 2u;
+    const uint pair_count = args.head_count * pairs_per_head;
+    if (index >= pair_count) return;
+    const uint head = index / pairs_per_head;
+    const uint pair = index % pairs_per_head;
+    const uint relative = pair * 2u;
+    const uint tail = head * args.head_dim + args.head_dim - args.rotary_dim;
+    const uint first_index = tail + relative;
+    const uint second_index = first_index + 1u;
+
+    const float extrapolated = float(args.position)
+        * pow(args.theta, -float(relative) / float(args.rotary_dim));
+    float angle = extrapolated;
+    if (args.yarn != 0u) {
+        const float interpolated = args.frequency_scale * extrapolated;
+        const float ramp = 1.0f - clamp(
+            (float(pair) - args.correction_low)
+                / max(0.001f, args.correction_high - args.correction_low),
+            0.0f,
+            1.0f);
+        angle = interpolated * (1.0f - ramp) + extrapolated * ramp;
+    }
+    const float cosine = cos(angle);
+    float sine = sin(angle);
+    if (args.inverse != 0u) sine = -sine;
+    const float first = values[first_index];
+    const float second = values[second_index];
+    values[first_index] = first * cosine - second * sine;
+    values[second_index] = first * sine + second * cosine;
+}
+
+kernel void kernel_deepseek_v4_local_sink_attention_f16(
+        constant ds4_local_attention_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * raw_cache [[buffer(2)]],
+        device const float * sinks [[buffer(3)]],
+        device float * output [[buffer(4)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint width = args.head_count * args.head_dim;
+    if (index >= width) return;
+    const uint head = index / args.head_dim;
+    const uint dimension = index % args.head_dim;
+    const uint query_start = head * args.head_dim;
+    float maximum = sinks[head];
+
+    for (uint row = 0u; row < args.raw_count; ++row) {
+        const uint logical_position = args.raw_start + row;
+        const uint cache_start = (logical_position % args.window) * args.head_dim;
+        float score = 0.0f;
+        for (uint inner = 0u; inner < args.head_dim; ++inner) {
+            score += queries[query_start + inner] * float(raw_cache[cache_start + inner]);
+        }
+        maximum = max(maximum, score * args.scale);
+    }
+
+    float denominator = exp(sinks[head] - maximum);
+    float value = 0.0f;
+    for (uint row = 0u; row < args.raw_count; ++row) {
+        const uint logical_position = args.raw_start + row;
+        const uint cache_start = (logical_position % args.window) * args.head_dim;
+        float score = 0.0f;
+        for (uint inner = 0u; inner < args.head_dim; ++inner) {
+            score += queries[query_start + inner] * float(raw_cache[cache_start + inner]);
+        }
+        const float mass = exp(score * args.scale - maximum);
+        denominator += mass;
+        value += float(raw_cache[cache_start + dimension]) * mass;
+    }
+    output[index] = value / denominator;
+}
+
+kernel void kernel_deepseek_v4_compressor_frontier_write(
+        constant ds4_compressor_frontier_args & args [[buffer(0)]],
+        device const float * projected_kv [[buffer(1)]],
+        device const float * projected_score [[buffer(2)]],
+        device const float * ape [[buffer(3)]],
+        device float * kv_state [[buffer(4)]],
+        device float * score_state [[buffer(5)]],
+        uint index [[thread_position_in_grid]]) {
+    if (index >= args.width) return;
+    const uint destination = args.row_offset + index;
+    kv_state[destination] = projected_kv[index];
+    score_state[destination] = projected_score[index] + ape[index];
 }
 
 kernel void kernel_deepseek_v4_position_zero_sink_attention(

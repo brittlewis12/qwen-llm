@@ -23,9 +23,10 @@ pub const DEEPSEEK_V4_CONNECTION_COUNT: usize = 4;
 pub const DEEPSEEK_V4_HC_PARAMETER_COUNT: usize = 24;
 pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
 /// Number of token forwards traversed by the longest retained-session
-/// differential, through the position-254 pre-HCA control. Callers use this to
-/// reject requests before streaming beyond the current evidence boundary.
-pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 255;
+/// differential, through the position-256 second-HCA continuation. Callers use
+/// this to reject requests before streaming beyond the current evidence
+/// boundary.
+pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 257;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeepSeekV4MetalError {
@@ -163,7 +164,9 @@ const DEEPSEEK_V4_VOCAB_SIZE: usize = 129_280;
 const DEEPSEEK_V4_LAYER_COUNT: usize = 43;
 const DEEPSEEK_V4_LOCAL_WINDOW: usize = 128;
 const DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS: usize = 256;
-const DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY: u32 = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32;
+const DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION: u32 =
+    DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32;
+const DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY: u32 = 383;
 const DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY: u32 =
     ((DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS + 1) * 4 - 1) as u32;
 
@@ -176,6 +179,11 @@ fn validate_promoted_session_position(position: u32) -> Result<(), DeepSeekV4Met
     if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY {
         return invalid(format!(
             "native session stops before unvalidated HCA publication at position {DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY}; next position is {position}"
+        ));
+    }
+    if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION {
+        return invalid(format!(
+            "native session stops after the promoted second-HCA continuation at position 256; next position is {position}"
         ));
     }
     Ok(())
@@ -195,9 +203,9 @@ pub enum DeepSeekV4AttentionCacheContract {
 
 /// Native qwen-owned DeepSeek V4 decode session.
 ///
-/// Dense-all CSA and the first HCA row are promoted through the position-254
-/// pre-boundary control. The session fails closed before position 255, where a
-/// second HCA row requires its own full-session differential.
+/// Dense-all CSA and two HCA rows are promoted through the position-256
+/// continuation. The session fails closed before position 257 until the next
+/// retained interval earns its own differential.
 pub struct DeepSeekV4Session {
     residency: DeepSeekV4MetalResidency,
     device_registry_id: u64,
@@ -4043,13 +4051,16 @@ mod tests {
     }
 
     #[test]
-    fn session_position_guard_stops_before_second_hca_and_unallocated_csa() {
-        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 255);
+    fn session_position_guard_stops_after_second_hca_and_at_later_boundaries() {
+        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 257);
         validate_promoted_session_position((DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY - 1) as u32)
             .unwrap();
-        let hca = validate_promoted_session_position(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32)
-            .unwrap_err();
-        assert!(hca.to_string().contains("HCA publication at position 255"));
+        let continuation =
+            validate_promoted_session_position(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32)
+                .unwrap_err();
+        assert!(continuation.to_string().contains("next position is 257"));
+        let hca = validate_promoted_session_position(383).unwrap_err();
+        assert!(hca.to_string().contains("HCA publication at position 383"));
         let csa = validate_promoted_session_position(1027).unwrap_err();
         assert!(csa.to_string().contains("CSA row 256 at position 1027"));
     }
@@ -5248,7 +5259,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_csa_attention_includes_the_same_token_compressed_row() {
+    fn dense_compressed_attention_includes_the_newest_published_row() {
         let Some(ctx) = metal_context() else {
             return;
         };
@@ -5281,12 +5292,20 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let compressed_row = (0..HEAD_DIM)
-            .map(|dimension| 0.52 - (dimension % 17) as f32 * 0.004)
+        let compressed_rows = (0..2)
+            .flat_map(|row| {
+                (0..HEAD_DIM).map(move |dimension| {
+                    if row == 0 {
+                        0.52 - (dimension % 17) as f32 * 0.004
+                    } else {
+                        -0.41 + (dimension % 19) as f32 * 0.005
+                    }
+                })
+            })
             .collect::<Vec<_>>();
         let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
         let raw_rows = raw_rows.into_iter().map(round_f16).collect::<Vec<_>>();
-        let compressed_row = compressed_row
+        let compressed_rows = compressed_rows
             .into_iter()
             .map(round_f16)
             .collect::<Vec<_>>();
@@ -5296,7 +5315,17 @@ mod tests {
             HEADS,
             HEAD_DIM,
             &raw_rows,
-            &compressed_row,
+            &compressed_rows,
+            None,
+            &sinks,
+        )
+        .unwrap();
+        let first_only = shared_kv_attention(
+            &queries,
+            HEADS,
+            HEAD_DIM,
+            &raw_rows,
+            &compressed_rows[..HEAD_DIM],
             None,
             &sinks,
         )
@@ -5309,6 +5338,13 @@ mod tests {
                 .zip(&local_only)
                 .any(|(dense, local)| (dense - local).abs() > 1e-2),
             "fixture must distinguish dense CSA from local-only attention"
+        );
+        assert!(
+            expected
+                .iter()
+                .zip(&first_only)
+                .any(|(two_rows, first)| (two_rows - first).abs() > 1e-2),
+            "fixture must make the newest compressed row materially visible"
         );
 
         let query_tensor = offset_f32(&ctx, &queries, vec![HEAD_DIM as u64, HEADS as u64]);
@@ -5325,7 +5361,7 @@ mod tests {
             .chunks_exact(HEAD_DIM)
             .map(|row| offset_f32(&ctx, row, vec![HEAD_DIM as u64]))
             .collect::<Vec<_>>();
-        let compressed_source = offset_f32(&ctx, &compressed_row, vec![HEAD_DIM as u64]);
+        let compressed_source = offset_f32(&ctx, &compressed_rows, vec![HEAD_DIM as u64, 2]);
         let output = offset_f32(
             &ctx,
             &vec![0.0; HEADS * HEAD_DIM],
@@ -5350,7 +5386,7 @@ mod tests {
             &compressed_source,
             &compressed_cache,
             0,
-            HEAD_DIM,
+            2 * HEAD_DIM,
         )
         .unwrap();
         encode_dense_sink_attention_f16(
@@ -5360,7 +5396,7 @@ mod tests {
             &raw_cache,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed_cache,
-                count: 1,
+                count: 2,
             }),
             &sink_tensor,
             &output,
@@ -5377,7 +5413,7 @@ mod tests {
             command.error()
         );
         assert_close(
-            "same-token dense CSA attention",
+            "two-row dense compressed attention",
             &read_f32(&output),
             &expected,
             4e-5,

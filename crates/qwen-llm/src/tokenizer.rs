@@ -2328,6 +2328,20 @@ mod tests {
                 .expect("encode position-255 CLI prefix"),
             position_255
         );
+        assert_eq!(
+            tokenizer
+                .encode(&"A\n\t@".repeat(64), false)
+                .expect("encode second HCA boundary prefix"),
+            [35, 201, 200, 34].repeat(64)
+        );
+        let mut position_257 = [35, 201, 200, 34].repeat(64);
+        position_257.push(35);
+        assert_eq!(
+            tokenizer
+                .encode(&("A\n\t@".repeat(64) + "A"), false)
+                .expect("encode position-257 CLI prefix"),
+            position_257
+        );
     }
 
     #[test]

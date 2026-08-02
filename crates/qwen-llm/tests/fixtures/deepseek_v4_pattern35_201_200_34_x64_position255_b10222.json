@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs",
+  "model_shards_sha256": [
+    "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a",
+    "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd",
+    "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
+    "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
+  ],
+  "producer": {
+    "llm_commit": "e07acac20fcd2ee0faca90aa91078ff142724d63",
+    "llama_core_commit": "b1cd3a914175adedcc976388c7c638d9a2f9a189",
+    "llama_cpp_rs_commit": "553b8e4501c57c1be08a83b6b54e549a614df162",
+    "llama_cpp_commit": "8621ac725a0b6892ae44ea33377f14b6a7e0ebdf",
+    "effective_llama_cpp_build": "b10222",
+    "backend": "Metal",
+    "platform": "Apple M4 Max",
+    "captured_at": "2026-08-02"
+  },
+  "request": {
+    "branch": "second_hca_boundary",
+    "prompt_raw": true,
+    "prompt_decode_mode": "singleton",
+    "prompt_tokenization": {
+      "pattern_text": "A\n\t@",
+      "pattern_token_ids": [35, 201, 200, 34],
+      "pattern_repetitions": 63,
+      "suffix_text": "A\n\t",
+      "suffix_token_ids": [35, 201, 200],
+      "expanded_token_count": 255,
+      "native_tokenizer_verified": true
+    },
+    "injected_token_id": 34,
+    "injection_position": 255,
+    "context_size": 512,
+    "cache_type": "F16",
+    "seed": 42,
+    "temperature": 0.0,
+    "command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 63 + \"A\\n\\t\")' | llm --model MODEL --context 512 --raw --prompt-geometry --snapshot OUT --snapshot-id position255_token34_singleton --inject-token-id 34 --seed 42 --temp 0 --repeat 2 --snapshot-top-k 10"
+  },
+  "vector": {
+    "file": "deepseek_v4_pattern35_201_200_34_x64_position255_b10222.f32",
+    "encoding": "f32-le",
+    "element_count": 129280,
+    "byte_count": 517120,
+    "sha256": "7b93e37f0da402e0dd9fc1a40d9ed99921adebfc0bed7667cbd5f15a880f93a6",
+    "argmax_token_id": 35,
+    "argmax_logit": 29.61789
+  },
+  "reproducibility": {
+    "fresh_session_repeats": 2,
+    "repeat_vectors_byte_identical": true,
+    "pre_boundary_fixture": "deepseek_v4_pattern35_201_200_34_pre_second_hca_position254_b10222.f32"
+  }
+}

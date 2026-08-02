@@ -19434,8 +19434,9 @@ where
 {
     let cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
     let enc = KernelEncoder::begin(&cmd_buf);
-    encode(&enc)?;
+    let encode_result = encode(&enc);
     enc.end();
+    encode_result?;
     cmd_buf.commit();
     cmd_buf.waitUntilCompleted();
     Ok(())
@@ -27087,7 +27088,7 @@ mod tests {
             &ctx,
             bytemuck::cast_slice(&ids),
             vec![n_rows as u64],
-            GgmlType::F32, // dtype tag is unused for the i32 buffer here
+            GgmlType::I32,
         )
         .unwrap();
         let y_t = MetalTensor::zeros_f32(&ctx, vec![n_rows as u64, n_cols as u64]).unwrap();
@@ -27133,7 +27134,7 @@ mod tests {
             &ctx,
             bytemuck::cast_slice(&ids),
             vec![n_rows as u64],
-            GgmlType::F32,
+            GgmlType::I32,
         )
         .expect("ids");
         let output =

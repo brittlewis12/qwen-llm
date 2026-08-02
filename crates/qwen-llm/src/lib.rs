@@ -34,6 +34,7 @@ pub mod codec;
 pub mod deepseek_v4;
 pub mod deepseek_v4_cache;
 pub mod deepseek_v4_census;
+pub mod deepseek_v4_metal;
 pub mod deepseek_v4_oracle;
 pub mod env_flag;
 pub mod forward;

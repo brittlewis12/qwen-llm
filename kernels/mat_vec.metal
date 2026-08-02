@@ -43,6 +43,17 @@ constant float iq4nl_values[16] = {
        1.0f,   13.0f,  25.0f,  38.0f,  53.0f,  69.0f,  89.0f, 113.0f,
 };
 
+constant float mxfp4_values[16] = {
+    0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 12.0f,
+    0.0f, -1.0f, -2.0f, -3.0f, -4.0f, -6.0f, -8.0f, -12.0f,
+};
+
+static inline float mxfp4_e8m0_scale(uchar e) {
+    const uint bits = e == 0u ? 0x00200000u
+        : (e == 1u ? 0x00400000u : (uint(e) - 1u) << 23u);
+    return as_type<float>(bits);
+}
+
 constant uchar mv_kmask_iq2xs[8] = {
     1, 2, 4, 8, 16, 32, 64, 128
 };
@@ -792,6 +803,39 @@ kernel void kernel_mat_vec_bf16_f32(
     const uint tail_start = n_in_v4 * 4;
     for (uint i = tail_start + tiisg; i < args.n_in; i += 32) {
         sum += bf16_to_float(weight[row * args.n_in + i]) * x[i];
+    }
+
+    sum = simd_sum(sum);
+    if (tiisg == 0) {
+        y[row] = sum;
+    }
+}
+
+kernel void kernel_mat_vec_mxfp4_f32(
+        constant mat_vec_args & args   [[buffer(0)]],
+        device const uchar    * weight [[buffer(1)]],
+        device const float    * x      [[buffer(2)]],
+        device       float    * y      [[buffer(3)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr uint QK_MXFP4 = 32;
+    constexpr ulong MXFP4_BYTES = 17;
+    const uint row = tgpig * MAT_VEC_ROWS_PER_TG + sgitg;
+    if (row >= args.n_out) return;
+
+    const uint blocks_per_row = args.n_in / QK_MXFP4;
+    device const uchar * row_blocks = weight + (ulong)row * blocks_per_row * MXFP4_BYTES;
+    float sum = 0.0f;
+    for (uint block_index = tiisg; block_index < blocks_per_row; block_index += 32u) {
+        device const uchar * block = row_blocks + (ulong)block_index * MXFP4_BYTES;
+        const float scale = mxfp4_e8m0_scale(block[0]);
+        const uint x_base = block_index * QK_MXFP4;
+        for (uint packed_index = 0; packed_index < 16u; ++packed_index) {
+            const uchar packed = block[1u + packed_index];
+            sum += (mxfp4_values[packed & 0x0fu] * x[x_base + packed_index]) * scale;
+            sum += (mxfp4_values[packed >> 4u] * x[x_base + 16u + packed_index]) * scale;
+        }
     }
 
     sum = simd_sum(sum);

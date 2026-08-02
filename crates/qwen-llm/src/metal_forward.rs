@@ -12762,6 +12762,9 @@ pub fn encode_mat_vec_dispatch(
         GgmlType::Q6_K => Ok(encode_mat_vec_q6_k_f32(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
+        GgmlType::MXFP4 => Ok(crate::metal::encode_mat_vec_mxfp4_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
         GgmlType::Q8_0 => Ok(crate::metal::encode_mat_vec_q8_0_f32(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),

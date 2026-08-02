@@ -757,6 +757,43 @@ kernel void kernel_get_rows_q4_K_f32(
     y[out_index] = dl * float(quant) - ml;
 }
 
+kernel void kernel_get_rows_q6_K_f32(
+        constant get_rows_args & args [[buffer(0)]],
+        device const uchar * embed [[buffer(1)]],
+        device const int   * ids   [[buffer(2)]],
+        device       float * y     [[buffer(3)]],
+        uint2 gid [[thread_position_in_grid]]) {
+    const uint r = gid.y;
+    const uint i = gid.x;
+    if (r >= args.n_rows || i >= args.n_cols) return;
+
+    constexpr ulong Q6_K_BYTES = 210;
+    constexpr uint QK_K = 256;
+    const int row_i = ids[r];
+    const ulong out_index = (ulong)r * args.n_cols + i;
+    if ((uint)row_i >= args.n_vocab) {
+        y[out_index] = 0.0f;
+        return;
+    }
+
+    const ulong blocks_per_row = (ulong)args.n_cols / QK_K;
+    const ulong block_index = (ulong)(uint)row_i * blocks_per_row + i / QK_K;
+    device const uchar * block = embed + block_index * Q6_K_BYTES;
+    const uint in_block = i % QK_K;
+    const uint half_index = in_block / 128u;
+    const uint half_offset = in_block % 128u;
+    const uint ql_index = 64u * half_index + (half_offset % 64u);
+    const uint qh_index = 32u * half_index + (half_offset % 32u);
+    const uint ql_shift = half_offset >= 64u ? 4u : 0u;
+    const uint qh_shift = 2u * (half_offset / 32u);
+    const uint low = (uint(block[ql_index]) >> ql_shift) & 0x0fu;
+    const uint high = (uint(block[128u + qh_index]) >> qh_shift) & 0x03u;
+    const int quant = int(low | (high << 4u)) - 32;
+    const int scale = int(((device const int8_t *)(block + 192u))[in_block / 16u]);
+    const float d = float(((device const half *)(block + 208u))[0]);
+    y[out_index] = d * float(scale) * float(quant);
+}
+
 kernel void kernel_get_rows_q8_0_f32(
         constant get_rows_args & args [[buffer(0)]],
         device const uchar * embed [[buffer(1)]],

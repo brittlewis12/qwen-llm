@@ -2049,6 +2049,29 @@ impl MetalTensor {
         Self::from_bytes(ctx, bytes, desc.shape.clone(), desc.dtype)
     }
 
+    pub(crate) fn copied_gguf_weight(
+        ctx: &MetalContext,
+        desc: &TensorDesc,
+        bytes: &[u8],
+    ) -> Result<Self, MetalError> {
+        let (_, expected) = checked_ggml_shape_bytes(&desc.shape, desc.dtype)?;
+        if bytes.len() != expected || desc.n_bytes != expected as u64 {
+            return Err(MetalError::BadShape {
+                kernel: "copied_gguf_weight",
+                detail: format!(
+                    "tensor {:?} has bytes.len()={} n_bytes={} but shape={:?} dtype={:?} expects {expected} bytes",
+                    desc.name,
+                    bytes.len(),
+                    desc.n_bytes,
+                    desc.shape,
+                    desc.dtype
+                ),
+            });
+        }
+        let buffer = ctx.buffer_from(bytes)?;
+        Self::owned_weight_view(buffer, 0, desc.shape.clone(), desc.dtype, 32)
+    }
+
     pub(crate) fn owned_weight_view(
         buffer: Buffer,
         offset: u64,
@@ -3083,6 +3106,133 @@ pub fn encode_mat_vec_bf16_f32(
         GgmlType::BF16,
         "kernel_mat_vec_bf16_f32",
     )
+}
+
+/// MXFP4 mat-vec with F32 activation and output tensors. MXFP4 stores 32
+/// values in each 17-byte block: one E8M0 scale followed by 16 packed nibbles.
+pub fn encode_mat_vec_mxfp4_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    const BLOCK_ELEMENTS: usize = 32;
+    const KERNEL: &str = "mat_vec_mxfp4";
+    if n_in == 0 || n_out == 0 || n_in % BLOCK_ELEMENTS != 0 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "n_in={n_in} must be nonzero and divisible by {BLOCK_ELEMENTS}; n_out={n_out} must be nonzero"
+            ),
+        });
+    }
+    let n_in_u32 = u32::try_from(n_in).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_in={n_in} exceeds u32"),
+    })?;
+    let n_out_u32 = u32::try_from(n_out).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_out={n_out} exceeds u32"),
+    })?;
+    let weight_elements = n_in
+        .checked_mul(n_out)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "n_in*n_out overflow".into(),
+        })?;
+    if weight.dtype != GgmlType::MXFP4 || x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "weight/x/y expected MXFP4/F32/F32, got {:?}/{:?}/{:?}",
+                weight.dtype, x.dtype, y.dtype
+            ),
+        });
+    }
+    if weight.shape.as_slice() != [n_in as u64, n_out as u64]
+        || x.shape.as_slice() != [n_in as u64]
+        || y.shape.as_slice() != [n_out as u64]
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "weight/x/y expected shapes [{n_in},{n_out}]/[{n_in}]/[{n_out}], got {:?}/{:?}/{:?}",
+                weight.shape, x.shape, y.shape
+            ),
+        });
+    }
+    debug_assert_eq!(weight.n_elements() as usize, weight_elements);
+    if x.offset % std::mem::align_of::<f32>() as u64 != 0
+        || y.offset % std::mem::align_of::<f32>() as u64 != 0
+        || !y.is_writable()
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "x/y must be aligned F32 and y writable, got offsets={}/{} y_provenance={:?}",
+                x.offset,
+                y.offset,
+                y.provenance()
+            ),
+        });
+    }
+    for (label, tensor) in [("weight", weight), ("x", x), ("y", y)] {
+        let end =
+            tensor
+                .offset
+                .checked_add(tensor.n_bytes())
+                .ok_or_else(|| MetalError::BadShape {
+                    kernel: KERNEL,
+                    detail: format!("{label} buffer range overflow"),
+                })?;
+        if end > tensor.buffer.length() as u64 {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!(
+                    "{label} range offset={} bytes={} exceeds buffer={}",
+                    tensor.offset,
+                    tensor.n_bytes(),
+                    tensor.buffer.length()
+                ),
+            });
+        }
+    }
+
+    let pso = ctx.pipeline("kernel_mat_vec_mxfp4_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in_u32,
+            n_out: n_out_u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    const ROWS_PER_TG: usize = 4;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(ROWS_PER_TG),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: ROWS_PER_TG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
 }
 
 fn encode_mat_vec_block32_f32(
@@ -17445,6 +17595,15 @@ pub fn encode_get_rows_f32(
             detail: format!("ids.n={} != n_rows={n_rows}", ids.n_elements()),
         });
     }
+    if ids.dtype != GgmlType::I32 || ids.offset % std::mem::align_of::<i32>() as u64 != 0 {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!(
+                "ids must be aligned I32, got dtype={:?} offset={}",
+                ids.dtype, ids.offset
+            ),
+        });
+    }
     let ids_bytes = n_rows
         .checked_mul(std::mem::size_of::<i32>())
         .ok_or_else(|| MetalError::BadShape {
@@ -17468,10 +17627,18 @@ pub fn encode_get_rows_f32(
             ),
         });
     }
-    if y.dtype != GgmlType::F32 {
+    if y.dtype != GgmlType::F32
+        || !y.is_writable()
+        || y.offset % std::mem::align_of::<f32>() as u64 != 0
+    {
         return Err(MetalError::BadShape {
             kernel: "get_rows",
-            detail: format!("expected F32 output, got {:?}", y.dtype),
+            detail: format!(
+                "output must be aligned writable F32, got dtype={:?} offset={} provenance={:?}",
+                y.dtype,
+                y.offset,
+                y.provenance()
+            ),
         });
     }
     let output_bytes = output_elements
@@ -17519,6 +17686,7 @@ pub fn encode_get_rows_f32(
         GgmlType::F32 => (1usize, 4usize),
         GgmlType::F16 | GgmlType::BF16 => (1, 2),
         GgmlType::Q4_K => (256, 144),
+        GgmlType::Q6_K => (256, 210),
         GgmlType::Q8_0 => (32, 34),
         other => {
             return Err(MetalError::BadShape {
@@ -17584,6 +17752,7 @@ pub fn encode_get_rows_f32(
         GgmlType::F16 => "kernel_get_rows_f16",
         GgmlType::BF16 => "kernel_get_rows_bf16",
         GgmlType::Q4_K => "kernel_get_rows_q4_K_f32",
+        GgmlType::Q6_K => "kernel_get_rows_q6_K_f32",
         GgmlType::Q8_0 => "kernel_get_rows_q8_0_f32",
         _ => unreachable!(),
     };
@@ -20066,6 +20235,321 @@ pub fn mat_vec_trellis3_f32_readback_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::size_of;
+
+    fn offset_tensor(
+        ctx: &MetalContext,
+        prefix: usize,
+        data: &[u8],
+        suffix: usize,
+        shape: Vec<u64>,
+        dtype: GgmlType,
+    ) -> MetalTensor {
+        let mut bytes = vec![0xA5; prefix];
+        bytes.extend_from_slice(data);
+        bytes.resize(bytes.len() + suffix, 0x5A);
+        MetalTensor {
+            buffer: ctx.buffer_from(&bytes).expect("offset tensor backing"),
+            offset: prefix as u64,
+            shape,
+            dtype,
+            provenance: MetalTensorProvenance::OwnedWritable,
+        }
+    }
+
+    fn tensor_f32_at_offset(tensor: &MetalTensor) -> Vec<f32> {
+        let n = tensor.n_elements() as usize;
+        unsafe {
+            let src = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<f32>();
+            std::slice::from_raw_parts(src, n).to_vec()
+        }
+    }
+
+    fn encode_q6_k_block(d: f32, seed: usize) -> ([u8; 210], [f32; 256]) {
+        let mut block = [0u8; 210];
+        let mut decoded = [0.0f32; 256];
+        for scale_index in 0..16 {
+            let scale = ((seed + scale_index * 3) % 15) as i8 - 7;
+            block[192 + scale_index] = scale as u8;
+        }
+        block[208..210].copy_from_slice(&half::f16::from_f32(d).to_bits().to_le_bytes());
+        let stored_d = half::f16::from_f32(d).to_f32();
+        for (i, value) in decoded.iter_mut().enumerate() {
+            let quant = ((seed * 11 + i * 7) % 64) as u8;
+            let half_index = i / 128;
+            let half_offset = i % 128;
+            let ql_index = 64 * half_index + half_offset % 64;
+            if half_offset < 64 {
+                block[ql_index] = (block[ql_index] & 0xF0) | (quant & 0x0F);
+            } else {
+                block[ql_index] = (block[ql_index] & 0x0F) | ((quant & 0x0F) << 4);
+            }
+            let qh_index = 128 + 32 * half_index + half_offset % 32;
+            let qh_shift = 2 * (half_offset / 32);
+            block[qh_index] |= (quant >> 4) << qh_shift;
+            let scale = block[192 + i / 16] as i8;
+            *value = stored_d * f32::from(scale) * (f32::from(quant) - 32.0);
+        }
+        (block, decoded)
+    }
+
+    #[test]
+    fn get_rows_q6_k_gpu_matches_cpu_with_offsets_and_rejects_bad_inputs() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        const N_VOCAB: usize = 3;
+        const N_COLS: usize = 512;
+        let mut weight_bytes = Vec::new();
+        let mut decoded = vec![0.0f32; N_VOCAB * N_COLS];
+        for row in 0..N_VOCAB {
+            for block_index in 0..2 {
+                let (block, values) = encode_q6_k_block(
+                    if (row + block_index) % 2 == 0 {
+                        0.5
+                    } else {
+                        -0.25
+                    },
+                    row * 2 + block_index,
+                );
+                weight_bytes.extend_from_slice(&block);
+                let start = row * N_COLS + block_index * 256;
+                decoded[start..start + 256].copy_from_slice(&values);
+            }
+        }
+        let desc = TensorDesc {
+            name: "q6_k_test".into(),
+            shape: vec![N_COLS as u64, N_VOCAB as u64],
+            dtype: GgmlType::Q6_K,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: weight_bytes.len() as u64,
+        };
+        let codec_decoded = crate::codec::dequant_to_f32(&desc, &weight_bytes)
+            .expect("llama.cpp Q6_K reference dequantization");
+        assert_eq!(decoded, codec_decoded);
+        let decoded = codec_decoded;
+        let embed = offset_tensor(
+            &ctx,
+            32,
+            &weight_bytes,
+            19,
+            vec![N_COLS as u64, N_VOCAB as u64],
+            GgmlType::Q6_K,
+        );
+        let row_ids = [2i32, -1, 0, 3];
+        let ids = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&row_ids),
+            12,
+            vec![row_ids.len() as u64],
+            GgmlType::I32,
+        );
+        let output_bytes = vec![0u8; row_ids.len() * N_COLS * size_of::<f32>()];
+        let y = offset_tensor(
+            &ctx,
+            32,
+            &output_bytes,
+            20,
+            vec![(row_ids.len() * N_COLS) as u64],
+            GgmlType::F32,
+        );
+        one_shot(&ctx, |enc| {
+            encode_get_rows_f32(&ctx, enc, &embed, &ids, &y, row_ids.len(), N_COLS)
+        })
+        .expect("Q6_K get_rows");
+
+        let actual = tensor_f32_at_offset(&y);
+        for (lookup_row, &row_id) in row_ids.iter().enumerate() {
+            let output_row = &actual[lookup_row * N_COLS..(lookup_row + 1) * N_COLS];
+            if row_id >= 0 && (row_id as usize) < N_VOCAB {
+                let expected = &decoded[row_id as usize * N_COLS..(row_id as usize + 1) * N_COLS];
+                assert_eq!(output_row, expected);
+            } else {
+                assert!(output_row.iter().all(|&value| value == 0.0));
+            }
+        }
+
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .expect("validation command buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        assert!(encode_get_rows_f32(&ctx, &enc, &embed, &ids, &y, row_ids.len(), 255).is_err());
+        let mut short_embed = embed.clone();
+        short_embed.offset = short_embed.buffer.length() as u64 - 1;
+        assert!(
+            encode_get_rows_f32(&ctx, &enc, &short_embed, &ids, &y, row_ids.len(), N_COLS).is_err()
+        );
+        let mut short_ids = ids.clone();
+        short_ids.offset = short_ids.buffer.length() as u64 - 1;
+        assert!(
+            encode_get_rows_f32(&ctx, &enc, &embed, &short_ids, &y, row_ids.len(), N_COLS).is_err()
+        );
+        enc.end();
+    }
+
+    fn mxfp4_scale(e: u8) -> f32 {
+        let bits = match e {
+            0 => 0x0020_0000,
+            1 => 0x0040_0000,
+            _ => u32::from(e - 1) << 23,
+        };
+        f32::from_bits(bits)
+    }
+
+    fn encode_mxfp4_block(e: u8, indices: &[u8; 32]) -> [u8; 17] {
+        let mut block = [0u8; 17];
+        block[0] = e;
+        for i in 0..16 {
+            block[1 + i] = indices[i] | (indices[16 + i] << 4);
+        }
+        block
+    }
+
+    #[test]
+    fn mxfp4_mat_vec_dispatch_gpu_matches_reference_with_offsets() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        const N_IN: usize = 64;
+        const N_OUT: usize = 3;
+        let mut all_indices = [0u8; 32];
+        for (i, index) in all_indices.iter_mut().enumerate() {
+            *index = (i % 16) as u8;
+        }
+        let zero_indices = [0u8; 32];
+        let blocks = [
+            encode_mxfp4_block(0, &all_indices),
+            encode_mxfp4_block(127, &zero_indices),
+            encode_mxfp4_block(1, &all_indices),
+            encode_mxfp4_block(128, &zero_indices),
+            encode_mxfp4_block(126, &zero_indices),
+            encode_mxfp4_block(127, &all_indices),
+        ];
+        let weight_bytes = blocks.concat();
+        let desc = TensorDesc {
+            name: "mxfp4_test".into(),
+            shape: vec![N_IN as u64, N_OUT as u64],
+            dtype: GgmlType::MXFP4,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: weight_bytes.len() as u64,
+        };
+        let decoded = crate::codec::dequant_to_f32(&desc, &weight_bytes)
+            .expect("llama.cpp MXFP4 reference dequantization");
+        let weight = offset_tensor(
+            &ctx,
+            32,
+            &weight_bytes,
+            31,
+            vec![N_IN as u64, N_OUT as u64],
+            GgmlType::MXFP4,
+        );
+        let mut x_values = vec![0.0f32; N_IN];
+        for (i, x) in x_values[..32].iter_mut().enumerate() {
+            *x = if i % 2 == 0 {
+                2.0f32.powi(120)
+            } else {
+                -2.0f32.powi(120)
+            };
+        }
+        for (i, x) in x_values[32..].iter_mut().enumerate() {
+            *x = (i as f32 - 15.5) / 8.0;
+        }
+        let x = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&x_values),
+            24,
+            vec![N_IN as u64],
+            GgmlType::F32,
+        );
+        let y = offset_tensor(
+            &ctx,
+            32,
+            &[0u8; N_OUT * size_of::<f32>()],
+            16,
+            vec![N_OUT as u64],
+            GgmlType::F32,
+        );
+
+        let cmd = ctx.queue.commandBuffer().expect("MXFP4 command buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        crate::metal_forward::encode_mat_vec_dispatch(&ctx, &enc, &weight, &x, &y, N_IN, N_OUT)
+            .expect("MXFP4 dispatch arm");
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+
+        let mut expected = vec![0.0f32; N_OUT];
+        for row in 0..N_OUT {
+            expected[row] = decoded[row * N_IN..(row + 1) * N_IN]
+                .iter()
+                .zip(&x_values)
+                .map(|(weight, x)| weight * x)
+                .sum();
+        }
+        let actual = tensor_f32_at_offset(&y);
+        for (row, (&got, &want)) in actual.iter().zip(&expected).enumerate() {
+            let tolerance = 2.0e-5 * want.abs().max(1.0);
+            assert!(
+                (got - want).abs() <= tolerance,
+                "row {row}: got {got}, want {want}"
+            );
+        }
+        assert_eq!(mxfp4_scale(0).to_bits(), 0x0020_0000);
+        assert_eq!(mxfp4_scale(1).to_bits(), 0x0040_0000);
+        assert!(!crate::metal_forward::weight_dtype_kept_native(
+            GgmlType::MXFP4
+        ));
+    }
+
+    #[test]
+    fn mxfp4_mat_vec_host_rejects_invalid_shapes_and_ranges() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        let weight =
+            MetalTensor::from_bytes(&ctx, &[0u8; 34], vec![64, 1], GgmlType::MXFP4).unwrap();
+        let x = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
+        let y = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let cmd = ctx
+            .queue
+            .commandBuffer()
+            .expect("validation command buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        assert!(encode_mat_vec_mxfp4_f32(&ctx, &enc, &weight, &x, &y, 48, 1).is_err());
+        let mut wrong_weight_shape = weight.clone();
+        wrong_weight_shape.shape = vec![32, 1];
+        assert!(encode_mat_vec_mxfp4_f32(&ctx, &enc, &wrong_weight_shape, &x, &y, 64, 1).is_err());
+        let wrong_x = MetalTensor::zeros_f32(&ctx, vec![32]).unwrap();
+        assert!(encode_mat_vec_mxfp4_f32(&ctx, &enc, &weight, &wrong_x, &y, 64, 1).is_err());
+        for which in 0..3 {
+            let mut bad_weight = weight.clone();
+            let mut bad_x = x.clone();
+            let mut bad_y = y.clone();
+            match which {
+                0 => bad_weight.offset = bad_weight.buffer.length() as u64 - 1,
+                1 => bad_x.offset = bad_x.buffer.length() as u64 - 1,
+                _ => bad_y.offset = bad_y.buffer.length() as u64 - 1,
+            }
+            assert!(
+                encode_mat_vec_mxfp4_f32(&ctx, &enc, &bad_weight, &bad_x, &bad_y, 64, 1).is_err()
+            );
+        }
+        enc.end();
+    }
 
     fn metal_test_context() -> Option<MetalContext> {
         match MetalContext::new() {

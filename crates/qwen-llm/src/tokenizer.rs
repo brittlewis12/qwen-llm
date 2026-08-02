@@ -25,6 +25,7 @@
 use crate::gguf::GgufFile;
 use rustc_hash::FxHashMap as HashMap;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ffi::CString;
@@ -34,6 +35,16 @@ use std::sync::{Once, OnceLock};
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 const NATIVE_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
+
+/// SHA-256 over the raw concatenation of signed token IDs in little-endian
+/// order. This is the production prompt-token identity contract.
+pub fn token_ids_sha256_i32le(tokens: &[i32]) -> String {
+    let mut digest = Sha256::new();
+    for token in tokens {
+        digest.update(token.to_le_bytes());
+    }
+    format!("{:x}", digest.finalize())
+}
 
 /// Backend-agnostic tokenizer interface. Implemented by the default native
 /// tokenizer and the llama.cpp oracle backend.
@@ -1379,6 +1390,18 @@ fn parse_hex_byte_token(text: &str) -> Option<u8> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn raw_i32le_token_digest_matches_frozen_vectors() {
+        assert_eq!(
+            token_ids_sha256_i32le(&[]),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            token_ids_sha256_i32le(&[1, -2, 248_319]),
+            "3f37364bc87f9ff835c64d4bdb3d993fe35e530097697da8cbacb5e6f92119d5"
+        );
+    }
 
     struct OraclePair {
         path: &'static str,

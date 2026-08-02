@@ -11,7 +11,7 @@ use qwen_llm::{
     runtime::{Runtime, SequenceConfig},
     sampling::{SAMPLER_ALGORITHM_VERSION, Sampler, SamplingConfig},
     tensor::GgmlType,
-    tokenizer::Tokenizer,
+    tokenizer::{Tokenizer, token_ids_sha256_i32le},
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,7 @@ use std::time::Instant;
 
 use crate::host_validity::HostSnapshot;
 
-const SCHEMA: &str = "qwen-lm-head-screening-oracle/v0663";
+const SCHEMA: &str = "qwen-lm-head-screening-oracle/v0664";
 const MODEL_PATH: &str = "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
 const MODEL_BYTES: u64 = 22_134_528_992;
 const MODEL_SHA256: &str = "ac0e2c1189e055faa36eff361580e79c5bd6f8e76bffb4ce547f167d53e31a61";
@@ -57,9 +57,9 @@ const PROMPT_TOKENS: usize = 419;
 const PRUNING_FLOOR: usize = 198_656;
 const BYTE_LIMIT: u64 = 125_153_280;
 const DOT_EXP: i32 = -173;
-const PACKET_PATH: &str = "target/profiles/v0663-generic-lm-head-screening-oracle-a3b-p1";
+const PACKET_PATH: &str = "target/profiles/v0664-generic-lm-head-screening-oracle-a3b-p1";
 const PREDECESSOR_DECISION_SHA256: &str =
-    "a457ae97a9f51ef62e2d01ff4c30f8f012421f6fab7c336cf44d536d6ac32c80";
+    "759750cfb5a8af2621e3c8c0dc9a8d120ad7a1df46ddeda223451f61e731dbcc";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -563,7 +563,7 @@ fn total_cmp_winner(logits: &[f32]) -> Result<usize> {
         .0)
 }
 
-fn token_digest(tokens: &[i32]) -> String {
+fn generated_token_digest(tokens: &[i32]) -> String {
     let mut hash = Sha256::new();
     hash.update(b"qwen-token-ids-i32le/v1\0");
     for token in tokens {
@@ -676,7 +676,7 @@ fn validate_args(args: &LmHeadScreeningOracleArgs) -> Result<()> {
 fn validate_build(build: &super::BuildIdentity) -> Result<()> {
     ensure!(
         !cfg!(debug_assertions),
-        "v0.663 requires a release binary without debug assertions"
+        "v0.664 requires a release binary without debug assertions"
     );
     validate_clean_build_identity(build)
 }
@@ -1480,7 +1480,7 @@ unsafe extern "C" {
 fn floating_environment_self_test() -> Result<(u64, i32, u64, u32, u64, [u32; 2])> {
     #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
     return Err(anyhow!(
-        "v0.663 floating-environment gate requires aarch64 macOS"
+        "v0.664 floating-environment gate requires aarch64 macOS"
     ));
 
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
@@ -1713,7 +1713,7 @@ fn runtime_opened_gguf_rewind_self_test() -> Result<OpenedGgufRewindObservation>
     let fixture = opened_gguf_identity_fixture();
 
     let root = std::env::temp_dir().join(format!(
-        "qwen-v0663-opened-gguf-self-test-{}-{}",
+        "qwen-v0664-opened-gguf-self-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -1851,7 +1851,7 @@ fn runtime_artifact_self_test() -> Result<()> {
     }
 
     let root = std::env::temp_dir().join(format!(
-        "qwen-v0663-self-test-{}-{}",
+        "qwen-v0664-self-test-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -1978,7 +1978,14 @@ fn prompt_identity(tokenizer: &Tokenizer, path: &Path) -> Result<(String, Vec<i3
     ensure!(bytes.len() == PROMPT_BYTES && sha256(&bytes) == PROMPT_SHA256);
     let prompt = std::str::from_utf8(&bytes).context("prompt is not UTF-8")?;
     let ids = tokenizer.encode(prompt, false)?;
-    ensure!(ids.len() == PROMPT_TOKENS && token_digest(&ids) == TOKEN_SHA256);
+    ensure!(
+        ids.len() == PROMPT_TOKENS,
+        "prompt token count differs from preregistration"
+    );
+    ensure!(
+        token_ids_sha256_i32le(&ids) == TOKEN_SHA256,
+        "prompt token digest differs from preregistration"
+    );
     Ok((prompt.to_string(), ids))
 }
 
@@ -2182,7 +2189,7 @@ fn persist_capture(packet: &mut Packet, capture: &Capture, prompt_tokens: &[i32]
             consumed_input_token: capture.consumed_input_token,
             selected_output_token: capture.winner,
             winner_logit_bits: format!("{:08x}", capture.winner_logit_bits),
-            prompt_token_sha256: token_digest(prompt_tokens),
+            prompt_token_sha256: token_ids_sha256_i32le(prompt_tokens),
             generated_prefix_token_sha256: capture.generated_prefix_token_sha256.clone(),
             stop_checked_before_capture: capture.stop_checked_before_capture,
             callback_completed_before_capture: capture.callback_completed_before_capture,
@@ -2296,7 +2303,7 @@ fn capture_request(
                 winner_logit_bits: logits[reconstructed].to_bits(),
                 hidden,
                 logits,
-                generated_prefix_token_sha256: token_digest(&generated),
+                generated_prefix_token_sha256: generated_token_digest(&generated),
                 stop_checked_before_capture: true,
                 callback_completed_before_capture: $callback_completed,
                 token_limit_checked_before_capture: $token_limit_checked,
@@ -4025,7 +4032,7 @@ fn capture_manifest_payload(
             max_context: 1024,
             capture_calls: CALLS.to_vec(),
             generated_tokens: generation.generated.len(),
-            generated_token_sha256: token_digest(&generation.generated),
+            generated_token_sha256: generated_token_digest(&generation.generated),
             transitions: generation.transitions,
             termination: if generation.coverage_eos_call.is_some() {
                 GenerationTermination::ProducerEos
@@ -4699,7 +4706,7 @@ fn run_reserved(
     validate_build(&build_identity)?;
     ensure!(
         qwen_env.is_empty(),
-        "v0.663 forbids every inherited QWEN_* control"
+        "v0.664 forbids every inherited QWEN_* control"
     );
     let executable = executable_identity()?;
     packet.executable_commitment = Some(executable.clone());
@@ -4712,9 +4719,9 @@ fn run_reserved(
     let tests = self_tests()?;
     packet.json_strict("self-tests.json", &tests)?;
 
-    let host_before_raw = HostSnapshot::capture("v0663_before_model")?;
+    let host_before_raw = HostSnapshot::capture("v0664_before_model")?;
     host_before_raw.validate()?;
-    let host_before = host_evidence("v0663_before_model", &host_before_raw)?;
+    let host_before = host_evidence("v0664_before_model", &host_before_raw)?;
     let AuthenticatedModel {
         file: authenticated_file,
         gguf: authenticated_gguf,
@@ -4739,9 +4746,9 @@ fn run_reserved(
     ensure!(stamp_retained_gguf(loaded.gguf())? == authenticated_stamp);
     drop(loaded);
     drop(runtime);
-    let host_after_raw = HostSnapshot::capture("v0663_after_capture")?;
+    let host_after_raw = HostSnapshot::capture("v0664_after_capture")?;
     host_after_raw.validate()?;
-    let host_after = host_evidence("v0663_after_capture", &host_after_raw)?;
+    let host_after = host_evidence("v0664_after_capture", &host_after_raw)?;
 
     for capture in &generation.captures {
         persist_capture(packet, capture, &prompt_ids)?;
@@ -5037,6 +5044,22 @@ mod tests {
     }
 
     #[test]
+    fn prompt_and_generated_token_digest_contracts_remain_distinct() {
+        let tokens = [1, -2, 248_319];
+        let prompt = token_ids_sha256_i32le(&tokens);
+        let generated = generated_token_digest(&tokens);
+        assert_eq!(
+            prompt,
+            "3f37364bc87f9ff835c64d4bdb3d993fe35e530097697da8cbacb5e6f92119d5"
+        );
+        assert_eq!(
+            generated,
+            "4b93ca7810c97ba477771dba407b0e8b9dd27e743f21d3a1fa9242d01fe06a9d"
+        );
+        assert_ne!(prompt, generated);
+    }
+
+    #[test]
     fn sum_norm_upper_and_next_up_cast_contain_exact() {
         let exact = Dyadic::new(BigInt::from(5), -2);
         let upper = norm_upper(&exact, &[1.0, 0.25]).unwrap();
@@ -5320,7 +5343,7 @@ mod tests {
     #[test]
     fn artifact_inventory_rejects_symlink_hardlink_and_foreign_file() {
         let root = std::env::temp_dir().join(format!(
-            "qwen-v0663-inventory-{}-{}",
+            "qwen-v0664-inventory-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -5366,7 +5389,7 @@ mod tests {
     #[test]
     fn invalid_terminalization_is_exclusive_and_atomic_visible() {
         let root = std::env::temp_dir().join(format!(
-            "qwen-v0663-terminal-{}-{}",
+            "qwen-v0664-terminal-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

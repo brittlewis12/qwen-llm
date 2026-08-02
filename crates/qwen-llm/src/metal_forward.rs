@@ -17145,12 +17145,8 @@ mod tests {
             .encode(&prompt, true)
             .expect("tokenize frozen prompt");
         assert_eq!(ids.len(), 419, "frozen prompt token count changed");
-        let mut token_digest = Sha256::new();
-        for token in &ids {
-            token_digest.update(token.to_le_bytes());
-        }
         assert_eq!(
-            format!("{:x}", token_digest.finalize()),
+            crate::tokenizer::token_ids_sha256_i32le(&ids),
             "fb4bbb4dc66ca7d219099e2974e787ef976f80789cde3e48b8a905dceece1f9f",
             "frozen prompt token identity changed"
         );

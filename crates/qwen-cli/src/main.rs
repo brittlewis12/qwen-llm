@@ -31,7 +31,7 @@ use qwen_llm::sampling::{
     SamplingConfig, SamplingError, SamplingPhaseProfile,
 };
 use qwen_llm::tensor::GgmlType;
-use qwen_llm::tokenizer::Tokenizer;
+use qwen_llm::tokenizer::{Tokenizer, token_ids_sha256_i32le};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
@@ -1002,7 +1002,7 @@ fn finalize_sampling_attribution(
     let structural_adjusted_ms = adjusted_bound(structural_raw_ms, observer_upper_ms);
     SamplingAttribution {
         version: 1,
-        prompt_token_ids_sha256: prompt_token_ids_sha256(prompt_ids),
+        prompt_token_ids_sha256: token_ids_sha256_i32le(prompt_ids),
         clock_probe,
         sampler,
         transitions,
@@ -2885,7 +2885,7 @@ fn run_single_turn(
     if args.sampling_attribution {
         ensure!(
             first_prompt_ids.len() == 419
-                && prompt_token_ids_sha256(&first_prompt_ids)
+                && token_ids_sha256_i32le(&first_prompt_ids)
                     == "fb4bbb4dc66ca7d219099e2974e787ef976f80789cde3e48b8a905dceece1f9f",
             "--sampling-attribution prompt token identity changed"
         );
@@ -5189,14 +5189,6 @@ fn generated_token_sha256(tokens: &[i32]) -> String {
     let mut digest = Sha256::new();
     digest.update(b"qwen-generated-token-ids-v1\0");
     digest.update((tokens.len() as u64).to_le_bytes());
-    for token in tokens {
-        digest.update(token.to_le_bytes());
-    }
-    format!("{:x}", digest.finalize())
-}
-
-fn prompt_token_ids_sha256(tokens: &[i32]) -> String {
-    let mut digest = Sha256::new();
     for token in tokens {
         digest.update(token.to_le_bytes());
     }
@@ -7928,7 +7920,7 @@ mod tests {
         assert!(probe.pair_ns.iter().all(|value| *value >= 0.0));
         assert!(probe.upper_pair_ns >= probe.pair_ns.iter().copied().fold(0.0, f64::max));
         assert_eq!(
-            prompt_token_ids_sha256(&[1, -2, 248_319]),
+            token_ids_sha256_i32le(&[1, -2, 248_319]),
             "3f37364bc87f9ff835c64d4bdb3d993fe35e530097697da8cbacb5e6f92119d5"
         );
     }

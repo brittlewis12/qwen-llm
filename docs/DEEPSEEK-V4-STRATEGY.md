@@ -202,6 +202,17 @@ about separately implemented executable semantics, not accelerator diversity:
 CPU-only DwarfStar and llama.cpp evidence is sufficient. CUDA, ROCm, Colab, and
 full-model redownloads are optional falsifiers, never S1 infrastructure gates.
 
+Full-model differentials also pin execution shape. The qwen-owned session is a
+singleton decode loop, so a continuing llama.cpp oracle must evaluate every
+prompt token separately rather than batch-prefill the prefix. The HCA audit
+found that `llm --snapshot` had ignored `--prompt-geometry`; `llm` commit
+`e07acac20fcd2ee0faca90aa91078ff142724d63` fixes that path and records
+`prompt_decode_mode` in snapshot metadata. Every position-1-and-later fixture
+now pins `singleton`; position zero separately pins direct token injection.
+At position 9, qwen versus the corrected b10222 singleton oracle gives cosine
+0.999999975 and relative RMS 0.000261269. The former batched-prefix vector is
+therefore not a valid decode oracle and is not retained as evidence.
+
 ## Dependency graph and promotion gates
 
 ### S0: architecture census and tokenizer - implemented in the spike
@@ -391,17 +402,23 @@ Gate:
   argmax 200, cosine 0.999999998, relative RMS 0.000065605, mean absolute error
   0.000233142, and max absolute error 0.001331806 across all logits.
 - Extending the exact sequence to `[35, 201, 200]` matches position 2 with
-  argmax 200, cosine 0.999999993, relative RMS 0.000124235, mean absolute error
-  0.000534181, and max absolute error 0.002157211.
+  argmax 200, cosine 0.999999990, relative RMS 0.000155619, mean absolute error
+  0.000689060, and max absolute error 0.003203392.
 - Focused release differentials cover adjacent local and scaled YaRN RoPE,
   inverse RoPE, ordered F32-to-F16 same-token cache insertion, sink attention,
   and ratio-4 frontier lane plus APE semantics.
 - No delegated llama.cpp runtime participates. Its full-vocabulary F32 vectors
   are checked-in numerical evidence only.
 
-The existing Qwen paths are untouched. Broad benchmark recertification is
-deferred until DS4 integration changes shared hot-path code; it is not useful
-feedback for this family-isolated correctness checkpoint.
+The DS4 model and forward loop remain family-isolated. The stricter shared
+`get_rows` boundary did expose a pre-existing Qwen representation mismatch:
+base decode, MTP, and DFlash stored I32 payloads in F32-tagged tensors, and a
+fallible encode could release an unfinished Metal encoder. Commit `1487fbc`
+repairs that shared seam before S4 promotion with typed I32 IDs/argmax outputs,
+I32 subviews, dtype-pinned prefill scratch plans, and idempotent encoder cleanup
+on early return or unwind. Focused release tests cover the original SIGTRAP and
+the actual 0.8B DFlash packed verifier. Broad performance recertification is
+still deferred because no dispatch or numerical kernel changed.
 
 ### S3: CSA lane
 
@@ -419,18 +436,19 @@ and one denominator-only-sink softmax over local raw rows plus every completed
 compressed row. The parallel indexer compressor publishes its normalized
 Hadamard row, but index scoring and top-512 selection remain deferred while the
 history is below 512 rows and dense-all is definitionally equivalent. The
-session fails closed before position 127, the first unvalidated HCA publication.
+session now continues through the independently promoted first HCA row and
+fails closed before position 255, its second ratio-128 publication.
 
 Gate:
 
 - Counterfactual sequence `[35, 201, 200, 34]` matches position 3 with argmax
-  262, cosine 0.999999994, and relative RMS 0.000110039; extending with token
-  262 matches position 4 with argmax 63,325, cosine 0.999999947, and relative
-  RMS 0.000335451.
+  262, cosine 0.999999988, and relative RMS 0.000165250; extending with token
+  262 matches position 4 with argmax 63,325, cosine 0.999999978, and relative
+  RMS 0.000210703.
 - Exact sequence `[35, 201, 200, 34, 35, 201, 200, 34]` matches the second
-  boundary at position 7 with argmax 35, cosine 0.999999987, and relative RMS
-  0.000162616; extending with token 35 matches position 8 with argmax 201,
-  cosine 0.999999983, and relative RMS 0.000199262.
+  boundary at position 7 with argmax 35, cosine 0.999999985, and relative RMS
+  0.000183200; extending with token 35 matches position 8 with argmax 201,
+  cosine 0.999999979, and relative RMS 0.000228075.
 - Focused release operation gates match ratio-4 frontier publication and roll,
   normalized Hadamard-128, and same-token dense CSA against independent CPU
   oracles.
@@ -440,26 +458,54 @@ Gate:
 
 ### S4: HCA lane
 
-Add ratio-128 pooling over the already-retained frontier, compressed-cache
-insertion, mixed local plus dense-compressed attention, and prefill planning.
+Status: first-boundary decode slice promoted through positions 126, 127, and
+128 on 2026-08-02. All 20 HCA layers now use the already-retained ratio-128
+frontier to pool, RMS-normalize, apply block-start adjacent-pair RoPE, publish
+an F16 compressed row, and include that row in the same-token softmax over the
+128-row local window plus dense compressed history. Position 128 proves that
+the row remains visible on continuation. The session fails closed at position
+255 before a second HCA row can be published.
+
+The long-prefix differential uses a different numerical gate from positions
+0-8. Singleton-versus-singleton drift accumulates before any HCA row exists:
+relative RMS is 0.000261269 at position 9 and 0.045916357 by position 126.
+Applying the short-prefix 0.002 threshold at position 127 would therefore
+misattribute inherited reduction drift to HCA. Promotion instead combines an
+exact integrated operation gate, preserved full-model argmaxes, an explicit
+boundary-discontinuity bound, and recovery on the immediate continuation.
 
 Gate:
 
-- Boundary vectors at positions 127, 128, 255, and 256 match both CPU and an
-  external implementation.
-- One HCA layer matches named intermediate states for decode and batched
-  prefill.
-- Incomplete groups are never visible to attention.
+- Production 512-wide compressor-row coverage writes two complete 128-token
+  frontiers, proves no early publication through positions 126 and 254, and
+  matches the CPU oracle after pooling, RMSNorm, and F16 publication at both
+  boundaries. Row 1 starts at position 128, so its position-255 differential
+  also exercises non-identity block-start adjacent-pair YaRN RoPE.
+- In one retained native session, positions 126, 127, and 128 preserve b10222
+  argmaxes 34, 35, and 201. Their cosine / relative-RMS pairs are
+  0.999086380 / 0.045916357, 0.998497359 / 0.063801241, and
+  0.998833369 / 0.048343154 respectively.
+- A controlled ablation that published but withheld the first HCA row worsened
+  relative RMS to 0.075390582 at position 127 and 0.128496492 at position 128.
+  Same-token consumption is therefore both directionally correct and necessary
+  for the continuation rather than an inert implementation detail.
+
+S4 remains open for the second boundary at positions 255/256, named
+full-layer intermediate states, and batched prefill. Those are extension and
+prefill gates; they do not block a bounded singleton-decode generation slice.
 
 ### S5: full 0731 target generation
 
-Connect all 43 layers, the native tokenizer, official prompt encoder subset,
-sampling, and stop handling. DSpark remains disabled and the compression-ratio
-tail remains opaque metadata.
+Expose the already-connected 43-layer session through first-class generation
+dispatch, then connect the native tokenizer, official prompt encoder subset,
+sampling, and stop handling. A bounded raw prompt path comes first so frontend
+work does not postpone executable inference. DSpark remains disabled and the
+compression-ratio tail remains opaque metadata.
 
 Gate:
 
-- Exact greedy 128-token continuation matches the pinned llama.cpp oracle.
+- Exact greedy continuation token IDs through the first HCA boundary match the
+  pinned singleton llama.cpp oracle.
 - Intermediate bisect can isolate any divergence to one layer and operation.
 - Repeated runs are deterministic under the same host-validity contract used
   by Qwen benchmarks.
@@ -532,13 +578,16 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Add a pinned llama.cpp CPU fixture harness and extend the DwarfStar scalar
-   harness until every S1 operation family has directly executed local evidence.
-2. Export a deterministic schema/quant census from `DeepSeekV4Model` and pin it
-   beside the target hashes.
-3. Add official tokenizer and prompt-encoding fixtures beyond raw BPE.
-4. Build the S2 local-layer scalar adapter over real dequantized layer-0 weights
-   and the typed cache transaction/view contract
-   without exposing generation dispatch.
-5. Define the packed Metal cache row/slab ownership plan before any long-context
-   allocation or durable DS4 snapshot ABI is introduced.
+1. Route a family-specific raw request into `DeepSeekV4Session`, native token
+   decode, greedy sampling, and stop handling. Keep the current position-255
+   guard visible to callers rather than hiding it with replay or delegation.
+2. Prove that bounded qwen-owned Metal generation matches the pinned singleton
+   oracle token by token through the first HCA publication.
+3. Port and fixture the minimum official 0731 prompt-encoder path required for
+   ordinary system/user/assistant turns; keep raw mode available as the exact
+   reproducibility interface.
+4. Capture positions 255 and 256 with singleton b10222 execution, promote the
+   second HCA publication, and extend the dense HCA history gate.
+5. Implement sparse CSA index scoring/top-512 selection before compressed
+   history exceeds 512 rows, and extend slab ownership before the current CSA
+   row-256 allocation guard at position 1027.

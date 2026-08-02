@@ -37,8 +37,30 @@ const POSITION_EIGHT_ORACLE_BYTES: &[u8] = include_bytes!(
 );
 const POSITION_EIGHT_ORACLE_MANIFEST: &str =
     include_str!("fixtures/deepseek_v4_tokens35_201_200_34_35_201_200_34_35_position8_b10222.json");
+const POSITION_126_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_pre_hca_position126_b10222.f32");
+const POSITION_126_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_pattern35_201_200_34_pre_hca_position126_b10222.json");
+const POSITION_127_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x32_position127_b10222.f32");
+const POSITION_127_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x32_position127_b10222.json");
+const POSITION_128_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x32_then35_position128_b10222.f32");
+const POSITION_128_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x32_then35_position128_b10222.json");
+const SINGLETON_ORACLE_LLM_COMMIT: &str = "e07acac20fcd2ee0faca90aa91078ff142724d63";
 
-fn assert_logits_match(label: &str, logits: &[f32], oracle_bytes: &[u8], expected_argmax: usize) {
+struct LogitComparison {
+    argmax: usize,
+    oracle_argmax: usize,
+    cosine: f64,
+    relative_rms: f64,
+    mean_absolute_error: f64,
+    maximum_error: (usize, f32),
+}
+
+fn compare_logits(label: &str, logits: &[f32], oracle_bytes: &[u8]) -> LogitComparison {
     let oracle = oracle_bytes
         .chunks_exact(4)
         .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
@@ -91,30 +113,46 @@ fn assert_logits_match(label: &str, logits: &[f32], oracle_bytes: &[u8], expecte
         maximum_error.1, maximum_error.0
     );
 
+    LogitComparison {
+        argmax,
+        oracle_argmax,
+        cosine,
+        relative_rms,
+        mean_absolute_error,
+        maximum_error,
+    }
+}
+
+fn assert_logits_match(label: &str, logits: &[f32], oracle_bytes: &[u8], expected_argmax: usize) {
+    let comparison = compare_logits(label, logits, oracle_bytes);
+
     assert_eq!(
-        oracle_argmax, expected_argmax,
+        comparison.oracle_argmax, expected_argmax,
         "unexpected {label} oracle argmax"
     );
     assert_eq!(
-        argmax, oracle_argmax,
+        comparison.argmax, comparison.oracle_argmax,
         "{label} native argmax differs from b10222"
     );
     assert!(
-        cosine >= 0.999_99,
-        "{label} native/oracle cosine is only {cosine}"
+        comparison.cosine >= 0.999_99,
+        "{label} native/oracle cosine is only {}",
+        comparison.cosine
     );
     assert!(
-        relative_rms <= 0.002,
-        "{label} native/oracle relative RMS is {relative_rms}"
+        comparison.relative_rms <= 0.002,
+        "{label} native/oracle relative RMS is {}",
+        comparison.relative_rms
     );
     assert!(
-        mean_absolute_error <= 0.005,
-        "{label} native/oracle mean absolute error is {mean_absolute_error}"
+        comparison.mean_absolute_error <= 0.005,
+        "{label} native/oracle mean absolute error is {}",
+        comparison.mean_absolute_error
     );
     assert!(
-        maximum_error.1 <= 0.05,
+        comparison.maximum_error.1 <= 0.05,
         "{label} native/oracle max absolute error is {:?}",
-        maximum_error
+        comparison.maximum_error
     );
 }
 
@@ -122,12 +160,16 @@ fn assert_logits_match(label: &str, logits: &[f32], oracle_bytes: &[u8], expecte
 fn pinned_position_zero_oracle_has_exact_identity() {
     assert_eq!(
         format!("{:x}", Sha256::digest(ORACLE_MANIFEST.as_bytes())),
-        "a9106b5a2fb6266e977428ce9caf1da4bb1ea20e56b97edba22d06363a28ecff"
+        "6cbbbe3579d48290fdfaef2c67343e8c2096c55d786ede813c01bfb0cb062af9"
     );
     let manifest: serde_json::Value = serde_json::from_str(ORACLE_MANIFEST).unwrap();
     assert_eq!(manifest["schema_version"], 1);
     assert_eq!(manifest["request"]["injected_token_id"], 35);
     assert_eq!(manifest["request"]["injection_position"], 0);
+    assert_eq!(
+        manifest["request"]["prompt_decode_mode"],
+        "position_zero_injection"
+    );
     assert_eq!(manifest["vector"]["element_count"], 129_280);
     assert_eq!(manifest["vector"]["byte_count"], ORACLE_BYTES.len());
     assert_eq!(manifest["vector"]["argmax_token_id"], 201);
@@ -144,7 +186,7 @@ fn pinned_position_one_oracle_has_exact_identity() {
             "{:x}",
             Sha256::digest(POSITION_ONE_ORACLE_MANIFEST.as_bytes())
         ),
-        "0c762b78cad36a629c92cfb36e38bb33695790f8adcc70701ca1c8e34e5295d9"
+        "03a7513fe075131b0602c0f795d3cccb44bcb719cf2db5dde88421e863f3bd30"
     );
     let manifest: serde_json::Value = serde_json::from_str(POSITION_ONE_ORACLE_MANIFEST).unwrap();
     assert_eq!(manifest["schema_version"], 1);
@@ -155,6 +197,11 @@ fn pinned_position_one_oracle_has_exact_identity() {
     assert_eq!(manifest["request"]["injected_token_id"], 201);
     assert_eq!(manifest["request"]["injection_position"], 1);
     assert_eq!(manifest["request"]["cache_type"], "F16");
+    assert_eq!(manifest["request"]["prompt_decode_mode"], "singleton");
+    assert_eq!(
+        manifest["producer"]["llm_commit"],
+        SINGLETON_ORACLE_LLM_COMMIT
+    );
     assert_eq!(manifest["vector"]["element_count"], 129_280);
     assert_eq!(
         manifest["vector"]["byte_count"],
@@ -174,7 +221,7 @@ fn pinned_position_two_oracle_has_exact_identity() {
             "{:x}",
             Sha256::digest(POSITION_TWO_ORACLE_MANIFEST.as_bytes())
         ),
-        "d4556adba526e8a83aed0bf3502161877a391fc87d3e783f8ff327362f8569e4"
+        "ed3c4a3ac1f2648dcbb23a4f343c6252e80000526c5d9920b1d69c5950e2e82b"
     );
     let manifest: serde_json::Value = serde_json::from_str(POSITION_TWO_ORACLE_MANIFEST).unwrap();
     assert_eq!(manifest["schema_version"], 1);
@@ -185,6 +232,11 @@ fn pinned_position_two_oracle_has_exact_identity() {
     assert_eq!(manifest["request"]["injected_token_id"], 200);
     assert_eq!(manifest["request"]["injection_position"], 2);
     assert_eq!(manifest["request"]["cache_type"], "F16");
+    assert_eq!(manifest["request"]["prompt_decode_mode"], "singleton");
+    assert_eq!(
+        manifest["producer"]["llm_commit"],
+        SINGLETON_ORACLE_LLM_COMMIT
+    );
     assert_eq!(manifest["vector"]["element_count"], 129_280);
     assert_eq!(
         manifest["vector"]["byte_count"],
@@ -203,7 +255,7 @@ fn pinned_csa_boundary_oracles_have_exact_identity() {
         (
             POSITION_THREE_GREEDY_ORACLE_MANIFEST,
             POSITION_THREE_GREEDY_ORACLE_BYTES,
-            "b04c3838db9eac27161625a229d1d9b934583f18f90210947cd63692497ebb1d",
+            "a141d1f7ea70a34a135eb547b648f953c6abaf40ce6cb3bc525281b6446fb8a9",
             serde_json::json!([35, 201, 200]),
             200,
             3,
@@ -212,7 +264,7 @@ fn pinned_csa_boundary_oracles_have_exact_identity() {
         (
             POSITION_THREE_BRANCH_ORACLE_MANIFEST,
             POSITION_THREE_BRANCH_ORACLE_BYTES,
-            "900976d50755196ee290e9385a50d93f624ea07075625cd17bbe49b777a0a8cb",
+            "2314ef2bdd85039a10fc16f6923465e391ae1d45d32ab6a435bd47fc9b57eb0a",
             serde_json::json!([35, 201, 200]),
             34,
             3,
@@ -221,7 +273,7 @@ fn pinned_csa_boundary_oracles_have_exact_identity() {
         (
             POSITION_FOUR_BRANCH_ORACLE_MANIFEST,
             POSITION_FOUR_BRANCH_ORACLE_BYTES,
-            "cb2ef350438f14bd59c049f03f6e1b2fd1ec290f4c1f93734dda4d4446499ae4",
+            "f3622b605aba98333228631ffa90b843cc6cbe8ca5e330f5fa8844b51e9566ab",
             serde_json::json!([35, 201, 200, 34]),
             262,
             4,
@@ -230,7 +282,7 @@ fn pinned_csa_boundary_oracles_have_exact_identity() {
         (
             POSITION_SEVEN_ORACLE_MANIFEST,
             POSITION_SEVEN_ORACLE_BYTES,
-            "462f728f0ab8d32327794f3d252eba9eff446163c2ac8bc7569919135a973e73",
+            "859ddd6655099197730c77b08239bcf8ce48103677056b3c00b59bbad66c3d1d",
             serde_json::json!([35, 201, 200, 34, 35, 201, 200]),
             34,
             7,
@@ -239,7 +291,7 @@ fn pinned_csa_boundary_oracles_have_exact_identity() {
         (
             POSITION_EIGHT_ORACLE_MANIFEST,
             POSITION_EIGHT_ORACLE_BYTES,
-            "4638324adc2c42423bbcbceb143f3db3700f8943ca9f0f644e8db9a8f0ad8b85",
+            "23011d7f27031e99817981aba1e27ddeb92aaa51a43d6165a6332350edc003f2",
             serde_json::json!([35, 201, 200, 34, 35, 201, 200, 34]),
             35,
             8,
@@ -254,7 +306,106 @@ fn pinned_csa_boundary_oracles_have_exact_identity() {
         let manifest: serde_json::Value = serde_json::from_str(manifest_source).unwrap();
         assert_eq!(manifest["schema_version"], 1);
         assert_eq!(manifest["producer"]["effective_llama_cpp_build"], "b10222");
+        assert_eq!(
+            manifest["producer"]["llm_commit"],
+            SINGLETON_ORACLE_LLM_COMMIT
+        );
+        assert_eq!(manifest["request"]["prompt_decode_mode"], "singleton");
         assert_eq!(manifest["request"]["prompt_token_ids"], prompt);
+        assert_eq!(manifest["request"]["injected_token_id"], injected);
+        assert_eq!(manifest["request"]["injection_position"], position);
+        assert_eq!(manifest["request"]["cache_type"], "F16");
+        assert_eq!(manifest["vector"]["element_count"], 129_280);
+        assert_eq!(manifest["vector"]["byte_count"], vector.len());
+        assert_eq!(manifest["vector"]["argmax_token_id"], argmax);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(vector)),
+            manifest["vector"]["sha256"].as_str().unwrap()
+        );
+        assert_eq!(
+            manifest["reproducibility"]["repeat_vectors_byte_identical"],
+            true
+        );
+    }
+}
+
+#[test]
+fn pinned_hca_boundary_oracles_have_exact_identity() {
+    let fixtures = [
+        (
+            POSITION_126_ORACLE_MANIFEST,
+            POSITION_126_ORACLE_BYTES,
+            "84d67ffb5a01afd887f7ec07f7c26437fc80890ce73d2987bbf0e8d14d5584ff",
+            31,
+            serde_json::json!([35, 201]),
+            126,
+            200,
+            34,
+        ),
+        (
+            POSITION_127_ORACLE_MANIFEST,
+            POSITION_127_ORACLE_BYTES,
+            "72182f2fe367afceeb5662503d92bd1ff1ebedb3ae9b1b85176af5db2d50386a",
+            31,
+            serde_json::json!([35, 201, 200]),
+            127,
+            34,
+            35,
+        ),
+        (
+            POSITION_128_ORACLE_MANIFEST,
+            POSITION_128_ORACLE_BYTES,
+            "4b1a0873da0e24d852cf4d9d928c6d0f99ef0ef933a09f9fe29bf0b528e8f062",
+            32,
+            serde_json::json!([]),
+            128,
+            35,
+            201,
+        ),
+    ];
+    for (
+        manifest_source,
+        vector,
+        manifest_sha256,
+        repetitions,
+        suffix,
+        position,
+        injected,
+        argmax,
+    ) in fixtures
+    {
+        assert_eq!(
+            format!("{:x}", Sha256::digest(manifest_source.as_bytes())),
+            manifest_sha256
+        );
+        let manifest: serde_json::Value = serde_json::from_str(manifest_source).unwrap();
+        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(manifest["producer"]["effective_llama_cpp_build"], "b10222");
+        assert_eq!(
+            manifest["producer"]["llm_commit"],
+            SINGLETON_ORACLE_LLM_COMMIT
+        );
+        assert_eq!(manifest["request"]["prompt_decode_mode"], "singleton");
+        assert_eq!(
+            manifest["request"]["prompt_tokenization"]["pattern_token_ids"],
+            serde_json::json!([35, 201, 200, 34])
+        );
+        assert_eq!(
+            manifest["request"]["prompt_tokenization"]["pattern_repetitions"],
+            repetitions
+        );
+        assert_eq!(
+            manifest["request"]["prompt_tokenization"]["suffix_token_ids"],
+            suffix
+        );
+        assert_eq!(
+            manifest["request"]["prompt_tokenization"]["expanded_token_count"],
+            position
+        );
+        assert_eq!(
+            manifest["request"]["prompt_tokenization"]["native_tokenizer_verified"],
+            true
+        );
         assert_eq!(manifest["request"]["injected_token_id"], injected);
         assert_eq!(manifest["request"]["injection_position"], position);
         assert_eq!(manifest["request"]["cache_type"], "F16");
@@ -685,6 +836,123 @@ fn native_deepseek_v4_second_csa_boundary_and_continuation() {
     );
     eprintln!(
         "nine_token_branch_elapsed={:.3}s",
+        started.elapsed().as_secs_f64()
+    );
+}
+
+/// Manual only: executes the first ratio-128 publication and its immediate
+/// continuation from an exact repeated-token prefix.
+#[test]
+#[ignore = "manual native DS4 129-token HCA branch maps the 95.93 GiB checkpoint"]
+fn native_deepseek_v4_first_hca_boundary_and_continuation() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(
+        model_path.exists(),
+        "missing DS4 model at {}",
+        model_path.display()
+    );
+
+    eprintln!("opening {}", model_path.display());
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = DeepSeekV4MetalResidency::load(&ctx, &gguf).expect("retain DS4 residency");
+    eprintln!("residency={}", residency.report());
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");
+    let started = Instant::now();
+    let repeated_prefix = [35, 201, 200, 34].repeat(32);
+    for &token in &repeated_prefix[..127] {
+        session.forward_token(&ctx, token).unwrap();
+    }
+    assert_eq!(session.next_position(), 127);
+    let pre_boundary_logits = session.copy_logits_f32().expect("copy position-126 logits");
+    let pre_boundary = compare_logits(
+        "position_126_same_session",
+        &pre_boundary_logits,
+        POSITION_126_ORACLE_BYTES,
+    );
+    assert_eq!(pre_boundary.oracle_argmax, 34);
+    assert_eq!(pre_boundary.argmax, pre_boundary.oracle_argmax);
+    assert!(
+        pre_boundary.cosine >= 0.998,
+        "position 126 native/oracle cosine is only {}",
+        pre_boundary.cosine
+    );
+    assert!(
+        pre_boundary.relative_rms <= 0.055,
+        "position 126 native/oracle relative RMS is {}",
+        pre_boundary.relative_rms
+    );
+
+    session
+        .forward_token_with_progress(&ctx, repeated_prefix[127], |layer| {
+            eprintln!(
+                "position_127 layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position 127");
+    assert_eq!(session.next_position(), 128);
+    let boundary_logits = session.copy_logits_f32().expect("copy position-127 logits");
+    let boundary = compare_logits("position_127", &boundary_logits, POSITION_127_ORACLE_BYTES);
+    assert_eq!(boundary.oracle_argmax, 35);
+    assert_eq!(boundary.argmax, boundary.oracle_argmax);
+    assert!(
+        boundary.cosine >= 0.998,
+        "position 127 native/oracle cosine is only {}",
+        boundary.cosine
+    );
+    assert!(
+        boundary.relative_rms <= 0.07,
+        "position 127 native/oracle relative RMS is {}",
+        boundary.relative_rms
+    );
+    assert!(
+        boundary.relative_rms <= pre_boundary.relative_rms + 0.025,
+        "first HCA publication introduced a discontinuity: pre={} boundary={}",
+        pre_boundary.relative_rms,
+        boundary.relative_rms
+    );
+
+    session
+        .forward_token_with_progress(&ctx, 35, |layer| {
+            eprintln!(
+                "position_128 layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position 128");
+    assert_eq!(session.next_position(), 129);
+    let continuation_logits = session.copy_logits_f32().expect("copy position-128 logits");
+    let continuation = compare_logits(
+        "position_128",
+        &continuation_logits,
+        POSITION_128_ORACLE_BYTES,
+    );
+    assert_eq!(continuation.oracle_argmax, 201);
+    assert_eq!(continuation.argmax, continuation.oracle_argmax);
+    assert!(
+        continuation.cosine >= 0.998,
+        "position 128 native/oracle cosine is only {}",
+        continuation.cosine
+    );
+    assert!(
+        continuation.relative_rms <= 0.06,
+        "position 128 native/oracle relative RMS is {}",
+        continuation.relative_rms
+    );
+    assert!(
+        continuation.relative_rms < boundary.relative_rms,
+        "HCA continuation did not recover from the boundary: boundary={} continuation={}",
+        boundary.relative_rms,
+        continuation.relative_rms
+    );
+    eprintln!(
+        "first_hca_branch_elapsed={:.3}s",
         started.elapsed().as_secs_f64()
     );
 }

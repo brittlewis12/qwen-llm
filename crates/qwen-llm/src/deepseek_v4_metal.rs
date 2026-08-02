@@ -159,7 +159,7 @@ const DEEPSEEK_V4_VOCAB_SIZE: usize = 129_280;
 const DEEPSEEK_V4_LAYER_COUNT: usize = 43;
 const DEEPSEEK_V4_LOCAL_WINDOW: usize = 128;
 const DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS: usize = 256;
-const DEEPSEEK_V4_FIRST_UNVALIDATED_HCA_BOUNDARY: u32 = 127;
+const DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY: u32 = 255;
 const DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY: u32 =
     ((DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS + 1) * 4 - 1) as u32;
 
@@ -169,9 +169,9 @@ fn validate_promoted_session_position(position: u32) -> Result<(), DeepSeekV4Met
             "native session stops before unallocated CSA row 256 at position {DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY}; next position is {position}"
         ));
     }
-    if position >= DEEPSEEK_V4_FIRST_UNVALIDATED_HCA_BOUNDARY {
+    if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY {
         return invalid(format!(
-            "native session stops before unvalidated HCA publication at position {DEEPSEEK_V4_FIRST_UNVALIDATED_HCA_BOUNDARY}; next position is {position}"
+            "native session stops before unvalidated HCA publication at position {DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY}; next position is {position}"
         ));
     }
     Ok(())
@@ -191,9 +191,9 @@ pub enum DeepSeekV4AttentionCacheContract {
 
 /// Native qwen-owned DeepSeek V4 decode session.
 ///
-/// The dense-all CSA path is promoted through two compression boundaries. The
-/// session fails closed before position 127, where the first HCA row would
-/// become visible, until that independent path earns its own differential.
+/// Dense-all CSA and the first HCA publication are promoted. The session fails
+/// closed before position 255, where HCA would publish its second row, until
+/// that independent continuation earns its own differential.
 pub struct DeepSeekV4Session {
     residency: DeepSeekV4MetalResidency,
     device_registry_id: u64,
@@ -4039,10 +4039,10 @@ mod tests {
     }
 
     #[test]
-    fn session_position_guard_stops_before_hca_and_unallocated_csa() {
-        validate_promoted_session_position(126).unwrap();
-        let hca = validate_promoted_session_position(127).unwrap_err();
-        assert!(hca.to_string().contains("HCA publication at position 127"));
+    fn session_position_guard_stops_before_next_hca_and_unallocated_csa() {
+        validate_promoted_session_position(254).unwrap();
+        let hca = validate_promoted_session_position(255).unwrap_err();
+        assert!(hca.to_string().contains("HCA publication at position 255"));
         let csa = validate_promoted_session_position(1027).unwrap_err();
         assert!(csa.to_string().contains("CSA row 256 at position 1027"));
     }
@@ -4893,6 +4893,323 @@ mod tests {
             published[2 * HEAD_DIM..].iter().all(|value| *value == 0.0),
             "unpublished index rows must remain zero"
         );
+    }
+
+    #[test]
+    fn ratio128_attention_publications_match_the_integrated_oracle() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HIDDEN: usize = 3;
+        const HEAD_DIM: usize = 512;
+        const RATIO: usize = 128;
+        let rms_eps = 1.0e-5;
+        let frontier = DeepSeekV4CompressorFrontier::new(
+            &ctx,
+            RATIO,
+            HEAD_DIM,
+            DeepSeekV4CompressorPublication::Attention,
+        )
+        .unwrap();
+        let kv_weights = (0..HIDDEN * HEAD_DIM)
+            .map(|index| ((index * 13 + index / 7 + 5) % 61) as f32 * 0.008 - 0.23)
+            .collect::<Vec<_>>();
+        let score_weights = (0..HIDDEN * HEAD_DIM)
+            .map(|index| ((index * 17 + index / 11 + 3) % 67) as f32 * 0.007 - 0.21)
+            .collect::<Vec<_>>();
+        let ape_values = (0..RATIO * HEAD_DIM)
+            .map(|index| ((index * 19 + index / 13 + 1) % 71) as f32 * 0.006 - 0.19)
+            .collect::<Vec<_>>();
+        let norm_values = (0..HEAD_DIM)
+            .map(|index| 0.49 + (index % 29) as f32 * 0.021)
+            .collect::<Vec<_>>();
+        let input_values = (0..2 * RATIO)
+            .map(|position| {
+                (0..HIDDEN)
+                    .map(|dimension| {
+                        (position as f32 - 61.0) * 0.004
+                            + (dimension as f32 - 0.7) * 0.17
+                            + if (position + dimension).is_multiple_of(5) {
+                                0.06
+                            } else {
+                                -0.03
+                            }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let kv_weight = offset_f32(&ctx, &kv_weights, vec![HIDDEN as u64, HEAD_DIM as u64]);
+        let score_weight = offset_f32(&ctx, &score_weights, vec![HIDDEN as u64, HEAD_DIM as u64]);
+        let ape = offset_f32(&ctx, &ape_values, vec![HEAD_DIM as u64, RATIO as u64]);
+        let norm = offset_f32(&ctx, &norm_values, vec![HEAD_DIM as u64]);
+        let inputs = input_values
+            .iter()
+            .map(|values| offset_f32(&ctx, values, vec![HIDDEN as u64]))
+            .collect::<Vec<_>>();
+        let rope = DeepSeekV4RopeParameters {
+            rotary_dim: 64,
+            theta: 160_000.0,
+            scaling_factor: 16.0,
+            original_context_length: 65_536,
+            beta_fast: 32.0,
+            beta_slow: 1.0,
+        };
+        let oracle_rope = RopeParameters::yarn(
+            rope.rotary_dim,
+            rope.theta,
+            rope.scaling_factor,
+            rope.original_context_length,
+            rope.beta_fast,
+            rope.beta_slow,
+        );
+        let mut oracle = CompressorState::new(RATIO, HEAD_DIM).unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for position in 0..RATIO - 1 {
+            let values = &input_values[position];
+            let projected_kv = mat_vec(&kv_weights, HIDDEN, HEAD_DIM, values).unwrap();
+            let projected_scores = mat_vec(&score_weights, HIDDEN, HEAD_DIM, values).unwrap();
+            let emitted = oracle
+                .push_projected(
+                    position as u32,
+                    &projected_kv,
+                    &projected_scores,
+                    &ape_values,
+                    &norm_values,
+                    rms_eps,
+                    oracle_rope,
+                )
+                .unwrap();
+            assert!(emitted.is_none());
+            frontier
+                .encode(
+                    &ctx,
+                    &encoder,
+                    &inputs[position],
+                    &kv_weight,
+                    &score_weight,
+                    &ape,
+                    &norm,
+                    position as u32,
+                    HIDDEN,
+                    rope,
+                    rms_eps,
+                )
+                .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "pre-boundary command failed: {:?}",
+            command.error()
+        );
+        assert_eq!(frontier.published_count(126), 0);
+        assert!(
+            read_f16(&frontier.published)
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+
+        let position = RATIO - 1;
+        let projected_kv = mat_vec(&kv_weights, HIDDEN, HEAD_DIM, &input_values[position]).unwrap();
+        let projected_scores =
+            mat_vec(&score_weights, HIDDEN, HEAD_DIM, &input_values[position]).unwrap();
+        let expected = oracle
+            .push_projected(
+                position as u32,
+                &projected_kv,
+                &projected_scores,
+                &ape_values,
+                &norm_values,
+                rms_eps,
+                oracle_rope,
+            )
+            .unwrap()
+            .expect("position 127 must publish");
+        assert_eq!(expected.start_position, 0);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        frontier
+            .encode(
+                &ctx,
+                &encoder,
+                &inputs[position],
+                &kv_weight,
+                &score_weight,
+                &ape,
+                &norm,
+                position as u32,
+                HIDDEN,
+                rope,
+                rms_eps,
+            )
+            .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "boundary command failed: {:?}",
+            command.error()
+        );
+
+        assert_eq!(frontier.published_count(127), 1);
+        assert_close(
+            "ratio-128 KV state",
+            &read_f32(&frontier.kv_state),
+            oracle.kv_state(),
+            4e-5,
+        );
+        assert_close(
+            "ratio-128 score state",
+            &read_f32(&frontier.score_state),
+            oracle.score_state(),
+            4e-5,
+        );
+        let expected_first = expected
+            .value
+            .into_iter()
+            .map(|value| half::f16::from_f32(value).to_f32())
+            .collect::<Vec<_>>();
+        let published = read_f16(&frontier.published);
+        assert_close(
+            "ratio-128 published row 0",
+            &published[..HEAD_DIM],
+            &expected_first,
+            1e-3,
+        );
+        assert!(published[HEAD_DIM..].iter().all(|value| *value == 0.0));
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for position in RATIO..2 * RATIO - 1 {
+            let values = &input_values[position];
+            let projected_kv = mat_vec(&kv_weights, HIDDEN, HEAD_DIM, values).unwrap();
+            let projected_scores = mat_vec(&score_weights, HIDDEN, HEAD_DIM, values).unwrap();
+            let emitted = oracle
+                .push_projected(
+                    position as u32,
+                    &projected_kv,
+                    &projected_scores,
+                    &ape_values,
+                    &norm_values,
+                    rms_eps,
+                    oracle_rope,
+                )
+                .unwrap();
+            assert!(emitted.is_none());
+            frontier
+                .encode(
+                    &ctx,
+                    &encoder,
+                    &inputs[position],
+                    &kv_weight,
+                    &score_weight,
+                    &ape,
+                    &norm,
+                    position as u32,
+                    HIDDEN,
+                    rope,
+                    rms_eps,
+                )
+                .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "second pre-boundary command failed: {:?}",
+            command.error()
+        );
+        assert_eq!(frontier.published_count(254), 1);
+        let published = read_f16(&frontier.published);
+        assert_close(
+            "ratio-128 retained row 0",
+            &published[..HEAD_DIM],
+            &expected_first,
+            1e-3,
+        );
+        assert!(published[HEAD_DIM..].iter().all(|value| *value == 0.0));
+
+        let position = 2 * RATIO - 1;
+        let projected_kv = mat_vec(&kv_weights, HIDDEN, HEAD_DIM, &input_values[position]).unwrap();
+        let projected_scores =
+            mat_vec(&score_weights, HIDDEN, HEAD_DIM, &input_values[position]).unwrap();
+        let expected_second = oracle
+            .push_projected(
+                position as u32,
+                &projected_kv,
+                &projected_scores,
+                &ape_values,
+                &norm_values,
+                rms_eps,
+                oracle_rope,
+            )
+            .unwrap()
+            .expect("position 255 must publish");
+        assert_eq!(expected_second.start_position, 128);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        frontier
+            .encode(
+                &ctx,
+                &encoder,
+                &inputs[position],
+                &kv_weight,
+                &score_weight,
+                &ape,
+                &norm,
+                position as u32,
+                HIDDEN,
+                rope,
+                rms_eps,
+            )
+            .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "second boundary command failed: {:?}",
+            command.error()
+        );
+
+        assert_eq!(frontier.published_count(255), 2);
+        assert_close(
+            "ratio-128 second-boundary KV state",
+            &read_f32(&frontier.kv_state),
+            oracle.kv_state(),
+            4e-5,
+        );
+        assert_close(
+            "ratio-128 second-boundary score state",
+            &read_f32(&frontier.score_state),
+            oracle.score_state(),
+            4e-5,
+        );
+        let expected_second = expected_second
+            .value
+            .into_iter()
+            .map(|value| half::f16::from_f32(value).to_f32())
+            .collect::<Vec<_>>();
+        let published = read_f16(&frontier.published);
+        assert_close(
+            "ratio-128 retained row 0 after second publication",
+            &published[..HEAD_DIM],
+            &expected_first,
+            1e-3,
+        );
+        assert_close(
+            "ratio-128 published row 1",
+            &published[HEAD_DIM..2 * HEAD_DIM],
+            &expected_second,
+            1e-3,
+        );
+        assert!(published[2 * HEAD_DIM..].iter().all(|value| *value == 0.0));
     }
 
     #[test]

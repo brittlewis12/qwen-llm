@@ -18,30 +18,37 @@
     "captured_at": "2026-08-02"
   },
   "request": {
-    "branch": "greedy",
-    "raw_prompt": "A\n\t",
+    "branch": "pre_hca_control",
+    "prompt_raw": true,
     "prompt_decode_mode": "singleton",
-    "prompt_token_ids": [35, 201, 200],
+    "prompt_tokenization": {
+      "pattern_text": "A\n\t@",
+      "pattern_token_ids": [35, 201, 200, 34],
+      "pattern_repetitions": 31,
+      "suffix_text": "A\n",
+      "suffix_token_ids": [35, 201],
+      "expanded_token_count": 126,
+      "native_tokenizer_verified": true
+    },
     "injected_token_id": 200,
-    "injection_position": 3,
+    "injection_position": 126,
     "context_size": 512,
     "cache_type": "F16",
     "seed": 42,
     "temperature": 0.0,
-    "command": "llm --model MODEL --context 512 --raw --prompt-geometry --snapshot OUT --snapshot-id position3_token200_singleton --inject-token-id 200 --seed 42 --temp 0 --repeat 2 --snapshot-top-k 10 $'A\\n\\t'"
+    "command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 31 + \"A\\n\")' | llm --model MODEL --context 512 --raw --prompt-geometry --snapshot OUT --snapshot-id position126_token200_singleton --inject-token-id 200 --seed 42 --temp 0 --repeat 2 --snapshot-top-k 10"
   },
   "vector": {
-    "file": "deepseek_v4_tokens35_201_200_200_position3_b10222.f32",
+    "file": "deepseek_v4_pattern35_201_200_34_pre_hca_position126_b10222.f32",
     "encoding": "f32-le",
     "element_count": 129280,
     "byte_count": 517120,
-    "sha256": "25ccca44b78834cee6ae79be1e7b3cc1c3324e5d1595d8d3a500f0ffa6a17718",
-    "argmax_token_id": 1778,
-    "argmax_logit": 25.650846
+    "sha256": "86653b95674bacabe44955412d98b8c36fc9ac5fa81a23d965392916ac7173a1",
+    "argmax_token_id": 34,
+    "argmax_logit": 32.64496
   },
   "reproducibility": {
     "fresh_session_repeats": 2,
-    "repeat_vectors_byte_identical": true,
-    "prefix_fixture": "deepseek_v4_tokens35_201_200_position2_b10222.f32"
+    "repeat_vectors_byte_identical": true
   }
 }

@@ -18,30 +18,38 @@
     "captured_at": "2026-08-02"
   },
   "request": {
-    "branch": "greedy",
-    "raw_prompt": "A\n\t",
+    "branch": "first_hca_boundary_greedy_continuation",
+    "prompt_raw": true,
     "prompt_decode_mode": "singleton",
-    "prompt_token_ids": [35, 201, 200],
-    "injected_token_id": 200,
-    "injection_position": 3,
+    "prompt_tokenization": {
+      "pattern_text": "A\n\t@",
+      "pattern_token_ids": [35, 201, 200, 34],
+      "pattern_repetitions": 32,
+      "suffix_text": "",
+      "suffix_token_ids": [],
+      "expanded_token_count": 128,
+      "native_tokenizer_verified": true
+    },
+    "injected_token_id": 35,
+    "injection_position": 128,
     "context_size": 512,
     "cache_type": "F16",
     "seed": 42,
     "temperature": 0.0,
-    "command": "llm --model MODEL --context 512 --raw --prompt-geometry --snapshot OUT --snapshot-id position3_token200_singleton --inject-token-id 200 --seed 42 --temp 0 --repeat 2 --snapshot-top-k 10 $'A\\n\\t'"
+    "command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 32)' | llm --model MODEL --context 512 --raw --prompt-geometry --snapshot OUT --snapshot-id position128_token35_singleton --inject-token-id 35 --seed 42 --temp 0 --repeat 2 --snapshot-top-k 10"
   },
   "vector": {
-    "file": "deepseek_v4_tokens35_201_200_200_position3_b10222.f32",
+    "file": "deepseek_v4_pattern35_201_200_34_x32_then35_position128_b10222.f32",
     "encoding": "f32-le",
     "element_count": 129280,
     "byte_count": 517120,
-    "sha256": "25ccca44b78834cee6ae79be1e7b3cc1c3324e5d1595d8d3a500f0ffa6a17718",
-    "argmax_token_id": 1778,
-    "argmax_logit": 25.650846
+    "sha256": "3024159cae46c4f666abaad6a86b9e19abdae34b27e1b4be17bffa69d6ecd819",
+    "argmax_token_id": 201,
+    "argmax_logit": 28.901424
   },
   "reproducibility": {
     "fresh_session_repeats": 2,
     "repeat_vectors_byte_identical": true,
-    "prefix_fixture": "deepseek_v4_tokens35_201_200_position2_b10222.f32"
+    "boundary_fixture": "deepseek_v4_pattern35_201_200_34_x32_position127_b10222.f32"
   }
 }

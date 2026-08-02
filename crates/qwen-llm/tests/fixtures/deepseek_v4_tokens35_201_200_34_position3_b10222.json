@@ -8,7 +8,7 @@
     "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
   ],
   "producer": {
-    "llm_commit": "5641ae56ecbcb24fa2b3f10d72c3498136a01d08",
+    "llm_commit": "e07acac20fcd2ee0faca90aa91078ff142724d63",
     "llama_core_commit": "b1cd3a914175adedcc976388c7c638d9a2f9a189",
     "llama_cpp_rs_commit": "553b8e4501c57c1be08a83b6b54e549a614df162",
     "llama_cpp_commit": "8621ac725a0b6892ae44ea33377f14b6a7e0ebdf",
@@ -20,6 +20,7 @@
   "request": {
     "branch": "counterfactual_boundary",
     "raw_prompt": "A\n\t",
+    "prompt_decode_mode": "singleton",
     "prompt_token_ids": [35, 201, 200],
     "injected_token_id": 34,
     "injection_position": 3,
@@ -27,16 +28,16 @@
     "cache_type": "F16",
     "seed": 42,
     "temperature": 0.0,
-    "command": "llm --model MODEL --context 512 --raw --snapshot OUT --snapshot-id token35_201_200_34 --inject-token-id 34 --seed 42 --temp 0 --repeat 2 --snapshot-top-k 10 $'A\\n\\t'"
+    "command": "llm --model MODEL --context 512 --raw --prompt-geometry --snapshot OUT --snapshot-id position3_token34_singleton --inject-token-id 34 --seed 42 --temp 0 --repeat 2 --snapshot-top-k 10 $'A\\n\\t'"
   },
   "vector": {
     "file": "deepseek_v4_tokens35_201_200_34_position3_b10222.f32",
     "encoding": "f32-le",
     "element_count": 129280,
     "byte_count": 517120,
-    "sha256": "c40531816cc8746d802458d11b8c1161769c30f118abfa009db82d3dffd0e0ed",
+    "sha256": "de62e745ba6c51cf199bcef88eb886e492128ac84c00424cf6a686f4c04c999b",
     "argmax_token_id": 262,
-    "argmax_logit": 16.780195
+    "argmax_logit": 16.77979
   },
   "reproducibility": {
     "fresh_session_repeats": 2,

@@ -247,6 +247,16 @@ fn assert_logits_match(label: &str, logits: &[f32], oracle_bytes: &[u8], expecte
     );
 }
 
+fn load_admitted_residency(ctx: &MetalContext, gguf: &GgufFile) -> DeepSeekV4MetalResidency {
+    let plan = DeepSeekV4MetalResidency::plan(ctx, gguf).expect("plan DS4 Metal residency");
+    let admitted = plan
+        .admit(ctx.memory_signals())
+        .expect("admit DS4 Metal residency");
+    DeepSeekV4MetalResidency::load_from_plan(ctx, gguf, admitted)
+        .expect("realize admitted DS4 Metal residency")
+        .into_residency()
+}
+
 #[test]
 fn pinned_position_zero_oracle_has_exact_identity() {
     assert_eq!(
@@ -736,6 +746,94 @@ fn pinned_hca_boundary_oracles_have_exact_identity() {
     );
 }
 
+#[test]
+#[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(
+        model_path.exists(),
+        "missing DS4 model at {}",
+        model_path.display()
+    );
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let ctx = MetalContext::new().expect("create Metal context");
+    let before_plan = ctx.current_allocated_size();
+    let load_plan = DeepSeekV4MetalResidency::plan(&ctx, &gguf).expect("plan DS4 Metal load");
+    assert_eq!(
+        ctx.current_allocated_size(),
+        before_plan,
+        "memory planning must not realize Metal buffers"
+    );
+    let memory_plan = load_plan.memory_plan().clone();
+    assert_eq!(memory_plan.session_allocations().len(), 474);
+    assert_eq!(memory_plan.session_logical_bytes(), 31_962_388);
+    assert_eq!(memory_plan.session_priced_upper_bytes(), 31_962_388);
+    assert_eq!(memory_plan.residency_buffer_count(), 7);
+    assert_eq!(memory_plan.residency_logical_bytes(), 102_994_608_640);
+    assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_608_640);
+    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_026_571_028);
+    assert_eq!(
+        memory_plan.required_with_reserve_bytes().unwrap(),
+        103_563_441_940
+    );
+    assert_eq!(load_plan.residency_report().window_count, 3);
+    assert_eq!(load_plan.residency_report().fallback_count, 4);
+    assert_eq!(
+        memory_plan.residency_logical_bytes(),
+        load_plan.residency_report().resident_bytes
+    );
+    let signals = ctx.memory_signals();
+    let admission = memory_plan.admission(signals);
+    eprintln!("memory_plan={memory_plan}");
+    eprintln!("memory_signals={signals:?} admission={admission:?}");
+    assert!(admission.admitted, "admission denied: {admission:?}");
+    assert_eq!(
+        admission.reason,
+        qwen_llm::metal::MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
+    );
+
+    let admitted_load_plan = load_plan.admit(signals).expect("admit DS4 load plan");
+    let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted_load_plan)
+        .expect("realize admitted DS4 residency");
+    let (residency, refreshed_admission, after_residency_bytes) = realized.into_parts();
+    assert!(
+        refreshed_admission.admitted,
+        "refreshed admission denied: {refreshed_admission:?}"
+    );
+    assert_eq!(
+        refreshed_admission.reason,
+        qwen_llm::metal::MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
+    );
+    let before_residency_bytes = refreshed_admission.signals.current_allocated_bytes;
+    memory_plan
+        .reconcile_residency(before_residency_bytes, after_residency_bytes)
+        .expect("reconcile DS4 residency allocation");
+    let mut session = DeepSeekV4PositionZeroForward::new(&ctx, residency)
+        .expect("construct admitted DS4 session");
+    let after_session_bytes = ctx.current_allocated_size();
+    memory_plan
+        .reconcile_session(
+            before_residency_bytes,
+            after_residency_bytes,
+            after_session_bytes,
+        )
+        .expect("reconcile DS4 session allocation");
+    session
+        .forward_token_zero(&ctx, 35)
+        .expect("execute first admitted forward");
+    let reconciliation = memory_plan
+        .reconcile(qwen_llm::deepseek_v4_metal::DeepSeekV4MemorySamples {
+            before_residency_bytes,
+            after_residency_bytes,
+            after_session_bytes,
+            after_first_forward_bytes: ctx.current_allocated_size(),
+        })
+        .expect("reconcile admitted DS4 allocation samples");
+    eprintln!("memory_reconciliation={reconciliation}");
+}
+
 /// Manual only: maps the 95.93 GiB model and executes all 43 native layers.
 /// This test must never be included in routine or CI test runs.
 #[test]
@@ -753,7 +851,7 @@ fn native_deepseek_v4_token_35_position_zero() {
     eprintln!("opening {}", model_path.display());
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
-    let residency = DeepSeekV4MetalResidency::load(&ctx, &gguf).expect("retain DS4 residency");
+    let residency = load_admitted_residency(&ctx, &gguf);
     eprintln!("residency={}", residency.report());
     let mut forward =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build position-zero forward");
@@ -860,7 +958,7 @@ fn native_deepseek_v4_tokens_35_201_200_local_prefix() {
     eprintln!("opening {}", model_path.display());
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
-    let residency = DeepSeekV4MetalResidency::load(&ctx, &gguf).expect("retain DS4 residency");
+    let residency = load_admitted_residency(&ctx, &gguf);
     eprintln!("residency={}", residency.report());
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");
@@ -1026,7 +1124,7 @@ fn native_deepseek_v4_csa_boundary_and_continuation_branch() {
     eprintln!("opening {}", model_path.display());
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
-    let residency = DeepSeekV4MetalResidency::load(&ctx, &gguf).expect("retain DS4 residency");
+    let residency = load_admitted_residency(&ctx, &gguf);
     eprintln!("residency={}", residency.report());
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");
@@ -1098,7 +1196,7 @@ fn native_deepseek_v4_second_csa_boundary_and_continuation() {
     eprintln!("opening {}", model_path.display());
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
-    let residency = DeepSeekV4MetalResidency::load(&ctx, &gguf).expect("retain DS4 residency");
+    let residency = load_admitted_residency(&ctx, &gguf);
     eprintln!("residency={}", residency.report());
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");
@@ -1170,7 +1268,7 @@ fn native_deepseek_v4_through_fourth_hca_continuation() {
     eprintln!("opening {}", model_path.display());
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
-    let residency = DeepSeekV4MetalResidency::load(&ctx, &gguf).expect("retain DS4 residency");
+    let residency = load_admitted_residency(&ctx, &gguf);
     eprintln!("residency={}", residency.report());
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");

@@ -12,7 +12,8 @@ use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedI
 use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
 use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
 use qwen_llm::deepseek_v4_metal::{
-    DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MetalResidency, DeepSeekV4Session,
+    DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples, DeepSeekV4MetalResidency,
+    DeepSeekV4Session,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
@@ -2220,8 +2221,32 @@ fn run_deepseek_v4_single_turn(
     );
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("init Metal context for DeepSeek V4")?;
-    let residency = DeepSeekV4MetalResidency::load(&ctx, &gguf)
-        .context("load strict DeepSeek V4 Metal residency")?;
+    let load_plan = DeepSeekV4MetalResidency::plan(&ctx, &gguf)
+        .context("plan strict DeepSeek V4 Metal residency and session")?;
+    let memory_plan = load_plan.memory_plan().clone();
+    let initial_memory_signals = ctx.memory_signals();
+    eprintln!("deepseek_v4: memory plan; {memory_plan}");
+    let admitted_load_plan = load_plan
+        .admit(initial_memory_signals)
+        .context("admit strict DeepSeek V4 Metal residency and session")?;
+    let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted_load_plan)
+        .context("load admitted strict DeepSeek V4 Metal residency")?;
+    let (residency, memory_admission, after_residency_bytes) = realized.into_parts();
+    let memory_signals = memory_admission.signals;
+    eprintln!(
+        "deepseek_v4: memory admission admitted={} reason={} recommended={} current={} process_remaining={:?} working_set_headroom={:?} required={:?}",
+        memory_admission.admitted,
+        memory_admission.reason.as_str(),
+        memory_signals.recommended_max_bytes,
+        memory_signals.current_allocated_bytes,
+        memory_signals.process_limit_remaining_bytes,
+        memory_admission.working_set_headroom_bytes,
+        memory_admission.required_bytes,
+    );
+    let before_residency_bytes = memory_signals.current_allocated_bytes;
+    memory_plan
+        .reconcile_residency(before_residency_bytes, after_residency_bytes)
+        .context("reconcile DeepSeek V4 residency allocation")?;
     ensure!(
         residency.config().vocab_size == vocab_size,
         "DeepSeek V4 tokenizer vocabulary {} differs from resident model vocabulary {}",
@@ -2231,6 +2256,14 @@ fn run_deepseek_v4_single_turn(
     let residency_report = residency.report().clone();
     let mut session =
         DeepSeekV4Session::new(&ctx, residency).context("create DeepSeek V4 session")?;
+    let after_session_bytes = ctx.current_allocated_size();
+    memory_plan
+        .reconcile_session(
+            before_residency_bytes,
+            after_residency_bytes,
+            after_session_bytes,
+        )
+        .context("reconcile DeepSeek V4 session allocation")?;
     let load_ms = load_t0.elapsed().as_secs_f64() * 1e3;
     eprintln!(
         "deepseek_v4: resident on {} in {:.1} ms; {}",
@@ -2244,6 +2277,17 @@ fn run_deepseek_v4_single_turn(
         session
             .forward_token(&ctx, token)
             .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
+        if index == 0 {
+            let reconciliation = memory_plan
+                .reconcile(DeepSeekV4MemorySamples {
+                    before_residency_bytes,
+                    after_residency_bytes,
+                    after_session_bytes,
+                    after_first_forward_bytes: ctx.current_allocated_size(),
+                })
+                .context("reconcile admitted DeepSeek V4 Metal memory")?;
+            eprintln!("deepseek_v4: memory reconciliation; {reconciliation}");
+        }
     }
     let logits = copy_deepseek_v4_logits(&session, vocab_size, "prompt")?;
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;

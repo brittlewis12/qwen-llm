@@ -7,9 +7,10 @@
 use crate::deepseek_v4::{AttentionKind, DeepSeekV4Config, DeepSeekV4Error, DeepSeekV4Model};
 use crate::gguf::{GgufError, GgufFile};
 use crate::metal::{
-    KernelEncoder, MetalContext, MetalError, MetalGgufBacking, MetalTensor, MetalTensorProvenance,
-    RetainedStorageDisposition, RetainedStorageFallback, RetainedStoragePlan, encode_get_rows_f32,
-    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_scatter_offset_f32_to_f16,
+    KernelEncoder, MetalContext, MetalError, MetalGgufBacking, MetalMemoryAdmission,
+    MetalMemorySignals, MetalTensor, MetalTensorProvenance, RetainedStorageDisposition,
+    RetainedStorageFallback, RetainedStoragePlan, encode_get_rows_f32, encode_rms_norm_batched_f32,
+    encode_rms_norm_mul_f32, encode_scatter_offset_f32_to_f16, evaluate_metal_memory_admission,
     host_page_size_bytes, plan_retained_storage,
 };
 use crate::tensor::{GgmlType, ggml_type_layout};
@@ -22,6 +23,7 @@ const GGUF_BINDING_ALIGNMENT: usize = 32;
 pub const DEEPSEEK_V4_CONNECTION_COUNT: usize = 4;
 pub const DEEPSEEK_V4_HC_PARAMETER_COUNT: usize = 24;
 pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
+pub const DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 /// Number of token forwards traversed by the longest retained-session
 /// differential, through the position-512 fourth-HCA continuation. Callers use
 /// this to reject requests before streaming beyond the current evidence
@@ -83,6 +85,365 @@ impl fmt::Display for DeepSeekV4ResidencyReport {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeepSeekV4SessionAllocation {
+    pub name: String,
+    pub logical_bytes: u64,
+    pub priced_bytes: u64,
+    pub alignment: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeepSeekV4MemoryPlan {
+    residency_buffer_count: usize,
+    residency_logical_bytes: u64,
+    residency_priced_upper_bytes: u64,
+    session_logical_bytes: u64,
+    session_priced_upper_bytes: u64,
+    total_priced_upper_bytes: u64,
+    session_allocations: Vec<DeepSeekV4SessionAllocation>,
+}
+
+impl DeepSeekV4MemoryPlan {
+    pub fn residency_buffer_count(&self) -> usize {
+        self.residency_buffer_count
+    }
+
+    pub fn residency_logical_bytes(&self) -> u64 {
+        self.residency_logical_bytes
+    }
+
+    pub fn residency_priced_upper_bytes(&self) -> u64 {
+        self.residency_priced_upper_bytes
+    }
+
+    pub fn session_logical_bytes(&self) -> u64 {
+        self.session_logical_bytes
+    }
+
+    pub fn session_priced_upper_bytes(&self) -> u64 {
+        self.session_priced_upper_bytes
+    }
+
+    pub fn total_priced_upper_bytes(&self) -> u64 {
+        self.total_priced_upper_bytes
+    }
+
+    pub fn session_allocations(&self) -> &[DeepSeekV4SessionAllocation] {
+        &self.session_allocations
+    }
+
+    pub fn admission(&self, signals: MetalMemorySignals) -> MetalMemoryAdmission {
+        evaluate_metal_memory_admission(
+            self.total_priced_upper_bytes,
+            DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
+            signals,
+            true,
+        )
+    }
+
+    pub fn required_with_reserve_bytes(&self) -> Result<u64, DeepSeekV4MetalError> {
+        self.total_priced_upper_bytes
+            .checked_add(DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "DeepSeek V4 priced memory plus dynamic reserve overflow".into(),
+                )
+            })
+    }
+
+    fn observed_delta(
+        before_residency_bytes: u64,
+        observed_bytes: u64,
+        phase: &str,
+    ) -> Result<u64, DeepSeekV4MetalError> {
+        observed_bytes
+            .checked_sub(before_residency_bytes)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(format!(
+                    "Metal allocation counter regressed during DeepSeek V4 {phase}"
+                ))
+            })
+    }
+
+    pub fn reconcile_residency(
+        &self,
+        before_residency_bytes: u64,
+        after_residency_bytes: u64,
+    ) -> Result<u64, DeepSeekV4MetalError> {
+        let observed =
+            Self::observed_delta(before_residency_bytes, after_residency_bytes, "residency")?;
+        let limit = self.residency_priced_upper_bytes;
+        if observed > limit {
+            return invalid(format!(
+                "observed DeepSeek V4 residency delta {observed} exceeds priced residency {limit}"
+            ));
+        }
+        Ok(observed)
+    }
+
+    pub fn reconcile_session(
+        &self,
+        before_residency_bytes: u64,
+        after_residency_bytes: u64,
+        after_session_bytes: u64,
+    ) -> Result<u64, DeepSeekV4MetalError> {
+        let observed_total =
+            Self::observed_delta(before_residency_bytes, after_session_bytes, "session")?;
+        let observed_session = after_session_bytes
+            .checked_sub(after_residency_bytes)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "Metal allocation counter regressed during DeepSeek V4 session construction"
+                        .into(),
+                )
+            })?;
+        if observed_total > self.total_priced_upper_bytes {
+            return invalid(format!(
+                "observed DeepSeek V4 session total {observed_total} exceeds priced model plus session {}",
+                self.total_priced_upper_bytes
+            ));
+        }
+        if observed_session > self.session_priced_upper_bytes {
+            return invalid(format!(
+                "observed DeepSeek V4 session increment {observed_session} exceeds priced session inventory {}",
+                self.session_priced_upper_bytes
+            ));
+        }
+        Ok(observed_total)
+    }
+
+    pub fn reconcile_first_forward(
+        &self,
+        before_residency_bytes: u64,
+        after_first_forward_bytes: u64,
+    ) -> Result<u64, DeepSeekV4MetalError> {
+        self.reconcile_total_phase(
+            before_residency_bytes,
+            after_first_forward_bytes,
+            "first forward",
+        )
+    }
+
+    fn reconcile_total_phase(
+        &self,
+        before_residency_bytes: u64,
+        observed_bytes: u64,
+        phase: &str,
+    ) -> Result<u64, DeepSeekV4MetalError> {
+        let observed = Self::observed_delta(before_residency_bytes, observed_bytes, phase)?;
+        let limit = self.required_with_reserve_bytes()?;
+        if observed > limit {
+            return invalid(format!(
+                "observed DeepSeek V4 {phase} delta {observed} exceeds planned total plus reserve {limit}"
+            ));
+        }
+        Ok(observed)
+    }
+
+    pub fn reconcile(
+        &self,
+        samples: DeepSeekV4MemorySamples,
+    ) -> Result<DeepSeekV4MemoryReconciliation, DeepSeekV4MetalError> {
+        let observed_residency_delta_bytes = self.reconcile_residency(
+            samples.before_residency_bytes,
+            samples.after_residency_bytes,
+        )?;
+        let observed_session_delta_bytes = self.reconcile_session(
+            samples.before_residency_bytes,
+            samples.after_residency_bytes,
+            samples.after_session_bytes,
+        )?;
+        let observed_first_forward_delta_bytes = self.reconcile_first_forward(
+            samples.before_residency_bytes,
+            samples.after_first_forward_bytes,
+        )?;
+        let total_limit = self.required_with_reserve_bytes()?;
+        let sampled_peak_bytes = samples
+            .after_residency_bytes
+            .max(samples.after_session_bytes)
+            .max(samples.after_first_forward_bytes);
+        let sampled_peak_delta_bytes = sampled_peak_bytes
+            .checked_sub(samples.before_residency_bytes)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "DeepSeek V4 sampled Metal peak precedes the allocation baseline".into(),
+                )
+            })?;
+        Ok(DeepSeekV4MemoryReconciliation {
+            samples,
+            observed_residency_delta_bytes,
+            observed_session_delta_bytes,
+            observed_first_forward_delta_bytes,
+            sampled_peak_delta_bytes,
+            planned_limit_bytes: total_limit,
+        })
+    }
+}
+
+impl fmt::Display for DeepSeekV4MemoryPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "residency_buffers={} residency_logical={} residency_priced={} session_buffers={} session_logical={} session_priced={} total_priced={} reserve={} required={}",
+            self.residency_buffer_count,
+            self.residency_logical_bytes,
+            self.residency_priced_upper_bytes,
+            self.session_allocations.len(),
+            self.session_logical_bytes,
+            self.session_priced_upper_bytes,
+            self.total_priced_upper_bytes,
+            DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
+            self.required_with_reserve_bytes().unwrap_or(u64::MAX),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeepSeekV4MemorySamples {
+    pub before_residency_bytes: u64,
+    pub after_residency_bytes: u64,
+    pub after_session_bytes: u64,
+    pub after_first_forward_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeepSeekV4MemoryReconciliation {
+    pub samples: DeepSeekV4MemorySamples,
+    pub observed_residency_delta_bytes: u64,
+    pub observed_session_delta_bytes: u64,
+    pub observed_first_forward_delta_bytes: u64,
+    pub sampled_peak_delta_bytes: u64,
+    pub planned_limit_bytes: u64,
+}
+
+impl fmt::Display for DeepSeekV4MemoryReconciliation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "before={} after_residency={} after_session={} after_first_forward={} residency_delta={} session_delta={} first_forward_delta={} sampled_peak_delta={} planned_limit={}",
+            self.samples.before_residency_bytes,
+            self.samples.after_residency_bytes,
+            self.samples.after_session_bytes,
+            self.samples.after_first_forward_bytes,
+            self.observed_residency_delta_bytes,
+            self.observed_session_delta_bytes,
+            self.observed_first_forward_delta_bytes,
+            self.sampled_peak_delta_bytes,
+            self.planned_limit_bytes,
+        )
+    }
+}
+
+pub struct DeepSeekV4MetalLoadPlan {
+    config: DeepSeekV4Config,
+    retained: RetainedStoragePlan,
+    descriptors: Vec<DeepSeekV4DescriptorFingerprint>,
+    report: DeepSeekV4ResidencyReport,
+    memory: DeepSeekV4MemoryPlan,
+    device_registry_id: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeepSeekV4DescriptorFingerprint {
+    name: String,
+    shape: Vec<u64>,
+    dtype: GgmlType,
+    shard_idx: usize,
+    data_offset: u64,
+    n_bytes: u64,
+}
+
+impl From<&crate::tensor::TensorDesc> for DeepSeekV4DescriptorFingerprint {
+    fn from(desc: &crate::tensor::TensorDesc) -> Self {
+        Self {
+            name: desc.name.clone(),
+            shape: desc.shape.clone(),
+            dtype: desc.dtype,
+            shard_idx: desc.shard_idx,
+            data_offset: desc.data_offset,
+            n_bytes: desc.n_bytes,
+        }
+    }
+}
+
+impl DeepSeekV4MetalLoadPlan {
+    pub fn config(&self) -> &DeepSeekV4Config {
+        &self.config
+    }
+
+    pub fn residency_report(&self) -> &DeepSeekV4ResidencyReport {
+        &self.report
+    }
+
+    pub fn memory_plan(&self) -> &DeepSeekV4MemoryPlan {
+        &self.memory
+    }
+
+    pub fn admit(
+        self,
+        signals: MetalMemorySignals,
+    ) -> Result<DeepSeekV4AdmittedLoadPlan, DeepSeekV4MetalError> {
+        let admission = self.memory.admission(signals);
+        if !admission.admitted {
+            return invalid(format!(
+                "DeepSeek V4 memory admission denied before Metal residency: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+                admission.reason.as_str(),
+                admission.required_bytes,
+                admission.working_set_headroom_bytes,
+                admission.signals.process_limit_remaining_bytes,
+            ));
+        }
+        Ok(DeepSeekV4AdmittedLoadPlan {
+            plan: self,
+            admission,
+        })
+    }
+}
+
+pub struct DeepSeekV4AdmittedLoadPlan {
+    plan: DeepSeekV4MetalLoadPlan,
+    admission: MetalMemoryAdmission,
+}
+
+impl DeepSeekV4AdmittedLoadPlan {
+    pub fn admission(&self) -> MetalMemoryAdmission {
+        self.admission
+    }
+
+    pub fn memory_plan(&self) -> &DeepSeekV4MemoryPlan {
+        &self.plan.memory
+    }
+
+    pub fn residency_report(&self) -> &DeepSeekV4ResidencyReport {
+        &self.plan.report
+    }
+}
+
+pub struct DeepSeekV4RealizedLoad {
+    residency: DeepSeekV4MetalResidency,
+    admission: MetalMemoryAdmission,
+    after_residency_bytes: u64,
+}
+
+impl DeepSeekV4RealizedLoad {
+    pub fn admission(&self) -> MetalMemoryAdmission {
+        self.admission
+    }
+
+    pub fn after_residency_bytes(&self) -> u64 {
+        self.after_residency_bytes
+    }
+
+    pub fn into_residency(self) -> DeepSeekV4MetalResidency {
+        self.residency
+    }
+
+    pub fn into_parts(self) -> (DeepSeekV4MetalResidency, MetalMemoryAdmission, u64) {
+        (self.residency, self.admission, self.after_residency_bytes)
+    }
+}
+
 /// Exact, read-only Metal realization of every tensor in a strict DeepSeek V4
 /// Flash-0731 GGUF binding.
 pub struct DeepSeekV4MetalResidency {
@@ -93,29 +454,96 @@ pub struct DeepSeekV4MetalResidency {
 }
 
 impl DeepSeekV4MetalResidency {
-    pub fn load(ctx: &MetalContext, gguf: &GgufFile) -> Result<Self, DeepSeekV4MetalError> {
+    pub fn plan(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+    ) -> Result<DeepSeekV4MetalLoadPlan, DeepSeekV4MetalError> {
         let model = DeepSeekV4Model::from_gguf_flash_0731(gguf)?;
         validate_strict_binding(gguf, &model)?;
+        validate_session_config(&model.config)?;
+        validate_session_lookup_storage(gguf)?;
 
         let requests = gguf.tensors.iter().collect::<Vec<_>>();
-        let plan = plan_retained_storage(
+        let retained = plan_retained_storage(
             &gguf.shard_mapped_lengths(),
             &requests,
             host_page_size_bytes()?,
             ctx.max_buffer_length(),
             GGUF_BINDING_ALIGNMENT,
         )?;
-        validate_fallback_policy(&plan)?;
-        let report = report_for_plan(&plan)?;
-        let windows = realize_windows(ctx, gguf, &plan)?;
-        let tensors = realize_tensors(ctx, gguf, &plan, &windows)?;
-        validate_realization(gguf, &tensors, &report)?;
-
-        Ok(Self {
+        validate_fallback_policy(&retained)?;
+        let report = report_for_plan(&retained)?;
+        let memory = build_memory_plan(ctx, &retained, &report, &model.config)?;
+        let descriptors = gguf
+            .tensors
+            .iter()
+            .map(DeepSeekV4DescriptorFingerprint::from)
+            .collect();
+        Ok(DeepSeekV4MetalLoadPlan {
             config: model.config,
-            tensors,
+            retained,
+            descriptors,
             report,
+            memory,
             device_registry_id: ctx.device.registryID(),
+        })
+    }
+
+    pub fn load_from_plan(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        admitted: DeepSeekV4AdmittedLoadPlan,
+    ) -> Result<DeepSeekV4RealizedLoad, DeepSeekV4MetalError> {
+        let plan = admitted.plan;
+        if plan.device_registry_id != ctx.device.registryID() {
+            return invalid(format!(
+                "DeepSeek V4 load plan belongs to Metal device registry {}, load context is {}",
+                plan.device_registry_id,
+                ctx.device.registryID()
+            ));
+        }
+        let model = DeepSeekV4Model::from_gguf_flash_0731(gguf)?;
+        validate_strict_binding(gguf, &model)?;
+        if model.config != plan.config {
+            return invalid("DeepSeek V4 load-plan configuration differs from the GGUF binding");
+        }
+        validate_descriptor_fingerprints(&gguf.tensors, &plan.descriptors)?;
+        validate_fallback_policy(&plan.retained)?;
+        validate_retained_plan_against_gguf(ctx, gguf, &plan.retained)?;
+        if report_for_plan(&plan.retained)? != plan.report {
+            return invalid("DeepSeek V4 retained-plan report changed before realization");
+        }
+        if build_memory_plan(ctx, &plan.retained, &plan.report, &plan.config)? != plan.memory {
+            return invalid("DeepSeek V4 memory plan changed before realization");
+        }
+        let refreshed_admission = plan.memory.admission(ctx.memory_signals());
+        if !refreshed_admission.admitted {
+            return invalid(format!(
+                "DeepSeek V4 memory admission changed before realization: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+                refreshed_admission.reason.as_str(),
+                refreshed_admission.required_bytes,
+                refreshed_admission.working_set_headroom_bytes,
+                refreshed_admission.signals.process_limit_remaining_bytes,
+            ));
+        }
+        let windows = realize_windows(ctx, gguf, &plan.retained)?;
+        let tensors = realize_tensors(ctx, gguf, &plan.retained, &windows)?;
+        validate_realization(gguf, &tensors, &plan.report)?;
+        let after_residency_bytes = ctx.current_allocated_size();
+        plan.memory.reconcile_residency(
+            refreshed_admission.signals.current_allocated_bytes,
+            after_residency_bytes,
+        )?;
+
+        Ok(DeepSeekV4RealizedLoad {
+            residency: Self {
+                config: plan.config,
+                tensors,
+                report: plan.report,
+                device_registry_id: ctx.device.registryID(),
+            },
+            admission: refreshed_admission,
+            after_residency_bytes,
         })
     }
 
@@ -245,20 +673,10 @@ impl DeepSeekV4Session {
         for name in session_required_tensor_names(residency.config()) {
             residency.require_tensor(&name)?;
         }
-        let embedding_weight = residency.require_tensor("token_embd.weight")?;
-        if embedding_weight.dtype != GgmlType::Q6_K {
-            return invalid(format!(
-                "token_embd.weight must be Q6_K for the native session get_rows path, got {:?}",
-                embedding_weight.dtype
-            ));
-        }
-        let output_weight = residency.require_tensor("output.weight")?;
-        if output_weight.dtype != GgmlType::Q6_K {
-            return invalid(format!(
-                "output.weight must be Q6_K for the native session logits path, got {:?}",
-                output_weight.dtype
-            ));
-        }
+        validate_session_lookup_dtypes(
+            residency.require_tensor("token_embd.weight")?.dtype,
+            residency.require_tensor("output.weight")?.dtype,
+        )?;
 
         let token_id =
             MetalTensor::from_bytes(ctx, bytemuck::bytes_of(&0_i32), vec![1], GgmlType::I32)?;
@@ -266,22 +684,8 @@ impl DeepSeekV4Session {
             DEEPSEEK_V4_HIDDEN_SIZE as u64,
             DEEPSEEK_V4_CONNECTION_COUNT as u64,
         ];
-        let attention_config = DeepSeekV4PositionZeroAttentionConfig {
-            hidden_size: DEEPSEEK_V4_HIDDEN_SIZE,
-            q_lora_rank: 1_024,
-            head_count: 64,
-            head_dim: 512,
-            rotary_dim: 64,
-            group_count: 8,
-            output_rank: 1_024,
-        };
-        let moe_config = DeepSeekV4MoeConfig {
-            hidden_size: DEEPSEEK_V4_HIDDEN_SIZE,
-            ffn_size: 2_048,
-            expert_count: 256,
-            top_k: 6,
-            routed_scale: residency.config().expert_weights_scale,
-        };
+        let attention_config = deepseek_v4_session_attention_config();
+        let moe_config = deepseek_v4_session_moe_config(residency.config());
         let compressor_frontiers = DeepSeekV4CompressorFrontiers::new(ctx, residency.config())?;
 
         Ok(Self {
@@ -654,6 +1058,28 @@ impl DeepSeekV4Session {
     }
 }
 
+fn deepseek_v4_session_attention_config() -> DeepSeekV4PositionZeroAttentionConfig {
+    DeepSeekV4PositionZeroAttentionConfig {
+        hidden_size: DEEPSEEK_V4_HIDDEN_SIZE,
+        q_lora_rank: 1_024,
+        head_count: 64,
+        head_dim: 512,
+        rotary_dim: 64,
+        group_count: 8,
+        output_rank: 1_024,
+    }
+}
+
+fn deepseek_v4_session_moe_config(config: &DeepSeekV4Config) -> DeepSeekV4MoeConfig {
+    DeepSeekV4MoeConfig {
+        hidden_size: DEEPSEEK_V4_HIDDEN_SIZE,
+        ffn_size: 2_048,
+        expert_count: 256,
+        top_k: 6,
+        routed_scale: config.expert_weights_scale,
+    }
+}
+
 fn validate_session_config(config: &DeepSeekV4Config) -> Result<(), DeepSeekV4MetalError> {
     config.validate_flash_0731_profile()?;
     if config.hidden_size != 4_096
@@ -840,10 +1266,7 @@ impl DeepSeekV4CompressorFrontier {
         if publication == DeepSeekV4CompressorPublication::IndexerHadamard && head_dim != 128 {
             return invalid("indexer publication requires exactly 128 dimensions");
         }
-        let coefficient = if ratio == 4 { 2 } else { 1 };
-        let width = checked_mul(coefficient, head_dim, "compressor frontier width")?;
-        let rows = checked_mul(coefficient, ratio, "compressor frontier rows")?;
-        let state_elements = checked_mul(width, rows, "compressor frontier elements")?;
+        let (width, rows, state_elements) = compressor_frontier_geometry(ratio, head_dim)?;
         let zeros = vec![0.0f32; state_elements];
         let negative_infinity = vec![f32::NEG_INFINITY; state_elements];
         Ok(Self {
@@ -1060,6 +1483,22 @@ impl DeepSeekV4CompressorFrontier {
     fn published_count(&self, position: u32) -> usize {
         (position as usize + 1) / self.ratio
     }
+}
+
+fn compressor_frontier_geometry(
+    ratio: usize,
+    head_dim: usize,
+) -> Result<(usize, usize, usize), DeepSeekV4MetalError> {
+    if !matches!(ratio, 4 | 128) || head_dim == 0 {
+        return invalid(format!(
+            "compressor frontier requires ratio 4 or 128 and a nonzero head dimension, got ratio={ratio} head_dim={head_dim}"
+        ));
+    }
+    let coefficient = if ratio == 4 { 2 } else { 1 };
+    let width = checked_mul(coefficient, head_dim, "compressor frontier width")?;
+    let rows = checked_mul(coefficient, ratio, "compressor frontier rows")?;
+    let state_elements = checked_mul(width, rows, "compressor frontier elements")?;
+    Ok((width, rows, state_elements))
 }
 
 enum DeepSeekV4LayerCompressorFrontiers {
@@ -3712,6 +4151,38 @@ fn validate_strict_binding(
     Ok(())
 }
 
+fn validate_session_lookup_storage(gguf: &GgufFile) -> Result<(), DeepSeekV4MetalError> {
+    let dtype = |name: &str| {
+        gguf.tensors
+            .iter()
+            .find(|desc| desc.name == name)
+            .map(|desc| desc.dtype)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(format!(
+                    "DeepSeek V4 session requires tensor {name:?}"
+                ))
+            })
+    };
+    validate_session_lookup_dtypes(dtype("token_embd.weight")?, dtype("output.weight")?)
+}
+
+fn validate_session_lookup_dtypes(
+    embedding_dtype: GgmlType,
+    output_dtype: GgmlType,
+) -> Result<(), DeepSeekV4MetalError> {
+    if embedding_dtype != GgmlType::Q6_K {
+        return invalid(format!(
+            "token_embd.weight must be Q6_K for the native session get_rows path, got {embedding_dtype:?}"
+        ));
+    }
+    if output_dtype != GgmlType::Q6_K {
+        return invalid(format!(
+            "output.weight must be Q6_K for the native session logits path, got {output_dtype:?}"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_fallback_policy(plan: &RetainedStoragePlan) -> Result<(), DeepSeekV4MetalError> {
     for entry in &plan.entries {
         if let RetainedStorageDisposition::CopyFallback { reason } = entry.disposition
@@ -3722,6 +4193,224 @@ fn validate_fallback_policy(plan: &RetainedStoragePlan) -> Result<(), DeepSeekV4
                 entry.name
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_descriptor_fingerprints(
+    tensors: &[crate::tensor::TensorDesc],
+    fingerprints: &[DeepSeekV4DescriptorFingerprint],
+) -> Result<(), DeepSeekV4MetalError> {
+    if tensors.len() != fingerprints.len() {
+        return invalid("DeepSeek V4 descriptor fingerprint count changed before realization");
+    }
+    for (index, (desc, fingerprint)) in tensors.iter().zip(fingerprints).enumerate() {
+        if fingerprint.name != desc.name
+            || fingerprint.shape != desc.shape
+            || fingerprint.dtype != desc.dtype
+            || fingerprint.shard_idx != desc.shard_idx
+            || fingerprint.data_offset != desc.data_offset
+            || fingerprint.n_bytes != desc.n_bytes
+        {
+            return invalid(format!(
+                "DeepSeek V4 descriptor fingerprint changed at index {index}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_retained_plan_against_gguf(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    plan: &RetainedStoragePlan,
+) -> Result<(), DeepSeekV4MetalError> {
+    validate_retained_plan_geometry(
+        host_page_size_bytes()?,
+        ctx.max_buffer_length(),
+        &gguf.shard_mapped_lengths(),
+        &gguf.tensors,
+        plan,
+    )
+}
+
+fn validate_retained_plan_geometry(
+    page_size: usize,
+    max_buffer_length: usize,
+    shard_lengths: &[usize],
+    tensors: &[crate::tensor::TensorDesc],
+    plan: &RetainedStoragePlan,
+) -> Result<(), DeepSeekV4MetalError> {
+    if page_size == 0 {
+        return invalid("DeepSeek V4 retained-plan page size is zero");
+    }
+    let usable_window_length = max_buffer_length / page_size * page_size;
+    if usable_window_length == 0
+        || plan.page_size != page_size
+        || plan.max_buffer_length != max_buffer_length
+        || plan.usable_window_length != usable_window_length
+        || plan.required_alignment != GGUF_BINDING_ALIGNMENT
+        || plan.entries.len() != tensors.len()
+    {
+        return invalid("DeepSeek V4 retained-plan geometry changed before realization");
+    }
+    for (index, window) in plan.windows.iter().enumerate() {
+        let shard_length = shard_lengths
+            .get(window.shard_idx)
+            .copied()
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(format!(
+                    "retained window {index} references missing shard {}",
+                    window.shard_idx
+                ))
+            })?;
+        let mmap_offset = usize::try_from(window.mmap_offset).map_err(|_| {
+            DeepSeekV4MetalError::Invalid(format!("retained window {index} offset exceeds usize"))
+        })?;
+        let end = mmap_offset.checked_add(window.length).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!("retained window {index} endpoint overflow"))
+        })?;
+        if window.length == 0
+            || window.length > plan.usable_window_length
+            || !mmap_offset.is_multiple_of(page_size)
+            || !window.length.is_multiple_of(page_size)
+            || end > shard_length
+        {
+            return invalid(format!(
+                "retained window {index} is outside the planned shard/page/buffer geometry"
+            ));
+        }
+    }
+    for (index, (entry, desc)) in plan.entries.iter().zip(tensors).enumerate() {
+        if entry.request_index != index
+            || entry.name != desc.name
+            || entry.shard_idx != desc.shard_idx
+            || entry.data_offset != desc.data_offset
+            || entry.n_bytes != desc.n_bytes
+        {
+            return invalid(format!("planner descriptor drift at index {index}"));
+        }
+        match entry.disposition {
+            RetainedStorageDisposition::View {
+                window_index,
+                buffer_offset,
+            } => {
+                let window = plan.windows.get(window_index).ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "retained entry {index} references missing window {window_index}"
+                    ))
+                })?;
+                let expected_data_offset = window
+                    .mmap_offset
+                    .checked_add(buffer_offset)
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(format!(
+                            "retained entry {index} source offset overflow"
+                        ))
+                    })?;
+                let buffer_end = buffer_offset.checked_add(entry.n_bytes).ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "retained entry {index} buffer endpoint overflow"
+                    ))
+                })?;
+                if entry.shard_idx != window.shard_idx
+                    || entry.data_offset != expected_data_offset
+                    || buffer_end > window.length as u64
+                    || !buffer_offset.is_multiple_of(plan.required_alignment as u64)
+                {
+                    return invalid(format!(
+                        "retained entry {index} differs from its planned window binding"
+                    ));
+                }
+            }
+            RetainedStorageDisposition::Alias {
+                source_request_index,
+            } => {
+                if source_request_index >= index {
+                    return invalid(format!(
+                        "retained alias {index} has non-prior source {source_request_index}"
+                    ));
+                }
+                let source_entry = &plan.entries[source_request_index];
+                let source_desc = &tensors[source_request_index];
+                if source_entry.shard_idx != entry.shard_idx
+                    || source_entry.data_offset != entry.data_offset
+                    || source_entry.n_bytes != entry.n_bytes
+                    || source_desc.shape != desc.shape
+                    || source_desc.dtype != desc.dtype
+                    || matches!(
+                        source_entry.disposition,
+                        RetainedStorageDisposition::Alias { .. }
+                    )
+                {
+                    return invalid(format!(
+                        "retained alias {index} differs from source {source_request_index}"
+                    ));
+                }
+            }
+            RetainedStorageDisposition::CopyFallback { reason } => {
+                let shard_length =
+                    shard_lengths.get(entry.shard_idx).copied().ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(format!(
+                            "retained fallback {index} references missing shard {}",
+                            entry.shard_idx
+                        ))
+                    })?;
+                let start = usize::try_from(entry.data_offset).map_err(|_| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "retained fallback {index} offset exceeds usize"
+                    ))
+                })?;
+                let length = usize::try_from(entry.n_bytes).map_err(|_| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "retained fallback {index} length exceeds usize"
+                    ))
+                })?;
+                let end = start.checked_add(length).ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "retained fallback {index} endpoint overflow"
+                    ))
+                })?;
+                let rounded_end = end
+                    .checked_add(page_size - 1)
+                    .map(|value| value / page_size * page_size)
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(format!(
+                            "retained fallback {index} page endpoint overflow"
+                        ))
+                    })?;
+                let window_start = start / page_size * page_size;
+                let candidate_window_length =
+                    rounded_end.checked_sub(window_start).ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(format!(
+                            "retained fallback {index} window range underflow"
+                        ))
+                    })?;
+                let full_page_end = shard_length / page_size * page_size;
+                if reason != RetainedStorageFallback::FinalPartialPage
+                    || length == 0
+                    || start % plan.required_alignment != 0
+                    || end > shard_length
+                    || end <= full_page_end
+                    || candidate_window_length > plan.usable_window_length
+                {
+                    return invalid(format!(
+                        "retained entry {index} differs from a final-partial-page fallback"
+                    ));
+                }
+            }
+        }
+    }
+    let requests = tensors.iter().collect::<Vec<_>>();
+    let rebuilt = plan_retained_storage(
+        shard_lengths,
+        &requests,
+        page_size,
+        max_buffer_length,
+        GGUF_BINDING_ALIGNMENT,
+    )?;
+    if rebuilt != *plan {
+        return invalid("DeepSeek V4 retained plan differs from deterministic planner output");
     }
     Ok(())
 }
@@ -3885,6 +4574,394 @@ fn validate_realization(
         validate_tensor(desc, tensor)?;
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeepSeekV4SessionAllocationRequest {
+    name: String,
+    logical_bytes: u64,
+}
+
+fn push_session_allocation(
+    requests: &mut Vec<DeepSeekV4SessionAllocationRequest>,
+    name: impl Into<String>,
+    elements: usize,
+    element_bytes: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    let logical_bytes = checked_mul(elements, element_bytes, "session allocation bytes")?;
+    requests.push(DeepSeekV4SessionAllocationRequest {
+        name: name.into(),
+        logical_bytes: u64::try_from(logical_bytes).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("session allocation bytes exceed u64".into())
+        })?,
+    });
+    Ok(())
+}
+
+fn append_compressor_frontier_allocations(
+    requests: &mut Vec<DeepSeekV4SessionAllocationRequest>,
+    prefix: &str,
+    ratio: usize,
+    head_dim: usize,
+    publication: DeepSeekV4CompressorPublication,
+) -> Result<(), DeepSeekV4MetalError> {
+    if publication == DeepSeekV4CompressorPublication::IndexerHadamard && head_dim != 128 {
+        return invalid("indexer publication requires exactly 128 dimensions");
+    }
+    let (width, _, state_elements) = compressor_frontier_geometry(ratio, head_dim)?;
+    for suffix in ["kv_state", "score_state"] {
+        push_session_allocation(
+            requests,
+            format!("{prefix}.{suffix}"),
+            state_elements,
+            std::mem::size_of::<f32>(),
+        )?;
+    }
+    for suffix in ["projected_kv", "projected_score"] {
+        push_session_allocation(
+            requests,
+            format!("{prefix}.{suffix}"),
+            width,
+            std::mem::size_of::<f32>(),
+        )?;
+    }
+    for suffix in ["pooled", "normalized"] {
+        push_session_allocation(
+            requests,
+            format!("{prefix}.{suffix}"),
+            head_dim,
+            std::mem::size_of::<f32>(),
+        )?;
+    }
+    push_session_allocation(
+        requests,
+        format!("{prefix}.published"),
+        checked_mul(
+            head_dim,
+            DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS,
+            "published compressor history elements",
+        )?,
+        std::mem::size_of::<u16>(),
+    )
+}
+
+fn deepseek_v4_session_allocation_requests(
+    config: &DeepSeekV4Config,
+) -> Result<Vec<DeepSeekV4SessionAllocationRequest>, DeepSeekV4MetalError> {
+    validate_session_config(config)?;
+    deepseek_v4_session_allocation_requests_for_kinds(&config.attention_kinds)
+}
+
+fn deepseek_v4_session_allocation_requests_for_kinds(
+    attention_kinds: &[AttentionKind],
+) -> Result<Vec<DeepSeekV4SessionAllocationRequest>, DeepSeekV4MetalError> {
+    let sliding = attention_kinds
+        .iter()
+        .filter(|&&kind| kind == AttentionKind::SlidingWindow)
+        .count();
+    let csa = attention_kinds
+        .iter()
+        .filter(|&&kind| kind == AttentionKind::CompressedSparse)
+        .count();
+    let hca = attention_kinds
+        .iter()
+        .filter(|&&kind| kind == AttentionKind::HeavilyCompressed)
+        .count();
+    if attention_kinds.len() != DEEPSEEK_V4_LAYER_COUNT || (sliding, csa, hca) != (2, 21, 20) {
+        return invalid(format!(
+            "session allocation inventory requires 43 layers split 2/21/20, got {}/{sliding}/{csa}/{hca}",
+            attention_kinds.len()
+        ));
+    }
+    let attention = deepseek_v4_session_attention_config();
+    let attention_dims = attention.checked()?;
+    let moe = DeepSeekV4MoeConfig {
+        hidden_size: DEEPSEEK_V4_HIDDEN_SIZE,
+        ffn_size: 2_048,
+        expert_count: 256,
+        top_k: 6,
+        routed_scale: 1.0,
+    };
+    moe.checked()?;
+    let mut requests = Vec::with_capacity(474);
+    let f32_bytes = std::mem::size_of::<f32>();
+    let i32_bytes = std::mem::size_of::<i32>();
+    let f16_bytes = std::mem::size_of::<u16>();
+    let residual_elements = residual_len(DEEPSEEK_V4_HIDDEN_SIZE)?;
+
+    push_session_allocation(&mut requests, "token_id", 1, i32_bytes)?;
+    push_session_allocation(
+        &mut requests,
+        "embedding",
+        DEEPSEEK_V4_HIDDEN_SIZE,
+        f32_bytes,
+    )?;
+    for name in ["residual_primary", "residual_secondary"] {
+        push_session_allocation(&mut requests, name, residual_elements, f32_bytes)?;
+    }
+
+    for name in ["hyper.ones", "hyper.normalized"] {
+        push_session_allocation(&mut requests, name, residual_elements, f32_bytes)?;
+    }
+    push_session_allocation(
+        &mut requests,
+        "hyper.mixes",
+        DEEPSEEK_V4_HC_PARAMETER_COUNT,
+        f32_bytes,
+    )?;
+    for name in ["hyper.pre", "hyper.post"] {
+        push_session_allocation(&mut requests, name, DEEPSEEK_V4_CONNECTION_COUNT, f32_bytes)?;
+    }
+    push_session_allocation(
+        &mut requests,
+        "hyper.combination",
+        checked_mul(
+            DEEPSEEK_V4_CONNECTION_COUNT,
+            DEEPSEEK_V4_CONNECTION_COUNT,
+            "hyper combination elements",
+        )?,
+        f32_bytes,
+    )?;
+    push_session_allocation(
+        &mut requests,
+        "hyper.collapsed",
+        DEEPSEEK_V4_HIDDEN_SIZE,
+        f32_bytes,
+    )?;
+    for name in ["hyper.head_mixes", "hyper.head_gates"] {
+        push_session_allocation(&mut requests, name, DEEPSEEK_V4_CONNECTION_COUNT, f32_bytes)?;
+    }
+
+    push_session_allocation(
+        &mut requests,
+        "attention.normalized_input",
+        attention.hidden_size,
+        f32_bytes,
+    )?;
+    for name in ["attention.q_lora_raw", "attention.q_lora"] {
+        push_session_allocation(&mut requests, name, attention.q_lora_rank, f32_bytes)?;
+    }
+    for name in ["attention.queries_raw", "attention.queries"] {
+        push_session_allocation(&mut requests, name, attention_dims.query_width, f32_bytes)?;
+    }
+    for name in ["attention.kv_raw", "attention.kv", "attention.cached_kv"] {
+        push_session_allocation(&mut requests, name, attention.head_dim, f32_bytes)?;
+    }
+    push_session_allocation(
+        &mut requests,
+        "attention.heads",
+        attention_dims.query_width,
+        f32_bytes,
+    )?;
+    push_session_allocation(
+        &mut requests,
+        "attention.low_rank",
+        attention_dims.low_rank_width,
+        f32_bytes,
+    )?;
+    push_session_allocation(
+        &mut requests,
+        "attention.output",
+        attention.hidden_size,
+        f32_bytes,
+    )?;
+    push_session_allocation(
+        &mut requests,
+        "attention.head_norm_ones",
+        attention.head_dim,
+        f32_bytes,
+    )?;
+    push_session_allocation(
+        &mut requests,
+        "raw_cache",
+        checked_mul(
+            checked_mul(
+                attention.head_dim,
+                DEEPSEEK_V4_LOCAL_WINDOW,
+                "raw-cache layer elements",
+            )?,
+            DEEPSEEK_V4_LAYER_COUNT,
+            "raw-cache session elements",
+        )?,
+        f16_bytes,
+    )?;
+
+    let attention_dim = 512;
+    let indexer_dim = 128;
+    for (layer, kind) in attention_kinds.iter().copied().enumerate() {
+        match kind {
+            AttentionKind::SlidingWindow => {}
+            AttentionKind::CompressedSparse => {
+                append_compressor_frontier_allocations(
+                    &mut requests,
+                    &format!("compressor.{layer}.attention"),
+                    4,
+                    attention_dim,
+                    DeepSeekV4CompressorPublication::Attention,
+                )?;
+                append_compressor_frontier_allocations(
+                    &mut requests,
+                    &format!("compressor.{layer}.indexer"),
+                    4,
+                    indexer_dim,
+                    DeepSeekV4CompressorPublication::IndexerHadamard,
+                )?;
+            }
+            AttentionKind::HeavilyCompressed => append_compressor_frontier_allocations(
+                &mut requests,
+                &format!("compressor.{layer}.attention"),
+                128,
+                attention_dim,
+                DeepSeekV4CompressorPublication::Attention,
+            )?,
+        }
+    }
+
+    push_session_allocation(
+        &mut requests,
+        "moe.normalized_input",
+        moe.hidden_size,
+        f32_bytes,
+    )?;
+    push_session_allocation(&mut requests, "moe.logits", moe.expert_count, f32_bytes)?;
+    push_session_allocation(&mut requests, "moe.expert_ids", moe.top_k, i32_bytes)?;
+    push_session_allocation(&mut requests, "moe.weights", moe.top_k, f32_bytes)?;
+    for name in ["moe.gate", "moe.up", "moe.inner"] {
+        push_session_allocation(&mut requests, name, moe.ffn_size, f32_bytes)?;
+    }
+    push_session_allocation(
+        &mut requests,
+        "moe.expert_outputs",
+        checked_mul(moe.hidden_size, moe.top_k, "MoE expert-output elements")?,
+        f32_bytes,
+    )?;
+    for name in ["moe.routed_output", "moe.shared_output", "moe.final_output"] {
+        push_session_allocation(&mut requests, name, moe.hidden_size, f32_bytes)?;
+    }
+
+    for name in ["final_hidden", "final_normalized_hidden"] {
+        push_session_allocation(&mut requests, name, DEEPSEEK_V4_HIDDEN_SIZE, f32_bytes)?;
+    }
+    push_session_allocation(&mut requests, "logits", DEEPSEEK_V4_VOCAB_SIZE, f32_bytes)?;
+    Ok(requests)
+}
+
+fn price_shared_buffer(
+    ctx: &MetalContext,
+    logical_bytes: u64,
+    name: &str,
+) -> Result<(u64, u64), DeepSeekV4MetalError> {
+    if logical_bytes == 0 {
+        return invalid(format!("planned Metal buffer {name:?} has zero bytes"));
+    }
+    let priced = ctx.shared_buffer_size_and_align(logical_bytes)?;
+    if priced.size < logical_bytes || priced.alignment == 0 || !priced.alignment.is_power_of_two() {
+        return invalid(format!(
+            "invalid Metal pricing for {name:?}: logical={logical_bytes} priced={} alignment={}",
+            priced.size, priced.alignment
+        ));
+    }
+    Ok((priced.size, priced.alignment))
+}
+
+fn build_memory_plan(
+    ctx: &MetalContext,
+    retained: &RetainedStoragePlan,
+    report: &DeepSeekV4ResidencyReport,
+    config: &DeepSeekV4Config,
+) -> Result<DeepSeekV4MemoryPlan, DeepSeekV4MetalError> {
+    let mut residency_priced_upper_bytes = 0_u64;
+    let mut residency_buffer_count = 0_usize;
+    let mut residency_logical_bytes = 0_u64;
+    for (index, window) in retained.windows.iter().enumerate() {
+        let logical = u64::try_from(window.length).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("retained window length exceeds u64".into())
+        })?;
+        let (priced, _) = price_shared_buffer(ctx, logical, &format!("weight_window[{index}]"))?;
+        residency_priced_upper_bytes = residency_priced_upper_bytes
+            .checked_add(priced)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid("priced residency byte count overflow".into())
+            })?;
+        residency_logical_bytes =
+            residency_logical_bytes
+                .checked_add(logical)
+                .ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid("logical residency byte count overflow".into())
+                })?;
+        residency_buffer_count += 1;
+    }
+    for entry in &retained.entries {
+        if matches!(
+            entry.disposition,
+            RetainedStorageDisposition::CopyFallback { .. }
+        ) {
+            let (priced, _) = price_shared_buffer(ctx, entry.n_bytes, &entry.name)?;
+            residency_priced_upper_bytes = residency_priced_upper_bytes
+                .checked_add(priced)
+                .ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid("priced fallback byte count overflow".into())
+                })?;
+            residency_logical_bytes = residency_logical_bytes
+                .checked_add(entry.n_bytes)
+                .ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid("logical fallback byte count overflow".into())
+                })?;
+            residency_buffer_count += 1;
+        }
+    }
+    if residency_logical_bytes != report.resident_bytes {
+        return invalid(format!(
+            "memory-plan residency bytes {residency_logical_bytes} differ from report {}",
+            report.resident_bytes
+        ));
+    }
+
+    let requests = deepseek_v4_session_allocation_requests(config)?;
+    let mut session_allocations = Vec::with_capacity(requests.len());
+    let mut session_logical_bytes = 0_u64;
+    let mut session_priced_upper_bytes = 0_u64;
+    for request in requests {
+        let (priced_bytes, alignment) =
+            price_shared_buffer(ctx, request.logical_bytes, &request.name)?;
+        session_logical_bytes = session_logical_bytes
+            .checked_add(request.logical_bytes)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid("session logical byte count overflow".into())
+            })?;
+        session_priced_upper_bytes = session_priced_upper_bytes
+            .checked_add(priced_bytes)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid("session priced byte count overflow".into())
+            })?;
+        session_allocations.push(DeepSeekV4SessionAllocation {
+            name: request.name,
+            logical_bytes: request.logical_bytes,
+            priced_bytes,
+            alignment,
+        });
+    }
+    let total_priced_upper_bytes = residency_priced_upper_bytes
+        .checked_add(session_priced_upper_bytes)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("total priced Metal byte count overflow".into())
+        })?;
+    total_priced_upper_bytes
+        .checked_add(DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "total priced Metal bytes plus dynamic reserve overflow".into(),
+            )
+        })?;
+    Ok(DeepSeekV4MemoryPlan {
+        residency_buffer_count,
+        residency_logical_bytes,
+        residency_priced_upper_bytes,
+        session_logical_bytes,
+        session_priced_upper_bytes,
+        total_priced_upper_bytes,
+        session_allocations,
+    })
 }
 
 fn report_for_plan(
@@ -4063,6 +5140,208 @@ mod tests {
         assert!(hca.to_string().contains("HCA publication at position 639"));
         let csa = validate_promoted_session_position(1027).unwrap_err();
         assert!(csa.to_string().contains("CSA row 256 at position 1027"));
+    }
+
+    #[test]
+    fn session_memory_inventory_is_complete_and_unique() {
+        let mut kinds = vec![AttentionKind::SlidingWindow; 2];
+        kinds.extend(std::iter::repeat_n(AttentionKind::CompressedSparse, 21));
+        kinds.extend(std::iter::repeat_n(AttentionKind::HeavilyCompressed, 20));
+        let requests = deepseek_v4_session_allocation_requests_for_kinds(&kinds).unwrap();
+        assert_eq!(requests.len(), 474);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.logical_bytes)
+                .sum::<u64>(),
+            31_962_388
+        );
+        let names = requests
+            .iter()
+            .map(|request| request.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names.len(), requests.len());
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.name.ends_with(".published"))
+                .map(|request| request.logical_bytes)
+                .sum::<u64>(),
+            12_124_160
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .find(|request| request.name == "raw_cache")
+                .unwrap()
+                .logical_bytes,
+            5_636_096
+        );
+    }
+
+    #[test]
+    fn memory_plan_admission_and_reconciliation_fail_closed() {
+        let plan = DeepSeekV4MemoryPlan {
+            residency_buffer_count: 4,
+            residency_logical_bytes: 900,
+            residency_priced_upper_bytes: 1_000,
+            session_logical_bytes: 400,
+            session_priced_upper_bytes: 500,
+            total_priced_upper_bytes: 1_500,
+            session_allocations: Vec::new(),
+        };
+        let required = plan.required_with_reserve_bytes().unwrap();
+        let baseline = 100_u64;
+        let exact = plan.admission(MetalMemorySignals {
+            recommended_max_bytes: baseline + required,
+            current_allocated_bytes: baseline,
+            process_limit_remaining_bytes: Some(0),
+        });
+        assert!(exact.admitted);
+        assert_eq!(
+            exact.reason,
+            crate::metal::MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
+        );
+        let short = plan.admission(MetalMemorySignals {
+            recommended_max_bytes: baseline + required - 1,
+            current_allocated_bytes: baseline,
+            process_limit_remaining_bytes: Some(0),
+        });
+        assert!(!short.admitted);
+        assert_eq!(
+            short.reason,
+            crate::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient
+        );
+
+        let reconciliation = plan
+            .reconcile(DeepSeekV4MemorySamples {
+                before_residency_bytes: baseline,
+                after_residency_bytes: baseline + 1_000,
+                after_session_bytes: baseline + 1_500,
+                after_first_forward_bytes: baseline + required,
+            })
+            .unwrap();
+        assert_eq!(reconciliation.observed_residency_delta_bytes, 1_000);
+        assert_eq!(reconciliation.observed_session_delta_bytes, 1_500);
+        assert_eq!(reconciliation.sampled_peak_delta_bytes, required);
+        let error = plan
+            .reconcile_session(baseline, baseline + 999, baseline + 1_500)
+            .unwrap_err();
+        assert!(error.to_string().contains("session increment"));
+        let error = plan
+            .reconcile(DeepSeekV4MemorySamples {
+                before_residency_bytes: baseline,
+                after_residency_bytes: baseline + 1_000,
+                after_session_bytes: baseline + 1_500,
+                after_first_forward_bytes: baseline + required + 1,
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("first forward delta"));
+    }
+
+    #[test]
+    fn retained_plan_preflight_rejects_descriptor_and_window_drift() {
+        let tensors = vec![f32_desc("a", 0), f32_desc("b", 32)];
+        let requests = tensors.iter().collect::<Vec<_>>();
+        let plan = plan_retained_storage(&[131_072], &requests, 4_096, 65_536, 32).unwrap();
+        validate_retained_plan_geometry(4_096, 65_536, &[131_072], &tensors, &plan).unwrap();
+
+        let mut descriptor_drift = plan.clone();
+        descriptor_drift.entries[1].data_offset += 32;
+        let error =
+            validate_retained_plan_geometry(4_096, 65_536, &[131_072], &tensors, &descriptor_drift)
+                .unwrap_err();
+        assert!(error.to_string().contains("descriptor drift"));
+
+        let mut window_drift = plan;
+        window_drift.windows[0].length = 135_168;
+        let error =
+            validate_retained_plan_geometry(4_096, 65_536, &[131_072], &tensors, &window_drift)
+                .unwrap_err();
+        assert!(error.to_string().contains("window 0"));
+
+        let plan = plan_retained_storage(&[131_072], &requests, 4_096, 65_536, 32).unwrap();
+        let mut usable_window_drift = plan.clone();
+        usable_window_drift.usable_window_length -= 4_096;
+        let error = validate_retained_plan_geometry(
+            4_096,
+            65_536,
+            &[131_072],
+            &tensors,
+            &usable_window_drift,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("geometry changed"));
+
+        let mut view_drift = plan;
+        let RetainedStorageDisposition::View { buffer_offset, .. } =
+            &mut view_drift.entries[0].disposition
+        else {
+            panic!("expected retained view");
+        };
+        *buffer_offset += 1;
+        let error =
+            validate_retained_plan_geometry(4_096, 65_536, &[131_072], &tensors, &view_drift)
+                .unwrap_err();
+        assert!(error.to_string().contains("window binding"));
+
+        let alias_tensors = vec![f32_desc("source", 0), f32_desc("alias", 0)];
+        let alias_requests = alias_tensors.iter().collect::<Vec<_>>();
+        let mut alias_plan =
+            plan_retained_storage(&[131_072], &alias_requests, 4_096, 65_536, 32).unwrap();
+        alias_plan.entries[1].disposition = RetainedStorageDisposition::Alias {
+            source_request_index: 1,
+        };
+        let error =
+            validate_retained_plan_geometry(4_096, 65_536, &[131_072], &alias_tensors, &alias_plan)
+                .unwrap_err();
+        assert!(error.to_string().contains("non-prior source"));
+
+        let tail_tensors = vec![f32_desc("tail", 131_072)];
+        let tail_requests = tail_tensors.iter().collect::<Vec<_>>();
+        let tail_plan =
+            plan_retained_storage(&[131_120], &tail_requests, 4_096, 65_536, 32).unwrap();
+        assert!(matches!(
+            tail_plan.entries[0].disposition,
+            RetainedStorageDisposition::CopyFallback {
+                reason: RetainedStorageFallback::FinalPartialPage
+            }
+        ));
+        validate_retained_plan_geometry(4_096, 65_536, &[131_120], &tail_tensors, &tail_plan)
+            .unwrap();
+        let error =
+            validate_retained_plan_geometry(4_096, 65_536, &[135_168], &tail_tensors, &tail_plan)
+                .unwrap_err();
+        assert!(error.to_string().contains("final-partial-page fallback"));
+    }
+
+    #[test]
+    fn descriptor_fingerprints_cover_representation_not_just_storage_range() {
+        let tensors = vec![f32_desc("a", 0), f32_desc("b", 32)];
+        let fingerprints = tensors
+            .iter()
+            .map(DeepSeekV4DescriptorFingerprint::from)
+            .collect::<Vec<_>>();
+        validate_descriptor_fingerprints(&tensors, &fingerprints).unwrap();
+
+        let mut dtype_drift = tensors.clone();
+        dtype_drift[0].dtype = GgmlType::I32;
+        let error = validate_descriptor_fingerprints(&dtype_drift, &fingerprints).unwrap_err();
+        assert!(error.to_string().contains("fingerprint changed"));
+
+        let mut shape_drift = tensors;
+        shape_drift[1].shape = vec![4, 2];
+        let error = validate_descriptor_fingerprints(&shape_drift, &fingerprints).unwrap_err();
+        assert!(error.to_string().contains("fingerprint changed"));
+    }
+
+    #[test]
+    fn session_lookup_storage_rejects_unsupported_dtypes_before_residency() {
+        validate_session_lookup_dtypes(GgmlType::Q6_K, GgmlType::Q6_K).unwrap();
+        let embedding = validate_session_lookup_dtypes(GgmlType::F32, GgmlType::Q6_K).unwrap_err();
+        assert!(embedding.to_string().contains("token_embd.weight"));
+        let output = validate_session_lookup_dtypes(GgmlType::Q6_K, GgmlType::F32).unwrap_err();
+        assert!(output.to_string().contains("output.weight"));
     }
 
     #[test]

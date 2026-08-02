@@ -572,21 +572,26 @@ Gate:
   513 as the next index and retaining all completed position-512 logit bits.
   As above, full-logit agreement is claimed only at named fixture positions.
 
-S4 remains open for the fifth boundary at positions 639/640, named full-layer
-intermediate states, and batched prefill. Those are extension and prefill gates;
-they do not block the bounded singleton-decode generation slice.
+Further HCA promotion will not repeat a mechanical fixture campaign at every
+128-token boundary. The next extension gate generalizes production-width
+compressor, wrapped-ring, publication, and visibility properties through HCA
+row 7, then spends one full-model oracle endpoint at position 1024. Named
+full-layer intermediate states remain useful for an actual divergence. Batched
+prefill is a separate product-path gate; neither blocks the bounded
+singleton-decode generation slice.
 
 ### S5: full 0731 target generation
 
-Status: bounded raw CLI slice promoted on 2026-08-02. The release `qwen`
-binary now opens the split GGUF once, dispatches `deepseek4` outside the Qwen
-model binder, constructs the native JoyAI tokenizer and strict Metal residency,
-forwards every raw prompt token, and reuses the common sampler and
-producer-declared stop-token contract. Generated pieces are written as exact
-token bytes without a synthetic stdout newline. Chat templates, batched
-requests, prompt lookup, prefill controls, and prefix/checkpoint caches fail
-before residency rather than being silently ignored, including when a
-value-bearing option is explicitly supplied at its Qwen default.
+Status: bounded raw CLI and resident-memory admission slices promoted on
+2026-08-02. The release `qwen` binary now opens the split GGUF once, dispatches
+`deepseek4` outside the Qwen model binder, constructs the native JoyAI tokenizer
+and strict Metal residency, forwards every raw prompt token, and reuses the
+common sampler and producer-declared stop-token contract. Generated pieces are
+written as exact token bytes without a synthetic stdout newline. Chat
+templates, batched requests, prompt lookup, prefill controls, and
+prefix/checkpoint caches fail before residency rather than being silently
+ignored, including when a value-bearing option is explicitly supplied at its
+Qwen default.
 
 The CLI reserves `prompt_tokens + max_generated_tokens - 1` forwards before
 Metal residency or any token execution. This mirrors the generator's
@@ -639,23 +644,53 @@ Gate:
 - Intermediate bisect can isolate any divergence to one layer and operation.
 - Repeated runs are deterministic under the same host-validity contract used
   by Qwen benchmarks.
-- Explicit IQ3 peak-resident plus scratch accounting remains an admission gate;
-  no reliance on swap is allowed for the resident target.
+- Allocation-free planning inventories 7 resident buffers (3 retained no-copy
+  windows and 4 final-page copies) at 102,994,608,640 priced bytes and 474
+  unique session buffers at 31,962,388 priced bytes. The total is
+  103,026,571,028 bytes; a 536,870,912-byte dynamic reserve makes the admission
+  requirement 103,563,441,940 bytes.
+- The load plan freezes configuration plus every descriptor's name, shape,
+  dtype, shard, offset, and byte length. Realization revalidates those values,
+  fallback policy, all view/alias/window geometry, and a deterministic planner
+  rebuild before refreshing admission at the last allocation-free point.
+- On the target M4 Max, Metal reported 126,701,535,232 recommended bytes and a
+  475,136-byte baseline, giving 126,701,060,096 bytes of working-set headroom.
+  The process signal was `Some(0)`, the established omitted-limit convention,
+  so the explicit reason was `admitted_process_budget_omitted`.
+- Live phase reconciliation observed 102,994,608,128 residency bytes and
+  103,026,491,392 cumulative bytes after both session construction and first
+  forward. Residency and session must fit their priced inventories without the
+  reserve; only the first-forward endpoint gate may use the reserve. Residency
+  is reconciled inside realization, before an unaccounted resident handle can
+  be returned.
+- A release `qwen -p A -n 1` run generated oracle ID 201 in 0.716 seconds of
+  prompt execution. `vm_stat` pageouts, swapins, and swapouts were unchanged;
+  `vm.swapusage` remained 1,825.94 MiB before and after; and `/usr/bin/time`
+  reported zero swaps. This proves no incremental swap in that run, not that
+  the host began swap-free.
 
-S5 remains open for explicit peak-memory admission. The bounded raw and
-ordinary-message slices now establish first-class native inference through
-every full-session differential promoted so far. Rich tools/reasoning are
-product extensions, not prerequisites for the minimum ordinary prompt-encoder
-gate.
+The pricing contract is validated on this Apple M4 Max using shared-buffer
+`heapBufferSizeAndAlign` results and the current no-copy mapping behavior; it is
+not yet a portable Metal guarantee. Reconciliation samples phase endpoints and
+therefore does not observe a transient allocation that is created and released
+between samples. Admission is also not an atomic reservation against another
+process allocating on the same device. The 512 MiB reserve and fail-closed
+phase checks are the current operational protection for those limits.
+
+The bounded raw and ordinary-message slices now establish first-class native
+inference and resident-memory admission through every full-session differential
+promoted so far. Rich tools/reasoning are product extensions, not prerequisites
+for the minimum ordinary prompt-encoder gate.
 
 ### S6: Metal performance promotion
 
-Only after S5 exactness:
+After bounded S5 correctness and memory admission:
 
 - Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, shared-KV
   sparse attention, and high-value MoE boundaries.
-- Implement real batched prefill; repeated single-token decode is not an
+- Implement real layer-major batched prefill first, within the already-promoted
+  positions 0-512. Repeated single-token decode is correctness evidence, not an
   acceptable prompt path.
 
 Gates:
@@ -714,10 +749,14 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Capture retained-interval controls at positions 513 and 638, then promote
-   the fifth HCA publication and continuation at positions 639/640.
-2. Implement sparse CSA index scoring/top-512 selection before compressed
-   history exceeds 512 rows, and extend slab ownership before the current CSA
-   row-256 allocation guard at position 1027.
-3. Extend the 0731 message encoder to reasoning and DSML tools only with exact
+1. Implement a real layer-major batched prefill path inside the promoted
+   positions 0-512, with singleton equivalence at named CSA/HCA boundaries and
+   the existing request-wide fail-closed capacity check.
+2. Generalize production-width HCA compressor, wrapped-ring, publication, and
+   visibility coverage through row 7, then use one pinned full-model endpoint
+   at position 1024 instead of collecting every intermediate boundary.
+3. Keep position 1027 fail-closed. Promote compressed-history slab growth as a
+   separate ownership milestone, then implement sparse CSA index scoring and
+   top-512 selection before history can exceed 512 rows.
+4. Extend the 0731 message encoder to reasoning and DSML tools only with exact
    release-derived byte fixtures and an end-to-end tool-call workload.

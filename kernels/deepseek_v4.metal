@@ -52,12 +52,24 @@ struct ds4_local_attention_args {
     uint window;
     uint raw_count;
     uint raw_start;
+    uint compressed_count;
     float scale;
 };
 
 struct ds4_compressor_frontier_args {
     uint width;
     uint row_offset;
+};
+
+struct ds4_compressor_pool_args {
+    uint ratio;
+    uint head_dim;
+    uint width;
+    uint rows;
+};
+
+struct ds4_compressor_roll_args {
+    uint width;
 };
 
 static inline float ds4_bf16_roundtrip(float value) {
@@ -176,12 +188,13 @@ kernel void kernel_deepseek_v4_rope_tail_adjacent_in_place(
     values[second_index] = first * sine + second * cosine;
 }
 
-kernel void kernel_deepseek_v4_local_sink_attention_f16(
+kernel void kernel_deepseek_v4_dense_sink_attention_f16(
         constant ds4_local_attention_args & args [[buffer(0)]],
         device const float * queries [[buffer(1)]],
         device const half * raw_cache [[buffer(2)]],
-        device const float * sinks [[buffer(3)]],
-        device float * output [[buffer(4)]],
+        device const half * compressed_cache [[buffer(3)]],
+        device const float * sinks [[buffer(4)]],
+        device float * output [[buffer(5)]],
         uint index [[thread_position_in_grid]]) {
     const uint width = args.head_count * args.head_dim;
     if (index >= width) return;
@@ -199,6 +212,14 @@ kernel void kernel_deepseek_v4_local_sink_attention_f16(
         }
         maximum = max(maximum, score * args.scale);
     }
+    for (uint row = 0u; row < args.compressed_count; ++row) {
+        const uint cache_start = row * args.head_dim;
+        float score = 0.0f;
+        for (uint inner = 0u; inner < args.head_dim; ++inner) {
+            score += queries[query_start + inner] * float(compressed_cache[cache_start + inner]);
+        }
+        maximum = max(maximum, score * args.scale);
+    }
 
     float denominator = exp(sinks[head] - maximum);
     float value = 0.0f;
@@ -212,6 +233,16 @@ kernel void kernel_deepseek_v4_local_sink_attention_f16(
         const float mass = exp(score * args.scale - maximum);
         denominator += mass;
         value += float(raw_cache[cache_start + dimension]) * mass;
+    }
+    for (uint row = 0u; row < args.compressed_count; ++row) {
+        const uint cache_start = row * args.head_dim;
+        float score = 0.0f;
+        for (uint inner = 0u; inner < args.head_dim; ++inner) {
+            score += queries[query_start + inner] * float(compressed_cache[cache_start + inner]);
+        }
+        const float mass = exp(score * args.scale - maximum);
+        denominator += mass;
+        value += float(compressed_cache[cache_start + dimension]) * mass;
     }
     output[index] = value / denominator;
 }
@@ -228,6 +259,88 @@ kernel void kernel_deepseek_v4_compressor_frontier_write(
     const uint destination = args.row_offset + index;
     kv_state[destination] = projected_kv[index];
     score_state[destination] = projected_score[index] + ape[index];
+}
+
+kernel void kernel_deepseek_v4_compressor_pool(
+        constant ds4_compressor_pool_args & args [[buffer(0)]],
+        device const float * kv_state [[buffer(1)]],
+        device const float * score_state [[buffer(2)]],
+        device float * output [[buffer(3)]],
+        uint dimension [[thread_position_in_grid]]) {
+    if (dimension >= args.head_dim) return;
+    float maximum = -INFINITY;
+    if (args.ratio == 4u) {
+        for (uint row = 0u; row < 4u; ++row) {
+            maximum = max(maximum, score_state[row * args.width + dimension]);
+            maximum = max(
+                maximum,
+                score_state[(4u + row) * args.width + args.head_dim + dimension]);
+        }
+    } else {
+        for (uint row = 0u; row < args.rows; ++row) {
+            maximum = max(maximum, score_state[row * args.width + dimension]);
+        }
+    }
+
+    float weighted = 0.0f;
+    float denominator = 0.0f;
+    if (args.ratio == 4u) {
+        for (uint row = 0u; row < 4u; ++row) {
+            const uint previous = row * args.width + dimension;
+            const uint current = (4u + row) * args.width + args.head_dim + dimension;
+            const float previous_mass = isfinite(score_state[previous])
+                ? exp(score_state[previous] - maximum)
+                : 0.0f;
+            const float current_mass = isfinite(score_state[current])
+                ? exp(score_state[current] - maximum)
+                : 0.0f;
+            denominator += previous_mass + current_mass;
+            weighted += kv_state[previous] * previous_mass + kv_state[current] * current_mass;
+        }
+    } else {
+        for (uint row = 0u; row < args.rows; ++row) {
+            const uint source = row * args.width + dimension;
+            const float mass = isfinite(score_state[source])
+                ? exp(score_state[source] - maximum)
+                : 0.0f;
+            denominator += mass;
+            weighted += kv_state[source] * mass;
+        }
+    }
+    output[dimension] = weighted / denominator;
+}
+
+kernel void kernel_deepseek_v4_compressor_roll_ratio4(
+        constant ds4_compressor_roll_args & args [[buffer(0)]],
+        device float * kv_state [[buffer(1)]],
+        device float * score_state [[buffer(2)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint group_elements = 4u * args.width;
+    if (index >= group_elements) return;
+    kv_state[index] = kv_state[group_elements + index];
+    score_state[index] = score_state[group_elements + index];
+}
+
+kernel void kernel_deepseek_v4_hadamard_128_in_place(
+        device float * values [[buffer(0)]],
+        uint index [[thread_position_in_grid]]) {
+    if (index != 0u) return;
+    for (uint span = 1u; span < 128u; span <<= 1u) {
+        for (uint start = 0u; start < 128u; start += span << 1u) {
+            for (uint offset = 0u; offset < span; ++offset) {
+                const uint first = start + offset;
+                const uint second = first + span;
+                const float a = values[first];
+                const float b = values[second];
+                values[first] = a + b;
+                values[second] = a - b;
+            }
+        }
+    }
+    const float normalization = rsqrt(128.0f);
+    for (uint element = 0u; element < 128u; ++element) {
+        values[element] *= normalization;
+    }
 }
 
 kernel void kernel_deepseek_v4_position_zero_sink_attention(

@@ -16,6 +16,27 @@ const POSITION_TWO_ORACLE_BYTES: &[u8] =
     include_bytes!("fixtures/deepseek_v4_tokens35_201_200_position2_b10222.f32");
 const POSITION_TWO_ORACLE_MANIFEST: &str =
     include_str!("fixtures/deepseek_v4_tokens35_201_200_position2_b10222.json");
+const POSITION_THREE_GREEDY_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_tokens35_201_200_200_position3_b10222.f32");
+const POSITION_THREE_GREEDY_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_tokens35_201_200_200_position3_b10222.json");
+const POSITION_THREE_BRANCH_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_tokens35_201_200_34_position3_b10222.f32");
+const POSITION_THREE_BRANCH_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_tokens35_201_200_34_position3_b10222.json");
+const POSITION_FOUR_BRANCH_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_tokens35_201_200_34_262_position4_b10222.f32");
+const POSITION_FOUR_BRANCH_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_tokens35_201_200_34_262_position4_b10222.json");
+const POSITION_SEVEN_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_tokens35_201_200_34_35_201_200_34_position7_b10222.f32");
+const POSITION_SEVEN_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_tokens35_201_200_34_35_201_200_34_position7_b10222.json");
+const POSITION_EIGHT_ORACLE_BYTES: &[u8] = include_bytes!(
+    "fixtures/deepseek_v4_tokens35_201_200_34_35_201_200_34_35_position8_b10222.f32"
+);
+const POSITION_EIGHT_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_tokens35_201_200_34_35_201_200_34_35_position8_b10222.json");
 
 fn assert_logits_match(label: &str, logits: &[f32], oracle_bytes: &[u8], expected_argmax: usize) {
     let oracle = oracle_bytes
@@ -176,6 +197,81 @@ fn pinned_position_two_oracle_has_exact_identity() {
     );
 }
 
+#[test]
+fn pinned_csa_boundary_oracles_have_exact_identity() {
+    let fixtures = [
+        (
+            POSITION_THREE_GREEDY_ORACLE_MANIFEST,
+            POSITION_THREE_GREEDY_ORACLE_BYTES,
+            "b04c3838db9eac27161625a229d1d9b934583f18f90210947cd63692497ebb1d",
+            serde_json::json!([35, 201, 200]),
+            200,
+            3,
+            1778,
+        ),
+        (
+            POSITION_THREE_BRANCH_ORACLE_MANIFEST,
+            POSITION_THREE_BRANCH_ORACLE_BYTES,
+            "900976d50755196ee290e9385a50d93f624ea07075625cd17bbe49b777a0a8cb",
+            serde_json::json!([35, 201, 200]),
+            34,
+            3,
+            262,
+        ),
+        (
+            POSITION_FOUR_BRANCH_ORACLE_MANIFEST,
+            POSITION_FOUR_BRANCH_ORACLE_BYTES,
+            "cb2ef350438f14bd59c049f03f6e1b2fd1ec290f4c1f93734dda4d4446499ae4",
+            serde_json::json!([35, 201, 200, 34]),
+            262,
+            4,
+            63_325,
+        ),
+        (
+            POSITION_SEVEN_ORACLE_MANIFEST,
+            POSITION_SEVEN_ORACLE_BYTES,
+            "462f728f0ab8d32327794f3d252eba9eff446163c2ac8bc7569919135a973e73",
+            serde_json::json!([35, 201, 200, 34, 35, 201, 200]),
+            34,
+            7,
+            35,
+        ),
+        (
+            POSITION_EIGHT_ORACLE_MANIFEST,
+            POSITION_EIGHT_ORACLE_BYTES,
+            "4638324adc2c42423bbcbceb143f3db3700f8943ca9f0f644e8db9a8f0ad8b85",
+            serde_json::json!([35, 201, 200, 34, 35, 201, 200, 34]),
+            35,
+            8,
+            201,
+        ),
+    ];
+    for (manifest_source, vector, manifest_sha256, prompt, injected, position, argmax) in fixtures {
+        assert_eq!(
+            format!("{:x}", Sha256::digest(manifest_source.as_bytes())),
+            manifest_sha256
+        );
+        let manifest: serde_json::Value = serde_json::from_str(manifest_source).unwrap();
+        assert_eq!(manifest["schema_version"], 1);
+        assert_eq!(manifest["producer"]["effective_llama_cpp_build"], "b10222");
+        assert_eq!(manifest["request"]["prompt_token_ids"], prompt);
+        assert_eq!(manifest["request"]["injected_token_id"], injected);
+        assert_eq!(manifest["request"]["injection_position"], position);
+        assert_eq!(manifest["request"]["cache_type"], "F16");
+        assert_eq!(manifest["vector"]["element_count"], 129_280);
+        assert_eq!(manifest["vector"]["byte_count"], vector.len());
+        assert_eq!(manifest["vector"]["argmax_token_id"], argmax);
+        assert_eq!(
+            format!("{:x}", Sha256::digest(vector)),
+            manifest["vector"]["sha256"].as_str().unwrap()
+        );
+        assert_eq!(
+            manifest["reproducibility"]["repeat_vectors_byte_identical"],
+            true
+        );
+    }
+}
+
 /// Manual only: maps the 95.93 GiB model and executes all 43 native layers.
 /// This test must never be included in routine or CI test runs.
 #[test]
@@ -283,10 +379,10 @@ fn native_deepseek_v4_token_35_position_zero() {
     );
 }
 
-/// Manual only: executes the complete local-only prefix in one retained native
-/// session and compares positions one and two with b10222 F16-cache oracles.
+/// Manual only: executes through the first ratio-4 compression boundary in one
+/// retained native session and compares every continuing position with b10222.
 #[test]
-#[ignore = "manual native DS4 three-token forward maps the 95.93 GiB checkpoint"]
+#[ignore = "manual native DS4 four-token forward maps the 95.93 GiB checkpoint"]
 fn native_deepseek_v4_tokens_35_201_200_local_prefix() {
     let model_path = std::env::var_os("DSV4_MODEL")
         .map(PathBuf::from)
@@ -427,14 +523,168 @@ fn native_deepseek_v4_tokens_35_201_200_local_prefix() {
         started.elapsed().as_secs_f64()
     );
 
-    let boundary_error = match session.forward_token(&ctx, 200) {
-        Ok(_) => panic!("position three must wait for same-token CSA publication"),
-        Err(error) => error,
-    };
-    assert!(
-        boundary_error
-            .to_string()
-            .contains("stops before CSA publication at position 3")
+    session
+        .forward_token_with_progress(&ctx, 200, |layer| {
+            eprintln!(
+                "position_three layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position three");
+    assert_eq!(session.next_position(), 4);
+    let fourth_logits = session
+        .copy_logits_f32()
+        .expect("copy position-three logits");
+    assert_logits_match(
+        "position_three_greedy",
+        &fourth_logits,
+        POSITION_THREE_GREEDY_ORACLE_BYTES,
+        1778,
     );
+    eprintln!("four_token_elapsed={:.3}s", started.elapsed().as_secs_f64());
+}
+
+/// Manual only: proves same-token CSA publication on an independently pinned
+/// counterfactual branch and then advances once with the published row retained.
+#[test]
+#[ignore = "manual native DS4 five-token branch maps the 95.93 GiB checkpoint"]
+fn native_deepseek_v4_csa_boundary_and_continuation_branch() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(
+        model_path.exists(),
+        "missing DS4 model at {}",
+        model_path.display()
+    );
+
+    eprintln!("opening {}", model_path.display());
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = DeepSeekV4MetalResidency::load(&ctx, &gguf).expect("retain DS4 residency");
+    eprintln!("residency={}", residency.report());
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");
+    let started = Instant::now();
+    for token in [35, 201, 200] {
+        session.forward_token(&ctx, token).unwrap();
+    }
     assert_eq!(session.next_position(), 3);
+
+    session
+        .forward_token_with_progress(&ctx, 34, |layer| {
+            eprintln!(
+                "branch_position_three layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute branch position three");
+    assert_eq!(session.next_position(), 4);
+    let boundary_logits = session
+        .copy_logits_f32()
+        .expect("copy branch position-three logits");
+    assert_logits_match(
+        "position_three_branch",
+        &boundary_logits,
+        POSITION_THREE_BRANCH_ORACLE_BYTES,
+        262,
+    );
+
+    session
+        .forward_token_with_progress(&ctx, 262, |layer| {
+            eprintln!(
+                "branch_position_four layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute branch position four");
+    assert_eq!(session.next_position(), 5);
+    let continuation_logits = session
+        .copy_logits_f32()
+        .expect("copy branch position-four logits");
+    assert_logits_match(
+        "position_four_branch",
+        &continuation_logits,
+        POSITION_FOUR_BRANCH_ORACLE_BYTES,
+        63_325,
+    );
+    eprintln!(
+        "five_token_branch_elapsed={:.3}s",
+        started.elapsed().as_secs_f64()
+    );
+}
+
+/// Manual only: reaches the second ratio-4 boundary to prove that the first
+/// overlap roll remains exact through another publication and continuation.
+#[test]
+#[ignore = "manual native DS4 nine-token branch maps the 95.93 GiB checkpoint"]
+fn native_deepseek_v4_second_csa_boundary_and_continuation() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(
+        model_path.exists(),
+        "missing DS4 model at {}",
+        model_path.display()
+    );
+
+    eprintln!("opening {}", model_path.display());
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = DeepSeekV4MetalResidency::load(&ctx, &gguf).expect("retain DS4 residency");
+    eprintln!("residency={}", residency.report());
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");
+    let started = Instant::now();
+    for token in [35, 201, 200, 34, 35, 201, 200] {
+        session.forward_token(&ctx, token).unwrap();
+    }
+    assert_eq!(session.next_position(), 7);
+
+    session
+        .forward_token_with_progress(&ctx, 34, |layer| {
+            eprintln!(
+                "position_seven layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position seven");
+    assert_eq!(session.next_position(), 8);
+    let boundary_logits = session
+        .copy_logits_f32()
+        .expect("copy position-seven logits");
+    assert_logits_match(
+        "position_seven",
+        &boundary_logits,
+        POSITION_SEVEN_ORACLE_BYTES,
+        35,
+    );
+
+    session
+        .forward_token_with_progress(&ctx, 35, |layer| {
+            eprintln!(
+                "position_eight layer={}/43 elapsed={:.3}s",
+                layer + 1,
+                started.elapsed().as_secs_f64()
+            );
+        })
+        .expect("execute native position eight");
+    assert_eq!(session.next_position(), 9);
+    let continuation_logits = session
+        .copy_logits_f32()
+        .expect("copy position-eight logits");
+    assert_logits_match(
+        "position_eight",
+        &continuation_logits,
+        POSITION_EIGHT_ORACLE_BYTES,
+        201,
+    );
+    eprintln!(
+        "nine_token_branch_elapsed={:.3}s",
+        started.elapsed().as_secs_f64()
+    );
 }

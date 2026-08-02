@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs",
+  "model_shards_sha256": [
+    "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a",
+    "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd",
+    "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
+    "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
+  ],
+  "producer": {
+    "llm_commit": "5641ae56ecbcb24fa2b3f10d72c3498136a01d08",
+    "llama_core_commit": "b1cd3a914175adedcc976388c7c638d9a2f9a189",
+    "llama_cpp_rs_commit": "553b8e4501c57c1be08a83b6b54e549a614df162",
+    "llama_cpp_commit": "8621ac725a0b6892ae44ea33377f14b6a7e0ebdf",
+    "effective_llama_cpp_build": "b10222",
+    "backend": "Metal",
+    "platform": "Apple M4 Max",
+    "captured_at": "2026-08-02"
+  },
+  "request": {
+    "branch": "counterfactual_boundary_greedy_continuation",
+    "raw_prompt": "A\n\t@",
+    "prompt_token_ids": [35, 201, 200, 34],
+    "injected_token_id": 262,
+    "injection_position": 4,
+    "context_size": 512,
+    "cache_type": "F16",
+    "seed": 42,
+    "temperature": 0.0,
+    "command": "llm --model MODEL --context 512 --raw --snapshot OUT --snapshot-id token35_201_200_34_262 --inject-token-id 262 --seed 42 --temp 0 --repeat 2 --snapshot-top-k 10 $'A\\n\\t@'"
+  },
+  "vector": {
+    "file": "deepseek_v4_tokens35_201_200_34_262_position4_b10222.f32",
+    "encoding": "f32-le",
+    "element_count": 129280,
+    "byte_count": 517120,
+    "sha256": "d9917c186993c547e4c300e777310d71e8ccf00c301d1833145b5743527df19b",
+    "argmax_token_id": 63325,
+    "argmax_logit": 17.883976
+  },
+  "reproducibility": {
+    "fresh_session_repeats": 2,
+    "repeat_vectors_byte_identical": true,
+    "boundary_fixture": "deepseek_v4_tokens35_201_200_34_position3_b10222.f32"
+  }
+}

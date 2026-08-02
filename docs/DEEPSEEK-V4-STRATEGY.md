@@ -341,8 +341,11 @@ support:
 The CPU transaction stages one bounded compressor candidate per compressed
 layer so rollback is structurally simple. That copies roughly the complete set
 of compressor frontiers per token and is intentionally not the Metal execution
-plan. A production `DeepSeekV4Session` must use preallocated deltas, shadow
-banks, or command-buffer ordering while preserving the same commit contract.
+plan. A resumable production session must use preallocated deltas or shadow
+banks to preserve rollback. The current Metal correctness session instead sets
+a poison bit before its first mutation and is deliberately fail-stop: any
+incomplete token makes the session permanently non-retryable rather than
+presenting partially committed state as reusable.
 
 Tests cover same-token positions 3/127/255, post-boundary phases 4/128/256,
 local-ring wrap, late failure and retry, exact storage round trips, empty and
@@ -360,7 +363,7 @@ before packed-cache promotion; it does not create an accelerator requirement.
 
 ### S2: local-only Metal backbone
 
-Status: promoted for sequential positions 0 and 1 on 2026-08-02. The native
+Status: promoted for sequential positions 0 through 2 on 2026-08-02. The native
 `DeepSeekV4MetalResidency` and `DeepSeekV4Session` execute the local branch of
 all 43 layers, not a truncated model: embedding, both mHC surrounds, shared-KV
 attention, routed and shared MoE, final HC collapse, output norm, and the full
@@ -375,9 +378,9 @@ contract rather than being silently substituted for the maintained F16 oracle.
 
 Every CSA attention/indexer and HCA attention compressor projection now runs
 from position zero and writes its F32 KV plus APE-adjusted score frontier. No
-compressed row is published early. This makes position 3 implementable from
-retained state without replay, while the session fails closed before that first
-unsupported same-token publication boundary.
+compressed row is published early. This made position 3 implementable from
+retained state without replay and closed S2 without speculating about visibility
+at the first compression boundary.
 
 Gate:
 
@@ -389,8 +392,7 @@ Gate:
   0.000233142, and max absolute error 0.001331806 across all logits.
 - Extending the exact sequence to `[35, 201, 200]` matches position 2 with
   argmax 200, cosine 0.999999993, relative RMS 0.000124235, mean absolute error
-  0.000534181, and max absolute error 0.002157211. The next call fails closed at
-  position 3 until same-token CSA publication is implemented.
+  0.000534181, and max absolute error 0.002157211.
 - Focused release differentials cover adjacent local and scaled YaRN RoPE,
   inverse RoPE, ordered F32-to-F16 same-token cache insertion, sink attention,
   and ratio-4 frontier lane plus APE semantics.
@@ -403,21 +405,38 @@ feedback for this family-isolated correctness checkpoint.
 
 ### S3: CSA lane
 
-Complete ratio-4 overlap pooling from the retained frontier, compressed
-attention-cache insertion, the parallel indexer compressor, and dense-all CSA
-attention. The indexer score/top-512 path can follow after dense-all is correct;
-with one visible compressed row at position 3, selection is initially trivial.
-Before implementing that path, freeze b10222 full-vocabulary fixtures at
-positions 3 and 4. Position 3 empirically arbitrates same-token compressed-row
-visibility; position 4 proves the first post-publication continuation.
+Status: dense-all baseline promoted through positions 3, 4, 7, and 8 on
+2026-08-02. Before implementation, exact-token b10222 full-vocabulary fixtures
+at positions 3 and 4 arbitrated same-token visibility and first continuation.
+The second-boundary fixtures at positions 7 and 8 then made overlap roll a live
+model differential rather than an operation-only claim. Every fixture has two
+byte-identical fresh-session captures, full shard hashes, and pinned producer
+commits.
+
+The native lane now performs ratio-4 two-branch pooling, learned RMSNorm,
+block-start adjacent-pair RoPE, F16 compressed-row publication, overlap roll,
+and one denominator-only-sink softmax over local raw rows plus every completed
+compressed row. The parallel indexer compressor publishes its normalized
+Hadamard row, but index scoring and top-512 selection remain deferred while the
+history is below 512 rows and dense-all is definitionally equivalent. The
+session fails closed before position 127, the first unvalidated HCA publication.
 
 Gate:
 
-- Overlap state matches across positions 3/4, 7/8, and snapshot restore.
-- The row completed by position 3 is visible to that same token and no earlier
-  token.
-- When compressed rows are at most 512, dense-all and selected paths agree.
-- Indexer scores and selected IDs match before comparing sparse attention.
+- Counterfactual sequence `[35, 201, 200, 34]` matches position 3 with argmax
+  262, cosine 0.999999994, and relative RMS 0.000110039; extending with token
+  262 matches position 4 with argmax 63,325, cosine 0.999999947, and relative
+  RMS 0.000335451.
+- Exact sequence `[35, 201, 200, 34, 35, 201, 200, 34]` matches the second
+  boundary at position 7 with argmax 35, cosine 0.999999987, and relative RMS
+  0.000162616; extending with token 35 matches position 8 with argmax 201,
+  cosine 0.999999983, and relative RMS 0.000199262.
+- Focused release operation gates match ratio-4 frontier publication and roll,
+  normalized Hadamard-128, and same-token dense CSA against independent CPU
+  oracles.
+- Snapshot restore, dense-all versus selected-path equivalence at scale, and
+  indexer score/ID differentials remain promotion requirements for sparse CSA;
+  they are not blockers for the validated dense-all baseline.
 
 ### S4: HCA lane
 

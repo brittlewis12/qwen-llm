@@ -23,10 +23,10 @@ pub const DEEPSEEK_V4_CONNECTION_COUNT: usize = 4;
 pub const DEEPSEEK_V4_HC_PARAMETER_COUNT: usize = 24;
 pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
 /// Number of token forwards traversed by the longest retained-session
-/// differential, through the position-384 third-HCA continuation. Callers use
+/// differential, through the position-512 fourth-HCA continuation. Callers use
 /// this to reject requests before streaming beyond the current evidence
 /// boundary.
-pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 385;
+pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 513;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeepSeekV4MetalError {
@@ -166,7 +166,7 @@ const DEEPSEEK_V4_LOCAL_WINDOW: usize = 128;
 const DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS: usize = 256;
 const DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION: u32 =
     DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32;
-const DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY: u32 = 511;
+const DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY: u32 = 639;
 const DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY: u32 =
     ((DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS + 1) * 4 - 1) as u32;
 
@@ -183,7 +183,7 @@ fn validate_promoted_session_position(position: u32) -> Result<(), DeepSeekV4Met
     }
     if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION {
         return invalid(format!(
-            "native session stops after the promoted third-HCA continuation at position 384; next position is {position}"
+            "native session stops after the promoted fourth-HCA continuation at position 512; next position is {position}"
         ));
     }
     Ok(())
@@ -203,8 +203,8 @@ pub enum DeepSeekV4AttentionCacheContract {
 
 /// Native qwen-owned DeepSeek V4 decode session.
 ///
-/// Dense-all CSA and three HCA rows are promoted through the position-384
-/// continuation. The session fails closed before position 385 until the next
+/// Dense-all CSA and four HCA rows are promoted through the position-512
+/// continuation. The session fails closed before position 513 until the next
 /// retained interval earns its own differential.
 pub struct DeepSeekV4Session {
     residency: DeepSeekV4MetalResidency,
@@ -4051,16 +4051,16 @@ mod tests {
     }
 
     #[test]
-    fn session_position_guard_stops_after_third_hca_and_at_later_boundaries() {
-        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 385);
+    fn session_position_guard_stops_after_fourth_hca_and_at_later_boundaries() {
+        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 513);
         validate_promoted_session_position((DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY - 1) as u32)
             .unwrap();
         let continuation =
             validate_promoted_session_position(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32)
                 .unwrap_err();
-        assert!(continuation.to_string().contains("next position is 385"));
-        let hca = validate_promoted_session_position(511).unwrap_err();
-        assert!(hca.to_string().contains("HCA publication at position 511"));
+        assert!(continuation.to_string().contains("next position is 513"));
+        let hca = validate_promoted_session_position(639).unwrap_err();
+        assert!(hca.to_string().contains("HCA publication at position 639"));
         let csa = validate_promoted_session_position(1027).unwrap_err();
         assert!(csa.to_string().contains("CSA row 256 at position 1027"));
     }
@@ -4941,7 +4941,7 @@ mod tests {
         let norm_values = (0..HEAD_DIM)
             .map(|index| 0.49 + (index % 29) as f32 * 0.021)
             .collect::<Vec<_>>();
-        let input_values = (0..3 * RATIO)
+        let input_values = (0..4 * RATIO)
             .map(|position| {
                 (0..HIDDEN)
                     .map(|dimension| {
@@ -5368,6 +5368,158 @@ mod tests {
             1e-3,
         );
         assert!(published[3 * HEAD_DIM..].iter().all(|value| *value == 0.0));
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for position in 3 * RATIO..4 * RATIO - 1 {
+            let values = &input_values[position];
+            let projected_kv = mat_vec(&kv_weights, HIDDEN, HEAD_DIM, values).unwrap();
+            let projected_scores = mat_vec(&score_weights, HIDDEN, HEAD_DIM, values).unwrap();
+            let emitted = oracle
+                .push_projected(
+                    position as u32,
+                    &projected_kv,
+                    &projected_scores,
+                    &ape_values,
+                    &norm_values,
+                    rms_eps,
+                    oracle_rope,
+                )
+                .unwrap();
+            assert!(emitted.is_none());
+            frontier
+                .encode(
+                    &ctx,
+                    &encoder,
+                    &inputs[position],
+                    &kv_weight,
+                    &score_weight,
+                    &ape,
+                    &norm,
+                    position as u32,
+                    HIDDEN,
+                    rope,
+                    rms_eps,
+                )
+                .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "fourth pre-boundary command failed: {:?}",
+            command.error()
+        );
+        assert_eq!(frontier.published_count(510), 3);
+        let published = read_f16(&frontier.published);
+        assert_close(
+            "ratio-128 row 0 before fourth publication",
+            &published[..HEAD_DIM],
+            &expected_first,
+            1e-3,
+        );
+        assert_close(
+            "ratio-128 row 1 before fourth publication",
+            &published[HEAD_DIM..2 * HEAD_DIM],
+            &expected_second,
+            1e-3,
+        );
+        assert_close(
+            "ratio-128 row 2 before fourth publication",
+            &published[2 * HEAD_DIM..3 * HEAD_DIM],
+            &expected_third,
+            1e-3,
+        );
+        assert!(published[3 * HEAD_DIM..].iter().all(|value| *value == 0.0));
+
+        let position = 4 * RATIO - 1;
+        let projected_kv = mat_vec(&kv_weights, HIDDEN, HEAD_DIM, &input_values[position]).unwrap();
+        let projected_scores =
+            mat_vec(&score_weights, HIDDEN, HEAD_DIM, &input_values[position]).unwrap();
+        let expected_fourth = oracle
+            .push_projected(
+                position as u32,
+                &projected_kv,
+                &projected_scores,
+                &ape_values,
+                &norm_values,
+                rms_eps,
+                oracle_rope,
+            )
+            .unwrap()
+            .expect("position 511 must publish");
+        assert_eq!(expected_fourth.start_position, 384);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        frontier
+            .encode(
+                &ctx,
+                &encoder,
+                &inputs[position],
+                &kv_weight,
+                &score_weight,
+                &ape,
+                &norm,
+                position as u32,
+                HIDDEN,
+                rope,
+                rms_eps,
+            )
+            .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "fourth boundary command failed: {:?}",
+            command.error()
+        );
+
+        assert_eq!(frontier.published_count(511), 4);
+        assert_close(
+            "ratio-128 fourth-boundary KV state",
+            &read_f32(&frontier.kv_state),
+            oracle.kv_state(),
+            4e-5,
+        );
+        assert_close(
+            "ratio-128 fourth-boundary score state",
+            &read_f32(&frontier.score_state),
+            oracle.score_state(),
+            4e-5,
+        );
+        let expected_fourth = expected_fourth
+            .value
+            .into_iter()
+            .map(|value| half::f16::from_f32(value).to_f32())
+            .collect::<Vec<_>>();
+        let published = read_f16(&frontier.published);
+        assert_close(
+            "ratio-128 retained row 0 after fourth publication",
+            &published[..HEAD_DIM],
+            &expected_first,
+            1e-3,
+        );
+        assert_close(
+            "ratio-128 retained row 1 after fourth publication",
+            &published[HEAD_DIM..2 * HEAD_DIM],
+            &expected_second,
+            1e-3,
+        );
+        assert_close(
+            "ratio-128 retained row 2 after fourth publication",
+            &published[2 * HEAD_DIM..3 * HEAD_DIM],
+            &expected_third,
+            1e-3,
+        );
+        assert_close(
+            "ratio-128 published row 3",
+            &published[3 * HEAD_DIM..4 * HEAD_DIM],
+            &expected_fourth,
+            1e-3,
+        );
+        assert!(published[4 * HEAD_DIM..].iter().all(|value| *value == 0.0));
     }
 
     #[test]
@@ -5432,12 +5584,13 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let compressed_rows = (0..3)
+        let compressed_rows = (0..4)
             .flat_map(|row| {
                 (0..HEAD_DIM).map(move |dimension| match row {
                     0 => 0.52 - (dimension % 17) as f32 * 0.004,
                     1 => -0.41 + (dimension % 19) as f32 * 0.005,
-                    _ => 0.33 - (dimension % 23) as f32 * 0.006,
+                    2 => 0.33 - (dimension % 23) as f32 * 0.006,
+                    _ => -0.28 + (dimension % 29) as f32 * 0.004,
                 })
             })
             .collect::<Vec<_>>();
@@ -5463,7 +5616,7 @@ mod tests {
             HEADS,
             HEAD_DIM,
             &raw_rows,
-            &compressed_rows[..2 * HEAD_DIM],
+            &compressed_rows[..3 * HEAD_DIM],
             None,
             &sinks,
         )
@@ -5481,7 +5634,7 @@ mod tests {
             expected
                 .iter()
                 .zip(&prior_rows)
-                .any(|(three_rows, prior)| (three_rows - prior).abs() > 1e-2),
+                .any(|(four_rows, prior)| (four_rows - prior).abs() > 1e-2),
             "fixture must make the newest compressed row materially visible"
         );
 
@@ -5499,7 +5652,7 @@ mod tests {
             .chunks_exact(HEAD_DIM)
             .map(|row| offset_f32(&ctx, row, vec![HEAD_DIM as u64]))
             .collect::<Vec<_>>();
-        let compressed_source = offset_f32(&ctx, &compressed_rows, vec![HEAD_DIM as u64, 3]);
+        let compressed_source = offset_f32(&ctx, &compressed_rows, vec![HEAD_DIM as u64, 4]);
         let output = offset_f32(
             &ctx,
             &vec![0.0; HEADS * HEAD_DIM],
@@ -5524,7 +5677,7 @@ mod tests {
             &compressed_source,
             &compressed_cache,
             0,
-            3 * HEAD_DIM,
+            4 * HEAD_DIM,
         )
         .unwrap();
         encode_dense_sink_attention_f16(
@@ -5534,7 +5687,7 @@ mod tests {
             &raw_cache,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed_cache,
-                count: 3,
+                count: 4,
             }),
             &sink_tensor,
             &output,
@@ -5551,7 +5704,7 @@ mod tests {
             command.error()
         );
         assert_close(
-            "three-row dense compressed attention",
+            "four-row dense compressed attention",
             &read_f32(&output),
             &expected,
             4e-5,
@@ -5559,13 +5712,13 @@ mod tests {
     }
 
     #[test]
-    fn dense_attention_matches_wrapped_third_hca_geometries() {
+    fn dense_attention_matches_wrapped_promoted_hca_geometries() {
         let Some(ctx) = metal_context() else {
             return;
         };
         const HEADS: usize = 2;
         const HEAD_DIM: usize = 512;
-        const COMPRESSED_ROWS: usize = 96;
+        const COMPRESSED_ROWS: usize = 128;
         let config = DeepSeekV4PositionZeroAttentionConfig {
             hidden_size: 1,
             q_lora_rank: 1,
@@ -5578,9 +5731,14 @@ mod tests {
         let sinks = [-0.31, 0.22];
         let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
 
-        for (position, expected_hca_count, expected_csa_count) in
-            [(382usize, 2usize, 95usize), (383, 3, 96), (384, 3, 96)]
-        {
+        for (position, expected_hca_count, expected_csa_count) in [
+            (382usize, 2usize, 95usize),
+            (383, 3, 96),
+            (384, 3, 96),
+            (510, 3, 127),
+            (511, 4, 128),
+            (512, 4, 128),
+        ] {
             let raw_start = position + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
             let mut raw_rows = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM);
             let mut raw_ring = vec![0.0; DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM];

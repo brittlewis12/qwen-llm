@@ -450,9 +450,9 @@ and one denominator-only-sink softmax over local raw rows plus every completed
 compressed row. The parallel indexer compressor publishes its normalized
 Hadamard row, but index scoring and top-512 selection remain deferred while the
 history is below 512 rows and dense-all is definitionally equivalent. The
-session now continues through three independently promoted HCA rows and the
-position-384 continuation after the third publication, then fails closed at
-position 385 before entering an unvalidated retained interval.
+session now continues through four independently promoted HCA rows and the
+position-512 continuation after the fourth publication, then fails closed at
+position 513 before entering an unvalidated retained interval.
 
 Gate:
 
@@ -473,15 +473,15 @@ Gate:
 
 ### S4: HCA lane
 
-Status: first-, second-, and third-boundary decode slices promoted through
-positions 126-129, 254-257, and 382-384 on 2026-08-02. All 20 HCA layers use the
+Status: first through fourth boundary decode slices promoted through positions
+126-129, 254-257, 382-385, and 510-512 on 2026-08-02. All 20 HCA layers use the
 retained ratio-128 frontier to pool, RMS-normalize, apply block-start
 adjacent-pair RoPE, publish F16 compressed rows, and include every published row
 in the same-token softmax over the 128-row local window plus dense compressed
-history. Position 382 is the pre-third-boundary control, position 383 publishes
-row 2 from the block beginning at position 256, and position 384 proves
-immediate retained continuation. The session fails closed at position 385; the
-next unvalidated HCA publication is position 511.
+history. Position 510 is the pre-fourth-boundary control, position 511 publishes
+row 3 from the block beginning at position 384, and position 512 proves
+immediate retained continuation. The session fails closed at position 513; the
+next unvalidated HCA publication is position 639.
 
 The long-prefix differential uses a different numerical gate from positions
 0-8. Singleton-versus-singleton drift accumulates before any HCA row exists:
@@ -493,11 +493,11 @@ boundary-discontinuity bound, and recovery on the immediate continuation.
 
 Gate:
 
-- Production 512-wide compressor-row coverage writes three complete 128-token
-  frontiers, proves no early publication through positions 126, 254, and 382,
-  and matches the CPU oracle after pooling, RMSNorm, and F16 publication at all
-  three boundaries. Rows 1 and 2 start at positions 128 and 256, exercising
-  non-identity block-start adjacent-pair YaRN RoPE.
+- Production 512-wide compressor-row coverage writes four complete 128-token
+  frontiers, proves no early publication through positions 126, 254, 382, and
+  510, and matches the CPU oracle after pooling, RMSNorm, and F16 publication
+  at all four boundaries. Rows 1-3 start at positions 128, 256, and 384,
+  exercising non-identity block-start adjacent-pair YaRN RoPE.
 - In one retained native session, positions 126, 127, and 128 preserve b10222
   argmaxes 34, 35, and 201. Their cosine / relative-RMS pairs are
   0.999086380 / 0.045916357, 0.998497359 / 0.063801241, and
@@ -529,12 +529,13 @@ Gate:
   three positions additionally require cosine at least 0.997 and relative RMS
   at most 0.075, preventing correlated drift from satisfying only relational
   checks.
-- A three-row Metal attention gate matches the CPU oracle and materially
-  differs from both prior-two-row and local-only ablations, proving the newest
+- A four-row Metal attention gate matches the CPU oracle and materially
+  differs from both prior-three-row and local-only ablations, proving the newest
   published row is consumed. A second production-width falsifier uses tagged
-  wrapped 128-row raw caches at positions 382/383/384 and independently matches
-  CPU attention for HCA row counts 2/3/3 and CSA counts 95/96/96. This closes
-  the ring-order, compressed-count, and same-token visibility alternatives.
+  wrapped 128-row raw caches at positions 382-384 and 510-512 and independently
+  matches CPU attention for HCA row counts 2/3/3 and 3/4/4 plus CSA counts
+  95/96/96 and 127/128/128. This closes the ring-order, compressed-count, and
+  same-token visibility alternatives.
 - Fresh-session b10222 captures at positions 257, 382, 383, and 384 are
   byte-identical across repeats. Their vector hashes are
   `234d6168ae338832cb694b51e8042bcf40ec129579b49a4d7b90c97e4aa5aa6c`,
@@ -549,12 +550,29 @@ Gate:
   containment rather than the established 0.997 / 0.075 endpoint gate. The
   publication must improve or preserve both measures from position 382, and
   position 384 must strictly recover both and satisfy the established gate.
-- A real position-385 call rejects before mutation while preserving position
-  385 as the next index and retaining all completed position-384 logit bits.
-  Every intervening token is executed in the retained session; full-logit
-  agreement is claimed only at the named fixture positions.
+- Before increasing oracle context capacity, position 384 was recaptured with
+  context 1,024 and remained byte-identical to the context-512 vector. A pinned
+  sidecar records the exact command, producer and shard revisions, both context
+  sizes, and shared vector hash. The fourth-interval fixtures therefore change
+  capacity only after an executable invariance check.
+- Fresh-session b10222 captures at positions 385, 510, 511, and 512 are
+  byte-identical across repeats. Their vector hashes are
+  `9ddcba113bb3a7f082cbf7b0fc6a78c23396f2dc86aebb00668052509439906c`,
+  `682683248e39eae1051f2de392f3f3052032b89e6b719c43a0e98202ec1cb018`,
+  `f90eea6537979dd51831216e0db3949c5869aabd75e505b627f05abf058f3340`,
+  and `56f13995d0f9e0042a81e2015878164bd3d23a14515e093023f07edd87677376`.
+- The retained session preserves b10222 argmaxes 200, 34, 35, and 201 at those
+  positions. Their cosine / relative-RMS pairs are
+  0.996155765 / 0.087700659, 0.992338381 / 0.124623164,
+  0.995358983 / 0.106502983, and 0.997749833 / 0.071887024. Positions 385,
+  510, and 511 use the existing 0.990 / 0.15 interval containment; publication
+  must improve or preserve both measures, and position 512 must strictly
+  recover both and satisfy the established 0.997 / 0.075 endpoint gate.
+- A real position-513 call rejects before mutation while preserving position
+  513 as the next index and retaining all completed position-512 logit bits.
+  As above, full-logit agreement is claimed only at named fixture positions.
 
-S4 remains open for the fourth boundary at positions 511/512, named full-layer
+S4 remains open for the fifth boundary at positions 639/640, named full-layer
 intermediate states, and batched prefill. Those are extension and prefill gates;
 they do not block the bounded singleton-decode generation slice.
 
@@ -573,7 +591,7 @@ value-bearing option is explicitly supplied at its Qwen default.
 The CLI reserves `prompt_tokens + max_generated_tokens - 1` forwards before
 Metal residency or any token execution. This mirrors the generator's
 pending-final-token semantics and guarantees an accepted request cannot
-partially stream beyond the retained-session evidence through position 384.
+partially stream beyond the retained-session evidence through position 512.
 The 103 GB split GGUF is already virtually mapped for family detection at that
 point; residency remains untouched on rejection. The promoted capacity is
 exported by the session implementation, so frontend and executor cannot drift
@@ -608,9 +626,9 @@ Gate:
   generated oracle token 201 in 100.9 seconds; requesting one additional
   transition rejected before Metal residency. These are correctness
   observations for the unoptimized singleton prompt path.
-- The same interface now accepts exactly 385 forwards. A 385-token prefix
-  crossed the third HCA publication, consumed position 384, and generated
-  oracle token 201 in 172.2 seconds; a request requiring 386 forwards rejected
+- The same interface now accepts exactly 513 forwards. A 513-token prefix
+  crossed the fourth HCA publication, consumed position 512, and generated
+  oracle token 201 in 248.6 seconds; a request requiring 514 forwards rejected
   before Metal residency.
 - Ordinary 0731 messages match vLLM and SGLang byte-for-byte. On the Flash
   vocabulary, user-only, system/user, and multi-turn Unicode fixtures encode to
@@ -621,8 +639,8 @@ Gate:
 - Intermediate bisect can isolate any divergence to one layer and operation.
 - Repeated runs are deterministic under the same host-validity contract used
   by Qwen benchmarks.
-- IQ3 peak resident plus scratch memory passes M4 Max admission with explicit
-  system headroom; no reliance on swap is allowed for the resident target.
+- Explicit IQ3 peak-resident plus scratch accounting remains an admission gate;
+  no reliance on swap is allowed for the resident target.
 
 S5 remains open for explicit peak-memory admission. The bounded raw and
 ordinary-message slices now establish first-class native inference through
@@ -696,8 +714,8 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Capture retained-interval controls at positions 385 and 510, then promote
-   the fourth HCA publication and continuation at positions 511/512.
+1. Capture retained-interval controls at positions 513 and 638, then promote
+   the fifth HCA publication and continuation at positions 639/640.
 2. Implement sparse CSA index scoring/top-512 selection before compressed
    history exceeds 512 rows, and extend slab ownership before the current CSA
    row-256 allocation guard at position 1027.

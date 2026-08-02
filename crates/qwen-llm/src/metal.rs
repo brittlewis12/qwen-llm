@@ -2169,6 +2169,19 @@ impl MetalTensor {
         })
     }
 
+    /// Allocate an I32 tensor for token IDs and integer kernel outputs.
+    pub fn zeros_i32(ctx: &MetalContext, shape: Vec<u64>) -> Result<Self, MetalError> {
+        let (_n, bytes) = checked_shape_bytes(&shape, std::mem::size_of::<i32>())?;
+        let buffer = ctx.buffer_uninit(bytes)?;
+        Ok(Self {
+            buffer,
+            offset: 0,
+            shape,
+            dtype: GgmlType::I32,
+            provenance: MetalTensorProvenance::OwnedWritable,
+        })
+    }
+
     /// Allocate an F16 (half-precision) tensor. Used for the KV cache
     /// when we want to halve attention bandwidth at long context. The
     /// scatter kernel converts F32 → F16 on append; the attn_decode
@@ -2232,16 +2245,16 @@ impl MetalTensor {
     /// the entire copy_offset dispatch. Used to slice GDN's fused QKV
     /// conv-output buffer into Q / K / V subranges with zero kernels.
     ///
-    /// Constraint: only valid for non-quantized dtypes (F32, F16) where
+    /// Constraint: only valid for non-quantized dtypes (F32, F16, I32) where
     /// elem_offset translates trivially to byte offset. For quantized
     /// types (Q4_K, Q5_K, Q6_K) the byte offset would need to align to
     /// the super-block boundary, which `view_subrange` does not check.
     pub fn view_subrange(&self, elem_offset: u64, shape: Vec<u64>) -> Self {
         let elem_size: u64 = match self.dtype {
-            GgmlType::F32 => 4,
+            GgmlType::F32 | GgmlType::I32 => 4,
             GgmlType::F16 => 2,
             other => panic!(
-                "view_subrange only supports F32/F16 (no super-block alignment), got {other:?}"
+                "view_subrange only supports F32/F16/I32 (no super-block alignment), got {other:?}"
             ),
         };
         let n_view = checked_shape_elements(&shape).expect("view_subrange shape overflow");
@@ -2307,15 +2320,16 @@ impl MetalTensor {
 
 /// Caller-owned wrapper around `MTLComputeCommandEncoder`. Produced by
 /// [`KernelEncoder::begin`] from a `MTLCommandBuffer`. All `encode_*`
-/// kernels accept this and mutate it; the caller is responsible for
-/// `end()` (which calls `endEncoding`), `commit()` on the parent command
-/// buffer, and `wait()` if a result needs to be read back.
+/// kernels accept this and mutate it. Callers should use `end()` as the explicit
+/// pass boundary before committing the parent command buffer. Early returns and
+/// panics are finalized by `Drop`; `Drop` never commits partial work.
 ///
 /// This is the *one* place in the engine where Metal lifecycle is exposed
 /// to client code. The forward-pass driver owns the command buffer; every
 /// kernel just appends dispatches.
 pub struct KernelEncoder {
-    pub raw: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    raw: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    ended: bool,
     /// True when created via [`KernelEncoder::begin_concurrent`]. Concurrent
     /// passes provide NO ordering between dispatches, so every dispatch pair
     /// must be independent (disjoint writes; no dispatch reads another's
@@ -2338,6 +2352,7 @@ impl KernelEncoder {
     fn new(raw: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>, concurrent: bool) -> Self {
         Self {
             raw,
+            ended: false,
             concurrent,
             #[cfg(debug_assertions)]
             hazard_writes: std::cell::RefCell::new(Vec::new()),
@@ -2481,8 +2496,15 @@ impl KernelEncoder {
         }
     }
 
-    pub fn end(self) {
-        self.raw.endEncoding();
+    fn finish(&mut self) {
+        if !self.ended {
+            self.ended = true;
+            self.raw.endEncoding();
+        }
+    }
+
+    pub fn end(mut self) {
+        self.finish();
     }
 
     /// Bind a buffer at slot `index`.
@@ -2535,6 +2557,12 @@ impl KernelEncoder {
 
     pub fn wait_for_fence(&self, fence: &Fence) {
         self.raw.waitForFence(fence);
+    }
+}
+
+impl Drop for KernelEncoder {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -11576,7 +11604,7 @@ pub fn encode_topk_bucket_logits_softmax_dot_sigmoid_packed_f32(
     {
         return Err(MetalError::BadShape {
             kernel: "topk_bucket_logits_softmax_dot_sigmoid_packed",
-            detail: "expected F32 buffers throughout".into(),
+            detail: "expected F32 logits, shared inputs, weights, counts, and bucket IDs".into(),
         });
     }
     if n_expert == 0 || n_expert > 256 || topk == 0 || topk > 16 || topk > n_expert {
@@ -12882,7 +12910,61 @@ pub fn encode_softmax_inplace_f32(
     Ok(())
 }
 
-/// GPU-side argmax over `[n_rows, n]` rows of F32, writing `[n_rows]` i32
+fn validate_i32_output(
+    kernel: &'static str,
+    output: &MetalTensor,
+    expected_elements: usize,
+) -> Result<(), MetalError> {
+    if output.n_elements() as usize != expected_elements {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "output.n_elements={} != expected={expected_elements}",
+                output.n_elements()
+            ),
+        });
+    }
+    if output.dtype != GgmlType::I32
+        || !output.is_writable()
+        || output.offset % std::mem::align_of::<i32>() as u64 != 0
+    {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "output must be aligned writable I32, got dtype={:?} offset={} provenance={:?}",
+                output.dtype,
+                output.offset,
+                output.provenance()
+            ),
+        });
+    }
+    let output_bytes = expected_elements
+        .checked_mul(std::mem::size_of::<i32>())
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "output byte size overflow".into(),
+        })?;
+    let output_end = output
+        .offset
+        .checked_add(output_bytes as u64)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel,
+            detail: "output buffer range overflow".into(),
+        })?;
+    if output_end > output.buffer.length() as u64 {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!(
+                "output range offset={} bytes={output_bytes} exceeds buffer={}",
+                output.offset,
+                output.buffer.length()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// GPU-side argmax over `[n_rows, n]` rows of F32, writing `[n_rows]` I32
 /// indices. Tie policy: lowest index wins (matches numpy/torch).
 ///
 /// Used by H5.3a `packed_forward` to produce `verify_argmax: [N] i32`
@@ -12906,15 +12988,7 @@ pub fn encode_argmax_f32(
             detail: format!("x.n_elements={} != n_rows*n={}", x.n_elements(), n_rows * n),
         });
     }
-    if out_idx.n_elements() as usize != n_rows {
-        return Err(MetalError::BadShape {
-            kernel: "argmax",
-            detail: format!(
-                "out_idx.n_elements={} != n_rows={n_rows}",
-                out_idx.n_elements(),
-            ),
-        });
-    }
+    validate_i32_output("argmax", out_idx, n_rows)?;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -12987,15 +13061,7 @@ pub fn encode_argmax_f32_greedy(
             detail: format!("x.n_elements={} != n_rows*n={expected}", x.n_elements()),
         });
     }
-    if out_idx.n_elements() as usize != n_rows {
-        return Err(MetalError::BadShape {
-            kernel: "argmax_greedy",
-            detail: format!(
-                "out_idx.n_elements={} != n_rows={n_rows}",
-                out_idx.n_elements(),
-            ),
-        });
-    }
+    validate_i32_output("argmax_greedy", out_idx, n_rows)?;
 
     let pso = ctx.pipeline("kernel_argmax_f32_greedy")?;
     let simd_width = pso.threadExecutionWidth();
@@ -20395,6 +20461,20 @@ mod tests {
         assert!(
             encode_get_rows_f32(&ctx, &enc, &embed, &short_ids, &y, row_ids.len(), N_COLS).is_err()
         );
+        let mut wrong_ids_dtype = ids.clone();
+        wrong_ids_dtype.dtype = GgmlType::F32;
+        assert!(
+            encode_get_rows_f32(
+                &ctx,
+                &enc,
+                &embed,
+                &wrong_ids_dtype,
+                &y,
+                row_ids.len(),
+                N_COLS,
+            )
+            .is_err()
+        );
         enc.end();
     }
 
@@ -21719,6 +21799,68 @@ mod tests {
             Err(e) => panic!("unexpected error: {e}"),
         };
         eprintln!("[metal] {}", ctx.describe());
+    }
+
+    #[test]
+    fn i32_subrange_preserves_type_and_byte_offset() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let ids = MetalTensor::zeros_i32(&ctx, vec![8]).unwrap();
+        let view = ids.view_subrange(3, vec![2]);
+        assert_eq!(view.dtype, GgmlType::I32);
+        assert_eq!(view.shape, vec![2]);
+        assert_eq!(view.offset, ids.offset + 3 * size_of::<i32>() as u64);
+        assert_eq!(
+            Retained::as_ptr(&view.buffer),
+            Retained::as_ptr(&ids.buffer)
+        );
+    }
+
+    #[test]
+    fn kernel_encoder_drop_closes_validation_error_pass() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let embed = MetalTensor::zeros_f32(&ctx, vec![8]).unwrap();
+        let wrong_ids = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![4]).unwrap();
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        {
+            let enc = KernelEncoder::begin(&cmd);
+            let error = encode_get_rows_f32(&ctx, &enc, &embed, &wrong_ids, &output, 1, 4)
+                .expect_err("F32 IDs must be rejected");
+            assert!(matches!(error, MetalError::BadShape { .. }));
+        }
+        let enc = KernelEncoder::begin(&cmd);
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        assert!(cmd.error().is_none(), "command failed: {:?}", cmd.error());
+    }
+
+    #[test]
+    fn kernel_encoder_drop_closes_panicking_pass() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _enc = KernelEncoder::begin(&cmd);
+            panic!("synthetic encoder unwind");
+        }));
+        assert!(panic.is_err());
+        let enc = KernelEncoder::begin(&cmd);
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        assert!(cmd.error().is_none(), "command failed: {:?}", cmd.error());
     }
 
     #[cfg(debug_assertions)]
@@ -30179,6 +30321,22 @@ mod tests {
     }
 
     #[test]
+    fn argmax_rejects_f32_output_metadata() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let input = MetalTensor::zeros_f32(&ctx, vec![2]).unwrap();
+        let wrong_output = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        assert!(encode_argmax_f32(&ctx, &enc, &input, &wrong_output, 1, 2).is_err());
+        assert!(encode_argmax_f32_greedy(&ctx, &enc, &input, &wrong_output, 1, 2).is_err());
+        enc.end();
+    }
+
+    #[test]
     fn greedy_argmax_matches_sampler_total_order_contract() {
         let ctx = match MetalContext::new() {
             Ok(c) => c,
@@ -30195,13 +30353,7 @@ mod tests {
                 dtype: crate::tensor::GgmlType::F32,
                 provenance: MetalTensorProvenance::OwnedWritable,
             };
-            let ot = MetalTensor {
-                buffer: ctx.buffer_uninit(n_rows * 4).expect("output buffer"),
-                offset: 0,
-                shape: vec![n_rows as u64],
-                dtype: crate::tensor::GgmlType::F32,
-                provenance: MetalTensorProvenance::OwnedWritable,
-            };
+            let ot = MetalTensor::zeros_i32(ctx, vec![n_rows as u64]).expect("output buffer");
             let cmd = ctx.queue.commandBuffer().expect("command buffer");
             let enc = KernelEncoder::begin(&cmd);
             encode_argmax_f32_greedy(ctx, &enc, &xt, &ot, n_rows, n).expect("encode greedy argmax");
@@ -30322,14 +30474,7 @@ mod tests {
                 dtype: crate::tensor::GgmlType::F32,
                 provenance: MetalTensorProvenance::OwnedWritable,
             };
-            let ob = ctx.buffer_uninit(n_rows * 4).expect("ob");
-            let ot = MetalTensor {
-                buffer: ob,
-                offset: 0,
-                shape: vec![n_rows as u64],
-                dtype: crate::tensor::GgmlType::F32,
-                provenance: MetalTensorProvenance::OwnedWritable,
-            };
+            let ot = MetalTensor::zeros_i32(ctx, vec![n_rows as u64]).expect("ob");
             let cmd = ctx.queue.commandBuffer().expect("cmd");
             let enc = KernelEncoder::begin(&cmd);
             encode_argmax_f32(ctx, &enc, &xt, &ot, n_rows, n).expect("encode argmax");

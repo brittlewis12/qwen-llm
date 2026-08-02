@@ -5047,14 +5047,14 @@ pub struct MetalSession {
     pub attn_v4_ml_partial: MetalTensor, // n_kv * NWG_max * GROUP * 2
 
     pub logits: MetalTensor,           // vocab_size
-    pub argmax_tok: MetalTensor,       // [1] i32 in F32 buffer
+    pub argmax_tok: MetalTensor,       // [1] I32
     pub moe_router_probs: MetalTensor, // [n_expert] F32 (or [1] on dense models)
     pub moe_topk_idx: MetalTensor,     // [top_k] i32 in F32 buffer (or [1] on dense models)
     pub moe_topk_weight: MetalTensor,  // [top_k] F32 (or [1] on dense models)
     pub moe_shared_gate: MetalTensor,  // [1] F32
     pub moe_inner: MetalTensor,        // [top_k, expert_ffn] F32 (or [1] on dense models)
     pub moe_expert_out: MetalTensor,   // [top_k, hidden] F32 (or [1] on dense models)
-    pub ids_buf: MetalTensor, // 1-element scratch for the input token id (i32 in an F32 buf)
+    pub ids_buf: MetalTensor,          // [1] I32 input-token scratch
 }
 
 impl MetalSession {
@@ -5263,14 +5263,14 @@ impl MetalSession {
             attn_v4_o_partial: MetalTensor::zeros_f32(ctx, vec![attn_v4_o_partial_elems])?,
             attn_v4_ml_partial: MetalTensor::zeros_f32(ctx, vec![attn_v4_ml_partial_elems])?,
             logits: MetalTensor::zeros_f32(ctx, vec![arch.vocab_size as u64])?,
-            argmax_tok: MetalTensor::zeros_f32(ctx, vec![1])?,
+            argmax_tok: MetalTensor::zeros_i32(ctx, vec![1])?,
             moe_router_probs: MetalTensor::zeros_f32(ctx, vec![moe_router_n])?,
             moe_topk_idx: MetalTensor::zeros_f32(ctx, vec![moe_topk_n])?,
             moe_topk_weight: MetalTensor::zeros_f32(ctx, vec![moe_topk_n])?,
             moe_shared_gate: MetalTensor::zeros_f32(ctx, vec![1])?,
             moe_inner: MetalTensor::zeros_f32(ctx, vec![moe_inner_n])?,
             moe_expert_out: MetalTensor::zeros_f32(ctx, vec![moe_expert_out_n])?,
-            ids_buf: MetalTensor::zeros_f32(ctx, vec![1])?,
+            ids_buf: MetalTensor::zeros_i32(ctx, vec![1])?,
         })
     }
 }
@@ -11284,7 +11284,7 @@ impl<'a> MetalForward<'a> {
 
         let t_total = std::time::Instant::now();
 
-        // Stage the token id into the ids_buf (i32 view of the F32 buffer).
+        // Stage the token id into the I32 ids buffer.
         unsafe {
             let ptr = session.ids_buf.buffer.contents().as_ptr() as *mut i32;
             *ptr = token_id;

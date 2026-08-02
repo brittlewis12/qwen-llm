@@ -604,9 +604,9 @@ pub struct MetalMtpSession {
     // Output (shared with base — but kept separate to allow concurrent
     // dispatch in a future ICB world).
     pub logits: MetalTensor,       // [V]
-    pub draft_argmax: MetalTensor, // [1] i32 in F32 buffer
-    pub draft_ids: MetalTensor,    // [16] i32 in F32 buffer
-    pub ids_buf: MetalTensor,      // i32 token id (in F32 buffer)
+    pub draft_argmax: MetalTensor, // [1] I32
+    pub draft_ids: MetalTensor,    // [16] I32
+    pub ids_buf: MetalTensor,      // [1] I32 input token
 }
 
 impl MetalMtpSession {
@@ -697,9 +697,9 @@ impl MetalMtpSession {
             attn_v4_o_partial: MetalTensor::zeros_f32(ctx, vec![attn_v4_o_partial_elems])?,
             attn_v4_ml_partial: MetalTensor::zeros_f32(ctx, vec![attn_v4_ml_partial_elems])?,
             logits: MetalTensor::zeros_f32(ctx, vec![arch.vocab_size as u64])?,
-            draft_argmax: MetalTensor::zeros_f32(ctx, vec![1])?,
-            draft_ids: MetalTensor::zeros_f32(ctx, vec![16])?,
-            ids_buf: MetalTensor::zeros_f32(ctx, vec![1])?,
+            draft_argmax: MetalTensor::zeros_i32(ctx, vec![1])?,
+            draft_ids: MetalTensor::zeros_i32(ctx, vec![16])?,
+            ids_buf: MetalTensor::zeros_i32(ctx, vec![1])?,
         })
     }
 }

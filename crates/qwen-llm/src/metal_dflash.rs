@@ -1797,6 +1797,15 @@ fn cpu_write_i32_f32buf(t: &MetalTensor, data: &[i32]) {
     }
 }
 
+fn cpu_write_i32buf(t: &MetalTensor, data: &[i32]) {
+    assert_eq!(t.dtype, GgmlType::I32);
+    assert_eq!(t.n_elements() as usize, data.len());
+    unsafe {
+        let dst = (t.buffer.contents().as_ptr() as *mut i32).add((t.offset / 4) as usize);
+        std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+    }
+}
+
 fn cpu_write_f32buf(t: &MetalTensor, data: &[f32]) {
     assert_eq!(t.dtype, GgmlType::F32);
     assert_eq!(t.n_elements() as usize, data.len());
@@ -2094,7 +2103,7 @@ pub struct MetalDFlashSession {
     /// regardless of what phase 1 did).
     pub kv_ctx_ready_n: usize,
 
-    /// Per-step block input `[N]` i32 in F32 buffer (carry + (N-1) MASK).
+    /// Per-step block input `[N]` I32 (carry + (N-1) MASK).
     pub noise_ids: MetalTensor,
 
     /// Drafter scratch — all `[N, ...]`-shaped.
@@ -2110,7 +2119,7 @@ pub struct MetalDFlashSession {
 
     /// Final logits buffer for the entire noise block: `[N, V_target]`.
     pub draft_logits: MetalTensor,
-    /// `[N]` i32 (in F32 buffer) — drafter argmax destination, written
+    /// `[N]` I32 — drafter argmax destination, written
     /// by the GPU argmax kernel after the batched lm_head. Avoids the
     /// per-row CPU readback + scalar-loop argmax that v0.71's draft_block
     /// did. v0.72.0 codex-recommended port from packed_verify's batched
@@ -2306,7 +2315,7 @@ impl MetalDFlashSession {
                 .map(|_| MetalTensor::zeros_f32(ctx, vec![kv_ctx_elems]))
                 .collect::<Result<Vec<_>, _>>()?,
             kv_ctx_ready_n: 0,
-            noise_ids: MetalTensor::zeros_f32(ctx, vec![n])?,
+            noise_ids: MetalTensor::zeros_i32(ctx, vec![n])?,
             x: MetalTensor::zeros_f32(ctx, vec![x_elems])?,
             h: MetalTensor::zeros_f32(ctx, vec![x_elems])?,
             q_buf: MetalTensor::zeros_f32(ctx, vec![q_elems])?,
@@ -2317,7 +2326,7 @@ impl MetalDFlashSession {
             attn_o: MetalTensor::zeros_f32(ctx, vec![q_elems])?,
             mixer_out: MetalTensor::zeros_f32(ctx, vec![x_elems])?,
             draft_logits: MetalTensor::zeros_f32(ctx, vec![logits_elems])?,
-            draft_argmax: MetalTensor::zeros_f32(ctx, vec![n])?,
+            draft_argmax: MetalTensor::zeros_i32(ctx, vec![n])?,
             // v0.72.1 phase 3 buffers
             k_full: MetalTensor::zeros_f32(ctx, vec![kv_full_elems])?,
             v_full: MetalTensor::zeros_f32(ctx, vec![kv_full_elems])?,
@@ -2675,8 +2684,8 @@ impl MetalDFlashVerifyScratch {
         )?;
 
         Ok(Self {
-            packed_ids_buf: MetalTensor::zeros_f32(ctx, vec![n])?, // i32 in F32 buf
-            verify_argmax: MetalTensor::zeros_f32(ctx, vec![n])?,  // i32 in F32 buf
+            packed_ids_buf: MetalTensor::zeros_i32(ctx, vec![n])?,
+            verify_argmax: MetalTensor::zeros_i32(ctx, vec![n])?,
             // Layout: [N, K, H] (NOT [K, N, H] as in v0.57). Each per-N
             // slot is `K * H` contiguous floats — exactly what
             // `MetalDFlashSession::append_target_ctx_column_now` expects
@@ -3077,6 +3086,7 @@ pub struct PrefillScratchConfig {
 pub struct PrefillScratchAllocation {
     name: &'static str,
     logical_bytes: u64,
+    dtype: GgmlType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3134,12 +3144,17 @@ impl PrefillScratchPlan {
         self.overlay
     }
 
-    fn validate_deferred(&self, name: &'static str, logical_bytes: u64) -> Result<(), MetalError> {
-        if self
-            .deferred_allocations
-            .iter()
-            .any(|allocation| allocation.name == name && allocation.logical_bytes == logical_bytes)
-        {
+    fn validate_deferred(
+        &self,
+        name: &'static str,
+        logical_bytes: u64,
+        dtype: GgmlType,
+    ) -> Result<(), MetalError> {
+        if self.deferred_allocations.iter().any(|allocation| {
+            allocation.name == name
+                && allocation.logical_bytes == logical_bytes
+                && allocation.dtype == dtype
+        }) {
             return Ok(());
         }
         Err(MetalError::BadShape {
@@ -3174,6 +3189,10 @@ impl PrefillScratchAllocation {
     pub fn logical_bytes(&self) -> u64 {
         self.logical_bytes
     }
+
+    pub fn dtype(&self) -> GgmlType {
+        self.dtype
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3204,8 +3223,18 @@ impl PrefillScratchPlanBuilder {
         &mut self,
         name: &'static str,
         elements: u64,
-        element_bytes: u64,
+        dtype: GgmlType,
     ) -> Result<(), MetalError> {
+        let element_bytes = match dtype {
+            GgmlType::F16 => 2,
+            GgmlType::F32 | GgmlType::I32 => 4,
+            _ => {
+                return Err(MetalError::BadShape {
+                    kernel: "prefill_scratch_plan",
+                    detail: format!("unsupported planned dtype {dtype:?}"),
+                });
+            }
+        };
         let logical_bytes = checked_u64_mul(
             elements,
             element_bytes,
@@ -3219,16 +3248,21 @@ impl PrefillScratchPlanBuilder {
         self.allocations.push(PrefillScratchAllocation {
             name,
             logical_bytes,
+            dtype,
         });
         Ok(())
     }
 
     fn f32(&mut self, name: &'static str, elements: u64) -> Result<(), MetalError> {
-        self.add(name, elements, 4)
+        self.add(name, elements, GgmlType::F32)
     }
 
     fn f16(&mut self, name: &'static str, elements: u64) -> Result<(), MetalError> {
-        self.add(name, elements, 2)
+        self.add(name, elements, GgmlType::F16)
+    }
+
+    fn i32(&mut self, name: &'static str, elements: u64) -> Result<(), MetalError> {
+        self.add(name, elements, GgmlType::I32)
     }
 }
 
@@ -3251,7 +3285,7 @@ impl<'a> PrefillScratchAllocator<'a> {
     ) -> Result<MetalTensor, MetalError> {
         let element_bytes = match dtype {
             GgmlType::F16 => 2,
-            GgmlType::F32 => 4,
+            GgmlType::F32 | GgmlType::I32 => 4,
             _ => {
                 return Err(MetalError::BadShape {
                     kernel: "prefill_scratch_plan",
@@ -3275,12 +3309,15 @@ impl<'a> PrefillScratchAllocator<'a> {
                     kernel: "prefill_scratch_plan",
                     detail: format!("unexpected allocation {name} after plan end"),
                 })?;
-        if expected.name != name || expected.logical_bytes != logical_bytes {
+        if expected.name != name
+            || expected.logical_bytes != logical_bytes
+            || expected.dtype != dtype
+        {
             return Err(MetalError::BadShape {
                 kernel: "prefill_scratch_plan",
                 detail: format!(
-                    "allocation {name}={logical_bytes} does not match {}={}",
-                    expected.name, expected.logical_bytes
+                    "allocation {name}={logical_bytes}/{dtype:?} does not match {}={}/{:?}",
+                    expected.name, expected.logical_bytes, expected.dtype
                 ),
             });
         }
@@ -3288,6 +3325,7 @@ impl<'a> PrefillScratchAllocator<'a> {
         match dtype {
             GgmlType::F16 => MetalTensor::zeros_f16(ctx, shape),
             GgmlType::F32 => MetalTensor::zeros_f32(ctx, shape),
+            GgmlType::I32 => MetalTensor::zeros_i32(ctx, shape),
             _ => unreachable!(),
         }
     }
@@ -3308,6 +3346,15 @@ impl<'a> PrefillScratchAllocator<'a> {
         shape: Vec<u64>,
     ) -> Result<MetalTensor, MetalError> {
         self.allocate(ctx, name, shape, GgmlType::F16)
+    }
+
+    fn i32(
+        &mut self,
+        ctx: &MetalContext,
+        name: &'static str,
+        shape: Vec<u64>,
+    ) -> Result<MetalTensor, MetalError> {
+        self.allocate(ctx, name, shape, GgmlType::I32)
     }
 
     fn finish(self) -> Result<(), MetalError> {
@@ -3509,7 +3556,16 @@ fn build_prefill_scratch_plan_from_arch(
 
     let mut builder = PrefillScratchPlanBuilder::new();
     if let Some(stats) = overlay {
-        builder.add("attn_gdn_overlay_backing", stats.backing_bytes, 1)?;
+        if !stats.backing_bytes.is_multiple_of(4) {
+            return Err(MetalError::BadShape {
+                kernel: "prefill_scratch_plan",
+                detail: format!(
+                    "overlay backing size {} is not F32-aligned",
+                    stats.backing_bytes
+                ),
+            });
+        }
+        builder.f32("attn_gdn_overlay_backing", stats.backing_bytes / 4)?;
     } else {
         builder.f16("attn_matrix_scores_h_pack", matrix_scores_h_elems)?;
         builder.f32("attn_matrix_ml_pack", matrix_ml_elems)?;
@@ -3625,7 +3681,11 @@ fn build_prefill_scratch_plan_from_arch(
             },
         ),
     ] {
-        builder.f32(name, elements)?;
+        if name == "moe_group_slot_idx_pack" {
+            builder.i32(name, elements)?;
+        } else {
+            builder.f32(name, elements)?;
+        }
     }
     let mut deferred = PrefillScratchPlanBuilder::new();
     if !include_spec_packs {
@@ -3834,7 +3894,7 @@ pub struct MetalDFlashLayerMajorScratch {
     /// arch math.
     moe_inner_full_elems: u64,
     moe_out_full_elems: u64,
-    /// `[N * topk]` i32-in-F32 buffer — grouped routed slot ids.
+    /// `[N * topk]` I32 — grouped routed slot ids used for row gathers.
     pub moe_group_slot_idx_pack: MetalTensor,
     /// `[n_expert]` i32-in-F32 buffer — grouped routed slot counts per expert.
     pub moe_group_count_pack: MetalTensor,
@@ -4438,7 +4498,7 @@ impl MetalDFlashLayerMajorScratch {
             moe_expert_out_pack: allocator.f32(ctx, "moe_expert_out_pack", moe_out_shape)?,
             moe_inner_full_elems: moe_inner_elems,
             moe_out_full_elems: moe_out_elems,
-            moe_group_slot_idx_pack: allocator.f32(
+            moe_group_slot_idx_pack: allocator.i32(
                 ctx,
                 "moe_group_slot_idx_pack",
                 vec![moe_slot_elems],
@@ -4609,8 +4669,11 @@ impl MetalDFlashLayerMajorScratch {
                 4,
                 "moe inner fallback allocation bytes overflow",
             )?;
-            self.scratch_plan
-                .validate_deferred("moe_inner_pack_fallback_growth", bytes)?;
+            self.scratch_plan.validate_deferred(
+                "moe_inner_pack_fallback_growth",
+                bytes,
+                GgmlType::F32,
+            )?;
             self.moe_inner_pack = MetalTensor::zeros_f32(ctx, vec![self.moe_inner_full_elems])?;
         }
         if self.moe_expert_out_pack.n_elements() < self.moe_out_full_elems {
@@ -4619,8 +4682,11 @@ impl MetalDFlashLayerMajorScratch {
                 4,
                 "moe output fallback allocation bytes overflow",
             )?;
-            self.scratch_plan
-                .validate_deferred("moe_expert_out_pack_fallback_growth", bytes)?;
+            self.scratch_plan.validate_deferred(
+                "moe_expert_out_pack_fallback_growth",
+                bytes,
+                GgmlType::F32,
+            )?;
             self.moe_expert_out_pack = MetalTensor::zeros_f32(ctx, vec![self.moe_out_full_elems])?;
         }
         Ok(())
@@ -7417,12 +7483,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
         Ok(())
     };
 
-    // Per-call ids buffer. P=16 i32 = 64 bytes; trivial alloc cost.
-    // (Same "F32-typed buffer holding i32" convention as
-    // verify_scratch.packed_ids_buf — see the noise_ids comment in
-    // MetalDFlashSession.)
+    // Per-call IDs buffer. P=16 I32 = 64 bytes; trivial allocation cost.
     let ids_buf =
-        MetalTensor::zeros_f32(base.ctx, vec![p_max as u64]).map_err(DFlashError::Metal)?;
+        MetalTensor::zeros_i32(base.ctx, vec![p_max as u64]).map_err(DFlashError::Metal)?;
 
     let n_chunks = total_n.div_ceil(p_max);
     let mut prefill_gpu_total_ms = 0.0f64;
@@ -10685,7 +10748,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 cold_idx[slot_id as usize] = -1;
                             }
                         }
-                        cpu_write_i32_f32buf(&moe_group_slot_idx_pack_p, &slot_ids);
+                        cpu_write_i32buf(&moe_group_slot_idx_pack_p, &slot_ids);
                         cpu_write_i32_f32buf(&moe_group_token_idx_pack_p, &token_ids);
                         cpu_write_f32buf(&moe_group_weight_pack_p, &weights);
                         cpu_write_i32_f32buf(&moe_topk_idx_pack_p, &cold_idx);
@@ -13318,6 +13381,14 @@ mod tests {
             names.dedup();
             assert_eq!(names.len(), count);
             assert_eq!(
+                wide.allocations
+                    .iter()
+                    .find(|allocation| allocation.name == "moe_group_slot_idx_pack")
+                    .expect("grouped gather IDs are planned")
+                    .dtype,
+                GgmlType::I32
+            );
+            assert_eq!(
                 wide.logical_bytes,
                 wide.allocations
                     .iter()
@@ -13344,6 +13415,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn prefill_overlay_backing_plan_allocates_with_matching_type() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let arch = product_moe_plan_arch(false);
+        let plan = product_moe_plan(&arch, 1, true);
+        let allocation = plan.allocations.first().expect("overlay backing plan");
+        assert_eq!(allocation.name, "attn_gdn_overlay_backing");
+        assert_eq!(allocation.dtype, GgmlType::F32);
+        assert!(allocation.logical_bytes.is_multiple_of(4));
+        let mut allocator = PrefillScratchAllocator::new(&plan);
+        let backing = allocator
+            .f32(&ctx, allocation.name, vec![allocation.logical_bytes / 4])
+            .expect("allocate overlay backing");
+        assert_eq!(backing.dtype, GgmlType::F32);
+        assert!(backing.buffer.length() as u64 >= allocation.logical_bytes);
+    }
+
     fn write_tensor_f32(t: &MetalTensor, data: &[f32]) {
         assert_eq!(t.dtype, GgmlType::F32);
         assert_eq!(t.n_elements() as usize, data.len());
@@ -13364,8 +13456,28 @@ mod tests {
         out
     }
 
+    fn read_tensor_i32(t: &MetalTensor) -> Vec<i32> {
+        assert_eq!(t.dtype, GgmlType::I32);
+        let n = t.n_elements() as usize;
+        let mut out = vec![0i32; n];
+        unsafe {
+            let src = (t.buffer.contents().as_ptr() as *const i32).add((t.offset / 4) as usize);
+            std::ptr::copy_nonoverlapping(src, out.as_mut_ptr(), n);
+        }
+        out
+    }
+
     fn write_tensor_i32_f32buf(t: &MetalTensor, data: &[i32]) {
         assert_eq!(t.dtype, GgmlType::F32);
+        assert_eq!(t.n_elements() as usize, data.len());
+        unsafe {
+            let dst = (t.buffer.contents().as_ptr() as *mut i32).add((t.offset / 4) as usize);
+            std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+        }
+    }
+
+    fn write_tensor_i32(t: &MetalTensor, data: &[i32]) {
+        assert_eq!(t.dtype, GgmlType::I32);
         assert_eq!(t.n_elements() as usize, data.len());
         unsafe {
             let dst = (t.buffer.contents().as_ptr() as *mut i32).add((t.offset / 4) as usize);
@@ -15346,7 +15458,7 @@ mod tests {
         });
 
         let split_idx_cpu = read_tensor_i32_f32buf(&split_idx);
-        let fused_idx_cpu = read_tensor_i32_f32buf(&fused_idx);
+        let fused_idx_cpu = read_tensor_i32(&fused_idx);
         let split_w_cpu = read_tensor_f32(&split_w);
         let fused_w_cpu = read_tensor_f32(&fused_w);
         let split_gate_cpu = read_tensor_f32(&split_gate);
@@ -16269,7 +16381,7 @@ mod tests {
             MetalTensor::zeros_f32(&ctx, vec![(group.len * h) as u64]).expect("grouped_out_t");
         let matmat_out_t =
             MetalTensor::zeros_f32(&ctx, vec![(group.len * h) as u64]).expect("matmat_out_t");
-        let slot_ids_t = MetalTensor::zeros_f32(&ctx, vec![group.len as u64]).expect("slot_ids_t");
+        let slot_ids_t = MetalTensor::zeros_i32(&ctx, vec![group.len as u64]).expect("slot_ids_t");
 
         let mut counts = vec![0i32; n_expert];
         counts[group.expert] = group.len as i32;
@@ -16279,7 +16391,7 @@ mod tests {
         }
         cpu_write_i32_f32buf(&count_t, &counts);
         cpu_write_i32_f32buf(&ids_t, &ids);
-        cpu_write_i32_f32buf(&slot_ids_t, &slot_ids[group.start..group.start + group.len]);
+        cpu_write_i32buf(&slot_ids_t, &slot_ids[group.start..group.start + group.len]);
 
         let _ = timed_gpu_cmd(&ctx, |enc| {
             encode_get_rows_f32(
@@ -16573,14 +16685,14 @@ mod tests {
             }
             let n = group_slots.len();
             let token_ids: Vec<i32> = group_slots.iter().map(|slot| slot / topk as i32).collect();
-            let token_ids_t = MetalTensor::zeros_f32(&ctx, vec![n as u64]).expect("token_ids");
+            let token_ids_t = MetalTensor::zeros_i32(&ctx, vec![n as u64]).expect("token_ids");
             let h_group = MetalTensor::zeros_f32(&ctx, vec![(n * h) as u64]).expect("h_group");
             let gate_out =
                 MetalTensor::zeros_f32(&ctx, vec![(n * f_exp) as u64]).expect("gate_out");
             let up_out = MetalTensor::zeros_f32(&ctx, vec![(n * f_exp) as u64]).expect("up_out");
             let inner_group =
                 MetalTensor::zeros_f32(&ctx, vec![(n * f_exp) as u64]).expect("inner_group");
-            cpu_write_i32_f32buf(&token_ids_t, &token_ids);
+            cpu_write_i32buf(&token_ids_t, &token_ids);
             let gate_w = moe
                 .gate_exps
                 .view_bytes(*expert as u64 * gate_bytes, vec![(h * f_exp) as u64]);
@@ -16780,7 +16892,7 @@ mod tests {
         let ids_t = MetalTensor::zeros_f32(&ctx, vec![(n_expert * chunk_p) as u64]).expect("ids_t");
         let grouped_inner_out = MetalTensor::zeros_f32(&ctx, vec![(chunk_p * topk * f_exp) as u64])
             .expect("grouped_inner_out");
-        let slot_ids_t = MetalTensor::zeros_f32(&ctx, vec![group.len as u64]).expect("slot_ids_t");
+        let slot_ids_t = MetalTensor::zeros_i32(&ctx, vec![group.len as u64]).expect("slot_ids_t");
         let packed_probe =
             MetalTensor::zeros_f32(&ctx, vec![(group.len * f_exp) as u64]).expect("packed_probe");
         let grouped_probe =
@@ -16794,7 +16906,7 @@ mod tests {
         }
         cpu_write_i32_f32buf(&count_t, &counts);
         cpu_write_i32_f32buf(&ids_t, &ids);
-        cpu_write_i32_f32buf(&slot_ids_t, &slot_ids[group.start..group.start + group.len]);
+        cpu_write_i32buf(&slot_ids_t, &slot_ids[group.start..group.start + group.len]);
 
         let _ = timed_gpu_cmd(&ctx, |enc| {
             encode_fill_f32(&ctx, enc, &grouped_inner_out, 0.0).expect("zero grouped q4 out");
@@ -16864,7 +16976,7 @@ mod tests {
             let grouped_probe_n = MetalTensor::zeros_f32(&ctx, vec![(probe_n * f_exp) as u64])
                 .expect("grouped_probe_n");
             let slot_ids_probe =
-                MetalTensor::zeros_f32(&ctx, vec![probe_n as u64]).expect("slot_ids_probe");
+                MetalTensor::zeros_i32(&ctx, vec![probe_n as u64]).expect("slot_ids_probe");
             let mut probe_counts = vec![0i32; n_expert];
             probe_counts[group.expert] = probe_n as i32;
             let mut probe_ids = vec![-1i32; n_expert * chunk_p];
@@ -16873,7 +16985,7 @@ mod tests {
             }
             cpu_write_i32_f32buf(&count_probe, &probe_counts);
             cpu_write_i32_f32buf(&ids_probe, &probe_ids);
-            cpu_write_i32_f32buf(
+            cpu_write_i32buf(
                 &slot_ids_probe,
                 &slot_ids[group.start..group.start + probe_n],
             );
@@ -20019,7 +20131,7 @@ mod tests {
                 }
             }
             assert_eq!(slot_ids, gpu_order, "grouped slot ordering diverged");
-            cpu_write_i32_f32buf(&moe_group_slot_idx_pack, &slot_ids);
+            cpu_write_i32buf(&moe_group_slot_idx_pack, &slot_ids);
             cpu_write_i32_f32buf(&moe_group_token_idx_pack, &token_ids);
             cpu_write_f32buf(&moe_group_weight_pack, &weights);
             cpu_group_ms += t_cpu.elapsed().as_secs_f64() * 1e3;
@@ -20461,7 +20573,7 @@ mod tests {
             .moe_expert_out_pack
             .view_subrange(0, vec![(slot_count * h) as u64]);
         let group_slot_ids =
-            MetalTensor::zeros_f32(&ctx, vec![slot_count as u64]).expect("group ids");
+            MetalTensor::zeros_i32(&ctx, vec![slot_count as u64]).expect("group ids");
         let group_token_ids =
             MetalTensor::zeros_f32(&ctx, vec![slot_count as u64]).expect("group tokens");
         let group_expert_ids =
@@ -20569,7 +20681,7 @@ mod tests {
             }
             group_count = groups.len();
             max_group = groups.iter().map(|g| g.len).max().unwrap_or(0);
-            write_tensor_i32_f32buf(&group_slot_ids, &slot_ids);
+            write_tensor_i32(&group_slot_ids, &slot_ids);
             write_tensor_i32_f32buf(&group_token_ids, &token_ids);
             write_tensor_i32_f32buf(&group_expert_ids, &expert_ids);
             write_tensor_f32(&group_weights, &weights);
@@ -20723,7 +20835,7 @@ mod tests {
             .mixer_out_pack
             .view_subrange(0, vec![(chunk_p * h) as u64]);
         let group_slot_ids =
-            MetalTensor::zeros_f32(&ctx, vec![slot_count as u64]).expect("group ids");
+            MetalTensor::zeros_i32(&ctx, vec![slot_count as u64]).expect("group ids");
         let group_token_ids =
             MetalTensor::zeros_f32(&ctx, vec![slot_count as u64]).expect("group tokens");
         let group_weights =
@@ -20839,7 +20951,7 @@ mod tests {
                     cold_idx[slot_id as usize] = -1;
                 }
             }
-            write_tensor_i32_f32buf(&group_slot_ids, &slot_ids);
+            write_tensor_i32(&group_slot_ids, &slot_ids);
             write_tensor_i32_f32buf(&group_token_ids, &token_ids);
             write_tensor_f32(&group_weights, &weights);
             write_tensor_i32_f32buf(&cold_idx_pack, &cold_idx);
@@ -20979,7 +21091,7 @@ mod tests {
         let scratch =
             MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, chunk_p as u32).expect("scratch");
 
-        let ids_buf = MetalTensor::zeros_f32(&ctx, vec![chunk_p as u64]).expect("ids buf");
+        let ids_buf = MetalTensor::zeros_i32(&ctx, vec![chunk_p as u64]).expect("ids buf");
         unsafe {
             let p = ids_buf.buffer.contents().as_ptr() as *mut i32;
             for (i, &t) in ids.iter().enumerate() {
@@ -21815,7 +21927,7 @@ mod tests {
         let sess = MetalSession::fresh(&ctx, &mm, total_n + 16).expect("session");
         let scratch =
             MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, total_n as u32).expect("scratch");
-        let ids_buf = MetalTensor::zeros_f32(&ctx, vec![total_n as u64]).expect("ids buf");
+        let ids_buf = MetalTensor::zeros_i32(&ctx, vec![total_n as u64]).expect("ids buf");
         unsafe {
             let p = ids_buf.buffer.contents().as_ptr() as *mut i32;
             for (i, &t) in ids.iter().enumerate() {
@@ -22147,6 +22259,8 @@ mod tests {
         );
         assert_eq!(scratch.packed_ids_buf.shape, vec![n as u64]);
         assert_eq!(scratch.verify_argmax.shape, vec![n as u64]);
+        assert_eq!(scratch.packed_ids_buf.dtype, GgmlType::I32);
+        assert_eq!(scratch.verify_argmax.dtype, GgmlType::I32);
 
         // -- gdn_ckpt_slot offsets --
         // Slot (layer, n) should land at offset (layer * N + n) * ssm_elems
@@ -22207,9 +22321,11 @@ mod tests {
             let tok_slot = scratch.token_slot(nn);
             assert_eq!(tok_slot.shape, vec![1]);
             assert_eq!(tok_slot.offset, (nn as u64) * f32_size);
+            assert_eq!(tok_slot.dtype, GgmlType::I32);
             let am_slot = scratch.argmax_slot(nn);
             assert_eq!(am_slot.shape, vec![1]);
             assert_eq!(am_slot.offset, (nn as u64) * f32_size);
+            assert_eq!(am_slot.dtype, GgmlType::I32);
         }
 
         // -- write/read round-trip via a slot, to confirm the underlying

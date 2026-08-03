@@ -16,6 +16,7 @@ const DEFAULT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XX
 const DEFAULT_DURABLE_SNAPSHOT: &str = "target/dsv4-position1024.ds4c";
 const DEFAULT_DURABLE_POSITION_2048_SNAPSHOT: &str = "target/dsv4-position2048.ds4c";
 const DEFAULT_DURABLE_POSITION_2052_SNAPSHOT: &str = "target/dsv4-position2052.ds4c";
+const DEFAULT_DURABLE_POSITION_2176_SNAPSHOT: &str = "target/dsv4-position2176.ds4c";
 const DEFAULT_DURABLE_IDENTITY_CACHE: &str = "target/.qwen-dsv4-model-identity-v2";
 const ORACLE_BYTES: &[u8] = include_bytes!("fixtures/deepseek_v4_token35_position0_b10222.f32");
 const ORACLE_MANIFEST: &str = include_str!("fixtures/deepseek_v4_token35_position0_b10222.json");
@@ -141,6 +142,20 @@ const POSITION_2052_ORACLE_BYTES: &[u8] =
     include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x513_then35_position2052_b10222.f32");
 const POSITION_2052_ORACLE_MANIFEST: &str =
     include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x513_then35_position2052_b10222.json");
+const POSITION_2174_ORACLE_BYTES: &[u8] = include_bytes!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_pre_seventeenth_hca_position2174_b10222.f32"
+);
+const POSITION_2174_ORACLE_MANIFEST: &str = include_str!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_pre_seventeenth_hca_position2174_b10222.json"
+);
+const POSITION_2175_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x544_position2175_b10222.f32");
+const POSITION_2175_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x544_position2175_b10222.json");
+const POSITION_2176_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x544_then35_position2176_b10222.f32");
+const POSITION_2176_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x544_then35_position2176_b10222.json");
 const SINGLETON_ORACLE_LLM_COMMIT: &str = "e07acac20fcd2ee0faca90aa91078ff142724d63";
 const SINGLETON_ORACLE_LLAMA_CORE_COMMIT: &str = "b1cd3a914175adedcc976388c7c638d9a2f9a189";
 const SINGLETON_ORACLE_LLAMA_CPP_RS_COMMIT: &str = "553b8e4501c57c1be08a83b6b54e549a614df162";
@@ -194,6 +209,19 @@ fn assert_hca_interval_drift_containment(label: &str, comparison: &LogitComparis
     assert!(
         comparison.relative_rms <= 0.15,
         "{label} native/oracle relative RMS is {}",
+        comparison.relative_rms
+    );
+}
+
+fn assert_packed_singleton_schedule_containment(label: &str, comparison: &LogitComparison) {
+    assert!(
+        comparison.cosine >= 0.998,
+        "{label} packed/singleton cosine is only {}",
+        comparison.cosine
+    );
+    assert!(
+        comparison.relative_rms <= 0.06,
+        "{label} packed/singleton relative RMS is {}",
         comparison.relative_rms
     );
 }
@@ -702,6 +730,39 @@ fn pinned_hca_boundary_oracles_have_exact_identity() {
             513,
             serde_json::json!([]),
             2052,
+            4096,
+            35,
+            201,
+        ),
+        (
+            POSITION_2174_ORACLE_MANIFEST,
+            POSITION_2174_ORACLE_BYTES,
+            "f8aa798ffb8beb2d8aca829131d6778065c1bb23c4edb787fcd77b8db5e12d28",
+            543,
+            serde_json::json!([35, 201]),
+            2174,
+            4096,
+            200,
+            34,
+        ),
+        (
+            POSITION_2175_ORACLE_MANIFEST,
+            POSITION_2175_ORACLE_BYTES,
+            "ea661d22ba04692a5e5b172035b08f268f0a143c662708ca04af5184d1a3ec24",
+            543,
+            serde_json::json!([35, 201, 200]),
+            2175,
+            4096,
+            34,
+            35,
+        ),
+        (
+            POSITION_2176_ORACLE_MANIFEST,
+            POSITION_2176_ORACLE_BYTES,
+            "5a7c07f7c600ffb41b10e483e43a1b575670662fccbcb73b70aa783ffb05db2e",
+            544,
+            serde_json::json!([]),
+            2176,
             4096,
             35,
             201,
@@ -2138,11 +2199,6 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
         started.elapsed().as_secs_f64()
     );
 
-    let error = session
-        .forward_token(&ctx, continuation_argmax as u32)
-        .err()
-        .expect("position 2053 must reject before mutation");
-    assert!(error.to_string().contains("next position is 2053"));
     assert_eq!(session.next_position(), 2_053);
     assert_eq!(endpoint_hashes.len(), 4);
 }
@@ -2237,6 +2293,376 @@ fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
     );
     eprintln!(
         "durable_position_2052_elapsed={:.3}s identity_cache={:?}",
+        started.elapsed().as_secs_f64(),
+        content.outcome
+    );
+}
+
+#[test]
+#[ignore = "requires the local DS4 model and a published position-2052 snapshot"]
+fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let source_snapshot_path = std::env::var_os("DSV4_POSITION_2052_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_POSITION_2052_SNAPSHOT)
+        });
+    let destination_snapshot_path = std::env::var_os("DSV4_POSITION_2176_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_POSITION_2176_SNAPSHOT)
+        });
+    let identity_cache_path = std::env::var_os("DSV4_IDENTITY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_IDENTITY_CACHE)
+        });
+    assert!(model_path.exists(), "missing DS4 model");
+    assert!(
+        source_snapshot_path.exists(),
+        "missing durable position-2052 snapshot"
+    );
+
+    let started = Instant::now();
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+            .expect("resolve HCA row-16 snapshot model identity");
+    let model_content_id = DeepSeekV4ModelContentId::new(content.content_id);
+    let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind DS4 config");
+    let source_snapshot = load_causal_snapshot_file(
+        &source_snapshot_path,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: &model.config,
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("load durable position-2052 snapshot");
+    assert_eq!(source_snapshot.next_position(), 2_052);
+
+    let ctx = MetalContext::new().expect("create Metal context");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("build HCA row-16 session");
+    session
+        .restore_causal_snapshot(&source_snapshot)
+        .expect("restore durable position-2052 snapshot");
+
+    let mut pre_boundary_interval = [35, 201, 200, 34].repeat(30);
+    pre_boundary_interval.extend_from_slice(&[35, 201]);
+    session
+        .advance_tokens(&ctx, &pre_boundary_interval)
+        .expect("advance sparse interval to pre-HCA-row-16 control");
+    assert_eq!(session.next_position(), 2_174);
+    session
+        .forward_token(&ctx, 200)
+        .expect("execute pre-HCA-row-16 control at position 2174");
+    let control_logits = session
+        .copy_logits_f32()
+        .expect("copy position-2174 logits");
+    let control = compare_logits("position_2174", &control_logits, POSITION_2174_ORACLE_BYTES);
+    assert_eq!(control.argmax, control.oracle_argmax);
+    assert_hca_interval_drift_containment("position 2174", &control);
+
+    session
+        .forward_token(&ctx, 34)
+        .expect("execute singleton HCA row-16 boundary at position 2175");
+    let singleton_boundary_logits = session
+        .copy_logits_f32()
+        .expect("copy singleton position-2175 logits");
+    let singleton_boundary = compare_logits(
+        "singleton_position_2175",
+        &singleton_boundary_logits,
+        POSITION_2175_ORACLE_BYTES,
+    );
+    assert_eq!(singleton_boundary.argmax, singleton_boundary.oracle_argmax);
+    assert_hca_interval_drift_containment("singleton position 2175", &singleton_boundary);
+    session
+        .forward_token(&ctx, 35)
+        .expect("execute singleton HCA row-16 continuation at position 2176");
+    let singleton_continuation_logits = session
+        .copy_logits_f32()
+        .expect("copy singleton position-2176 logits");
+    let singleton_continuation = compare_logits(
+        "singleton_position_2176",
+        &singleton_continuation_logits,
+        POSITION_2176_ORACLE_BYTES,
+    );
+    assert_eq!(
+        singleton_continuation.argmax,
+        singleton_continuation.oracle_argmax
+    );
+    assert_hca_interval_drift_containment("singleton position 2176", &singleton_continuation);
+    for (label, logits, expected) in [
+        (
+            "position 2174",
+            control_logits.as_slice(),
+            "03e663ca731af919392372f0571f20808ee626b2ad5f2bc74bf3236204d3eacc",
+        ),
+        (
+            "singleton position 2175",
+            singleton_boundary_logits.as_slice(),
+            "33fa665a0bf96b557b90ca60b3f0e00bc514c9bec004a337e1f4d13e3ee730db",
+        ),
+        (
+            "singleton position 2176",
+            singleton_continuation_logits.as_slice(),
+            "1b204da223f460115a9e6e0735861b424dd15a7632ec4c21c5f1eca01898e2f1",
+        ),
+    ] {
+        let mut hasher = Sha256::new();
+        for value in logits {
+            hasher.update(value.to_le_bytes());
+        }
+        assert_eq!(format!("{:x}", hasher.finalize()), expected, "{label}");
+    }
+    assert!(singleton_boundary.cosine >= control.cosine);
+    assert!(singleton_boundary.relative_rms <= control.relative_rms);
+    assert!(singleton_continuation.cosine >= singleton_boundary.cosine);
+    assert!(singleton_continuation.relative_rms <= singleton_boundary.relative_rms);
+    assert_hca_long_prefix_gate("singleton position 2176", &singleton_continuation);
+
+    session
+        .restore_causal_snapshot(&source_snapshot)
+        .expect("restore position-2052 snapshot for packed HCA boundary");
+    let interval = [35, 201, 200, 34].repeat(31);
+    session
+        .prefill_tokens(&ctx, &interval)
+        .expect("execute sparse interval through HCA row 16");
+    assert_eq!(session.next_position(), 2_176);
+    let boundary_logits = session
+        .copy_logits_f32()
+        .expect("copy position-2175 logits");
+    assert!(boundary_logits.iter().all(|value| value.is_finite()));
+    let boundary_argmax = boundary_logits
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .unwrap()
+        .0;
+    let mut boundary_hasher = Sha256::new();
+    for value in &boundary_logits {
+        boundary_hasher.update(value.to_le_bytes());
+    }
+    let boundary_hash = format!("{:x}", boundary_hasher.finalize());
+    assert_eq!(boundary_argmax, 35);
+    assert_eq!(
+        boundary_hash,
+        "b9a17795021d99e2c94445f5afd8144a97ee06c2df7fb514ff24cebe11ad788b"
+    );
+    let boundary = compare_logits(
+        "position_2175",
+        &boundary_logits,
+        POSITION_2175_ORACLE_BYTES,
+    );
+    assert_eq!(boundary.argmax, boundary.oracle_argmax);
+    assert_hca_interval_drift_containment("position 2175", &boundary);
+    assert!(boundary.cosine >= control.cosine - 0.002);
+    assert!(boundary.relative_rms <= control.relative_rms + 0.01);
+    let packed_boundary = compare_logits(
+        "packed_vs_singleton_position_2175",
+        &boundary_logits,
+        bytemuck::cast_slice(&singleton_boundary_logits),
+    );
+    assert_eq!(packed_boundary.argmax, packed_boundary.oracle_argmax);
+    assert_packed_singleton_schedule_containment("position 2175", &packed_boundary);
+
+    let boundary_snapshot = session
+        .capture_causal_snapshot()
+        .expect("capture HCA row-16 snapshot");
+    assert_eq!(boundary_snapshot.next_position(), 2_176);
+    assert_eq!(boundary_snapshot.payload_bytes(), 32_821_760);
+    let report = publish_causal_snapshot_file(
+        &destination_snapshot_path,
+        &boundary_snapshot,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: session.residency().config(),
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("publish position-2176 snapshot");
+    assert_eq!(report.record_bytes, 32_838_176);
+
+    session
+        .forward_token(&ctx, 35)
+        .expect("execute HCA row-16 continuation at position 2176");
+    let continuation_logits = session
+        .copy_logits_f32()
+        .expect("copy position-2176 logits");
+    assert!(continuation_logits.iter().all(|value| value.is_finite()));
+    let continuation_argmax = continuation_logits
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .unwrap()
+        .0;
+    let mut continuation_hasher = Sha256::new();
+    for value in &continuation_logits {
+        continuation_hasher.update(value.to_le_bytes());
+    }
+    let continuation_hash = format!("{:x}", continuation_hasher.finalize());
+    let causal_digest = boundary_snapshot
+        .causal_digest()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(continuation_argmax, 201);
+    assert_eq!(
+        continuation_hash,
+        "b6de17ab59a753d51a242f0a71e8c34965d85542e4d0b1a747098eb47b1244a3"
+    );
+    let continuation = compare_logits(
+        "position_2176",
+        &continuation_logits,
+        POSITION_2176_ORACLE_BYTES,
+    );
+    assert_eq!(continuation.argmax, continuation.oracle_argmax);
+    assert_hca_interval_drift_containment("position 2176", &continuation);
+    assert!(continuation.cosine >= boundary.cosine);
+    assert!(continuation.relative_rms <= boundary.relative_rms);
+    assert!(continuation.cosine >= control.cosine);
+    assert!(continuation.relative_rms <= control.relative_rms);
+    assert!(continuation.cosine >= 0.997);
+    assert!(continuation.relative_rms <= 0.08);
+    let packed_continuation = compare_logits(
+        "packed_vs_singleton_position_2176",
+        &continuation_logits,
+        bytemuck::cast_slice(&singleton_continuation_logits),
+    );
+    assert_eq!(
+        packed_continuation.argmax,
+        packed_continuation.oracle_argmax
+    );
+    assert_packed_singleton_schedule_containment("position 2176", &packed_continuation);
+    assert_eq!(
+        causal_digest,
+        "279a2f4ba1a7a6541144b5af6f2cbff745b498cca1fd24e414ec1cb7f86ffa68"
+    );
+    eprintln!(
+        "hca_row16 boundary_position=2175 argmax={boundary_argmax} sha256={boundary_hash} continuation_position=2176 argmax={continuation_argmax} sha256={continuation_hash} snapshot_digest={causal_digest} elapsed={:.3}s",
+        started.elapsed().as_secs_f64()
+    );
+
+    let error = session
+        .forward_token(&ctx, continuation_argmax as u32)
+        .err()
+        .expect("position 2177 must reject before mutation");
+    assert!(error.to_string().contains("next position is 2177"));
+    assert_eq!(session.next_position(), 2_177);
+    let retained_logits = session
+        .copy_logits_f32()
+        .expect("position-2176 logits remain completed after rejection");
+    assert!(
+        retained_logits
+            .iter()
+            .zip(&continuation_logits)
+            .all(|(retained, prior)| retained.to_bits() == prior.to_bits())
+    );
+}
+
+#[test]
+#[ignore = "requires the local DS4 model and a published position-2176 snapshot"]
+fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let snapshot_path = std::env::var_os("DSV4_POSITION_2176_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_POSITION_2176_SNAPSHOT)
+        });
+    let identity_cache_path = std::env::var_os("DSV4_IDENTITY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_IDENTITY_CACHE)
+        });
+    assert!(model_path.exists(), "missing DS4 model");
+    assert!(
+        snapshot_path.exists(),
+        "missing durable position-2176 snapshot"
+    );
+
+    let started = Instant::now();
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+            .expect("resolve durable HCA row-16 snapshot model identity");
+    let model_content_id = DeepSeekV4ModelContentId::new(content.content_id);
+    let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind DS4 config");
+    let snapshot = load_causal_snapshot_file(
+        &snapshot_path,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: &model.config,
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("load durable position-2176 snapshot");
+    assert_eq!(snapshot.next_position(), 2_176);
+    assert_eq!(
+        snapshot.prefix_tokens(),
+        [35, 201, 200, 34].repeat(544).as_slice()
+    );
+    assert_eq!(snapshot.payload_bytes(), 32_821_760);
+    assert_eq!(
+        snapshot.source_observation(),
+        DeepSeekV4SnapshotObservation::Available
+    );
+    assert_eq!(
+        snapshot
+            .causal_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        "279a2f4ba1a7a6541144b5af6f2cbff745b498cca1fd24e414ec1cb7f86ffa68"
+    );
+
+    let ctx = MetalContext::new().expect("create Metal context");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("build durable position-2176 session");
+    session
+        .restore_causal_snapshot(&snapshot)
+        .expect("restore durable position-2176 snapshot");
+    assert!(session.copy_logits_f32().is_err());
+    session
+        .forward_token(&ctx, 35)
+        .expect("execute restored position 2176");
+    let logits = session
+        .copy_logits_f32()
+        .expect("copy durable position-2176 logits");
+    let endpoint = compare_logits("durable_position_2176", &logits, POSITION_2176_ORACLE_BYTES);
+    assert_eq!(endpoint.oracle_argmax, 201);
+    assert_eq!(endpoint.argmax, endpoint.oracle_argmax);
+    assert_hca_interval_drift_containment("durable position 2176", &endpoint);
+    assert!(endpoint.cosine >= 0.997);
+    assert!(endpoint.relative_rms <= 0.08);
+    let mut native_hasher = Sha256::new();
+    for value in &logits {
+        native_hasher.update(value.to_le_bytes());
+    }
+    assert_eq!(
+        format!("{:x}", native_hasher.finalize()),
+        "b6de17ab59a753d51a242f0a71e8c34965d85542e4d0b1a747098eb47b1244a3"
+    );
+    eprintln!(
+        "durable_position_2176_elapsed={:.3}s identity_cache={:?}",
         started.elapsed().as_secs_f64(),
         content.outcome
     );

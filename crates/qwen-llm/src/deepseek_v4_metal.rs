@@ -37,10 +37,10 @@ pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
 pub const DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 pub use prefill::DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 /// Number of token forwards traversed by the longest retained-session
-/// differential, through the first sparse-CSA continuation at position 2052.
+/// differential, through the HCA row-16 continuation at position 2176.
 /// Callers use this to reject requests before streaming beyond the current
 /// evidence boundary.
-pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 2_053;
+pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 2_177;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeepSeekV4MetalError {
@@ -620,7 +620,7 @@ fn validate_promoted_session_position(position: u32) -> Result<(), DeepSeekV4Met
     }
     if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION {
         return invalid(format!(
-            "native session stops after the promoted first sparse-CSA continuation at position 2052; next position is {position}"
+            "native session stops after the promoted HCA row-16 continuation at position 2176; next position is {position}"
         ));
     }
     Ok(())
@@ -732,8 +732,8 @@ impl DeepSeekV4SessionPhase {
 
 /// Native qwen-owned DeepSeek V4 decode session.
 ///
-/// Sparse CSA and sixteen HCA rows are promoted through the position-2052
-/// continuation. The session fails closed before position 2053 until the next
+/// Sparse CSA and seventeen HCA rows are promoted through the position-2176
+/// continuation. The session fails closed before position 2177 until the next
 /// retained interval earns its own differential.
 pub struct DeepSeekV4Session {
     residency: DeepSeekV4MetalResidency,
@@ -6136,13 +6136,13 @@ mod tests {
 
     #[test]
     fn session_position_guard_separates_evidence_from_physical_capacity() {
-        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 2_053);
+        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 2_177);
         validate_promoted_session_position((DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY - 1) as u32)
             .unwrap();
         let continuation =
             validate_promoted_session_position(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32)
                 .unwrap_err();
-        assert!(continuation.to_string().contains("next position is 2053"));
+        assert!(continuation.to_string().contains("next position is 2177"));
         let retained_interval = validate_promoted_session_position(3_074).unwrap_err();
         assert!(
             retained_interval
@@ -7881,14 +7881,14 @@ mod tests {
     }
 
     #[test]
-    fn ratio128_frontier_preserves_sixteen_rows_and_publishes_before_attention() {
+    fn ratio128_frontier_preserves_seventeen_rows_and_publishes_before_attention() {
         let Some(ctx) = metal_context() else {
             return;
         };
         const HEADS: usize = 2;
         const HEAD_DIM: usize = 512;
         const RATIO: usize = 128;
-        const PUBLISHED_ROWS: usize = 16;
+        const PUBLISHED_ROWS: usize = 17;
         const POSITIONS: usize = PUBLISHED_ROWS * RATIO + 1;
         let rms_eps = 1.0e-5;
         let frontier = DeepSeekV4CompressorFrontier::new(
@@ -8051,7 +8051,7 @@ mod tests {
                 .collect::<Vec<_>>();
             expected_rows.extend_from_slice(&expected_row);
 
-            let integration = if matches!(boundary, 639 | 1023 | 2047) {
+            let integration = if matches!(boundary, 639 | 1023 | 2047 | 2175) {
                 let raw_start = boundary + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
                 let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
                 let mut raw_rows = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM);
@@ -8729,7 +8729,7 @@ mod tests {
         const CAPACITY: usize = 768;
         const VISIBLE: usize = 513;
         const TOP_K: usize = 512;
-        const QUERIES: usize = 2;
+        const QUERIES: usize = 3;
 
         let values = (0..ROWS * 128)
             .map(|index| {
@@ -8746,12 +8746,15 @@ mod tests {
 
         let mut score_values = vec![23.0f32; CAPACITY * QUERIES];
         score_values[..VISIBLE].fill(1.0);
-        score_values[CAPACITY..CAPACITY + VISIBLE].fill(1.0);
-        score_values[CAPACITY + 17] = f32::NAN;
+        for row in 0..CAPACITY {
+            score_values[CAPACITY + row] = row as f32;
+        }
+        score_values[2 * CAPACITY..2 * CAPACITY + VISIBLE].fill(1.0);
+        score_values[2 * CAPACITY + 17] = f32::NAN;
         let scores = offset_f32(&ctx, &score_values, vec![CAPACITY as u64, QUERIES as u64]);
         let visible_counts = offset_i32(
             &ctx,
-            &[VISIBLE as i32, VISIBLE as i32],
+            &[VISIBLE as i32, CAPACITY as i32, VISIBLE as i32],
             vec![QUERIES as u64],
         );
         let mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap();
@@ -8793,21 +8796,42 @@ mod tests {
             &expected,
             2e-6,
         );
-        assert_eq!(read_i32(&status), vec![0, 2]);
-        assert_eq!(read_i32(&counts), vec![TOP_K as i32, TOP_K as i32]);
-        let expected_ids = (0..TOP_K as i32).collect::<Vec<_>>();
+        assert_eq!(read_i32(&status), vec![0, 0, 2]);
+        assert_eq!(read_i32(&counts), vec![TOP_K as i32; QUERIES]);
+        let first_ids = (0..TOP_K as i32).collect::<Vec<_>>();
+        let full_ranked = (CAPACITY - TOP_K..CAPACITY)
+            .rev()
+            .map(|row| row as i32)
+            .collect::<Vec<_>>();
+        let full_cache_order = (CAPACITY - TOP_K..CAPACITY)
+            .map(|row| row as i32)
+            .collect::<Vec<_>>();
         let ranked = read_i32(&ranked);
         let cache_order = read_i32(&cache_order);
-        assert_eq!(&ranked[..TOP_K], &expected_ids);
-        assert_eq!(&cache_order[..TOP_K], &expected_ids);
-        assert_eq!(&ranked[TOP_K..], &expected_ids);
-        assert_eq!(&cache_order[TOP_K..], &expected_ids);
+        assert_eq!(&ranked[..TOP_K], &first_ids);
+        assert_eq!(&cache_order[..TOP_K], &first_ids);
+        assert_eq!(&ranked[TOP_K..2 * TOP_K], &full_ranked);
+        assert_eq!(&cache_order[TOP_K..2 * TOP_K], &full_cache_order);
+        assert_eq!(&ranked[2 * TOP_K..], &first_ids);
+        assert_eq!(&cache_order[2 * TOP_K..], &first_ids);
         let mask = read_i32(&mask);
-        for query in 0..QUERIES {
-            let rows = &mask[query * CAPACITY..(query + 1) * CAPACITY];
-            assert!(rows[..TOP_K].iter().all(|&selected| selected == 1));
-            assert!(rows[TOP_K..].iter().all(|&selected| selected == 0));
-        }
+        let first = &mask[..CAPACITY];
+        assert!(first[..TOP_K].iter().all(|&selected| selected == 1));
+        assert!(first[TOP_K..].iter().all(|&selected| selected == 0));
+        let full = &mask[CAPACITY..2 * CAPACITY];
+        assert!(
+            full[..CAPACITY - TOP_K]
+                .iter()
+                .all(|&selected| selected == 0)
+        );
+        assert!(
+            full[CAPACITY - TOP_K..]
+                .iter()
+                .all(|&selected| selected == 1)
+        );
+        let invalid = &mask[2 * CAPACITY..];
+        assert!(invalid[..TOP_K].iter().all(|&selected| selected == 1));
+        assert!(invalid[TOP_K..].iter().all(|&selected| selected == 0));
     }
 
     #[test]

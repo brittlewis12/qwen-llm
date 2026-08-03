@@ -1446,6 +1446,9 @@ mod tests {
             (2_051, 128, 512, 16),
             (2_052, 128, 513, 16),
             (2_053, 128, 513, 16),
+            (2_175, 128, 543, 16),
+            (2_176, 128, 544, 17),
+            (2_177, 128, 544, 17),
         ] {
             let geometry = snapshot_geometry(&config, position).unwrap();
             assert_eq!(geometry.raw_rows, raw_rows, "position {position}");
@@ -1455,11 +1458,11 @@ mod tests {
                 "position {position}"
             );
         }
-        let terminal = snapshot_geometry(&config, 2_053).unwrap();
+        let terminal = snapshot_geometry(&config, 2_177).unwrap();
         assert_eq!(terminal.raw_elements, 2_818_048);
         assert_eq!(terminal.compressor_elements, 3_051_520);
-        assert_eq!(terminal.published_elements, 7_058_560);
-        assert!(snapshot_geometry(&config, 2_054).is_err());
+        assert_eq!(terminal.published_elements, 7_485_440);
+        assert!(snapshot_geometry(&config, 2_178).is_err());
     }
 
     #[test]
@@ -1494,7 +1497,9 @@ mod tests {
             return;
         };
         let config = crate::deepseek_v4::flash_0731_config_fixture();
-        for &position in &[0, 4, 127, 128, 129, 1_025, 1_028, 2_049, 2_052, 2_053] {
+        for &position in &[
+            0, 4, 127, 128, 129, 1_025, 1_028, 2_049, 2_052, 2_053, 2_176, 2_177,
+        ] {
             let source = synthetic_state(
                 &ctx,
                 &config,

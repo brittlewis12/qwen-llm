@@ -429,8 +429,8 @@ The durable wire layer derives every section length before allocation, uses a
 256-byte versioned header at a 16 KiB payload boundary, requires zero padding and
 reserved fields, and closes the record with a BLAKE3 digest in addition to the
 typed prefix and causal digests. Its hard limit is 64 MiB. The current terminal
-position-2053 state encodes as a 31,983,924-byte record; the durable
-position-2052 development checkpoint is 31,983,920 bytes. Decode temporarily
+position-2177 state encodes as a 32,838,180-byte record; the durable
+position-2176 development checkpoint is 32,838,176 bytes. Decode temporarily
 retains byte sections while constructing typed arenas, so peak host allocation
 is about twice the payload. Request/sampler state remains deliberately outside
 this model-session checkpoint.
@@ -529,8 +529,8 @@ still deferred because no dispatch or numerical kernel changed.
 
 ### S3: CSA lane
 
-Status: the dense-all prefix and first sparse-selection boundary are promoted
-through position 2052 on 2026-08-03. Exact-token b10222 full-vocabulary fixtures
+Status: the dense-all prefix and sparse selection through 544 visible rows are
+promoted through position 2176. Exact-token b10222 full-vocabulary fixtures
 at positions 3/4 first arbitrated same-token visibility; positions 7/8 made the
 overlap roll a live model differential; positions 2051/2052 now pin the first
 513-row history and its immediate continuation. Every named fixture has two
@@ -573,9 +573,11 @@ Gate:
   oracles.
 - Production 64x128 index scoring over 513 and 768 physical rows matches the
   CPU equation. Stable top-512 tests pin exact IDs, all-score ties retain rows
-  0-511, and a non-finite visible score fails closed. Selected attention drops a tagged
-  row, includes row 512, matches the CPU oracle, and materially differs from
-  both dense-513 and blind-first-512 alternatives.
+  0-511, a full 768-visible-row query retains exactly rows 256-767 in descending
+  score / ascending cache order, and a non-finite visible score fails closed.
+  Selected attention drops a tagged row, includes row 512, matches the CPU
+  oracle, and materially differs from both dense-513 and blind-first-512
+  alternatives.
 - Two fresh b10222 position-2051 captures are byte-identical at SHA-256
   `064fd66567734085532b7307186b4087adea7c28cc6334105b0e26e05b50b8a6`;
   two independent position-2052 captures are byte-identical at
@@ -603,7 +605,7 @@ numerics requires a version bump or explicit legacy acceptance.
 
 ### S4: HCA lane
 
-Status: HCA rows 0-15 and continuing execution through position 2052 are
+Status: HCA rows 0-16 and continuing execution through position 2176 are
 promoted. All 20 HCA layers use the retained ratio-128 frontier to pool,
 RMS-normalize, apply block-start adjacent-pair RoPE, publish F16 compressed
 rows, and include every published row in the same-token softmax over the
@@ -612,8 +614,9 @@ their named full-model boundary evidence. Later rows use generalized
 production-width operation properties and strategic full-model endpoints
 rather than a mechanical fixture campaign at every boundary. Position 2047
 publishes HCA row 15 and CSA row 511; position 2048 proves immediate wrapped
-continuation at the former dense-all limit, while positions 2051/2052 prove HCA
-continues unchanged as CSA enters sparse selection.
+continuation at the former dense-all limit, positions 2051/2052 prove HCA
+continues unchanged as CSA enters sparse selection, and positions 2174/2175/2176
+pin the first HCA publication reached while that sparse path is active.
 
 The long-prefix differential uses a different numerical gate from positions
 0-8. Singleton-versus-singleton drift accumulates before any HCA row exists:
@@ -700,12 +703,12 @@ Gate:
   510, and 511 use the existing 0.990 / 0.15 interval containment; publication
   must improve or preserve both measures, and position 512 must strictly
   recover both and satisfy the established 0.997 / 0.075 endpoint gate.
-- A production-width ratio-128 property executes all 2,049 positions through
-  row 15. It rejects every early publication, compares every emitted row with
+- A production-width ratio-128 property executes all 2,177 positions through
+  row 16. It rejects every early publication, compares every emitted row with
   the independent CPU compressor after F16 storage, preserves all older rows,
-  validates block-start YaRN positions 0 through 1,920, and leaves the history
-  unchanged at position 2048.
-- Serial publication-to-attention gates at positions 639, 1023, and 2047
+  validates block-start YaRN positions 0 through 2,048, and leaves the history
+  unchanged at position 2176.
+- Serial publication-to-attention gates at positions 639, 1023, 2047, and 2175
   materially distinguish the newest row from a prior-count ablation. Tagged
   wrapped-ring gates at 638/639/640 and 1022/1023/1024 independently match HCA
   counts 4/5/5 and 7/8/8 plus CSA counts 159/160/160 and 255/256/256. The same gate now
@@ -733,16 +736,37 @@ Gate:
   0.063223233. Both the uninterrupted extension and a fresh durable restore
   produce full-vector SHA-256
   `13cb8a323341f3f23bcb98ddfb8c257b5125411065d14e1b40c5a75fa19ed53c`.
-- The first sparse CSA boundary and continuation preserve the named b10222
-  full-logit gates at positions 2051/2052. A valid-token position-2053 call
-  rejects before mutation, keeps `next_position == 2053`, and preserves the
-  completed position-2052 observation.
+- Fresh-session b10222 captures at positions 2174, 2175, and 2176 are
+  byte-identical across repeats at SHA-256
+  `dd1662dd4310ce97796f666ccc41b7088c747409b8148487a9c26d6d69f95d4f`,
+  `a3bd79f2b0becb7a97ad8688b698711b78d9df3c0c5b8a09c6f51d6011873e58`,
+  and `2c4a75eaa53d206ee996ec01480dff2f5d41c3dae02185c9737de34b6dbeb8f7`.
+- The singleton-schedule native control/boundary/continuation preserves
+  argmaxes 34/35/201 at cosine / relative-RMS pairs
+  0.996295811 / 0.092469395, 0.997194787 / 0.075041071, and
+  0.997642849 / 0.069782687. Publication and continuation each improve both
+  measures, so inherited sparse-interval drift is not misattributed to row 16.
+- The product packed schedule reaches the boundary in one 124-token chunk at
+  0.995150607 / 0.098514095, then recovers on the immediate singleton
+  continuation to 0.997213076 / 0.076756856. The gate combines 0.990 / 0.15
+  interval containment, a boundary allowance of 0.002 cosine / 0.01 relative
+  RMS from the pre-boundary control, strict two-measure recovery, and an
+  absolute continuation floor/ceiling of 0.997 / 0.08. Packed-versus-singleton
+  schedule comparisons are separately bounded at 0.998 / 0.06; measured pairs
+  are 0.998269056 / 0.058813970 and 0.999267213 / 0.038684935.
+- The next-position-2176 checkpoint has a 32,821,760-byte payload,
+  32,838,176-byte record, and causal digest
+  `279a2f4ba1a7a6541144b5af6f2cbff745b498cca1fd24e414ec1cb7f86ffa68`.
+  Fresh restore reproduces full-logit SHA-256
+  `b6de17ab59a753d51a242f0a71e8c34965d85542e4d0b1a747098eb47b1244a3`;
+  position 2177 rejects before mutation and preserves every completed
+  position-2176 logit bit.
 
-The next semantic ownership boundary is HCA row 16 at position 2175. Sparse CSA
-is already active throughout that interval, so the next extension must prove
-both continued top-512 selection and same-token HCA publication. Named
-full-layer intermediate states remain useful for an actual divergence, not as
-a mandatory campaign at every ratio-4 boundary.
+The next physical ownership boundary is CSA row 768 at position 3075. The
+strategic endpoint immediately before it is position 3072, where CSA has filled
+all 768 physical rows and HCA has published row 23. Named full-layer
+intermediate states remain useful for an actual divergence, not as a mandatory
+campaign at every ratio-4 boundary.
 
 ### S5: full 0731 target generation
 
@@ -760,7 +784,7 @@ Qwen default.
 The CLI reserves `prompt_tokens + max_generated_tokens - 1` forwards before
 Metal residency or any token execution. This mirrors the generator's
 pending-final-token semantics and guarantees an accepted request cannot
-partially stream beyond the retained-session evidence through position 2052.
+partially stream beyond the retained-session evidence through position 2176.
 The 103 GB split GGUF is already virtually mapped for family detection at that
 point; residency remains untouched on rejection. The promoted capacity is
 exported by the session implementation, so frontend and executor cannot drift
@@ -807,11 +831,16 @@ Gate:
   uncached position-2048 endpoint in 982.3 ms, and generated
   oracle ID 201 with `prefill_mode=causal_snapshot_restore`. End-to-end process
   time is 1.56 seconds.
-- The exported budget now accepts exactly 2,053 forwards. The release CLI
-  validates the 31,983,920-byte position-2052 record before residency, restores
-  2,052 tokens, consumes the uncached sparse endpoint in 1,495.5 ms, and
-  generates oracle ID 201 with `prefill_mode=causal_snapshot_restore`. The
-  request reports `reserved_forwards=2053/2053`; position 2053 remains rejected.
+- The earlier 2,053-forward budget validated the 31,983,920-byte position-2052
+  record before residency, restored 2,052 tokens, consumed the uncached sparse
+  endpoint in 1,495.5 ms, and
+  generated oracle ID 201 with `prefill_mode=causal_snapshot_restore`. The
+  request reported `reserved_forwards=2053/2053`.
+- The exported budget now accepts exactly 2,177 forwards. The release CLI
+  validates the 32,838,176-byte position-2176 record before residency, restores
+  2,176 tokens, consumes the uncached endpoint in 1,566.3 ms, and generates
+  oracle ID 201. It reports `reserved_forwards=2177/2177`; position 2177 remains
+  rejected.
 - Ordinary 0731 messages match vLLM and SGLang byte-for-byte. On the Flash
   vocabulary, user-only, system/user, and multi-turn Unicode fixtures encode to
   exact token sequences of 5, 8, and 16 tokens. A live system/user request
@@ -873,7 +902,7 @@ for the minimum ordinary prompt-encoder gate.
 ### S6: Metal performance promotion
 
 Status: retained layer-major chunks of 1-128 tokens are promoted through the
-full 2,053-forward session capacity. The physical scratch is sized and
+full 2,177-forward session capacity. The physical scratch is sized and
 admitted once for 128; short chunks use exact prefix views. One-token prompts
 remain singleton only when they are the entire request. Longer prompts consume
 successive explicit packed chunks, with no singleton replay or hidden fallback.
@@ -965,6 +994,12 @@ Gate:
   packed causal-state digest
   `03cea8187af6782fa374bf8ce441057d74924880eb6be46439b25982098476db`
   is pinned separately from the singleton reduction history.
+- Starting from the durable position-2052 state, one 124-token packed chunk
+  keeps sparse CSA active from 513 through 544 visible rows and publishes HCA
+  row 16 on its final token. The packed boundary/continuation preserves
+  argmaxes 35/201 at 0.995150607 / 0.098514095 and
+  0.997213076 / 0.076756856; the immediate continuation recovers both measures.
+  The complete checkpoint-producing live packet takes 23.324 seconds cold.
 - A successful advance revokes the session's current logits and final hidden
   observation; vectors already copied to the host remain ordinary owned values.
   A callback unwind from retained position 2 leaves that position unchanged,
@@ -1034,14 +1069,17 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Use the durable certified position-2052 checkpoint as the ordinary boundary
-   development loop; reopen fresh 2,052-token replay only for a causal-prefix or
+1. Use the durable certified position-2176 checkpoint as the ordinary boundary
+   development loop; reopen fresh 2,176-token replay only for a causal-prefix or
    restore-ABI change.
-2. Extend the retained interval through the HCA row-16 publication at position
-   2175 and its immediate continuation. Keep sparse CSA active throughout; do
-   not reintroduce dense-all as a temporary bridge.
-3. Add a named real-weight selected-ID/intermediate probe only if the next
+2. Remove score-ranked IDs and their insertion sort from the production sparse
+   scratch before the longer interval; retain them only in an operation probe.
+   Attention consumes ascending cache-order IDs.
+3. Extend the generalized HCA property through row 23, then use retained chunks
+   to position 3072, immediately after all 768 CSA rows are populated and before
+   unallocated row 768 at position 3075.
+4. Add a named real-weight selected-ID/intermediate probe only if the next
    full-logit endpoint diverges. The current operation-level exact-ID gate plus
-   two independent full-model endpoints already owns the first sparse boundary.
-4. Extend the 0731 message encoder to reasoning and DSML tools only with exact
+   independently captured sparse/HCA full-model endpoints own the current path.
+5. Extend the 0731 message encoder to reasoning and DSML tools only with exact
    release-derived byte fixtures and an end-to-end tool-call workload.

@@ -489,49 +489,54 @@ fn pinned_position_zero_oracle_has_exact_identity() {
 
 #[test]
 #[ignore = "requires the local DS4 model and target Metal device"]
-fn native_deepseek_v4_64k_session_plan_is_exact_and_admitted() {
+fn native_deepseek_v4_full_context_session_plan_is_exact_and_admitted() {
     let model_path = std::env::var_os("DSV4_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
-    let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 65_536)
-        .expect("plan 64K DS4 session");
-    assert_eq!(plan.session_capacity().forward_limit(), 65_536);
-    assert_eq!(plan.session_capacity().csa_physical_rows(), 16_384);
-    assert_eq!(plan.session_capacity().hca_physical_rows(), 512);
+    let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 1_048_576)
+        .expect("plan full-context DS4 session");
+    assert_eq!(plan.session_capacity().forward_limit(), 1_048_576);
+    assert_eq!(plan.session_capacity().csa_physical_rows(), 262_144);
+    assert_eq!(plan.session_capacity().hca_physical_rows(), 8_192);
     let memory = plan.memory_plan().clone();
+    eprintln!("deepseek_v4 full-context planned memory={memory}");
     assert_eq!(memory.session_allocations().len(), 537);
-    assert_eq!(memory.session_logical_bytes(), 614_951_456);
-    assert_eq!(memory.session_priced_upper_bytes(), 619_413_504);
-    assert_eq!(memory.total_priced_upper_bytes(), 103_614_038_016);
+    assert_eq!(memory.session_logical_bytes(), 7_631_890_976);
+    assert_eq!(memory.session_priced_upper_bytes(), 7_636_353_024);
+    assert_eq!(memory.total_priced_upper_bytes(), 110_630_977_536);
     let required = memory
         .required_with_reserve_bytes()
-        .expect("price 64K plan with reserve");
-    assert_eq!(required, 104_150_908_928);
+        .expect("price full-context plan with reserve");
+    assert_eq!(required, 111_167_848_448);
     let admission = memory.admission(ctx.memory_signals());
-    assert!(admission.admitted, "64K plan denied: {admission:?}");
+    assert!(
+        admission.admitted,
+        "full-context plan denied: {admission:?}"
+    );
     let before_residency = admission.signals.current_allocated_bytes;
     let realized = DeepSeekV4MetalResidency::load_from_plan(
         &ctx,
         &gguf,
-        plan.admit(admission.signals).expect("admit 64K DS4 plan"),
+        plan.admit(admission.signals)
+            .expect("admit full-context DS4 plan"),
     )
-    .expect("realize 64K DS4 residency");
+    .expect("realize full-context DS4 residency");
     let after_residency = realized.after_residency_bytes();
     let residency = realized.into_residency();
     let session = DeepSeekV4PositionZeroForward::new(&ctx, residency)
-        .expect("construct admitted 64K DS4 session");
-    assert_eq!(session.capacity().forward_limit(), 65_536);
+        .expect("construct admitted full-context DS4 session");
+    assert_eq!(session.capacity().forward_limit(), 1_048_576);
     let after_session = ctx.current_allocated_size();
     let observed_total = memory
         .reconcile_session(before_residency, after_residency, after_session)
-        .expect("reconcile admitted 64K session");
+        .expect("reconcile admitted full-context session");
     let observed_session = after_session - after_residency;
     assert!(observed_session <= memory.session_priced_upper_bytes());
     eprintln!(
-        "deepseek_v4 64k memory session_priced={} total_priced={} required_with_reserve={} observed_session={} observed_total={}",
+        "deepseek_v4 full-context memory session_priced={} total_priced={} required_with_reserve={} observed_session={} observed_total={}",
         memory.session_priced_upper_bytes(),
         memory.total_priced_upper_bytes(),
         required,

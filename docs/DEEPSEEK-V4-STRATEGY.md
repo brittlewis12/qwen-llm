@@ -146,22 +146,26 @@ must be reviewed as tokenizer changes.
 Raw tokenization is only half of frontend support. The official 0731 release
 deliberately does not ship a Jinja template. Its Python encoder defines system,
 user, assistant, tool, developer, latest-reminder, reasoning-effort, DSML, and
-quick-task behavior. The ordinary chat subset is now ported from two
-independently maintained release-derived implementations: vLLM's V4 encoder and
-SGLang's encoder, whose source explicitly records release provenance. Both
-produce byte-identical user-only, system/user, and multi-turn Unicode prompts.
+quick-task behavior. The ordinary chat and reasoning-mode subset is ported from
+two independently maintained release-derived implementations: vLLM's V4
+encoder and SGLang's encoder, whose source explicitly records release
+provenance. Fourteen generated cases require those pinned implementations to
+produce byte-identical prompts before their bytes are accepted as fixtures.
 
 The promoted subset accepts an optional leading system turn, alternating plain
-user/assistant history, and a final user turn. It emits BOS explicitly,
-attaches `<｜Assistant｜></think>` to each user turn, and terminates historical
-assistant content with EOS. Unknown per-message or wrapped top-level fields,
-developer/tool roles, reasoning records, non-alternating history, and Qwen
-thinking-policy flags fail closed. `--messages-max` applies after structural
-JSON deserialization, then role/order/extra-field semantics validate only the
-retained prefix; wrapper-level semantics are always rejected. Raw mode remains
-the exact reproduction interface. Rich V4 tools, reasoning, latest-reminder,
-response-format, and quick-task semantics remain separate fixture-gated
-extensions rather than approximations of the official encoder.
+user/assistant history, and a final user turn. Chat mode emits the established
+`<｜Assistant｜></think>` transition. `--reasoning high` opens `<think>` on the
+final turn, `max` also prepends the exact release effort instruction, and
+`--preserve-reasoning` replays assistant `reasoning` / `reasoning_content`
+fields across turns with conflict checks. Unknown per-message or wrapped
+top-level fields, developer/tool roles, non-alternating history, and Qwen
+thinking-policy flags fail closed. Reasoning controls are rejected before every
+CLI early exit unless `--messages` owns the request. `--messages-max` applies
+after structural JSON deserialization, then role/order/extra-field semantics
+validate only the retained prefix; wrapper-level semantics are always rejected.
+Raw mode remains the exact reproduction interface. Rich V4 tools,
+latest-reminder, response-format, and quick-task semantics remain separate
+fixture-gated extensions rather than approximations of the official encoder.
 
 ## What transfers from qwen-llm
 
@@ -434,30 +438,38 @@ cannot capture or restore.
 The payload contains only persistent state: chronological visible F16 raw rows,
 all F32 CSA-attention/CSA-indexer/HCA compressor state bits, and visible F16
 attention/indexer publications. Scratch and observations are excluded. Restore
-builds deterministic full physical images and validates identity, geometry,
-prefix, numerical phase, overlap lanes, arena lengths, and whole-state digest
-before poisoning the destination; success always becomes ready without an
-observation. This preserves the distinction between “correct from restored
+validates identity, geometry, prefix, numerical phase, overlap lanes, arena
+lengths, and whole-state digest before poisoning the destination. It then zeros
+each destination publication buffer directly and copies only the visible wire
+prefix; it does not construct a full-capacity host image, and no recoverable
+operation remains after mutation begins. Success always becomes ready without
+an observation. This preserves the distinction between “correct from restored
 position” and “this build reproduced the prefix.”
 
 The durable wire layer derives every section length before allocation, uses a
 256-byte versioned header at a 16 KiB payload boundary, requires zero padding and
 reserved fields, and closes the record with a BLAKE3 digest in addition to the
-typed prefix and causal digests. The CLI policy now permits records through 1
-GiB. A terminal 65,536-forward state has 262,144 prefix bytes, 5,636,096 raw
-bytes, 12,206,080 compressor bytes, and 450,887,680 visible-publication bytes:
-the payload is 468,992,000 bytes and the complete v1 record is 469,008,416
-bytes. Decode temporarily retains byte sections while constructing typed
-arenas, so peak host allocation is about twice the payload. Request/sampler
-state remains deliberately outside this model-session checkpoint.
+typed prefix and causal digests. The CLI policy permits records through 1 GiB.
+A terminal 1,048,576-forward state has 4,194,304 prefix bytes, 5,636,096 raw
+bytes, 12,206,080 compressor bytes, and 7,214,202,880 visible-publication bytes:
+the payload is 7,236,239,360 bytes and the complete v1 record is 7,236,255,776
+bytes. A missing snapshot path is sized immediately after tokenization, before
+strong shard hashing or Metal residency, so this terminal record fails the
+policy cheaply. Existing records are likewise budgeted before residency.
+Permitted decode still temporarily retains wire sections while constructing
+typed arenas, so its peak host allocation is about twice the visible payload.
+Streaming long-context snapshots remain a separate product lane; inference does
+not require them. Request/sampler state remains deliberately outside this
+model-session checkpoint.
 
 Physical history capacity is destination policy, not wire identity. Snapshot
 v1 stores only visible rows and retains the same compatibility digest across
 slab counts. A position-3072 record from a 768-row session restores canonically
-into a 16,384-row CSA image with every unpublished tail bit zero, and re-encoding
-the restored state produces the identical record. The reverse direction rejects
-before mutation when the snapshot position exceeds the smaller session. No ABI
-bump was needed for capacity generalization.
+into a full-context 262,144-row CSA / 8,192-row HCA session with every
+unpublished destination bit zero, and re-encoding the restored state produces
+the identical record. The reverse direction rejects before mutation when the
+snapshot position exceeds the smaller session. No ABI bump or full physical
+host image was needed for capacity generalization.
 
 The explicit `--deepseek-v4-snapshot PATH` surface derives a strong cached
 content root over every complete retained GGUF shard. The snapshot parent must
@@ -560,22 +572,23 @@ still deferred because no dispatch or numerical kernel changed.
 
 ### S3: CSA lane
 
-Status: the dynamic CSA lane is promoted for the 65,536-forward v1 capacity.
-Full-model evidence crosses the first request-derived fourth-slab row at
-position 3075 and its continuation at 3076; production-width far-index
-properties publish the final v1 row 16,383 at position 65,535. Exact-token
-b10222 full-vocabulary fixtures at positions 3/4 first arbitrated same-token
-visibility; positions 7/8 made the overlap roll a live model differential;
-positions 2051/2052 pin the first 513-row history; positions 3070/3071/3072
-close the former fixed third slab. Every named external fixture has two
-byte-identical fresh-session captures, full shard hashes, and pinned producer
-commits.
+Status: the dynamic CSA lane is structurally promoted through the model's exact
+1,048,576-forward context. Full-model evidence crosses the first
+request-derived fourth-slab row at position 3075 and its continuation at 3076;
+terminal-capacity far-index properties publish and consume rows
+262,142/262,143 at positions 1,048,571/1,048,575 without replaying their prefix.
+Exact-token b10222 full-vocabulary fixtures at positions 3/4 first arbitrated
+same-token visibility; positions 7/8 made the overlap roll a live model
+differential; positions 2051/2052 pin the first 513-row history; positions
+3070/3071/3072 close the former fixed third slab. Every named external fixture
+has two byte-identical fresh-session captures, full shard hashes, and pinned
+producer commits.
 
 The native lane performs ratio-4 two-branch pooling, learned RMSNorm,
 block-start adjacent-pair RoPE, F16 compressed-row publication, overlap roll,
 and denominator-only-sink attention over the local raw window plus compressed
 history. Attention and indexer publications now own request-derived 256-row
-slabs, with a 768-row compatibility floor and 16,384 rows at the v1 ceiling.
+slabs, with a 768-row compatibility floor and 262,144 rows at full context.
 Rows 0-511 retain the exact dense-all path; row 512 and later use an explicit
 `LlamaCppB10222F16HadamardV1` indexer contract: project 64x128 queries
 from normalized Q-LoRA, apply adjacent-pair tail RoPE and normalized Hadamard,
@@ -619,6 +632,21 @@ Gate:
   Scores, mask, IDs, and output match the independent CPU contracts; a blind
   first-512 alternative is materially different. Earlier sparse gates separately
   pin future-row masking.
+- A terminal ratio-4 frontier starts at position 1,048,568 and publishes rows
+  262,142/262,143 for both attention and Hadamard-indexer caches. Against the
+  iterative CPU compressor after the production F16 round trip, attention rows
+  measure cosine 0.999999024/0.999992249, relative RMS
+  0.001397355/0.003937333, and max error 0.010986328/0.037734985; indexer rows
+  measure 0.999995600/0.999951636, 0.002969242/0.009835373, and
+  0.005859375/0.016235352. The wider far-position envelope accounts for direct
+  power versus iterative RoPE evaluation rather than changing the equation.
+- At position 1,048,575, a one-head 128-wide integration gate scores all
+  262,144 index rows, forces terminal row 262,143 into the deterministic top
+  512, compacts the result into cache order, and feeds selected attention.
+  Score, mask, IDs, and output match their CPU contracts, closing terminal
+  capacity, stride, visibility, and top-k consumption without a million-token
+  replay. Separate 64x128 production-head gates pin the same scoring equation
+  and cache layout at smaller histories.
 - Production 64x128 index scoring over 513 and 768 physical rows matches the
   CPU equation. Stable top-512 tests pin exact IDs, all-score ties retain rows
   0-511, a full 768-visible-row query retains exactly rows 256-767 in descending
@@ -690,15 +718,20 @@ numerics requires a version bump or explicit legacy acceptance.
 
 ### S4: HCA lane
 
-Status: the dense HCA lane is promoted through all 512 rows required by the
-65,536-forward v1 capacity. Full-model evidence currently reaches 24 published
-rows and position 3076; a production-width far-index property publishes and
-consumes the final v1 row 511 at position 65,535 without replaying its 65K-token
-prefix. All
-20 HCA layers use the retained ratio-128 frontier to pool, RMS-normalize, apply
-block-start adjacent-pair RoPE, publish F16 compressed rows, and include every
-published row in the same-token softmax over the 128-row local window plus
-dense compressed history. The first four rows retain their named full-model
+Status: the dense HCA lane is structurally promoted through all 8,192 rows in
+the model's exact context. Full-model semantic evidence currently reaches 24
+published rows and position 3076; a bounded real-weight integration gate crosses
+the first tiled query at position 65,663, and production-width properties
+publish and consume terminal row 8,191 at position 1,048,575 without replaying
+the prefix. All 20 HCA layers use the retained ratio-128 frontier to pool,
+RMS-normalize, apply block-start adjacent-pair RoPE, publish F16 compressed rows,
+and include every published row in the same-token softmax over the 128-row local
+window plus dense compressed history. Counts through 512 retain the established
+single-threadgroup reduction. Larger histories use a correctness-first tiled
+two-pass kernel: each 512-row tile recomputes scalar 512-wide dot products,
+finds the global maximum, and then accumulates masses and values in the same
+raw-then-compressed order as the legacy path. It uses no global scratch and
+makes no throughput claim. The first four rows retain their named full-model
 boundary evidence. Later rows use generalized production-width operation
 properties and strategic full-model endpoints rather than a mechanical fixture
 campaign at every boundary. Position 2047
@@ -805,6 +838,38 @@ Gate:
   CPU attention while a prior-511-row ablation is materially different. This
   proves far row addressing and terminal same-token visibility without a 65K
   replay.
+- The tiled kernel is bit-identical to the legacy reduction at compressed counts
+  1, 511, and 512. Above the switch it matches the independent CPU equation at
+  counts 513, 527, 528, 895, 896, 897, 8,191, and 8,192, including late rising
+  maxima and a material final-row ablation. Counts 895/896/897 straddle a true
+  512-row tile boundary rather than only the legacy-to-tiled dispatch boundary.
+- A packed two-query gate at positions 65,662/65,663 executes a legacy prefix
+  and tiled suffix in one retained chunk. It preserves the original pre-chunk
+  raw ring for the older query and consumes the newly published row 512 only for
+  the later query. A separate terminal pair at positions
+  1,048,574/1,048,575 pins visibility 8,191 to 8,192 and the same raw-cache
+  causality at the maximum supported indices.
+- A ratio-128 frontier starts directly at position 1,048,448, publishes row
+  8,191 on position 1,048,575, and consumes all 8,192 rows in that same Metal
+  command. The published F16 row measures cosine 0.999990738, relative RMS
+  0.004303934, and max absolute error 0.032226563 against the iterative CPU
+  compressor; attention recomputed from the actual stored row then matches the
+  CPU contract at the tight operation tolerance.
+- Scaled YaRN forward/inverse properties cover positions 65,535, 65,536,
+  1,048,448, and 1,048,575. The production direct-power Metal schedule and the
+  independent iterative-theta CPU schedule each remain inside relative-RMS
+  0.01 / max-error 0.02 envelopes; observed worst cases are 0.002540418 /
+  0.003356243 and 0.004722705 / 0.003458768 respectively. The unscaled
+  theta-10,000 branch separately remains bounded at the terminal position with
+  relative RMS 0.004380320 and max error 0.002259519.
+- A deliberately bounded real-weight session begins with synthetic empty causal
+  state at position 65,663 and executes one complete 43-layer token through
+  sparse CSA and the first tiled HCA query. Two fresh sessions produce the
+  byte-identical full-logit SHA-256
+  `faec662738ace00aff407638de8adfd44ac3e98106ff5fbc6e1133c5e42fb363`;
+  the next position rejects without changing logits. This proves mechanical
+  integration on the 95.93 GiB asset, not semantic correctness of the synthetic
+  prefix.
 - Serial publication-to-attention gates at positions 639, 1023, 2047, 2175,
   and 3071 materially distinguish the newest row from a prior-count ablation.
   Tagged
@@ -860,23 +925,23 @@ Gate:
   position 2177 rejects before mutation and preserves every completed
   position-2176 logit bit.
 
-The next HCA algorithm boundary is outside v1: position 65,663 publishes row
-512, requiring attention over 513 dense compressed rows. That coincides with
-the first post-65,536 block and is coupled to the post-original-context YaRN
-audit. It requires a tiled online-softmax HCA kernel and a new numerical gate;
-it is not approximated by raising the current thread geometry.
-
-The promoted strategic capacity is now 65,536 forwards. Position 3075 is a
-property case inside the generalized allocator, not another product milestone.
-There is no further CSA addressing or algorithm discontinuity below the v1
-ceiling: sparse attention always consumes at most 512 selected compressed rows,
-while publication storage grows in derived slabs. Named full-layer intermediate
-states remain useful for an actual divergence, not at every ratio-4 boundary.
+The former post-original-context discontinuity is now closed. Position 65,663
+uses 513 dense compressed rows, the packed scheduler splits crossing chunks at
+the first tiled query, and the same kernel scales to all 8,192 terminal rows.
+The promoted strategic capacity is the model's exact 1,048,576 forwards rather
+than decimal one million. There is no further CSA or HCA addressing or algorithm
+discontinuity below that ceiling: sparse CSA always consumes at most 512 selected
+rows, dense HCA scans derived 512-row tiles, and publication storage grows in
+request-derived slabs. Named full-layer intermediate states remain useful for an
+actual divergence, not at every compression boundary. Full-context feasibility
+is a correctness and memory statement; practical long-prompt latency remains an
+optimization problem.
 
 ### S5: full 0731 target generation
 
 Status: bounded raw CLI and resident-memory admission slices promoted on
-2026-08-02. The release `qwen` binary now opens the split GGUF once, dispatches
+2026-08-02; request-derived execution and admission now extend through the exact
+model context. The release `qwen` binary opens the split GGUF once, dispatches
 `deepseek4` outside the Qwen model binder, constructs the native JoyAI tokenizer
 and strict Metal residency, forwards every raw prompt token, and reuses the
 common sampler and producer-declared stop-token contract. Generated pieces are
@@ -889,7 +954,7 @@ Qwen default.
 The CLI reserves `prompt_tokens + max_generated_tokens - 1` forwards before
 Metal residency or any token execution. This mirrors the generator's
 pending-final-token semantics and guarantees an accepted request cannot
-partially stream beyond the engine-owned 65,536-forward evidence ceiling.
+partially stream beyond the engine-owned 1,048,576-forward evidence ceiling.
 The 103 GB split GGUF is already virtually mapped for family detection at that
 point; residency remains untouched on rejection. The promoted capacity is
 exported by the session implementation, so frontend and executor cannot drift
@@ -955,32 +1020,37 @@ Gate:
   oracle ID 201 with `reserved_forwards=3073/3073` and
   `prefill_mode=causal_snapshot_restore`. End-to-end process time is 1.79
   seconds with zero reported swaps.
-- The current request contract accepts every exact budget through 65,536 and
-  rejects 65,537 before residency. Capacity arithmetic is exhaustive over the
-  entire interval: CSA requires `floor(F/4)` rows, HCA requires
-  `floor(F/128)`, each rounds to a 256-row slab with compatibility floors of
+- The current request contract accepts every exact budget through 1,048,576 and
+  rejects 1,048,577 before residency. Capacity arithmetic is exhaustively
+  checked over the entire interval: CSA requires `floor(F/4)` rows, HCA requires
+  `floor(F/128)`, and each rounds to a 256-row slab with compatibility floors of
   768 and 512. Thus 3,075 forwards retain 768 CSA rows, 3,076 allocate 1,024,
-  and 65,536 allocate exactly 16,384 CSA plus 512 HCA rows.
+  decimal 1,000,000 allocates 250,112 CSA / 7,936 HCA rows, and the exact model
+  context allocates 262,144 CSA / 8,192 HCA rows.
 - Ordinary 0731 messages match vLLM and SGLang byte-for-byte. On the Flash
   vocabulary, user-only, system/user, and multi-turn Unicode fixtures encode to
   exact token sequences of 5, 8, and 16 tokens. A live system/user request
   rendered to 11 tokens and qwen generated IDs `[46382, 15697, 11898, 1]`
   (`ghiaccioli` then EOS); the b10222 `llm` singleton oracle produced the same
   first-token argmax and complete greedy text.
+- Fourteen executable-source fixtures cover chat, high/max reasoning,
+  drop/preserve history, two rounds, missing reasoning, and both field aliases.
+  Pinned vLLM and SGLang revisions plus encoder hashes regenerate every prompt
+  byte-identically; invalid alias, role, wrapper, and CLI-scope combinations
+  fail before model execution.
 - Intermediate bisect can isolate any divergence to one layer and operation.
 - Repeated runs are deterministic under the same host-validity contract used
   by Qwen benchmarks.
-- Allocation-free maximum-capacity planning inventories 7 resident buffers (3
-  retained no-copy windows and 4 final-page copies) at 102,994,624,512
-  priced-upper bytes and 537 unique session buffers at 614,951,456 logical /
-  619,413,504 priced-upper bytes. Of the logical session total, 450,887,680
-  bytes are published-history storage. The remainder includes the complete
-  physical 128-token packed
-  scratch, sparse-index score/selection matrices, and 131,072-byte pre-chunk
-  raw-ring snapshot rather than charging them to reserve. The complete priced
-  upper bound is 103,614,038,016 bytes;
-  a 536,870,912-byte dynamic reserve makes the admission requirement
-  104,150,908,928 bytes.
+- Allocation-free full-context planning inventories 7 resident buffers (3
+  retained no-copy windows and 4 final-page copies) at 102,994,608,640 logical /
+  102,994,624,512 priced-upper bytes and 537 unique session buffers at
+  7,631,890,976 logical / 7,636,353,024 priced-upper bytes. Of the logical
+  session total, 7,214,202,880 bytes are published-history storage. The
+  remainder includes the complete physical 128-token packed scratch,
+  sparse-index score/selection matrices, and 131,072-byte pre-chunk raw-ring
+  snapshot rather than charging them to reserve. The complete priced upper
+  bound is 110,630,977,536 bytes; a 536,870,912-byte dynamic reserve makes the
+  admission requirement 111,167,848,448 bytes.
 - The load plan freezes configuration plus every descriptor's name, shape,
   dtype, shard, offset, and byte length. Realization revalidates those values,
   fallback policy, all view/alias/window geometry, and a deterministic planner
@@ -989,8 +1059,8 @@ Gate:
   475,136-byte baseline, giving 126,701,060,096 bytes of working-set headroom.
   The process signal was `Some(0)`, the established omitted-limit convention,
   so the explicit reason was `admitted_process_budget_omitted`.
-- Live maximum-capacity reconciliation observed 614,957,056 session bytes and
-  103,609,565,184 cumulative residency-plus-session bytes, both below their
+- Live full-context reconciliation observed 7,631,896,576 session bytes and
+  110,626,504,704 cumulative residency-plus-session bytes, both below their
   priced inventories. Residency and session must fit those inventories without
   the reserve; only the first-forward endpoint gate may use the reserve.
   Residency is reconciled inside realization, before an unaccounted resident
@@ -1015,24 +1085,31 @@ those limits.
 
 This admission and reconciliation contract is explicitly Metal-scoped. It does
 not include the snapshot codec's temporary host vectors, whose separate 1 GiB
-record limit and roughly twice-payload decode peak are documented above. A
-future total-process admission claim must account for those host allocations.
+record limit and roughly twice-visible-payload decode peak are documented above.
+The CLI preflights an absent snapshot's exact record size before shard hashing
+or residency, so a full-context capture is rejected by policy rather than
+silently consuming the 7.2 GiB wire payload. A future total-process admission
+claim must account for streaming or those host allocations.
 
-The bounded raw and ordinary-message slices now establish first-class native
-inference and resident-memory admission through every full-session differential
-promoted so far. Rich tools/reasoning are product extensions, not prerequisites
-for the minimum ordinary prompt-encoder gate.
+The bounded raw and ordinary-message slices establish first-class native
+inference. Full-context operation properties, request guards, and live memory
+reconciliation establish structural feasibility through every model position;
+they do not claim practical million-token TTFT or replace a real-prefix semantic
+endpoint. Rich tool/developer schemas are product extensions, not prerequisites
+for the ordinary chat and reasoning prompt-encoder gate.
 
 ### S6: Metal performance promotion
 
 Status: retained layer-major chunks of 1-128 tokens use request-derived storage
-through the 65,536-forward v1 capacity. The physical scratch is sized and
-admitted once for 128; short chunks use exact prefix views. One-token prompts
+through the exact 1,048,576-forward model context. The physical scratch is sized
+and admitted once for 128; short chunks use exact prefix views. One-token prompts
 remain singleton only when they are the entire request. Longer prompts consume
 successive explicit packed chunks, with no singleton replay or hidden fallback.
-Full-model packed evidence crosses the old fixed-capacity boundary through
-position 3076; far-index operation gates replace a prohibitively slow 65K
-fixture replay where no new mechanism exists.
+Full-model packed semantic evidence crosses the old fixed-capacity boundary
+through position 3076. Production-width far-index properties, terminal
+two-query causality gates, and a bounded real-weight post-64K execution replace
+prohibitively slow deep-prefix fixture replay at the remaining structural
+boundaries.
 
 The packed path is DS4-owned and never calls `forward_token`. Its outer loop is
 43 layers over a token matrix. Embedding, mHC function projections and controls,
@@ -1050,11 +1127,15 @@ then selects pre-chunk or current storage before modulo addressing. This keeps
 future chunk rows from destroying historical keys needed by earlier queries;
 append-only compressed rows remain hidden solely by per-query absolute counts.
 CSA chunks that straddle row 512 run an unchanged dense prefix followed by a
-sparse suffix with per-query visible counts and cache-ordered selected IDs. The
+sparse suffix with per-query visible counts and cache-ordered selected IDs. Its
 dynamic mass slab covers exactly 128 raw rows, 512 dense-or-selected compressed
-rows, and one denominator slot. The host dispatch uses 640 threads so every
-possible raw or compressed score has one producer while the first 512 lanes
-also write output.
+rows, and one denominator slot; the host dispatch uses 640 threads so every
+possible score has one producer while the first 512 lanes also write output.
+HCA queries through 512 compressed rows retain that established reduction.
+Above 512, the packed scheduler keeps any legacy prefix and dispatches only the
+suffix from the first 513-row query to a 512-thread tiled two-pass kernel. The
+suffix retains the original chunk start so future raw-ring writes cannot leak
+into an earlier query.
 
 Intermediate teacher-forced chunks use the typed `advance_tokens` transition.
 It executes every causal layer state but omits final HC collapse, output norm,
@@ -1155,11 +1236,12 @@ Gate:
   endpoint hash, agrees with singleton execution within 0.000153 relative RMS,
   and restores the immediate continuation bit-for-bit. This makes the former
   ceiling a tested allocator property rather than a new fixture ladder.
-- At the 65K geometry, far-index compressor publication, score/mask generation,
-  deterministic top-512 selection, selected attention, snapshot sizing, and
-  admission all execute with production dimensions. These gates cover the final
-  CSA/HCA rows and exact physical strides while avoiding roughly 512 packed
-  chunks of semantically redundant prefix replay.
+- At exact full-context capacities, far-index compressor publication,
+  score/mask generation across 262,144 CSA rows, deterministic top-512
+  selection, selected CSA attention, dense HCA across 8,192 rows, snapshot
+  sizing, and admission execute at terminal row counts and physical strides.
+  Production head counts and widths are covered by separate composition gates;
+  together they avoid replaying 8,192 semantically redundant packed chunks.
 - A successful advance revokes the session's current logits and final hidden
   observation; vectors already copied to the host remain ordinary owned values.
   A callback unwind from retained position 2 leaves that position unchanged,
@@ -1170,9 +1252,9 @@ Broader S6 work remains:
 - Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, shared-KV
   sparse attention, and high-value MoE boundaries.
-- Attribute far-context index scoring, deterministic parallel selection, dense
-  HCA, and retained-chunk routing before choosing the next fusion or tiling
-  target.
+- Attribute far-context index scoring, deterministic parallel selection, tiled
+  HCA score recomputation, and retained-chunk routing before choosing the next
+  fusion or scheduling target.
 - Move CPU routing and grouped expert schedules onto the GPU only after named
   retained-chunk phase attribution identifies them as the next bottleneck.
 
@@ -1181,8 +1263,11 @@ Gates:
 - Decode throughput is at least current llama.cpp Metal on the same hashes,
   request, context, and memory policy.
 - Fresh TTFT and warm decode have named phase attribution.
-- Representative 32K/65,536 product workloads validate v1 memory slope and
-  throughput; 128K and beyond reopen only with the post-64K HCA/YaRN work.
+- Representative 32K/65,536 product workloads validate prompt throughput;
+  durable or synthetic deep states measure decode at larger indices without
+  making a million-token cold-replay gate part of ordinary development.
+- Full-context memory and operation gates remain green while optimization
+  replaces serial or recomputed work; the exact 1,048,576 ceiling does not move.
 - Existing canonical Qwen packets regress by less than 2%.
 
 ### S7: DSpark - independent lane
@@ -1232,21 +1317,25 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Treat 65,536 forwards as the complete v1 correctness capacity rather than
-   resuming incremental position unlocks. Keep the certified position-3072
-   checkpoint as the ordinary full-model loop; run representative 8K/32K/64K
-   workloads for product behavior and performance, not as fixture ladders.
-2. Profile v1 at sparse depth. The selector is now bounded and parallel, but
-   full-history index scoring, 43-layer host routing synchronization, and the
-   roughly 1,000 chronological compressor/cache dispatches per packed chunk
-   remain likely TTFT/decode cliffs. Optimize from named phase attribution.
-3. Build tiled online-softmax HCA and audit post-original-context YaRN before
-   admitting forward 65,537 or publishing HCA row 512 at position 65,663. That
-   is the next correctness discontinuity and the gate for 128K/1M capacity;
-   snapshot streaming should accompany it if twice-payload host memory is no
-   longer acceptable.
-4. Establish a same-hash, same-request llama.cpp Metal throughput baseline once
-   its DS4 path is runnable on this host. Use it to prioritize fusion and
-   scheduling work, not as a delegated production runtime.
-5. Extend the 0731 message encoder to reasoning and DSML tools only with exact
-   release-derived byte fixtures and an end-to-end tool-call workload.
+1. Treat 1,048,576 forwards as the closed structural correctness space. Keep the
+   certified position-3072 checkpoint as the ordinary semantic full-model loop,
+   the synthetic position-65,663 token as a mechanical integration gate, and
+   terminal operation properties as the deep-index gate. Do not resume fixture
+   ladders or require a cold million-token replay without a new discontinuity.
+2. Profile representative dense, sparse, and tiled-HCA depths with named phase
+   attribution. Use durable or constructed deep states to measure the mechanism
+   under study directly; optimization, not another position unlock, is now the
+   critical path to useful long-context inference.
+3. Attack CSA index scoring first if attribution confirms the expected cliff.
+   The selector is bounded and parallel, but production scoring still scales
+   over the complete visible history. Preserve stable lower-row tie breaks,
+   cache-order compaction, and the terminal selected-ID transcript while tiling
+   or fusing it.
+4. Then reduce whichever measured synchronization cost dominates: tiled HCA's
+   deliberate two-pass score recomputation, 43-layer host routing completion,
+   or the roughly 1,000 chronological compressor/cache dispatches per packed
+   chunk. Keep the current correctness path as the differential reference.
+5. Establish a same-hash, same-request llama.cpp Metal throughput baseline once
+   its DS4 path is runnable on this host. Pursue streaming snapshots and the
+   remaining DSML tool/developer encoder as independent product lanes, not
+   blockers for inference optimization.

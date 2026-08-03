@@ -17,8 +17,8 @@ use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
 use qwen_llm::deepseek_v4_metal::{
     DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples,
     DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4Session,
-    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotFileOutcome, load_causal_snapshot_file,
-    publish_causal_snapshot_file,
+    DeepSeekV4SessionCapacity, DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotFileOutcome,
+    causal_snapshot_record_bytes, load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
@@ -2418,38 +2418,53 @@ fn run_deepseek_v4_single_turn(
     for &token in &stop_tokens {
         checked_deepseek_v4_token_id(token, vocab_size, "stop")?;
     }
-    let (snapshot_model_content_id, snapshot_file_exists) =
-        if let Some(path) = args.deepseek_v4_snapshot.as_ref() {
-            let parent = deepseek_v4_snapshot_parent(path)?;
-            let exists = match path.symlink_metadata() {
-                Ok(_) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("inspect DeepSeek V4 snapshot path {}", path.display())
-                    });
-                }
-            };
-            if !exists {
-                deepseek_v4_snapshot_publish_prefix(prompt_token_ids.len())?;
+    let (snapshot_model_content_id, snapshot_file_exists) = if let Some(path) =
+        args.deepseek_v4_snapshot.as_ref()
+    {
+        let parent = deepseek_v4_snapshot_parent(path)?;
+        let exists = match path.symlink_metadata() {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect DeepSeek V4 snapshot path {}", path.display())
+                });
             }
-            let identity_cache = deepseek_v4_snapshot_identity_cache(parent)?;
-            let identity_t0 = Instant::now();
-            let report = checkpoint_content_identity(&gguf, &identity_cache)
-                .context("derive strong ordered-shard DeepSeek V4 model identity")?;
-            eprintln!(
-                "deepseek_v4: snapshot model identity cache={} hashed_bytes={} elapsed_ms={:.1}",
-                identity_cache_outcome_label(report.outcome),
-                report.bytes_hashed,
-                identity_t0.elapsed().as_secs_f64() * 1e3,
-            );
-            (
-                Some(DeepSeekV4ModelContentId::new(report.content_id)),
-                exists,
-            )
-        } else {
-            (None, false)
         };
+        if !exists {
+            let publish_prefix = deepseek_v4_snapshot_publish_prefix(prompt_token_ids.len())?;
+            let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf)
+                .context("bind DeepSeek V4 snapshot geometry")?;
+            let session_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+                required_forwards,
+                model.config.context_length,
+            )
+            .context("derive DeepSeek V4 snapshot session capacity")?;
+            causal_snapshot_record_bytes(
+                &model.config,
+                session_capacity,
+                u32::try_from(publish_prefix).context("DeepSeek V4 snapshot prefix exceeds u32")?,
+                DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES,
+            )
+            .context("preflight DeepSeek V4 causal snapshot record budget")?;
+        }
+        let identity_cache = deepseek_v4_snapshot_identity_cache(parent)?;
+        let identity_t0 = Instant::now();
+        let report = checkpoint_content_identity(&gguf, &identity_cache)
+            .context("derive strong ordered-shard DeepSeek V4 model identity")?;
+        eprintln!(
+            "deepseek_v4: snapshot model identity cache={} hashed_bytes={} elapsed_ms={:.1}",
+            identity_cache_outcome_label(report.outcome),
+            report.bytes_hashed,
+            identity_t0.elapsed().as_secs_f64() * 1e3,
+        );
+        (
+            Some(DeepSeekV4ModelContentId::new(report.content_id)),
+            exists,
+        )
+    } else {
+        (None, false)
+    };
 
     eprintln!(
         "deepseek_v4: loading {} for generation; prompt_kind={} prompt_tokens={} max_generated_tokens={} reserved_forwards={}/{}",
@@ -6436,7 +6451,7 @@ mod tests {
         );
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
-            512
+            8_192
         );
     }
 

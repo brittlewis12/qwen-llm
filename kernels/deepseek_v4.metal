@@ -66,6 +66,17 @@ struct ds4_packed_attention_args {
     float scale;
 };
 
+struct ds4_tiled_dense_attention_args {
+    uint head_count;
+    uint head_dim;
+    uint query_count;
+    uint query_token_offset;
+    uint chunk_start_position;
+    uint window;
+    uint compression_ratio;
+    float scale;
+};
+
 struct ds4_packed_selected_attention_args {
     uint head_count;
     uint head_dim;
@@ -410,6 +421,124 @@ kernel void kernel_deepseek_v4_packed_dense_sink_attention_f16(
                 * masses[raw_count + row];
         }
         output[query_start + tid] = value / masses[row_count];
+    }
+}
+
+kernel void kernel_deepseek_v4_tiled_dense_sink_attention_f16(
+        constant ds4_tiled_dense_attention_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * raw_cache [[buffer(2)]],
+        device const half * preserved_raw_cache [[buffer(3)]],
+        device const half * compressed_cache [[buffer(4)]],
+        device const float * sinks [[buffer(5)]],
+        device float * output [[buffer(6)]],
+        threadgroup float * scratch [[threadgroup(0)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        uint tid [[thread_index_in_threadgroup]]) {
+    constexpr uint tile_rows = 512u;
+    threadgroup float * scores = scratch;
+    threadgroup float * masses = scratch + tile_rows;
+    const uint local_query = group.x;
+    const uint head = group.y;
+    if (local_query >= args.query_count || head >= args.head_count) return;
+
+    const uint token = args.query_token_offset + local_query;
+    const uint absolute_position = args.chunk_start_position + token;
+    const uint visible_end = absolute_position + 1u;
+    const uint raw_count = min(visible_end, args.window);
+    const uint raw_start = visible_end - raw_count;
+    const uint compressed_count = visible_end / args.compression_ratio;
+    const uint row_count = raw_count + compressed_count;
+    const uint query_start = (token * args.head_count + head) * args.head_dim;
+    float maximum = sinks[head];
+
+    for (uint tile_start = 0u; tile_start < row_count; tile_start += tile_rows) {
+        const uint tile_count = min(tile_rows, row_count - tile_start);
+        if (tid < tile_count) {
+            const uint attention_row = tile_start + tid;
+            const bool compressed = attention_row >= raw_count;
+            const uint row = compressed ? attention_row - raw_count : attention_row;
+            const uint logical_position = raw_start + row;
+            device const half * cache = compressed
+                ? compressed_cache
+                : (logical_position < args.chunk_start_position
+                    ? preserved_raw_cache
+                    : raw_cache);
+            const uint cache_start = compressed
+                ? row * args.head_dim
+                : (logical_position % args.window) * args.head_dim;
+            float score = 0.0f;
+            for (uint dimension = 0u; dimension < args.head_dim; ++dimension) {
+                score += queries[query_start + dimension]
+                    * float(cache[cache_start + dimension]);
+            }
+            scores[tid] = score * args.scale;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            for (uint row = 0u; row < tile_count; ++row) {
+                maximum = max(maximum, scores[row]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    float denominator = tid == 0u ? exp(sinks[head] - maximum) : 0.0f;
+    float value = 0.0f;
+    for (uint tile_start = 0u; tile_start < row_count; tile_start += tile_rows) {
+        const uint tile_count = min(tile_rows, row_count - tile_start);
+        if (tid < tile_count) {
+            const uint attention_row = tile_start + tid;
+            const bool compressed = attention_row >= raw_count;
+            const uint row = compressed ? attention_row - raw_count : attention_row;
+            const uint logical_position = raw_start + row;
+            device const half * cache = compressed
+                ? compressed_cache
+                : (logical_position < args.chunk_start_position
+                    ? preserved_raw_cache
+                    : raw_cache);
+            const uint cache_start = compressed
+                ? row * args.head_dim
+                : (logical_position % args.window) * args.head_dim;
+            float score = 0.0f;
+            for (uint dimension = 0u; dimension < args.head_dim; ++dimension) {
+                score += queries[query_start + dimension]
+                    * float(cache[cache_start + dimension]);
+            }
+            scores[tid] = score * args.scale;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0u) {
+            for (uint row = 0u; row < tile_count; ++row) {
+                const float mass = exp(scores[row] - maximum);
+                masses[row] = mass;
+                denominator += mass;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (tid < args.head_dim) {
+            for (uint tile_row = 0u; tile_row < tile_count; ++tile_row) {
+                const uint attention_row = tile_start + tile_row;
+                const bool compressed = attention_row >= raw_count;
+                const uint row = compressed ? attention_row - raw_count : attention_row;
+                const uint logical_position = raw_start + row;
+                device const half * cache = compressed
+                    ? compressed_cache
+                    : (logical_position < args.chunk_start_position
+                        ? preserved_raw_cache
+                        : raw_cache);
+                const uint cache_start = compressed
+                    ? row * args.head_dim
+                    : (logical_position % args.window) * args.head_dim;
+                value += float(cache[cache_start + tid]) * masses[tile_row];
+            }
+        }
+    }
+    if (tid == 0u) scores[0] = denominator;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid < args.head_dim) {
+        output[query_start + tid] = value / scores[0];
     }
 }
 

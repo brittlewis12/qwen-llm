@@ -858,6 +858,13 @@ fn sparse_csa_query_offset(start_position: u32, n_tokens: usize) -> Option<usize
     })
 }
 
+fn tiled_hca_query_offset(start_position: u32, n_tokens: usize) -> Option<usize> {
+    (0..n_tokens).find(|&token| {
+        let position = u64::from(start_position) + token as u64;
+        (position + 1) / 128 > DEEPSEEK_V4_HCA_TILE_ROWS as u64
+    })
+}
+
 impl PrefillSparseCsaScratch {
     #[allow(clippy::too_many_arguments)]
     fn encode(
@@ -2378,7 +2385,99 @@ fn encode_copy_raw_ring_f16_bits(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_packed_dense_sink_attention_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    raw_cache: &MetalTensor,
+    raw_cache_before_chunk: &MetalTensor,
+    compressed: Option<DeepSeekV4PublishedRows<'_>>,
+    sinks: &MetalTensor,
+    output: &MetalTensor,
+    kind: AttentionKind,
+    start_position: u32,
+    n_tokens: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    checked_token_count(n_tokens)?;
+    let Some(query_offset) = (kind == AttentionKind::HeavilyCompressed)
+        .then(|| tiled_hca_query_offset(start_position, n_tokens))
+        .flatten()
+    else {
+        return encode_packed_legacy_dense_sink_attention_f16(
+            ctx,
+            enc,
+            queries,
+            raw_cache,
+            raw_cache_before_chunk,
+            compressed,
+            sinks,
+            output,
+            kind,
+            start_position,
+            n_tokens,
+        );
+    };
+    let rows = compressed.ok_or_else(|| {
+        DeepSeekV4MetalError::Invalid(
+            "packed tiled HCA requires a published compressed history".into(),
+        )
+    })?;
+    let config = deepseek_v4_session_attention_config();
+    let query_width = config.checked()?.query_width;
+    if query_offset > 0 {
+        let prefix_queries = f32_prefix(
+            queries,
+            vec![query_width as u64, query_offset as u64],
+            "packed legacy-HCA prefix queries",
+        )?;
+        let prefix_output = f32_prefix(
+            output,
+            vec![query_width as u64, query_offset as u64],
+            "packed legacy-HCA prefix output",
+        )?;
+        let prefix_end = start_position
+            .checked_add(u32::try_from(query_offset).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed HCA prefix exceeds u32".into())
+            })?)
+            .ok_or_else(|| DeepSeekV4MetalError::Invalid("packed HCA prefix overflow".into()))?;
+        encode_packed_legacy_dense_sink_attention_f16(
+            ctx,
+            enc,
+            &prefix_queries,
+            raw_cache,
+            raw_cache_before_chunk,
+            Some(DeepSeekV4PublishedRows {
+                cache: rows.cache,
+                count: prefix_end as usize / 128,
+                capacity_rows: rows.capacity_rows,
+            }),
+            sinks,
+            &prefix_output,
+            kind,
+            start_position,
+            query_offset,
+        )?;
+    }
+    encode_tiled_dense_sink_attention_f16(
+        ctx,
+        enc,
+        queries,
+        raw_cache,
+        raw_cache_before_chunk,
+        rows,
+        sinks,
+        output,
+        start_position,
+        query_offset,
+        n_tokens - query_offset,
+        128,
+        config,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_packed_legacy_dense_sink_attention_f16(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     queries: &MetalTensor,
@@ -3253,6 +3352,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tiled_hca_offset_starts_at_the_513th_visible_row() {
+        assert_eq!(tiled_hca_query_offset(65_535, 1), None);
+        assert_eq!(tiled_hca_query_offset(65_536, 127), None);
+        assert_eq!(tiled_hca_query_offset(65_536, 128), Some(127));
+        assert_eq!(tiled_hca_query_offset(65_662, 2), Some(1));
+        assert_eq!(tiled_hca_query_offset(65_663, 1), Some(0));
+        assert_eq!(tiled_hca_query_offset(1_048_448, 128), Some(0));
+    }
+
+    #[test]
     fn packed_dense_attention_matches_ordered_singleton_rows_within_roundoff() {
         let Ok(ctx) = MetalContext::new() else {
             return;
@@ -3387,6 +3496,204 @@ mod tests {
             assert!(
                 (packed - ordered).abs() <= allowed,
                 "packed attention differs at {index}: {packed} vs {ordered}, allowed {allowed}"
+            );
+        }
+    }
+
+    #[test]
+    fn packed_hca_splits_the_first_tiled_query_without_future_raw_leakage() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        const START_POSITION: usize = 65_662;
+        const N_TOKENS: usize = 2;
+        const CAPACITY: usize = 768;
+        let config = deepseek_v4_session_attention_config();
+        let dims = config.checked().unwrap();
+        let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
+        let query_values = (0..N_TOKENS * dims.query_width)
+            .map(|index| {
+                let token = index / dims.query_width;
+                let within = index % dims.query_width;
+                let head = within / config.head_dim;
+                let dimension = within % config.head_dim;
+                let tag = (token * 31 + head * 17 + dimension * 7) % 149;
+                (tag as f32 - 74.0) * 0.0011
+            })
+            .collect::<Vec<_>>();
+        let future_row = query_values[..config.head_dim]
+            .iter()
+            .map(|value| round_f16(value * 512.0))
+            .collect::<Vec<_>>();
+        let raw_value = |position: usize, dimension: usize| {
+            let tag = (position * 23 + dimension * 11 + position / 13) % 137;
+            round_f16((tag as f32 - 68.0) * 0.0013)
+        };
+        let mut raw_before = vec![0.0f32; DEEPSEEK_V4_LOCAL_WINDOW * config.head_dim];
+        for position in START_POSITION - DEEPSEEK_V4_LOCAL_WINDOW..START_POSITION {
+            let slot = position % DEEPSEEK_V4_LOCAL_WINDOW;
+            for dimension in 0..config.head_dim {
+                raw_before[slot * config.head_dim + dimension] = raw_value(position, dimension);
+            }
+        }
+        let mut raw_current = raw_before.clone();
+        for dimension in 0..config.head_dim {
+            raw_current
+                [(START_POSITION % DEEPSEEK_V4_LOCAL_WINDOW) * config.head_dim + dimension] =
+                raw_value(START_POSITION, dimension);
+            raw_current
+                [((START_POSITION + 1) % DEEPSEEK_V4_LOCAL_WINDOW) * config.head_dim + dimension] =
+                future_row[dimension];
+        }
+        let mut compressed_values = (0..CAPACITY * config.head_dim)
+            .map(|index| {
+                let row = index / config.head_dim;
+                let dimension = index % config.head_dim;
+                let tag = (row * 43 + dimension * 5 + row / 7) % 151;
+                round_f16((tag as f32 - 75.0) * 0.0012)
+            })
+            .collect::<Vec<_>>();
+        for dimension in 0..config.head_dim {
+            compressed_values[512 * config.head_dim + dimension] =
+                round_f16(query_values[dimension] * 640.0);
+        }
+        let sinks_values = (0..config.head_count)
+            .map(|head| head as f32 * 0.003 - 0.27)
+            .collect::<Vec<_>>();
+        let mut expected = Vec::with_capacity(N_TOKENS * dims.query_width);
+        for token in 0..N_TOKENS {
+            let position = START_POSITION + token;
+            let raw_start = position + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
+            let mut raw_rows = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * config.head_dim);
+            for logical_position in raw_start..=position {
+                if logical_position == START_POSITION + 1 {
+                    raw_rows.extend_from_slice(&future_row);
+                } else {
+                    raw_rows.extend(
+                        (0..config.head_dim)
+                            .map(|dimension| raw_value(logical_position, dimension)),
+                    );
+                }
+            }
+            let count = (position + 1) / 128;
+            expected.extend(
+                crate::deepseek_v4_oracle::shared_kv_attention(
+                    &query_values[token * dims.query_width..(token + 1) * dims.query_width],
+                    config.head_count,
+                    config.head_dim,
+                    &raw_rows,
+                    &compressed_values[..count * config.head_dim],
+                    None,
+                    &sinks_values,
+                )
+                .unwrap(),
+            );
+        }
+        let first_raw_start = START_POSITION + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
+        let mut leaked_raw = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * config.head_dim);
+        for logical_position in first_raw_start..=START_POSITION {
+            if logical_position == first_raw_start {
+                leaked_raw.extend_from_slice(&future_row);
+            } else {
+                leaked_raw.extend(
+                    (0..config.head_dim).map(|dimension| raw_value(logical_position, dimension)),
+                );
+            }
+        }
+        let leaked = crate::deepseek_v4_oracle::shared_kv_attention(
+            &query_values[..dims.query_width],
+            config.head_count,
+            config.head_dim,
+            &leaked_raw,
+            &compressed_values[..DEEPSEEK_V4_CSA_TOP_K * config.head_dim],
+            None,
+            &sinks_values,
+        )
+        .unwrap();
+        assert!(
+            expected[..dims.query_width]
+                .iter()
+                .zip(leaked)
+                .any(|(correct, leaked)| (correct - leaked).abs() > 1e-3)
+        );
+
+        let queries = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&query_values),
+            vec![dims.query_width as u64, N_TOKENS as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let make_raw = |values: &[f32]| {
+            let bits = values
+                .iter()
+                .map(|value| half::f16::from_f32(*value).to_bits())
+                .collect::<Vec<_>>();
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&bits),
+                vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+                GgmlType::F16,
+            )
+            .unwrap()
+        };
+        let raw_before = make_raw(&raw_before);
+        let raw_current = make_raw(&raw_current);
+        let compressed_bits = compressed_values
+            .iter()
+            .map(|value| half::f16::from_f32(*value).to_bits())
+            .collect::<Vec<_>>();
+        let compressed = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&compressed_bits),
+            vec![config.head_dim as u64, CAPACITY as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let sinks = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&sinks_values),
+            vec![config.head_count as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let output =
+            MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, N_TOKENS as u64]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_packed_dense_sink_attention_f16(
+            &ctx,
+            &encoder,
+            &queries,
+            &raw_current,
+            &raw_before,
+            Some(DeepSeekV4PublishedRows {
+                cache: &compressed,
+                count: 513,
+                capacity_rows: CAPACITY,
+            }),
+            &sinks,
+            &output,
+            AttentionKind::HeavilyCompressed,
+            START_POSITION as u32,
+            N_TOKENS,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "packed HCA split command failed: {:?}",
+            command.error()
+        );
+        let actual = host_read_f32(&output, "packed HCA split output").unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+            let allowed = 8e-5 * expected.abs().max(1.0);
+            assert!(
+                (actual - expected).abs() <= allowed,
+                "packed HCA split output[{index}]={actual}, expected {expected}, allowed {allowed}"
             );
         }
     }

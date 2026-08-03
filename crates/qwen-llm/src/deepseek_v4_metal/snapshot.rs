@@ -5,7 +5,7 @@ mod file;
 
 pub use codec::{
     DeepSeekV4EncodedSnapshot, DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotCodecError,
-    decode_causal_snapshot, encode_causal_snapshot,
+    causal_snapshot_record_bytes, decode_causal_snapshot, encode_causal_snapshot,
 };
 pub use file::{
     DeepSeekV4SnapshotFileError, DeepSeekV4SnapshotFileOutcome, DeepSeekV4SnapshotFileReport,
@@ -130,7 +130,6 @@ struct SnapshotGeometry {
 
 struct RestoreImages {
     raw_f16_bits: Vec<u16>,
-    published_f16_bits: Vec<u16>,
 }
 
 impl DeepSeekV4Session {
@@ -290,8 +289,9 @@ fn restore_causal_state(
     write_frontiers(
         frontiers,
         config,
+        snapshot.next_position,
         &snapshot.compressor_f32_bits,
-        &images.published_f16_bits,
+        &snapshot.published_f16_bits,
     );
     committed_tokens.clear();
     committed_tokens.extend_from_slice(&snapshot.prefix_tokens);
@@ -694,72 +694,15 @@ fn build_restore_images(
     }
     debug_assert_eq!(source_cursor, snapshot.raw_f16_bits.len());
 
-    let mut published_f16_bits = try_zeroed_bits(
-        geometry.published_capacity_elements,
-        "snapshot published restore image",
-    )?;
-    let mut source_cursor = 0usize;
-    let mut destination_cursor = 0usize;
-    for kind in config.attention_kinds.iter().copied() {
-        match kind {
-            AttentionKind::SlidingWindow => {}
-            AttentionKind::CompressedSparse => {
-                for head_dim in [
-                    config.key_length as usize,
-                    config.indexer_key_length as usize,
-                ] {
-                    fill_published_image(
-                        &snapshot.published_f16_bits,
-                        &mut source_cursor,
-                        &mut published_f16_bits,
-                        &mut destination_cursor,
-                        snapshot.next_position as usize / 4,
-                        head_dim,
-                        capacity.csa_physical_rows(),
-                    );
-                }
-            }
-            AttentionKind::HeavilyCompressed => fill_published_image(
-                &snapshot.published_f16_bits,
-                &mut source_cursor,
-                &mut published_f16_bits,
-                &mut destination_cursor,
-                snapshot.next_position as usize / 128,
-                config.key_length as usize,
-                capacity.hca_physical_rows(),
-            ),
-        }
-    }
-    debug_assert_eq!(source_cursor, snapshot.published_f16_bits.len());
-    debug_assert_eq!(destination_cursor, published_f16_bits.len());
-    Ok(RestoreImages {
-        raw_f16_bits,
-        published_f16_bits,
-    })
-}
-
-fn fill_published_image(
-    source: &[u16],
-    source_cursor: &mut usize,
-    destination: &mut [u16],
-    destination_cursor: &mut usize,
-    row_count: usize,
-    head_dim: usize,
-    capacity_rows: usize,
-) {
-    let visible = row_count * head_dim;
-    let capacity = capacity_rows * head_dim;
-    destination[*destination_cursor..*destination_cursor + visible]
-        .copy_from_slice(&source[*source_cursor..*source_cursor + visible]);
-    *source_cursor += visible;
-    *destination_cursor += capacity;
+    Ok(RestoreImages { raw_f16_bits })
 }
 
 fn write_frontiers(
     frontiers: &DeepSeekV4CompressorFrontiers,
     config: &DeepSeekV4Config,
+    next_position: u32,
     compressor_arena: &[u32],
-    published_image: &[u16],
+    published_arena: &[u16],
 ) {
     let mut compressor_cursor = 0usize;
     let mut published_cursor = 0usize;
@@ -771,37 +714,41 @@ fn write_frontiers(
                     attention,
                     compressor_arena,
                     &mut compressor_cursor,
-                    published_image,
+                    published_arena,
                     &mut published_cursor,
+                    next_position as usize / 4,
                 );
                 write_frontier(
                     indexer,
                     compressor_arena,
                     &mut compressor_cursor,
-                    published_image,
+                    published_arena,
                     &mut published_cursor,
+                    next_position as usize / 4,
                 );
             }
             DeepSeekV4LayerCompressorFrontiers::HeavilyCompressed { attention } => write_frontier(
                 attention,
                 compressor_arena,
                 &mut compressor_cursor,
-                published_image,
+                published_arena,
                 &mut published_cursor,
+                next_position as usize / 128,
             ),
         }
     }
     debug_assert_eq!(frontiers.layers.len(), config.attention_kinds.len());
     debug_assert_eq!(compressor_cursor, compressor_arena.len());
-    debug_assert_eq!(published_cursor, published_image.len());
+    debug_assert_eq!(published_cursor, published_arena.len());
 }
 
 fn write_frontier(
     frontier: &DeepSeekV4CompressorFrontier,
     compressor_arena: &[u32],
     compressor_cursor: &mut usize,
-    published_image: &[u16],
+    published_arena: &[u16],
     published_cursor: &mut usize,
+    published_count: usize,
 ) {
     let state_elements = frontier.width * frontier.rows;
     write_u32_bits(
@@ -814,10 +761,11 @@ fn write_frontier(
         &compressor_arena[*compressor_cursor..*compressor_cursor + state_elements],
     );
     *compressor_cursor += state_elements;
-    let published_elements = frontier.capacity_rows * frontier.head_dim;
-    write_f16_bits(
+    let published_elements = published_count * frontier.head_dim;
+    zero_f16_bits(&frontier.published);
+    write_f16_prefix(
         &frontier.published,
-        &published_image[*published_cursor..*published_cursor + published_elements],
+        &published_arena[*published_cursor..*published_cursor + published_elements],
     );
     *published_cursor += published_elements;
 }
@@ -1241,6 +1189,36 @@ fn tensor_u32(tensor: &MetalTensor) -> &[u32] {
     }
 }
 
+fn zero_f16_bits(tensor: &MetalTensor) {
+    unsafe {
+        let destination = tensor
+            .buffer
+            .contents()
+            .as_ptr()
+            .cast::<u8>()
+            .add(tensor.offset as usize)
+            .cast::<u16>();
+        std::ptr::write_bytes(destination, 0, tensor.n_elements() as usize);
+    }
+}
+
+fn write_f16_prefix(tensor: &MetalTensor, bits: &[u16]) {
+    assert!(
+        bits.len() <= tensor.n_elements() as usize,
+        "F16 snapshot prefix must fit its validated tensor"
+    );
+    unsafe {
+        let destination = tensor
+            .buffer
+            .contents()
+            .as_ptr()
+            .cast::<u8>()
+            .add(tensor.offset as usize)
+            .cast::<u16>();
+        std::ptr::copy_nonoverlapping(bits.as_ptr(), destination, bits.len());
+    }
+}
+
 fn write_f16_bits(tensor: &MetalTensor, bits: &[u16]) {
     assert_eq!(
         tensor.n_elements() as usize,
@@ -1487,6 +1465,11 @@ mod tests {
             (32_768, 128, 8_192, 256),
             (65_535, 128, 16_383, 511),
             (65_536, 128, 16_384, 512),
+            (65_663, 128, 16_415, 512),
+            (65_664, 128, 16_416, 513),
+            (1_000_000, 128, 250_000, 7_812),
+            (1_048_575, 128, 262_143, 8_191),
+            (1_048_576, 128, 262_144, 8_192),
         ] {
             let geometry = snapshot_geometry(&config, capacity, position).unwrap();
             assert_eq!(geometry.raw_rows, raw_rows, "position {position}");
@@ -1496,12 +1479,12 @@ mod tests {
                 "position {position}"
             );
         }
-        let terminal = snapshot_geometry(&config, capacity, 65_536).unwrap();
+        let terminal = snapshot_geometry(&config, capacity, 1_048_576).unwrap();
         assert_eq!(terminal.raw_elements, 2_818_048);
         assert_eq!(terminal.compressor_elements, 3_051_520);
-        assert_eq!(terminal.published_elements, 225_443_840);
-        assert_eq!(terminal.published_capacity_elements, 225_443_840);
-        assert!(snapshot_geometry(&config, capacity, 65_537).is_err());
+        assert_eq!(terminal.published_elements, 3_607_101_440);
+        assert_eq!(terminal.published_capacity_elements, 3_607_101_440);
+        assert!(snapshot_geometry(&config, capacity, 1_048_577).is_err());
     }
 
     #[test]
@@ -1752,7 +1735,7 @@ mod tests {
         .unwrap();
         let destination_capacity =
             DeepSeekV4SessionCapacity::for_forward_limit(3_075, config.context_length).unwrap();
-        assert_eq!(source_capacity.csa_physical_rows(), 16_384);
+        assert_eq!(source_capacity.csa_physical_rows(), 262_144);
         assert_eq!(destination_capacity.csa_physical_rows(), 768);
 
         let source = synthetic_state_with_capacity(

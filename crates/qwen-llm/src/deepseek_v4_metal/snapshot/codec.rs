@@ -143,6 +143,25 @@ impl WireLayout {
     }
 }
 
+pub fn causal_snapshot_record_bytes(
+    config: &DeepSeekV4Config,
+    session_capacity: DeepSeekV4SessionCapacity,
+    next_position: u32,
+    max_record_bytes: u64,
+) -> Result<u64, DeepSeekV4SnapshotCodecError> {
+    Ok(WireLayout::derive(
+        next_position,
+        DeepSeekV4SnapshotObservation::Unavailable,
+        DeepSeekV4SnapshotCodecConstraints {
+            config,
+            session_capacity,
+            expected_model_content_id: DeepSeekV4ModelContentId::new([0; 32]),
+            max_record_bytes,
+        },
+    )?
+    .record_bytes)
+}
+
 pub fn encode_causal_snapshot<W: Write>(
     dst: &mut W,
     snapshot: &DeepSeekV4CausalSnapshot,
@@ -757,7 +776,7 @@ mod tests {
             config: &config,
             session_capacity: promoted_capacity,
             expected_model_content_id: DeepSeekV4ModelContentId::new([0x5a; 32]),
-            max_record_bytes: 1024 * 1024 * 1024,
+            max_record_bytes: 8 * 1024 * 1024 * 1024,
         };
         let legacy = WireLayout::derive(
             1_025,
@@ -778,11 +797,20 @@ mod tests {
             constraints,
         )
         .unwrap();
-        assert_eq!(terminal.prefix_bytes, 262_144);
+        assert_eq!(terminal.prefix_bytes, 4_194_304);
         assert_eq!(terminal.raw_bytes, 5_636_096);
         assert_eq!(terminal.compressor_bytes, 12_206_080);
-        assert_eq!(terminal.published_bytes, 450_887_680);
-        assert_eq!(terminal.payload_bytes, 468_992_000);
-        assert_eq!(terminal.record_bytes, 469_008_416);
+        assert_eq!(terminal.published_bytes, 7_214_202_880);
+        assert_eq!(terminal.payload_bytes, 7_236_239_360);
+        assert_eq!(terminal.record_bytes, 7_236_255_776);
+        assert!(matches!(
+            causal_snapshot_record_bytes(
+                &config,
+                promoted_capacity,
+                DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32,
+                1024 * 1024 * 1024,
+            ),
+            Err(DeepSeekV4SnapshotCodecError::RecordBudgetExceeded { .. })
+        ));
     }
 }

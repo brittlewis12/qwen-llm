@@ -66,6 +66,17 @@ struct ds4_packed_attention_args {
     float scale;
 };
 
+struct ds4_packed_selected_attention_args {
+    uint head_count;
+    uint head_dim;
+    uint query_count;
+    uint query_token_offset;
+    uint chunk_start_position;
+    uint window;
+    uint selected_slots;
+    float scale;
+};
+
 struct ds4_copy_u16_args {
     uint n;
 };
@@ -84,6 +95,39 @@ struct ds4_compressor_pool_args {
 
 struct ds4_compressor_roll_args {
     uint width;
+};
+
+struct ds4_hadamard_rows_args {
+    uint row_count;
+};
+
+struct ds4_scale_args {
+    uint count;
+    float scale;
+};
+
+struct ds4_indexer_score_args {
+    uint head_count;
+    uint head_dim;
+    uint row_capacity;
+    uint query_count;
+};
+
+struct ds4_indexer_select_args {
+    uint row_capacity;
+    uint top_k;
+    uint query_count;
+};
+
+struct ds4_selected_attention_args {
+    uint head_count;
+    uint head_dim;
+    uint window;
+    uint raw_count;
+    uint raw_start;
+    uint compressed_count;
+    uint selected_slots;
+    float scale;
 };
 
 struct ds4_hc_batch_args {
@@ -368,6 +412,100 @@ kernel void kernel_deepseek_v4_packed_dense_sink_attention_f16(
     }
 }
 
+kernel void kernel_deepseek_v4_packed_selected_sink_attention_f16(
+        constant ds4_packed_selected_attention_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * raw_cache [[buffer(2)]],
+        device const half * preserved_raw_cache [[buffer(3)]],
+        device const half * compressed_cache [[buffer(4)]],
+        device const int * selected_ids [[buffer(5)]],
+        device const int * selected_counts [[buffer(6)]],
+        device const int * visible_counts [[buffer(7)]],
+        device const float * sinks [[buffer(8)]],
+        device float * output [[buffer(9)]],
+        threadgroup float * masses [[threadgroup(0)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        uint tid [[thread_index_in_threadgroup]]) {
+    const uint local_query = group.x;
+    const uint head = group.y;
+    if (local_query >= args.query_count || head >= args.head_count) return;
+    const uint token = args.query_token_offset + local_query;
+    const uint absolute_position = args.chunk_start_position + token;
+    const uint visible_end = absolute_position + 1u;
+    const uint raw_count = min(visible_end, args.window);
+    const uint raw_start = visible_end - raw_count;
+    const int selected_i = selected_counts[local_query];
+    const int visible_i = visible_counts[local_query];
+    const uint selected_count = selected_i > 0
+        ? min(uint(selected_i), args.selected_slots)
+        : 0u;
+    const uint visible_count = visible_i > 0 ? uint(visible_i) : 0u;
+    const uint row_count = raw_count + selected_count;
+    const uint query_start = (token * args.head_count + head) * args.head_dim;
+    const uint ids_base = local_query * args.selected_slots;
+
+    if (tid < row_count) {
+        const bool compressed = tid >= raw_count;
+        const uint row = compressed ? tid - raw_count : tid;
+        const int selected_id = compressed ? selected_ids[ids_base + row] : -1;
+        const bool valid_selected = compressed && selected_id >= 0
+            && uint(selected_id) < visible_count;
+        const uint logical_position = raw_start + row;
+        device const half * cache = compressed
+            ? compressed_cache
+            : (logical_position < args.chunk_start_position
+                ? preserved_raw_cache
+                : raw_cache);
+        const uint cache_start = compressed
+            ? (valid_selected ? uint(selected_id) * args.head_dim : 0u)
+            : (logical_position % args.window) * args.head_dim;
+        float score = -INFINITY;
+        if (!compressed || valid_selected) {
+            score = 0.0f;
+            for (uint dimension = 0u; dimension < args.head_dim; ++dimension) {
+                score += queries[query_start + dimension] * float(cache[cache_start + dimension]);
+            }
+            score *= args.scale;
+        }
+        masses[tid] = score;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0u) {
+        float maximum = sinks[head];
+        for (uint row = 0u; row < row_count; ++row) {
+            maximum = max(maximum, masses[row]);
+        }
+        float denominator = exp(sinks[head] - maximum);
+        for (uint row = 0u; row < row_count; ++row) {
+            const float mass = exp(masses[row] - maximum);
+            masses[row] = mass;
+            denominator += mass;
+        }
+        masses[row_count] = denominator;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid < args.head_dim) {
+        float value = 0.0f;
+        for (uint row = 0u; row < raw_count; ++row) {
+            const uint logical_position = raw_start + row;
+            device const half * cache = logical_position < args.chunk_start_position
+                ? preserved_raw_cache
+                : raw_cache;
+            const uint cache_start = (logical_position % args.window) * args.head_dim;
+            value += float(cache[cache_start + tid]) * masses[row];
+        }
+        for (uint slot = 0u; slot < selected_count; ++slot) {
+            const int selected_id = selected_ids[ids_base + slot];
+            if (selected_id < 0 || uint(selected_id) >= visible_count) continue;
+            const uint cache_start = uint(selected_id) * args.head_dim;
+            value += float(compressed_cache[cache_start + tid]) * masses[raw_count + slot];
+        }
+        output[query_start + tid] = value / masses[row_count];
+    }
+}
+
 kernel void kernel_deepseek_v4_compressor_frontier_write(
         constant ds4_compressor_frontier_args & args [[buffer(0)]],
         device const float * projected_kv [[buffer(1)]],
@@ -462,6 +600,227 @@ kernel void kernel_deepseek_v4_hadamard_128_in_place(
     for (uint element = 0u; element < 128u; ++element) {
         values[element] *= normalization;
     }
+}
+
+kernel void kernel_deepseek_v4_hadamard_128_rows_in_place(
+        constant ds4_hadamard_rows_args & args [[buffer(0)]],
+        device float * values [[buffer(1)]],
+        uint row [[thread_position_in_grid]]) {
+    if (row >= args.row_count) return;
+    const uint base = row * 128u;
+    for (uint span = 1u; span < 128u; span <<= 1u) {
+        for (uint start = 0u; start < 128u; start += span << 1u) {
+            for (uint offset = 0u; offset < span; ++offset) {
+                const uint first = base + start + offset;
+                const uint second = first + span;
+                const float a = values[first];
+                const float b = values[second];
+                values[first] = a + b;
+                values[second] = a - b;
+            }
+        }
+    }
+    const float normalization = rsqrt(128.0f);
+    for (uint element = 0u; element < 128u; ++element) {
+        values[base + element] *= normalization;
+    }
+}
+
+kernel void kernel_deepseek_v4_scale_f32_in_place(
+        constant ds4_scale_args & args [[buffer(0)]],
+        device float * values [[buffer(1)]],
+        uint index [[thread_position_in_grid]]) {
+    if (index >= args.count) return;
+    values[index] *= args.scale;
+}
+
+kernel void kernel_deepseek_v4_lightning_indexer_scores_f16(
+        constant ds4_indexer_score_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const float * head_weights [[buffer(2)]],
+        device const half * keys [[buffer(3)]],
+        device const int * visible_counts [[buffer(4)]],
+        device float * scores [[buffer(5)]],
+        uint2 index [[thread_position_in_grid]]) {
+    const uint row = index.x;
+    const uint query = index.y;
+    if (row >= args.row_capacity || query >= args.query_count) return;
+    const uint score_index = query * args.row_capacity + row;
+    const int visible = visible_counts[query];
+    if (visible < 0 || row >= uint(visible)) {
+        scores[score_index] = -INFINITY;
+        return;
+    }
+
+    const uint query_base = query * args.head_count * args.head_dim;
+    const uint weight_base = query * args.head_count;
+    const uint key_base = row * args.head_dim;
+    float score = 0.0f;
+    for (uint head = 0u; head < args.head_count; ++head) {
+        float dot = 0.0f;
+        const uint head_base = query_base + head * args.head_dim;
+        for (uint dimension = 0u; dimension < args.head_dim; ++dimension) {
+            dot += queries[head_base + dimension] * float(keys[key_base + dimension]);
+        }
+        score += max(dot, 0.0f) * head_weights[weight_base + head];
+    }
+    scores[score_index] = score;
+}
+
+kernel void kernel_deepseek_v4_select_top_k_f32(
+        constant ds4_indexer_select_args & args [[buffer(0)]],
+        device const float * scores [[buffer(1)]],
+        device const int * visible_counts [[buffer(2)]],
+        device int * selected_mask [[buffer(3)]],
+        device int * ranked_ids [[buffer(4)]],
+        device int * cache_order_ids [[buffer(5)]],
+        device int * selected_counts [[buffer(6)]],
+        device int * status [[buffer(7)]],
+        uint query [[thread_position_in_grid]]) {
+    if (query >= args.query_count) return;
+    const uint mask_base = query * args.row_capacity;
+    const uint ids_base = query * args.top_k;
+    const int visible_i = visible_counts[query];
+    const bool geometry_valid = visible_i > 0 && uint(visible_i) <= args.row_capacity
+        && args.top_k > 0u && args.top_k <= args.row_capacity;
+    const uint visible = geometry_valid ? uint(visible_i) : 0u;
+    const uint selected_count = min(visible, args.top_k);
+
+    for (uint row = 0u; row < args.row_capacity; ++row) {
+        selected_mask[mask_base + row] = row < visible ? 1 : 0;
+    }
+    for (uint slot = 0u; slot < args.top_k; ++slot) {
+        ranked_ids[ids_base + slot] = -1;
+        cache_order_ids[ids_base + slot] = -1;
+    }
+
+    int error = geometry_valid ? 0 : 1;
+    if (error == 0) {
+        for (uint row = 0u; row < visible; ++row) {
+            if (!isfinite(scores[query * args.row_capacity + row])) {
+                error = 2;
+                break;
+            }
+        }
+    }
+
+    if (error == 0) {
+        const uint removals = visible - selected_count;
+        for (uint removal = 0u; removal < removals; ++removal) {
+            int worst = -1;
+            float worst_score = INFINITY;
+            for (uint row = 0u; row < visible; ++row) {
+                if (selected_mask[mask_base + row] == 0) continue;
+                const float candidate = scores[query * args.row_capacity + row];
+                const bool worse = worst < 0 || candidate < worst_score
+                    || (candidate == worst_score && int(row) > worst);
+                if (worse) {
+                    worst = int(row);
+                    worst_score = candidate;
+                }
+            }
+            if (worst < 0) {
+                error = 3;
+                break;
+            }
+            selected_mask[mask_base + uint(worst)] = 0;
+        }
+    }
+
+    if (error != 0) {
+        for (uint row = 0u; row < args.row_capacity; ++row) {
+            selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
+        }
+    }
+
+    uint filled = 0u;
+    for (uint row = 0u; row < visible && filled < selected_count; ++row) {
+        if (selected_mask[mask_base + row] == 0) continue;
+        cache_order_ids[ids_base + filled] = int(row);
+        uint insertion = filled;
+        if (error == 0) {
+            const float candidate = scores[query * args.row_capacity + row];
+            for (uint slot = 0u; slot < filled; ++slot) {
+                const int current_id = ranked_ids[ids_base + slot];
+                const float current = scores[query * args.row_capacity + uint(current_id)];
+                if (candidate > current || (candidate == current && int(row) < current_id)) {
+                    insertion = slot;
+                    break;
+                }
+            }
+            for (uint slot = filled; slot > insertion; --slot) {
+                ranked_ids[ids_base + slot] = ranked_ids[ids_base + slot - 1u];
+            }
+        }
+        ranked_ids[ids_base + insertion] = int(row);
+        ++filled;
+    }
+    selected_counts[query] = int(filled);
+    status[query] = error;
+}
+
+kernel void kernel_deepseek_v4_selected_sink_attention_f16(
+        constant ds4_selected_attention_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * raw_cache [[buffer(2)]],
+        device const half * compressed_cache [[buffer(3)]],
+        device const int * selected_ids [[buffer(4)]],
+        device const float * sinks [[buffer(5)]],
+        device float * output [[buffer(6)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint width = args.head_count * args.head_dim;
+    if (index >= width) return;
+    const uint head = index / args.head_dim;
+    const uint dimension = index % args.head_dim;
+    const uint query_start = head * args.head_dim;
+    float maximum = sinks[head];
+
+    for (uint row = 0u; row < args.raw_count; ++row) {
+        const uint logical_position = args.raw_start + row;
+        const uint cache_start = (logical_position % args.window) * args.head_dim;
+        float score = 0.0f;
+        for (uint inner = 0u; inner < args.head_dim; ++inner) {
+            score += queries[query_start + inner] * float(raw_cache[cache_start + inner]);
+        }
+        maximum = max(maximum, score * args.scale);
+    }
+    for (uint slot = 0u; slot < args.selected_slots; ++slot) {
+        const int row = selected_ids[slot];
+        if (row < 0 || uint(row) >= args.compressed_count) continue;
+        const uint cache_start = uint(row) * args.head_dim;
+        float score = 0.0f;
+        for (uint inner = 0u; inner < args.head_dim; ++inner) {
+            score += queries[query_start + inner] * float(compressed_cache[cache_start + inner]);
+        }
+        maximum = max(maximum, score * args.scale);
+    }
+
+    float denominator = exp(sinks[head] - maximum);
+    float value = 0.0f;
+    for (uint row = 0u; row < args.raw_count; ++row) {
+        const uint logical_position = args.raw_start + row;
+        const uint cache_start = (logical_position % args.window) * args.head_dim;
+        float score = 0.0f;
+        for (uint inner = 0u; inner < args.head_dim; ++inner) {
+            score += queries[query_start + inner] * float(raw_cache[cache_start + inner]);
+        }
+        const float mass = exp(score * args.scale - maximum);
+        denominator += mass;
+        value += float(raw_cache[cache_start + dimension]) * mass;
+    }
+    for (uint slot = 0u; slot < args.selected_slots; ++slot) {
+        const int row = selected_ids[slot];
+        if (row < 0 || uint(row) >= args.compressed_count) continue;
+        const uint cache_start = uint(row) * args.head_dim;
+        float score = 0.0f;
+        for (uint inner = 0u; inner < args.head_dim; ++inner) {
+            score += queries[query_start + inner] * float(compressed_cache[cache_start + inner]);
+        }
+        const float mass = exp(score * args.scale - maximum);
+        denominator += mass;
+        value += float(compressed_cache[cache_start + dimension]) * mass;
+    }
+    output[index] = value / denominator;
 }
 
 kernel void kernel_deepseek_v4_position_zero_sink_attention(

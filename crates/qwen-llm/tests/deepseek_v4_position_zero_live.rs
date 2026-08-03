@@ -15,6 +15,7 @@ use std::time::Instant;
 const DEFAULT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 const DEFAULT_DURABLE_SNAPSHOT: &str = "target/dsv4-position1024.ds4c";
 const DEFAULT_DURABLE_POSITION_2048_SNAPSHOT: &str = "target/dsv4-position2048.ds4c";
+const DEFAULT_DURABLE_POSITION_2052_SNAPSHOT: &str = "target/dsv4-position2052.ds4c";
 const DEFAULT_DURABLE_IDENTITY_CACHE: &str = "target/.qwen-dsv4-model-identity-v2";
 const ORACLE_BYTES: &[u8] = include_bytes!("fixtures/deepseek_v4_token35_position0_b10222.f32");
 const ORACLE_MANIFEST: &str = include_str!("fixtures/deepseek_v4_token35_position0_b10222.json");
@@ -132,6 +133,14 @@ const POSITION_2048_ORACLE_BYTES: &[u8] =
     include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x512_then35_position2048_b10222.f32");
 const POSITION_2048_ORACLE_MANIFEST: &str =
     include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x512_then35_position2048_b10222.json");
+const POSITION_2051_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x513_position2051_b10222.f32");
+const POSITION_2051_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x513_position2051_b10222.json");
+const POSITION_2052_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x513_then35_position2052_b10222.f32");
+const POSITION_2052_ORACLE_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x513_then35_position2052_b10222.json");
 const SINGLETON_ORACLE_LLM_COMMIT: &str = "e07acac20fcd2ee0faca90aa91078ff142724d63";
 const SINGLETON_ORACLE_LLAMA_CORE_COMMIT: &str = "b1cd3a914175adedcc976388c7c638d9a2f9a189";
 const SINGLETON_ORACLE_LLAMA_CPP_RS_COMMIT: &str = "553b8e4501c57c1be08a83b6b54e549a614df162";
@@ -675,6 +684,28 @@ fn pinned_hca_boundary_oracles_have_exact_identity() {
             35,
             201,
         ),
+        (
+            POSITION_2051_ORACLE_MANIFEST,
+            POSITION_2051_ORACLE_BYTES,
+            "54446ba2caa6a3616679de32032cab16c5d55bd1af1fbef5123684b90f30596d",
+            512,
+            serde_json::json!([35, 201, 200]),
+            2051,
+            4096,
+            34,
+            35,
+        ),
+        (
+            POSITION_2052_ORACLE_MANIFEST,
+            POSITION_2052_ORACLE_BYTES,
+            "41e4e1b41ff5ed7846e420edc0f789bdf3eb9613657fb8be0567da71551b410c",
+            513,
+            serde_json::json!([]),
+            2052,
+            4096,
+            35,
+            201,
+        ),
     ];
     for (
         manifest_source,
@@ -903,16 +934,16 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         "memory planning must not realize Metal buffers"
     );
     let memory_plan = load_plan.memory_plan().clone();
-    assert_eq!(memory_plan.session_allocations().len(), 521);
-    assert_eq!(memory_plan.session_logical_bytes(), 166_877_972);
-    assert_eq!(memory_plan.session_priced_upper_bytes(), 171_212_800);
+    assert_eq!(memory_plan.session_allocations().len(), 539);
+    assert_eq!(memory_plan.session_logical_bytes(), 179_341_856);
+    assert_eq!(memory_plan.session_priced_upper_bytes(), 183_844_864);
     assert_eq!(memory_plan.residency_buffer_count(), 7);
     assert_eq!(memory_plan.residency_logical_bytes(), 102_994_608_640);
     assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_624_512);
-    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_165_837_312);
+    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_469_376);
     assert_eq!(
         memory_plan.required_with_reserve_bytes().unwrap(),
-        103_702_708_224
+        103_715_340_288
     );
     assert_eq!(load_plan.residency_report().window_count, 3);
     assert_eq!(load_plan.residency_report().fallback_count, 4);
@@ -1852,6 +1883,360 @@ fn native_deepseek_v4_durable_position_2048_snapshot_matches_oracle() {
     );
     eprintln!(
         "durable_position_2048_elapsed={:.3}s identity_cache={:?}",
+        started.elapsed().as_secs_f64(),
+        content.outcome
+    );
+}
+
+#[test]
+#[ignore = "requires the local DS4 model and a published position-2048 snapshot"]
+fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let source_snapshot_path = std::env::var_os("DSV4_POSITION_2048_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_POSITION_2048_SNAPSHOT)
+        });
+    let destination_snapshot_path = std::env::var_os("DSV4_POSITION_2052_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_POSITION_2052_SNAPSHOT)
+        });
+    let identity_cache_path = std::env::var_os("DSV4_IDENTITY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_IDENTITY_CACHE)
+        });
+    assert!(model_path.exists(), "missing DS4 model");
+    assert!(
+        source_snapshot_path.exists(),
+        "missing durable position-2048 snapshot"
+    );
+
+    let started = Instant::now();
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+            .expect("resolve durable snapshot model identity");
+    let model_content_id = DeepSeekV4ModelContentId::new(content.content_id);
+    let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind DS4 config");
+    let source_snapshot = load_causal_snapshot_file(
+        &source_snapshot_path,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: &model.config,
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("load durable position-2048 snapshot");
+    assert_eq!(source_snapshot.next_position(), 2_048);
+
+    let ctx = MetalContext::new().expect("create Metal context");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("build sparse CSA session");
+    session
+        .restore_causal_snapshot(&source_snapshot)
+        .expect("restore durable position-2048 snapshot");
+
+    let mut endpoint_hashes = Vec::new();
+    for (offset, token) in [35, 201, 200, 34].into_iter().enumerate() {
+        let position = 2_048 + offset;
+        if offset == 0 {
+            session
+                .prefill_tokens(&ctx, &[token])
+                .unwrap_or_else(|error| panic!("execute packed position {position}: {error}"));
+        } else {
+            session
+                .forward_token(&ctx, token)
+                .unwrap_or_else(|error| panic!("execute position {position}: {error}"));
+        }
+        let logits = session
+            .copy_logits_f32()
+            .unwrap_or_else(|error| panic!("copy position {position} logits: {error}"));
+        assert!(logits.iter().all(|value| value.is_finite()));
+        let argmax = logits
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .unwrap()
+            .0;
+        let mut hasher = Sha256::new();
+        for value in &logits {
+            hasher.update(value.to_le_bytes());
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        let (expected_argmax, expected_hash) = [
+            (
+                201,
+                "13cb8a323341f3f23bcb98ddfb8c257b5125411065d14e1b40c5a75fa19ed53c",
+            ),
+            (
+                200,
+                "84e8d26310d87438423f3ce27c7b05f9a6567d6e72fc9d7bb0e17e589a603c25",
+            ),
+            (
+                34,
+                "e94c259038cf1272cf8ed190b1d3eeaeed2b9ae9cd93f5094cb6cd6ab080cf8d",
+            ),
+            (
+                35,
+                "de815a03d7b827d1c43859b477709b34e8ea0afd0c8eef4fed0bc2c0c8062b16",
+            ),
+        ][offset];
+        assert_eq!(argmax, expected_argmax);
+        assert_eq!(hash, expected_hash);
+        if position == 2_051 {
+            let boundary = compare_logits("position_2051", &logits, POSITION_2051_ORACLE_BYTES);
+            assert_eq!(boundary.argmax, boundary.oracle_argmax);
+            assert_hca_long_prefix_gate("position 2051", &boundary);
+        }
+        eprintln!(
+            "sparse_position={position} token={token} argmax={argmax} sha256={hash} elapsed={:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+        endpoint_hashes.push((position, argmax, hash));
+    }
+    assert_eq!(session.next_position(), 2_052);
+
+    let sparse_snapshot = session
+        .capture_causal_snapshot()
+        .expect("capture first sparse-CSA snapshot");
+    assert_eq!(sparse_snapshot.next_position(), 2_052);
+    assert_eq!(sparse_snapshot.payload_bytes(), 31_967_504);
+    let report = publish_causal_snapshot_file(
+        &destination_snapshot_path,
+        &sparse_snapshot,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: session.residency().config(),
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("publish position-2052 snapshot");
+    assert_eq!(report.record_bytes, 31_983_920);
+
+    session
+        .forward_token(&ctx, 35)
+        .expect("execute first sparse-CSA continuation at position 2052");
+    let continuation_logits = session
+        .copy_logits_f32()
+        .expect("copy position-2052 logits");
+    assert!(continuation_logits.iter().all(|value| value.is_finite()));
+    let continuation_argmax = continuation_logits
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .unwrap()
+        .0;
+    let mut hasher = Sha256::new();
+    for value in &continuation_logits {
+        hasher.update(value.to_le_bytes());
+    }
+    let continuation_hash = format!("{:x}", hasher.finalize());
+    assert_eq!(continuation_argmax, 201);
+    assert_eq!(
+        continuation_hash,
+        "52e0d3bcd450bff10443ac16a93937138e3f5fce224daab6e68c76b8a0d386e6"
+    );
+    let continuation = compare_logits(
+        "position_2052",
+        &continuation_logits,
+        POSITION_2052_ORACLE_BYTES,
+    );
+    assert_eq!(continuation.argmax, continuation.oracle_argmax);
+    assert_hca_long_prefix_gate("position 2052", &continuation);
+    assert_eq!(
+        sparse_snapshot
+            .causal_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        "8b7906e362419dfe077eb5dd7d4909e154a5729cd100463dcfd9c2a86c172920"
+    );
+    eprintln!(
+        "sparse_position=2052 token=35 argmax={continuation_argmax} sha256={continuation_hash} elapsed={:.3}s snapshot_digest={}",
+        started.elapsed().as_secs_f64(),
+        sparse_snapshot
+            .causal_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+
+    session
+        .restore_causal_snapshot(&source_snapshot)
+        .expect("restore position-2048 snapshot for packed sparse replay");
+    session
+        .prefill_tokens(&ctx, &[35, 201, 200, 34])
+        .expect("execute packed chunk across first sparse-CSA boundary");
+    assert_eq!(session.next_position(), 2_052);
+    let packed_sparse_snapshot = session
+        .capture_causal_snapshot()
+        .expect("capture packed first sparse-CSA snapshot");
+    session
+        .prefill_tokens(&ctx, &[35])
+        .expect("execute packed sparse continuation at position 2052");
+    let packed_continuation_logits = session
+        .copy_logits_f32()
+        .expect("copy packed position-2052 logits");
+    let packed_comparison = compare_logits(
+        "packed_vs_singleton_position_2052",
+        &packed_continuation_logits,
+        bytemuck::cast_slice(&continuation_logits),
+    );
+    assert_eq!(packed_comparison.argmax, continuation_argmax);
+    assert!(
+        packed_comparison.cosine >= 0.999_99,
+        "packed/singleton sparse cosine is only {}",
+        packed_comparison.cosine
+    );
+    assert!(
+        packed_comparison.relative_rms <= 0.002,
+        "packed/singleton sparse relative RMS is {}",
+        packed_comparison.relative_rms
+    );
+    let mut packed_hasher = Sha256::new();
+    for value in &packed_continuation_logits {
+        packed_hasher.update(value.to_le_bytes());
+    }
+    let packed_hash = format!("{:x}", packed_hasher.finalize());
+    assert_eq!(
+        packed_hash,
+        "d78f88e7acd4746477c25bc899eefa78af97a42cba266141ec7c76ab27e96b9f"
+    );
+    assert_eq!(
+        packed_sparse_snapshot
+            .causal_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        "03cea8187af6782fa374bf8ce441057d74924880eb6be46439b25982098476db"
+    );
+    eprintln!(
+        "packed_sparse_position=2052 sha256={} snapshot_digest={} singleton_snapshot_digest={} elapsed={:.3}s",
+        packed_hash,
+        packed_sparse_snapshot
+            .causal_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        sparse_snapshot
+            .causal_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        started.elapsed().as_secs_f64()
+    );
+
+    let error = session
+        .forward_token(&ctx, continuation_argmax as u32)
+        .err()
+        .expect("position 2053 must reject before mutation");
+    assert!(error.to_string().contains("next position is 2053"));
+    assert_eq!(session.next_position(), 2_053);
+    assert_eq!(endpoint_hashes.len(), 4);
+}
+
+#[test]
+#[ignore = "requires the local DS4 model and a published position-2052 snapshot"]
+fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let snapshot_path = std::env::var_os("DSV4_POSITION_2052_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_POSITION_2052_SNAPSHOT)
+        });
+    let identity_cache_path = std::env::var_os("DSV4_IDENTITY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_IDENTITY_CACHE)
+        });
+    assert!(model_path.exists(), "missing DS4 model");
+    assert!(
+        snapshot_path.exists(),
+        "missing durable position-2052 snapshot"
+    );
+
+    let started = Instant::now();
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+            .expect("resolve durable sparse snapshot model identity");
+    let model_content_id = DeepSeekV4ModelContentId::new(content.content_id);
+    let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind DS4 config");
+    let snapshot = load_causal_snapshot_file(
+        &snapshot_path,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: &model.config,
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("load durable position-2052 snapshot");
+    assert_eq!(snapshot.next_position(), 2_052);
+    assert_eq!(
+        snapshot.prefix_tokens(),
+        [35, 201, 200, 34].repeat(513).as_slice()
+    );
+    assert_eq!(snapshot.payload_bytes(), 31_967_504);
+    assert_eq!(
+        snapshot.source_observation(),
+        DeepSeekV4SnapshotObservation::Available
+    );
+    assert_eq!(
+        snapshot
+            .causal_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        "8b7906e362419dfe077eb5dd7d4909e154a5729cd100463dcfd9c2a86c172920"
+    );
+
+    let ctx = MetalContext::new().expect("create Metal context");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("build durable position-2052 session");
+    session
+        .restore_causal_snapshot(&snapshot)
+        .expect("restore durable position-2052 snapshot");
+    assert!(session.copy_logits_f32().is_err());
+    session
+        .forward_token(&ctx, 35)
+        .expect("execute restored position 2052");
+    let logits = session
+        .copy_logits_f32()
+        .expect("copy durable position-2052 logits");
+    let endpoint = compare_logits("durable_position_2052", &logits, POSITION_2052_ORACLE_BYTES);
+    assert_eq!(endpoint.oracle_argmax, 201);
+    assert_eq!(endpoint.argmax, endpoint.oracle_argmax);
+    assert_hca_long_prefix_gate("durable position 2052", &endpoint);
+    let mut native_hasher = Sha256::new();
+    for value in &logits {
+        native_hasher.update(value.to_le_bytes());
+    }
+    assert_eq!(
+        format!("{:x}", native_hasher.finalize()),
+        "52e0d3bcd450bff10443ac16a93937138e3f5fce224daab6e68c76b8a0d386e6"
+    );
+    eprintln!(
+        "durable_position_2052_elapsed={:.3}s identity_cache={:?}",
         started.elapsed().as_secs_f64(),
         content.outcome
     );

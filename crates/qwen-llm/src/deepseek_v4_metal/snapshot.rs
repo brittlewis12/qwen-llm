@@ -13,6 +13,8 @@ pub use file::{
 };
 
 const CAUSAL_SNAPSHOT_ABI_VERSION: u32 = 1;
+// Numerics v1 includes LlamaCppB10222F16HadamardV1 scoring, tie-breaking,
+// cache-order compaction, and the F16 Hadamard index-key representation.
 const CAUSAL_SNAPSHOT_NUMERICS_VERSION: u32 = 1;
 const CAUSAL_SNAPSHOT_ENCODING_VERSION: u32 = 1;
 const COMPATIBILITY_DOMAIN: &[u8] = b"qwen-dsv4-metal-causal-compatibility-v1\0";
@@ -339,9 +341,9 @@ fn snapshot_geometry(
                         "snapshot compressor arena",
                     )?;
                     let count = next_position as usize / 4;
-                    if count > DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS {
+                    if count > DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS {
                         return invalid(format!(
-                            "DeepSeek V4 snapshot CSA row count {count} exceeds history capacity {DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS}"
+                            "DeepSeek V4 snapshot CSA row count {count} exceeds history capacity {DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS}"
                         ));
                     }
                     published_elements = checked_add(
@@ -352,7 +354,7 @@ fn snapshot_geometry(
                     published_capacity_elements = checked_add(
                         published_capacity_elements,
                         checked_mul(
-                            DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS,
+                            DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
                             head_dim,
                             "snapshot CSA publication capacity",
                         )?,
@@ -369,9 +371,9 @@ fn snapshot_geometry(
                     "snapshot compressor arena",
                 )?;
                 let count = next_position as usize / 128;
-                if count > DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS {
+                if count > DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS {
                     return invalid(format!(
-                        "DeepSeek V4 snapshot HCA row count {count} exceeds history capacity {DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS}"
+                        "DeepSeek V4 snapshot HCA row count {count} exceeds history capacity {DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS}"
                     ));
                 }
                 published_elements = checked_add(
@@ -382,7 +384,7 @@ fn snapshot_geometry(
                 published_capacity_elements = checked_add(
                     published_capacity_elements,
                     checked_mul(
-                        DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS,
+                        DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS,
                         head_dim,
                         "snapshot HCA publication capacity",
                     )?,
@@ -550,10 +552,16 @@ fn validate_frontier(
     layer: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
     let (width, rows, _) = compressor_frontier_geometry(ratio, head_dim)?;
+    let capacity_rows = if ratio == 4 {
+        DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS
+    } else {
+        DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS
+    };
     if frontier.ratio != ratio
         || frontier.head_dim != head_dim
         || frontier.width != width
         || frontier.rows != rows
+        || frontier.capacity_rows != capacity_rows
         || frontier.publication != publication
     {
         return invalid(format!(
@@ -574,10 +582,7 @@ fn validate_frontier(
     )?;
     validate_f16(
         &frontier.published,
-        &[
-            head_dim as u64,
-            DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
-        ],
+        &[head_dim as u64, capacity_rows as u64],
         true,
         "snapshot compressor published rows",
     )
@@ -702,6 +707,7 @@ fn build_restore_images(
                         &mut destination_cursor,
                         snapshot.next_position as usize / 4,
                         head_dim,
+                        DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
                     );
                 }
             }
@@ -712,6 +718,7 @@ fn build_restore_images(
                 &mut destination_cursor,
                 snapshot.next_position as usize / 128,
                 config.key_length as usize,
+                DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS,
             ),
         }
     }
@@ -730,9 +737,10 @@ fn fill_published_image(
     destination_cursor: &mut usize,
     row_count: usize,
     head_dim: usize,
+    capacity_rows: usize,
 ) {
     let visible = row_count * head_dim;
-    let capacity = DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS * head_dim;
+    let capacity = capacity_rows * head_dim;
     destination[*destination_cursor..*destination_cursor + visible]
         .copy_from_slice(&source[*source_cursor..*source_cursor + visible]);
     *source_cursor += visible;
@@ -798,7 +806,7 @@ fn write_frontier(
         &compressor_arena[*compressor_cursor..*compressor_cursor + state_elements],
     );
     *compressor_cursor += state_elements;
-    let published_elements = DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS * frontier.head_dim;
+    let published_elements = frontier.capacity_rows * frontier.head_dim;
     write_f16_bits(
         &frontier.published,
         &published_image[*published_cursor..*published_cursor + published_elements],
@@ -1330,8 +1338,7 @@ mod tests {
         write_u32_bits(&frontier.kv_state, &kv);
         write_u32_bits(&frontier.score_state, &scores);
 
-        let mut published =
-            vec![0x7e00u16; frontier.head_dim * DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS];
+        let mut published = vec![0x7e00u16; frontier.head_dim * frontier.capacity_rows];
         let count = next_position as usize / frontier.ratio;
         for row in 0..count {
             for dimension in 0..frontier.head_dim {
@@ -1436,6 +1443,9 @@ mod tests {
             (2_047, 128, 511, 15),
             (2_048, 128, 512, 16),
             (2_049, 128, 512, 16),
+            (2_051, 128, 512, 16),
+            (2_052, 128, 513, 16),
+            (2_053, 128, 513, 16),
         ] {
             let geometry = snapshot_geometry(&config, position).unwrap();
             assert_eq!(geometry.raw_rows, raw_rows, "position {position}");
@@ -1445,11 +1455,11 @@ mod tests {
                 "position {position}"
             );
         }
-        let terminal = snapshot_geometry(&config, 2_049).unwrap();
+        let terminal = snapshot_geometry(&config, 2_053).unwrap();
         assert_eq!(terminal.raw_elements, 2_818_048);
         assert_eq!(terminal.compressor_elements, 3_051_520);
-        assert_eq!(terminal.published_elements, 7_045_120);
-        assert!(snapshot_geometry(&config, 2_050).is_err());
+        assert_eq!(terminal.published_elements, 7_058_560);
+        assert!(snapshot_geometry(&config, 2_054).is_err());
     }
 
     #[test]
@@ -1484,7 +1494,7 @@ mod tests {
             return;
         };
         let config = crate::deepseek_v4::flash_0731_config_fixture();
-        for &position in &[0, 4, 127, 128, 129, 1_025, 1_028, 2_049] {
+        for &position in &[0, 4, 127, 128, 129, 1_025, 1_028, 2_049, 2_052, 2_053] {
             let source = synthetic_state(
                 &ctx,
                 &config,

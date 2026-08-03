@@ -626,6 +626,71 @@ pub enum DeepSeekV4AttentionCacheContract {
     MixedFp8NopeBf16RopeOracle,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeepSeekV4SessionPhase {
+    ReadyWithoutObservation { next_position: u32 },
+    ReadyWithObservation { next_position: u32 },
+    Poisoned { next_position: u32 },
+}
+
+impl DeepSeekV4SessionPhase {
+    fn fresh() -> Self {
+        Self::ReadyWithoutObservation { next_position: 0 }
+    }
+
+    fn next_position(self) -> u32 {
+        match self {
+            Self::ReadyWithoutObservation { next_position }
+            | Self::ReadyWithObservation { next_position }
+            | Self::Poisoned { next_position } => next_position,
+        }
+    }
+
+    fn ready_position(self) -> Result<u32, DeepSeekV4MetalError> {
+        match self {
+            Self::ReadyWithoutObservation { next_position }
+            | Self::ReadyWithObservation { next_position } => Ok(next_position),
+            Self::Poisoned { .. } => {
+                invalid("DeepSeek V4 session is poisoned by an incomplete token")
+            }
+        }
+    }
+
+    fn observation_valid(self) -> bool {
+        matches!(self, Self::ReadyWithObservation { .. })
+    }
+
+    fn begin_mutation(&mut self) -> Result<u32, DeepSeekV4MetalError> {
+        let next_position = self.ready_position()?;
+        *self = Self::Poisoned { next_position };
+        Ok(next_position)
+    }
+
+    fn complete_mutation(
+        &mut self,
+        start_position: u32,
+        next_position: u32,
+        publish_observation: bool,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if next_position <= start_position {
+            return invalid("DeepSeek V4 mutation did not advance the session position");
+        }
+        match *self {
+            Self::Poisoned {
+                next_position: poisoned_position,
+            } if poisoned_position == start_position => {
+                *self = if publish_observation {
+                    Self::ReadyWithObservation { next_position }
+                } else {
+                    Self::ReadyWithoutObservation { next_position }
+                };
+                Ok(())
+            }
+            _ => invalid("DeepSeek V4 mutation completed from an invalid session phase"),
+        }
+    }
+}
+
 /// Native qwen-owned DeepSeek V4 decode session.
 ///
 /// Dense-all CSA and eight HCA rows are promoted through the position-1024
@@ -647,9 +712,7 @@ pub struct DeepSeekV4Session {
     final_normalized_hidden: MetalTensor,
     logits: MetalTensor,
     prefill: prefill::DeepSeekV4PrefillScratch,
-    next_position: u32,
-    completed: bool,
-    poisoned: bool,
+    phase: DeepSeekV4SessionPhase,
 }
 
 /// Compatibility name retained for the position-zero live differential.
@@ -712,9 +775,7 @@ impl DeepSeekV4Session {
             )?,
             logits: MetalTensor::zeros_f32(ctx, vec![DEEPSEEK_V4_VOCAB_SIZE as u64])?,
             prefill: prefill::DeepSeekV4PrefillScratch::new(ctx)?,
-            next_position: 0,
-            completed: false,
-            poisoned: false,
+            phase: DeepSeekV4SessionPhase::fresh(),
         })
     }
 
@@ -723,18 +784,21 @@ impl DeepSeekV4Session {
     }
 
     pub fn logits(&self) -> Result<&MetalTensor, DeepSeekV4MetalError> {
-        if !self.completed {
+        if !self.phase.observation_valid() {
             return invalid("DeepSeek V4 logits have not completed");
         }
         Ok(&self.logits)
     }
 
-    pub fn final_normalized_hidden(&self) -> &MetalTensor {
-        &self.final_normalized_hidden
+    pub fn final_normalized_hidden(&self) -> Result<&MetalTensor, DeepSeekV4MetalError> {
+        if !self.phase.observation_valid() {
+            return invalid("DeepSeek V4 final normalized hidden state has not completed");
+        }
+        Ok(&self.final_normalized_hidden)
     }
 
     pub fn next_position(&self) -> u32 {
-        self.next_position
+        self.phase.next_position()
     }
 
     pub fn cache_contract(&self) -> DeepSeekV4AttentionCacheContract {
@@ -761,10 +825,11 @@ impl DeepSeekV4Session {
         token_id: u32,
         layer_completed: impl FnMut(usize),
     ) -> Result<&MetalTensor, DeepSeekV4MetalError> {
-        if self.next_position != 0 {
+        let next_position = self.phase.next_position();
+        if next_position != 0 {
             return invalid(format!(
                 "position-zero entry point requires a fresh session, next position is {}",
-                self.next_position
+                next_position
             ));
         }
         self.forward_token_with_progress(ctx, token_id, layer_completed)
@@ -794,32 +859,25 @@ impl DeepSeekV4Session {
                 ctx.device.registryID()
             ));
         }
-        if self.poisoned {
-            return invalid("DeepSeek V4 session is poisoned by an incomplete token");
-        }
+        let position = self.phase.ready_position()?;
         if token_id as usize >= DEEPSEEK_V4_VOCAB_SIZE {
             return invalid(format!(
                 "token id {token_id} is outside vocabulary {DEEPSEEK_V4_VOCAB_SIZE}"
             ));
         }
-        validate_promoted_session_position(self.next_position)?;
+        validate_promoted_session_position(position)?;
+        let next_position = position
+            .checked_add(1)
+            .ok_or_else(|| DeepSeekV4MetalError::Invalid("position overflow".into()))?;
 
-        self.completed = false;
         host_write_i32(&self.token_id, &[token_id as i32], "DeepSeek V4 token ID")?;
-        let position = self.next_position;
-        // Set before the first cache mutation. If a user progress callback
-        // unwinds, a caught panic cannot make a partially published token
-        // reusable at the same logical position.
-        self.poisoned = true;
+        let begun_position = self.phase.begin_mutation()?;
+        debug_assert_eq!(begun_position, position);
         let result = self.forward_token_inner(ctx, token_id, position, &mut layer_completed);
         match result {
             Ok(()) => {
-                self.next_position = self
-                    .next_position
-                    .checked_add(1)
-                    .ok_or_else(|| DeepSeekV4MetalError::Invalid("position overflow".into()))?;
-                self.completed = true;
-                self.poisoned = false;
+                self.phase
+                    .complete_mutation(position, next_position, true)?;
                 Ok(&self.logits)
             }
             Err(error) => Err(error),
@@ -4783,7 +4841,7 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
         routed_scale: 1.0,
     };
     moe.checked()?;
-    let mut requests = Vec::with_capacity(520);
+    let mut requests = Vec::with_capacity(521);
     let f32_bytes = std::mem::size_of::<f32>();
     let i32_bytes = std::mem::size_of::<i32>();
     let f16_bytes = std::mem::size_of::<u16>();
@@ -5258,18 +5316,62 @@ mod tests {
     }
 
     #[test]
+    fn session_phase_encodes_observation_and_poison_transitions() {
+        let mut phase = DeepSeekV4SessionPhase::fresh();
+        assert_eq!(phase.next_position(), 0);
+        assert_eq!(phase.ready_position().unwrap(), 0);
+        assert!(!phase.observation_valid());
+
+        assert_eq!(phase.begin_mutation().unwrap(), 0);
+        assert_eq!(phase, DeepSeekV4SessionPhase::Poisoned { next_position: 0 });
+        assert!(!phase.observation_valid());
+        assert!(
+            phase
+                .ready_position()
+                .unwrap_err()
+                .to_string()
+                .contains("poisoned")
+        );
+
+        phase.complete_mutation(0, 1, true).unwrap();
+        assert_eq!(phase.ready_position().unwrap(), 1);
+        assert!(phase.observation_valid());
+
+        assert_eq!(phase.begin_mutation().unwrap(), 1);
+        assert!(!phase.observation_valid());
+        phase.complete_mutation(1, 2, false).unwrap();
+        assert_eq!(phase.ready_position().unwrap(), 2);
+        assert!(!phase.observation_valid());
+
+        let invalid_phase = phase.complete_mutation(2, 3, true).unwrap_err();
+        assert!(invalid_phase.to_string().contains("invalid session phase"));
+        assert_eq!(phase.begin_mutation().unwrap(), 2);
+        let nonadvancing = phase.complete_mutation(2, 2, true).unwrap_err();
+        assert!(nonadvancing.to_string().contains("did not advance"));
+        assert_eq!(phase.next_position(), 2);
+        assert!(!phase.observation_valid());
+        assert!(
+            phase
+                .begin_mutation()
+                .unwrap_err()
+                .to_string()
+                .contains("poisoned")
+        );
+    }
+
+    #[test]
     fn session_memory_inventory_is_complete_and_unique() {
         let mut kinds = vec![AttentionKind::SlidingWindow; 2];
         kinds.extend(std::iter::repeat_n(AttentionKind::CompressedSparse, 21));
         kinds.extend(std::iter::repeat_n(AttentionKind::HeavilyCompressed, 20));
         let requests = deepseek_v4_session_allocation_requests_for_kinds(&kinds).unwrap();
-        assert_eq!(requests.len(), 520);
+        assert_eq!(requests.len(), 521);
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            154_622_740
+            154_753_812
         );
         let names = requests
             .iter()

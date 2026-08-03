@@ -386,6 +386,36 @@ at exact E2M1 midpoints. This does not affect ordinary non-tiny activations. It
 must be resolved against the official contract or an explicit bit-level spec
 before packed-cache promotion; it does not create an accelerator requirement.
 
+### Evidence cadence
+
+Correctness evidence is an explicit DAG, not an instruction to replay every
+ancestor after every edit:
+
+- Sub-second gates own layout, scalar semantics, cache bounds, state-machine
+  rejection, manifest identity, and allocation arithmetic.
+- Tens-of-seconds gates own retained packed transitions, sparse layer probes,
+  short packed-versus-singleton schedule checks, and one exact endpoint from an
+  already-certified prefix.
+- Fresh long-prefix native runs, cold independent-oracle captures, broad model
+  matrices, and performance packets are rare promotion audits measured in
+  minutes. They do not belong in an ordinary kernel edit loop.
+
+An immutable external oracle fixture is not invalidated by a native
+implementation edit. Recapture it only when model bytes, prompt tokens,
+semantics, or oracle revisions change, or when evidence shows the fixture is
+defective. Fresh-from-zero native replay reopens for changes to tokenizer or
+GGUF interpretation, position/RoPE semantics, cache mutation or addressing,
+packed scheduling, quant decoding across the prefix, and future snapshot
+restore. Otherwise operation evidence plus a retained strategic endpoint is the
+shortest responsible gate.
+
+Metal causal-state snapshots are the next workflow layer. They must enumerate
+only persistent state, bind exact model/prefix/cache ABI identities, reject
+partial or unknown fields, and distinguish “correct from restored position”
+from “this build reproduced the prefix.” Opaque live-session serialization is
+not an acceptable shortcut. Either ready phase may become a causal checkpoint;
+a poisoned session must never serialize.
+
 ### S2: local-only Metal backbone
 
 Status: promoted for sequential positions 0 through 2 on 2026-08-02. The native
@@ -655,11 +685,11 @@ Gate:
   oracle token 201 in 248.6 seconds; a request requiring 514 forwards rejected
   before Metal residency.
 - The exported session and CLI budget now accept exactly 1,025 forwards. A
-  native request used one proven 128-token layer-major prefix, continued by the
-  ordinary singleton path, published HCA row 7 and CSA row 255 at position
-  1023, and matched the position-1024 b10222 endpoint at 0.998247840 cosine /
-  0.060068528 relative RMS. A 1,026-forward request rejects before residency;
-  a direct valid-token call at position 1025 rejects before session mutation.
+  native request publishes HCA row 7 and CSA row 255 at position 1023 and
+  matches the position-1024 b10222 endpoint through retained layer-major chunks
+  at 0.998133285 cosine / 0.061869968 relative RMS. A 1,026-forward request
+  rejects before residency; a direct valid-token call at position 1025 rejects
+  before session mutation.
 - Ordinary 0731 messages match vLLM and SGLang byte-for-byte. On the Flash
   vocabulary, user-only, system/user, and multi-turn Unicode fixtures encode to
   exact token sequences of 5, 8, and 16 tokens. A live system/user request
@@ -671,11 +701,12 @@ Gate:
   by Qwen benchmarks.
 - Allocation-free planning inventories 7 resident buffers (3 retained no-copy
   windows and 4 final-page copies) at 102,994,624,512 priced-upper bytes and
-  520 unique session buffers at 154,622,740 logical / 158,957,568 priced-upper
+  521 unique session buffers at 154,753,812 logical / 159,088,640 priced-upper
   bytes. The session total includes the complete physical 128-token packed
-  scratch rather than charging it to reserve. The complete priced upper bound
-  is 103,153,582,080 bytes; a 536,870,912-byte dynamic reserve makes the
-  admission requirement 103,690,452,992 bytes.
+  scratch and its 131,072-byte pre-chunk raw-ring snapshot rather than charging
+  either to reserve. The complete priced upper bound is 103,153,713,152 bytes;
+  a 536,870,912-byte dynamic reserve makes the admission requirement
+  103,690,584,064 bytes.
 - The load plan freezes configuration plus every descriptor's name, shape,
   dtype, shard, offset, and byte length. Realization revalidates those values,
   fallback policy, all view/alias/window geometry, and a deterministic planner
@@ -685,12 +716,12 @@ Gate:
   The process signal was `Some(0)`, the established omitted-limit convention,
   so the explicit reason was `admitted_process_budget_omitted`.
 - Live phase reconciliation observed 102,994,608,128 residency bytes and
-  103,149,240,320 cumulative bytes after session construction. The packed CLI
-  endpoint reached 103,149,502,464 bytes after lazy pipeline state, still below
-  the 103,690,452,992-byte first-forward gate. Residency and session must fit
-  their priced inventories without the reserve; only the first-forward endpoint
-  gate may use the reserve. Residency is reconciled inside realization, before
-  an unaccounted resident handle can be returned.
+  103,149,371,392 cumulative bytes after session construction. The retained
+  packed CLI endpoint reached 103,149,633,536 bytes after lazy pipeline state,
+  still below the 103,690,584,064-byte first-forward gate. Residency and session
+  must fit their priced inventories without the reserve; only the first-forward
+  endpoint gate may use the reserve. Residency is reconciled inside realization,
+  before an unaccounted resident handle can be returned.
 - A release `qwen -p A -n 1` run generated oracle ID 201 in 0.716 seconds of
   prompt execution. `vm_stat` pageouts, swapins, and swapouts were unchanged;
   `vm.swapusage` remained 1,825.94 MiB before and after; and `/usr/bin/time`
@@ -716,12 +747,11 @@ for the minimum ordinary prompt-encoder gate.
 
 ### S6: Metal performance promotion
 
-Status: first layer-major prefill slice promoted for fresh prompts of 2-128
-tokens on 2026-08-02. The physical scratch is sized and admitted once for 128;
-short requests use exact prefix views. One-token prompts remain singleton. A
-longer prompt uses exactly one fresh packed prefix of 128, then continues with
-the already-promoted singleton path; it does not pretend subsequent chunks are
-packed or replay the prefix through a hidden fallback.
+Status: retained layer-major chunks of 1-128 tokens promoted through the full
+1,025-forward session capacity on 2026-08-02. The physical scratch is sized and
+admitted once for 128; short chunks use exact prefix views. One-token prompts
+remain singleton only when they are the entire request. Longer prompts consume
+successive explicit packed chunks, with no singleton replay or hidden fallback.
 
 The packed path is DS4-owned and never calls `forward_token`. Its outer loop is
 43 layers over a token matrix. Embedding, mHC function projections and controls,
@@ -731,6 +761,21 @@ position-dependent RoPE, raw-cache publication, and ratio-4/128 compressor
 transitions remain chronologically ordered. CPU routing reads one `[N,256]`
 matrix per layer, preserves top-k slot order, and groups selected rows by expert;
 the two MXFP4 routed-down outliers retain an explicit row fallback.
+
+Before each retained layer chunk, a bitwise `ushort` copy preserves that
+layer's complete F16 raw ring. New rows publish by absolute modulo-128 position.
+Packed attention derives each query's absolute raw window and compressed count,
+then selects pre-chunk or current storage before modulo addressing. This keeps
+future chunk rows from destroying historical keys needed by earlier queries;
+append-only compressed rows remain hidden solely by per-query absolute counts.
+The dynamic mass slab covers exactly 128 raw rows, 256 compressed rows, and one
+denominator slot.
+
+Intermediate teacher-forced chunks use the typed `advance_tokens` transition.
+It executes every causal layer state but omits final HC collapse, output norm,
+and the 129,280-row vocabulary projection. Successful advancement explicitly
+invalidates prior logits and final hidden observations; only the final chunk
+can make those observations valid again.
 
 The first packed attention implementation honestly preserved semantics but
 reused the singleton kernel, which recomputed every 512-wide score independently
@@ -760,22 +805,37 @@ Gate:
   generated IDs `[35, 201]` across the HCA boundary and continuation.
 - The packed causal attention kernel matches ordered singleton rows within two
   F32 epsilons; token-axis Q8_0 GEMV is bitwise identical to successive
-  singleton dispatches. A callback unwind after a completed layer leaves the
-  batch at position zero with poison set, exposes no completed logits, and
-  rejects subsequent decode.
-- The strategic position-1024 differential composes the same packed first 128
-  tokens with 897 ordinary singleton forwards and reaches the exact retained
-  endpoint without a delegated runner or a second packed chunk. This is a
-  reachability result, not a long-prompt TTFT claim; the run took 582.536
-  seconds after session construction.
+  singleton dispatches.
+- Retained synthetic attention matches the independent CPU oracle across a
+  sliding-window wrap at start 127, CSA and HCA boundary crossings at start
+  125, a complete 128-token overwrite from start 128, and the maximum promoted
+  CSA geometry at start 1,020 with 128 raw plus 256 compressed rows.
+- Two retained 128-token chunks preserve position-255 argmax 35 under the
+  established interval containment at 0.997055041 / 0.080157928, then ordinary
+  position-256 decode recovers into the endpoint band at argmax 201 and
+  0.998410769 / 0.057533156. The complete transition takes 6.179 seconds versus
+  the prior 100.9-second singleton prompt path.
+- Eight advance-only chunks plus one one-token endpoint reach position 1024 in
+  21.144-21.821 seconds, down from 582.536 seconds for packed-128 plus singleton
+  replay (26.7-27.6x). The full b10222 vector keeps argmax 201 at cosine
+  0.998133285 and relative RMS 0.061869968 without changing the frozen endpoint
+  gate. Both native runs produced the byte-identical full-vector SHA-256
+  `73d357295a7821607869764af42aaafc845e1764afe8c23a0aab2e5f570a7956`.
+- The release CLI independently reserves 1,025/1,025 forwards, reports
+  `prefill_mode=layer_major_128_chunks`, and generates oracle ID 201 in 20,357.1
+  ms of prompt execution with zero reported swaps.
+- A successful advance revokes the session's current logits and final hidden
+  observation; vectors already copied to the host remain ordinary owned values.
+  A callback unwind from retained position 2 leaves that position unchanged,
+  keeps observations invalid, sets poison, and rejects subsequent decode.
 
 Broader S6 work remains:
 
 - Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, shared-KV
   sparse attention, and high-value MoE boundaries.
-- Extend packed prefill beyond a fresh 128-token chunk only with explicit
-  pre-chunk ring preservation and absolute-position compressed visibility.
+- Move CPU routing and grouped expert schedules onto the GPU only after named
+  retained-chunk phase attribution identifies them as the next bottleneck.
 
 Gates:
 
@@ -833,13 +893,14 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Keep position 1027 fail-closed. Promote compressed-history slab growth as a
-   separate ownership milestone, then implement sparse CSA index scoring and
-   top-512 selection before history can exceed 512 rows.
-2. Extend packed prefill past a fresh 128-token chunk only after the
-   pre-existing raw ring and compressed-history prefix have explicit packed
-   visibility tests; do not hide retained chunking behind singleton replay.
-3. Attribute the now-dominant singleton suffix before choosing between retained
-   packed chunks, GPU routing, grouped experts, MXFP4 matmat, and kernel fusion.
+1. Add a typed Metal causal-state snapshot at a certified boundary, with exact
+   model/prefix/cache ABI identity and fresh-versus-restored continuation gates.
+   Keep restored-state claims explicitly narrower than fresh-prefix claims.
+2. Keep position 1027 fail-closed. Promote compressed-history slab growth as a
+   separate ownership milestone and use retained chunks for one position-2048
+   endpoint rather than rebuilding a singleton fixture ladder.
+3. Implement sparse CSA index scoring and stable top-512 selection before
+   compressed history can exceed 512 rows; do not use slab growth to evade the
+   semantic selection boundary.
 4. Extend the 0731 message encoder to reasoning and DSML tools only with exact
    release-derived byte fixtures and an end-to-end tool-call workload.

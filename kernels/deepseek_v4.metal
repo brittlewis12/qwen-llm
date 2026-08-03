@@ -61,7 +61,13 @@ struct ds4_packed_attention_args {
     uint head_dim;
     uint n_tokens;
     uint compression_ratio;
+    uint start_position;
+    uint window;
     float scale;
+};
+
+struct ds4_copy_u16_args {
+    uint n;
 };
 
 struct ds4_compressor_frontier_args {
@@ -278,31 +284,49 @@ kernel void kernel_deepseek_v4_dense_sink_attention_f16(
     output[index] = value / denominator;
 }
 
+kernel void kernel_deepseek_v4_copy_u16(
+        constant ds4_copy_u16_args & args [[buffer(0)]],
+        device const ushort * source [[buffer(1)]],
+        device ushort * destination [[buffer(2)]],
+        uint index [[thread_position_in_grid]]) {
+    if (index >= args.n) return;
+    destination[index] = source[index];
+}
+
 kernel void kernel_deepseek_v4_packed_dense_sink_attention_f16(
         constant ds4_packed_attention_args & args [[buffer(0)]],
         device const float * queries [[buffer(1)]],
         device const half * raw_cache [[buffer(2)]],
-        device const half * compressed_cache [[buffer(3)]],
-        device const float * sinks [[buffer(4)]],
-        device float * output [[buffer(5)]],
+        device const half * preserved_raw_cache [[buffer(3)]],
+        device const half * compressed_cache [[buffer(4)]],
+        device const float * sinks [[buffer(5)]],
+        device float * output [[buffer(6)]],
         threadgroup float * masses [[threadgroup(0)]],
         uint2 group [[threadgroup_position_in_grid]],
         uint tid [[thread_index_in_threadgroup]]) {
     const uint token = group.x;
     const uint head = group.y;
     if (token >= args.n_tokens || head >= args.head_count) return;
-    const uint raw_count = token + 1u;
+    const uint absolute_position = args.start_position + token;
+    const uint visible_end = absolute_position + 1u;
+    const uint raw_count = min(visible_end, args.window);
+    const uint raw_start = visible_end - raw_count;
     const uint compressed_count = args.compression_ratio == 0u
         ? 0u
-        : (token + 1u) / args.compression_ratio;
+        : visible_end / args.compression_ratio;
     const uint row_count = raw_count + compressed_count;
     const uint query_start = (token * args.head_count + head) * args.head_dim;
 
     if (tid < row_count) {
         const bool compressed = tid >= raw_count;
         const uint row = compressed ? tid - raw_count : tid;
-        device const half * cache = compressed ? compressed_cache : raw_cache;
-        const uint cache_start = row * args.head_dim;
+        const uint logical_position = raw_start + row;
+        device const half * cache = compressed
+            ? compressed_cache
+            : (logical_position < args.start_position ? preserved_raw_cache : raw_cache);
+        const uint cache_start = compressed
+            ? row * args.head_dim
+            : (logical_position % args.window) * args.head_dim;
         float score = 0.0f;
         for (uint dimension = 0u; dimension < args.head_dim; ++dimension) {
             score += queries[query_start + dimension] * float(cache[cache_start + dimension]);
@@ -329,7 +353,12 @@ kernel void kernel_deepseek_v4_packed_dense_sink_attention_f16(
     if (tid < args.head_dim) {
         float value = 0.0f;
         for (uint row = 0u; row < raw_count; ++row) {
-            value += float(raw_cache[row * args.head_dim + tid]) * masses[row];
+            const uint logical_position = raw_start + row;
+            device const half * cache = logical_position < args.start_position
+                ? preserved_raw_cache
+                : raw_cache;
+            const uint cache_start = (logical_position % args.window) * args.head_dim;
+            value += float(cache[cache_start + tid]) * masses[row];
         }
         for (uint row = 0u; row < compressed_count; ++row) {
             value += float(compressed_cache[row * args.head_dim + tid])

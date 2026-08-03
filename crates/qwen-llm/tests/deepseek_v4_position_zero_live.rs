@@ -853,16 +853,16 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         "memory planning must not realize Metal buffers"
     );
     let memory_plan = load_plan.memory_plan().clone();
-    assert_eq!(memory_plan.session_allocations().len(), 520);
-    assert_eq!(memory_plan.session_logical_bytes(), 154_622_740);
-    assert_eq!(memory_plan.session_priced_upper_bytes(), 158_957_568);
+    assert_eq!(memory_plan.session_allocations().len(), 521);
+    assert_eq!(memory_plan.session_logical_bytes(), 154_753_812);
+    assert_eq!(memory_plan.session_priced_upper_bytes(), 159_088_640);
     assert_eq!(memory_plan.residency_buffer_count(), 7);
     assert_eq!(memory_plan.residency_logical_bytes(), 102_994_608_640);
     assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_624_512);
-    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_153_582_080);
+    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_153_713_152);
     assert_eq!(
         memory_plan.required_with_reserve_bytes().unwrap(),
-        103_690_452_992
+        103_690_584_064
     );
     assert_eq!(load_plan.residency_report().window_count, 3);
     assert_eq!(load_plan.residency_report().fallback_count, 4);
@@ -1137,15 +1137,26 @@ fn native_deepseek_v4_packed_callback_unwind_poison_is_fail_stop() {
     let residency = load_admitted_residency(&ctx, &gguf);
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
+    session
+        .prefill_tokens(&ctx, &[35])
+        .expect("complete a packed token with logits");
+    assert!(session.copy_logits_f32().is_ok());
+    assert!(session.final_normalized_hidden().is_ok());
+    session
+        .advance_tokens(&ctx, &[201])
+        .expect("advance a retained packed token without logits");
+    assert_eq!(session.next_position(), 2);
+    assert!(session.copy_logits_f32().is_err());
+    assert!(session.final_normalized_hidden().is_err());
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = session.prefill_tokens_with_progress(&ctx, &[35, 201, 200, 34], |layer| {
+        let _ = session.prefill_tokens_with_progress(&ctx, &[200, 34], |layer| {
             if layer == 2 {
                 panic!("intentional packed prefill interruption");
             }
         });
     }));
     assert!(unwind.is_err(), "progress callback must interrupt prefill");
-    assert_eq!(session.next_position(), 0);
+    assert_eq!(session.next_position(), 2);
     assert!(session.copy_logits_f32().is_err());
     let error = match session.forward_token(&ctx, 35) {
         Err(error) => error,
@@ -1237,7 +1248,62 @@ fn native_deepseek_v4_packed_n128_preserves_hca_and_wrapped_decode() {
 
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
-fn native_deepseek_v4_packed_prefix_reaches_position_1024_and_rejects_1025() {
+fn native_deepseek_v4_two_packed_chunks_match_second_hca_and_decode() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
+    let prompt = [35, 201, 200, 34].repeat(64);
+    let started = Instant::now();
+    session
+        .advance_tokens(&ctx, &prompt[..128])
+        .expect("advance first packed chunk without logits");
+    assert_eq!(session.next_position(), 128);
+    assert!(session.copy_logits_f32().is_err());
+    session
+        .prefill_tokens(&ctx, &prompt[128..])
+        .expect("execute second retained packed chunk");
+    assert_eq!(session.next_position(), 256);
+    let boundary_logits = session
+        .copy_logits_f32()
+        .expect("copy second-HCA packed logits");
+    let boundary = compare_logits(
+        "two_chunk_position_255",
+        &boundary_logits,
+        POSITION_255_ORACLE_BYTES,
+    );
+    assert_eq!(boundary.oracle_argmax, 35);
+    assert_eq!(boundary.argmax, boundary.oracle_argmax);
+    assert_hca_interval_drift_containment("two-chunk position 255", &boundary);
+
+    session
+        .forward_token(&ctx, 35)
+        .expect("decode after second retained packed chunk");
+    assert_eq!(session.next_position(), 257);
+    let continuation_logits = session
+        .copy_logits_f32()
+        .expect("copy two-chunk singleton continuation");
+    let continuation = compare_logits(
+        "two_chunk_position_256",
+        &continuation_logits,
+        POSITION_256_ORACLE_BYTES,
+    );
+    assert_eq!(continuation.oracle_argmax, 201);
+    assert_eq!(continuation.argmax, continuation.oracle_argmax);
+    assert_hca_long_prefix_gate("two-chunk position 256", &continuation);
+    eprintln!(
+        "two_packed_chunks_elapsed={:.3}s",
+        started.elapsed().as_secs_f64()
+    );
+}
+
+#[test]
+#[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+fn native_deepseek_v4_retained_chunks_reach_position_1024_and_reject_1025() {
     let model_path = std::env::var_os("DSV4_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
@@ -1253,27 +1319,23 @@ fn native_deepseek_v4_packed_prefix_reaches_position_1024_and_rejects_1025() {
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");
     let prompt = [35, 201, 200, 34].repeat(256);
     let started = Instant::now();
-    session
-        .prefill_tokens(&ctx, &prompt[..128])
-        .expect("execute the proven 128-token packed prefix");
-    assert_eq!(session.next_position(), 128);
-    for &token in &prompt[128..] {
+    for (chunk_index, chunk) in prompt.chunks(128).enumerate() {
         session
-            .forward_token(&ctx, token)
-            .expect("continue the long prefix by ordinary singleton decode");
-        if session.next_position().is_multiple_of(128) {
-            eprintln!(
-                "position_1024_progress next_position={} elapsed={:.3}s",
-                session.next_position(),
-                started.elapsed().as_secs_f64()
-            );
-        }
+            .advance_tokens(&ctx, chunk)
+            .unwrap_or_else(|error| panic!("advance packed chunk {chunk_index}: {error}"));
+        assert!(session.copy_logits_f32().is_err());
+        eprintln!(
+            "position_1024_progress chunk={} next_position={} elapsed={:.3}s",
+            chunk_index + 1,
+            session.next_position(),
+            started.elapsed().as_secs_f64()
+        );
     }
     assert_eq!(session.next_position(), 1_024);
 
     session
-        .forward_token(&ctx, 35)
-        .expect("execute native position 1024");
+        .prefill_tokens(&ctx, &[35])
+        .expect("execute retained packed position 1024 with logits");
     assert_eq!(session.next_position(), 1_025);
     let endpoint_logits = session
         .copy_logits_f32()

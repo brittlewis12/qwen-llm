@@ -2137,11 +2137,11 @@ fn deepseek_v4_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Res
     Ok(required)
 }
 
-fn deepseek_v4_packed_prefix_tokens(prompt_tokens: usize) -> usize {
+fn deepseek_v4_packed_chunk_count(prompt_tokens: usize) -> usize {
     if prompt_tokens < 2 {
         0
     } else {
-        prompt_tokens.min(DEEPSEEK_V4_PREFILL_MAX_TOKENS)
+        prompt_tokens.div_ceil(DEEPSEEK_V4_PREFILL_MAX_TOKENS)
     }
 }
 
@@ -2281,21 +2281,26 @@ fn run_deepseek_v4_single_turn(
     );
 
     let prefill_t0 = Instant::now();
-    let packed_prefix_tokens = deepseek_v4_packed_prefix_tokens(prompt_token_ids.len());
-    let prefill_mode = if packed_prefix_tokens > 0 {
-        session
-            .prefill_tokens(&ctx, &prompt_token_ids[..packed_prefix_tokens])
-            .context("prefill DeepSeek V4 prompt layer-major")?;
-        for (suffix_index, &token) in prompt_token_ids[packed_prefix_tokens..].iter().enumerate() {
-            let prompt_index = packed_prefix_tokens + suffix_index;
-            session
-                .forward_token(&ctx, token)
-                .with_context(|| format!("forward DeepSeek V4 prompt token {prompt_index}"))?;
+    let packed_chunk_count = deepseek_v4_packed_chunk_count(prompt_token_ids.len());
+    let prefill_mode = if packed_chunk_count > 0 {
+        for (chunk_index, chunk) in prompt_token_ids
+            .chunks(DEEPSEEK_V4_PREFILL_MAX_TOKENS)
+            .enumerate()
+        {
+            if chunk_index + 1 == packed_chunk_count {
+                session.prefill_tokens(&ctx, chunk).with_context(|| {
+                    format!("prefill final DeepSeek V4 prompt chunk {chunk_index}")
+                })?;
+            } else {
+                session.advance_tokens(&ctx, chunk).with_context(|| {
+                    format!("advance DeepSeek V4 prompt chunk {chunk_index} without logits")
+                })?;
+            }
         }
-        if packed_prefix_tokens == prompt_token_ids.len() {
+        if packed_chunk_count == 1 {
             "layer_major_128"
         } else {
-            "layer_major_128_then_singleton"
+            "layer_major_128_chunks"
         }
     } else {
         for (index, &token) in prompt_token_ids.iter().enumerate() {
@@ -6078,21 +6083,21 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v4_prefill_uses_one_packed_prefix_then_singleton_continuation() {
-        assert_eq!(deepseek_v4_packed_prefix_tokens(0), 0);
-        assert_eq!(deepseek_v4_packed_prefix_tokens(1), 0);
-        assert_eq!(deepseek_v4_packed_prefix_tokens(2), 2);
+    fn deepseek_v4_prefill_chunks_every_retained_prompt_interval() {
+        assert_eq!(deepseek_v4_packed_chunk_count(0), 0);
+        assert_eq!(deepseek_v4_packed_chunk_count(1), 0);
+        assert_eq!(deepseek_v4_packed_chunk_count(2), 1);
         assert_eq!(
-            deepseek_v4_packed_prefix_tokens(DEEPSEEK_V4_PREFILL_MAX_TOKENS),
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS
+            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS),
+            1
         );
         assert_eq!(
-            deepseek_v4_packed_prefix_tokens(DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1),
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS
+            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1),
+            2
         );
         assert_eq!(
-            deepseek_v4_packed_prefix_tokens(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS
+            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
+            9
         );
     }
 

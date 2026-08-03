@@ -796,7 +796,7 @@ fn render_tokenize_prompt(
         .map(|message| ChatMessage {
             role: message.role.clone(),
             content: message.content.clone(),
-            extra: Default::default(),
+            ..Default::default()
         })
         .collect();
     let rendered = render_qwen_messages_prompt(&messages, false, true);
@@ -2840,7 +2840,7 @@ mod tests {
             .map(|message| ChatMessage {
                 role: message.role.clone(),
                 content: message.content.clone(),
-                extra: Default::default(),
+                ..Default::default()
             })
             .collect();
         let rendered = render_qwen_messages_prompt(&messages, false, true);

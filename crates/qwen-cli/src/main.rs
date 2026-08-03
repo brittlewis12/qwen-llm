@@ -5,7 +5,8 @@ mod messages;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use messages::{
-    load_deepseek_v4_0731_messages_prompt, load_messages_prompt_with_policy, messages_thinking_mode,
+    DeepSeekV4EncodeOptions, DeepSeekV4Reasoning, load_deepseek_v4_0731_messages_prompt,
+    load_messages_prompt_with_policy, messages_thinking_mode,
 };
 use qwen_llm::checkpoint_identity::{
     CheckpointIdentityCache, IdentityCacheOutcome, checkpoint_content_identity,
@@ -183,6 +184,14 @@ struct Args {
     #[arg(long, requires = "messages")]
     messages_no_generation_prompt: bool,
 
+    /// DeepSeek V4 release reasoning mode for --messages encoding.
+    #[arg(long, requires = "messages", value_enum)]
+    reasoning: Option<ReasoningLevelArg>,
+
+    /// Retain reasoning across turns (DeepSeek V4 thinking modes only).
+    #[arg(long, requires = "messages")]
+    preserve_reasoning: bool,
+
     /// Read JSONL request objects from a file or '-' while keeping one model loaded.
     #[arg(long, conflicts_with_all = ["prompt", "prompt_file", "messages"])]
     requests_jsonl: Option<PathBuf>,
@@ -335,6 +344,33 @@ impl ExplicitCliOptions {
             durable_prefix_cache_min_tokens: command_line("durable_prefix_cache_min_tokens"),
         }
     }
+}
+
+/// CLI values for `--reasoning`, mapping to the DeepSeek V4 release encoder's
+/// reasoning-effort contract: `none` is chat mode, `high` opens `<think>`
+/// with no extra template bytes, and `max` additionally prepends the release
+/// effort instruction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+enum ReasoningLevelArg {
+    None,
+    High,
+    Max,
+}
+
+fn deepseek_v4_encode_options(args: &Args) -> Result<DeepSeekV4EncodeOptions> {
+    let reasoning = match args.reasoning {
+        None | Some(ReasoningLevelArg::None) => DeepSeekV4Reasoning::None,
+        Some(ReasoningLevelArg::High) => DeepSeekV4Reasoning::High,
+        Some(ReasoningLevelArg::Max) => DeepSeekV4Reasoning::Max,
+    };
+    ensure!(
+        !(args.preserve_reasoning && matches!(reasoning, DeepSeekV4Reasoning::None)),
+        "--preserve-reasoning requires --reasoning high or max"
+    );
+    Ok(DeepSeekV4EncodeOptions {
+        reasoning,
+        preserve_reasoning: args.preserve_reasoning,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1816,6 +1852,7 @@ fn main() -> Result<()> {
     let matches = Args::command().get_matches();
     let explicit_options = ExplicitCliOptions::from_matches(&matches);
     let args = Args::from_arg_matches(&matches).expect("validated clap arguments");
+    validate_deepseek_v4_reasoning_scope(&args)?;
     validate_request_timing_mode(&args)?;
     validate_sampling_attribution_mode(&args)?;
     validate_sampled_structural_mode(&args)?;
@@ -1866,6 +1903,10 @@ fn main() -> Result<()> {
     ensure!(
         args.deepseek_v4_snapshot.is_none(),
         "--deepseek-v4-snapshot requires a DeepSeek V4 model"
+    );
+    ensure!(
+        args.reasoning.is_none() && !args.preserve_reasoning,
+        "--reasoning and --preserve-reasoning apply to DeepSeek V4 --messages requests only"
     );
 
     if args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some() {
@@ -2037,10 +2078,19 @@ fn validate_durable_prefix_cache_mode(args: &Args) -> Result<()> {
 fn validate_request_before_model_open(args: &Args) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
+    validate_deepseek_v4_reasoning_scope(args)?;
     let sampling = cli_sampling_config(args)?;
     if args.requests_jsonl.is_none() {
         validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
     }
+    Ok(())
+}
+
+fn validate_deepseek_v4_reasoning_scope(args: &Args) -> Result<()> {
+    ensure!(
+        (args.reasoning.is_none() && !args.preserve_reasoning) || args.messages.is_some(),
+        "--reasoning and --preserve-reasoning require --messages"
+    );
     Ok(())
 }
 
@@ -2328,9 +2378,10 @@ fn run_deepseek_v4_single_turn(
     ensure!(args.tokens > 0, "--tokens must be >= 1");
     let sampling = cli_sampling_config(args)?;
     let arrival_ms = unix_epoch_ms()?;
+    let encode_options = deepseek_v4_encode_options(args)?;
     let (prompt, prompt_source) = if let Some(path) = args.messages.as_ref() {
         (
-            load_deepseek_v4_0731_messages_prompt(path, args.messages_max)
+            load_deepseek_v4_0731_messages_prompt(path, args.messages_max, encode_options)
                 .context("render DeepSeek V4 0731 messages")?,
             PromptSource::Messages,
         )
@@ -2340,7 +2391,10 @@ fn run_deepseek_v4_single_turn(
     };
     let prompt_kind = match prompt_source {
         PromptSource::Inline | PromptSource::File => "raw",
-        PromptSource::Messages => "messages_0731_chat",
+        PromptSource::Messages => match encode_options.reasoning {
+            DeepSeekV4Reasoning::None => "messages_0731_chat",
+            DeepSeekV4Reasoning::High | DeepSeekV4Reasoning::Max => "messages_0731_thinking",
+        },
     };
 
     let tokenizer_t0 = Instant::now();
@@ -6571,6 +6625,90 @@ mod tests {
                 .contains("--requests-jsonl")
         );
 
+        // `--reasoning`/`--preserve-reasoning` require `--messages` in
+        // pre-open validation and map onto the release encoder contract.
+        let raw_reasoning = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "-p",
+            "hi",
+            "--reasoning",
+            "high",
+        ])
+        .unwrap();
+        assert!(
+            validate_request_before_model_open(&raw_reasoning)
+                .unwrap_err()
+                .to_string()
+                .contains("require --messages")
+        );
+        let census_reasoning = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--deepseek-census-json",
+            "--reasoning",
+            "high",
+        ])
+        .unwrap();
+        assert!(
+            validate_deepseek_v4_reasoning_scope(&census_reasoning)
+                .unwrap_err()
+                .to_string()
+                .contains("require --messages")
+        );
+        for (level, expected) in [
+            (None, DeepSeekV4Reasoning::None),
+            (Some("none"), DeepSeekV4Reasoning::None),
+            (Some("high"), DeepSeekV4Reasoning::High),
+            (Some("max"), DeepSeekV4Reasoning::Max),
+        ] {
+            let mut command = vec![
+                "qwen",
+                "--model",
+                "model.gguf",
+                "--messages",
+                "messages.json",
+            ];
+            if let Some(level) = level {
+                command.extend(["--reasoning", level]);
+            }
+            let args = Args::try_parse_from(command).unwrap();
+            let options = deepseek_v4_encode_options(&args).unwrap();
+            assert_eq!(options.reasoning, expected);
+            assert!(!options.preserve_reasoning);
+        }
+        let preserve_without_thinking = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--preserve-reasoning",
+        ])
+        .unwrap();
+        assert!(
+            deepseek_v4_encode_options(&preserve_without_thinking)
+                .unwrap_err()
+                .to_string()
+                .contains("requires --reasoning high or max")
+        );
+        let preserve = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--reasoning",
+            "max",
+            "--preserve-reasoning",
+        ])
+        .unwrap();
+        let options = deepseek_v4_encode_options(&preserve).unwrap();
+        assert_eq!(options.reasoning, DeepSeekV4Reasoning::Max);
+        assert!(options.preserve_reasoning);
+
         let matches = Args::command()
             .try_get_matches_from([
                 "qwen",
@@ -6620,11 +6758,15 @@ mod tests {
             messages::ChatMessage {
                 role: role.into(),
                 content: content.into(),
-                extra: Default::default(),
+                ..Default::default()
             }
         }
         fn render_ids(tokenizer: &Tokenizer, messages: &[messages::ChatMessage]) -> Vec<i32> {
-            let prompt = messages::render_deepseek_v4_0731_messages_prompt(messages).unwrap();
+            let prompt = messages::render_deepseek_v4_0731_messages_prompt(
+                messages,
+                messages::DeepSeekV4EncodeOptions::default(),
+            )
+            .unwrap();
             tokenizer.encode(&prompt, false).unwrap()
         }
 

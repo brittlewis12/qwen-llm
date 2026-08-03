@@ -1,0 +1,323 @@
+{
+  "fixture": "deepseek_v4_0731_chat_fixtures_v1",
+  "sources": {
+    "vllm": {
+      "revision": "b40d859c7b07ae244bcd8c6eecdcdbd9a3afaa07",
+      "file": "vllm/tokenizers/deepseek_v4_encoding.py",
+      "sha256": "20eb61abe97be7607fd12e2b929faef91743cd2699ad9a4e032b54237d137694"
+    },
+    "sglang": {
+      "revision": "58974ca16ca2a4bb2f02f9ceb9622a0fd2ccf7f8",
+      "file": "python/sglang/srt/entrypoints/openai/encoding_dsv4.py",
+      "sha256": "012e4dc254c4046f600674eaa799d59dffe5e4a46450da7b4629cf16706fc6c3"
+    }
+  },
+  "cases": [
+    {
+      "name": "chat_single_user",
+      "thinking_mode": "chat",
+      "reasoning_effort": null,
+      "drop_thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>"
+    },
+    {
+      "name": "chat_system_user",
+      "thinking_mode": "chat",
+      "reasoning_effort": null,
+      "drop_thinking": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be exact."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜>Be exact.<｜User｜>Hello<｜Assistant｜></think>"
+    },
+    {
+      "name": "chat_multi_turn",
+      "thinking_mode": "chat",
+      "reasoning_effort": null,
+      "drop_thinking": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be exact."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi!"
+        },
+        {
+          "role": "user",
+          "content": "上海 🙂"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜>Be exact.<｜User｜>Hello<｜Assistant｜></think>Hi!<｜end▁of▁sentence｜><｜User｜>上海 🙂<｜Assistant｜></think>"
+    },
+    {
+      "name": "chat_multi_turn_drops_reasoning_fields",
+      "thinking_mode": "chat",
+      "reasoning_effort": null,
+      "drop_thinking": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be exact."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi!",
+          "reasoning": "hidden plan",
+          "reasoning_content": "hidden plan"
+        },
+        {
+          "role": "user",
+          "content": "上海 🙂"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜>Be exact.<｜User｜>Hello<｜Assistant｜></think>Hi!<｜end▁of▁sentence｜><｜User｜>上海 🙂<｜Assistant｜></think>"
+    },
+    {
+      "name": "thinking_single_user",
+      "thinking_mode": "thinking",
+      "reasoning_effort": null,
+      "drop_thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think>"
+    },
+    {
+      "name": "thinking_high_single_user",
+      "thinking_mode": "thinking",
+      "reasoning_effort": "high",
+      "drop_thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think>"
+    },
+    {
+      "name": "thinking_max_single_user",
+      "thinking_mode": "thinking",
+      "reasoning_effort": "max",
+      "drop_thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum with no shortcuts permitted.\nYou MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\nExplicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n<｜User｜>Hello<｜Assistant｜><think>"
+    },
+    {
+      "name": "thinking_max_system_user",
+      "thinking_mode": "thinking",
+      "reasoning_effort": "max",
+      "drop_thinking": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be exact."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum with no shortcuts permitted.\nYou MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\nExplicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\nBe exact.<｜User｜>Hello<｜Assistant｜><think>"
+    },
+    {
+      "name": "thinking_drop_multi_turn",
+      "thinking_mode": "thinking",
+      "reasoning_effort": null,
+      "drop_thinking": true,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be exact."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi!",
+          "reasoning": "hidden plan",
+          "reasoning_content": "hidden plan"
+        },
+        {
+          "role": "user",
+          "content": "上海 🙂"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜>Be exact.<｜User｜>Hello<｜Assistant｜></think>Hi!<｜end▁of▁sentence｜><｜User｜>上海 🙂<｜Assistant｜><think>"
+    },
+    {
+      "name": "thinking_drop_two_rounds",
+      "thinking_mode": "thinking",
+      "reasoning_effort": "high",
+      "drop_thinking": true,
+      "messages": [
+        {
+          "role": "user",
+          "content": "one"
+        },
+        {
+          "role": "assistant",
+          "content": "first",
+          "reasoning": "alpha",
+          "reasoning_content": "alpha"
+        },
+        {
+          "role": "user",
+          "content": "two"
+        },
+        {
+          "role": "assistant",
+          "content": "second",
+          "reasoning": "beta",
+          "reasoning_content": "beta"
+        },
+        {
+          "role": "user",
+          "content": "three"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>one<｜Assistant｜></think>first<｜end▁of▁sentence｜><｜User｜>two<｜Assistant｜></think>second<｜end▁of▁sentence｜><｜User｜>three<｜Assistant｜><think>"
+    },
+    {
+      "name": "thinking_preserve_multi_turn",
+      "thinking_mode": "thinking",
+      "reasoning_effort": "high",
+      "drop_thinking": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be exact."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi!",
+          "reasoning": "hidden plan",
+          "reasoning_content": "hidden plan"
+        },
+        {
+          "role": "user",
+          "content": "上海 🙂"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜>Be exact.<｜User｜>Hello<｜Assistant｜><think>hidden plan</think>Hi!<｜end▁of▁sentence｜><｜User｜>上海 🙂<｜Assistant｜><think>"
+    },
+    {
+      "name": "thinking_preserve_two_rounds",
+      "thinking_mode": "thinking",
+      "reasoning_effort": "high",
+      "drop_thinking": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "one"
+        },
+        {
+          "role": "assistant",
+          "content": "first",
+          "reasoning": "alpha",
+          "reasoning_content": "alpha"
+        },
+        {
+          "role": "user",
+          "content": "two"
+        },
+        {
+          "role": "assistant",
+          "content": "second",
+          "reasoning": "beta",
+          "reasoning_content": "beta"
+        },
+        {
+          "role": "user",
+          "content": "three"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>one<｜Assistant｜><think>alpha</think>first<｜end▁of▁sentence｜><｜User｜>two<｜Assistant｜><think>beta</think>second<｜end▁of▁sentence｜><｜User｜>three<｜Assistant｜><think>"
+    },
+    {
+      "name": "thinking_preserve_missing_reasoning",
+      "thinking_mode": "thinking",
+      "reasoning_effort": "high",
+      "drop_thinking": false,
+      "messages": [
+        {
+          "role": "user",
+          "content": "one"
+        },
+        {
+          "role": "assistant",
+          "content": "done"
+        },
+        {
+          "role": "user",
+          "content": "two"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜><｜User｜>one<｜Assistant｜><think></think>done<｜end▁of▁sentence｜><｜User｜>two<｜Assistant｜><think>"
+    },
+    {
+      "name": "thinking_max_preserve_multi_turn",
+      "thinking_mode": "thinking",
+      "reasoning_effort": "max",
+      "drop_thinking": false,
+      "messages": [
+        {
+          "role": "system",
+          "content": "Be exact."
+        },
+        {
+          "role": "user",
+          "content": "Hello"
+        },
+        {
+          "role": "assistant",
+          "content": "Hi!",
+          "reasoning": "hidden plan",
+          "reasoning_content": "hidden plan"
+        },
+        {
+          "role": "user",
+          "content": "上海 🙂"
+        }
+      ],
+      "prompt": "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum with no shortcuts permitted.\nYou MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\nExplicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\nBe exact.<｜User｜>Hello<｜Assistant｜><think>hidden plan</think>Hi!<｜end▁of▁sentence｜><｜User｜>上海 🙂<｜Assistant｜><think>"
+    }
+  ]
+}

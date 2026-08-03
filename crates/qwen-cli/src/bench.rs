@@ -10193,12 +10193,12 @@ mod tok_tests {
             ChatMessage {
                 role: "user".into(),
                 content: "hi".into(),
-                extra: Default::default(),
+                ..Default::default()
             },
             ChatMessage {
                 role: "assistant".into(),
                 content: "<think>hidden</think>shown".into(),
-                extra: Default::default(),
+                ..Default::default()
             },
         ];
         let stripped = render_qwen_messages_prompt(&messages, false, true);

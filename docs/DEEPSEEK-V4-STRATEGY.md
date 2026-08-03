@@ -425,14 +425,49 @@ before poisoning the destination; success always becomes ready without an
 observation. This preserves the distinction between “correct from restored
 position” and “this build reproduced the prefix.”
 
-At the first CSA boundary, the 12,409,104-byte snapshot restores backward in the
-same resident session. Its position-4 continuation is bit-identical in all
-129,280 logits and in the post-continuation causal digest, while independently
-preserving the b10222 argmax 63,325 at cosine 0.999999958 / relative RMS
-0.000290112. Capture, restore, and two continuations complete with the prefix in
-1.424-1.435 seconds. The current model-content ID remains a caller-asserted trust
-anchor, and the snapshot is in-memory only; strong GGUF identity derivation,
-durable encoding, and immutable publication remain the next workflow slice.
+The durable wire layer derives every section length before allocation, uses a
+256-byte versioned header at a 16 KiB payload boundary, requires zero padding and
+reserved fields, and closes the record with a BLAKE3 digest in addition to the
+typed prefix and causal digests. Its hard limit is 64 MiB; the largest currently
+admitted position-1025 record is 24,907,812 bytes. Decode temporarily retains
+byte sections while constructing typed arenas, so peak host allocation is about
+twice the payload. Request/sampler state remains deliberately outside this
+model-session checkpoint.
+
+The explicit `--deepseek-v4-snapshot PATH` surface derives a strong cached
+content root over every complete retained GGUF shard. The snapshot parent must
+be current-user-owned and not group/world-writable; the versioned identity cache
+is a current-user `0700` directory. Snapshot files are staged as `0600`, synced,
+decoded again, and published create-only by hard link. Existing paths are
+accepted only for the same model/ABI/prefix/causal digest. Ancestor components
+remain caller-trusted. A transient or crash-retained same-inode staging alias is
+valid; link-only count/ctime changes are not integrity, while file type, private
+mode, size, descriptor identity, and the complete digest are. A restore
+record and exact token prefix are validated before Metal residency, then at
+least one uncached endpoint token rebuilds the observation that causal snapshots
+intentionally omit.
+
+Gate:
+
+- At the first CSA boundary, the 12,409,104-byte causal payload encodes as a
+  12,425,520-byte record. Decode and backward restore preserve all 129,280
+  continuation logits and the post-continuation state bit-for-bit, while the
+  independent b10222 gate remains argmax 63,325 at cosine 0.999999958 / relative
+  RMS 0.000290112. The complete live packet takes 1.534-1.539 seconds.
+- A fresh CLI process hashes 102,999,888,416 ordered shard bytes in 4,840.5 ms,
+  advances the first 1,024 tokens of the certified 1,025-token prompt, and
+  publishes a 24,907,808-byte record. Prompt execution takes 21,746.0 ms and
+  generates oracle ID 201.
+- A second process gets a zero-byte identity-cache hit, validates the record in
+  83.7 ms before residency, restores 1,024 tokens, and executes only the endpoint
+  token. Prompt execution takes 922.2 ms, a 23.6x feedback-loop reduction, and
+  again generates ID 201.
+- The focused restored-endpoint gate completes in 1.035-1.117 seconds and
+  reproduces the established full-vector SHA-256
+  `73d357295a7821607869764af42aaafc845e1764afe8c23a0aab2e5f570a7956`,
+  argmax 201, cosine 0.998133285, and relative RMS 0.061869968 against b10222.
+  Its causal snapshot digest is
+  `c4173d31f6ddb8bf3cb2a2c2eb6310de4c9ccdacc830d0c032489bb3db6fa77d`.
 
 ### S2: local-only Metal backbone
 
@@ -911,9 +946,9 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Give the typed causal snapshot a bounded canonical codec, derive its strong
-   model-content ID from every retained GGUF shard, and publish immutable cache
-   blobs. Keep request/sampler state outside this model-session checkpoint.
+1. Use the durable certified position-1024 checkpoint as the ordinary boundary
+   development loop; reopen fresh 1,024-token replay only for a causal-prefix or
+   restore-ABI change.
 2. Keep position 1027 fail-closed. Promote compressed-history slab growth as a
    separate ownership milestone and use retained chunks for one position-2048
    endpoint rather than rebuilding a singleton fixture ladder.

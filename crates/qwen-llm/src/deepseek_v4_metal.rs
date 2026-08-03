@@ -8,8 +8,11 @@ mod prefill;
 mod snapshot;
 
 pub use snapshot::{
-    DeepSeekV4CausalSnapshot, DeepSeekV4CompatibilityDigest, DeepSeekV4ModelContentId,
-    DeepSeekV4SnapshotObservation,
+    DeepSeekV4CausalSnapshot, DeepSeekV4CompatibilityDigest, DeepSeekV4EncodedSnapshot,
+    DeepSeekV4ModelContentId, DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotCodecError,
+    DeepSeekV4SnapshotFileError, DeepSeekV4SnapshotFileOutcome, DeepSeekV4SnapshotFileReport,
+    DeepSeekV4SnapshotObservation, decode_causal_snapshot, encode_causal_snapshot,
+    load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 
 use crate::deepseek_v4::{AttentionKind, DeepSeekV4Config, DeepSeekV4Error, DeepSeekV4Model};

@@ -1,14 +1,20 @@
+use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
+use qwen_llm::deepseek_v4::DeepSeekV4Model;
 use qwen_llm::deepseek_v4_metal::{
     DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4PositionZeroForward,
-    DeepSeekV4SnapshotObservation,
+    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotObservation, decode_causal_snapshot,
+    encode_causal_snapshot, load_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
 use sha2::{Digest, Sha256};
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Instant;
 
 const DEFAULT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+const DEFAULT_DURABLE_SNAPSHOT: &str = "target/dsv4-position1024.ds4c";
+const DEFAULT_DURABLE_IDENTITY_CACHE: &str = "target/.qwen-dsv4-model-identity-v2";
 const ORACLE_BYTES: &[u8] = include_bytes!("fixtures/deepseek_v4_token35_position0_b10222.f32");
 const ORACLE_MANIFEST: &str = include_str!("fixtures/deepseek_v4_token35_position0_b10222.json");
 const POSITION_ONE_ORACLE_BYTES: &[u8] =
@@ -1150,12 +1156,10 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
     let ctx = MetalContext::new().expect("create Metal context");
     let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
     let residency = load_admitted_residency(&ctx, &gguf);
-    let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
-        &ctx,
-        residency,
-        frozen_model_content_id(),
-    )
-    .expect("build snapshot-bound session");
+    let model_content_id = frozen_model_content_id();
+    let mut session =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("build snapshot-bound session");
     let started = Instant::now();
     session
         .prefill_tokens(&ctx, &[35, 201, 200, 34])
@@ -1179,6 +1183,20 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
         prefix_snapshot.source_observation(),
         DeepSeekV4SnapshotObservation::Available
     );
+    let snapshot_config = session.residency().config().clone();
+    let constraints = DeepSeekV4SnapshotCodecConstraints {
+        config: &snapshot_config,
+        expected_model_content_id: model_content_id,
+        max_record_bytes: 64 * 1024 * 1024,
+    };
+    let mut encoded_snapshot = Vec::new();
+    let encoded = encode_causal_snapshot(&mut encoded_snapshot, &prefix_snapshot, constraints)
+        .expect("encode causal snapshot");
+    assert_eq!(encoded.record_bytes, encoded_snapshot.len() as u64);
+    let durable_prefix_snapshot =
+        decode_causal_snapshot(&mut Cursor::new(&encoded_snapshot), constraints)
+            .expect("decode causal snapshot");
+    assert_eq!(durable_prefix_snapshot, prefix_snapshot);
 
     session
         .forward_token(&ctx, 262)
@@ -1191,7 +1209,7 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
         .expect("capture uninterrupted continuation state");
 
     session
-        .restore_causal_snapshot(&prefix_snapshot)
+        .restore_causal_snapshot(&durable_prefix_snapshot)
         .expect("restore certified CSA-boundary state");
     assert_eq!(session.next_position(), 4);
     assert_eq!(session.committed_tokens(), &[35, 201, 200, 34]);
@@ -1236,8 +1254,8 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
         63_325,
     );
     eprintln!(
-        "snapshot_bytes={} snapshot_restore_live_elapsed={:.3}s causal_digest={}",
-        prefix_snapshot.payload_bytes(),
+        "snapshot_record_bytes={} snapshot_restore_live_elapsed={:.3}s causal_digest={}",
+        encoded.record_bytes,
         started.elapsed().as_secs_f64(),
         prefix_snapshot
             .causal_digest()
@@ -1490,6 +1508,89 @@ fn native_deepseek_v4_retained_chunks_reach_position_1024_and_reject_1025() {
     eprintln!(
         "position_1024_branch_elapsed={:.3}s",
         started.elapsed().as_secs_f64()
+    );
+}
+
+#[test]
+#[ignore = "requires the local DS4 model and a published position-1024 snapshot"]
+fn native_deepseek_v4_durable_position_1024_snapshot_matches_oracle() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let snapshot_path = std::env::var_os("DSV4_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_SNAPSHOT)
+        });
+    let identity_cache_path = std::env::var_os("DSV4_IDENTITY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_IDENTITY_CACHE)
+        });
+    assert!(model_path.exists(), "missing DS4 model");
+    assert!(snapshot_path.exists(), "missing durable DS4 snapshot");
+
+    let started = Instant::now();
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+            .expect("resolve durable snapshot model identity");
+    let model_content_id = DeepSeekV4ModelContentId::new(content.content_id);
+    let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind DS4 config");
+    let snapshot = load_causal_snapshot_file(
+        &snapshot_path,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: &model.config,
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("load durable position-1024 snapshot");
+    assert_eq!(snapshot.next_position(), 1_024);
+    assert_eq!(
+        snapshot.prefix_tokens(),
+        [35, 201, 200, 34].repeat(256).as_slice()
+    );
+
+    let ctx = MetalContext::new().expect("create Metal context");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("build durable snapshot session");
+    session
+        .restore_causal_snapshot(&snapshot)
+        .expect("restore durable position-1024 snapshot");
+    session
+        .prefill_tokens(&ctx, &[35])
+        .expect("execute restored position 1024");
+    let logits = session
+        .copy_logits_f32()
+        .expect("copy durable restored endpoint logits");
+    let endpoint = compare_logits("durable_position_1024", &logits, POSITION_1024_ORACLE_BYTES);
+    assert_eq!(endpoint.oracle_argmax, 201);
+    assert_eq!(endpoint.argmax, endpoint.oracle_argmax);
+    assert_hca_long_prefix_gate("durable position 1024", &endpoint);
+    let mut native_hasher = Sha256::new();
+    for value in &logits {
+        native_hasher.update(value.to_le_bytes());
+    }
+    assert_eq!(
+        format!("{:x}", native_hasher.finalize()),
+        "73d357295a7821607869764af42aaafc845e1764afe8c23a0aab2e5f570a7956"
+    );
+    eprintln!(
+        "durable_position_1024_elapsed={:.3}s identity_cache={:?} causal_digest={}",
+        started.elapsed().as_secs_f64(),
+        content.outcome,
+        snapshot
+            .causal_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
     );
 }
 

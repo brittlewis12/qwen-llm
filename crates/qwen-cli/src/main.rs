@@ -7,13 +7,17 @@ use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use messages::{
     load_deepseek_v4_0731_messages_prompt, load_messages_prompt_with_policy, messages_thinking_mode,
 };
-use qwen_llm::checkpoint_identity::IdentityCacheOutcome;
+use qwen_llm::checkpoint_identity::{
+    CheckpointIdentityCache, IdentityCacheOutcome, checkpoint_content_identity,
+};
 use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedIntegrityMode};
 use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
 use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
 use qwen_llm::deepseek_v4_metal::{
     DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples,
-    DeepSeekV4MetalResidency, DeepSeekV4Session,
+    DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4Session,
+    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotFileOutcome, load_causal_snapshot_file,
+    publish_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
@@ -47,12 +51,15 @@ use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::io::{BufRead, IsTerminal, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const CHECKPOINT_STAGED_INTEGRITY_ENV: &str = "QWEN_CHECKPOINT_STAGED_INTEGRITY";
 const GREEDY_GPU_ARGMAX_ENV: &str = "QWEN_GREEDY_GPU_ARGMAX";
+const DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+const DEEPSEEK_V4_SNAPSHOT_IDENTITY_CACHE_DIR: &str = ".qwen-dsv4-model-identity-v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GreedyGpuArgmaxMode {
@@ -231,6 +238,14 @@ struct Args {
     /// Persist anonymous prefix checkpoints under this private directory.
     #[arg(long)]
     durable_prefix_cache: Option<PathBuf>,
+
+    /// Load or immutably publish one explicit DeepSeek V4 causal-prefix file.
+    #[arg(
+        long = "deepseek-v4-snapshot",
+        value_name = "PATH",
+        conflicts_with_all = ["info", "deepseek_census_json", "requests_jsonl", "durable_prefix_cache"]
+    )]
+    deepseek_v4_snapshot: Option<PathBuf>,
 
     /// Aggregate durable checkpoint budget in MiB.
     #[arg(long, default_value_t = 32 * 1024)]
@@ -1822,6 +1837,13 @@ fn main() -> Result<()> {
         return print_deepseek_v4_census(model_path);
     }
 
+    if args.deepseek_v4_snapshot.is_some() {
+        ensure!(
+            args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some(),
+            "--deepseek-v4-snapshot requires --prompt, --prompt-file, or --messages"
+        );
+    }
+
     if args.prompt.is_none()
         && args.prompt_file.is_none()
         && args.messages.is_none()
@@ -1841,6 +1863,10 @@ fn main() -> Result<()> {
     if ModelFamily::detect(&gguf) == Some(ModelFamily::DeepSeek4) {
         return run_deepseek_v4_single_turn(model_path, gguf, &args, explicit_options);
     }
+    ensure!(
+        args.deepseek_v4_snapshot.is_none(),
+        "--deepseek-v4-snapshot requires a DeepSeek V4 model"
+    );
 
     if args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some() {
         return run_single_turn(model_path, gguf, &args, staged_integrity);
@@ -2145,6 +2171,127 @@ fn deepseek_v4_packed_chunk_count(prompt_tokens: usize) -> usize {
     }
 }
 
+fn deepseek_v4_snapshot_publish_prefix(prompt_tokens: usize) -> Result<usize> {
+    ensure!(
+        prompt_tokens >= 2,
+        "--deepseek-v4-snapshot requires at least two prompt tokens so restored state has an uncached endpoint token"
+    );
+    Ok(prompt_tokens - 1)
+}
+
+fn deepseek_v4_snapshot_restored_prefix_len(
+    snapshot_prefix: &[u32],
+    prompt_tokens: &[u32],
+) -> Result<usize> {
+    ensure!(
+        snapshot_prefix.len() < prompt_tokens.len(),
+        "DeepSeek V4 snapshot prefix has {} tokens but the request has {}; at least one uncached endpoint token is required because causal snapshots omit observations",
+        snapshot_prefix.len(),
+        prompt_tokens.len(),
+    );
+    ensure!(
+        prompt_tokens.starts_with(snapshot_prefix),
+        "DeepSeek V4 snapshot token prefix does not match this request"
+    );
+    Ok(snapshot_prefix.len())
+}
+
+fn deepseek_v4_snapshot_parent(path: &Path) -> Result<&Path> {
+    ensure!(
+        path.file_name().is_some(),
+        "--deepseek-v4-snapshot requires a file path"
+    );
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let metadata = std::fs::symlink_metadata(parent)
+        .with_context(|| format!("inspect DeepSeek V4 snapshot parent {}", parent.display()))?;
+    ensure!(
+        metadata.file_type().is_dir(),
+        "DeepSeek V4 snapshot parent {} is not a directory",
+        parent.display()
+    );
+    ensure!(
+        metadata.uid() == current_effective_uid() && metadata.mode() & 0o022 == 0,
+        "DeepSeek V4 snapshot parent {} must be owned by the current user and not group/world-writable",
+        parent.display()
+    );
+    Ok(parent)
+}
+
+fn deepseek_v4_snapshot_identity_cache(parent: &Path) -> Result<CheckpointIdentityCache> {
+    let root = parent.join(DEEPSEEK_V4_SNAPSHOT_IDENTITY_CACHE_DIR);
+    match std::fs::DirBuilder::new().mode(0o700).create(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "create private DeepSeek V4 identity cache {}",
+                    root.display()
+                )
+            });
+        }
+    }
+    let metadata = std::fs::symlink_metadata(&root)
+        .with_context(|| format!("inspect DeepSeek V4 identity cache {}", root.display()))?;
+    ensure!(
+        metadata.file_type().is_dir()
+            && metadata.uid() == current_effective_uid()
+            && metadata.mode() & 0o077 == 0,
+        "DeepSeek V4 identity cache {} must be a current-user 0700 directory",
+        root.display()
+    );
+    Ok(CheckpointIdentityCache::new(root))
+}
+
+fn current_effective_uid() -> u32 {
+    // geteuid has no preconditions and does not retain pointers.
+    unsafe { libc::geteuid() }
+}
+
+fn advance_deepseek_v4_prompt_prefix(
+    session: &mut DeepSeekV4Session,
+    ctx: &MetalContext,
+    token_ids: &[u32],
+) -> Result<()> {
+    ensure!(
+        !token_ids.is_empty(),
+        "DeepSeek V4 snapshot prefix is empty"
+    );
+    for (chunk_index, chunk) in token_ids.chunks(DEEPSEEK_V4_PREFILL_MAX_TOKENS).enumerate() {
+        session.advance_tokens(ctx, chunk).with_context(|| {
+            format!("advance DeepSeek V4 snapshot prefix chunk {chunk_index} without logits")
+        })?;
+    }
+    Ok(())
+}
+
+fn execute_deepseek_v4_prompt_suffix(
+    session: &mut DeepSeekV4Session,
+    ctx: &MetalContext,
+    token_ids: &[u32],
+) -> Result<usize> {
+    ensure!(
+        !token_ids.is_empty(),
+        "DeepSeek V4 prompt suffix requires an endpoint token"
+    );
+    let chunk_count = token_ids.len().div_ceil(DEEPSEEK_V4_PREFILL_MAX_TOKENS);
+    for (chunk_index, chunk) in token_ids.chunks(DEEPSEEK_V4_PREFILL_MAX_TOKENS).enumerate() {
+        if chunk_index + 1 == chunk_count {
+            session
+                .prefill_tokens(ctx, chunk)
+                .with_context(|| format!("prefill final DeepSeek V4 prompt chunk {chunk_index}"))?;
+        } else {
+            session.advance_tokens(ctx, chunk).with_context(|| {
+                format!("advance DeepSeek V4 prompt chunk {chunk_index} without logits")
+            })?;
+        }
+    }
+    Ok(chunk_count)
+}
+
 fn checked_deepseek_v4_token_id(token: i32, vocab_size: u32, purpose: &str) -> Result<u32> {
     let token =
         u32::try_from(token).with_context(|| format!("{purpose} token ID {token} is negative"))?;
@@ -2217,6 +2364,38 @@ fn run_deepseek_v4_single_turn(
     for &token in &stop_tokens {
         checked_deepseek_v4_token_id(token, vocab_size, "stop")?;
     }
+    let (snapshot_model_content_id, snapshot_file_exists) =
+        if let Some(path) = args.deepseek_v4_snapshot.as_ref() {
+            let parent = deepseek_v4_snapshot_parent(path)?;
+            let exists = match path.symlink_metadata() {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("inspect DeepSeek V4 snapshot path {}", path.display())
+                    });
+                }
+            };
+            if !exists {
+                deepseek_v4_snapshot_publish_prefix(prompt_token_ids.len())?;
+            }
+            let identity_cache = deepseek_v4_snapshot_identity_cache(parent)?;
+            let identity_t0 = Instant::now();
+            let report = checkpoint_content_identity(&gguf, &identity_cache)
+                .context("derive strong ordered-shard DeepSeek V4 model identity")?;
+            eprintln!(
+                "deepseek_v4: snapshot model identity cache={} hashed_bytes={} elapsed_ms={:.1}",
+                identity_cache_outcome_label(report.outcome),
+                report.bytes_hashed,
+                identity_t0.elapsed().as_secs_f64() * 1e3,
+            );
+            (
+                Some(DeepSeekV4ModelContentId::new(report.content_id)),
+                exists,
+            )
+        } else {
+            (None, false)
+        };
 
     eprintln!(
         "deepseek_v4: loading {} for generation; prompt_kind={} prompt_tokens={} max_generated_tokens={} reserved_forwards={}/{}",
@@ -2231,6 +2410,40 @@ fn run_deepseek_v4_single_turn(
     let ctx = MetalContext::new().context("init Metal context for DeepSeek V4")?;
     let load_plan = DeepSeekV4MetalResidency::plan(&ctx, &gguf)
         .context("plan strict DeepSeek V4 Metal residency and session")?;
+    let restored_snapshot = if snapshot_file_exists {
+        let snapshot_path = args
+            .deepseek_v4_snapshot
+            .as_ref()
+            .expect("snapshot existence requires a snapshot path");
+        let model_content_id = snapshot_model_content_id
+            .expect("snapshot path resolved a model-content identity before planning");
+        let snapshot_t0 = Instant::now();
+        let snapshot = load_causal_snapshot_file(
+            snapshot_path,
+            DeepSeekV4SnapshotCodecConstraints {
+                config: load_plan.config(),
+                expected_model_content_id: model_content_id,
+                max_record_bytes: DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES,
+            },
+        )
+        .with_context(|| {
+            format!(
+                "load DeepSeek V4 causal snapshot {}",
+                snapshot_path.display()
+            )
+        })?;
+        let restored_prefix =
+            deepseek_v4_snapshot_restored_prefix_len(snapshot.prefix_tokens(), &prompt_token_ids)?;
+        eprintln!(
+            "deepseek_v4: snapshot validated before residency path={} prefix_tokens={} record_load_ms={:.1}",
+            snapshot_path.display(),
+            restored_prefix,
+            snapshot_t0.elapsed().as_secs_f64() * 1e3,
+        );
+        Some((snapshot, restored_prefix))
+    } else {
+        None
+    };
     let memory_plan = load_plan.memory_plan().clone();
     let initial_memory_signals = ctx.memory_signals();
     eprintln!("deepseek_v4: memory plan; {memory_plan}");
@@ -2262,8 +2475,13 @@ fn run_deepseek_v4_single_turn(
         residency.config().vocab_size,
     );
     let residency_report = residency.report().clone();
-    let mut session =
-        DeepSeekV4Session::new(&ctx, residency).context("create DeepSeek V4 session")?;
+    let mut session = match snapshot_model_content_id {
+        Some(model_content_id) => {
+            DeepSeekV4Session::new_with_model_content_id(&ctx, residency, model_content_id)
+        }
+        None => DeepSeekV4Session::new(&ctx, residency),
+    }
+    .context("create DeepSeek V4 session")?;
     let after_session_bytes = ctx.current_allocated_size();
     memory_plan
         .reconcile_session(
@@ -2281,34 +2499,90 @@ fn run_deepseek_v4_single_turn(
     );
 
     let prefill_t0 = Instant::now();
-    let packed_chunk_count = deepseek_v4_packed_chunk_count(prompt_token_ids.len());
-    let prefill_mode = if packed_chunk_count > 0 {
-        for (chunk_index, chunk) in prompt_token_ids
-            .chunks(DEEPSEEK_V4_PREFILL_MAX_TOKENS)
-            .enumerate()
-        {
-            if chunk_index + 1 == packed_chunk_count {
-                session.prefill_tokens(&ctx, chunk).with_context(|| {
-                    format!("prefill final DeepSeek V4 prompt chunk {chunk_index}")
-                })?;
-            } else {
-                session.advance_tokens(&ctx, chunk).with_context(|| {
-                    format!("advance DeepSeek V4 prompt chunk {chunk_index} without logits")
-                })?;
-            }
-        }
-        if packed_chunk_count == 1 {
-            "layer_major_128"
+    let prefill_mode = if let Some(snapshot_path) = args.deepseek_v4_snapshot.as_ref() {
+        let model_content_id = snapshot_model_content_id
+            .expect("snapshot path resolved a model-content identity before residency");
+        if snapshot_file_exists {
+            let (snapshot, restored_prefix) = restored_snapshot
+                .as_ref()
+                .expect("existing snapshot was validated before residency");
+            session
+                .restore_causal_snapshot(snapshot)
+                .context("restore DeepSeek V4 causal snapshot")?;
+            let suffix_chunks = execute_deepseek_v4_prompt_suffix(
+                &mut session,
+                &ctx,
+                &prompt_token_ids[*restored_prefix..],
+            )?;
+            eprintln!(
+                "deepseek_v4: snapshot restore path={} restored_tokens={} suffix_tokens={} suffix_chunks={} payload_bytes={}",
+                snapshot_path.display(),
+                restored_prefix,
+                prompt_token_ids.len() - *restored_prefix,
+                suffix_chunks,
+                snapshot.payload_bytes(),
+            );
+            "causal_snapshot_restore"
         } else {
-            "layer_major_128_chunks"
+            let publish_prefix = deepseek_v4_snapshot_publish_prefix(prompt_token_ids.len())?;
+            advance_deepseek_v4_prompt_prefix(
+                &mut session,
+                &ctx,
+                &prompt_token_ids[..publish_prefix],
+            )?;
+            let snapshot = session
+                .capture_causal_snapshot()
+                .context("capture DeepSeek V4 causal snapshot")?;
+            let report = publish_causal_snapshot_file(
+                snapshot_path,
+                &snapshot,
+                DeepSeekV4SnapshotCodecConstraints {
+                    config: session.residency().config(),
+                    expected_model_content_id: model_content_id,
+                    max_record_bytes: DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES,
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "publish DeepSeek V4 causal snapshot {}",
+                    snapshot_path.display()
+                )
+            })?;
+            execute_deepseek_v4_prompt_suffix(
+                &mut session,
+                &ctx,
+                &prompt_token_ids[publish_prefix..],
+            )?;
+            eprintln!(
+                "deepseek_v4: snapshot publish path={} outcome={} prefix_tokens={} payload_bytes={} record_bytes={}",
+                snapshot_path.display(),
+                match report.outcome {
+                    DeepSeekV4SnapshotFileOutcome::Published => "published",
+                    DeepSeekV4SnapshotFileOutcome::AlreadyPresent => "already_present",
+                },
+                publish_prefix,
+                snapshot.payload_bytes(),
+                report.record_bytes,
+            );
+            "causal_snapshot_publish"
         }
     } else {
-        for (index, &token) in prompt_token_ids.iter().enumerate() {
-            session
-                .forward_token(&ctx, token)
-                .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
+        let packed_chunk_count = deepseek_v4_packed_chunk_count(prompt_token_ids.len());
+        if packed_chunk_count > 0 {
+            execute_deepseek_v4_prompt_suffix(&mut session, &ctx, &prompt_token_ids)?;
+            if packed_chunk_count == 1 {
+                "layer_major_128"
+            } else {
+                "layer_major_128_chunks"
+            }
+        } else {
+            for (index, &token) in prompt_token_ids.iter().enumerate() {
+                session
+                    .forward_token(&ctx, token)
+                    .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
+            }
+            "singleton"
         }
-        "singleton"
     };
     let reconciliation = memory_plan
         .reconcile(DeepSeekV4MemorySamples {
@@ -5834,6 +6108,7 @@ mod tests {
     use clap::CommandFactory;
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
+    use std::os::unix::fs::PermissionsExt;
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum AllocationEvent {
@@ -6102,6 +6377,68 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v4_snapshot_keeps_one_uncached_endpoint_token() {
+        assert!(deepseek_v4_snapshot_publish_prefix(0).is_err());
+        assert!(deepseek_v4_snapshot_publish_prefix(1).is_err());
+        assert_eq!(deepseek_v4_snapshot_publish_prefix(2).unwrap(), 1);
+        assert_eq!(
+            deepseek_v4_snapshot_publish_prefix(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY).unwrap(),
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY - 1
+        );
+
+        let prompt = [35, 201, 200, 34];
+        assert_eq!(
+            deepseek_v4_snapshot_restored_prefix_len(&prompt[..3], &prompt).unwrap(),
+            3
+        );
+        assert!(deepseek_v4_snapshot_restored_prefix_len(&prompt, &prompt).is_err());
+        assert!(deepseek_v4_snapshot_restored_prefix_len(&[35, 200], &prompt).is_err());
+    }
+
+    #[test]
+    fn deepseek_v4_snapshot_identity_cache_requires_private_owned_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "qwen-dsv4-cli-cache-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let snapshot_path = root.join("prefix.ds4c");
+        assert_eq!(
+            deepseek_v4_snapshot_parent(&snapshot_path).unwrap(),
+            root.as_path()
+        );
+        let cache = deepseek_v4_snapshot_identity_cache(&root).unwrap();
+        assert_eq!(
+            std::fs::symlink_metadata(cache.root())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o077,
+            0
+        );
+
+        std::fs::remove_dir(cache.root()).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(cache.root())
+            .unwrap();
+        std::fs::set_permissions(cache.root(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(deepseek_v4_snapshot_identity_cache(&root).is_err());
+
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(deepseek_v4_snapshot_parent(&snapshot_path).is_err());
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn deepseek_v4_cli_accepts_only_bounded_single_turn_surfaces() {
         let raw = Args::try_parse_from([
             "qwen",
@@ -6117,6 +6454,18 @@ mod tests {
         ])
         .unwrap();
         validate_deepseek_v4_generation_mode(&raw, ExplicitCliOptions::default()).unwrap();
+
+        let snapshot = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--deepseek-v4-snapshot",
+            "prefix.ds4c",
+        ])
+        .unwrap();
+        validate_deepseek_v4_generation_mode(&snapshot, ExplicitCliOptions::default()).unwrap();
 
         let unsupported = Args::try_parse_from([
             "qwen",

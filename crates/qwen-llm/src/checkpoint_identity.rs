@@ -107,6 +107,13 @@ pub struct CheckpointCompatibilityReport {
     pub bytes_hashed: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CheckpointContentReport {
+    pub content_id: [u8; 32],
+    pub outcome: IdentityCacheOutcome,
+    pub bytes_hashed: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointIdentityError {
     #[error("checkpoint identity source changed since model load at shard {shard}")]
@@ -140,21 +147,32 @@ enum CacheRead {
     Corrupt,
 }
 
+pub fn checkpoint_content_identity(
+    gguf: &GgufFile,
+    cache: &CheckpointIdentityCache,
+) -> Result<CheckpointContentReport, CheckpointIdentityError> {
+    let sources = source_views(gguf);
+    resolve_content_sources(&sources, cache, || {})
+}
+
 pub(crate) fn checkpoint_compatibility(
     gguf: &GgufFile,
     abi: SnapshotAbi,
     cache: &CheckpointIdentityCache,
 ) -> Result<CheckpointCompatibilityReport, CheckpointIdentityError> {
-    let sources: Vec<_> = gguf
-        .shards
+    let sources = source_views(gguf);
+    resolve_sources(&sources, abi, cache, || {})
+}
+
+fn source_views(gguf: &GgufFile) -> Vec<SourceView<'_>> {
+    gguf.shards
         .iter()
         .map(|shard| SourceView {
             file: shard.file.as_ref(),
             bytes: shard.mmap.as_ref(),
             baseline: shard.source_stamp,
         })
-        .collect();
-    resolve_sources(&sources, abi, cache, || {})
+        .collect()
 }
 
 fn resolve_sources<F>(
@@ -180,6 +198,36 @@ where
     C: FnOnce(),
     H: FnOnce(),
 {
+    let content = resolve_content_sources_with_hooks(sources, cache, after_cache_read, after_hash)?;
+    Ok(CheckpointCompatibilityReport {
+        compatibility_id: compose_compatibility_id(content.content_id, abi),
+        content_id: content.content_id,
+        outcome: content.outcome,
+        bytes_hashed: content.bytes_hashed,
+    })
+}
+
+fn resolve_content_sources<H>(
+    sources: &[SourceView<'_>],
+    cache: &CheckpointIdentityCache,
+    after_hash: H,
+) -> Result<CheckpointContentReport, CheckpointIdentityError>
+where
+    H: FnOnce(),
+{
+    resolve_content_sources_with_hooks(sources, cache, || {}, after_hash)
+}
+
+fn resolve_content_sources_with_hooks<C, H>(
+    sources: &[SourceView<'_>],
+    cache: &CheckpointIdentityCache,
+    after_cache_read: C,
+    after_hash: H,
+) -> Result<CheckpointContentReport, CheckpointIdentityError>
+where
+    C: FnOnce(),
+    H: FnOnce(),
+{
     validate_sources(sources, false)?;
     let metadata_key = metadata_key(sources);
     let cache_path = cache_path(cache.root(), &metadata_key);
@@ -187,8 +235,7 @@ where
     if let CacheRead::Hit(content_id) = cache_read {
         after_cache_read();
         validate_sources(sources, false)?;
-        return Ok(CheckpointCompatibilityReport {
-            compatibility_id: compose_compatibility_id(content_id, abi),
+        return Ok(CheckpointContentReport {
             content_id,
             outcome: IdentityCacheOutcome::Hit,
             bytes_hashed: 0,
@@ -209,8 +256,7 @@ where
     } else {
         IdentityCacheOutcome::ComputedUncached
     };
-    Ok(CheckpointCompatibilityReport {
-        compatibility_id: compose_compatibility_id(content_id, abi),
+    Ok(CheckpointContentReport {
         content_id,
         outcome,
         bytes_hashed,

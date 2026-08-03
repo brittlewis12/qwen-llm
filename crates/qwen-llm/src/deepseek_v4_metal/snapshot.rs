@@ -1,5 +1,17 @@
 use super::*;
 
+mod codec;
+mod file;
+
+pub use codec::{
+    DeepSeekV4EncodedSnapshot, DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotCodecError,
+    decode_causal_snapshot, encode_causal_snapshot,
+};
+pub use file::{
+    DeepSeekV4SnapshotFileError, DeepSeekV4SnapshotFileOutcome, DeepSeekV4SnapshotFileReport,
+    load_causal_snapshot_file, publish_causal_snapshot_file,
+};
+
 const CAUSAL_SNAPSHOT_ABI_VERSION: u32 = 1;
 const CAUSAL_SNAPSHOT_NUMERICS_VERSION: u32 = 1;
 const CAUSAL_SNAPSHOT_ENCODING_VERSION: u32 = 1;

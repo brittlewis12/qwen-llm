@@ -158,6 +158,7 @@ impl DeepSeekV4Session {
         })?;
         capture_causal_state(
             self.residency.config(),
+            self.capacity,
             self.phase,
             &self.committed_tokens,
             model_content_id,
@@ -185,6 +186,7 @@ impl DeepSeekV4Session {
         })?;
         restore_causal_state(
             self.residency.config(),
+            self.capacity,
             &mut self.phase,
             &mut self.committed_tokens,
             model_content_id,
@@ -197,6 +199,7 @@ impl DeepSeekV4Session {
 
 fn capture_causal_state(
     config: &DeepSeekV4Config,
+    capacity: DeepSeekV4SessionCapacity,
     phase: DeepSeekV4SessionPhase,
     committed_tokens: &[u32],
     model_content_id: DeepSeekV4ModelContentId,
@@ -205,8 +208,8 @@ fn capture_causal_state(
 ) -> Result<DeepSeekV4CausalSnapshot, DeepSeekV4MetalError> {
     let next_position = phase.ready_position()?;
     validate_prefix(committed_tokens, next_position, config.vocab_size as usize)?;
-    let geometry = snapshot_geometry(config, next_position)?;
-    validate_persistent_tensors(config, raw_cache, frontiers)?;
+    let geometry = snapshot_geometry(config, capacity, next_position)?;
+    validate_persistent_tensors(config, capacity, raw_cache, frontiers)?;
 
     let mut raw_f16_bits = try_bits(geometry.raw_elements, "snapshot raw F16 arena")?;
     capture_raw_rows(raw_cache, config, geometry, &mut raw_f16_bits);
@@ -250,12 +253,13 @@ fn capture_causal_state(
         causal_digest: [0; 32],
     };
     snapshot.causal_digest = causal_digest(&snapshot);
-    validate_snapshot(&snapshot, config, model_content_id)?;
+    validate_snapshot(&snapshot, config, capacity, model_content_id)?;
     Ok(snapshot)
 }
 
 fn restore_causal_state(
     config: &DeepSeekV4Config,
+    capacity: DeepSeekV4SessionCapacity,
     phase: &mut DeepSeekV4SessionPhase,
     committed_tokens: &mut Vec<u32>,
     model_content_id: DeepSeekV4ModelContentId,
@@ -269,8 +273,8 @@ fn restore_causal_state(
         replaced_position,
         config.vocab_size as usize,
     )?;
-    validate_snapshot(snapshot, config, model_content_id)?;
-    validate_persistent_tensors(config, raw_cache, frontiers)?;
+    validate_snapshot(snapshot, config, capacity, model_content_id)?;
+    validate_persistent_tensors(config, capacity, raw_cache, frontiers)?;
     if committed_tokens.capacity() < snapshot.prefix_tokens.len() {
         return invalid(format!(
             "DeepSeek V4 transcript capacity {} cannot restore {} tokens",
@@ -278,7 +282,7 @@ fn restore_causal_state(
             snapshot.prefix_tokens.len()
         ));
     }
-    let images = build_restore_images(snapshot, config)?;
+    let images = build_restore_images(snapshot, config, capacity)?;
 
     let begun_position = phase.begin_restore()?;
     debug_assert_eq!(begun_position, replaced_position);
@@ -296,13 +300,10 @@ fn restore_causal_state(
 
 fn snapshot_geometry(
     config: &DeepSeekV4Config,
+    capacity: DeepSeekV4SessionCapacity,
     next_position: u32,
 ) -> Result<SnapshotGeometry, DeepSeekV4MetalError> {
-    if next_position as usize > DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY {
-        return invalid(format!(
-            "DeepSeek V4 snapshot position {next_position} exceeds promoted capacity {DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY}"
-        ));
-    }
+    capacity.validate_next_position(next_position)?;
     if next_position > config.context_length {
         return invalid(format!(
             "DeepSeek V4 snapshot position {next_position} exceeds context length {}",
@@ -344,9 +345,10 @@ fn snapshot_geometry(
                         "snapshot compressor arena",
                     )?;
                     let count = next_position as usize / 4;
-                    if count > DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS {
+                    if count > capacity.csa_physical_rows() {
                         return invalid(format!(
-                            "DeepSeek V4 snapshot CSA row count {count} exceeds history capacity {DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS}"
+                            "DeepSeek V4 snapshot CSA row count {count} exceeds history capacity {}",
+                            capacity.csa_physical_rows()
                         ));
                     }
                     published_elements = checked_add(
@@ -357,7 +359,7 @@ fn snapshot_geometry(
                     published_capacity_elements = checked_add(
                         published_capacity_elements,
                         checked_mul(
-                            DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+                            capacity.csa_physical_rows(),
                             head_dim,
                             "snapshot CSA publication capacity",
                         )?,
@@ -374,9 +376,10 @@ fn snapshot_geometry(
                     "snapshot compressor arena",
                 )?;
                 let count = next_position as usize / 128;
-                if count > DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS {
+                if count > capacity.hca_physical_rows() {
                     return invalid(format!(
-                        "DeepSeek V4 snapshot HCA row count {count} exceeds history capacity {DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS}"
+                        "DeepSeek V4 snapshot HCA row count {count} exceeds history capacity {}",
+                        capacity.hca_physical_rows()
                     ));
                 }
                 published_elements = checked_add(
@@ -387,7 +390,7 @@ fn snapshot_geometry(
                 published_capacity_elements = checked_add(
                     published_capacity_elements,
                     checked_mul(
-                        DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS,
+                        capacity.hca_physical_rows(),
                         head_dim,
                         "snapshot HCA publication capacity",
                     )?,
@@ -409,6 +412,7 @@ fn snapshot_geometry(
 fn validate_snapshot(
     snapshot: &DeepSeekV4CausalSnapshot,
     config: &DeepSeekV4Config,
+    capacity: DeepSeekV4SessionCapacity,
     expected_model_content_id: DeepSeekV4ModelContentId,
 ) -> Result<(), DeepSeekV4MetalError> {
     if snapshot.model_content_id != expected_model_content_id {
@@ -426,7 +430,7 @@ fn validate_snapshot(
     if snapshot.prefix_digest != prefix_digest(&snapshot.prefix_tokens) {
         return invalid("DeepSeek V4 snapshot prefix digest mismatch");
     }
-    let geometry = snapshot_geometry(config, snapshot.next_position)?;
+    let geometry = snapshot_geometry(config, capacity, snapshot.next_position)?;
     require_len(
         "snapshot raw F16 arena",
         snapshot.raw_f16_bits.len(),
@@ -479,6 +483,7 @@ fn validate_prefix(
 
 fn validate_persistent_tensors(
     config: &DeepSeekV4Config,
+    capacity: DeepSeekV4SessionCapacity,
     raw_cache: &MetalTensor,
     frontiers: &DeepSeekV4CompressorFrontiers,
 ) -> Result<(), DeepSeekV4MetalError> {
@@ -517,6 +522,7 @@ fn validate_persistent_tensors(
                     4,
                     config.key_length as usize,
                     DeepSeekV4CompressorPublication::Attention,
+                    capacity.csa_physical_rows(),
                     layer,
                 )?;
                 validate_frontier(
@@ -524,6 +530,7 @@ fn validate_persistent_tensors(
                     4,
                     config.indexer_key_length as usize,
                     DeepSeekV4CompressorPublication::IndexerHadamard,
+                    capacity.csa_physical_rows(),
                     layer,
                 )?;
             }
@@ -535,6 +542,7 @@ fn validate_persistent_tensors(
                 128,
                 config.key_length as usize,
                 DeepSeekV4CompressorPublication::Attention,
+                capacity.hca_physical_rows(),
                 layer,
             )?,
             _ => {
@@ -552,14 +560,10 @@ fn validate_frontier(
     ratio: usize,
     head_dim: usize,
     publication: DeepSeekV4CompressorPublication,
+    capacity_rows: usize,
     layer: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
     let (width, rows, _) = compressor_frontier_geometry(ratio, head_dim)?;
-    let capacity_rows = if ratio == 4 {
-        DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS
-    } else {
-        DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS
-    };
     if frontier.ratio != ratio
         || frontier.head_dim != head_dim
         || frontier.width != width
@@ -663,8 +667,9 @@ fn capture_frontier(
 fn build_restore_images(
     snapshot: &DeepSeekV4CausalSnapshot,
     config: &DeepSeekV4Config,
+    capacity: DeepSeekV4SessionCapacity,
 ) -> Result<RestoreImages, DeepSeekV4MetalError> {
-    let geometry = snapshot_geometry(config, snapshot.next_position)?;
+    let geometry = snapshot_geometry(config, capacity, snapshot.next_position)?;
     let raw_capacity = checked_product(
         &[
             config.layer_count as usize,
@@ -710,7 +715,7 @@ fn build_restore_images(
                         &mut destination_cursor,
                         snapshot.next_position as usize / 4,
                         head_dim,
-                        DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+                        capacity.csa_physical_rows(),
                     );
                 }
             }
@@ -721,7 +726,7 @@ fn build_restore_images(
                 &mut destination_cursor,
                 snapshot.next_position as usize / 128,
                 config.key_length as usize,
-                DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS,
+                capacity.hca_physical_rows(),
             ),
         }
     }
@@ -1277,6 +1282,7 @@ mod tests {
     use super::*;
 
     struct SyntheticState {
+        capacity: DeepSeekV4SessionCapacity,
         raw_cache: MetalTensor,
         frontiers: DeepSeekV4CompressorFrontiers,
         phase: DeepSeekV4SessionPhase,
@@ -1360,6 +1366,20 @@ mod tests {
         observation: DeepSeekV4SnapshotObservation,
         seed: u32,
     ) -> SyntheticState {
+        let capacity =
+            DeepSeekV4SessionCapacity::for_forward_limit(3_073, config.context_length).unwrap();
+        synthetic_state_with_capacity(ctx, config, capacity, next_position, observation, seed)
+    }
+
+    fn synthetic_state_with_capacity(
+        ctx: &MetalContext,
+        config: &DeepSeekV4Config,
+        capacity: DeepSeekV4SessionCapacity,
+        next_position: u32,
+        observation: DeepSeekV4SnapshotObservation,
+        seed: u32,
+    ) -> SyntheticState {
+        capacity.validate_next_position(next_position).unwrap();
         let raw_cache = MetalTensor::zeros_f16(
             ctx,
             vec![
@@ -1376,7 +1396,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         write_f16_bits(&raw_cache, &raw);
-        let frontiers = DeepSeekV4CompressorFrontiers::new(ctx, config).unwrap();
+        let frontiers = DeepSeekV4CompressorFrontiers::new(ctx, config, capacity).unwrap();
         for (layer, layer_frontiers) in frontiers.layers.iter().enumerate() {
             match layer_frontiers {
                 DeepSeekV4LayerCompressorFrontiers::SlidingWindow => {}
@@ -1399,10 +1419,11 @@ mod tests {
         };
         let mut committed_tokens = Vec::new();
         committed_tokens
-            .try_reserve_exact(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+            .try_reserve_exact(capacity.forward_limit())
             .unwrap();
         committed_tokens.extend((0..next_position).map(|position| position % config.vocab_size));
         SyntheticState {
+            capacity,
             raw_cache,
             frontiers,
             phase,
@@ -1417,6 +1438,7 @@ mod tests {
     ) -> DeepSeekV4CausalSnapshot {
         capture_causal_state(
             config,
+            state.capacity,
             state.phase,
             &state.committed_tokens,
             id,
@@ -1429,6 +1451,11 @@ mod tests {
     #[test]
     fn snapshot_geometry_covers_every_promoted_boundary() {
         let config = crate::deepseek_v4::flash_0731_config_fixture();
+        let capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+            config.context_length,
+        )
+        .unwrap();
         for (position, raw_rows, csa_rows, hca_rows) in [
             (0, 0, 0, 0),
             (1, 1, 0, 0),
@@ -1455,8 +1482,13 @@ mod tests {
             (3_071, 128, 767, 23),
             (3_072, 128, 768, 24),
             (3_073, 128, 768, 24),
+            (3_075, 128, 768, 24),
+            (3_076, 128, 769, 24),
+            (32_768, 128, 8_192, 256),
+            (65_535, 128, 16_383, 511),
+            (65_536, 128, 16_384, 512),
         ] {
-            let geometry = snapshot_geometry(&config, position).unwrap();
+            let geometry = snapshot_geometry(&config, capacity, position).unwrap();
             assert_eq!(geometry.raw_rows, raw_rows, "position {position}");
             let expected_published = 21 * csa_rows * (512 + 128) + 20 * hca_rows * 512;
             assert_eq!(
@@ -1464,11 +1496,12 @@ mod tests {
                 "position {position}"
             );
         }
-        let terminal = snapshot_geometry(&config, 3_073).unwrap();
+        let terminal = snapshot_geometry(&config, capacity, 65_536).unwrap();
         assert_eq!(terminal.raw_elements, 2_818_048);
         assert_eq!(terminal.compressor_elements, 3_051_520);
-        assert_eq!(terminal.published_elements, 10_567_680);
-        assert!(snapshot_geometry(&config, 3_074).is_err());
+        assert_eq!(terminal.published_elements, 225_443_840);
+        assert_eq!(terminal.published_capacity_elements, 225_443_840);
+        assert!(snapshot_geometry(&config, capacity, 65_537).is_err());
     }
 
     #[test]
@@ -1529,6 +1562,7 @@ mod tests {
             );
             restore_causal_state(
                 &config,
+                destination.capacity,
                 &mut destination.phase,
                 &mut destination.committed_tokens,
                 model_id(0x5a),
@@ -1598,6 +1632,170 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_v1_restores_canonically_across_physical_capacities() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let mut config = crate::deepseek_v4::flash_0731_config_fixture();
+        config.key_length = 64;
+        config.value_length = 64;
+        config.attention_kinds = vec![AttentionKind::SlidingWindow; DEEPSEEK_V4_LAYER_COUNT];
+        config.attention_kinds[2] = AttentionKind::CompressedSparse;
+        config.attention_kinds[3] = AttentionKind::HeavilyCompressed;
+        let source_capacity =
+            DeepSeekV4SessionCapacity::for_forward_limit(3_073, config.context_length).unwrap();
+        let destination_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+            config.context_length,
+        )
+        .unwrap();
+        let source = synthetic_state_with_capacity(
+            &ctx,
+            &config,
+            source_capacity,
+            3_072,
+            DeepSeekV4SnapshotObservation::Unavailable,
+            117,
+        );
+        let snapshot = capture_synthetic(&config, &source, model_id(0x5a));
+        let mut destination = synthetic_state_with_capacity(
+            &ctx,
+            &config,
+            destination_capacity,
+            1,
+            DeepSeekV4SnapshotObservation::Available,
+            913,
+        );
+        restore_causal_state(
+            &config,
+            destination_capacity,
+            &mut destination.phase,
+            &mut destination.committed_tokens,
+            model_id(0x5a),
+            &destination.raw_cache,
+            &destination.frontiers,
+            &snapshot,
+        )
+        .unwrap();
+        let restored = capture_synthetic(&config, &destination, model_id(0x5a));
+        assert_eq!(restored.prefix_tokens, snapshot.prefix_tokens);
+        assert_eq!(restored.raw_f16_bits, snapshot.raw_f16_bits);
+        assert_eq!(restored.compressor_f32_bits, snapshot.compressor_f32_bits);
+        assert_eq!(restored.published_f16_bits, snapshot.published_f16_bits);
+        assert_eq!(restored.causal_digest, snapshot.causal_digest);
+        assert_eq!(restored.compatibility_digest, snapshot.compatibility_digest);
+
+        let encode = |snapshot: &DeepSeekV4CausalSnapshot,
+                      session_capacity: DeepSeekV4SessionCapacity| {
+            let mut bytes = Vec::new();
+            encode_causal_snapshot(
+                &mut bytes,
+                snapshot,
+                DeepSeekV4SnapshotCodecConstraints {
+                    config: &config,
+                    session_capacity,
+                    expected_model_content_id: model_id(0x5a),
+                    max_record_bytes: 1024 * 1024 * 1024,
+                },
+            )
+            .unwrap();
+            bytes
+        };
+        assert_eq!(
+            encode(&snapshot, source_capacity),
+            encode(&restored, destination_capacity)
+        );
+
+        for layer in &destination.frontiers.layers {
+            match layer {
+                DeepSeekV4LayerCompressorFrontiers::SlidingWindow => {}
+                DeepSeekV4LayerCompressorFrontiers::CompressedSparse { attention, indexer } => {
+                    let visible = 768;
+                    assert!(
+                        tensor_u16(&attention.published)[visible * attention.head_dim..]
+                            .iter()
+                            .all(|&bits| bits == 0)
+                    );
+                    assert!(
+                        tensor_u16(&indexer.published)[visible * indexer.head_dim..]
+                            .iter()
+                            .all(|&bits| bits == 0)
+                    );
+                }
+                DeepSeekV4LayerCompressorFrontiers::HeavilyCompressed { attention } => {
+                    let visible = 24;
+                    assert!(
+                        tensor_u16(&attention.published)[visible * attention.head_dim..]
+                            .iter()
+                            .all(|&bits| bits == 0)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn larger_capacity_snapshot_rejects_smaller_destination_atomically() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let mut config = crate::deepseek_v4::flash_0731_config_fixture();
+        config.key_length = 64;
+        config.value_length = 64;
+        config.attention_kinds = vec![AttentionKind::SlidingWindow; DEEPSEEK_V4_LAYER_COUNT];
+        config.attention_kinds[2] = AttentionKind::CompressedSparse;
+        config.attention_kinds[3] = AttentionKind::HeavilyCompressed;
+        let source_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+            config.context_length,
+        )
+        .unwrap();
+        let destination_capacity =
+            DeepSeekV4SessionCapacity::for_forward_limit(3_075, config.context_length).unwrap();
+        assert_eq!(source_capacity.csa_physical_rows(), 16_384);
+        assert_eq!(destination_capacity.csa_physical_rows(), 768);
+
+        let source = synthetic_state_with_capacity(
+            &ctx,
+            &config,
+            source_capacity,
+            3_076,
+            DeepSeekV4SnapshotObservation::Unavailable,
+            211,
+        );
+        let snapshot = capture_synthetic(&config, &source, model_id(0x5a));
+        let mut destination = synthetic_state_with_capacity(
+            &ctx,
+            &config,
+            destination_capacity,
+            1,
+            DeepSeekV4SnapshotObservation::Available,
+            977,
+        );
+        let before = capture_synthetic(&config, &destination, model_id(0x5a));
+        let error = restore_causal_state(
+            &config,
+            destination_capacity,
+            &mut destination.phase,
+            &mut destination.committed_tokens,
+            model_id(0x5a),
+            &destination.raw_cache,
+            &destination.frontiers,
+            &snapshot,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("state position 3076 exceeds session capacity 3075")
+        );
+        assert_eq!(
+            capture_synthetic(&config, &destination, model_id(0x5a)),
+            before
+        );
+    }
+
+    #[test]
     fn snapshot_rejection_is_preflight_atomic_and_poison_is_ineligible() {
         let Ok(ctx) = MetalContext::new() else {
             return;
@@ -1627,6 +1825,7 @@ mod tests {
         truncated.refresh_digests();
         let error = restore_causal_state(
             &config,
+            destination.capacity,
             &mut destination.phase,
             &mut destination.committed_tokens,
             model_id(0x5a),
@@ -1646,6 +1845,7 @@ mod tests {
         nonfinite.refresh_digests();
         let error = restore_causal_state(
             &config,
+            destination.capacity,
             &mut destination.phase,
             &mut destination.committed_tokens,
             model_id(0x5a),
@@ -1662,6 +1862,7 @@ mod tests {
 
         let error = restore_causal_state(
             &config,
+            destination.capacity,
             &mut destination.phase,
             &mut destination.committed_tokens,
             model_id(0xa5),
@@ -1680,6 +1881,7 @@ mod tests {
         assert!(
             capture_causal_state(
                 &config,
+                destination.capacity,
                 destination.phase,
                 &destination.committed_tokens,
                 model_id(0x5a),
@@ -1691,6 +1893,7 @@ mod tests {
         assert!(
             restore_causal_state(
                 &config,
+                destination.capacity,
                 &mut destination.phase,
                 &mut destination.committed_tokens,
                 model_id(0x5a),

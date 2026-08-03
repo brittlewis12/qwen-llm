@@ -33,7 +33,9 @@ use crate::metal::{
     host_page_size_bytes, plan_retained_storage,
 };
 use crate::tensor::{GgmlType, ggml_type_layout};
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice, MTLSize};
+use objc2_metal::{
+    MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLSize,
+};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -44,11 +46,88 @@ pub const DEEPSEEK_V4_HC_PARAMETER_COUNT: usize = 24;
 pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
 pub const DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 pub use prefill::DEEPSEEK_V4_PREFILL_MAX_TOKENS;
-/// Number of token forwards traversed by the longest retained-session
-/// differential, through the full third CSA slab continuation at position 3072.
-/// Callers use this to reject requests before streaming beyond the current
-/// evidence boundary.
-pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 3_073;
+/// Engine-owned evidence ceiling for the first generally useful DS4 release.
+/// A request may allocate less, but allocation never authorizes execution past
+/// this independently promoted boundary.
+pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 65_536;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeepSeekV4SessionCapacity {
+    forward_limit: u32,
+    csa_physical_rows: usize,
+    hca_physical_rows: usize,
+}
+
+impl DeepSeekV4SessionCapacity {
+    pub fn for_forward_limit(
+        forward_limit: usize,
+        model_context_length: u32,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        if forward_limit == 0 {
+            return invalid("DeepSeek V4 session capacity requires at least one forward");
+        }
+        if forward_limit > DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY {
+            return invalid(format!(
+                "DeepSeek V4 request requires {forward_limit} forwards, beyond promoted evidence capacity {DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY}"
+            ));
+        }
+        if forward_limit > model_context_length as usize {
+            return invalid(format!(
+                "DeepSeek V4 request requires {forward_limit} forwards, beyond model context length {model_context_length}"
+            ));
+        }
+        let forward_limit = u32::try_from(forward_limit).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("DeepSeek V4 forward capacity exceeds u32".into())
+        })?;
+        let csa_physical_rows = rounded_history_capacity(
+            forward_limit as usize / 4,
+            DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+            "CSA",
+        )?;
+        let hca_physical_rows = rounded_history_capacity(
+            forward_limit as usize / 128,
+            DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS,
+            "HCA",
+        )?;
+        Ok(Self {
+            forward_limit,
+            csa_physical_rows,
+            hca_physical_rows,
+        })
+    }
+
+    pub fn forward_limit(self) -> usize {
+        self.forward_limit as usize
+    }
+
+    pub fn csa_physical_rows(self) -> usize {
+        self.csa_physical_rows
+    }
+
+    pub fn hca_physical_rows(self) -> usize {
+        self.hca_physical_rows
+    }
+
+    fn validate_position(self, position: u32) -> Result<(), DeepSeekV4MetalError> {
+        if position >= self.forward_limit {
+            return invalid(format!(
+                "DeepSeek V4 session capacity is {} forwards; next position is {position}",
+                self.forward_limit
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_next_position(self, next_position: u32) -> Result<(), DeepSeekV4MetalError> {
+        if next_position > self.forward_limit {
+            return invalid(format!(
+                "DeepSeek V4 state position {next_position} exceeds session capacity {}",
+                self.forward_limit
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeepSeekV4MetalError {
@@ -360,6 +439,7 @@ impl fmt::Display for DeepSeekV4MemoryReconciliation {
 
 pub struct DeepSeekV4MetalLoadPlan {
     config: DeepSeekV4Config,
+    session_capacity: DeepSeekV4SessionCapacity,
     retained: RetainedStoragePlan,
     descriptors: Vec<DeepSeekV4DescriptorFingerprint>,
     report: DeepSeekV4ResidencyReport,
@@ -401,6 +481,10 @@ impl DeepSeekV4MetalLoadPlan {
 
     pub fn memory_plan(&self) -> &DeepSeekV4MemoryPlan {
         &self.memory
+    }
+
+    pub fn session_capacity(&self) -> DeepSeekV4SessionCapacity {
+        self.session_capacity
     }
 
     pub fn admit(
@@ -471,6 +555,7 @@ impl DeepSeekV4RealizedLoad {
 /// Flash-0731 GGUF binding.
 pub struct DeepSeekV4MetalResidency {
     config: DeepSeekV4Config,
+    session_capacity: DeepSeekV4SessionCapacity,
     tensors: BTreeMap<String, MetalTensor>,
     report: DeepSeekV4ResidencyReport,
     device_registry_id: u64,
@@ -481,10 +566,22 @@ impl DeepSeekV4MetalResidency {
         ctx: &MetalContext,
         gguf: &GgufFile,
     ) -> Result<DeepSeekV4MetalLoadPlan, DeepSeekV4MetalError> {
+        Self::plan_for_forward_limit(ctx, gguf, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+    }
+
+    pub fn plan_for_forward_limit(
+        ctx: &MetalContext,
+        gguf: &GgufFile,
+        forward_limit: usize,
+    ) -> Result<DeepSeekV4MetalLoadPlan, DeepSeekV4MetalError> {
         let model = DeepSeekV4Model::from_gguf_flash_0731(gguf)?;
         validate_strict_binding(gguf, &model)?;
         validate_session_config(&model.config)?;
         validate_session_lookup_storage(gguf)?;
+        let session_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+            forward_limit,
+            model.config.context_length,
+        )?;
 
         let requests = gguf.tensors.iter().collect::<Vec<_>>();
         let retained = plan_retained_storage(
@@ -496,7 +593,7 @@ impl DeepSeekV4MetalResidency {
         )?;
         validate_fallback_policy(&retained)?;
         let report = report_for_plan(&retained)?;
-        let memory = build_memory_plan(ctx, &retained, &report, &model.config)?;
+        let memory = build_memory_plan(ctx, &retained, &report, &model.config, session_capacity)?;
         let descriptors = gguf
             .tensors
             .iter()
@@ -504,6 +601,7 @@ impl DeepSeekV4MetalResidency {
             .collect();
         Ok(DeepSeekV4MetalLoadPlan {
             config: model.config,
+            session_capacity,
             retained,
             descriptors,
             report,
@@ -536,7 +634,14 @@ impl DeepSeekV4MetalResidency {
         if report_for_plan(&plan.retained)? != plan.report {
             return invalid("DeepSeek V4 retained-plan report changed before realization");
         }
-        if build_memory_plan(ctx, &plan.retained, &plan.report, &plan.config)? != plan.memory {
+        if build_memory_plan(
+            ctx,
+            &plan.retained,
+            &plan.report,
+            &plan.config,
+            plan.session_capacity,
+        )? != plan.memory
+        {
             return invalid("DeepSeek V4 memory plan changed before realization");
         }
         let refreshed_admission = plan.memory.admission(ctx.memory_signals());
@@ -561,6 +666,7 @@ impl DeepSeekV4MetalResidency {
         Ok(DeepSeekV4RealizedLoad {
             residency: Self {
                 config: plan.config,
+                session_capacity: plan.session_capacity,
                 tensors,
                 report: plan.report,
                 device_registry_id: ctx.device.registryID(),
@@ -572,6 +678,10 @@ impl DeepSeekV4MetalResidency {
 
     pub fn config(&self) -> &DeepSeekV4Config {
         &self.config
+    }
+
+    pub fn session_capacity(&self) -> DeepSeekV4SessionCapacity {
+        self.session_capacity
     }
 
     pub fn tensor(&self, name: &str) -> Option<&MetalTensor> {
@@ -618,23 +728,31 @@ const DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS: usize = 256;
 const DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS: usize = DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS * 3;
 const DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS: usize = DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS * 2;
 const DEEPSEEK_V4_CSA_TOP_K: usize = 512;
-const DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION: u32 =
-    DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32;
-const DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY: u32 =
-    ((DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS + 1) * 4 - 1) as u32;
 
-fn validate_promoted_session_position(position: u32) -> Result<(), DeepSeekV4MetalError> {
-    if position >= DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY {
+fn rounded_history_capacity(
+    required_rows: usize,
+    floor_rows: usize,
+    name: &str,
+) -> Result<usize, DeepSeekV4MetalError> {
+    if floor_rows == 0 || !floor_rows.is_multiple_of(DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS) {
         return invalid(format!(
-            "native session stops before unallocated CSA row {DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS} at position {DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY}; next position is {position}"
+            "DeepSeek V4 {name} history floor {floor_rows} is not a nonzero slab multiple"
         ));
     }
-    if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION {
-        return invalid(format!(
-            "native session stops after the promoted full third-CSA-slab continuation at position 3072; next position is {position}"
-        ));
-    }
-    Ok(())
+    let slabs = required_rows
+        .checked_add(DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS - 1)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "DeepSeek V4 {name} history row rounding overflow"
+            ))
+        })?
+        / DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS;
+    let rounded = slabs
+        .checked_mul(DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!("DeepSeek V4 {name} history capacity overflow"))
+        })?;
+    Ok(rounded.max(floor_rows))
 }
 
 /// Numerical cache contract used by a native DeepSeek V4 execution path.
@@ -743,11 +861,12 @@ impl DeepSeekV4SessionPhase {
 
 /// Native qwen-owned DeepSeek V4 decode session.
 ///
-/// Sparse CSA and twenty-four HCA rows are promoted through the position-3072
-/// continuation. The session fails closed before position 3073 until the next
-/// retained interval earns its own differential.
+/// Physical retained state is derived from the admitted request. The separate
+/// evidence ceiling prevents successful allocation from authorizing positions
+/// beyond the promoted 65,536-forward contract.
 pub struct DeepSeekV4Session {
     residency: DeepSeekV4MetalResidency,
+    capacity: DeepSeekV4SessionCapacity,
     device_registry_id: u64,
     token_id: MetalTensor,
     embedding: MetalTensor,
@@ -818,10 +937,12 @@ impl DeepSeekV4Session {
         ];
         let attention_config = deepseek_v4_session_attention_config();
         let moe_config = deepseek_v4_session_moe_config(residency.config());
-        let compressor_frontiers = DeepSeekV4CompressorFrontiers::new(ctx, residency.config())?;
+        let capacity = residency.session_capacity();
+        let compressor_frontiers =
+            DeepSeekV4CompressorFrontiers::new(ctx, residency.config(), capacity)?;
         let mut committed_tokens = Vec::new();
         committed_tokens
-            .try_reserve_exact(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+            .try_reserve_exact(capacity.forward_limit())
             .map_err(|error| {
                 DeepSeekV4MetalError::Invalid(format!(
                     "reserve DeepSeek V4 committed-token transcript: {error}"
@@ -831,13 +952,14 @@ impl DeepSeekV4Session {
         Ok(Self {
             device_registry_id: residency.device_registry_id(),
             residency,
+            capacity,
             token_id,
             embedding: MetalTensor::zeros_f32(ctx, vec![DEEPSEEK_V4_HIDDEN_SIZE as u64])?,
             residual_primary: MetalTensor::zeros_f32(ctx, residual_shape.clone())?,
             residual_secondary: MetalTensor::zeros_f32(ctx, residual_shape)?,
             hyper_connection: DeepSeekV4HyperConnectionScratch::new(ctx, DEEPSEEK_V4_HIDDEN_SIZE)?,
             attention: DeepSeekV4PositionZeroAttentionScratch::new(ctx, attention_config)?,
-            sparse_csa: DeepSeekV4SparseCsaScratch::new(ctx)?,
+            sparse_csa: DeepSeekV4SparseCsaScratch::new(ctx, capacity.csa_physical_rows())?,
             raw_cache: MetalTensor::zeros_f16(
                 ctx,
                 vec![
@@ -854,7 +976,7 @@ impl DeepSeekV4Session {
                 vec![DEEPSEEK_V4_HIDDEN_SIZE as u64],
             )?,
             logits: MetalTensor::zeros_f32(ctx, vec![DEEPSEEK_V4_VOCAB_SIZE as u64])?,
-            prefill: prefill::DeepSeekV4PrefillScratch::new(ctx)?,
+            prefill: prefill::DeepSeekV4PrefillScratch::new(ctx, capacity.csa_physical_rows())?,
             phase: DeepSeekV4SessionPhase::fresh(),
             committed_tokens,
             snapshot_model_content_id,
@@ -889,9 +1011,14 @@ impl DeepSeekV4Session {
         &self.committed_tokens
     }
 
+    pub fn capacity(&self) -> DeepSeekV4SessionCapacity {
+        self.capacity
+    }
+
     /// Arms the feature-gated, single-use decision capture for position 3070.
     #[cfg(feature = "dsv4-diagnostics")]
     pub fn arm_decision_transcript(&mut self, position: u32) -> Result<(), DeepSeekV4MetalError> {
+        self.capacity.validate_position(position)?;
         if position != self.phase.ready_position()? {
             return Err(DeepSeekV4DiagnosticsError::WrongPosition {
                 expected: position,
@@ -979,7 +1106,7 @@ impl DeepSeekV4Session {
                 "token id {token_id} is outside vocabulary {DEEPSEEK_V4_VOCAB_SIZE}"
             ));
         }
-        validate_promoted_session_position(position)?;
+        self.capacity.validate_position(position)?;
         #[cfg(feature = "dsv4-diagnostics")]
         self.decision_diagnostics.begin_forward(position)?;
         let next_position = position
@@ -1022,9 +1149,10 @@ impl DeepSeekV4Session {
                     "DeepSeek V4 committed-token transcript length overflow".into(),
                 )
             })?;
-        if end > DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY {
+        if end > self.capacity.forward_limit() {
             return invalid(format!(
-                "DeepSeek V4 committed-token transcript would reach {end}, beyond capacity {DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY}"
+                "DeepSeek V4 committed-token transcript would reach {end}, beyond capacity {}",
+                self.capacity.forward_limit()
             ));
         }
         if self.committed_tokens.capacity() < end {
@@ -1531,6 +1659,7 @@ impl DeepSeekV4CompressorFrontier {
         ratio: usize,
         head_dim: usize,
         publication: DeepSeekV4CompressorPublication,
+        capacity_rows: usize,
     ) -> Result<Self, DeepSeekV4MetalError> {
         if !matches!(ratio, 4 | 128) || head_dim == 0 {
             return invalid(format!(
@@ -1540,11 +1669,13 @@ impl DeepSeekV4CompressorFrontier {
         if publication == DeepSeekV4CompressorPublication::IndexerHadamard && head_dim != 128 {
             return invalid("indexer publication requires exactly 128 dimensions");
         }
-        let capacity_rows = if ratio == 4 {
-            DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS
-        } else {
-            DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS
-        };
+        if capacity_rows == 0
+            || !capacity_rows.is_multiple_of(DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS)
+        {
+            return invalid(format!(
+                "compressor publication capacity {capacity_rows} is not a nonzero slab multiple"
+            ));
+        }
         let (width, rows, state_elements) = compressor_frontier_geometry(ratio, head_dim)?;
         let zeros = vec![0.0f32; state_elements];
         let negative_infinity = vec![f32::NEG_INFINITY; state_elements];
@@ -1876,7 +2007,11 @@ struct DeepSeekV4CompressorFrontiers {
 }
 
 impl DeepSeekV4CompressorFrontiers {
-    fn new(ctx: &MetalContext, config: &DeepSeekV4Config) -> Result<Self, DeepSeekV4MetalError> {
+    fn new(
+        ctx: &MetalContext,
+        config: &DeepSeekV4Config,
+        capacity: DeepSeekV4SessionCapacity,
+    ) -> Result<Self, DeepSeekV4MetalError> {
         let hidden_size = config.hidden_size as usize;
         let attention_dim = config.key_length as usize;
         let indexer_dim = config.indexer_key_length as usize;
@@ -1891,12 +2026,14 @@ impl DeepSeekV4CompressorFrontiers {
                             4,
                             attention_dim,
                             DeepSeekV4CompressorPublication::Attention,
+                            capacity.csa_physical_rows(),
                         )?,
                         indexer: DeepSeekV4CompressorFrontier::new(
                             ctx,
                             4,
                             indexer_dim,
                             DeepSeekV4CompressorPublication::IndexerHadamard,
+                            capacity.csa_physical_rows(),
                         )?,
                     }
                 }
@@ -1907,6 +2044,7 @@ impl DeepSeekV4CompressorFrontiers {
                             128,
                             attention_dim,
                             DeepSeekV4CompressorPublication::Attention,
+                            capacity.hca_physical_rows(),
                         )?,
                     }
                 }
@@ -2021,10 +2159,7 @@ impl DeepSeekV4CompressorFrontiers {
         };
         let attention_count = attention.published_count(position);
         let indexer_count = indexer.published_count(position);
-        if attention_count != indexer_count
-            || attention.capacity_rows != indexer.capacity_rows
-            || attention.capacity_rows != DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS
-        {
+        if attention_count != indexer_count || attention.capacity_rows != indexer.capacity_rows {
             return invalid(format!(
                 "CSA layer {layer} histories are misaligned: attention={attention_count}/{} indexer={indexer_count}/{}",
                 attention.capacity_rows, indexer.capacity_rows
@@ -2058,6 +2193,7 @@ struct DeepSeekV4CsaRows<'a> {
 }
 
 struct DeepSeekV4SparseCsaScratch {
+    capacity_rows: usize,
     index_queries: MetalTensor,
     head_weights: MetalTensor,
     visible_counts: MetalTensor,
@@ -2069,19 +2205,21 @@ struct DeepSeekV4SparseCsaScratch {
 }
 
 impl DeepSeekV4SparseCsaScratch {
-    fn new(ctx: &MetalContext) -> Result<Self, DeepSeekV4MetalError> {
+    fn new(ctx: &MetalContext, capacity_rows: usize) -> Result<Self, DeepSeekV4MetalError> {
+        if capacity_rows < DEEPSEEK_V4_CSA_TOP_K
+            || !capacity_rows.is_multiple_of(DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS)
+        {
+            return invalid(format!(
+                "sparse CSA scratch capacity {capacity_rows} is not an aligned top-k superset"
+            ));
+        }
         Ok(Self {
+            capacity_rows,
             index_queries: MetalTensor::zeros_f32(ctx, vec![128, 64, 1])?,
             head_weights: MetalTensor::zeros_f32(ctx, vec![64, 1])?,
             visible_counts: MetalTensor::zeros_i32(ctx, vec![1])?,
-            scores: MetalTensor::zeros_f32(
-                ctx,
-                vec![DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS as u64, 1],
-            )?,
-            selected_mask: MetalTensor::zeros_i32(
-                ctx,
-                vec![DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS as u64, 1],
-            )?,
+            scores: MetalTensor::zeros_f32(ctx, vec![capacity_rows as u64, 1])?,
+            selected_mask: MetalTensor::zeros_i32(ctx, vec![capacity_rows as u64, 1])?,
             cache_order_ids: MetalTensor::zeros_i32(ctx, vec![DEEPSEEK_V4_CSA_TOP_K as u64, 1])?,
             selected_counts: MetalTensor::zeros_i32(ctx, vec![1])?,
             status: MetalTensor::zeros_i32(ctx, vec![1])?,
@@ -2104,11 +2242,11 @@ impl DeepSeekV4SparseCsaScratch {
         require_serial(enc, "deepseek_v4_sparse_csa_indexer")?;
         if rows.count <= DEEPSEEK_V4_CSA_TOP_K
             || rows.count > rows.capacity_rows
-            || rows.capacity_rows != DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS
+            || rows.capacity_rows != self.capacity_rows
         {
             return invalid(format!(
                 "sparse CSA requires 513..={} aligned rows, got count={} capacity={}",
-                DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS, rows.count, rows.capacity_rows
+                self.capacity_rows, rows.count, rows.capacity_rows
             ));
         }
         validate_f32(q_lora, &[1_024], false, "sparse CSA Q-LoRA input")?;
@@ -2196,6 +2334,7 @@ impl DeepSeekV4SparseCsaScratch {
             &self.selected_counts,
             &self.status,
             rows.capacity_rows,
+            rows.count,
             DEEPSEEK_V4_CSA_TOP_K,
             1,
         )
@@ -4831,10 +4970,13 @@ fn encode_select_top_k_f32(
     selected_counts: &MetalTensor,
     status: &MetalTensor,
     row_capacity: usize,
+    max_visible_rows: usize,
     top_k: usize,
     query_count: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
     if row_capacity == 0
+        || max_visible_rows == 0
+        || max_visible_rows > row_capacity
         || top_k == 0
         || top_k > row_capacity
         || query_count == 0
@@ -4898,7 +5040,18 @@ fn encode_select_top_k_f32(
     }
     let emit_ranked = ranked_ids.is_some();
     let ranked_ids = ranked_ids.unwrap_or(cache_order_ids);
-    let pso = ctx.pipeline("kernel_deepseek_v4_select_top_k_f32")?;
+    let parallel = max_visible_rows > 1_024;
+    let pso = ctx.pipeline(if parallel {
+        "kernel_deepseek_v4_select_top_k_parallel_f32"
+    } else {
+        "kernel_deepseek_v4_select_top_k_f32"
+    })?;
+    if parallel {
+        validate_parallel_selector_pipeline(
+            pso.threadExecutionWidth(),
+            pso.maxTotalThreadsPerThreadgroup(),
+        )?;
+    }
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
@@ -4916,18 +5069,55 @@ fn encode_select_top_k_f32(
     enc.set_tensor(5, cache_order_ids);
     enc.set_tensor(6, selected_counts);
     enc.set_tensor(7, status);
-    enc.dispatch(
-        MTLSize {
-            width: query_count.div_ceil(64),
-            height: 1,
-            depth: 1,
-        },
-        MTLSize {
-            width: 64,
-            height: 1,
-            depth: 1,
-        },
-    );
+    if parallel {
+        const THREADGROUP_WIDTH: usize = 256;
+        enc.set_threadgroup_memory(0, THREADGROUP_WIDTH * std::mem::size_of::<f32>());
+        enc.set_threadgroup_memory(1, THREADGROUP_WIDTH * std::mem::size_of::<i32>());
+        enc.dispatch(
+            MTLSize {
+                width: query_count,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: THREADGROUP_WIDTH,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else {
+        enc.dispatch(
+            MTLSize {
+                width: query_count.div_ceil(64),
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 64,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn validate_parallel_selector_pipeline(
+    thread_execution_width: usize,
+    max_threads_per_threadgroup: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const REQUIRED_SIMD_WIDTH: usize = 32;
+    const THREADGROUP_WIDTH: usize = 256;
+    if thread_execution_width != REQUIRED_SIMD_WIDTH {
+        return invalid(format!(
+            "parallel indexer selector requires {REQUIRED_SIMD_WIDTH}-lane SIMD groups, pipeline reports {thread_execution_width}"
+        ));
+    }
+    if max_threads_per_threadgroup < THREADGROUP_WIDTH {
+        return invalid(format!(
+            "parallel indexer selector supports {max_threads_per_threadgroup} threads, requires {THREADGROUP_WIDTH}"
+        ));
+    }
     Ok(())
 }
 
@@ -5719,13 +5909,15 @@ fn append_compressor_frontier_allocations(
 
 fn deepseek_v4_session_allocation_requests(
     config: &DeepSeekV4Config,
+    capacity: DeepSeekV4SessionCapacity,
 ) -> Result<Vec<DeepSeekV4SessionAllocationRequest>, DeepSeekV4MetalError> {
     validate_session_config(config)?;
-    deepseek_v4_session_allocation_requests_for_kinds(&config.attention_kinds)
+    deepseek_v4_session_allocation_requests_for_kinds(&config.attention_kinds, capacity)
 }
 
 fn deepseek_v4_session_allocation_requests_for_kinds(
     attention_kinds: &[AttentionKind],
+    capacity: DeepSeekV4SessionCapacity,
 ) -> Result<Vec<DeepSeekV4SessionAllocationRequest>, DeepSeekV4MetalError> {
     let sliding = attention_kinds
         .iter()
@@ -5854,13 +6046,13 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
     push_session_allocation(
         &mut requests,
         "sparse_csa.scores",
-        DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+        capacity.csa_physical_rows(),
         f32_bytes,
     )?;
     push_session_allocation(
         &mut requests,
         "sparse_csa.selected_mask",
-        DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+        capacity.csa_physical_rows(),
         i32_bytes,
     )?;
     push_session_allocation(
@@ -5899,7 +6091,7 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
                     4,
                     attention_dim,
                     DeepSeekV4CompressorPublication::Attention,
-                    DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+                    capacity.csa_physical_rows(),
                 )?;
                 append_compressor_frontier_allocations(
                     &mut requests,
@@ -5907,7 +6099,7 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
                     4,
                     indexer_dim,
                     DeepSeekV4CompressorPublication::IndexerHadamard,
-                    DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+                    capacity.csa_physical_rows(),
                 )?;
             }
             AttentionKind::HeavilyCompressed => append_compressor_frontier_allocations(
@@ -5916,7 +6108,7 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
                 128,
                 attention_dim,
                 DeepSeekV4CompressorPublication::Attention,
-                DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS,
+                capacity.hca_physical_rows(),
             )?,
         }
     }
@@ -5947,7 +6139,7 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
         push_session_allocation(&mut requests, name, DEEPSEEK_V4_HIDDEN_SIZE, f32_bytes)?;
     }
     push_session_allocation(&mut requests, "logits", DEEPSEEK_V4_VOCAB_SIZE, f32_bytes)?;
-    prefill::append_session_allocation_requests(&mut requests)?;
+    prefill::append_session_allocation_requests(&mut requests, capacity.csa_physical_rows())?;
     Ok(requests)
 }
 
@@ -5984,6 +6176,7 @@ fn build_memory_plan(
     retained: &RetainedStoragePlan,
     report: &DeepSeekV4ResidencyReport,
     config: &DeepSeekV4Config,
+    capacity: DeepSeekV4SessionCapacity,
 ) -> Result<DeepSeekV4MemoryPlan, DeepSeekV4MetalError> {
     let mut residency_priced_upper_bytes = 0_u64;
     let mut residency_buffer_count = 0_usize;
@@ -6032,7 +6225,7 @@ fn build_memory_plan(
         ));
     }
 
-    let requests = deepseek_v4_session_allocation_requests(config)?;
+    let requests = deepseek_v4_session_allocation_requests(config, capacity)?;
     let mut session_allocations = Vec::with_capacity(requests.len());
     let mut session_logical_bytes = 0_u64;
     let mut session_priced_upper_bytes = 0_u64;
@@ -6245,21 +6438,59 @@ mod tests {
 
     #[test]
     fn session_position_guard_separates_evidence_from_physical_capacity() {
-        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 3_073);
-        validate_promoted_session_position((DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY - 1) as u32)
-            .unwrap();
-        let continuation =
-            validate_promoted_session_position(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32)
-                .unwrap_err();
-        assert!(continuation.to_string().contains("next position is 3073"));
-        let retained_interval = validate_promoted_session_position(3_074).unwrap_err();
+        let config = crate::deepseek_v4::flash_0731_config_fixture();
+        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 65_536);
+        let capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+            config.context_length,
+        )
+        .unwrap();
+        assert_eq!(capacity.csa_physical_rows(), 16_384);
+        assert_eq!(capacity.hca_physical_rows(), 512);
+        capacity.validate_position(65_535).unwrap();
         assert!(
-            retained_interval
+            capacity
+                .validate_position(65_536)
+                .unwrap_err()
                 .to_string()
-                .contains("next position is 3074")
+                .contains("next position is 65536")
         );
-        let csa = validate_promoted_session_position(3_075).unwrap_err();
-        assert!(csa.to_string().contains("CSA row 768 at position 3075"));
+
+        let before_fourth =
+            DeepSeekV4SessionCapacity::for_forward_limit(3_075, config.context_length).unwrap();
+        let fourth =
+            DeepSeekV4SessionCapacity::for_forward_limit(3_076, config.context_length).unwrap();
+        assert_eq!(before_fourth.csa_physical_rows(), 768);
+        assert_eq!(fourth.csa_physical_rows(), 1_024);
+        for forward_limit in 1..=DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY {
+            let derived =
+                DeepSeekV4SessionCapacity::for_forward_limit(forward_limit, config.context_length)
+                    .unwrap();
+            let required_csa = forward_limit / 4;
+            let required_hca = forward_limit / 128;
+            assert!(derived.csa_physical_rows() >= required_csa.max(768));
+            assert!(derived.hca_physical_rows() >= required_hca.max(512));
+            assert!(
+                derived
+                    .csa_physical_rows()
+                    .is_multiple_of(DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS)
+            );
+            assert!(
+                derived
+                    .hca_physical_rows()
+                    .is_multiple_of(DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS)
+            );
+            if required_csa > 768 {
+                assert!(
+                    derived.csa_physical_rows() - required_csa
+                        < DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS
+                );
+            }
+        }
+        assert!(
+            DeepSeekV4SessionCapacity::for_forward_limit(65_537, config.context_length).is_err()
+        );
+        assert!(DeepSeekV4SessionCapacity::for_forward_limit(65_536, 65_535).is_err());
     }
 
     #[test]
@@ -6320,7 +6551,10 @@ mod tests {
         let mut kinds = vec![AttentionKind::SlidingWindow; 2];
         kinds.extend(std::iter::repeat_n(AttentionKind::CompressedSparse, 21));
         kinds.extend(std::iter::repeat_n(AttentionKind::HeavilyCompressed, 20));
-        let requests = deepseek_v4_session_allocation_requests_for_kinds(&kinds).unwrap();
+        let config = crate::deepseek_v4::flash_0731_config_fixture();
+        let capacity =
+            DeepSeekV4SessionCapacity::for_forward_limit(3_073, config.context_length).unwrap();
+        let requests = deepseek_v4_session_allocation_requests_for_kinds(&kinds, capacity).unwrap();
         assert_eq!(requests.len(), 537);
         assert_eq!(
             requests
@@ -6349,6 +6583,37 @@ mod tests {
                 .unwrap()
                 .logical_bytes,
             5_636_096
+        );
+
+        let promoted_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+            config.context_length,
+        )
+        .unwrap();
+        let promoted =
+            deepseek_v4_session_allocation_requests_for_kinds(&kinds, promoted_capacity).unwrap();
+        assert_eq!(promoted.len(), requests.len());
+        assert_eq!(
+            promoted
+                .iter()
+                .map(|request| request.logical_bytes)
+                .sum::<u64>(),
+            614_951_456
+        );
+        assert_eq!(
+            promoted
+                .iter()
+                .filter(|request| request.name.ends_with(".published"))
+                .map(|request| request.logical_bytes)
+                .sum::<u64>(),
+            450_887_680
+        );
+        assert_eq!(
+            promoted
+                .iter()
+                .map(|request| request.name.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            names
         );
     }
 
@@ -7038,6 +7303,7 @@ mod tests {
             4,
             HEAD_DIM,
             DeepSeekV4CompressorPublication::Attention,
+            DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
         )
         .unwrap();
         let input_values = [0.7, -0.4, 1.1];
@@ -7134,6 +7400,7 @@ mod tests {
             4,
             HEAD_DIM,
             DeepSeekV4CompressorPublication::Attention,
+            DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
         )
         .unwrap();
         let kv_weights = (0..HIDDEN * WIDTH)
@@ -7269,6 +7536,7 @@ mod tests {
             4,
             HEAD_DIM,
             DeepSeekV4CompressorPublication::IndexerHadamard,
+            DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
         )
         .unwrap();
         let kv_weights = (0..HIDDEN * WIDTH)
@@ -7394,6 +7662,11 @@ mod tests {
             RATIO,
             HEAD_DIM,
             DeepSeekV4CompressorPublication::Attention,
+            if RATIO == 4 {
+                DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS
+            } else {
+                DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS
+            },
         )
         .unwrap();
         let kv_weights = (0..HIDDEN * HEAD_DIM)
@@ -8005,6 +8278,11 @@ mod tests {
             RATIO,
             HEAD_DIM,
             DeepSeekV4CompressorPublication::Attention,
+            if RATIO == 4 {
+                DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS
+            } else {
+                DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS
+            },
         )
         .unwrap();
         let projected_kv_values = (0..POSITIONS * HEAD_DIM)
@@ -8409,8 +8687,18 @@ mod tests {
                 DeepSeekV4CompressorPublication::Attention => "attention",
                 DeepSeekV4CompressorPublication::IndexerHadamard => "indexer",
             };
-            let frontier =
-                DeepSeekV4CompressorFrontier::new(ctx, RATIO, head_dim, publication).unwrap();
+            let frontier = DeepSeekV4CompressorFrontier::new(
+                ctx,
+                RATIO,
+                head_dim,
+                publication,
+                if RATIO == 4 {
+                    DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS
+                } else {
+                    DEEPSEEK_V4_HCA_HISTORY_CAPACITY_ROWS
+                },
+            )
+            .unwrap();
             let projected_kv_values = (0..POSITIONS * width)
                 .map(|index| {
                     let position = index / width;
@@ -8935,6 +9223,408 @@ mod tests {
     }
 
     #[test]
+    fn ratio4_frontiers_publish_the_final_64k_row_without_prefix_replay() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+
+        fn run_case(
+            ctx: &MetalContext,
+            head_dim: usize,
+            publication: DeepSeekV4CompressorPublication,
+        ) {
+            const RATIO: usize = 4;
+            const START_POSITION: u32 = 65_528;
+            const CAPACITY_ROWS: usize = 16_384;
+            let width = 2 * head_dim;
+            let rms_eps = 1.0e-5;
+            let frontier =
+                DeepSeekV4CompressorFrontier::new(ctx, RATIO, head_dim, publication, CAPACITY_ROWS)
+                    .unwrap();
+            let lower_kv = (0..RATIO * width)
+                .map(|index| ((index * 17 + 5) % 131) as f32 * 0.0017 - 0.09)
+                .collect::<Vec<_>>();
+            let lower_scores = (0..RATIO * width)
+                .map(|index| ((index * 23 + 7) % 137) as f32 * 0.0019 - 0.11)
+                .collect::<Vec<_>>();
+            let mut initial_kv = lower_kv.clone();
+            initial_kv.extend_from_slice(&lower_kv);
+            let mut initial_scores = lower_scores.clone();
+            initial_scores.extend_from_slice(&lower_scores);
+            host_write_f32(&frontier.kv_state, &initial_kv, "far CSA KV state").unwrap();
+            host_write_f32(
+                &frontier.score_state,
+                &initial_scores,
+                "far CSA score state",
+            )
+            .unwrap();
+            let mut oracle = CompressorState::from_snapshot(
+                RATIO,
+                head_dim,
+                u64::from(START_POSITION),
+                initial_kv,
+                initial_scores,
+            )
+            .unwrap();
+            let projected_kv_values = (0..8 * width)
+                .map(|index| {
+                    let row = index / width;
+                    let dimension = index % width;
+                    ((row * 29 + dimension * 11 + 3) % 149) as f32 * 0.0013 - 0.08
+                })
+                .collect::<Vec<_>>();
+            let projected_score_values = (0..8 * width)
+                .map(|index| {
+                    let row = index / width;
+                    let dimension = index % width;
+                    ((row * 31 + dimension * 13 + 9) % 151) as f32 * 0.0011 - 0.07
+                })
+                .collect::<Vec<_>>();
+            let ape_values = (0..RATIO * width)
+                .map(|index| ((index * 19 + 1) % 127) as f32 * 0.0015 - 0.1)
+                .collect::<Vec<_>>();
+            let norm_values = (0..head_dim)
+                .map(|index| 0.63 + (index % 37) as f32 * 0.009)
+                .collect::<Vec<_>>();
+            let projected_kv = offset_f32(ctx, &projected_kv_values, vec![width as u64, 8]);
+            let projected_score = offset_f32(ctx, &projected_score_values, vec![width as u64, 8]);
+            let ape = offset_f32(ctx, &ape_values, vec![width as u64, RATIO as u64]);
+            let norm = offset_f32(ctx, &norm_values, vec![head_dim as u64]);
+            let rope = DeepSeekV4RopeParameters {
+                rotary_dim: 64,
+                theta: 160_000.0,
+                scaling_factor: 16.0,
+                original_context_length: 65_536,
+                beta_fast: 32.0,
+                beta_slow: 1.0,
+            };
+            let oracle_rope = RopeParameters::yarn(
+                rope.rotary_dim,
+                rope.theta,
+                rope.scaling_factor,
+                rope.original_context_length,
+                rope.beta_fast,
+                rope.beta_slow,
+            );
+            let mut expected_rows = Vec::new();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            for local in 0..8usize {
+                let position = START_POSITION + local as u32;
+                let offset = local * width;
+                if let Some(mut emitted) = oracle
+                    .push_projected(
+                        position,
+                        &projected_kv_values[offset..offset + width],
+                        &projected_score_values[offset..offset + width],
+                        &ape_values,
+                        &norm_values,
+                        rms_eps,
+                        oracle_rope,
+                    )
+                    .unwrap()
+                {
+                    if publication == DeepSeekV4CompressorPublication::IndexerHadamard {
+                        hadamard_128_in_place(&mut emitted.value).unwrap();
+                    }
+                    expected_rows.push((
+                        (position as usize + 1) / RATIO - 1,
+                        emitted
+                            .value
+                            .into_iter()
+                            .map(|value| half::f16::from_f32(value).to_f32())
+                            .collect::<Vec<_>>(),
+                    ));
+                }
+                let kv = projected_kv.view_subrange(offset as u64, vec![width as u64]);
+                let score = projected_score.view_subrange(offset as u64, vec![width as u64]);
+                frontier
+                    .encode_projected(
+                        ctx, &encoder, &kv, &score, &ape, &norm, position, rope, rms_eps,
+                    )
+                    .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            assert_eq!(
+                expected_rows
+                    .iter()
+                    .map(|(row, _)| *row)
+                    .collect::<Vec<_>>(),
+                [16_382, 16_383]
+            );
+            assert_eq!(frontier.published_count(65_535), CAPACITY_ROWS);
+            for (row, expected) in expected_rows {
+                let published = frontier
+                    .published
+                    .view_subrange((row * head_dim) as u64, vec![head_dim as u64]);
+                let actual = read_f16(&published);
+                let mut dot = 0.0_f64;
+                let mut actual_norm = 0.0_f64;
+                let mut expected_norm = 0.0_f64;
+                let mut squared_error = 0.0_f64;
+                let mut max_error = 0.0_f32;
+                for (&actual, &expected) in actual.iter().zip(&expected) {
+                    dot += f64::from(actual) * f64::from(expected);
+                    actual_norm += f64::from(actual).powi(2);
+                    expected_norm += f64::from(expected).powi(2);
+                    squared_error += f64::from(actual - expected).powi(2);
+                    max_error = max_error.max((actual - expected).abs());
+                }
+                let cosine = dot / (actual_norm.sqrt() * expected_norm.sqrt());
+                let relative_rms = (squared_error / expected_norm).sqrt();
+                eprintln!(
+                    "far CSA row {row} cosine={cosine:.9} rel_rms={relative_rms:.9} max_abs={max_error}"
+                );
+                assert!(cosine >= 0.999_999_5);
+                assert!(relative_rms <= 0.001);
+                assert!(max_error <= 0.004);
+            }
+            let first = frontier.published.view_subrange(0, vec![head_dim as u64]);
+            assert!(read_f16(&first).iter().all(|&value| value == 0.0));
+            assert_close(
+                "far CSA KV state",
+                &read_f32(&frontier.kv_state),
+                oracle.kv_state(),
+                4e-5,
+            );
+            assert_close(
+                "far CSA score state",
+                &read_f32(&frontier.score_state),
+                oracle.score_state(),
+                4e-5,
+            );
+        }
+
+        run_case(&ctx, 512, DeepSeekV4CompressorPublication::Attention);
+        run_case(&ctx, 128, DeepSeekV4CompressorPublication::IndexerHadamard);
+    }
+
+    #[test]
+    fn ratio128_frontier_publishes_the_final_64k_row_without_prefix_replay() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const RATIO: usize = 128;
+        const HEAD_DIM: usize = 512;
+        const START_POSITION: u32 = 65_408;
+        const CAPACITY_ROWS: usize = 512;
+        let rms_eps = 1.0e-5;
+        let frontier = DeepSeekV4CompressorFrontier::new(
+            &ctx,
+            RATIO,
+            HEAD_DIM,
+            DeepSeekV4CompressorPublication::Attention,
+            CAPACITY_ROWS,
+        )
+        .unwrap();
+        let initial_kv = (0..RATIO * HEAD_DIM)
+            .map(|index| ((index * 17 + 3) % 139) as f32 * 0.0013 - 0.08)
+            .collect::<Vec<_>>();
+        let initial_scores = (0..RATIO * HEAD_DIM)
+            .map(|index| ((index * 19 + 7) % 149) as f32 * 0.0011 - 0.07)
+            .collect::<Vec<_>>();
+        host_write_f32(&frontier.kv_state, &initial_kv, "far HCA KV state").unwrap();
+        host_write_f32(
+            &frontier.score_state,
+            &initial_scores,
+            "far HCA score state",
+        )
+        .unwrap();
+        let mut oracle = CompressorState::from_snapshot(
+            RATIO,
+            HEAD_DIM,
+            u64::from(START_POSITION),
+            initial_kv,
+            initial_scores,
+        )
+        .unwrap();
+        let projected_kv_values = (0..RATIO * HEAD_DIM)
+            .map(|index| ((index * 23 + 5) % 151) as f32 * 0.0012 - 0.075)
+            .collect::<Vec<_>>();
+        let projected_score_values = (0..RATIO * HEAD_DIM)
+            .map(|index| ((index * 29 + 11) % 157) as f32 * 0.001 - 0.068)
+            .collect::<Vec<_>>();
+        let ape_values = (0..RATIO * HEAD_DIM)
+            .map(|index| ((index * 31 + 13) % 163) as f32 * 0.0009 - 0.073)
+            .collect::<Vec<_>>();
+        let norm_values = (0..HEAD_DIM)
+            .map(|index| 0.59 + (index % 41) as f32 * 0.008)
+            .collect::<Vec<_>>();
+        let projected_kv = offset_f32(
+            &ctx,
+            &projected_kv_values,
+            vec![HEAD_DIM as u64, RATIO as u64],
+        );
+        let projected_score = offset_f32(
+            &ctx,
+            &projected_score_values,
+            vec![HEAD_DIM as u64, RATIO as u64],
+        );
+        let ape = offset_f32(&ctx, &ape_values, vec![HEAD_DIM as u64, RATIO as u64]);
+        let norm = offset_f32(&ctx, &norm_values, vec![HEAD_DIM as u64]);
+        let rope = DeepSeekV4RopeParameters {
+            rotary_dim: 64,
+            theta: 160_000.0,
+            scaling_factor: 16.0,
+            original_context_length: 65_536,
+            beta_fast: 32.0,
+            beta_slow: 1.0,
+        };
+        let oracle_rope = RopeParameters::yarn(
+            rope.rotary_dim,
+            rope.theta,
+            rope.scaling_factor,
+            rope.original_context_length,
+            rope.beta_fast,
+            rope.beta_slow,
+        );
+        let mut expected = None;
+        for local in 0..RATIO {
+            let position = START_POSITION + local as u32;
+            let offset = local * HEAD_DIM;
+            let emitted = oracle
+                .push_projected(
+                    position,
+                    &projected_kv_values[offset..offset + HEAD_DIM],
+                    &projected_score_values[offset..offset + HEAD_DIM],
+                    &ape_values,
+                    &norm_values,
+                    rms_eps,
+                    oracle_rope,
+                )
+                .unwrap();
+            if local + 1 == RATIO {
+                expected = Some(
+                    emitted
+                        .expect("position 65535 must publish HCA row 511")
+                        .value
+                        .into_iter()
+                        .map(|value| half::f16::from_f32(value).to_f32())
+                        .collect::<Vec<_>>(),
+                );
+            } else {
+                assert!(emitted.is_none());
+            }
+        }
+        let expected = expected.unwrap();
+        let attention_queries = expected
+            .iter()
+            .map(|value| value * 12.0)
+            .collect::<Vec<_>>();
+        let raw_rows = vec![0.0f32; DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM];
+        let mut compressed_rows = vec![0.0f32; CAPACITY_ROWS * HEAD_DIM];
+        compressed_rows[(CAPACITY_ROWS - 1) * HEAD_DIM..].copy_from_slice(&expected);
+        let sinks = [-0.21f32];
+        let expected_attention = shared_kv_attention(
+            &attention_queries,
+            1,
+            HEAD_DIM,
+            &raw_rows,
+            &compressed_rows,
+            None,
+            &sinks,
+        )
+        .unwrap();
+        let prior_attention = shared_kv_attention(
+            &attention_queries,
+            1,
+            HEAD_DIM,
+            &raw_rows,
+            &compressed_rows[..(CAPACITY_ROWS - 1) * HEAD_DIM],
+            None,
+            &sinks,
+        )
+        .unwrap();
+        assert!(
+            expected_attention
+                .iter()
+                .zip(&prior_attention)
+                .any(|(current, prior)| (current - prior).abs() > 1e-3)
+        );
+        let attention_queries = offset_f32(&ctx, &attention_queries, vec![HEAD_DIM as u64, 1]);
+        let raw_cache =
+            MetalTensor::zeros_f16(&ctx, vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64])
+                .unwrap();
+        let sink_tensor = offset_f32(&ctx, &sinks, vec![1]);
+        let attention_output = MetalTensor::zeros_f32(&ctx, vec![HEAD_DIM as u64, 1]).unwrap();
+        let attention_config = DeepSeekV4PositionZeroAttentionConfig {
+            hidden_size: 1,
+            q_lora_rank: 1,
+            head_count: 1,
+            head_dim: HEAD_DIM,
+            rotary_dim: 64,
+            group_count: 1,
+            output_rank: 1,
+        };
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for local in 0..RATIO {
+            let position = START_POSITION + local as u32;
+            let offset = local * HEAD_DIM;
+            let kv = projected_kv.view_subrange(offset as u64, vec![HEAD_DIM as u64]);
+            let score = projected_score.view_subrange(offset as u64, vec![HEAD_DIM as u64]);
+            frontier
+                .encode_projected(
+                    &ctx, &encoder, &kv, &score, &ape, &norm, position, rope, rms_eps,
+                )
+                .unwrap();
+        }
+        encode_dense_sink_attention_f16(
+            &ctx,
+            &encoder,
+            &attention_queries,
+            &raw_cache,
+            Some(DeepSeekV4PublishedRows {
+                cache: &frontier.published,
+                count: CAPACITY_ROWS,
+                capacity_rows: CAPACITY_ROWS,
+            }),
+            &sink_tensor,
+            &attention_output,
+            65_535,
+            attention_config,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        assert_eq!(frontier.published_count(65_535), CAPACITY_ROWS);
+        let published = frontier.published.view_subrange(
+            ((CAPACITY_ROWS - 1) * HEAD_DIM) as u64,
+            vec![HEAD_DIM as u64],
+        );
+        assert_close("far HCA row 511", &read_f16(&published), &expected, 0.004);
+        assert_close(
+            "far HCA attention consumes row 511",
+            &read_f32(&attention_output),
+            &expected_attention,
+            0.004,
+        );
+        let prior = frontier.published.view_subrange(
+            ((CAPACITY_ROWS - 2) * HEAD_DIM) as u64,
+            vec![HEAD_DIM as u64],
+        );
+        assert!(read_f16(&prior).iter().all(|&value| value == 0.0));
+        assert_close(
+            "far HCA KV state",
+            &read_f32(&frontier.kv_state),
+            oracle.kv_state(),
+            4e-5,
+        );
+        assert_close(
+            "far HCA score state",
+            &read_f32(&frontier.score_state),
+            oracle.score_state(),
+            4e-5,
+        );
+    }
+
+    #[test]
     fn hadamard_128_matches_the_indexer_oracle() {
         let Some(ctx) = metal_context() else {
             return;
@@ -8960,6 +9650,17 @@ mod tests {
             command.error()
         );
         assert_close("Hadamard-128", &read_f32(&tensor), &expected, 2e-6);
+    }
+
+    #[test]
+    fn parallel_selector_pipeline_requires_32_lane_simdgroups() {
+        validate_parallel_selector_pipeline(32, 256).unwrap();
+        let error = validate_parallel_selector_pipeline(16, 256).unwrap_err();
+        assert!(error.to_string().contains("requires 32-lane SIMD groups"));
+        let error = validate_parallel_selector_pipeline(64, 1_024).unwrap_err();
+        assert!(error.to_string().contains("pipeline reports 64"));
+        let error = validate_parallel_selector_pipeline(32, 255).unwrap_err();
+        assert!(error.to_string().contains("255 threads, requires 256"));
     }
 
     #[test]
@@ -9019,6 +9720,7 @@ mod tests {
             &counts,
             &status,
             CAPACITY,
+            CAPACITY,
             TOP_K,
             QUERIES,
         )
@@ -9074,6 +9776,180 @@ mod tests {
         let invalid = &mask[2 * CAPACITY..];
         assert!(invalid[..TOP_K].iter().all(|&selected| selected == 1));
         assert!(invalid[TOP_K..].iter().all(|&selected| selected == 0));
+    }
+
+    #[test]
+    fn stable_top512_scales_to_the_full_64k_csa_history() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 16_384;
+        const TOP_K: usize = 512;
+        let scores = (0..CAPACITY)
+            .map(|row| {
+                let bucket = (row * 73 + row / 11) % 2_003;
+                bucket as f32 * 0.001 - 0.7
+            })
+            .collect::<Vec<_>>();
+        let mut expected = (0..CAPACITY).collect::<Vec<_>>();
+        expected.sort_by(|&left, &right| {
+            scores[right]
+                .total_cmp(&scores[left])
+                .then_with(|| left.cmp(&right))
+        });
+        expected.truncate(TOP_K);
+        expected.sort_unstable();
+
+        let scores = offset_f32(&ctx, &scores, vec![CAPACITY as u64, 1]);
+        let visible_counts = offset_i32(&ctx, &[CAPACITY as i32], vec![1]);
+        let mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+        let cache_order = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let counts = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let started = std::time::Instant::now();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &scores,
+            &visible_counts,
+            &mask,
+            None,
+            &cache_order,
+            &counts,
+            &status,
+            CAPACITY,
+            CAPACITY,
+            TOP_K,
+            1,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        let cold_elapsed = started.elapsed();
+        assert!(
+            command.error().is_none(),
+            "64K selector command failed: {:?}",
+            command.error()
+        );
+        assert_eq!(read_i32(&status), [0]);
+        assert_eq!(read_i32(&counts), [TOP_K as i32]);
+        let cold_ids = read_i32(&cache_order);
+        assert_eq!(
+            cold_ids,
+            expected.iter().map(|&row| row as i32).collect::<Vec<_>>()
+        );
+        let cold_mask = read_i32(&mask);
+        assert_eq!(cold_mask.iter().filter(|&&value| value == 1).count(), TOP_K);
+        for row in expected {
+            assert_eq!(cold_mask[row], 1);
+        }
+        let warm_started = std::time::Instant::now();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &scores,
+            &visible_counts,
+            &mask,
+            None,
+            &cache_order,
+            &counts,
+            &status,
+            CAPACITY,
+            CAPACITY,
+            TOP_K,
+            1,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        let warm_elapsed = warm_started.elapsed();
+        assert!(command.error().is_none());
+        assert_eq!(read_i32(&status), [0]);
+        assert_eq!(read_i32(&counts), [TOP_K as i32]);
+        assert_eq!(read_i32(&cache_order), cold_ids);
+        assert_eq!(read_i32(&mask), cold_mask);
+        eprintln!(
+            "deepseek_v4 full_64k_top512 cold_ms={:.3} warm_ms={:.3}",
+            cold_elapsed.as_secs_f64() * 1e3,
+            warm_elapsed.as_secs_f64() * 1e3,
+        );
+    }
+
+    #[test]
+    fn packed_top512_scales_to_the_full_64k_csa_history() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 16_384;
+        const TOP_K: usize = 512;
+        const QUERIES: usize = 128;
+        let mut score_values = Vec::with_capacity(CAPACITY * QUERIES);
+        for query in 0..QUERIES {
+            score_values.extend((0..CAPACITY).map(|row| {
+                if query.is_multiple_of(2) {
+                    row as f32
+                } else {
+                    -(row as f32)
+                }
+            }));
+        }
+        let scores = offset_f32(&ctx, &score_values, vec![CAPACITY as u64, QUERIES as u64]);
+        let visible_counts =
+            offset_i32(&ctx, &vec![CAPACITY as i32; QUERIES], vec![QUERIES as u64]);
+        let mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap();
+        let cache_order = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap();
+        let counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let run = || {
+            let started = std::time::Instant::now();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_select_top_k_f32(
+                &ctx,
+                &encoder,
+                &scores,
+                &visible_counts,
+                &mask,
+                None,
+                &cache_order,
+                &counts,
+                &status,
+                CAPACITY,
+                CAPACITY,
+                TOP_K,
+                QUERIES,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            started.elapsed()
+        };
+        let cold = run();
+        let warm = run();
+        assert_eq!(read_i32(&status), vec![0; QUERIES]);
+        assert_eq!(read_i32(&counts), vec![TOP_K as i32; QUERIES]);
+        let ids = read_i32(&cache_order);
+        let high = (CAPACITY - TOP_K..CAPACITY)
+            .map(|row| row as i32)
+            .collect::<Vec<_>>();
+        let low = (0..TOP_K as i32).collect::<Vec<_>>();
+        for query in 0..QUERIES {
+            let expected = if query.is_multiple_of(2) { &high } else { &low };
+            assert_eq!(&ids[query * TOP_K..(query + 1) * TOP_K], expected);
+        }
+        eprintln!(
+            "deepseek_v4 packed_full_64k_top512 cold_ms={:.3} warm_ms={:.3}",
+            cold.as_secs_f64() * 1e3,
+            warm.as_secs_f64() * 1e3,
+        );
     }
 
     #[test]
@@ -9307,6 +10183,7 @@ mod tests {
             &selected_counts,
             &status,
             CAPACITY,
+            VISIBLE,
             TOP_K,
             1,
         )
@@ -9371,6 +10248,267 @@ mod tests {
             &read_f32(&attention_output),
             &expected_attention,
             8e-5,
+        );
+    }
+
+    #[test]
+    fn sparse_csa_score_select_attention_reaches_the_64k_frontier() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const INDEX_HEADS: usize = 1;
+        const INDEX_DIM: usize = 128;
+        const ATTENTION_HEADS: usize = 1;
+        const ATTENTION_DIM: usize = 128;
+        const CAPACITY: usize = 16_384;
+        const VISIBLE: usize = CAPACITY;
+        const TOP_K: usize = 512;
+        const POSITION: usize = 65_535;
+
+        let index_queries = (0..INDEX_DIM)
+            .map(|dimension| 0.008 + (dimension % 17) as f32 * 0.0003)
+            .collect::<Vec<_>>();
+        let raw_head_weights = [0.73f32];
+        let index_scale = 1.0 / ((INDEX_HEADS * INDEX_DIM) as f32).sqrt();
+        let index_key_bits = (0..CAPACITY * INDEX_DIM)
+            .map(|index| {
+                let row = index / INDEX_DIM;
+                let dimension = index % INDEX_DIM;
+                let value = (row + 1) as f32 * 0.000_004 * (1.0 + (dimension % 13) as f32 * 0.007);
+                half::f16::from_f32(value).to_bits()
+            })
+            .collect::<Vec<_>>();
+        let index_keys_f32 = index_key_bits
+            .iter()
+            .map(|bits| half::f16::from_bits(*bits).to_f32())
+            .collect::<Vec<_>>();
+        let expected_scores = indexer_scores(
+            &index_queries,
+            &raw_head_weights,
+            &index_keys_f32[..VISIBLE * INDEX_DIM],
+            INDEX_HEADS,
+            INDEX_DIM,
+        )
+        .unwrap();
+        let expected_ranked = top_k_indices(&expected_scores, TOP_K).unwrap();
+        let mut expected_cache_order = expected_ranked.clone();
+        expected_cache_order.sort_unstable();
+        assert!(expected_cache_order[0] > 15_000);
+        assert!(expected_cache_order.contains(&(CAPACITY - 1)));
+
+        let attention_queries = (0..ATTENTION_DIM)
+            .map(|dimension| 0.037 + (dimension % 19) as f32 * 0.0006)
+            .collect::<Vec<_>>();
+        let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
+        let raw_start = POSITION + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
+        let mut raw_ring = vec![0.0f32; DEEPSEEK_V4_LOCAL_WINDOW * ATTENTION_DIM];
+        let mut raw_rows = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * ATTENTION_DIM);
+        for logical_position in raw_start..=POSITION {
+            let row = (0..ATTENTION_DIM)
+                .map(|dimension| {
+                    let tag = (logical_position * 17 + dimension * 11) % 89;
+                    round_f16((tag as f32 - 44.0) * 0.0004)
+                })
+                .collect::<Vec<_>>();
+            raw_rows.extend_from_slice(&row);
+            let slot = logical_position % DEEPSEEK_V4_LOCAL_WINDOW;
+            raw_ring[slot * ATTENTION_DIM..(slot + 1) * ATTENTION_DIM].copy_from_slice(&row);
+        }
+        let compressed_rows = (0..CAPACITY * ATTENTION_DIM)
+            .map(|index| {
+                let row = index / ATTENTION_DIM;
+                let dimension = index % ATTENTION_DIM;
+                let progression = row as f32 / (VISIBLE - 1) as f32;
+                round_f16(-0.25 + progression * 0.5 + ((dimension % 11) as f32 - 5.0) * 0.0005)
+            })
+            .collect::<Vec<_>>();
+        let mut selected_mask = vec![false; VISIBLE];
+        for &row in &expected_ranked {
+            selected_mask[row] = true;
+        }
+        let sinks = [-0.17f32];
+        let expected_attention = shared_kv_attention(
+            &attention_queries,
+            ATTENTION_HEADS,
+            ATTENTION_DIM,
+            &raw_rows,
+            &compressed_rows[..VISIBLE * ATTENTION_DIM],
+            Some(&selected_mask),
+            &sinks,
+        )
+        .unwrap();
+        let mut first_512 = vec![false; VISIBLE];
+        first_512[..TOP_K].fill(true);
+        let first_512_attention = shared_kv_attention(
+            &attention_queries,
+            ATTENTION_HEADS,
+            ATTENTION_DIM,
+            &raw_rows,
+            &compressed_rows[..VISIBLE * ATTENTION_DIM],
+            Some(&first_512),
+            &sinks,
+        )
+        .unwrap();
+        assert!(
+            expected_attention
+                .iter()
+                .zip(&first_512_attention)
+                .any(|(selected, first)| (selected - first).abs() > 1e-3)
+        );
+
+        let index_queries = offset_f32(
+            &ctx,
+            &index_queries,
+            vec![INDEX_DIM as u64, INDEX_HEADS as u64, 1],
+        );
+        let head_weights = offset_f32(&ctx, &raw_head_weights, vec![INDEX_HEADS as u64, 1]);
+        let index_keys = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&index_key_bits),
+            vec![INDEX_DIM as u64, CAPACITY as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let visible_counts = offset_i32(&ctx, &[VISIBLE as i32], vec![1]);
+        let scores = MetalTensor::zeros_f32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+        let gpu_mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+        let cache_order_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let selected_counts = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let attention_queries_tensor = offset_f32(
+            &ctx,
+            &attention_queries,
+            vec![ATTENTION_DIM as u64, ATTENTION_HEADS as u64],
+        );
+        let raw_bits = raw_ring
+            .iter()
+            .map(|value| half::f16::from_f32(*value).to_bits())
+            .collect::<Vec<_>>();
+        let raw_cache = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&raw_bits),
+            vec![ATTENTION_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let compressed_bits = compressed_rows
+            .iter()
+            .map(|value| half::f16::from_f32(*value).to_bits())
+            .collect::<Vec<_>>();
+        let compressed_cache = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&compressed_bits),
+            vec![ATTENTION_DIM as u64, CAPACITY as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let sink_tensor = offset_f32(&ctx, &sinks, vec![ATTENTION_HEADS as u64]);
+        let attention_output =
+            MetalTensor::zeros_f32(&ctx, vec![ATTENTION_DIM as u64, ATTENTION_HEADS as u64])
+                .unwrap();
+        let attention_config = DeepSeekV4PositionZeroAttentionConfig {
+            hidden_size: 1,
+            q_lora_rank: 1,
+            head_count: ATTENTION_HEADS,
+            head_dim: ATTENTION_DIM,
+            rotary_dim: 64,
+            group_count: 1,
+            output_rank: 1,
+        };
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_scale_f32_in_place(
+            &ctx,
+            &encoder,
+            &head_weights,
+            index_scale,
+            "64K indexer head weights",
+        )
+        .unwrap();
+        encode_lightning_indexer_scores_f16(
+            &ctx,
+            &encoder,
+            &index_queries,
+            &head_weights,
+            &index_keys,
+            &visible_counts,
+            &scores,
+            INDEX_HEADS,
+            INDEX_DIM,
+            CAPACITY,
+            1,
+        )
+        .unwrap();
+        encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &scores,
+            &visible_counts,
+            &gpu_mask,
+            None,
+            &cache_order_ids,
+            &selected_counts,
+            &status,
+            CAPACITY,
+            VISIBLE,
+            TOP_K,
+            1,
+        )
+        .unwrap();
+        let selected_ids = cache_order_ids.view_subrange(0, vec![TOP_K as u64]);
+        encode_selected_sink_attention_f16(
+            &ctx,
+            &encoder,
+            &attention_queries_tensor,
+            &raw_cache,
+            &compressed_cache,
+            &selected_ids,
+            &sink_tensor,
+            &attention_output,
+            POSITION as u32,
+            VISIBLE,
+            TOP_K,
+            CAPACITY,
+            attention_config,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "far sparse CSA command failed: {:?}",
+            command.error()
+        );
+
+        assert_eq!(read_i32(&status), vec![0]);
+        assert_eq!(read_i32(&selected_counts), vec![TOP_K as i32]);
+        let actual_scores = read_f32(&scores);
+        assert_close(
+            "64K Lightning Indexer scores",
+            &actual_scores,
+            &expected_scores,
+            3e-5,
+        );
+        let actual_mask = read_i32(&gpu_mask);
+        assert!(
+            actual_mask.iter().enumerate().all(|(row, &selected)| {
+                (selected != 0) == (row < VISIBLE && selected_mask[row])
+            })
+        );
+        assert_eq!(
+            read_i32(&cache_order_ids),
+            expected_cache_order
+                .iter()
+                .map(|row| *row as i32)
+                .collect::<Vec<_>>()
+        );
+        assert_close(
+            "64K selected sparse CSA attention",
+            &read_f32(&attention_output),
+            &expected_attention,
+            1.5e-4,
         );
     }
 

@@ -323,7 +323,6 @@ fn decode_f32_vector(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-#[cfg(feature = "dsv4-diagnostics")]
 fn f32_sha256(values: &[f32]) -> String {
     let mut hasher = Sha256::new();
     for value in values {
@@ -430,13 +429,39 @@ fn assert_logits_match(label: &str, logits: &[f32], oracle_bytes: &[u8], expecte
 }
 
 fn load_admitted_residency(ctx: &MetalContext, gguf: &GgufFile) -> DeepSeekV4MetalResidency {
-    let plan = DeepSeekV4MetalResidency::plan(ctx, gguf).expect("plan DS4 Metal residency");
+    load_admitted_residency_for(ctx, gguf, 3_073)
+}
+
+fn load_admitted_residency_for(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    forward_limit: usize,
+) -> DeepSeekV4MetalResidency {
+    let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(ctx, gguf, forward_limit)
+        .expect("plan DS4 Metal residency");
     let admitted = plan
         .admit(ctx.memory_signals())
         .expect("admit DS4 Metal residency");
     DeepSeekV4MetalResidency::load_from_plan(ctx, gguf, admitted)
         .expect("realize admitted DS4 Metal residency")
         .into_residency()
+}
+
+fn test_session_capacity_for(
+    config: &qwen_llm::deepseek_v4::DeepSeekV4Config,
+    forward_limit: usize,
+) -> qwen_llm::deepseek_v4_metal::DeepSeekV4SessionCapacity {
+    qwen_llm::deepseek_v4_metal::DeepSeekV4SessionCapacity::for_forward_limit(
+        forward_limit,
+        config.context_length,
+    )
+    .expect("derive DS4 test session capacity")
+}
+
+fn test_session_capacity(
+    config: &qwen_llm::deepseek_v4::DeepSeekV4Config,
+) -> qwen_llm::deepseek_v4_metal::DeepSeekV4SessionCapacity {
+    test_session_capacity_for(config, 3_073)
 }
 
 #[test]
@@ -459,6 +484,59 @@ fn pinned_position_zero_oracle_has_exact_identity() {
     assert_eq!(
         format!("{:x}", Sha256::digest(ORACLE_BYTES)),
         manifest["vector"]["sha256"].as_str().unwrap()
+    );
+}
+
+#[test]
+#[ignore = "requires the local DS4 model and target Metal device"]
+fn native_deepseek_v4_64k_session_plan_is_exact_and_admitted() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(model_path.exists(), "missing DS4 model");
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 65_536)
+        .expect("plan 64K DS4 session");
+    assert_eq!(plan.session_capacity().forward_limit(), 65_536);
+    assert_eq!(plan.session_capacity().csa_physical_rows(), 16_384);
+    assert_eq!(plan.session_capacity().hca_physical_rows(), 512);
+    let memory = plan.memory_plan().clone();
+    assert_eq!(memory.session_allocations().len(), 537);
+    assert_eq!(memory.session_logical_bytes(), 614_951_456);
+    assert_eq!(memory.session_priced_upper_bytes(), 619_413_504);
+    assert_eq!(memory.total_priced_upper_bytes(), 103_614_038_016);
+    let required = memory
+        .required_with_reserve_bytes()
+        .expect("price 64K plan with reserve");
+    assert_eq!(required, 104_150_908_928);
+    let admission = memory.admission(ctx.memory_signals());
+    assert!(admission.admitted, "64K plan denied: {admission:?}");
+    let before_residency = admission.signals.current_allocated_bytes;
+    let realized = DeepSeekV4MetalResidency::load_from_plan(
+        &ctx,
+        &gguf,
+        plan.admit(admission.signals).expect("admit 64K DS4 plan"),
+    )
+    .expect("realize 64K DS4 residency");
+    let after_residency = realized.after_residency_bytes();
+    let residency = realized.into_residency();
+    let session = DeepSeekV4PositionZeroForward::new(&ctx, residency)
+        .expect("construct admitted 64K DS4 session");
+    assert_eq!(session.capacity().forward_limit(), 65_536);
+    let after_session = ctx.current_allocated_size();
+    let observed_total = memory
+        .reconcile_session(before_residency, after_residency, after_session)
+        .expect("reconcile admitted 64K session");
+    let observed_session = after_session - after_residency;
+    assert!(observed_session <= memory.session_priced_upper_bytes());
+    eprintln!(
+        "deepseek_v4 64k memory session_priced={} total_priced={} required_with_reserve={} observed_session={} observed_total={}",
+        memory.session_priced_upper_bytes(),
+        memory.total_priced_upper_bytes(),
+        required,
+        observed_session,
+        observed_total,
     );
 }
 
@@ -1095,7 +1173,8 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
     let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
     let ctx = MetalContext::new().expect("create Metal context");
     let before_plan = ctx.current_allocated_size();
-    let load_plan = DeepSeekV4MetalResidency::plan(&ctx, &gguf).expect("plan DS4 Metal load");
+    let load_plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 3_073)
+        .expect("plan DS4 Metal load");
     assert_eq!(
         ctx.current_allocated_size(),
         before_plan,
@@ -1419,6 +1498,7 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
     let snapshot_config = session.residency().config().clone();
     let constraints = DeepSeekV4SnapshotCodecConstraints {
         config: &snapshot_config,
+        session_capacity: test_session_capacity(&snapshot_config),
         expected_model_content_id: model_content_id,
         max_record_bytes: 64 * 1024 * 1024,
     };
@@ -1761,6 +1841,7 @@ fn native_deepseek_v4_durable_position_1024_snapshot_matches_oracle() {
         &snapshot_path,
         DeepSeekV4SnapshotCodecConstraints {
             config: &model.config,
+            session_capacity: test_session_capacity(&model.config),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -1854,6 +1935,7 @@ fn native_deepseek_v4_position_1024_snapshot_reaches_position_2048() {
         &source_snapshot_path,
         DeepSeekV4SnapshotCodecConstraints {
             config: &model.config,
+            session_capacity: test_session_capacity(&model.config),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -1899,6 +1981,7 @@ fn native_deepseek_v4_position_1024_snapshot_reaches_position_2048() {
         &boundary_snapshot,
         DeepSeekV4SnapshotCodecConstraints {
             config: session.residency().config(),
+            session_capacity: session.capacity(),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -1998,6 +2081,7 @@ fn native_deepseek_v4_durable_position_2048_snapshot_matches_oracle() {
         &snapshot_path,
         DeepSeekV4SnapshotCodecConstraints {
             config: &model.config,
+            session_capacity: test_session_capacity(&model.config),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -2100,6 +2184,7 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
         &source_snapshot_path,
         DeepSeekV4SnapshotCodecConstraints {
             config: &model.config,
+            session_capacity: test_session_capacity(&model.config),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -2186,6 +2271,7 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
         &sparse_snapshot,
         DeepSeekV4SnapshotCodecConstraints {
             config: session.residency().config(),
+            session_capacity: session.capacity(),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -2347,6 +2433,7 @@ fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
         &snapshot_path,
         DeepSeekV4SnapshotCodecConstraints {
             config: &model.config,
+            session_capacity: test_session_capacity(&model.config),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -2449,6 +2536,7 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
         &source_snapshot_path,
         DeepSeekV4SnapshotCodecConstraints {
             config: &model.config,
+            session_capacity: test_session_capacity(&model.config),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -2594,6 +2682,7 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
         &boundary_snapshot,
         DeepSeekV4SnapshotCodecConstraints {
             config: session.residency().config(),
+            session_capacity: session.capacity(),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -2715,6 +2804,7 @@ fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
         &snapshot_path,
         DeepSeekV4SnapshotCodecConstraints {
             config: &model.config,
+            session_capacity: test_session_capacity(&model.config),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -2820,6 +2910,7 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
         &source_snapshot_path,
         DeepSeekV4SnapshotCodecConstraints {
             config: &model.config,
+            session_capacity: test_session_capacity(&model.config),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -3145,6 +3236,7 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
         &boundary_snapshot,
         DeepSeekV4SnapshotCodecConstraints {
             config: session.residency().config(),
+            session_capacity: session.capacity(),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -3187,6 +3279,7 @@ fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope()
         &snapshot_path,
         DeepSeekV4SnapshotCodecConstraints {
             config: &model.config,
+            session_capacity: test_session_capacity(&model.config),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -3265,6 +3358,192 @@ fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope()
         "durable_position_3072_elapsed={:.3}s identity_cache={:?}",
         started.elapsed().as_secs_f64(),
         content.outcome
+    );
+}
+
+#[test]
+#[ignore = "requires the local DS4 model and a published position-3072 snapshot"]
+fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
+    const FORWARD_LIMIT: usize = 3_077;
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let snapshot_path = std::env::var_os("DSV4_POSITION_3072_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_POSITION_3072_SNAPSHOT)
+        });
+    let identity_cache_path = std::env::var_os("DSV4_IDENTITY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_IDENTITY_CACHE)
+        });
+    assert!(model_path.exists(), "missing DS4 model");
+    assert!(snapshot_path.exists(), "missing position-3072 snapshot");
+
+    let started = Instant::now();
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+            .expect("resolve dynamic-capacity snapshot model identity");
+    let model_content_id = DeepSeekV4ModelContentId::new(content.content_id);
+    let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind DS4 config");
+    let capacity = test_session_capacity_for(&model.config, FORWARD_LIMIT);
+    assert_eq!(capacity.csa_physical_rows(), 1_024);
+    assert_eq!(capacity.hca_physical_rows(), 512);
+    let source = load_causal_snapshot_file(
+        &snapshot_path,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: &model.config,
+            session_capacity: capacity,
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("load position-3072 snapshot into fourth-slab capacity");
+    assert_eq!(source.next_position(), 3_072);
+
+    let ctx = MetalContext::new().expect("create Metal context");
+    let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
+    assert_eq!(residency.session_capacity(), capacity);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("build fourth-slab session");
+    session
+        .restore_causal_snapshot(&source)
+        .expect("restore position-3072 state into fourth slab");
+    let schedule_fork = session
+        .capture_causal_snapshot()
+        .expect("capture dynamic-capacity schedule fork");
+    assert_eq!(schedule_fork.causal_digest(), source.causal_digest());
+    session
+        .forward_token(&ctx, 35)
+        .expect("reproduce position 3072 under larger physical capacity");
+    assert_eq!(
+        f32_sha256(
+            &session
+                .copy_logits_f32()
+                .expect("copy larger-capacity position-3072 logits")
+        ),
+        "067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130"
+    );
+    session
+        .restore_causal_snapshot(&schedule_fork)
+        .expect("restore larger-capacity schedule fork after identity probe");
+
+    session
+        .prefill_tokens(&ctx, &[35, 201, 200, 34])
+        .expect("packed publication through position 3075");
+    assert_eq!(session.next_position(), 3_076);
+    let packed_boundary = session
+        .copy_logits_f32()
+        .expect("copy packed position-3075 logits");
+    let boundary_snapshot = session
+        .capture_causal_snapshot()
+        .expect("capture position-3076 fourth-slab state");
+    assert_eq!(boundary_snapshot.next_position(), 3_076);
+    assert_eq!(boundary_snapshot.payload_bytes(), 39_016_720);
+    session
+        .forward_token(&ctx, 35)
+        .expect("execute packed continuation at position 3076");
+    let packed_continuation = session
+        .copy_logits_f32()
+        .expect("copy packed position-3076 logits");
+
+    session
+        .restore_causal_snapshot(&schedule_fork)
+        .expect("restore split schedule fork");
+    for token in [35, 201, 200] {
+        session
+            .forward_token(&ctx, token)
+            .expect("advance singleton fourth-slab prefix");
+    }
+    session
+        .forward_token(&ctx, 34)
+        .expect("execute singleton row-768 publication");
+    let split_boundary = session
+        .copy_logits_f32()
+        .expect("copy singleton position-3075 logits");
+    session
+        .forward_token(&ctx, 35)
+        .expect("execute singleton position-3076 continuation");
+    let split_continuation = session
+        .copy_logits_f32()
+        .expect("copy singleton position-3076 logits");
+    let boundary_comparison = compare_logits(
+        "dynamic_capacity_packed_vs_singleton_position_3075",
+        &packed_boundary,
+        bytemuck::cast_slice(&split_boundary),
+    );
+    let continuation_comparison = compare_logits(
+        "dynamic_capacity_packed_vs_singleton_position_3076",
+        &packed_continuation,
+        bytemuck::cast_slice(&split_continuation),
+    );
+    assert_packed_singleton_schedule_containment("position 3075", &boundary_comparison);
+    assert_packed_singleton_schedule_containment("position 3076", &continuation_comparison);
+
+    session
+        .restore_causal_snapshot(&boundary_snapshot)
+        .expect("restore row-768 publication snapshot");
+    session
+        .forward_token(&ctx, 35)
+        .expect("replay restored position-3076 continuation");
+    let restored_continuation = session
+        .copy_logits_f32()
+        .expect("copy restored position-3076 logits");
+    assert!(
+        restored_continuation
+            .iter()
+            .zip(&packed_continuation)
+            .all(|(restored, packed)| restored.to_bits() == packed.to_bits())
+    );
+    let terminal = session
+        .capture_causal_snapshot()
+        .expect("capture terminal position-3077 state");
+    assert_eq!(terminal.next_position(), 3_077);
+    assert_eq!(terminal.payload_bytes(), 39_016_724);
+    let terminal_digest = terminal
+        .causal_digest()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let boundary_hash = f32_sha256(&packed_boundary);
+    let continuation_hash = f32_sha256(&packed_continuation);
+    assert_eq!(
+        boundary_hash,
+        "068c670b59fdc9c378a7dfb213d371dcbf44bebd69242b4ca453a1cd49ec3b2c"
+    );
+    assert_eq!(
+        continuation_hash,
+        "2b0dbd86ae4c1771c00027e535717c41ec96a8fa7e75f839b9e6e8ce75875382"
+    );
+    assert_eq!(
+        terminal_digest,
+        "082f7ed5e81fc77491610d403e5d9a80211026abbac32cab80db4dd1b3ac8e35"
+    );
+    let error = session
+        .forward_token(&ctx, 201)
+        .err()
+        .expect("position 3077 must reject before mutation");
+    assert!(error.to_string().contains("next position is 3077"));
+    assert_eq!(session.next_position(), 3_077);
+    assert_eq!(
+        session
+            .copy_logits_f32()
+            .expect("rejected continuation preserves logits"),
+        restored_continuation
+    );
+    eprintln!(
+        "dynamic_capacity position3075_hash={} position3076_hash={} terminal_digest={} elapsed={:.3}s",
+        boundary_hash,
+        continuation_hash,
+        terminal_digest,
+        started.elapsed().as_secs_f64(),
     );
 }
 

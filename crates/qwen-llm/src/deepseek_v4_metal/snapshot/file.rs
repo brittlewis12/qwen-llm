@@ -299,10 +299,15 @@ mod tests {
         config
     }
 
+    fn capacity(config: &DeepSeekV4Config) -> DeepSeekV4SessionCapacity {
+        DeepSeekV4SessionCapacity::for_forward_limit(3_073, config.context_length).unwrap()
+    }
+
     fn test_snapshot(config: &DeepSeekV4Config, seed: u16) -> DeepSeekV4CausalSnapshot {
         let model_content_id = DeepSeekV4ModelContentId::new([0x5a; 32]);
         let position = 3;
-        let geometry = snapshot_geometry(config, position).unwrap();
+        let session_capacity = capacity(config);
+        let geometry = snapshot_geometry(config, session_capacity, position).unwrap();
         let prefix_tokens = vec![35, 201, 200].into_boxed_slice();
         let raw_f16_bits = (0..geometry.raw_elements)
             .map(|index| index as u16 ^ seed)
@@ -321,13 +326,14 @@ mod tests {
             causal_digest: [0; 32],
         };
         snapshot.causal_digest = causal_digest(&snapshot);
-        validate_snapshot(&snapshot, config, model_content_id).unwrap();
+        validate_snapshot(&snapshot, config, session_capacity, model_content_id).unwrap();
         snapshot
     }
 
     fn constraints(config: &DeepSeekV4Config) -> DeepSeekV4SnapshotCodecConstraints<'_> {
         DeepSeekV4SnapshotCodecConstraints {
             config,
+            session_capacity: capacity(config),
             expected_model_content_id: DeepSeekV4ModelContentId::new([0x5a; 32]),
             max_record_bytes: 1024 * 1024,
         }

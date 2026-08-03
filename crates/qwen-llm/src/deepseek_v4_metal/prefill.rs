@@ -55,6 +55,7 @@ struct PrefillAttentionScratch {
 }
 
 struct PrefillSparseCsaScratch {
+    capacity_rows: usize,
     index_queries: MetalTensor,
     head_weights: MetalTensor,
     visible_counts: MetalTensor,
@@ -94,7 +95,17 @@ struct PrefillMoeScratch {
 }
 
 impl DeepSeekV4PrefillScratch {
-    pub(super) fn new(ctx: &MetalContext) -> Result<Self, DeepSeekV4MetalError> {
+    pub(super) fn new(
+        ctx: &MetalContext,
+        csa_capacity_rows: usize,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        if csa_capacity_rows < DEEPSEEK_V4_CSA_TOP_K
+            || !csa_capacity_rows.is_multiple_of(DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS)
+        {
+            return invalid(format!(
+                "packed sparse CSA capacity {csa_capacity_rows} is not an aligned top-k superset"
+            ));
+        }
         let n = DEEPSEEK_V4_PREFILL_MAX_TOKENS as u64;
         let h = DEEPSEEK_V4_HIDDEN_SIZE as u64;
         let residual = residual_len(DEEPSEEK_V4_HIDDEN_SIZE)? as u64;
@@ -155,20 +166,15 @@ impl DeepSeekV4PrefillScratch {
                 group_input: MetalTensor::zeros_f32(ctx, vec![GROUP_WIDTH as u64, n])?,
                 group_output: MetalTensor::zeros_f32(ctx, vec![1_024, n])?,
                 sparse_csa: PrefillSparseCsaScratch {
+                    capacity_rows: csa_capacity_rows,
                     index_queries: MetalTensor::zeros_f32(
                         ctx,
                         vec![INDEXER_HEAD_DIM as u64, INDEXER_HEAD_COUNT as u64, n],
                     )?,
                     head_weights: MetalTensor::zeros_f32(ctx, vec![INDEXER_HEAD_COUNT as u64, n])?,
                     visible_counts: MetalTensor::zeros_i32(ctx, vec![n])?,
-                    scores: MetalTensor::zeros_f32(
-                        ctx,
-                        vec![DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS as u64, n],
-                    )?,
-                    selected_mask: MetalTensor::zeros_i32(
-                        ctx,
-                        vec![DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS as u64, n],
-                    )?,
+                    scores: MetalTensor::zeros_f32(ctx, vec![csa_capacity_rows as u64, n])?,
+                    selected_mask: MetalTensor::zeros_i32(ctx, vec![csa_capacity_rows as u64, n])?,
                     cache_order_ids: MetalTensor::zeros_i32(
                         ctx,
                         vec![DEEPSEEK_V4_CSA_TOP_K as u64, n],
@@ -230,6 +236,7 @@ impl DeepSeekV4PrefillScratch {
 
 pub(super) fn append_session_allocation_requests(
     requests: &mut Vec<DeepSeekV4SessionAllocationRequest>,
+    csa_capacity_rows: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
     let n = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
     let h = DEEPSEEK_V4_HIDDEN_SIZE;
@@ -323,11 +330,7 @@ pub(super) fn append_session_allocation_requests(
     for name in ["scores", "selected_mask"] {
         push(
             &format!("attention.sparse_csa.{name}"),
-            checked_mul(
-                n,
-                DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
-                "packed sparse row scratch",
-            )?,
+            checked_mul(n, csa_capacity_rows, "packed sparse row scratch")?,
             if name == "scores" {
                 f32_bytes
             } else {
@@ -876,7 +879,7 @@ impl PrefillSparseCsaScratch {
         if query_offset >= n_tokens
             || rows.count <= DEEPSEEK_V4_CSA_TOP_K
             || rows.count > rows.capacity_rows
-            || rows.capacity_rows != DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS
+            || rows.capacity_rows != self.capacity_rows
         {
             return invalid(format!(
                 "packed sparse CSA geometry is invalid: offset={query_offset} tokens={n_tokens} rows={}/{}",
@@ -1090,6 +1093,7 @@ impl PrefillSparseCsaScratch {
             &selected_counts,
             &status,
             rows.capacity_rows,
+            rows.count,
             DEEPSEEK_V4_CSA_TOP_K,
             query_count,
         )?;
@@ -2543,7 +2547,6 @@ fn encode_packed_selected_sink_attention_f16(
         || sparse_end != n_tokens
         || rows.count <= DEEPSEEK_V4_CSA_TOP_K
         || rows.count > rows.capacity_rows
-        || rows.capacity_rows != DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS
     {
         return invalid(format!(
             "packed selected attention geometry is invalid: offset={} count={} tokens={n_tokens} rows={}/{}",
@@ -2740,7 +2743,7 @@ impl DeepSeekV4Session {
                     DeepSeekV4MetalError::Invalid("packed token index exceeds u32".into())
                 })?)
                 .ok_or_else(|| DeepSeekV4MetalError::Invalid("packed position overflow".into()))?;
-            validate_promoted_session_position(position)?;
+            self.capacity.validate_position(position)?;
         }
         self.validate_committed_token_append(start_position, token_ids.len())?;
         let token_values = token_ids

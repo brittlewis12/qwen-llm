@@ -707,24 +707,49 @@ kernel void kernel_deepseek_v4_select_top_k_f32(
 
     if (error == 0) {
         const uint removals = visible - selected_count;
-        for (uint removal = 0u; removal < removals; ++removal) {
-            int worst = -1;
-            float worst_score = INFINITY;
-            for (uint row = 0u; row < visible; ++row) {
-                if (selected_mask[mask_base + row] == 0) continue;
-                const float candidate = scores[query * args.row_capacity + row];
-                const bool worse = worst < 0 || candidate < worst_score
-                    || (candidate == worst_score && int(row) > worst);
-                if (worse) {
-                    worst = int(row);
-                    worst_score = candidate;
+        if (removals <= selected_count) {
+            for (uint removal = 0u; removal < removals; ++removal) {
+                int worst = -1;
+                float worst_score = INFINITY;
+                for (uint row = 0u; row < visible; ++row) {
+                    if (selected_mask[mask_base + row] == 0) continue;
+                    const float candidate = scores[query * args.row_capacity + row];
+                    const bool worse = worst < 0 || candidate < worst_score
+                        || (candidate == worst_score && int(row) > worst);
+                    if (worse) {
+                        worst = int(row);
+                        worst_score = candidate;
+                    }
                 }
+                if (worst < 0) {
+                    error = 3;
+                    break;
+                }
+                selected_mask[mask_base + uint(worst)] = 0;
             }
-            if (worst < 0) {
-                error = 3;
-                break;
+        } else {
+            for (uint row = 0u; row < visible; ++row) {
+                selected_mask[mask_base + row] = 0;
             }
-            selected_mask[mask_base + uint(worst)] = 0;
+            for (uint selection = 0u; selection < selected_count; ++selection) {
+                int best = -1;
+                float best_score = -INFINITY;
+                for (uint row = 0u; row < visible; ++row) {
+                    if (selected_mask[mask_base + row] != 0) continue;
+                    const float candidate = scores[query * args.row_capacity + row];
+                    const bool better = best < 0 || candidate > best_score
+                        || (candidate == best_score && int(row) < best);
+                    if (better) {
+                        best = int(row);
+                        best_score = candidate;
+                    }
+                }
+                if (best < 0) {
+                    error = 3;
+                    break;
+                }
+                selected_mask[mask_base + uint(best)] = 1;
+            }
         }
     }
 
@@ -760,6 +785,143 @@ kernel void kernel_deepseek_v4_select_top_k_f32(
     }
     selected_counts[query] = int(filled);
     status[query] = error;
+}
+
+kernel void kernel_deepseek_v4_select_top_k_parallel_f32(
+        constant ds4_indexer_select_args & args [[buffer(0)]],
+        device const float * scores [[buffer(1)]],
+        device const int * visible_counts [[buffer(2)]],
+        device int * selected_mask [[buffer(3)]],
+        device int * ranked_ids [[buffer(4)]],
+        device int * cache_order_ids [[buffer(5)]],
+        device int * selected_counts [[buffer(6)]],
+        device int * status [[buffer(7)]],
+        threadgroup float * candidate_scores [[threadgroup(0)]],
+        threadgroup int * candidate_ids [[threadgroup(1)]],
+        uint lane [[thread_index_in_threadgroup]],
+        uint query [[threadgroup_position_in_grid]],
+        uint width [[threads_per_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
+    if (query >= args.query_count) return;
+    const uint simdgroup_count = (width + 31u) / 32u;
+    const uint mask_base = query * args.row_capacity;
+    const uint ids_base = query * args.top_k;
+    const int visible_i = visible_counts[query];
+    const bool geometry_valid = visible_i > 0 && uint(visible_i) <= args.row_capacity
+        && args.top_k > 0u && args.top_k <= args.row_capacity;
+    const uint visible = geometry_valid ? uint(visible_i) : 0u;
+    const uint selected_count = min(visible, args.top_k);
+
+    for (uint row = lane; row < args.row_capacity; row += width) {
+        selected_mask[mask_base + row] = 0;
+    }
+    for (uint slot = lane; slot < args.top_k; slot += width) {
+        if (args.emit_ranked != 0u) ranked_ids[ids_base + slot] = -1;
+        cache_order_ids[ids_base + slot] = -1;
+    }
+    int local_error = geometry_valid ? 0 : 1;
+    if (local_error == 0) {
+        for (uint row = lane; row < visible; row += width) {
+            if (!isfinite(scores[query * args.row_capacity + row])) {
+                local_error = 2;
+                break;
+            }
+        }
+    }
+    const uint simd_error = simd_max(uint(local_error));
+    if (simd_lane == 0u) {
+        candidate_ids[simdgroup] = int(simd_error);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    if (simdgroup == 0u) {
+        const uint group_error = simd_lane < simdgroup_count
+            ? uint(candidate_ids[simd_lane])
+            : 0u;
+        const uint reduced_error = simd_max(group_error);
+        if (simd_lane == 0u) candidate_ids[0] = int(reduced_error);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    int error = candidate_ids[0];
+
+    if (error == 0) {
+        for (uint selection = 0u; selection < selected_count; ++selection) {
+            int best = -1;
+            float best_score = -INFINITY;
+            for (uint row = lane; row < visible; row += width) {
+                if (selected_mask[mask_base + row] != 0) continue;
+                const float candidate = scores[query * args.row_capacity + row];
+                if (best < 0 || candidate > best_score
+                        || (candidate == best_score && int(row) < best)) {
+                    best = int(row);
+                    best_score = candidate;
+                }
+            }
+            const float simd_best_score = simd_max(best_score);
+            const uint simd_best_id = simd_min(
+                best_score == simd_best_score && best >= 0 ? uint(best) : UINT_MAX
+            );
+            if (simd_lane == 0u) {
+                candidate_ids[simdgroup] = int(simd_best_id);
+                candidate_scores[simdgroup] = simd_best_score;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (simdgroup == 0u) {
+                const float group_score = simd_lane < simdgroup_count
+                    ? candidate_scores[simd_lane]
+                    : -INFINITY;
+                const int group_id = simd_lane < simdgroup_count
+                    ? candidate_ids[simd_lane]
+                    : -1;
+                const float global_score = simd_max(group_score);
+                const uint global_id = simd_min(
+                    group_score == global_score && group_id >= 0 ? uint(group_id) : UINT_MAX
+                );
+                if (simd_lane == 0u) {
+                    if (global_id == UINT_MAX) {
+                        error = 3;
+                    } else {
+                        selected_mask[mask_base + global_id] = 1;
+                        if (args.emit_ranked != 0u) {
+                            ranked_ids[ids_base + selection] = int(global_id);
+                        }
+                    }
+                    candidate_ids[0] = error;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+            error = candidate_ids[0];
+            if (error != 0) break;
+        }
+    }
+
+    if (error != 0) {
+        for (uint row = lane; row < args.row_capacity; row += width) {
+            selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
+        }
+        for (uint slot = lane; slot < args.top_k; slot += width) {
+            const int id = slot < selected_count ? int(slot) : -1;
+            if (args.emit_ranked != 0u) ranked_ids[ids_base + slot] = id;
+            cache_order_ids[ids_base + slot] = id;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+
+    if (lane == 0u) {
+        uint filled = 0u;
+        if (error == 0) {
+            for (uint row = 0u; row < visible && filled < selected_count; ++row) {
+                if (selected_mask[mask_base + row] == 0) continue;
+                cache_order_ids[ids_base + filled] = int(row);
+                ++filled;
+            }
+            if (filled != selected_count) error = 3;
+        } else {
+            filled = selected_count;
+        }
+        selected_counts[query] = int(filled);
+        status[query] = error;
+    }
 }
 
 kernel void kernel_deepseek_v4_selected_sink_attention_f16(

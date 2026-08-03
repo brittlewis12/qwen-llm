@@ -39,6 +39,7 @@ const OFF_RESERVED: usize = 0xe0;
 #[derive(Clone, Copy, Debug)]
 pub struct DeepSeekV4SnapshotCodecConstraints<'a> {
     pub config: &'a DeepSeekV4Config,
+    pub session_capacity: DeepSeekV4SessionCapacity,
     pub expected_model_content_id: DeepSeekV4ModelContentId,
     pub max_record_bytes: u64,
 }
@@ -102,8 +103,12 @@ impl WireLayout {
         source_observation: DeepSeekV4SnapshotObservation,
         constraints: DeepSeekV4SnapshotCodecConstraints<'_>,
     ) -> Result<Self, DeepSeekV4SnapshotCodecError> {
-        let geometry =
-            snapshot_geometry(constraints.config, next_position).map_err(snapshot_codec_error)?;
+        let geometry = snapshot_geometry(
+            constraints.config,
+            constraints.session_capacity,
+            next_position,
+        )
+        .map_err(snapshot_codec_error)?;
         let prefix_bytes = checked_mul("prefix bytes", u64::from(next_position), 4)?;
         let raw_bytes = checked_mul("raw bytes", geometry.raw_elements as u64, 2)?;
         let compressor_bytes =
@@ -147,6 +152,7 @@ pub fn encode_causal_snapshot<W: Write>(
     validate_snapshot(
         snapshot,
         constraints.config,
+        constraints.session_capacity,
         constraints.expected_model_content_id,
     )
     .map_err(snapshot_codec_error)?;
@@ -252,6 +258,7 @@ pub fn decode_causal_snapshot<R: Read>(
     validate_snapshot(
         &snapshot,
         constraints.config,
+        constraints.session_capacity,
         constraints.expected_model_content_id,
     )
     .map_err(snapshot_codec_error)?;
@@ -582,13 +589,18 @@ mod tests {
         config
     }
 
+    fn capacity(config: &DeepSeekV4Config) -> DeepSeekV4SessionCapacity {
+        DeepSeekV4SessionCapacity::for_forward_limit(3_073, config.context_length).unwrap()
+    }
+
     fn test_snapshot(
         config: &DeepSeekV4Config,
         position: u32,
         observation: DeepSeekV4SnapshotObservation,
     ) -> DeepSeekV4CausalSnapshot {
         let model_content_id = DeepSeekV4ModelContentId::new([0x5a; 32]);
-        let geometry = snapshot_geometry(config, position).unwrap();
+        let session_capacity = capacity(config);
+        let geometry = snapshot_geometry(config, session_capacity, position).unwrap();
         let prefix_tokens = (0..position)
             .map(|token| token % config.vocab_size)
             .collect::<Vec<_>>()
@@ -615,13 +627,14 @@ mod tests {
             causal_digest: [0; 32],
         };
         snapshot.causal_digest = causal_digest(&snapshot);
-        validate_snapshot(&snapshot, config, model_content_id).unwrap();
+        validate_snapshot(&snapshot, config, session_capacity, model_content_id).unwrap();
         snapshot
     }
 
     fn constraints(config: &DeepSeekV4Config) -> DeepSeekV4SnapshotCodecConstraints<'_> {
         DeepSeekV4SnapshotCodecConstraints {
             config,
+            session_capacity: capacity(config),
             expected_model_content_id: DeepSeekV4ModelContentId::new([0x5a; 32]),
             max_record_bytes: 64 * 1024 * 1024,
         }
@@ -735,10 +748,16 @@ mod tests {
     #[test]
     fn production_and_legacy_layouts_stay_bounded_and_exact() {
         let config = crate::deepseek_v4::flash_0731_config_fixture();
+        let promoted_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+            config.context_length,
+        )
+        .unwrap();
         let constraints = DeepSeekV4SnapshotCodecConstraints {
             config: &config,
+            session_capacity: promoted_capacity,
             expected_model_content_id: DeepSeekV4ModelContentId::new([0x5a; 32]),
-            max_record_bytes: 64 * 1024 * 1024,
+            max_record_bytes: 1024 * 1024 * 1024,
         };
         let legacy = WireLayout::derive(
             1_025,
@@ -759,11 +778,11 @@ mod tests {
             constraints,
         )
         .unwrap();
-        assert_eq!(terminal.prefix_bytes, 12_292);
+        assert_eq!(terminal.prefix_bytes, 262_144);
         assert_eq!(terminal.raw_bytes, 5_636_096);
         assert_eq!(terminal.compressor_bytes, 12_206_080);
-        assert_eq!(terminal.published_bytes, 21_135_360);
-        assert_eq!(terminal.payload_bytes, 38_989_828);
-        assert_eq!(terminal.record_bytes, 39_006_244);
+        assert_eq!(terminal.published_bytes, 450_887_680);
+        assert_eq!(terminal.payload_bytes, 468_992_000);
+        assert_eq!(terminal.record_bytes, 469_008_416);
     }
 }

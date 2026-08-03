@@ -58,7 +58,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const CHECKPOINT_STAGED_INTEGRITY_ENV: &str = "QWEN_CHECKPOINT_STAGED_INTEGRITY";
 const GREEDY_GPU_ARGMAX_ENV: &str = "QWEN_GREEDY_GPU_ARGMAX";
-const DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+const DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES: u64 = 1024 * 1024 * 1024;
 const DEEPSEEK_V4_SNAPSHOT_IDENTITY_CACHE_DIR: &str = ".qwen-dsv4-model-identity-v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2408,8 +2408,16 @@ fn run_deepseek_v4_single_turn(
     );
     let load_t0 = Instant::now();
     let ctx = MetalContext::new().context("init Metal context for DeepSeek V4")?;
-    let load_plan = DeepSeekV4MetalResidency::plan(&ctx, &gguf)
-        .context("plan strict DeepSeek V4 Metal residency and session")?;
+    let load_plan =
+        DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, required_forwards)
+            .context("plan strict DeepSeek V4 Metal residency and session")?;
+    let session_capacity = load_plan.session_capacity();
+    eprintln!(
+        "deepseek_v4: session capacity forwards={} csa_physical_rows={} hca_physical_rows={}",
+        session_capacity.forward_limit(),
+        session_capacity.csa_physical_rows(),
+        session_capacity.hca_physical_rows(),
+    );
     let restored_snapshot = if snapshot_file_exists {
         let snapshot_path = args
             .deepseek_v4_snapshot
@@ -2422,6 +2430,7 @@ fn run_deepseek_v4_single_turn(
             snapshot_path,
             DeepSeekV4SnapshotCodecConstraints {
                 config: load_plan.config(),
+                session_capacity: load_plan.session_capacity(),
                 expected_model_content_id: model_content_id,
                 max_record_bytes: DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES,
             },
@@ -2538,6 +2547,7 @@ fn run_deepseek_v4_single_turn(
                 &snapshot,
                 DeepSeekV4SnapshotCodecConstraints {
                     config: session.residency().config(),
+                    session_capacity: session.capacity(),
                     expected_model_content_id: model_content_id,
                     max_record_bytes: DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES,
                 },
@@ -6372,7 +6382,7 @@ mod tests {
         );
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
-            25
+            512
         );
     }
 

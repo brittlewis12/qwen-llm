@@ -919,6 +919,13 @@ kernel void kernel_deepseek_v4_select_top_k_f32(
     status[query] = error;
 }
 
+static inline uint ds4_selector_order_key(float value) {
+    uint bits = as_type<uint>(value);
+    // Match -ffast-math comparisons: subnormals and both signed zeros tie.
+    if ((bits & 0x7f800000u) == 0u) bits = 0u;
+    return (bits & 0x80000000u) != 0u ? ~bits : (bits ^ 0x80000000u);
+}
+
 kernel void kernel_deepseek_v4_select_top_k_parallel_f32(
         constant ds4_indexer_select_args & args [[buffer(0)]],
         device const float * scores [[buffer(1)]],
@@ -928,8 +935,8 @@ kernel void kernel_deepseek_v4_select_top_k_parallel_f32(
         device int * cache_order_ids [[buffer(5)]],
         device int * selected_counts [[buffer(6)]],
         device int * status [[buffer(7)]],
-        threadgroup float * candidate_scores [[threadgroup(0)]],
-        threadgroup int * candidate_ids [[threadgroup(1)]],
+        threadgroup uint * lane_scratch [[threadgroup(0)]],
+        threadgroup uint * shared [[threadgroup(1)]],
         uint lane [[thread_index_in_threadgroup]],
         uint query [[threadgroup_position_in_grid]],
         uint width [[threads_per_threadgroup]],
@@ -963,69 +970,18 @@ kernel void kernel_deepseek_v4_select_top_k_parallel_f32(
     }
     const uint simd_error = simd_max(uint(local_error));
     if (simd_lane == 0u) {
-        candidate_ids[simdgroup] = int(simd_error);
+        lane_scratch[simdgroup] = simd_error;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
     if (simdgroup == 0u) {
         const uint group_error = simd_lane < simdgroup_count
-            ? uint(candidate_ids[simd_lane])
+            ? lane_scratch[simd_lane]
             : 0u;
         const uint reduced_error = simd_max(group_error);
-        if (simd_lane == 0u) candidate_ids[0] = int(reduced_error);
+        if (simd_lane == 0u) shared[0] = reduced_error;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    int error = candidate_ids[0];
-
-    if (error == 0) {
-        for (uint selection = 0u; selection < selected_count; ++selection) {
-            int best = -1;
-            float best_score = -INFINITY;
-            for (uint row = lane; row < visible; row += width) {
-                if (selected_mask[mask_base + row] != 0) continue;
-                const float candidate = scores[query * args.row_capacity + row];
-                if (best < 0 || candidate > best_score
-                        || (candidate == best_score && int(row) < best)) {
-                    best = int(row);
-                    best_score = candidate;
-                }
-            }
-            const float simd_best_score = simd_max(best_score);
-            const uint simd_best_id = simd_min(
-                best_score == simd_best_score && best >= 0 ? uint(best) : UINT_MAX
-            );
-            if (simd_lane == 0u) {
-                candidate_ids[simdgroup] = int(simd_best_id);
-                candidate_scores[simdgroup] = simd_best_score;
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            if (simdgroup == 0u) {
-                const float group_score = simd_lane < simdgroup_count
-                    ? candidate_scores[simd_lane]
-                    : -INFINITY;
-                const int group_id = simd_lane < simdgroup_count
-                    ? candidate_ids[simd_lane]
-                    : -1;
-                const float global_score = simd_max(group_score);
-                const uint global_id = simd_min(
-                    group_score == global_score && group_id >= 0 ? uint(group_id) : UINT_MAX
-                );
-                if (simd_lane == 0u) {
-                    if (global_id == UINT_MAX) {
-                        error = 3;
-                    } else {
-                        selected_mask[mask_base + global_id] = 1;
-                        if (args.emit_ranked != 0u) {
-                            ranked_ids[ids_base + selection] = int(global_id);
-                        }
-                    }
-                    candidate_ids[0] = error;
-                }
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
-            error = candidate_ids[0];
-            if (error != 0) break;
-        }
-    }
+    int error = int(shared[0]);
 
     if (error != 0) {
         for (uint row = lane; row < args.row_capacity; row += width) {
@@ -1036,23 +992,159 @@ kernel void kernel_deepseek_v4_select_top_k_parallel_f32(
             if (args.emit_ranked != 0u) ranked_ids[ids_base + slot] = id;
             cache_order_ids[ids_base + slot] = id;
         }
+        threadgroup_barrier(mem_flags::mem_device);
+        if (lane == 0u) {
+            selected_counts[query] = int(selected_count);
+            status[query] = error;
+        }
+        return;
+    }
+
+    uint prefix = 0u;
+    uint prefix_mask = 0u;
+    uint rank = selected_count;
+    // Resolve the 1-based kth score by counting one radix bit per pass.
+    for (int bit = 31; bit >= 0; --bit) {
+        const uint bit_mask = 1u << uint(bit);
+        uint local_ones = 0u;
+        for (uint row = lane; row < visible; row += width) {
+            const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
+            if ((key & prefix_mask) == prefix && (key & bit_mask) != 0u) {
+                ++local_ones;
+            }
+        }
+        const uint simd_ones = simd_sum(local_ones);
+        if (simd_lane == 0u) lane_scratch[simdgroup] = simd_ones;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (simdgroup == 0u) {
+            const uint group_ones = simd_lane < simdgroup_count
+                ? lane_scratch[simd_lane]
+                : 0u;
+            const uint total_ones = simd_sum(group_ones);
+            if (simd_lane == 0u) shared[0] = total_ones;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const uint ones = shared[0];
+        if (rank <= ones) {
+            prefix |= bit_mask;
+        } else {
+            rank -= ones;
+        }
+        prefix_mask |= bit_mask;
+    }
+
+    const uint threshold_key = prefix;
+    const uint threshold_take = rank;
+    const uint chunk = (visible + width - 1u) / width;
+    const uint chunk_start = min(lane * chunk, visible);
+    const uint chunk_end = min(chunk_start + chunk, visible);
+    // Ordered chunks make threshold ties and final compaction stable by row ID.
+    uint local_equal = 0u;
+    for (uint row = chunk_start; row < chunk_end; ++row) {
+        const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
+        if (key == threshold_key) ++local_equal;
+    }
+    lane_scratch[lane] = local_equal;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        uint equal_total = 0u;
+        for (uint index = 0u; index < width; ++index) {
+            const uint count = lane_scratch[index];
+            lane_scratch[index] = equal_total;
+            equal_total += count;
+        }
+        shared[0] = equal_total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint equal_before = lane_scratch[lane];
+
+    uint local_equal_seen = 0u;
+    uint local_selected = 0u;
+    for (uint row = chunk_start; row < chunk_end; ++row) {
+        const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
+        const bool at_threshold = key == threshold_key;
+        const bool selected = key > threshold_key
+            || (at_threshold && equal_before + local_equal_seen < threshold_take);
+        if (at_threshold) ++local_equal_seen;
+        if (selected) ++local_selected;
+    }
+    lane_scratch[lane] = local_selected;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        uint selected_total = 0u;
+        for (uint index = 0u; index < width; ++index) {
+            const uint count = lane_scratch[index];
+            lane_scratch[index] = selected_total;
+            selected_total += count;
+        }
+        shared[0] = selected_total;
+        shared[1] = selected_total == selected_count ? 0u : 3u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    error = int(shared[1]);
+    if (error != 0) {
+        for (uint row = lane; row < args.row_capacity; row += width) {
+            selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
+        }
+        for (uint slot = lane; slot < args.top_k; slot += width) {
+            const int id = slot < selected_count ? int(slot) : -1;
+            if (args.emit_ranked != 0u) ranked_ids[ids_base + slot] = id;
+            cache_order_ids[ids_base + slot] = id;
+        }
+        threadgroup_barrier(mem_flags::mem_device);
+        if (lane == 0u) {
+            selected_counts[query] = int(selected_count);
+            status[query] = error;
+        }
+        return;
+    }
+
+    uint output_slot = lane_scratch[lane];
+    local_equal_seen = 0u;
+    for (uint row = chunk_start; row < chunk_end; ++row) {
+        const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
+        const bool at_threshold = key == threshold_key;
+        const bool selected = key > threshold_key
+            || (at_threshold && equal_before + local_equal_seen < threshold_take);
+        if (at_threshold) ++local_equal_seen;
+        if (!selected) continue;
+        selected_mask[mask_base + row] = 1;
+        cache_order_ids[ids_base + output_slot] = int(row);
+        ++output_slot;
     }
     threadgroup_barrier(mem_flags::mem_device);
 
-    if (lane == 0u) {
-        uint filled = 0u;
-        if (error == 0) {
-            for (uint row = 0u; row < visible && filled < selected_count; ++row) {
-                if (selected_mask[mask_base + row] == 0) continue;
-                cache_order_ids[ids_base + filled] = int(row);
-                ++filled;
-            }
-            if (filled != selected_count) error = 3;
-        } else {
-            filled = selected_count;
+    if (args.emit_ranked != 0u) {
+        for (uint slot = lane; slot < selected_count; slot += width) {
+            ranked_ids[ids_base + slot] = cache_order_ids[ids_base + slot];
         }
-        selected_counts[query] = int(filled);
-        status[query] = error;
+        threadgroup_barrier(mem_flags::mem_device);
+        if (lane == 0u) {
+            for (uint slot = 1u; slot < selected_count; ++slot) {
+                const int candidate_id = ranked_ids[ids_base + slot];
+                const uint candidate_key = ds4_selector_order_key(
+                    scores[query * args.row_capacity + uint(candidate_id)]
+                );
+                uint insertion = slot;
+                while (insertion > 0u) {
+                    const int prior_id = ranked_ids[ids_base + insertion - 1u];
+                    const uint prior_key = ds4_selector_order_key(
+                        scores[query * args.row_capacity + uint(prior_id)]
+                    );
+                    if (candidate_key < prior_key
+                            || (candidate_key == prior_key && candidate_id > prior_id)) break;
+                    ranked_ids[ids_base + insertion] = prior_id;
+                    --insertion;
+                }
+                ranked_ids[ids_base + insertion] = candidate_id;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_device);
+    }
+
+    if (lane == 0u) {
+        selected_counts[query] = int(selected_count);
+        status[query] = 0;
     }
 }
 

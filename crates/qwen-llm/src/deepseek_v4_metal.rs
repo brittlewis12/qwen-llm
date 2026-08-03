@@ -5166,6 +5166,15 @@ fn encode_select_top_k_f32(
     {
         return invalid("indexer selection geometry is invalid");
     }
+    let score_elements = checked_mul(
+        row_capacity,
+        query_count,
+        "indexer selection score elements",
+    )?;
+    let id_elements = checked_mul(top_k, query_count, "indexer selection ID elements")?;
+    if u32::try_from(score_elements).is_err() || u32::try_from(id_elements).is_err() {
+        return invalid("indexer selection buffer offsets exceed u32");
+    }
     validate_f32(
         scores,
         &[row_capacity as u64, query_count as u64],
@@ -5251,8 +5260,8 @@ fn encode_select_top_k_f32(
     enc.set_tensor(7, status);
     if parallel {
         const THREADGROUP_WIDTH: usize = 256;
-        enc.set_threadgroup_memory(0, THREADGROUP_WIDTH * std::mem::size_of::<f32>());
-        enc.set_threadgroup_memory(1, THREADGROUP_WIDTH * std::mem::size_of::<i32>());
+        enc.set_threadgroup_memory(0, THREADGROUP_WIDTH * std::mem::size_of::<u32>());
+        enc.set_threadgroup_memory(1, THREADGROUP_WIDTH * std::mem::size_of::<u32>());
         enc.dispatch(
             MTLSize {
                 width: query_count,
@@ -6781,6 +6790,30 @@ mod tests {
         host_read_i32(tensor, "test I32 tensor").expect("read I32")
     }
 
+    fn deployed_selector_order_key(value: f32) -> u32 {
+        assert!(value.is_finite());
+        let mut bits = value.to_bits();
+        if (bits & 0x7f80_0000) == 0 {
+            bits = 0;
+        }
+        if bits & 0x8000_0000 != 0 {
+            !bits
+        } else {
+            bits ^ 0x8000_0000
+        }
+    }
+
+    fn deployed_selector_top_k_indices(scores: &[f32], top_k: usize) -> Vec<usize> {
+        let mut indices = (0..scores.len()).collect::<Vec<_>>();
+        indices.sort_unstable_by(|&left, &right| {
+            deployed_selector_order_key(scores[right])
+                .cmp(&deployed_selector_order_key(scores[left]))
+                .then_with(|| left.cmp(&right))
+        });
+        indices.truncate(top_k.min(indices.len()));
+        indices
+    }
+
     fn assert_close(label: &str, actual: &[f32], expected: &[f32], tolerance: f32) {
         assert_eq!(actual.len(), expected.len(), "{label} length");
         for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
@@ -7083,7 +7116,7 @@ mod tests {
         let hash = format!("{:x}", hasher.finalize());
         assert_eq!(
             hash,
-            "faec662738ace00aff407638de8adfd44ac3e98106ff5fbc6e1133c5e42fb363"
+            "915be9ad610710c4bcb3cfb661ef1fcdd35e2ccebca82c20e15b05336528997a"
         );
         eprintln!("deepseek_v4 synthetic_position_65663_sha256={hash}");
     }
@@ -10779,6 +10812,109 @@ mod tests {
     }
 
     #[test]
+    fn selector_rejects_u32_buffer_offset_overflow_before_binding() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let f32_tensor = MetalTensor::zeros_f32(&ctx, vec![1]).unwrap();
+        let i32_tensor = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let error = encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &f32_tensor,
+            &i32_tensor,
+            &i32_tensor,
+            None,
+            &i32_tensor,
+            &i32_tensor,
+            &i32_tensor,
+            u32::MAX as usize,
+            1,
+            1,
+            2,
+        )
+        .unwrap_err();
+        encoder.end();
+        assert!(error.to_string().contains("buffer offsets exceed u32"));
+    }
+
+    #[test]
+    fn parallel_selector_flushes_subnormals_and_ties_signed_zero_by_row() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 1_025;
+        const TOP_K: usize = 512;
+        let mut score_values = vec![-1.0f32; CAPACITY];
+        score_values[..510].fill(1.0);
+        score_values[511] = f32::from_bits(0x8000_0001);
+        score_values[512] = 0.0;
+        score_values[513] = -0.0;
+        score_values[600] = f32::from_bits(1);
+        let ieee_ranked = top_k_indices(&score_values, TOP_K).unwrap();
+        assert_eq!(&ieee_ranked[510..], &[600, 512]);
+        let expected_ranked = deployed_selector_top_k_indices(&score_values, TOP_K);
+        assert_eq!(&expected_ranked[510..], &[511, 512]);
+        let mut expected_cache_order = expected_ranked.clone();
+        expected_cache_order.sort_unstable();
+
+        let scores = offset_f32(&ctx, &score_values, vec![CAPACITY as u64, 1]);
+        let visible_counts = offset_i32(&ctx, &[CAPACITY as i32], vec![1]);
+        let mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+        let ranked = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let cache_order = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let counts = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &scores,
+            &visible_counts,
+            &mask,
+            Some(&ranked),
+            &cache_order,
+            &counts,
+            &status,
+            CAPACITY,
+            CAPACITY,
+            TOP_K,
+            1,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        assert_eq!(read_i32(&status), [0]);
+        assert_eq!(read_i32(&counts), [TOP_K as i32]);
+        assert_eq!(
+            read_i32(&ranked),
+            expected_ranked
+                .iter()
+                .map(|&row| row as i32)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            read_i32(&cache_order),
+            expected_cache_order
+                .iter()
+                .map(|&row| row as i32)
+                .collect::<Vec<_>>()
+        );
+        let actual_mask = read_i32(&mask);
+        for row in 0..CAPACITY {
+            assert_eq!(
+                actual_mask[row],
+                i32::from(expected_cache_order.contains(&row))
+            );
+        }
+    }
+
+    #[test]
     fn batched_hadamard_and_stable_top512_match_cpu_contracts() {
         let Some(ctx) = metal_context() else {
             return;
@@ -10894,6 +11030,264 @@ mod tests {
     }
 
     #[test]
+    fn radix_top512_matches_mixed_packed_cpu_contracts_repeatably() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 1_537;
+        const TOP_K: usize = 512;
+        const QUERIES: usize = 16;
+        let mut score_values = vec![0.0f32; CAPACITY * QUERIES];
+        fn query_scores(scores: &mut [f32], query: usize, capacity: usize) -> &mut [f32] {
+            &mut scores[query * capacity..(query + 1) * capacity]
+        }
+        query_scores(&mut score_values, 0, CAPACITY).fill(1.0);
+        for row in 600..900 {
+            query_scores(&mut score_values, 1, CAPACITY)[row] = 2.0;
+        }
+        for row in 0..600 {
+            query_scores(&mut score_values, 1, CAPACITY)[row] = 1.0;
+        }
+        for row in 0..CAPACITY {
+            let bucket = (row * 73 + row / 11) % 503;
+            query_scores(&mut score_values, 2, CAPACITY)[row] = bucket as f32 * 0.003 - 0.7;
+            query_scores(&mut score_values, 3, CAPACITY)[row] = row as f32;
+            query_scores(&mut score_values, 4, CAPACITY)[row] = -(row as f32);
+        }
+        query_scores(&mut score_values, 5, CAPACITY).fill(0.5);
+        query_scores(&mut score_values, 5, CAPACITY)[CAPACITY - 1] = f32::NAN;
+        query_scores(&mut score_values, 6, CAPACITY).fill(0.5);
+        query_scores(&mut score_values, 6, CAPACITY)[CAPACITY / 2] = f32::INFINITY;
+        query_scores(&mut score_values, 7, CAPACITY).fill(0.5);
+        query_scores(&mut score_values, 7, CAPACITY)[17] = f32::NEG_INFINITY;
+        for row in 0..CAPACITY {
+            query_scores(&mut score_values, 8, CAPACITY)[row] = (row % 97) as f32 - 48.0;
+        }
+        query_scores(&mut score_values, 8, CAPACITY)[1_024] = f32::NAN;
+        query_scores(&mut score_values, 9, CAPACITY).fill(f32::NAN);
+        query_scores(&mut score_values, 10, CAPACITY).fill(f32::INFINITY);
+        query_scores(&mut score_values, 11, CAPACITY).fill(f32::NEG_INFINITY);
+        for (query, tie_count, greater_count) in
+            [(12, 2, 511), (13, 511, 256), (14, 512, 256), (15, 513, 0)]
+        {
+            query_scores(&mut score_values, query, CAPACITY).fill(-1.0);
+            query_scores(&mut score_values, query, CAPACITY)[..tie_count].fill(1.0);
+            query_scores(&mut score_values, query, CAPACITY)[CAPACITY - greater_count..].fill(2.0);
+        }
+
+        let visible_values = [
+            CAPACITY as i32,
+            CAPACITY as i32,
+            CAPACITY as i32,
+            CAPACITY as i32,
+            CAPACITY as i32,
+            CAPACITY as i32,
+            CAPACITY as i32,
+            CAPACITY as i32,
+            1_024,
+            -1,
+            0,
+            CAPACITY as i32 + 1,
+            CAPACITY as i32,
+            CAPACITY as i32,
+            CAPACITY as i32,
+            CAPACITY as i32,
+        ];
+        let scores = offset_f32(&ctx, &score_values, vec![CAPACITY as u64, QUERIES as u64]);
+        let visible_counts = offset_i32(&ctx, &visible_values, vec![QUERIES as u64]);
+        let mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap();
+        let ranked = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap();
+        let cache_order = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap();
+        let counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let run = || {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_select_top_k_f32(
+                &ctx,
+                &encoder,
+                &scores,
+                &visible_counts,
+                &mask,
+                Some(&ranked),
+                &cache_order,
+                &counts,
+                &status,
+                CAPACITY,
+                CAPACITY,
+                TOP_K,
+                QUERIES,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            (
+                read_i32(&mask),
+                read_i32(&ranked),
+                read_i32(&cache_order),
+                read_i32(&counts),
+                read_i32(&status),
+            )
+        };
+        let first = run();
+        let second = run();
+        assert_eq!(second, first);
+        let (actual_mask, actual_ranked, actual_cache_order, actual_counts, actual_status) = first;
+
+        for query in 0..QUERIES {
+            let visible = visible_values[query];
+            let expected_status = if visible <= 0 || visible as usize > CAPACITY {
+                1
+            } else if score_values[query * CAPACITY..query * CAPACITY + visible as usize]
+                .iter()
+                .any(|score| !score.is_finite())
+            {
+                2
+            } else {
+                0
+            };
+            let expected_count = if expected_status == 1 {
+                0
+            } else {
+                TOP_K.min(visible as usize)
+            };
+            let expected_ranked = if expected_status == 0 {
+                deployed_selector_top_k_indices(
+                    &score_values[query * CAPACITY..query * CAPACITY + visible as usize],
+                    TOP_K,
+                )
+            } else {
+                (0..expected_count).collect::<Vec<_>>()
+            };
+            let mut expected_cache_order = expected_ranked.clone();
+            expected_cache_order.sort_unstable();
+            let ranked_slice = &actual_ranked[query * TOP_K..(query + 1) * TOP_K];
+            let cache_slice = &actual_cache_order[query * TOP_K..(query + 1) * TOP_K];
+            assert_eq!(
+                actual_status[query], expected_status,
+                "query {query} status"
+            );
+            assert_eq!(
+                actual_counts[query], expected_count as i32,
+                "query {query} count"
+            );
+            assert_eq!(
+                &ranked_slice[..expected_count],
+                &expected_ranked
+                    .iter()
+                    .map(|&row| row as i32)
+                    .collect::<Vec<_>>(),
+                "query {query} ranked IDs"
+            );
+            assert_eq!(
+                &cache_slice[..expected_count],
+                &expected_cache_order
+                    .iter()
+                    .map(|&row| row as i32)
+                    .collect::<Vec<_>>(),
+                "query {query} cache-order IDs"
+            );
+            assert!(ranked_slice[expected_count..].iter().all(|&id| id == -1));
+            assert!(cache_slice[expected_count..].iter().all(|&id| id == -1));
+            let mask_slice = &actual_mask[query * CAPACITY..(query + 1) * CAPACITY];
+            for (row, &selected) in mask_slice.iter().enumerate() {
+                assert_eq!(
+                    selected,
+                    i32::from(expected_cache_order.binary_search(&row).is_ok()),
+                    "query {query} row {row} mask"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_and_radix_top512_agree_at_dispatch_boundary() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 1_025;
+        const VISIBLE: usize = 1_024;
+        const TOP_K: usize = 512;
+        let mut score_values = vec![-1.0f32; CAPACITY];
+        score_values[..507].fill(1.0);
+        score_values[600] = 0.0;
+        score_values[601] = -0.0;
+        score_values[602] = f32::from_bits(0x007f_ffff);
+        score_values[603] = f32::from_bits(0x807f_ffff);
+        score_values[604] = f32::from_bits(1);
+        score_values[605] = f32::from_bits(0x8000_0001);
+        score_values[900] = f32::from_bits(0x0080_0000);
+        score_values[901] = f32::from_bits(0x8080_0000);
+        score_values[1_024] = f32::NAN;
+        let expected_ranked = deployed_selector_top_k_indices(&score_values[..VISIBLE], TOP_K);
+        assert_eq!(&expected_ranked[507..], &[900, 600, 601, 602, 603]);
+        let mut expected_cache_order = expected_ranked.clone();
+        expected_cache_order.sort_unstable();
+        let scores = offset_f32(&ctx, &score_values, vec![CAPACITY as u64, 1]);
+        let visible_counts = offset_i32(&ctx, &[VISIBLE as i32], vec![1]);
+        let allocate_outputs = || {
+            (
+                MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![1]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![1]).unwrap(),
+            )
+        };
+        let scalar = allocate_outputs();
+        let radix = allocate_outputs();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for (max_visible, outputs) in [(VISIBLE, &scalar), (CAPACITY, &radix)] {
+            encode_select_top_k_f32(
+                &ctx,
+                &encoder,
+                &scores,
+                &visible_counts,
+                &outputs.0,
+                Some(&outputs.1),
+                &outputs.2,
+                &outputs.3,
+                &outputs.4,
+                CAPACITY,
+                max_visible,
+                TOP_K,
+                1,
+            )
+            .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        for (label, left, right) in [
+            ("mask", &scalar.0, &radix.0),
+            ("ranked", &scalar.1, &radix.1),
+            ("cache order", &scalar.2, &radix.2),
+            ("count", &scalar.3, &radix.3),
+            ("status", &scalar.4, &radix.4),
+        ] {
+            assert_eq!(read_i32(left), read_i32(right), "{label}");
+        }
+        assert_eq!(
+            read_i32(&radix.1),
+            expected_ranked
+                .iter()
+                .map(|&row| row as i32)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            read_i32(&radix.2),
+            expected_cache_order
+                .iter()
+                .map(|&row| row as i32)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn stable_top512_scales_to_the_full_64k_csa_history() {
         let Some(ctx) = metal_context() else {
             return;
@@ -10906,13 +11300,7 @@ mod tests {
                 bucket as f32 * 0.001 - 0.7
             })
             .collect::<Vec<_>>();
-        let mut expected = (0..CAPACITY).collect::<Vec<_>>();
-        expected.sort_by(|&left, &right| {
-            scores[right]
-                .total_cmp(&scores[left])
-                .then_with(|| left.cmp(&right))
-        });
-        expected.truncate(TOP_K);
+        let mut expected = deployed_selector_top_k_indices(&scores, TOP_K);
         expected.sort_unstable();
 
         let scores = offset_f32(&ctx, &scores, vec![CAPACITY as u64, 1]);
@@ -11923,9 +12311,11 @@ mod tests {
             elapsed_ms / repeats as f64
         }
 
-        fn median(mut samples: Vec<f64>) -> f64 {
+        fn median_and_p95(mut samples: Vec<f64>) -> (f64, f64) {
             samples.sort_by(f64::total_cmp);
-            samples[samples.len() / 2]
+            let median = samples[samples.len() / 2];
+            let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+            (median, p95)
         }
 
         let index_query_values = (0..INDEX_HEADS * INDEX_DIM)
@@ -11946,6 +12336,13 @@ mod tests {
             .expect("allocate profile index keys");
         let scores = MetalTensor::zeros_f32(&ctx, vec![MAX_ROWS as u64, 1])
             .expect("allocate profile scores");
+        let mixed_score_values = (0..MAX_ROWS)
+            .map(|row| {
+                let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
+                bucket as f32 * 0.0003 - 1.1
+            })
+            .collect::<Vec<_>>();
+        let mixed_scores = offset_f32(&ctx, &mixed_score_values, vec![MAX_ROWS as u64, 1]);
         let selected_mask = MetalTensor::zeros_i32(&ctx, vec![MAX_ROWS as u64, 1])
             .expect("allocate profile selected mask");
         let cache_order_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1])
@@ -11997,6 +12394,7 @@ mod tests {
             let visible_counts = offset_i32(&ctx, &[row_count as i32], vec![1]);
             let keys = index_keys.view_subrange(0, vec![INDEX_DIM as u64, row_count as u64]);
             let score_rows = scores.view_subrange(0, vec![row_count as u64, 1]);
+            let mixed_score_rows = mixed_scores.view_subrange(0, vec![row_count as u64, 1]);
             let mask_rows = selected_mask.view_subrange(0, vec![row_count as u64, 1]);
             let compressed_rows =
                 compressed_cache.view_subrange(0, vec![ATTENTION_DIM as u64, row_count as u64]);
@@ -12077,7 +12475,7 @@ mod tests {
             warm.waitUntilCompleted();
             assert!(warm.error().is_none());
 
-            let score_ms = median(
+            let score_ms = median_and_p95(
                 (0..3)
                     .map(|_| {
                         timed_gpu(&ctx, 1, |encoder| {
@@ -12097,9 +12495,29 @@ mod tests {
                         })
                     })
                     .collect(),
-            );
-            let select_ms = median(
-                (0..3)
+            )
+            .0;
+            for _ in 0..5 {
+                timed_gpu(&ctx, 1, |encoder| {
+                    encode_select_top_k_f32(
+                        &ctx,
+                        encoder,
+                        &score_rows,
+                        &visible_counts,
+                        &mask_rows,
+                        None,
+                        &cache_order_ids,
+                        &selected_counts,
+                        &status,
+                        row_count,
+                        row_count,
+                        TOP_K,
+                        1,
+                    )
+                });
+            }
+            let (tied_select_ms, tied_select_p95_ms) = median_and_p95(
+                (0..20)
                     .map(|_| {
                         timed_gpu(&ctx, 1, |encoder| {
                             encode_select_top_k_f32(
@@ -12121,7 +12539,65 @@ mod tests {
                     })
                     .collect(),
             );
-            let legacy_attention_ms = median(
+            assert_eq!(read_i32(&status), vec![0]);
+            assert_eq!(read_i32(&selected_counts), vec![TOP_K as i32]);
+            assert_eq!(
+                read_i32(&cache_order_ids),
+                (0..TOP_K as i32).collect::<Vec<_>>()
+            );
+            for _ in 0..5 {
+                timed_gpu(&ctx, 1, |encoder| {
+                    encode_select_top_k_f32(
+                        &ctx,
+                        encoder,
+                        &mixed_score_rows,
+                        &visible_counts,
+                        &mask_rows,
+                        None,
+                        &cache_order_ids,
+                        &selected_counts,
+                        &status,
+                        row_count,
+                        row_count,
+                        TOP_K,
+                        1,
+                    )
+                });
+            }
+            let (mixed_select_ms, mixed_select_p95_ms) = median_and_p95(
+                (0..20)
+                    .map(|_| {
+                        timed_gpu(&ctx, 1, |encoder| {
+                            encode_select_top_k_f32(
+                                &ctx,
+                                encoder,
+                                &mixed_score_rows,
+                                &visible_counts,
+                                &mask_rows,
+                                None,
+                                &cache_order_ids,
+                                &selected_counts,
+                                &status,
+                                row_count,
+                                row_count,
+                                TOP_K,
+                                1,
+                            )
+                        })
+                    })
+                    .collect(),
+            );
+            let mut expected_mixed =
+                deployed_selector_top_k_indices(&mixed_score_values[..row_count], TOP_K);
+            expected_mixed.sort_unstable();
+            assert_eq!(
+                read_i32(&cache_order_ids),
+                expected_mixed
+                    .iter()
+                    .map(|&row| row as i32)
+                    .collect::<Vec<_>>()
+            );
+            let legacy_attention_ms = median_and_p95(
                 (0..3)
                     .map(|_| {
                         timed_gpu(&ctx, 4, |encoder| {
@@ -12143,8 +12619,9 @@ mod tests {
                         })
                     })
                     .collect(),
-            );
-            let cooperative_attention_ms = median(
+            )
+            .0;
+            let cooperative_attention_ms = median_and_p95(
                 (0..3)
                     .map(|_| {
                         timed_gpu(&ctx, 4, |encoder| {
@@ -12171,13 +12648,10 @@ mod tests {
                         })
                     })
                     .collect(),
-            );
+            )
+            .0;
             assert_eq!(read_i32(&status), vec![0]);
             assert_eq!(read_i32(&selected_counts), vec![TOP_K as i32]);
-            assert_eq!(
-                read_i32(&cache_order_ids),
-                (0..TOP_K as i32).collect::<Vec<_>>()
-            );
             assert!(
                 read_f32(&attention_output)
                     .iter()
@@ -12188,11 +12662,12 @@ mod tests {
                     .iter()
                     .all(|value| value.is_finite())
             );
+            let conservative_select_ms = tied_select_ms.max(mixed_select_ms);
             eprintln!(
-                "deepseek_v4 sparse_profile rows={row_count} token_equivalent={} score_ms={score_ms:.3} select_ms={select_ms:.3} legacy_attention_ms={legacy_attention_ms:.3} cooperative_attention_ms={cooperative_attention_ms:.3} attention_speedup={:.2} projected_21_csa_ms={:.3}",
+                "deepseek_v4 sparse_profile rows={row_count} token_equivalent={} score_ms={score_ms:.3} tied_select_ms={tied_select_ms:.3} tied_select_p95_ms={tied_select_p95_ms:.3} mixed_select_ms={mixed_select_ms:.3} mixed_select_p95_ms={mixed_select_p95_ms:.3} legacy_attention_ms={legacy_attention_ms:.3} cooperative_attention_ms={cooperative_attention_ms:.3} attention_speedup={:.2} conservative_projected_21_csa_ms={:.3}",
                 row_count * 4,
                 legacy_attention_ms / cooperative_attention_ms,
-                (score_ms + select_ms + cooperative_attention_ms) * 21.0,
+                (score_ms + conservative_select_ms + cooperative_attention_ms) * 21.0,
             );
         }
     }

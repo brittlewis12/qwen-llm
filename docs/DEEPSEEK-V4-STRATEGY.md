@@ -659,13 +659,21 @@ Gate:
   Selected attention drops a tagged row, includes row 512, matches the CPU
   oracle, and materially differs from both dense-513 and blind-first-512
   alternatives.
-- The selector no longer performs `visible - 512` serial full-history rescans.
+- The selector no longer performs 512 synchronized full-history maximum scans.
   Histories above 1,024 rows use one deterministic 256-thread threadgroup per
-  query, reduce score maxima with lower-row tie breaks, and emit either ranked
-  or ascending cache order without persistent scratch. At 16,384 rows, the
-  repeat dispatch measured 4.76-4.80 ms for one query and 13.27-13.45 ms for
-  128 packed queries across two runs; exact IDs also hold for ties, non-finite
-  failure, and the legacy 768-row path.
+  query and 32 MSB-first radix count passes to derive the exact cutoff score.
+  The key transform preserves finite numerical order, canonicalizes exponent-
+  zero values to match the deployed fast-math subnormal/`+0`/`-0` equivalence,
+  rejects every visible NaN or infinity first, and retains lower row IDs at the
+  cutoff. Contiguous per-lane prefix compaction emits ascending cache-order IDs;
+  score-ranked IDs are insertion-sorted only when a diagnostic asks for them.
+- The radix path reuses two 256-u32 threadgroup regions and adds no persistent
+  or admission-priced storage. Exact gates cover the 1,024/1,025 dispatch seam,
+  16 mixed packed queries, cutoff ties of 2/511/512/513/all rows, signed zeros,
+  positive and negative subnormals, all three non-finite classes, invalid and
+  per-query visibility, repeated dispatches, and terminal row 262,143. The
+  16,384-row warm host packet now measures about 0.32 ms for one query and
+  0.49 ms for 128 queries versus the former 4.76-4.80 and 13.27-13.45 ms.
 - Two fresh b10222 position-2051 captures are byte-identical at SHA-256
   `064fd66567734085532b7307186b4087adea7c28cc6334105b0e26e05b50b8a6`;
   two independent position-2052 captures are byte-identical at
@@ -876,7 +884,7 @@ Gate:
   state at position 65,663 and executes one complete 43-layer token through
   sparse CSA and the first tiled HCA query. Two fresh sessions produce the
   byte-identical full-logit SHA-256
-  `faec662738ace00aff407638de8adfd44ac3e98106ff5fbc6e1133c5e42fb363`;
+  `915be9ad610710c4bcb3cfb661ef1fcdd35e2ccebca82c20e15b05336528997a`;
   the next position rejects without changing logits. This proves mechanical
   integration on the 95.93 GiB asset, not semantic correctness of the synthetic
   prefix.
@@ -1183,14 +1191,26 @@ threadgroup memory. It takes 0.303-0.304 ms, a 136.4-137.2x kernel speedup. The
 legacy host path remains test-only; its compiled kernel is retained solely for
 the numerical differential.
 
-At 16,384, 65,536, and 262,144 compressed rows, one-query index scoring measures
-0.701, 2.347, and 8.215 ms; deterministic top-512 selection measures 3.490,
-25.876, and 114.212 ms; cooperative selected attention measures 0.304, 0.304,
-and 0.303 ms. Projecting only those three isolated GPU phases across all 21 CSA
-layers gives 94.390, 599.053, and 2,577.333 ms per token. These are not full
-decode timings: they exclude projections, HCA, MoE, command synchronization, and
-host work. They do establish that exact selection, not attention, is now the
-dominant full-context CSA target.
+The first profile measured deterministic top-512 selection at 3.490, 25.876,
+and 114.212 ms over 16,384, 65,536, and 262,144 compressed rows. Replacing its
+512 maximum scans with exact radix thresholding reduces all-tied medians to
+0.190, 1.146, and 4.467 ms and production-like mixed-score medians to 0.190,
+1.172, and 4.582 ms, an 18.4-24.9x improvement. Twenty-dispatch p95s are at
+most 0.191, 1.173, and 4.589 ms. The same packet measures index scoring at
+0.702, 1.961, and 8.232 ms and cooperative attention at 0.320, 0.323, and
+0.323 ms. Conservatively projecting only those three isolated GPU phases across
+all 21 CSA layers gives 25.451, 72.568, and 275.880 ms per token.
+
+These are not full decode timings: they exclude projections, HCA, MoE, command
+synchronization, and host work. They establish that full-history index scoring,
+not exact selection or selected attention, is now the dominant CSA target.
+
+The retained legacy selected-attention differential still measures 43.36 ms at
+the 128-raw-plus-512-compressed shape, and singleton dense attention has the same
+output-lane score-recomputation structure. It remains live for every SWA layer,
+HCA through 512 rows, and CSA through its first 512 rows. Reusing the already
+promoted cooperative dense kernel for N=1 is therefore the next product-level
+optimization before specializing the now-dominant far-context score phase.
 
 Gate:
 
@@ -1278,6 +1298,12 @@ Gate:
   sizing, and admission execute at terminal row counts and physical strides.
   Production head counts and widths are covered by separate composition gates;
   together they avoid replaying 8,192 semantically redundant packed chunks.
+- A real-weight session constructed directly at position 65,663 executes the
+  radix selector inside every sparse CSA layer and the first tiled HCA query.
+  Two fresh sessions remain byte-identical at full-logit SHA-256
+  `915be9ad610710c4bcb3cfb661ef1fcdd35e2ccebca82c20e15b05336528997a`;
+  a clean pre-radix cooperative-attention worktree produces the same hash,
+  isolating selector exactness from the earlier reduction-schedule change.
 - A successful advance revokes the session's current logits and final hidden
   observation; vectors already copied to the host remain ordinary owned values.
   A callback unwind from retained position 2 leaves that position unchanged,
@@ -1288,10 +1314,9 @@ Broader S6 work remains:
 - Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, shared-KV
   sparse attention, and high-value MoE boundaries.
-- Replace the measured 114.212 ms terminal deterministic selector with a
-  hierarchical exact top-512 design while preserving lower-row tie breaks,
-  cache-order output, and fail-closed non-finite handling. Index scoring is the
-  secondary measured CSA target.
+- Parallelize or tile the measured 8.232 ms terminal Lightning Indexer scoring
+  kernel while preserving scalar head/dimension accumulation semantics and the
+  exact selected-ID transcript. It is now the primary measured CSA target.
 - Attribute tiled HCA score recomputation and retained-chunk routing before
   choosing their next fusion or scheduling target.
 - Move CPU routing and grouped expert schedules onto the GPU only after named
@@ -1365,16 +1390,18 @@ noise without reducing technical risk. Revisit after S5.
    attribution. Use durable or constructed deep states to measure the mechanism
    under study directly; optimization, not another position unlock, is now the
    critical path to useful long-context inference.
-3. Attack CSA index scoring first if attribution confirms the expected cliff.
-   The selector is bounded and parallel, but production scoring still scales
-   over the complete visible history. Preserve stable lower-row tie breaks,
-   cache-order compaction, and the terminal selected-ID transcript while tiling
-   or fusing it.
-4. Then reduce whichever measured synchronization cost dominates: tiled HCA's
+3. Route singleton dense SWA/HCA/CSA attention through the promoted cooperative
+   packed kernel. Preserve the legacy reduction as the operation differential
+   and remeasure the context-128/512 decode curve before deeper kernel work.
+4. Then choose between CSA index scoring and routing synchronization from the
+   product profile. Exact radix selection is bounded at 4.582 ms median /
+   4.589 ms p95 over all 262,144 rows, while scoring leads at 8.232 ms; the
+   current per-layer routing completion instead governs short-context decode.
+5. Reduce whichever remaining synchronization cost dominates: tiled HCA's
    deliberate two-pass score recomputation, 43-layer host routing completion,
    or the roughly 1,000 chronological compressor/cache dispatches per packed
    chunk. Keep the current correctness path as the differential reference.
-5. Establish a same-hash, same-request llama.cpp Metal throughput baseline once
+6. Establish a same-hash, same-request llama.cpp Metal throughput baseline once
    its DS4 path is runnable on this host. Pursue streaming snapshots and the
    remaining DSML tool/developer encoder as independent product lanes, not
    blockers for inference optimization.

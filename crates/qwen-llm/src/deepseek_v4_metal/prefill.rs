@@ -60,7 +60,6 @@ struct PrefillSparseCsaScratch {
     visible_counts: MetalTensor,
     scores: MetalTensor,
     selected_mask: MetalTensor,
-    ranked_ids: MetalTensor,
     cache_order_ids: MetalTensor,
     selected_counts: MetalTensor,
     status: MetalTensor,
@@ -170,7 +169,6 @@ impl DeepSeekV4PrefillScratch {
                         ctx,
                         vec![DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS as u64, n],
                     )?,
-                    ranked_ids: MetalTensor::zeros_i32(ctx, vec![DEEPSEEK_V4_CSA_TOP_K as u64, n])?,
                     cache_order_ids: MetalTensor::zeros_i32(
                         ctx,
                         vec![DEEPSEEK_V4_CSA_TOP_K as u64, n],
@@ -337,13 +335,11 @@ pub(super) fn append_session_allocation_requests(
             },
         )?;
     }
-    for name in ["ranked_ids", "cache_order_ids"] {
-        push(
-            &format!("attention.sparse_csa.{name}"),
-            checked_mul(n, DEEPSEEK_V4_CSA_TOP_K, "packed sparse selected IDs")?,
-            i32_bytes,
-        )?;
-    }
+    push(
+        "attention.sparse_csa.cache_order_ids",
+        checked_mul(n, DEEPSEEK_V4_CSA_TOP_K, "packed sparse selected IDs")?,
+        i32_bytes,
+    )?;
     for name in ["selected_counts", "status"] {
         push(&format!("attention.sparse_csa.{name}"), n, i32_bytes)?;
     }
@@ -960,11 +956,6 @@ impl PrefillSparseCsaScratch {
             vec![rows.capacity_rows as u64, query_count as u64],
             "packed sparse selection mask",
         )?;
-        let ranked_ids = i32_prefix(
-            &self.ranked_ids,
-            vec![DEEPSEEK_V4_CSA_TOP_K as u64, query_count as u64],
-            "packed sparse ranked IDs",
-        )?;
         let cache_order_ids = i32_prefix(
             &self.cache_order_ids,
             vec![DEEPSEEK_V4_CSA_TOP_K as u64, query_count as u64],
@@ -1094,7 +1085,7 @@ impl PrefillSparseCsaScratch {
             &scores,
             &visible_counts,
             &selected_mask,
-            &ranked_ids,
+            None,
             &cache_order_ids,
             &selected_counts,
             &status,

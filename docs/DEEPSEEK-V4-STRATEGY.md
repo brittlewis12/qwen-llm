@@ -547,7 +547,9 @@ from normalized Q-LoRA, apply adjacent-pair tail RoPE and normalized Hadamard,
 project and scale 64 head weights from normalized attention input, sum
 `relu(dot(q_h, k_row)) * weight_h`, then select descending score with lower-row
 tie breaks. Selected IDs are compacted back into ascending cache order before
-attention, matching b10222 mask-order accumulation.
+attention, matching b10222 mask-order accumulation. Production scratch stores
+only that consumed order; score-ranked IDs remain available to operation probes
+without paying their insertion sort or buffer cost on every query.
 
 Singleton and retained packed paths share those score/selection kernels. A
 packed chunk keeps its pre-boundary prefix on the old dense kernel and switches
@@ -838,7 +840,7 @@ Gate:
   request reported `reserved_forwards=2053/2053`.
 - The exported budget now accepts exactly 2,177 forwards. The release CLI
   validates the 32,838,176-byte position-2176 record before residency, restores
-  2,176 tokens, consumes the uncached endpoint in 1,566.3 ms, and generates
+  2,176 tokens, consumes the uncached endpoint in 1,049.5 ms, and generates
   oracle ID 201. It reports `reserved_forwards=2177/2177`; position 2177 remains
   rejected.
 - Ordinary 0731 messages match vLLM and SGLang byte-for-byte. On the Flash
@@ -852,13 +854,13 @@ Gate:
   by Qwen benchmarks.
 - Allocation-free planning inventories 7 resident buffers (3 retained no-copy
   windows and 4 final-page copies) at 102,994,624,512 priced-upper bytes and
-  539 unique session buffers at 179,341,856 logical / 183,844,864 priced-upper
+  537 unique session buffers at 179,077,664 logical / 183,566,336 priced-upper
   bytes. The session total includes the complete physical 128-token packed
   scratch, sparse-index score/selection matrices, and 131,072-byte pre-chunk
   raw-ring snapshot rather than charging them to reserve. The complete priced
-  upper bound is 103,178,469,376 bytes;
+  upper bound is 103,178,190,848 bytes;
   a 536,870,912-byte dynamic reserve makes the admission requirement
-  103,715,340,288 bytes.
+  103,715,061,760 bytes.
 - The load plan freezes configuration plus every descriptor's name, shape,
   dtype, shard, offset, and byte length. Realization revalidates those values,
   fallback policy, all view/alias/window geometry, and a deterministic planner
@@ -868,13 +870,13 @@ Gate:
   The process signal was `Some(0)`, the established omitted-limit convention,
   so the explicit reason was `admitted_process_budget_omitted`.
 - Live phase reconciliation observed 102,994,608,128 residency bytes and
-  103,174,422,528 cumulative bytes after session construction and after the
-  first forward. This remains below the 103,715,340,288-byte first-forward
+  103,174,160,384 cumulative bytes after session construction and after the
+  first forward. This remains below the 103,715,061,760-byte first-forward
   gate. Residency and session must fit their priced inventories without the
   reserve; only the first-forward endpoint gate may use the reserve. Residency
   is reconciled inside realization, before an unaccounted resident handle can
   be returned.
-- The maximum-capacity sparse CLI restore observed 103,174,684,672 cumulative
+- The maximum-capacity sparse CLI restore observed 103,174,422,528 cumulative
   bytes after its endpoint forward, also below the same planned limit.
 - A release `qwen -p A -n 1` run generated oracle ID 201 in 0.716 seconds of
   prompt execution. `vm_stat` pageouts, swapins, and swapouts were unchanged;
@@ -944,6 +946,16 @@ singleton accumulation body, while a DS4 packed causal kernel computes each
 raw/compressed score once in scalar dimension order and shares the resulting
 mass across output lanes. Per-query counts preserve same-token publication and
 prevent future compressed rows from leaking.
+
+The selector originally also materialized a score-ranked top-512 list for every
+query, then sorted it by insertion even though attention consumes only ascending
+cache-order IDs. Ranked output is now optional and enabled only by diagnostic
+operation tests. Removing the singleton and packed ranked buffers reduces the
+session by 264,192 logical / 278,528 priced-upper bytes. In the measured row-16
+packet, the full two-schedule live gate fell from 14.651 to 12.574 seconds while
+retaining every pinned logit and causal-state bit; the release restored endpoint
+fell from 1,566.3 to 1,049.5 ms. These are observed paired runs, not a standalone
+microbenchmark attribution.
 
 Gate:
 
@@ -1072,14 +1084,11 @@ noise without reducing technical risk. Revisit after S5.
 1. Use the durable certified position-2176 checkpoint as the ordinary boundary
    development loop; reopen fresh 2,176-token replay only for a causal-prefix or
    restore-ABI change.
-2. Remove score-ranked IDs and their insertion sort from the production sparse
-   scratch before the longer interval; retain them only in an operation probe.
-   Attention consumes ascending cache-order IDs.
-3. Extend the generalized HCA property through row 23, then use retained chunks
+2. Extend the generalized HCA property through row 23, then use retained chunks
    to position 3072, immediately after all 768 CSA rows are populated and before
    unallocated row 768 at position 3075.
-4. Add a named real-weight selected-ID/intermediate probe only if the next
+3. Add a named real-weight selected-ID/intermediate probe only if the next
    full-logit endpoint diverges. The current operation-level exact-ID gate plus
    independently captured sparse/HCA full-model endpoints own the current path.
-5. Extend the 0731 message encoder to reasoning and DSML tools only with exact
+4. Extend the 0731 message encoder to reasoning and DSML tools only with exact
    release-derived byte fixtures and an end-to-end tool-call workload.

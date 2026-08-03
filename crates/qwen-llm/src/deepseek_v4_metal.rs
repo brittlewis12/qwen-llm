@@ -2001,7 +2001,6 @@ struct DeepSeekV4SparseCsaScratch {
     visible_counts: MetalTensor,
     scores: MetalTensor,
     selected_mask: MetalTensor,
-    ranked_ids: MetalTensor,
     cache_order_ids: MetalTensor,
     selected_counts: MetalTensor,
     status: MetalTensor,
@@ -2021,7 +2020,6 @@ impl DeepSeekV4SparseCsaScratch {
                 ctx,
                 vec![DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS as u64, 1],
             )?,
-            ranked_ids: MetalTensor::zeros_i32(ctx, vec![DEEPSEEK_V4_CSA_TOP_K as u64, 1])?,
             cache_order_ids: MetalTensor::zeros_i32(ctx, vec![DEEPSEEK_V4_CSA_TOP_K as u64, 1])?,
             selected_counts: MetalTensor::zeros_i32(ctx, vec![1])?,
             status: MetalTensor::zeros_i32(ctx, vec![1])?,
@@ -2131,7 +2129,7 @@ impl DeepSeekV4SparseCsaScratch {
             &self.scores,
             &self.visible_counts,
             &self.selected_mask,
-            &self.ranked_ids,
+            None,
             &self.cache_order_ids,
             &self.selected_counts,
             &self.status,
@@ -4732,7 +4730,7 @@ fn encode_select_top_k_f32(
     scores: &MetalTensor,
     visible_counts: &MetalTensor,
     selected_mask: &MetalTensor,
-    ranked_ids: &MetalTensor,
+    ranked_ids: Option<&MetalTensor>,
     cache_order_ids: &MetalTensor,
     selected_counts: &MetalTensor,
     status: &MetalTensor,
@@ -4768,12 +4766,20 @@ fn encode_select_top_k_f32(
         true,
         "indexer selection mask",
     )?;
-    for (tensor, name) in [
-        (ranked_ids, "ranked indexer IDs"),
-        (cache_order_ids, "cache-order indexer IDs"),
-    ] {
-        validate_i32(tensor, &[top_k as u64, query_count as u64], true, name)?;
+    if let Some(ranked_ids) = ranked_ids {
+        validate_i32(
+            ranked_ids,
+            &[top_k as u64, query_count as u64],
+            true,
+            "ranked indexer IDs",
+        )?;
     }
+    validate_i32(
+        cache_order_ids,
+        &[top_k as u64, query_count as u64],
+        true,
+        "cache-order indexer IDs",
+    )?;
     validate_i32(
         selected_counts,
         &[query_count as u64],
@@ -4792,7 +4798,10 @@ fn encode_select_top_k_f32(
         row_capacity: u32,
         top_k: u32,
         query_count: u32,
+        emit_ranked: u32,
     }
+    let emit_ranked = ranked_ids.is_some();
+    let ranked_ids = ranked_ids.unwrap_or(cache_order_ids);
     let pso = ctx.pipeline("kernel_deepseek_v4_select_top_k_f32")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
@@ -4801,6 +4810,7 @@ fn encode_select_top_k_f32(
             row_capacity: row_capacity as u32,
             top_k: top_k as u32,
             query_count: query_count as u32,
+            emit_ranked: u32::from(emit_ranked),
         },
     );
     enc.set_tensor(1, scores);
@@ -5757,9 +5767,12 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
         DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
         i32_bytes,
     )?;
-    for name in ["sparse_csa.ranked_ids", "sparse_csa.cache_order_ids"] {
-        push_session_allocation(&mut requests, name, DEEPSEEK_V4_CSA_TOP_K, i32_bytes)?;
-    }
+    push_session_allocation(
+        &mut requests,
+        "sparse_csa.cache_order_ids",
+        DEEPSEEK_V4_CSA_TOP_K,
+        i32_bytes,
+    )?;
     for name in ["sparse_csa.selected_counts", "sparse_csa.status"] {
         push_session_allocation(&mut requests, name, 1, i32_bytes)?;
     }
@@ -6212,13 +6225,13 @@ mod tests {
         kinds.extend(std::iter::repeat_n(AttentionKind::CompressedSparse, 21));
         kinds.extend(std::iter::repeat_n(AttentionKind::HeavilyCompressed, 20));
         let requests = deepseek_v4_session_allocation_requests_for_kinds(&kinds).unwrap();
-        assert_eq!(requests.len(), 539);
+        assert_eq!(requests.len(), 537);
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            179_341_856
+            179_077_664
         );
         let names = requests
             .iter()
@@ -8772,7 +8785,7 @@ mod tests {
             &scores,
             &visible_counts,
             &mask,
-            &ranked,
+            Some(&ranked),
             &cache_order,
             &counts,
             &status,
@@ -9060,7 +9073,7 @@ mod tests {
             &scores,
             &visible_counts,
             &gpu_mask,
-            &ranked_ids,
+            Some(&ranked_ids),
             &cache_order_ids,
             &selected_counts,
             &status,

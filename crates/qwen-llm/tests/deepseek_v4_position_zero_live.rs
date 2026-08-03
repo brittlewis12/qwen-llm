@@ -995,16 +995,16 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         "memory planning must not realize Metal buffers"
     );
     let memory_plan = load_plan.memory_plan().clone();
-    assert_eq!(memory_plan.session_allocations().len(), 539);
-    assert_eq!(memory_plan.session_logical_bytes(), 179_341_856);
-    assert_eq!(memory_plan.session_priced_upper_bytes(), 183_844_864);
+    assert_eq!(memory_plan.session_allocations().len(), 537);
+    assert_eq!(memory_plan.session_logical_bytes(), 179_077_664);
+    assert_eq!(memory_plan.session_priced_upper_bytes(), 183_566_336);
     assert_eq!(memory_plan.residency_buffer_count(), 7);
     assert_eq!(memory_plan.residency_logical_bytes(), 102_994_608_640);
     assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_624_512);
-    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_469_376);
+    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_190_848);
     assert_eq!(
         memory_plan.required_with_reserve_bytes().unwrap(),
-        103_715_340_288
+        103_715_061_760
     );
     assert_eq!(load_plan.residency_report().window_count, 3);
     assert_eq!(load_plan.residency_report().fallback_count, 4);

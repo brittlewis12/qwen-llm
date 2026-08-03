@@ -117,6 +117,7 @@ struct ds4_indexer_select_args {
     uint row_capacity;
     uint top_k;
     uint query_count;
+    uint emit_ranked;
 };
 
 struct ds4_selected_attention_args {
@@ -690,7 +691,7 @@ kernel void kernel_deepseek_v4_select_top_k_f32(
         selected_mask[mask_base + row] = row < visible ? 1 : 0;
     }
     for (uint slot = 0u; slot < args.top_k; ++slot) {
-        ranked_ids[ids_base + slot] = -1;
+        if (args.emit_ranked != 0u) ranked_ids[ids_base + slot] = -1;
         cache_order_ids[ids_base + slot] = -1;
     }
 
@@ -737,22 +738,24 @@ kernel void kernel_deepseek_v4_select_top_k_f32(
     for (uint row = 0u; row < visible && filled < selected_count; ++row) {
         if (selected_mask[mask_base + row] == 0) continue;
         cache_order_ids[ids_base + filled] = int(row);
-        uint insertion = filled;
-        if (error == 0) {
-            const float candidate = scores[query * args.row_capacity + row];
-            for (uint slot = 0u; slot < filled; ++slot) {
-                const int current_id = ranked_ids[ids_base + slot];
-                const float current = scores[query * args.row_capacity + uint(current_id)];
-                if (candidate > current || (candidate == current && int(row) < current_id)) {
-                    insertion = slot;
-                    break;
+        if (args.emit_ranked != 0u) {
+            uint insertion = filled;
+            if (error == 0) {
+                const float candidate = scores[query * args.row_capacity + row];
+                for (uint slot = 0u; slot < filled; ++slot) {
+                    const int current_id = ranked_ids[ids_base + slot];
+                    const float current = scores[query * args.row_capacity + uint(current_id)];
+                    if (candidate > current || (candidate == current && int(row) < current_id)) {
+                        insertion = slot;
+                        break;
+                    }
+                }
+                for (uint slot = filled; slot > insertion; --slot) {
+                    ranked_ids[ids_base + slot] = ranked_ids[ids_base + slot - 1u];
                 }
             }
-            for (uint slot = filled; slot > insertion; --slot) {
-                ranked_ids[ids_base + slot] = ranked_ids[ids_base + slot - 1u];
-            }
+            ranked_ids[ids_base + insertion] = int(row);
         }
-        ranked_ids[ids_base + insertion] = int(row);
         ++filled;
     }
     selected_counts[query] = int(filled);

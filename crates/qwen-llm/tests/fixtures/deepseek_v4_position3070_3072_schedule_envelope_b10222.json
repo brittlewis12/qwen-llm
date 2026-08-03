@@ -133,7 +133,7 @@
     {
       "schedule": "native_packed_prefix_singleton_target",
       "file": "deepseek_v4_position3070_native_decisions.json",
-      "sha256": "c13043479c26ef5cc674d0ecf0f07e672bfca3fb9e2e56ddef09803507acaac3",
+      "sha256": "539c0cfac45ff2ead361a5f3c0d9e2730347810c41fac5b3fdf006a4360a7c46",
       "fresh_process_repeats": 2,
       "repeat_payloads_byte_identical": true,
       "capture_command": "DSV4_NATIVE_DECISION_TRANSCRIPT=TRANSCRIPT cargo test --release -p qwen-llm --features dsv4-diagnostics --test deepseek_v4_position_zero_live native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab -- --ignored --exact --nocapture",
@@ -175,27 +175,27 @@
     "first_route_set_difference_layer": 7,
     "score_bifurcations": {
       "native_vs_batched_layer4": {
-        "score_cosine": 0.999999867288,
-        "score_relative_rms": 0.000515665772,
-        "left_cutoff_margin": 0.0012743,
-        "right_cutoff_margin": 0.0021193,
-        "minimum_reversed_row_perturbation": 0.0042672,
+        "score_cosine": 0.999999867287,
+        "score_relative_rms": 0.000515676130,
+        "left_cutoff_margin": 0.001275063,
+        "right_cutoff_margin": 0.002119303,
+        "minimum_reversed_row_perturbation": 0.004267454,
         "perturbation_exceeds_each_cutoff_margin": true
       },
       "native_vs_singleton_layer4": {
-        "score_cosine": 0.999999883622,
-        "score_relative_rms": 0.000484446507,
-        "left_cutoff_margin": 0.0012743,
-        "right_cutoff_margin": 0.0011115,
-        "minimum_reversed_row_perturbation": 0.0045111,
+        "score_cosine": 0.999999883619,
+        "score_relative_rms": 0.000484466722,
+        "left_cutoff_margin": 0.001275063,
+        "right_cutoff_margin": 0.001111507,
+        "minimum_reversed_row_perturbation": 0.004511356,
         "perturbation_exceeds_each_cutoff_margin": true
       },
       "batched_vs_singleton_layer6": {
-        "score_cosine": 0.999997268400,
-        "score_relative_rms": 0.002497829743,
-        "left_cutoff_margin": 0.0002245,
-        "right_cutoff_margin": 0.0000520,
-        "minimum_reversed_row_perturbation": 0.0028656,
+        "score_cosine": 0.999997268398,
+        "score_relative_rms": 0.002497829824,
+        "left_cutoff_margin": 0.000224352,
+        "right_cutoff_margin": 0.000051975,
+        "minimum_reversed_row_perturbation": 0.002865553,
         "perturbation_exceeds_each_cutoff_margin": true
       }
     }
@@ -210,11 +210,11 @@
     }
   },
   "native_repeat_hashes": {
-    "position3070_singleton_target": "8228d621cb42d919d340301affa1430fdb25b82b5ab7cd2794bcdf2456453cf6",
+    "position3070_singleton_target": "2479973378fe4befe8304dc89b4a836274ad7ccb3fbda4b3e4f0c8c63ad0defc",
     "position3071_packed": "ee1a5814897a2d89bd884e6089cf40803939ac6140fca95906ce2349f9485126",
-    "position3071_split": "00012f61dea1fb6a047b6ed48e4ea5d816f78a2c12b60c734f940e9583b7332f",
-    "position3072_packed": "067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130",
-    "position3072_split": "33e1d2077e028b645cfc2f366222139113f7e679b4d80a856dfa059777fbc967",
+    "position3071_split": "f3be04a3823f7008e6735c81c35ae1ad8c6d68dd72698f77082f1c2843c41b25",
+    "position3072_packed": "e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da",
+    "position3072_split": "d85c2d5698ebc537ae39d2ced5d34892c4340250fe4811d031a55013118d4db1",
     "fresh_process_repeats": 2,
     "repeat_vectors_byte_identical": true,
     "packed_64_128_vectors_byte_identical": true

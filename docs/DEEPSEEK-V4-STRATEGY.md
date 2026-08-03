@@ -518,9 +518,10 @@ Gate:
   publish HCA row 23 at position 3071. The next-position-3072 checkpoint has a
   38,989,824-byte payload, 39,006,240-byte record, and causal digest
   `8ba373e16e2b9bde526d7b00326ae26331b2bedd68fee2fbfaf6055a2e4f8d25`.
-  Fresh restore reproduces position-3072 logit SHA-256
-  `067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130`
-  in 2.561 seconds including identity-cache and model setup.
+  Fresh restore under the cooperative singleton schedule reproduces
+  position-3072 logit SHA-256
+  `e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da`
+  without changing the snapshot ABI or causal digest.
 
 ### S2: local-only Metal backbone
 
@@ -599,14 +600,18 @@ attention, matching b10222 mask-order accumulation. Production scratch stores
 only that consumed order; score-ranked IDs remain available to operation probes
 without paying their insertion sort or buffer cost on every query.
 
-Singleton and retained packed paths share those score/selection kernels. A
-packed chunk keeps its pre-boundary prefix on the old dense kernel and switches
-only the suffix whose visibility exceeds 512 rows. The sparse attention kernel
-receives both the original chunk start and suffix offset, so a future row in the
-same chunk cannot overwrite an older raw-ring key needed by an earlier sparse
-query. Invalid geometry or non-finite scores produce a bounded safe selection,
-record an error status, and poison the session after command completion rather
-than risking an out-of-bounds GPU read.
+Singleton and retained packed paths share those score/selection kernels and the
+cooperative selected-attention kernel. A packed chunk keeps its pre-boundary
+prefix on the old dense kernel and switches only the suffix whose visibility
+exceeds 512 rows. The sparse attention kernel receives both the original chunk
+start and suffix offset, so a future row in the same chunk cannot overwrite an
+older raw-ring key needed by an earlier sparse query. Its N=1 dispatch aliases
+the current and preserved raw ring intentionally, computes each shared-KV score
+once per query/head, and shares the mass across all 512 output lanes. The host
+contract validates the physical compressed capacity and the shader bounds every
+selected ID by both visibility and capacity. Invalid geometry or non-finite
+scores produce a bounded safe selection, record an error status, and poison the
+session after command completion rather than risking an out-of-bounds GPU read.
 
 Gate:
 
@@ -666,16 +671,17 @@ Gate:
   two independent position-2052 captures are byte-identical at
   `819a833db015eb57c553d3e77e9514141d5094fc0b07df9e9977553bfa51abaf`.
   Native singleton execution preserves argmaxes 35 and 201 at cosine / relative
-  RMS 0.998268670 / 0.059771198 and 0.997478853 / 0.071004289.
+  RMS 0.998268912 / 0.059766996 and 0.997480789 / 0.070976469.
 - A packed four-token chunk crosses the 513-row boundary and an immediate packed
   continuation preserves argmax 201. Against the singleton continuation it has
-  cosine 0.999999955 and relative RMS 0.000301680; a model-free packed test also
+  relative RMS 0.000273143; a model-free packed test also
   matches the CPU oracle while forcing the original-chunk raw-ring branch.
 - The durable next-position-2052 checkpoint has a 31,967,504-byte payload,
   31,983,920-byte record, and causal digest
   `8b7906e362419dfe077eb5dd7d4909e154a5729cd100463dcfd9c2a86c172920`.
-  Fresh restore reproduces the exact singleton position-2052 logit hash
-  `52e0d3bcd450bff10443ac16a93937138e3f5fce224daab6e68c76b8a0d386e6`.
+  Fresh restore remains ABI-compatible and reproduces cooperative-schedule
+  position-2052 logit SHA-256
+  `db5cf5daddd63eb265cec1a7d693a35ac8adb4ca1632f5dad653732a3df32bce`.
   Packed and singleton prefixes intentionally retain their own deterministic
   reduction histories; their snapshots need not be bit-identical.
 - At positions 3070/3071/3072, b10222's legal singleton and batched prompt
@@ -685,9 +691,9 @@ Gate:
   angular chord and common-singleton-norm L2 diameter: the expanded native
   diameter must fit inside the independently measured b10222 schedule diameter
   plus the already-established historical allowance. Measured expanded versus
-  allowed angular/L2 diameters are 0.202833/0.215392 versus
+  allowed angular/L2 diameters are 0.202828/0.215391 versus
   0.289972/0.298147 at position 3070, 0.261382/0.271941 versus
-  0.402803/0.421941 at position 3071, and 0.102988/0.105351 versus
+  0.402803/0.421941 at position 3071, and 0.102983/0.105346 versus
   0.161559/0.168516 at position 3072.
 - Complete position-3070 decision transcripts pin 21 CSA selectors and all 43
   MoE routes for native, batched b10222, and singleton b10222. All three agree
@@ -698,14 +704,18 @@ Gate:
   reference/reference comparisons. The first disagreement is therefore a
   cutoff-sensitive numerical bifurcation, not a publication, ordering, or
   large-margin semantic mismatch. Canonical vectors and transcripts are
-  byte-identical across two fresh processes and validated model-free.
+  byte-identical across two fresh processes and validated model-free. Moving
+  singleton attention onto the cooperative reduction changes low-order score
+  values but preserves all 21 selected sets and all 43 routed-expert sets from
+  the prior native transcript. The only selector rank change is a layer-22
+  rank-513 row, outside the consumed top 512.
 - The certified position-3072 v1 snapshot restores into a 1,024-row CSA session
   and reproduces its existing full-logit hash before crossing the old fixed
   allocation. Packed and singleton schedules then publish row 768 at position
   3075 and continue through 3076 at cosine / relative-RMS pairs
-  0.999999989 / 0.000152354 and 0.999999998 / 0.000070677. Fresh restore of the
+  0.999999988 / 0.000158082 and 0.999999998 / 0.000070236. Fresh restore of the
   row-768 state reproduces continuation bits exactly; the terminal causal digest
-  is `082f7ed5e81fc77491610d403e5d9a80211026abbac32cab80db4dd1b3ac8e35`,
+  is `5b65f082d06c94f98604bdaf5b3d0ff45e875e3371d7dd9e215d2132fb3fdc11`,
   and position 3077 rejects before mutation in that deliberately bounded test
   session.
 
@@ -920,8 +930,9 @@ Gate:
 - The next-position-2176 checkpoint has a 32,821,760-byte payload,
   32,838,176-byte record, and causal digest
   `279a2f4ba1a7a6541144b5af6f2cbff745b498cca1fd24e414ec1cb7f86ffa68`.
-  Fresh restore reproduces full-logit SHA-256
-  `b6de17ab59a753d51a242f0a71e8c34965d85542e4d0b1a747098eb47b1244a3`;
+  Fresh restore under the cooperative singleton schedule reproduces full-logit
+  SHA-256
+  `f11d5f383999f85be6a606672dc6529cdd1d370d4b42c5b14460f7392c1f7870`;
   position 2177 rejects before mutation and preserves every completed
   position-2176 logit bit.
 
@@ -1163,6 +1174,24 @@ retaining every pinned logit and causal-state bit; the release restored endpoint
 fell from 1,566.3 to 1,049.5 ms. These are observed paired runs, not a standalone
 microbenchmark attribution.
 
+The first production-shape far-context profile identified a separate singleton
+attention cliff. The original kernel recomputed each 512-wide shared-KV dot
+product independently for every output lane and took 41.49-41.63 ms per CSA
+layer regardless of history length. Singleton decode now uses the packed
+cooperative kernel: each score is computed once per query/head and shared through
+threadgroup memory. It takes 0.303-0.304 ms, a 136.4-137.2x kernel speedup. The
+legacy host path remains test-only; its compiled kernel is retained solely for
+the numerical differential.
+
+At 16,384, 65,536, and 262,144 compressed rows, one-query index scoring measures
+0.701, 2.347, and 8.215 ms; deterministic top-512 selection measures 3.490,
+25.876, and 114.212 ms; cooperative selected attention measures 0.304, 0.304,
+and 0.303 ms. Projecting only those three isolated GPU phases across all 21 CSA
+layers gives 94.390, 599.053, and 2,577.333 ms per token. These are not full
+decode timings: they exclude projections, HCA, MoE, command synchronization, and
+host work. They do establish that exact selection, not attention, is now the
+dominant full-context CSA target.
+
 Gate:
 
 - Packed N=1 preserves position-zero argmax 201 at cosine 0.999999548 and
@@ -1208,7 +1237,7 @@ Gate:
 - Starting from the durable position-2048 state, a packed four-token chunk
   crosses the first sparse boundary and a packed one-token continuation reaches
   position 2052. The continuation preserves argmax 201 and differs from the
-  singleton path by only 0.000301680 relative RMS at cosine 0.999999955. The
+  cooperative singleton path by only 0.000273143 relative RMS. The
   packed causal-state digest
   `03cea8187af6782fa374bf8ce441057d74924880eb6be46439b25982098476db`
   is pinned separately from the singleton reduction history.
@@ -1231,6 +1260,13 @@ Gate:
   must reproduce the pinned native transcript canonically before publication.
   Fresh durable restore reproduces the endpoint bits, and the release CLI
   reaches that historical 3,073-forward endpoint in 1.79 seconds end to end.
+- At positions 2051, 2052, and 3071 the cooperative and legacy singleton
+  attention reductions differ in only 28-46 of 32,768 output bits. Maximum
+  absolute error is at most 5.83e-11 and relative RMS at most 9e-9. The induced
+  deep-logit schedule is deterministic across fresh processes, remains inside
+  the pinned b10222 schedule envelope, preserves every consumed CSA selection
+  and MoE expert set, and restores the existing causal snapshots without an ABI
+  change.
 - Restoring that certified position-3072 state into a request-sized session,
   then crossing row 768 with one four-token packed chunk, preserves the existing
   endpoint hash, agrees with singleton execution within 0.000153 relative RMS,
@@ -1252,9 +1288,12 @@ Broader S6 work remains:
 - Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, shared-KV
   sparse attention, and high-value MoE boundaries.
-- Attribute far-context index scoring, deterministic parallel selection, tiled
-  HCA score recomputation, and retained-chunk routing before choosing the next
-  fusion or scheduling target.
+- Replace the measured 114.212 ms terminal deterministic selector with a
+  hierarchical exact top-512 design while preserving lower-row tie breaks,
+  cache-order output, and fail-closed non-finite handling. Index scoring is the
+  secondary measured CSA target.
+- Attribute tiled HCA score recomputation and retained-chunk routing before
+  choosing their next fusion or scheduling target.
 - Move CPU routing and grouped expert schedules onto the GPU only after named
   retained-chunk phase attribution identifies them as the next bottleneck.
 

@@ -2703,77 +2703,26 @@ fn encode_packed_selected_sink_attention_f16(
         "packed selected attention output",
     )?;
 
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        head_count: u32,
-        head_dim: u32,
-        query_count: u32,
-        query_token_offset: u32,
-        chunk_start_position: u32,
-        window: u32,
-        selected_slots: u32,
-        scale: f32,
-    }
-    let pso = ctx.pipeline("kernel_deepseek_v4_packed_selected_sink_attention_f16")?;
-    let maximum_rows = DEEPSEEK_V4_LOCAL_WINDOW + DEEPSEEK_V4_CSA_TOP_K;
-    let threadgroup_width = config.head_dim.max(maximum_rows);
-    if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
-        return invalid(format!(
-            "packed selected attention pipeline supports {} threads, requires {}",
-            pso.maxTotalThreadsPerThreadgroup(),
-            threadgroup_width
-        ));
-    }
-    enc.set_pipeline(&pso);
-    enc.set_bytes(
-        0,
-        &Args {
-            head_count: u32::try_from(config.head_count).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed selected head count exceeds u32".into())
-            })?,
-            head_dim: u32::try_from(config.head_dim).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed selected head dimension exceeds u32".into())
-            })?,
-            query_count: u32::try_from(sparse.query_count).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed selected query count exceeds u32".into())
-            })?,
-            query_token_offset: u32::try_from(sparse.query_offset).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed selected query offset exceeds u32".into())
-            })?,
-            chunk_start_position: start_position,
-            window: u32::try_from(DEEPSEEK_V4_LOCAL_WINDOW).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed selected window exceeds u32".into())
-            })?,
-            selected_slots: u32::try_from(DEEPSEEK_V4_CSA_TOP_K).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("packed selected slot count exceeds u32".into())
-            })?,
-            scale: 1.0 / (config.head_dim as f32).sqrt(),
-        },
-    );
-    enc.set_tensor(1, queries);
-    enc.set_tensor(2, raw_cache);
-    enc.set_tensor(3, raw_cache_before_chunk);
-    enc.set_tensor(4, rows.attention_cache);
-    enc.set_tensor(5, &sparse.cache_order_ids);
-    enc.set_tensor(6, &sparse.selected_counts);
-    enc.set_tensor(7, &sparse.visible_counts);
-    enc.set_tensor(8, sinks);
-    enc.set_tensor(9, output);
-    enc.set_threadgroup_memory(0, (maximum_rows + 1) * std::mem::size_of::<f32>());
-    enc.dispatch(
-        MTLSize {
-            width: sparse.query_count,
-            height: config.head_count,
-            depth: 1,
-        },
-        MTLSize {
-            width: threadgroup_width,
-            height: 1,
-            depth: 1,
-        },
-    );
-    Ok(())
+    encode_cooperative_selected_sink_attention_f16(
+        ctx,
+        enc,
+        queries,
+        raw_cache,
+        raw_cache_before_chunk,
+        rows.attention_cache,
+        rows.capacity_rows,
+        &sparse.cache_order_ids,
+        &sparse.selected_counts,
+        &sparse.visible_counts,
+        sinks,
+        output,
+        start_position,
+        sparse.query_offset,
+        sparse.query_count,
+        n_tokens,
+        DEEPSEEK_V4_CSA_TOP_K,
+        config,
+    )
 }
 
 impl DeepSeekV4Session {

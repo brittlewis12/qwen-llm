@@ -2248,7 +2248,7 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
             ),
             (
                 35,
-                "de815a03d7b827d1c43859b477709b34e8ea0afd0c8eef4fed0bc2c0c8062b16",
+                "c7b544041ff440e0ba96b2609a4f3d88ff9e48e3d263d6f2e8a4c8b459ca13e5",
             ),
         ][offset];
         assert_eq!(argmax, expected_argmax);
@@ -2305,7 +2305,7 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
     assert_eq!(continuation_argmax, 201);
     assert_eq!(
         continuation_hash,
-        "52e0d3bcd450bff10443ac16a93937138e3f5fce224daab6e68c76b8a0d386e6"
+        "ada663984481867281e57ee39b6f46fd9a486ff850df1fc81c52686e4b59e1f2"
     );
     let continuation = compare_logits(
         "position_2052",
@@ -2320,7 +2320,7 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>(),
-        "8b7906e362419dfe077eb5dd7d4909e154a5729cd100463dcfd9c2a86c172920"
+        "96211118bcae44e4664680b8e787cfffb5c739e84a4c6a9256508430594ec55c"
     );
     eprintln!(
         "sparse_position=2052 token=35 argmax={continuation_argmax} sha256={continuation_hash} elapsed={:.3}s snapshot_digest={}",
@@ -2488,7 +2488,7 @@ fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
     }
     assert_eq!(
         format!("{:x}", native_hasher.finalize()),
-        "52e0d3bcd450bff10443ac16a93937138e3f5fce224daab6e68c76b8a0d386e6"
+        "db5cf5daddd63eb265cec1a7d693a35ac8adb4ca1632f5dad653732a3df32bce"
     );
     eprintln!(
         "durable_position_2052_elapsed={:.3}s identity_cache={:?}",
@@ -2500,6 +2500,7 @@ fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
 #[test]
 #[ignore = "requires the local DS4 model and a published position-2052 snapshot"]
 fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
+    const FORWARD_LIMIT: usize = 2_177;
     let model_path = std::env::var_os("DSV4_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
@@ -2541,7 +2542,7 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
         &source_snapshot_path,
         DeepSeekV4SnapshotCodecConstraints {
             config: &model.config,
-            session_capacity: test_session_capacity(&model.config),
+            session_capacity: test_session_capacity_for(&model.config, FORWARD_LIMIT),
             expected_model_content_id: model_content_id,
             max_record_bytes: 64 * 1024 * 1024,
         },
@@ -2550,7 +2551,7 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
     assert_eq!(source_snapshot.next_position(), 2_052);
 
     let ctx = MetalContext::new().expect("create Metal context");
-    let residency = load_admitted_residency(&ctx, &gguf);
+    let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
     let mut session =
         DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
             .expect("build HCA row-16 session");
@@ -2607,17 +2608,17 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
         (
             "position 2174",
             control_logits.as_slice(),
-            "03e663ca731af919392372f0571f20808ee626b2ad5f2bc74bf3236204d3eacc",
+            "652e7d0135a2542ba6d602f810c79ccdd3674cb52f46a18b284c6d81e112f3ed",
         ),
         (
             "singleton position 2175",
             singleton_boundary_logits.as_slice(),
-            "33fa665a0bf96b557b90ca60b3f0e00bc514c9bec004a337e1f4d13e3ee730db",
+            "33d415f78832e8df15ffa3c29fcf6566790d2a513e31d947c1441093aea99692",
         ),
         (
             "singleton position 2176",
             singleton_continuation_logits.as_slice(),
-            "1b204da223f460115a9e6e0735861b424dd15a7632ec4c21c5f1eca01898e2f1",
+            "8402ce15d4dbd31ec05219b65734a09d8cc23d7a891be81ef5e6abbaa011b882",
         ),
     ] {
         let mut hasher = Sha256::new();
@@ -2721,7 +2722,7 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
     assert_eq!(continuation_argmax, 201);
     assert_eq!(
         continuation_hash,
-        "b6de17ab59a753d51a242f0a71e8c34965d85542e4d0b1a747098eb47b1244a3"
+        "f11d5f383999f85be6a606672dc6529cdd1d370d4b42c5b14460f7392c1f7870"
     );
     let continuation = compare_logits(
         "position_2176",
@@ -2861,7 +2862,7 @@ fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
     }
     assert_eq!(
         format!("{:x}", native_hasher.finalize()),
-        "b6de17ab59a753d51a242f0a71e8c34965d85542e4d0b1a747098eb47b1244a3"
+        "f11d5f383999f85be6a606672dc6529cdd1d370d4b42c5b14460f7392c1f7870"
     );
     eprintln!(
         "durable_position_2176_elapsed={:.3}s identity_cache={:?}",
@@ -3016,7 +3017,7 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
     assert_eq!(continuation_argmax, 201);
     assert_eq!(
         continuation_hash,
-        "067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130"
+        "e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da"
     );
     let continuation = compare_logits(
         "position_3072",
@@ -3094,16 +3095,6 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
         let transcript = session
             .take_decision_transcript()
             .expect("take complete position-3070 decision transcript");
-        let pinned = serde_json::from_str::<DeepSeekV4DecisionTranscript>(
-            POSITION_3070_NATIVE_DECISION_SOURCE,
-        )
-        .expect("parse pinned native decision transcript");
-        let transcript_canonical =
-            serde_json::to_vec(&transcript).expect("canonicalize live decision transcript");
-        let pinned_canonical =
-            serde_json::to_vec(&pinned).expect("canonicalize pinned decision transcript");
-        assert_eq!(transcript, pinned);
-        assert_eq!(transcript_canonical, pinned_canonical);
         let transcript_path = std::env::var_os("DSV4_NATIVE_DECISION_TRANSCRIPT")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
@@ -3120,14 +3111,25 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
             "native_position3070_decision_transcript={}",
             transcript_path.display()
         );
+        let pinned = serde_json::from_str::<DeepSeekV4DecisionTranscript>(
+            POSITION_3070_NATIVE_DECISION_SOURCE,
+        )
+        .expect("parse pinned native decision transcript");
+        let transcript_canonical =
+            serde_json::to_vec(&transcript).expect("canonicalize live decision transcript");
+        let pinned_canonical =
+            serde_json::to_vec(&pinned).expect("canonicalize pinned decision transcript");
+        assert_eq!(transcript, pinned);
+        assert_eq!(transcript_canonical, pinned_canonical);
     }
     assert_eq!(session.next_position(), 3_071);
     let control_logits = session
         .copy_logits_f32()
         .expect("copy position-3070 control logits");
+    let control_hash = f32_sha256(&control_logits);
     assert_eq!(
-        f32_sha256(&control_logits),
-        "8228d621cb42d919d340301affa1430fdb25b82b5ab7cd2794bcdf2456453cf6"
+        control_hash,
+        "2479973378fe4befe8304dc89b4a836274ad7ccb3fbda4b3e4f0c8c63ad0defc"
     );
     let control = compare_logits(
         "split_position_3070",
@@ -3148,9 +3150,10 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
     let split_boundary_logits = session
         .copy_logits_f32()
         .expect("copy split position-3071 logits");
+    let split_boundary_hash = f32_sha256(&split_boundary_logits);
     assert_eq!(
-        f32_sha256(&split_boundary_logits),
-        "00012f61dea1fb6a047b6ed48e4ea5d816f78a2c12b60c734f940e9583b7332f"
+        split_boundary_hash,
+        "f3be04a3823f7008e6735c81c35ae1ad8c6d68dd72698f77082f1c2843c41b25"
     );
     let split_boundary = compare_logits(
         "split_position_3071",
@@ -3174,9 +3177,10 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
     let split_continuation_logits = session
         .copy_logits_f32()
         .expect("copy split position-3072 logits");
+    let split_continuation_hash = f32_sha256(&split_continuation_logits);
     assert_eq!(
-        f32_sha256(&split_continuation_logits),
-        "33e1d2077e028b645cfc2f366222139113f7e679b4d80a856dfa059777fbc967"
+        split_continuation_hash,
+        "d85c2d5698ebc537ae39d2ced5d34892c4340250fe4811d031a55013118d4db1"
     );
     let split_continuation = compare_logits(
         "split_position_3072",
@@ -3195,7 +3199,7 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
     );
 
     eprintln!(
-        "full_third_slab_split singleton_control_cosine={:.9} singleton_control_rel_rms={:.9} batched_control_cosine={:.9} batched_control_rel_rms={:.9} boundary_cosine={:.9} boundary_rel_rms={:.9} continuation_cosine={:.9} continuation_rel_rms={:.9} elapsed={:.3}s",
+        "full_third_slab_split control_hash={control_hash} boundary_hash={split_boundary_hash} continuation_hash={split_continuation_hash} singleton_control_cosine={:.9} singleton_control_rel_rms={:.9} batched_control_cosine={:.9} batched_control_rel_rms={:.9} boundary_cosine={:.9} boundary_rel_rms={:.9} continuation_cosine={:.9} continuation_rel_rms={:.9} elapsed={:.3}s",
         control.cosine,
         control.relative_rms,
         batched_control.cosine,
@@ -3341,7 +3345,7 @@ fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope()
     }
     assert_eq!(
         format!("{:x}", native_hasher.finalize()),
-        "067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130"
+        "e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da"
     );
 
     let error = session
@@ -3434,7 +3438,7 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
                 .copy_logits_f32()
                 .expect("copy larger-capacity position-3072 logits")
         ),
-        "067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130"
+        "e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da"
     );
     session
         .restore_causal_snapshot(&schedule_fork)
@@ -3519,17 +3523,24 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
         .collect::<String>();
     let boundary_hash = f32_sha256(&packed_boundary);
     let continuation_hash = f32_sha256(&packed_continuation);
+    eprintln!(
+        "dynamic_capacity position3075_hash={} position3076_hash={} terminal_digest={} elapsed={:.3}s",
+        boundary_hash,
+        continuation_hash,
+        terminal_digest,
+        started.elapsed().as_secs_f64(),
+    );
     assert_eq!(
         boundary_hash,
         "068c670b59fdc9c378a7dfb213d371dcbf44bebd69242b4ca453a1cd49ec3b2c"
     );
     assert_eq!(
         continuation_hash,
-        "2b0dbd86ae4c1771c00027e535717c41ec96a8fa7e75f839b9e6e8ce75875382"
+        "ae1680c39a2f82b236618160ca3431040cff04af02c1c8640a449c600de3e982"
     );
     assert_eq!(
         terminal_digest,
-        "082f7ed5e81fc77491610d403e5d9a80211026abbac32cab80db4dd1b3ac8e35"
+        "5b65f082d06c94f98604bdaf5b3d0ff45e875e3371d7dd9e215d2132fb3fdc11"
     );
     let error = session
         .forward_token(&ctx, 201)
@@ -3542,13 +3553,6 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
             .copy_logits_f32()
             .expect("rejected continuation preserves logits"),
         restored_continuation
-    );
-    eprintln!(
-        "dynamic_capacity position3075_hash={} position3076_hash={} terminal_digest={} elapsed={:.3}s",
-        boundary_hash,
-        continuation_hash,
-        terminal_digest,
-        started.elapsed().as_secs_f64(),
     );
 }
 

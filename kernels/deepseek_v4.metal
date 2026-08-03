@@ -85,6 +85,7 @@ struct ds4_packed_selected_attention_args {
     uint chunk_start_position;
     uint window;
     uint selected_slots;
+    uint compressed_capacity;
     float scale;
 };
 
@@ -579,7 +580,8 @@ kernel void kernel_deepseek_v4_packed_selected_sink_attention_f16(
         const uint row = compressed ? tid - raw_count : tid;
         const int selected_id = compressed ? selected_ids[ids_base + row] : -1;
         const bool valid_selected = compressed && selected_id >= 0
-            && uint(selected_id) < visible_count;
+            && uint(selected_id) < visible_count
+            && uint(selected_id) < args.compressed_capacity;
         const uint logical_position = raw_start + row;
         device const half * cache = compressed
             ? compressed_cache
@@ -628,7 +630,8 @@ kernel void kernel_deepseek_v4_packed_selected_sink_attention_f16(
         }
         for (uint slot = 0u; slot < selected_count; ++slot) {
             const int selected_id = selected_ids[ids_base + slot];
-            if (selected_id < 0 || uint(selected_id) >= visible_count) continue;
+            if (selected_id < 0 || uint(selected_id) >= visible_count
+                    || uint(selected_id) >= args.compressed_capacity) continue;
             const uint cache_start = uint(selected_id) * args.head_dim;
             value += float(compressed_cache[cache_start + tid]) * masses[raw_count + slot];
         }

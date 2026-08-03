@@ -1265,7 +1265,7 @@ impl DeepSeekV4Session {
                         &encoder,
                         &raw_cache,
                         rows,
-                        &self.sparse_csa.cache_order_ids(),
+                        &self.sparse_csa,
                         self.layer_tensor(layer, "attn_sinks.weight")?,
                         self.layer_tensor(layer, "attn_output_a.weight")?,
                         self.layer_tensor(layer, "attn_output_b.weight")?,
@@ -2341,11 +2341,6 @@ impl DeepSeekV4SparseCsaScratch {
         )
     }
 
-    fn cache_order_ids(&self) -> MetalTensor {
-        self.cache_order_ids
-            .view_subrange(0, vec![DEEPSEEK_V4_CSA_TOP_K as u64])
-    }
-
     fn validate_completed(&self) -> Result<(), DeepSeekV4MetalError> {
         let status = host_read_i32(&self.status, "sparse CSA selection status")?;
         let count = host_read_i32(&self.selected_counts, "sparse CSA selected count")?;
@@ -2874,7 +2869,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         enc: &KernelEncoder,
         raw_cache: &MetalTensor,
         rows: DeepSeekV4CsaRows<'_>,
-        selected_ids: &MetalTensor,
+        selection: &DeepSeekV4SparseCsaScratch,
         sinks: &MetalTensor,
         output_a: &MetalTensor,
         output_b: &MetalTensor,
@@ -2886,19 +2881,36 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         let dims = c.checked()?;
         self.validate_scratch(dims)?;
         validate_ds4_rope(rope, c.head_dim, c.rotary_dim)?;
-        encode_selected_sink_attention_f16(
+        if selection.capacity_rows != rows.capacity_rows {
+            return invalid(format!(
+                "selected attention scratch capacity {} differs from CSA capacity {}",
+                selection.capacity_rows, rows.capacity_rows
+            ));
+        }
+        let queries = self
+            .queries
+            .view_subrange(0, vec![dims.query_width as u64, 1]);
+        let output = self
+            .attention
+            .view_subrange(0, vec![dims.query_width as u64, 1]);
+        encode_cooperative_selected_sink_attention_f16(
             ctx,
             enc,
-            &self.queries,
+            &queries,
+            raw_cache,
             raw_cache,
             rows.attention_cache,
-            selected_ids,
-            sinks,
-            &self.attention,
-            position,
-            rows.count,
-            DEEPSEEK_V4_CSA_TOP_K,
             rows.capacity_rows,
+            &selection.cache_order_ids,
+            &selection.selected_counts,
+            &selection.visible_counts,
+            sinks,
+            &output,
+            position,
+            0,
+            1,
+            1,
+            DEEPSEEK_V4_CSA_TOP_K,
             c,
         )?;
         self.encode_attention_output(ctx, enc, output_a, output_b, position, rope)
@@ -5289,6 +5301,7 @@ fn validate_parallel_selector_pipeline(
     Ok(())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn encode_selected_sink_attention_f16(
     ctx: &MetalContext,
@@ -5398,6 +5411,183 @@ fn encode_selected_sink_attention_f16(
         },
         MTLSize {
             width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_cooperative_selected_sink_attention_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    raw_cache: &MetalTensor,
+    raw_cache_before_chunk: &MetalTensor,
+    compressed_cache: &MetalTensor,
+    compressed_capacity: usize,
+    selected_ids: &MetalTensor,
+    selected_counts: &MetalTensor,
+    visible_counts: &MetalTensor,
+    sinks: &MetalTensor,
+    output: &MetalTensor,
+    chunk_start_position: u32,
+    query_token_offset: usize,
+    query_count: usize,
+    token_count: usize,
+    selected_slots: usize,
+    config: DeepSeekV4PositionZeroAttentionConfig,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, "deepseek_v4_cooperative_selected_attention")?;
+    let query_width = checked_mul(
+        config.head_count,
+        config.head_dim,
+        "cooperative selected query width",
+    )?;
+    let query_end = query_token_offset.checked_add(query_count).ok_or_else(|| {
+        DeepSeekV4MetalError::Invalid("cooperative selected query range overflow".into())
+    })?;
+    if compressed_capacity == 0
+        || selected_slots == 0
+        || selected_slots > compressed_capacity
+        || query_count == 0
+        || token_count == 0
+        || query_token_offset >= token_count
+        || query_end > token_count
+        || [
+            config.head_count,
+            config.head_dim,
+            query_width,
+            compressed_capacity,
+            selected_slots,
+            query_token_offset,
+            query_count,
+            token_count,
+        ]
+        .into_iter()
+        .any(|value| u32::try_from(value).is_err())
+    {
+        return invalid("cooperative selected attention geometry is invalid");
+    }
+    let final_token = query_end - 1;
+    chunk_start_position
+        .checked_add(u32::try_from(final_token).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("cooperative selected final token exceeds u32".into())
+        })?)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("cooperative selected absolute position overflow".into())
+        })?;
+    validate_f32(
+        queries,
+        &[query_width as u64, token_count as u64],
+        false,
+        "cooperative selected attention queries",
+    )?;
+    for (tensor, name) in [
+        (raw_cache, "cooperative selected raw cache"),
+        (
+            raw_cache_before_chunk,
+            "cooperative selected preserved raw cache",
+        ),
+    ] {
+        validate_f16(
+            tensor,
+            &[config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+            false,
+            name,
+        )?;
+    }
+    validate_f16(
+        compressed_cache,
+        &[config.head_dim as u64, compressed_capacity as u64],
+        false,
+        "cooperative selected compressed cache",
+    )?;
+    validate_i32(
+        selected_ids,
+        &[selected_slots as u64, query_count as u64],
+        false,
+        "cooperative selected row IDs",
+    )?;
+    for (tensor, name) in [
+        (selected_counts, "cooperative selected row counts"),
+        (visible_counts, "cooperative selected visible counts"),
+    ] {
+        validate_i32(tensor, &[query_count as u64], false, name)?;
+    }
+    validate_f32(
+        sinks,
+        &[config.head_count as u64],
+        false,
+        "cooperative selected attention sinks",
+    )?;
+    validate_f32(
+        output,
+        &[query_width as u64, token_count as u64],
+        true,
+        "cooperative selected attention output",
+    )?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        head_count: u32,
+        head_dim: u32,
+        query_count: u32,
+        query_token_offset: u32,
+        chunk_start_position: u32,
+        window: u32,
+        selected_slots: u32,
+        compressed_capacity: u32,
+        scale: f32,
+    }
+    let pso = ctx.pipeline("kernel_deepseek_v4_packed_selected_sink_attention_f16")?;
+    let maximum_rows = DEEPSEEK_V4_LOCAL_WINDOW
+        .checked_add(selected_slots)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("cooperative selected maximum row count overflow".into())
+        })?;
+    let threadgroup_width = config.head_dim.max(maximum_rows);
+    if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
+        return invalid(format!(
+            "cooperative selected attention pipeline supports {} threads, requires {threadgroup_width}",
+            pso.maxTotalThreadsPerThreadgroup()
+        ));
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            head_count: config.head_count as u32,
+            head_dim: config.head_dim as u32,
+            query_count: query_count as u32,
+            query_token_offset: query_token_offset as u32,
+            chunk_start_position,
+            window: DEEPSEEK_V4_LOCAL_WINDOW as u32,
+            selected_slots: selected_slots as u32,
+            compressed_capacity: compressed_capacity as u32,
+            scale: 1.0 / (config.head_dim as f32).sqrt(),
+        },
+    );
+    enc.set_tensor(1, queries);
+    enc.set_tensor(2, raw_cache);
+    enc.set_tensor(3, raw_cache_before_chunk);
+    enc.set_tensor(4, compressed_cache);
+    enc.set_tensor(5, selected_ids);
+    enc.set_tensor(6, selected_counts);
+    enc.set_tensor(7, visible_counts);
+    enc.set_tensor(8, sinks);
+    enc.set_tensor(9, output);
+    enc.set_threadgroup_memory(0, (maximum_rows + 1) * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: query_count,
+            height: config.head_count,
+            depth: 1,
+        },
+        MTLSize {
+            width: threadgroup_width,
             height: 1,
             depth: 1,
         },
@@ -11063,6 +11253,10 @@ mod tests {
         let attention_output =
             MetalTensor::zeros_f32(&ctx, vec![ATTENTION_DIM as u64, ATTENTION_HEADS as u64])
                 .unwrap();
+        let cooperative_queries = attention_queries_tensor
+            .view_subrange(0, vec![(ATTENTION_HEADS * ATTENTION_DIM) as u64, 1]);
+        let cooperative_output =
+            attention_output.view_subrange(0, vec![(ATTENTION_HEADS * ATTENTION_DIM) as u64, 1]);
         let attention_config = DeepSeekV4PositionZeroAttentionConfig {
             hidden_size: 1,
             q_lora_rank: 1,
@@ -11113,20 +11307,24 @@ mod tests {
             1,
         )
         .unwrap();
-        let selected_ids = cache_order_ids.view_subrange(0, vec![TOP_K as u64]);
-        encode_selected_sink_attention_f16(
+        encode_cooperative_selected_sink_attention_f16(
             &ctx,
             &encoder,
-            &attention_queries_tensor,
+            &cooperative_queries,
+            &raw_cache,
             &raw_cache,
             &compressed_cache,
-            &selected_ids,
-            &sink_tensor,
-            &attention_output,
-            POSITION as u32,
-            VISIBLE,
-            TOP_K,
             CAPACITY,
+            &cache_order_ids,
+            &selected_counts,
+            &visible_counts,
+            &sink_tensor,
+            &cooperative_output,
+            POSITION as u32,
+            0,
+            1,
+            1,
+            TOP_K,
             attention_config,
         )
         .unwrap();
@@ -11435,6 +11633,568 @@ mod tests {
             &expected_attention,
             1.5e-4,
         );
+    }
+
+    #[test]
+    fn cooperative_selected_attention_matches_legacy_singleton_within_roundoff() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 768;
+        const TOP_K: usize = 512;
+        let config = deepseek_v4_session_attention_config();
+        let dims = config.checked().unwrap();
+        let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
+        let query_values = (0..dims.query_width)
+            .map(|index| ((index * 17 + 3) % 131) as f32 * 0.0007 - 0.043)
+            .collect::<Vec<_>>();
+        let queries = offset_f32(
+            &ctx,
+            &query_values,
+            vec![config.head_dim as u64, config.head_count as u64],
+        );
+        let packed_queries = queries.view_subrange(0, vec![dims.query_width as u64, 1]);
+        let compressed_values = (0..CAPACITY * config.head_dim)
+            .map(|index| {
+                let row = index / config.head_dim;
+                let dimension = index % config.head_dim;
+                let tag = (row * 31 + dimension * 11 + row / 5) % 149;
+                round_f16((tag as f32 - 74.0) * 0.0008)
+            })
+            .collect::<Vec<_>>();
+        let compressed_bits = compressed_values
+            .iter()
+            .map(|value| half::f16::from_f32(*value).to_bits())
+            .collect::<Vec<_>>();
+        let compressed = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&compressed_bits),
+            vec![config.head_dim as u64, CAPACITY as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let sink_values = (0..config.head_count)
+            .map(|head| -0.37 + head as f32 * 0.003)
+            .collect::<Vec<_>>();
+        let sinks = offset_f32(&ctx, &sink_values, vec![config.head_count as u64]);
+
+        for (position, visible, first_selected) in [
+            (2_051u32, 513usize, 0usize),
+            (2_052, 513, 1),
+            (3_071, 768, 256),
+        ] {
+            let raw_values = (0..DEEPSEEK_V4_LOCAL_WINDOW * config.head_dim)
+                .map(|index| {
+                    let slot = index / config.head_dim;
+                    let dimension = index % config.head_dim;
+                    let tag = (slot * 23 + dimension * 7 + position as usize) % 137;
+                    round_f16((tag as f32 - 68.0) * 0.0009)
+                })
+                .collect::<Vec<_>>();
+            let raw_bits = raw_values
+                .iter()
+                .map(|value| half::f16::from_f32(*value).to_bits())
+                .collect::<Vec<_>>();
+            let raw_cache = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&raw_bits),
+                vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+                GgmlType::F16,
+            )
+            .unwrap();
+            let ids = (first_selected..first_selected + TOP_K)
+                .map(|row| row as i32)
+                .collect::<Vec<_>>();
+            let selected_ids = offset_i32(&ctx, &ids, vec![TOP_K as u64, 1]);
+            let legacy_ids = selected_ids.view_subrange(0, vec![TOP_K as u64]);
+            let selected_counts = offset_i32(&ctx, &[TOP_K as i32], vec![1]);
+            let visible_counts = offset_i32(&ctx, &[visible as i32], vec![1]);
+            let legacy = MetalTensor::zeros_f32(
+                &ctx,
+                vec![config.head_dim as u64, config.head_count as u64],
+            )
+            .unwrap();
+            let cooperative =
+                MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_selected_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &queries,
+                &raw_cache,
+                &compressed,
+                &legacy_ids,
+                &sinks,
+                &legacy,
+                position,
+                visible,
+                TOP_K,
+                CAPACITY,
+                config,
+            )
+            .unwrap();
+            encode_cooperative_selected_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &packed_queries,
+                &raw_cache,
+                &raw_cache,
+                &compressed,
+                CAPACITY,
+                &selected_ids,
+                &selected_counts,
+                &visible_counts,
+                &sinks,
+                &cooperative,
+                position,
+                0,
+                1,
+                1,
+                TOP_K,
+                config,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            let legacy = read_f32(&legacy);
+            let cooperative = read_f32(&cooperative);
+            let differing = legacy
+                .iter()
+                .zip(&cooperative)
+                .filter(|(legacy, cooperative)| legacy.to_bits() != cooperative.to_bits())
+                .count();
+            let max_abs = legacy
+                .iter()
+                .zip(&cooperative)
+                .map(|(legacy, cooperative)| (legacy - cooperative).abs())
+                .fold(0.0f32, f32::max);
+            let squared_error = legacy
+                .iter()
+                .zip(&cooperative)
+                .map(|(legacy, cooperative)| f64::from(legacy - cooperative).powi(2))
+                .sum::<f64>();
+            let reference_norm = legacy
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>();
+            let relative_rms = (squared_error / reference_norm).sqrt();
+            eprintln!(
+                "cooperative selected position={position} visible={visible} differing={differing}/{} max_abs={max_abs} rel_rms={:.9}",
+                legacy.len(),
+                relative_rms,
+            );
+            assert!(max_abs <= 1e-8);
+            assert!(relative_rms <= 1e-6);
+        }
+    }
+
+    #[test]
+    fn cooperative_selected_attention_bounds_corrupt_selector_metadata() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEAD_DIM: usize = 4;
+        const CAPACITY: usize = 3;
+        const SELECTED_SLOTS: usize = 3;
+        let config = DeepSeekV4PositionZeroAttentionConfig {
+            hidden_size: 1,
+            q_lora_rank: 1,
+            head_count: 1,
+            head_dim: HEAD_DIM,
+            rotary_dim: 2,
+            group_count: 1,
+            output_rank: 1,
+        };
+        let queries = offset_f32(&ctx, &[0.17, -0.23, 0.31, 0.11], vec![HEAD_DIM as u64, 1]);
+        let f16_tensor = |values: &[f32], shape: Vec<u64>| {
+            let bits = values
+                .iter()
+                .map(|value| half::f16::from_f32(*value).to_bits())
+                .collect::<Vec<_>>();
+            MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&bits), shape, GgmlType::F16)
+                .unwrap()
+        };
+        let raw_values = (0..DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM)
+            .map(|index| ((index * 7 + 3) % 29) as f32 * 0.01 - 0.14)
+            .collect::<Vec<_>>();
+        let raw_cache = f16_tensor(
+            &raw_values,
+            vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+        );
+        let compressed_cache = f16_tensor(
+            &[
+                0.8, -0.4, 0.2, 0.6, -0.7, 0.9, 0.5, -0.3, 0.4, 0.1, -0.8, 0.7,
+            ],
+            vec![HEAD_DIM as u64, CAPACITY as u64],
+        );
+        let sinks = offset_f32(&ctx, &[-0.2], vec![1]);
+
+        let run = |ids: [i32; SELECTED_SLOTS], count: i32, visible: i32| {
+            let selected_ids = offset_i32(&ctx, &ids, vec![SELECTED_SLOTS as u64, 1]);
+            let selected_counts = offset_i32(&ctx, &[count], vec![1]);
+            let visible_counts = offset_i32(&ctx, &[visible], vec![1]);
+            let output = MetalTensor::zeros_f32(&ctx, vec![HEAD_DIM as u64, 1]).unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_cooperative_selected_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &queries,
+                &raw_cache,
+                &raw_cache,
+                &compressed_cache,
+                CAPACITY,
+                &selected_ids,
+                &selected_counts,
+                &visible_counts,
+                &sinks,
+                &output,
+                127,
+                0,
+                1,
+                1,
+                SELECTED_SLOTS,
+                config,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "corrupt-selector command failed: {:?}",
+                command.error()
+            );
+            read_f32(&output)
+        };
+
+        let raw_only = run([0, 1, 2], 0, CAPACITY as i32);
+        let invalid_ids = run([-1, 4, 3], SELECTED_SLOTS as i32, 4);
+        let negative_count = run([0, 1, 2], -7, CAPACITY as i32);
+        let selected = run([0, 1, 2], SELECTED_SLOTS as i32, CAPACITY as i32);
+        let oversized_count = run([0, 1, 2], i32::MAX, CAPACITY as i32);
+
+        assert_eq!(invalid_ids, raw_only);
+        assert_eq!(negative_count, raw_only);
+        assert_eq!(oversized_count, selected);
+        assert!(
+            selected
+                .iter()
+                .zip(&raw_only)
+                .any(|(selected, raw)| selected.to_bits() != raw.to_bits())
+        );
+    }
+
+    #[test]
+    #[ignore = "focused production-shape GPU profiler; run explicitly with --nocapture"]
+    fn profile_sparse_csa_decode_phases_at_far_context() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const INDEX_HEADS: usize = 64;
+        const INDEX_DIM: usize = 128;
+        const ATTENTION_HEADS: usize = 64;
+        const ATTENTION_DIM: usize = 512;
+        const TOP_K: usize = 512;
+        const MAX_ROWS: usize = 262_144;
+
+        fn timed_gpu<F>(ctx: &MetalContext, repeats: usize, encode: F) -> f64
+        where
+            F: Fn(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        {
+            let command = ctx.queue.commandBuffer().expect("profile command buffer");
+            let encoder = KernelEncoder::begin(&command);
+            for _ in 0..repeats {
+                encode(&encoder).expect("encode profiled phase");
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "profile command failed: {:?}",
+                command.error()
+            );
+            let elapsed_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            assert!(elapsed_ms.is_finite() && elapsed_ms > 0.0);
+            elapsed_ms / repeats as f64
+        }
+
+        fn median(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        }
+
+        let index_query_values = (0..INDEX_HEADS * INDEX_DIM)
+            .map(|index| ((index * 17 + 3) % 113) as f32 * 0.0007 - 0.037)
+            .collect::<Vec<_>>();
+        let index_queries = offset_f32(
+            &ctx,
+            &index_query_values,
+            vec![INDEX_DIM as u64, INDEX_HEADS as u64, 1],
+        );
+        let index_scale = 1.0 / ((INDEX_HEADS * INDEX_DIM) as f32).sqrt();
+        let head_weights = offset_f32(
+            &ctx,
+            &vec![index_scale; INDEX_HEADS],
+            vec![INDEX_HEADS as u64, 1],
+        );
+        let index_keys = MetalTensor::zeros_f16(&ctx, vec![INDEX_DIM as u64, MAX_ROWS as u64])
+            .expect("allocate profile index keys");
+        let scores = MetalTensor::zeros_f32(&ctx, vec![MAX_ROWS as u64, 1])
+            .expect("allocate profile scores");
+        let selected_mask = MetalTensor::zeros_i32(&ctx, vec![MAX_ROWS as u64, 1])
+            .expect("allocate profile selected mask");
+        let cache_order_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1])
+            .expect("allocate profile selected IDs");
+        let selected_counts =
+            MetalTensor::zeros_i32(&ctx, vec![1]).expect("allocate profile selected count");
+        let status = MetalTensor::zeros_i32(&ctx, vec![1]).expect("allocate profile status");
+
+        let attention_query_values = (0..ATTENTION_HEADS * ATTENTION_DIM)
+            .map(|index| ((index * 19 + 5) % 127) as f32 * 0.0004 - 0.025)
+            .collect::<Vec<_>>();
+        let attention_queries = offset_f32(
+            &ctx,
+            &attention_query_values,
+            vec![ATTENTION_DIM as u64, ATTENTION_HEADS as u64],
+        );
+        let cooperative_queries =
+            attention_queries.view_subrange(0, vec![(ATTENTION_HEADS * ATTENTION_DIM) as u64, 1]);
+        let raw_cache = MetalTensor::zeros_f16(
+            &ctx,
+            vec![ATTENTION_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+        )
+        .expect("allocate profile raw cache");
+        let compressed_cache =
+            MetalTensor::zeros_f16(&ctx, vec![ATTENTION_DIM as u64, MAX_ROWS as u64])
+                .expect("allocate profile compressed cache");
+        let sinks = offset_f32(
+            &ctx,
+            &vec![-0.2f32; ATTENTION_HEADS],
+            vec![ATTENTION_HEADS as u64],
+        );
+        let attention_output =
+            MetalTensor::zeros_f32(&ctx, vec![ATTENTION_DIM as u64, ATTENTION_HEADS as u64])
+                .expect("allocate profile attention output");
+        let cooperative_output =
+            MetalTensor::zeros_f32(&ctx, vec![(ATTENTION_HEADS * ATTENTION_DIM) as u64, 1])
+                .expect("allocate profile cooperative attention output");
+        let attention_config = DeepSeekV4PositionZeroAttentionConfig {
+            hidden_size: 1,
+            q_lora_rank: 1,
+            head_count: ATTENTION_HEADS,
+            head_dim: ATTENTION_DIM,
+            rotary_dim: 64,
+            group_count: 8,
+            output_rank: 1,
+        };
+
+        for row_count in [16_384usize, 65_536, MAX_ROWS] {
+            let visible_counts = offset_i32(&ctx, &[row_count as i32], vec![1]);
+            let keys = index_keys.view_subrange(0, vec![INDEX_DIM as u64, row_count as u64]);
+            let score_rows = scores.view_subrange(0, vec![row_count as u64, 1]);
+            let mask_rows = selected_mask.view_subrange(0, vec![row_count as u64, 1]);
+            let compressed_rows =
+                compressed_cache.view_subrange(0, vec![ATTENTION_DIM as u64, row_count as u64]);
+            let selected_ids = cache_order_ids.view_subrange(0, vec![TOP_K as u64]);
+            let position = u32::try_from(row_count * 4 - 1).unwrap();
+
+            let warm = ctx.queue.commandBuffer().expect("profile warm command");
+            let encoder = KernelEncoder::begin(&warm);
+            encode_lightning_indexer_scores_f16(
+                &ctx,
+                &encoder,
+                &index_queries,
+                &head_weights,
+                &keys,
+                &visible_counts,
+                &score_rows,
+                INDEX_HEADS,
+                INDEX_DIM,
+                row_count,
+                1,
+            )
+            .unwrap();
+            encode_select_top_k_f32(
+                &ctx,
+                &encoder,
+                &score_rows,
+                &visible_counts,
+                &mask_rows,
+                None,
+                &cache_order_ids,
+                &selected_counts,
+                &status,
+                row_count,
+                row_count,
+                TOP_K,
+                1,
+            )
+            .unwrap();
+            encode_selected_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &attention_queries,
+                &raw_cache,
+                &compressed_rows,
+                &selected_ids,
+                &sinks,
+                &attention_output,
+                position,
+                row_count,
+                TOP_K,
+                row_count,
+                attention_config,
+            )
+            .unwrap();
+            encode_cooperative_selected_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &cooperative_queries,
+                &raw_cache,
+                &raw_cache,
+                &compressed_rows,
+                row_count,
+                &cache_order_ids,
+                &selected_counts,
+                &visible_counts,
+                &sinks,
+                &cooperative_output,
+                position,
+                0,
+                1,
+                1,
+                TOP_K,
+                attention_config,
+            )
+            .unwrap();
+            encoder.end();
+            warm.commit();
+            warm.waitUntilCompleted();
+            assert!(warm.error().is_none());
+
+            let score_ms = median(
+                (0..3)
+                    .map(|_| {
+                        timed_gpu(&ctx, 1, |encoder| {
+                            encode_lightning_indexer_scores_f16(
+                                &ctx,
+                                encoder,
+                                &index_queries,
+                                &head_weights,
+                                &keys,
+                                &visible_counts,
+                                &score_rows,
+                                INDEX_HEADS,
+                                INDEX_DIM,
+                                row_count,
+                                1,
+                            )
+                        })
+                    })
+                    .collect(),
+            );
+            let select_ms = median(
+                (0..3)
+                    .map(|_| {
+                        timed_gpu(&ctx, 1, |encoder| {
+                            encode_select_top_k_f32(
+                                &ctx,
+                                encoder,
+                                &score_rows,
+                                &visible_counts,
+                                &mask_rows,
+                                None,
+                                &cache_order_ids,
+                                &selected_counts,
+                                &status,
+                                row_count,
+                                row_count,
+                                TOP_K,
+                                1,
+                            )
+                        })
+                    })
+                    .collect(),
+            );
+            let legacy_attention_ms = median(
+                (0..3)
+                    .map(|_| {
+                        timed_gpu(&ctx, 4, |encoder| {
+                            encode_selected_sink_attention_f16(
+                                &ctx,
+                                encoder,
+                                &attention_queries,
+                                &raw_cache,
+                                &compressed_rows,
+                                &selected_ids,
+                                &sinks,
+                                &attention_output,
+                                position,
+                                row_count,
+                                TOP_K,
+                                row_count,
+                                attention_config,
+                            )
+                        })
+                    })
+                    .collect(),
+            );
+            let cooperative_attention_ms = median(
+                (0..3)
+                    .map(|_| {
+                        timed_gpu(&ctx, 4, |encoder| {
+                            encode_cooperative_selected_sink_attention_f16(
+                                &ctx,
+                                encoder,
+                                &cooperative_queries,
+                                &raw_cache,
+                                &raw_cache,
+                                &compressed_rows,
+                                row_count,
+                                &cache_order_ids,
+                                &selected_counts,
+                                &visible_counts,
+                                &sinks,
+                                &cooperative_output,
+                                position,
+                                0,
+                                1,
+                                1,
+                                TOP_K,
+                                attention_config,
+                            )
+                        })
+                    })
+                    .collect(),
+            );
+            assert_eq!(read_i32(&status), vec![0]);
+            assert_eq!(read_i32(&selected_counts), vec![TOP_K as i32]);
+            assert_eq!(
+                read_i32(&cache_order_ids),
+                (0..TOP_K as i32).collect::<Vec<_>>()
+            );
+            assert!(
+                read_f32(&attention_output)
+                    .iter()
+                    .all(|value| value.is_finite())
+            );
+            assert!(
+                read_f32(&cooperative_output)
+                    .iter()
+                    .all(|value| value.is_finite())
+            );
+            eprintln!(
+                "deepseek_v4 sparse_profile rows={row_count} token_equivalent={} score_ms={score_ms:.3} select_ms={select_ms:.3} legacy_attention_ms={legacy_attention_ms:.3} cooperative_attention_ms={cooperative_attention_ms:.3} attention_speedup={:.2} projected_21_csa_ms={:.3}",
+                row_count * 4,
+                legacy_attention_ms / cooperative_attention_ms,
+                (score_ms + select_ms + cooperative_attention_ms) * 21.0,
+            );
+        }
     }
 
     #[test]

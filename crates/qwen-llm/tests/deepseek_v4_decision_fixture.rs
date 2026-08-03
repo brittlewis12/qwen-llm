@@ -329,7 +329,7 @@ fn assert_cutoff_bifurcation(
 fn pinned_position_3070_decisions_explain_long_sparse_schedule_drift() {
     assert_eq!(
         format!("{:x}", Sha256::digest(NATIVE_SOURCE.as_bytes())),
-        "c13043479c26ef5cc674d0ecf0f07e672bfca3fb9e2e56ddef09803507acaac3"
+        "539c0cfac45ff2ead361a5f3c0d9e2730347810c41fac5b3fdf006a4360a7c46"
     );
     assert_eq!(
         format!("{:x}", Sha256::digest(BATCHED_SOURCE.as_bytes())),
@@ -435,7 +435,7 @@ fn pinned_position_3070_decisions_explain_long_sparse_schedule_drift() {
 fn schedule_envelope_manifest_pins_producer_vectors_and_repeats() {
     assert_eq!(
         format!("{:x}", Sha256::digest(MANIFEST_SOURCE.as_bytes())),
-        "f016fa182790afcda409379bf33eb480c7840aef2726e20d160c3d5f32672c40"
+        "ba26fa36e8ba6c0f776c3c2783cf23c305c60f9b1d06298bab41c8347d80c067"
     );
     let manifest: Value = serde_json::from_str(MANIFEST_SOURCE).unwrap();
     assert_eq!(manifest["schema_version"], 1);
@@ -632,7 +632,7 @@ fn schedule_envelope_manifest_pins_producer_vectors_and_repeats() {
     for (field, expected) in [
         (
             "position3070_singleton_target",
-            "8228d621cb42d919d340301affa1430fdb25b82b5ab7cd2794bcdf2456453cf6",
+            "2479973378fe4befe8304dc89b4a836274ad7ccb3fbda4b3e4f0c8c63ad0defc",
         ),
         (
             "position3071_packed",
@@ -640,15 +640,15 @@ fn schedule_envelope_manifest_pins_producer_vectors_and_repeats() {
         ),
         (
             "position3071_split",
-            "00012f61dea1fb6a047b6ed48e4ea5d816f78a2c12b60c734f940e9583b7332f",
+            "f3be04a3823f7008e6735c81c35ae1ad8c6d68dd72698f77082f1c2843c41b25",
         ),
         (
             "position3072_packed",
-            "067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130",
+            "e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da",
         ),
         (
             "position3072_split",
-            "33e1d2077e028b645cfc2f366222139113f7e679b4d80a856dfa059777fbc967",
+            "d85c2d5698ebc537ae39d2ced5d34892c4340250fe4811d031a55013118d4db1",
         ),
     ] {
         assert_eq!(native_hashes[field], expected);

@@ -2208,6 +2208,7 @@ impl DeepSeekV4Session {
                 .ok_or_else(|| DeepSeekV4MetalError::Invalid("packed position overflow".into()))?;
             validate_promoted_session_position(position)?;
         }
+        self.validate_committed_token_append(start_position, token_ids.len())?;
         let token_values = token_ids
             .iter()
             .map(|&token| token as i32)
@@ -2231,6 +2232,7 @@ impl DeepSeekV4Session {
         );
         match result {
             Ok(()) => {
+                self.commit_tokens(token_ids);
                 self.phase
                     .complete_mutation(start_position, end_position, emit_logits)?;
                 Ok(())

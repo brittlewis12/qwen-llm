@@ -409,12 +409,30 @@ packed scheduling, quant decoding across the prefix, and future snapshot
 restore. Otherwise operation evidence plus a retained strategic endpoint is the
 shortest responsible gate.
 
-Metal causal-state snapshots are the next workflow layer. They must enumerate
-only persistent state, bind exact model/prefix/cache ABI identities, reject
-partial or unknown fields, and distinguish “correct from restored position”
-from “this build reproduced the prefix.” Opaque live-session serialization is
-not an acceptable shortcut. Either ready phase may become a causal checkpoint;
-a poisoned session must never serialize.
+The first typed Metal causal-state snapshot layer is now live. Each session owns
+its exact committed token transcript, pre-reserved before inference, and may
+capture either ready phase. The snapshot binds a constructor-supplied strong
+model-content ID, an exhaustive domain-separated digest of the Flash config and
+explicit causal/numerics/storage ABI, and the exact prefix. A poisoned session
+cannot capture or restore.
+
+The payload contains only persistent state: chronological visible F16 raw rows,
+all F32 CSA-attention/CSA-indexer/HCA compressor state bits, and visible F16
+attention/indexer publications. Scratch and observations are excluded. Restore
+builds deterministic full physical images and validates identity, geometry,
+prefix, numerical phase, overlap lanes, arena lengths, and whole-state digest
+before poisoning the destination; success always becomes ready without an
+observation. This preserves the distinction between “correct from restored
+position” and “this build reproduced the prefix.”
+
+At the first CSA boundary, the 12,409,104-byte snapshot restores backward in the
+same resident session. Its position-4 continuation is bit-identical in all
+129,280 logits and in the post-continuation causal digest, while independently
+preserving the b10222 argmax 63,325 at cosine 0.999999958 / relative RMS
+0.000290112. Capture, restore, and two continuations complete with the prefix in
+1.424-1.435 seconds. The current model-content ID remains a caller-asserted trust
+anchor, and the snapshot is in-memory only; strong GGUF identity derivation,
+durable encoding, and immutable publication remain the next workflow slice.
 
 ### S2: local-only Metal backbone
 
@@ -893,9 +911,9 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Add a typed Metal causal-state snapshot at a certified boundary, with exact
-   model/prefix/cache ABI identity and fresh-versus-restored continuation gates.
-   Keep restored-state claims explicitly narrower than fresh-prefix claims.
+1. Give the typed causal snapshot a bounded canonical codec, derive its strong
+   model-content ID from every retained GGUF shard, and publish immutable cache
+   blobs. Keep request/sampler state outside this model-session checkpoint.
 2. Keep position 1027 fail-closed. Promote compressed-history slab growth as a
    separate ownership milestone and use retained chunks for one position-2048
    endpoint rather than rebuilding a singleton fixture ladder.

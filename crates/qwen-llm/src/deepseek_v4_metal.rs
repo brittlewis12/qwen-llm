@@ -5,6 +5,12 @@
 //! execution bodies deliberately have no dependency on the Qwen Metal model.
 
 mod prefill;
+mod snapshot;
+
+pub use snapshot::{
+    DeepSeekV4CausalSnapshot, DeepSeekV4CompatibilityDigest, DeepSeekV4ModelContentId,
+    DeepSeekV4SnapshotObservation,
+};
 
 use crate::deepseek_v4::{AttentionKind, DeepSeekV4Config, DeepSeekV4Error, DeepSeekV4Model};
 use crate::gguf::{GgufError, GgufFile};
@@ -689,6 +695,28 @@ impl DeepSeekV4SessionPhase {
             _ => invalid("DeepSeek V4 mutation completed from an invalid session phase"),
         }
     }
+
+    fn begin_restore(&mut self) -> Result<u32, DeepSeekV4MetalError> {
+        let next_position = self.ready_position()?;
+        *self = Self::Poisoned { next_position };
+        Ok(next_position)
+    }
+
+    fn complete_restore(
+        &mut self,
+        replaced_position: u32,
+        restored_position: u32,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        match *self {
+            Self::Poisoned { next_position } if next_position == replaced_position => {
+                *self = Self::ReadyWithoutObservation {
+                    next_position: restored_position,
+                };
+                Ok(())
+            }
+            _ => invalid("DeepSeek V4 restore completed from an invalid session phase"),
+        }
+    }
 }
 
 /// Native qwen-owned DeepSeek V4 decode session.
@@ -713,6 +741,8 @@ pub struct DeepSeekV4Session {
     logits: MetalTensor,
     prefill: prefill::DeepSeekV4PrefillScratch,
     phase: DeepSeekV4SessionPhase,
+    committed_tokens: Vec<u32>,
+    snapshot_model_content_id: Option<DeepSeekV4ModelContentId>,
 }
 
 /// Compatibility name retained for the position-zero live differential.
@@ -722,6 +752,22 @@ impl DeepSeekV4Session {
     pub fn new(
         ctx: &MetalContext,
         residency: DeepSeekV4MetalResidency,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        Self::new_inner(ctx, residency, None)
+    }
+
+    pub fn new_with_model_content_id(
+        ctx: &MetalContext,
+        residency: DeepSeekV4MetalResidency,
+        model_content_id: DeepSeekV4ModelContentId,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        Self::new_inner(ctx, residency, Some(model_content_id))
+    }
+
+    fn new_inner(
+        ctx: &MetalContext,
+        residency: DeepSeekV4MetalResidency,
+        snapshot_model_content_id: Option<DeepSeekV4ModelContentId>,
     ) -> Result<Self, DeepSeekV4MetalError> {
         if residency.device_registry_id() != ctx.device.registryID() {
             return invalid(format!(
@@ -748,6 +794,14 @@ impl DeepSeekV4Session {
         let attention_config = deepseek_v4_session_attention_config();
         let moe_config = deepseek_v4_session_moe_config(residency.config());
         let compressor_frontiers = DeepSeekV4CompressorFrontiers::new(ctx, residency.config())?;
+        let mut committed_tokens = Vec::new();
+        committed_tokens
+            .try_reserve_exact(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+            .map_err(|error| {
+                DeepSeekV4MetalError::Invalid(format!(
+                    "reserve DeepSeek V4 committed-token transcript: {error}"
+                ))
+            })?;
 
         Ok(Self {
             device_registry_id: residency.device_registry_id(),
@@ -776,6 +830,8 @@ impl DeepSeekV4Session {
             logits: MetalTensor::zeros_f32(ctx, vec![DEEPSEEK_V4_VOCAB_SIZE as u64])?,
             prefill: prefill::DeepSeekV4PrefillScratch::new(ctx)?,
             phase: DeepSeekV4SessionPhase::fresh(),
+            committed_tokens,
+            snapshot_model_content_id,
         })
     }
 
@@ -799,6 +855,10 @@ impl DeepSeekV4Session {
 
     pub fn next_position(&self) -> u32 {
         self.phase.next_position()
+    }
+
+    pub fn committed_tokens(&self) -> &[u32] {
+        &self.committed_tokens
     }
 
     pub fn cache_contract(&self) -> DeepSeekV4AttentionCacheContract {
@@ -869,6 +929,7 @@ impl DeepSeekV4Session {
         let next_position = position
             .checked_add(1)
             .ok_or_else(|| DeepSeekV4MetalError::Invalid("position overflow".into()))?;
+        self.validate_committed_token_append(position, 1)?;
 
         host_write_i32(&self.token_id, &[token_id as i32], "DeepSeek V4 token ID")?;
         let begun_position = self.phase.begin_mutation()?;
@@ -876,12 +937,54 @@ impl DeepSeekV4Session {
         let result = self.forward_token_inner(ctx, token_id, position, &mut layer_completed);
         match result {
             Ok(()) => {
+                self.commit_tokens(&[token_id]);
                 self.phase
                     .complete_mutation(position, next_position, true)?;
                 Ok(&self.logits)
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn validate_committed_token_append(
+        &self,
+        start_position: u32,
+        token_count: usize,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if self.committed_tokens.len() != start_position as usize {
+            return invalid(format!(
+                "DeepSeek V4 committed-token transcript has length {}, expected {start_position}",
+                self.committed_tokens.len()
+            ));
+        }
+        let end = self
+            .committed_tokens
+            .len()
+            .checked_add(token_count)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "DeepSeek V4 committed-token transcript length overflow".into(),
+                )
+            })?;
+        if end > DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY {
+            return invalid(format!(
+                "DeepSeek V4 committed-token transcript would reach {end}, beyond capacity {DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY}"
+            ));
+        }
+        if self.committed_tokens.capacity() < end {
+            return invalid(format!(
+                "DeepSeek V4 committed-token transcript capacity {} cannot record {end} tokens",
+                self.committed_tokens.capacity()
+            ));
+        }
+        Ok(())
+    }
+
+    fn commit_tokens(&mut self, tokens: &[u32]) {
+        debug_assert!(
+            self.committed_tokens.len() + tokens.len() <= self.committed_tokens.capacity()
+        );
+        self.committed_tokens.extend_from_slice(tokens);
     }
 
     fn forward_token_inner(
@@ -5345,10 +5448,19 @@ mod tests {
 
         let invalid_phase = phase.complete_mutation(2, 3, true).unwrap_err();
         assert!(invalid_phase.to_string().contains("invalid session phase"));
-        assert_eq!(phase.begin_mutation().unwrap(), 2);
-        let nonadvancing = phase.complete_mutation(2, 2, true).unwrap_err();
+
+        assert_eq!(phase.begin_restore().unwrap(), 2);
+        phase.complete_restore(2, 1).unwrap();
+        assert_eq!(phase.ready_position().unwrap(), 1);
+        assert!(!phase.observation_valid());
+        assert_eq!(phase.begin_restore().unwrap(), 1);
+        phase.complete_restore(1, 1).unwrap();
+        assert_eq!(phase.ready_position().unwrap(), 1);
+
+        assert_eq!(phase.begin_mutation().unwrap(), 1);
+        let nonadvancing = phase.complete_mutation(1, 1, true).unwrap_err();
         assert!(nonadvancing.to_string().contains("did not advance"));
-        assert_eq!(phase.next_position(), 2);
+        assert_eq!(phase.next_position(), 1);
         assert!(!phase.observation_valid());
         assert!(
             phase

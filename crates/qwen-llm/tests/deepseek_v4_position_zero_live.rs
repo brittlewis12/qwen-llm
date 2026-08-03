@@ -1,4 +1,7 @@
-use qwen_llm::deepseek_v4_metal::{DeepSeekV4MetalResidency, DeepSeekV4PositionZeroForward};
+use qwen_llm::deepseek_v4_metal::{
+    DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4PositionZeroForward,
+    DeepSeekV4SnapshotObservation,
+};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
 use sha2::{Digest, Sha256};
@@ -122,6 +125,12 @@ const SINGLETON_ORACLE_LLM_COMMIT: &str = "e07acac20fcd2ee0faca90aa91078ff142724
 const SINGLETON_ORACLE_LLAMA_CORE_COMMIT: &str = "b1cd3a914175adedcc976388c7c638d9a2f9a189";
 const SINGLETON_ORACLE_LLAMA_CPP_RS_COMMIT: &str = "553b8e4501c57c1be08a83b6b54e549a614df162";
 const SINGLETON_ORACLE_LLAMA_CPP_COMMIT: &str = "8621ac725a0b6892ae44ea33377f14b6a7e0ebdf";
+const MODEL_SHARDS_SHA256: [&str; 4] = [
+    "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a",
+    "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd",
+    "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
+    "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2",
+];
 
 struct LogitComparison {
     argmax: usize,
@@ -130,6 +139,17 @@ struct LogitComparison {
     relative_rms: f64,
     mean_absolute_error: f64,
     maximum_error: (usize, f32),
+}
+
+fn frozen_model_content_id() -> DeepSeekV4ModelContentId {
+    let mut hasher = Sha256::new();
+    hasher.update(b"deepseek-v4-flash-0731-ordered-shard-sha256-v1\0");
+    for (index, digest) in MODEL_SHARDS_SHA256.iter().enumerate() {
+        hasher.update((index as u32).to_le_bytes());
+        hasher.update((digest.len() as u32).to_le_bytes());
+        hasher.update(digest.as_bytes());
+    }
+    DeepSeekV4ModelContentId::new(hasher.finalize().into())
 }
 
 fn assert_hca_long_prefix_gate(label: &str, comparison: &LogitComparison) {
@@ -432,12 +452,7 @@ fn pinned_csa_boundary_oracles_have_exact_identity() {
         );
         assert_eq!(
             manifest["model_shards_sha256"],
-            serde_json::json!([
-                "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a",
-                "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd",
-                "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
-                "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
-            ])
+            serde_json::json!(MODEL_SHARDS_SHA256)
         );
         assert_eq!(manifest["request"]["prompt_decode_mode"], "singleton");
         assert_eq!(manifest["request"]["prompt_token_ids"], prompt);
@@ -676,12 +691,7 @@ fn pinned_hca_boundary_oracles_have_exact_identity() {
         );
         assert_eq!(
             manifest["model_shards_sha256"],
-            serde_json::json!([
-                "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a",
-                "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd",
-                "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
-                "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
-            ])
+            serde_json::json!(MODEL_SHARDS_SHA256)
         );
         assert_eq!(manifest["request"]["prompt_decode_mode"], "singleton");
         assert_eq!(
@@ -1123,6 +1133,117 @@ fn native_deepseek_v4_packed_n4_preserves_csa_and_decode_continuation() {
         &continuation,
         POSITION_FOUR_BRANCH_ORACLE_BYTES,
         63_325,
+    );
+}
+
+#[test]
+#[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(
+        model_path.exists(),
+        "missing DS4 model at {}",
+        model_path.display()
+    );
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
+        &ctx,
+        residency,
+        frozen_model_content_id(),
+    )
+    .expect("build snapshot-bound session");
+    let started = Instant::now();
+    session
+        .prefill_tokens(&ctx, &[35, 201, 200, 34])
+        .expect("execute certified CSA-boundary prefix");
+    assert_eq!(session.committed_tokens(), &[35, 201, 200, 34]);
+    let prefix_logits = session
+        .copy_logits_f32()
+        .expect("copy snapshot-prefix logits");
+    assert_logits_match(
+        "snapshot source position 3",
+        &prefix_logits,
+        POSITION_THREE_BRANCH_ORACLE_BYTES,
+        262,
+    );
+    let prefix_snapshot = session
+        .capture_causal_snapshot()
+        .expect("capture position-4 causal state");
+    assert_eq!(prefix_snapshot.next_position(), 4);
+    assert_eq!(prefix_snapshot.prefix_tokens(), &[35, 201, 200, 34]);
+    assert_eq!(
+        prefix_snapshot.source_observation(),
+        DeepSeekV4SnapshotObservation::Available
+    );
+
+    session
+        .forward_token(&ctx, 262)
+        .expect("execute uninterrupted snapshot continuation");
+    let uninterrupted_logits = session
+        .copy_logits_f32()
+        .expect("copy uninterrupted continuation logits");
+    let uninterrupted_state = session
+        .capture_causal_snapshot()
+        .expect("capture uninterrupted continuation state");
+
+    session
+        .restore_causal_snapshot(&prefix_snapshot)
+        .expect("restore certified CSA-boundary state");
+    assert_eq!(session.next_position(), 4);
+    assert_eq!(session.committed_tokens(), &[35, 201, 200, 34]);
+    assert!(session.copy_logits_f32().is_err());
+    assert!(session.final_normalized_hidden().is_err());
+    let restored_prefix = session
+        .capture_causal_snapshot()
+        .expect("recapture restored prefix");
+    assert_eq!(
+        restored_prefix.source_observation(),
+        DeepSeekV4SnapshotObservation::Unavailable
+    );
+    assert_eq!(
+        restored_prefix.causal_digest(),
+        prefix_snapshot.causal_digest()
+    );
+
+    session
+        .forward_token(&ctx, 262)
+        .expect("execute restored snapshot continuation");
+    let restored_logits = session
+        .copy_logits_f32()
+        .expect("copy restored continuation logits");
+    assert!(
+        uninterrupted_logits
+            .iter()
+            .zip(&restored_logits)
+            .all(|(left, right)| left.to_bits() == right.to_bits()),
+        "restored continuation logits must be bit-identical"
+    );
+    let restored_state = session
+        .capture_causal_snapshot()
+        .expect("capture restored continuation state");
+    assert_eq!(
+        restored_state.causal_digest(),
+        uninterrupted_state.causal_digest()
+    );
+    assert_logits_match(
+        "snapshot-restored position 4",
+        &restored_logits,
+        POSITION_FOUR_BRANCH_ORACLE_BYTES,
+        63_325,
+    );
+    eprintln!(
+        "snapshot_bytes={} snapshot_restore_live_elapsed={:.3}s causal_digest={}",
+        prefix_snapshot.payload_bytes(),
+        started.elapsed().as_secs_f64(),
+        prefix_snapshot
+            .causal_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
     );
 }
 

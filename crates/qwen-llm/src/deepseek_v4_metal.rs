@@ -28,10 +28,10 @@ pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
 pub const DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 pub use prefill::DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 /// Number of token forwards traversed by the longest retained-session
-/// differential, through the position-512 fourth-HCA continuation. Callers use
-/// this to reject requests before streaming beyond the current evidence
-/// boundary.
-pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 513;
+/// differential, through the position-1024 continuation after HCA row seven.
+/// Callers use this to reject requests before streaming beyond the current
+/// evidence boundary.
+pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 1_025;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeepSeekV4MetalError {
@@ -597,7 +597,6 @@ const DEEPSEEK_V4_LOCAL_WINDOW: usize = 128;
 const DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS: usize = 256;
 const DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION: u32 =
     DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32;
-const DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY: u32 = 639;
 const DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY: u32 =
     ((DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS + 1) * 4 - 1) as u32;
 
@@ -607,14 +606,9 @@ fn validate_promoted_session_position(position: u32) -> Result<(), DeepSeekV4Met
             "native session stops before unallocated CSA row 256 at position {DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY}; next position is {position}"
         ));
     }
-    if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY {
-        return invalid(format!(
-            "native session stops before unvalidated HCA publication at position {DEEPSEEK_V4_NEXT_UNVALIDATED_HCA_BOUNDARY}; next position is {position}"
-        ));
-    }
     if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION {
         return invalid(format!(
-            "native session stops after the promoted fourth-HCA continuation at position 512; next position is {position}"
+            "native session stops after the promoted row-seven HCA continuation at position 1024; next position is {position}"
         ));
     }
     Ok(())
@@ -634,8 +628,8 @@ pub enum DeepSeekV4AttentionCacheContract {
 
 /// Native qwen-owned DeepSeek V4 decode session.
 ///
-/// Dense-all CSA and four HCA rows are promoted through the position-512
-/// continuation. The session fails closed before position 513 until the next
+/// Dense-all CSA and eight HCA rows are promoted through the position-1024
+/// continuation. The session fails closed before position 1025 until the next
 /// retained interval earns its own differential.
 pub struct DeepSeekV4Session {
     residency: DeepSeekV4MetalResidency,
@@ -5245,16 +5239,20 @@ mod tests {
     }
 
     #[test]
-    fn session_position_guard_stops_after_fourth_hca_and_at_later_boundaries() {
-        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 513);
+    fn session_position_guard_stops_after_position_1024_and_before_slab_growth() {
+        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 1_025);
         validate_promoted_session_position((DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY - 1) as u32)
             .unwrap();
         let continuation =
             validate_promoted_session_position(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32)
                 .unwrap_err();
-        assert!(continuation.to_string().contains("next position is 513"));
-        let hca = validate_promoted_session_position(639).unwrap_err();
-        assert!(hca.to_string().contains("HCA publication at position 639"));
+        assert!(continuation.to_string().contains("next position is 1025"));
+        let retained_interval = validate_promoted_session_position(1_026).unwrap_err();
+        assert!(
+            retained_interval
+                .to_string()
+                .contains("next position is 1026")
+        );
         let csa = validate_promoted_session_position(1027).unwrap_err();
         assert!(csa.to_string().contains("CSA row 256 at position 1027"));
     }
@@ -6934,6 +6932,729 @@ mod tests {
     }
 
     #[test]
+    fn ratio128_frontier_preserves_eight_rows_and_publishes_before_attention() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 2;
+        const HEAD_DIM: usize = 512;
+        const RATIO: usize = 128;
+        const PUBLISHED_ROWS: usize = 8;
+        const POSITIONS: usize = PUBLISHED_ROWS * RATIO + 1;
+        let rms_eps = 1.0e-5;
+        let frontier = DeepSeekV4CompressorFrontier::new(
+            &ctx,
+            RATIO,
+            HEAD_DIM,
+            DeepSeekV4CompressorPublication::Attention,
+        )
+        .unwrap();
+        let projected_kv_values = (0..POSITIONS * HEAD_DIM)
+            .map(|index| {
+                let position = index / HEAD_DIM;
+                let dimension = index % HEAD_DIM;
+                let tag = (position * 17 + dimension * 7 + position / 11) % 131;
+                (tag as f32 - 65.0) * 0.0031
+                    + if (position + dimension).is_multiple_of(29) {
+                        0.037
+                    } else {
+                        -0.011
+                    }
+            })
+            .collect::<Vec<_>>();
+        let projected_score_values = (0..POSITIONS * HEAD_DIM)
+            .map(|index| {
+                let position = index / HEAD_DIM;
+                let dimension = index % HEAD_DIM;
+                let tag = (position * 23 + dimension * 13 + position / 7) % 137;
+                (tag as f32 - 68.0) * 0.0027
+                    + if (position * 3 + dimension).is_multiple_of(31) {
+                        0.043
+                    } else {
+                        -0.009
+                    }
+            })
+            .collect::<Vec<_>>();
+        let ape_values = (0..RATIO * HEAD_DIM)
+            .map(|index| ((index * 19 + index / 17 + 5) % 149) as f32 * 0.0023 - 0.17)
+            .collect::<Vec<_>>();
+        let norm_values = (0..HEAD_DIM)
+            .map(|index| 0.47 + (index % 37) as f32 * 0.019)
+            .collect::<Vec<_>>();
+        let projected_kv = offset_f32(
+            &ctx,
+            &projected_kv_values,
+            vec![HEAD_DIM as u64, POSITIONS as u64],
+        );
+        let projected_score = offset_f32(
+            &ctx,
+            &projected_score_values,
+            vec![HEAD_DIM as u64, POSITIONS as u64],
+        );
+        let ape = offset_f32(&ctx, &ape_values, vec![HEAD_DIM as u64, RATIO as u64]);
+        let norm = offset_f32(&ctx, &norm_values, vec![HEAD_DIM as u64]);
+        let rope = DeepSeekV4RopeParameters {
+            rotary_dim: 64,
+            theta: 160_000.0,
+            scaling_factor: 16.0,
+            original_context_length: 65_536,
+            beta_fast: 32.0,
+            beta_slow: 1.0,
+        };
+        let oracle_rope = RopeParameters::yarn(
+            rope.rotary_dim,
+            rope.theta,
+            rope.scaling_factor,
+            rope.original_context_length,
+            rope.beta_fast,
+            rope.beta_slow,
+        );
+        let attention_config = DeepSeekV4PositionZeroAttentionConfig {
+            hidden_size: 1,
+            q_lora_rank: 1,
+            head_count: HEADS,
+            head_dim: HEAD_DIM,
+            rotary_dim: 64,
+            group_count: 1,
+            output_rank: 1,
+        };
+        let sinks = [-0.29, 0.17];
+        let sink_tensor = offset_f32(&ctx, &sinks, vec![HEADS as u64]);
+        let mut oracle = CompressorState::new(RATIO, HEAD_DIM).unwrap();
+        let mut expected_rows = Vec::with_capacity(PUBLISHED_ROWS * HEAD_DIM);
+
+        for row in 0..PUBLISHED_ROWS {
+            let start = row * RATIO;
+            let boundary = (row + 1) * RATIO - 1;
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            for position in start..boundary {
+                let offset = position * HEAD_DIM;
+                let emitted = oracle
+                    .push_projected(
+                        position as u32,
+                        &projected_kv_values[offset..offset + HEAD_DIM],
+                        &projected_score_values[offset..offset + HEAD_DIM],
+                        &ape_values,
+                        &norm_values,
+                        rms_eps,
+                        oracle_rope,
+                    )
+                    .unwrap();
+                assert!(emitted.is_none(), "position {position} published early");
+                let kv_row = projected_kv.view_subrange(offset as u64, vec![HEAD_DIM as u64]);
+                let score_row = projected_score.view_subrange(offset as u64, vec![HEAD_DIM as u64]);
+                frontier
+                    .encode_projected(
+                        &ctx,
+                        &encoder,
+                        &kv_row,
+                        &score_row,
+                        &ape,
+                        &norm,
+                        position as u32,
+                        rope,
+                        rms_eps,
+                    )
+                    .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "row {row} pre-boundary command failed: {:?}",
+                command.error()
+            );
+            assert_eq!(frontier.published_count((boundary - 1) as u32), row);
+            let published = read_f16(&frontier.published);
+            assert_close(
+                &format!("ratio-128 rows retained before publication {row}"),
+                &published[..expected_rows.len()],
+                &expected_rows,
+                1e-3,
+            );
+            assert!(
+                published[expected_rows.len()..]
+                    .iter()
+                    .all(|value| *value == 0.0),
+                "row {row} appeared before position {boundary}"
+            );
+
+            let offset = boundary * HEAD_DIM;
+            let emitted = oracle
+                .push_projected(
+                    boundary as u32,
+                    &projected_kv_values[offset..offset + HEAD_DIM],
+                    &projected_score_values[offset..offset + HEAD_DIM],
+                    &ape_values,
+                    &norm_values,
+                    rms_eps,
+                    oracle_rope,
+                )
+                .unwrap()
+                .unwrap_or_else(|| panic!("position {boundary} did not publish row {row}"));
+            assert_eq!(emitted.start_position as usize, row * RATIO);
+            let expected_row = emitted
+                .value
+                .into_iter()
+                .map(|value| half::f16::from_f32(value).to_f32())
+                .collect::<Vec<_>>();
+            expected_rows.extend_from_slice(&expected_row);
+
+            let integration = if matches!(boundary, 639 | 1023) {
+                let raw_start = boundary + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
+                let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
+                let mut raw_rows = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM);
+                let mut raw_ring = vec![0.0; DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM];
+                for logical_position in raw_start..=boundary {
+                    let raw_row = (0..HEAD_DIM)
+                        .map(|dimension| {
+                            let tag =
+                                (logical_position * 31 + dimension * 11 + logical_position / 9)
+                                    % 139;
+                            round_f16(
+                                (tag as f32 - 69.0) * 0.0021
+                                    + if (logical_position + dimension).is_multiple_of(23) {
+                                        0.039
+                                    } else {
+                                        -0.007
+                                    },
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    raw_rows.extend_from_slice(&raw_row);
+                    let slot = logical_position % DEEPSEEK_V4_LOCAL_WINDOW;
+                    raw_ring[slot * HEAD_DIM..(slot + 1) * HEAD_DIM].copy_from_slice(&raw_row);
+                }
+                let queries = (0..HEADS * HEAD_DIM)
+                    .map(|index| {
+                        let head = index / HEAD_DIM;
+                        let dimension = index % HEAD_DIM;
+                        let tag = (boundary * 13 + head * 17 + dimension * 5) % 103;
+                        (tag as f32 - 51.0) * 0.0029
+                    })
+                    .collect::<Vec<_>>();
+                let expected = shared_kv_attention(
+                    &queries,
+                    HEADS,
+                    HEAD_DIM,
+                    &raw_rows,
+                    &expected_rows,
+                    None,
+                    &sinks,
+                )
+                .unwrap();
+                let prior = shared_kv_attention(
+                    &queries,
+                    HEADS,
+                    HEAD_DIM,
+                    &raw_rows,
+                    &expected_rows[..expected_rows.len() - HEAD_DIM],
+                    None,
+                    &sinks,
+                )
+                .unwrap();
+                assert!(
+                    expected
+                        .iter()
+                        .zip(&prior)
+                        .any(|(current, prior)| (current - prior).abs() > 1e-3),
+                    "position {boundary} must distinguish the newest HCA row"
+                );
+                Some((
+                    offset_f32(&ctx, &queries, vec![HEAD_DIM as u64, HEADS as u64]),
+                    offset_f32(
+                        &ctx,
+                        &raw_ring,
+                        vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+                    ),
+                    MetalTensor::zeros_f16(
+                        &ctx,
+                        vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+                    )
+                    .unwrap(),
+                    offset_f32(
+                        &ctx,
+                        &vec![0.0; HEADS * HEAD_DIM],
+                        vec![HEAD_DIM as u64, HEADS as u64],
+                    ),
+                    expected,
+                ))
+            } else {
+                None
+            };
+
+            let kv_row = projected_kv.view_subrange(offset as u64, vec![HEAD_DIM as u64]);
+            let score_row = projected_score.view_subrange(offset as u64, vec![HEAD_DIM as u64]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            frontier
+                .encode_projected(
+                    &ctx,
+                    &encoder,
+                    &kv_row,
+                    &score_row,
+                    &ape,
+                    &norm,
+                    boundary as u32,
+                    rope,
+                    rms_eps,
+                )
+                .unwrap();
+            if let Some((queries, raw_source, raw_cache, output, _)) = &integration {
+                encode_scatter_offset_f32_to_f16(
+                    &ctx,
+                    &encoder,
+                    raw_source,
+                    raw_cache,
+                    0,
+                    DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM,
+                )
+                .unwrap();
+                encode_dense_sink_attention_f16(
+                    &ctx,
+                    &encoder,
+                    queries,
+                    raw_cache,
+                    Some(DeepSeekV4PublishedRows {
+                        cache: &frontier.published,
+                        count: row + 1,
+                    }),
+                    &sink_tensor,
+                    output,
+                    boundary as u32,
+                    attention_config,
+                )
+                .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "row {row} publication command failed: {:?}",
+                command.error()
+            );
+
+            assert_eq!(frontier.published_count(boundary as u32), row + 1);
+            assert_close(
+                &format!("ratio-128 row {row} boundary KV state"),
+                &read_f32(&frontier.kv_state),
+                oracle.kv_state(),
+                4e-5,
+            );
+            assert_close(
+                &format!("ratio-128 row {row} boundary score state"),
+                &read_f32(&frontier.score_state),
+                oracle.score_state(),
+                4e-5,
+            );
+            let published = read_f16(&frontier.published);
+            assert_close(
+                &format!("ratio-128 rows through {row}"),
+                &published[..expected_rows.len()],
+                &expected_rows,
+                1e-3,
+            );
+            assert!(
+                published[expected_rows.len()..]
+                    .iter()
+                    .all(|value| *value == 0.0),
+                "ratio-128 slab tail changed after row {row}"
+            );
+            if let Some((_, _, _, output, expected)) = &integration {
+                assert_close(
+                    &format!("position {boundary} serial HCA publication visibility"),
+                    &read_f32(output),
+                    expected,
+                    8e-5,
+                );
+            }
+        }
+
+        let position = PUBLISHED_ROWS * RATIO;
+        let offset = position * HEAD_DIM;
+        assert!(
+            oracle
+                .push_projected(
+                    position as u32,
+                    &projected_kv_values[offset..offset + HEAD_DIM],
+                    &projected_score_values[offset..offset + HEAD_DIM],
+                    &ape_values,
+                    &norm_values,
+                    rms_eps,
+                    oracle_rope,
+                )
+                .unwrap()
+                .is_none()
+        );
+        let before_continuation = read_f16(&frontier.published);
+        let kv_row = projected_kv.view_subrange(offset as u64, vec![HEAD_DIM as u64]);
+        let score_row = projected_score.view_subrange(offset as u64, vec![HEAD_DIM as u64]);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        frontier
+            .encode_projected(
+                &ctx,
+                &encoder,
+                &kv_row,
+                &score_row,
+                &ape,
+                &norm,
+                position as u32,
+                rope,
+                rms_eps,
+            )
+            .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "position 1024 continuation command failed: {:?}",
+            command.error()
+        );
+        assert_eq!(frontier.published_count(position as u32), PUBLISHED_ROWS);
+        assert_eq!(read_f16(&frontier.published), before_continuation);
+        assert_close(
+            "position 1024 HCA KV state",
+            &read_f32(&frontier.kv_state),
+            oracle.kv_state(),
+            4e-5,
+        );
+        assert_close(
+            "position 1024 HCA score state",
+            &read_f32(&frontier.score_state),
+            oracle.score_state(),
+            4e-5,
+        );
+    }
+
+    #[test]
+    fn ratio4_frontiers_fill_first_slab_and_reject_row_256() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+
+        fn run_case(
+            ctx: &MetalContext,
+            head_dim: usize,
+            publication: DeepSeekV4CompressorPublication,
+        ) {
+            const RATIO: usize = 4;
+            const POSITIONS: usize = 1_025;
+            let width = 2 * head_dim;
+            let rms_eps = 1.0e-5;
+            let label = match publication {
+                DeepSeekV4CompressorPublication::Attention => "attention",
+                DeepSeekV4CompressorPublication::IndexerHadamard => "indexer",
+            };
+            let frontier =
+                DeepSeekV4CompressorFrontier::new(ctx, RATIO, head_dim, publication).unwrap();
+            let projected_kv_values = (0..POSITIONS * width)
+                .map(|index| {
+                    let position = index / width;
+                    let dimension = index % width;
+                    let tag = (position * 17 + dimension * 7 + position / 13) % 127;
+                    (tag as f32 - 63.0) * 0.0027
+                        + if (position + dimension).is_multiple_of(31) {
+                            0.041
+                        } else {
+                            -0.009
+                        }
+                })
+                .collect::<Vec<_>>();
+            let projected_score_values = (0..POSITIONS * width)
+                .map(|index| {
+                    let position = index / width;
+                    let dimension = index % width;
+                    let tag = (position * 23 + dimension * 11 + position / 5) % 131;
+                    (tag as f32 - 65.0) * 0.0023
+                        + if (position * 3 + dimension).is_multiple_of(29) {
+                            0.037
+                        } else {
+                            -0.007
+                        }
+                })
+                .collect::<Vec<_>>();
+            let ape_values = (0..RATIO * width)
+                .map(|index| ((index * 19 + index / 7 + 3) % 137) as f32 * 0.0021 - 0.14)
+                .collect::<Vec<_>>();
+            let norm_values = (0..head_dim)
+                .map(|index| 0.51 + (index % 31) as f32 * 0.017)
+                .collect::<Vec<_>>();
+            let projected_kv = offset_f32(
+                ctx,
+                &projected_kv_values,
+                vec![width as u64, POSITIONS as u64],
+            );
+            let projected_score = offset_f32(
+                ctx,
+                &projected_score_values,
+                vec![width as u64, POSITIONS as u64],
+            );
+            let ape = offset_f32(ctx, &ape_values, vec![width as u64, RATIO as u64]);
+            let norm = offset_f32(ctx, &norm_values, vec![head_dim as u64]);
+            let rope = DeepSeekV4RopeParameters {
+                rotary_dim: 64,
+                theta: 160_000.0,
+                scaling_factor: 16.0,
+                original_context_length: 65_536,
+                beta_fast: 32.0,
+                beta_slow: 1.0,
+            };
+            let oracle_rope = RopeParameters::yarn(
+                rope.rotary_dim,
+                rope.theta,
+                rope.scaling_factor,
+                rope.original_context_length,
+                rope.beta_fast,
+                rope.beta_slow,
+            );
+            let mut oracle = CompressorState::new(RATIO, head_dim).unwrap();
+            let mut expected_rows =
+                Vec::with_capacity(DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS * head_dim);
+
+            for chunk_start in (0..1_023).step_by(64) {
+                let chunk_end = (chunk_start + 64).min(1_023);
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                for position in chunk_start..chunk_end {
+                    let offset = position * width;
+                    if let Some(mut emitted) = oracle
+                        .push_projected(
+                            position as u32,
+                            &projected_kv_values[offset..offset + width],
+                            &projected_score_values[offset..offset + width],
+                            &ape_values,
+                            &norm_values,
+                            rms_eps,
+                            oracle_rope,
+                        )
+                        .unwrap()
+                    {
+                        if publication == DeepSeekV4CompressorPublication::IndexerHadamard {
+                            hadamard_128_in_place(&mut emitted.value).unwrap();
+                        }
+                        expected_rows.extend(
+                            emitted
+                                .value
+                                .into_iter()
+                                .map(|value| half::f16::from_f32(value).to_f32()),
+                        );
+                    }
+                    let kv_row = projected_kv.view_subrange(offset as u64, vec![width as u64]);
+                    let score_row =
+                        projected_score.view_subrange(offset as u64, vec![width as u64]);
+                    frontier
+                        .encode_projected(
+                            ctx,
+                            &encoder,
+                            &kv_row,
+                            &score_row,
+                            &ape,
+                            &norm,
+                            position as u32,
+                            rope,
+                            rms_eps,
+                        )
+                        .unwrap();
+                }
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(
+                    command.error().is_none(),
+                    "ratio-4 {label} chunk {chunk_start} command failed: {:?}",
+                    command.error()
+                );
+            }
+
+            assert_eq!(frontier.published_count(1_022), 255);
+            assert_eq!(expected_rows.len(), 255 * head_dim);
+            let published = read_f16(&frontier.published);
+            assert_close(
+                &format!("ratio-4 {label} rows before slab end"),
+                &published[..expected_rows.len()],
+                &expected_rows,
+                2e-3,
+            );
+            assert!(
+                published[expected_rows.len()..]
+                    .iter()
+                    .all(|value| *value == 0.0),
+                "ratio-4 {label} row 255 published before position 1023"
+            );
+            assert_close(
+                &format!("ratio-4 {label} pre-slab-end KV state"),
+                &read_f32(&frontier.kv_state),
+                oracle.kv_state(),
+                4e-5,
+            );
+            assert_close(
+                &format!("ratio-4 {label} pre-slab-end score state"),
+                &read_f32(&frontier.score_state),
+                oracle.score_state(),
+                4e-5,
+            );
+
+            let position = 1_023usize;
+            let offset = position * width;
+            let mut emitted = oracle
+                .push_projected(
+                    position as u32,
+                    &projected_kv_values[offset..offset + width],
+                    &projected_score_values[offset..offset + width],
+                    &ape_values,
+                    &norm_values,
+                    rms_eps,
+                    oracle_rope,
+                )
+                .unwrap()
+                .expect("position 1023 must publish row 255");
+            assert_eq!(emitted.start_position, 1_020);
+            if publication == DeepSeekV4CompressorPublication::IndexerHadamard {
+                hadamard_128_in_place(&mut emitted.value).unwrap();
+            }
+            expected_rows.extend(
+                emitted
+                    .value
+                    .into_iter()
+                    .map(|value| half::f16::from_f32(value).to_f32()),
+            );
+            let kv_row = projected_kv.view_subrange(offset as u64, vec![width as u64]);
+            let score_row = projected_score.view_subrange(offset as u64, vec![width as u64]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            frontier
+                .encode_projected(
+                    ctx,
+                    &encoder,
+                    &kv_row,
+                    &score_row,
+                    &ape,
+                    &norm,
+                    position as u32,
+                    rope,
+                    rms_eps,
+                )
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "ratio-4 {label} slab-end command failed: {:?}",
+                command.error()
+            );
+            assert_eq!(frontier.published_count(position as u32), 256);
+            assert_eq!(expected_rows.len(), 256 * head_dim);
+            assert_close(
+                &format!("ratio-4 {label} complete first slab"),
+                &read_f16(&frontier.published),
+                &expected_rows,
+                2e-3,
+            );
+            assert_close(
+                &format!("ratio-4 {label} slab-end KV state"),
+                &read_f32(&frontier.kv_state),
+                oracle.kv_state(),
+                4e-5,
+            );
+            assert_close(
+                &format!("ratio-4 {label} slab-end score state"),
+                &read_f32(&frontier.score_state),
+                oracle.score_state(),
+                4e-5,
+            );
+
+            let position = 1_024usize;
+            let offset = position * width;
+            assert!(
+                oracle
+                    .push_projected(
+                        position as u32,
+                        &projected_kv_values[offset..offset + width],
+                        &projected_score_values[offset..offset + width],
+                        &ape_values,
+                        &norm_values,
+                        rms_eps,
+                        oracle_rope,
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            let before_continuation = read_f16(&frontier.published);
+            let kv_row = projected_kv.view_subrange(offset as u64, vec![width as u64]);
+            let score_row = projected_score.view_subrange(offset as u64, vec![width as u64]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            frontier
+                .encode_projected(
+                    ctx,
+                    &encoder,
+                    &kv_row,
+                    &score_row,
+                    &ape,
+                    &norm,
+                    position as u32,
+                    rope,
+                    rms_eps,
+                )
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "ratio-4 {label} position-1024 command failed: {:?}",
+                command.error()
+            );
+            assert_eq!(frontier.published_count(position as u32), 256);
+            assert_eq!(read_f16(&frontier.published), before_continuation);
+            assert_close(
+                &format!("ratio-4 {label} position-1024 KV state"),
+                &read_f32(&frontier.kv_state),
+                oracle.kv_state(),
+                4e-5,
+            );
+            assert_close(
+                &format!("ratio-4 {label} position-1024 score state"),
+                &read_f32(&frontier.score_state),
+                oracle.score_state(),
+                4e-5,
+            );
+
+            let before_rejection_kv = read_f32(&frontier.kv_state);
+            let before_rejection_score = read_f32(&frontier.score_state);
+            let before_rejection_rows = read_f16(&frontier.published);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let error = frontier
+                .encode_projected(
+                    ctx, &encoder, &kv_row, &score_row, &ape, &norm, 1_027, rope, rms_eps,
+                )
+                .unwrap_err();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "ratio-4 {label} rejected-row command failed: {:?}",
+                command.error()
+            );
+            assert!(error.to_string().contains("published row 256"));
+            assert_eq!(read_f32(&frontier.kv_state), before_rejection_kv);
+            assert_eq!(read_f32(&frontier.score_state), before_rejection_score);
+            assert_eq!(read_f16(&frontier.published), before_rejection_rows);
+        }
+
+        run_case(&ctx, 512, DeepSeekV4CompressorPublication::Attention);
+        run_case(&ctx, 128, DeepSeekV4CompressorPublication::IndexerHadamard);
+    }
+
+    #[test]
     fn hadamard_128_matches_the_indexer_oracle() {
         let Some(ctx) = metal_context() else {
             return;
@@ -7123,13 +7844,13 @@ mod tests {
     }
 
     #[test]
-    fn dense_attention_matches_wrapped_promoted_hca_geometries() {
+    fn dense_attention_matches_wrapped_hca_geometries_through_row_seven() {
         let Some(ctx) = metal_context() else {
             return;
         };
         const HEADS: usize = 2;
         const HEAD_DIM: usize = 512;
-        const COMPRESSED_ROWS: usize = 128;
+        const COMPRESSED_ROWS: usize = DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS;
         let config = DeepSeekV4PositionZeroAttentionConfig {
             hidden_size: 1,
             q_lora_rank: 1,
@@ -7143,12 +7864,12 @@ mod tests {
         let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
 
         for (position, expected_hca_count, expected_csa_count) in [
-            (382usize, 2usize, 95usize),
-            (383, 3, 96),
-            (384, 3, 96),
-            (510, 3, 127),
-            (511, 4, 128),
-            (512, 4, 128),
+            (638usize, 4usize, 159usize),
+            (639, 5, 160),
+            (640, 5, 160),
+            (1022, 7, 255),
+            (1023, 8, 256),
+            (1024, 8, 256),
         ] {
             let raw_start = position + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
             let mut raw_rows = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM);
@@ -7172,7 +7893,7 @@ mod tests {
                 let slot = logical_position % DEEPSEEK_V4_LOCAL_WINDOW;
                 raw_ring[slot * HEAD_DIM..(slot + 1) * HEAD_DIM].copy_from_slice(&row);
             }
-            let compressed_rows = (0..COMPRESSED_ROWS)
+            let mut compressed_rows = (0..COMPRESSED_ROWS)
                 .flat_map(|row| {
                     (0..HEAD_DIM).map(move |dimension| {
                         let tag = (row * 37 + dimension * 7 + row / 3) % 113;
@@ -7199,6 +7920,14 @@ mod tests {
             let csa_count = (position + 1) / 4;
             assert_eq!(hca_count, expected_hca_count);
             assert_eq!(csa_count, expected_csa_count);
+            if matches!(position, 639 | 1023) {
+                for row in [hca_count - 1, csa_count - 1] {
+                    for dimension in 0..HEAD_DIM {
+                        compressed_rows[row * HEAD_DIM + dimension] =
+                            round_f16(queries[dimension] * 12.0);
+                    }
+                }
+            }
             let expected_hca = shared_kv_attention(
                 &queries,
                 HEADS,
@@ -7226,6 +7955,42 @@ mod tests {
                     .any(|(hca, csa)| (hca - csa).abs() > 1e-3),
                 "position {position} fixture must distinguish HCA and CSA row counts"
             );
+            if matches!(position, 639 | 1023) {
+                let prior_hca = shared_kv_attention(
+                    &queries,
+                    HEADS,
+                    HEAD_DIM,
+                    &raw_rows,
+                    &compressed_rows[..(hca_count - 1) * HEAD_DIM],
+                    None,
+                    &sinks,
+                )
+                .unwrap();
+                assert!(
+                    expected_hca
+                        .iter()
+                        .zip(&prior_hca)
+                        .any(|(current, prior)| (current - prior).abs() > 1e-3),
+                    "position {position} HCA fixture must expose the newest row"
+                );
+                let prior_csa = shared_kv_attention(
+                    &queries,
+                    HEADS,
+                    HEAD_DIM,
+                    &raw_rows,
+                    &compressed_rows[..(csa_count - 1) * HEAD_DIM],
+                    None,
+                    &sinks,
+                )
+                .unwrap();
+                assert!(
+                    expected_csa
+                        .iter()
+                        .zip(&prior_csa)
+                        .any(|(current, prior)| (current - prior).abs() > 1e-3),
+                    "position {position} CSA fixture must expose the newest row"
+                );
+            }
 
             let query_tensor = offset_f32(&ctx, &queries, vec![HEAD_DIM as u64, HEADS as u64]);
             let sink_tensor = offset_f32(&ctx, &sinks, vec![HEADS as u64]);
@@ -7330,6 +8095,45 @@ mod tests {
                 7e-5,
             );
         }
+
+        let queries = offset_f32(
+            &ctx,
+            &vec![0.0; HEADS * HEAD_DIM],
+            vec![HEAD_DIM as u64, HEADS as u64],
+        );
+        let raw_cache =
+            MetalTensor::zeros_f16(&ctx, vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64])
+                .unwrap();
+        let compressed_cache = MetalTensor::zeros_f16(
+            &ctx,
+            vec![HEAD_DIM as u64, DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64],
+        )
+        .unwrap();
+        let sink_tensor = offset_f32(&ctx, &sinks, vec![HEADS as u64]);
+        let output = offset_f32(
+            &ctx,
+            &vec![0.0; HEADS * HEAD_DIM],
+            vec![HEAD_DIM as u64, HEADS as u64],
+        );
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        let error = encode_dense_sink_attention_f16(
+            &ctx,
+            &encoder,
+            &queries,
+            &raw_cache,
+            Some(DeepSeekV4PublishedRows {
+                cache: &compressed_cache,
+                count: DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS + 1,
+            }),
+            &sink_tensor,
+            &output,
+            1_024,
+            config,
+        )
+        .unwrap_err();
+        encoder.end();
+        assert!(error.to_string().contains("count 257 is out of range"));
     }
 
     fn oracle_expert(

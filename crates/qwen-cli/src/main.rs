@@ -2137,6 +2137,14 @@ fn deepseek_v4_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Res
     Ok(required)
 }
 
+fn deepseek_v4_packed_prefix_tokens(prompt_tokens: usize) -> usize {
+    if prompt_tokens < 2 {
+        0
+    } else {
+        prompt_tokens.min(DEEPSEEK_V4_PREFILL_MAX_TOKENS)
+    }
+}
+
 fn checked_deepseek_v4_token_id(token: i32, vocab_size: u32, purpose: &str) -> Result<u32> {
     let token =
         u32::try_from(token).with_context(|| format!("{purpose} token ID {token} is negative"))?;
@@ -2273,11 +2281,22 @@ fn run_deepseek_v4_single_turn(
     );
 
     let prefill_t0 = Instant::now();
-    let prefill_mode = if (2..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&prompt_token_ids.len()) {
+    let packed_prefix_tokens = deepseek_v4_packed_prefix_tokens(prompt_token_ids.len());
+    let prefill_mode = if packed_prefix_tokens > 0 {
         session
-            .prefill_tokens(&ctx, &prompt_token_ids)
+            .prefill_tokens(&ctx, &prompt_token_ids[..packed_prefix_tokens])
             .context("prefill DeepSeek V4 prompt layer-major")?;
-        "layer_major_128"
+        for (suffix_index, &token) in prompt_token_ids[packed_prefix_tokens..].iter().enumerate() {
+            let prompt_index = packed_prefix_tokens + suffix_index;
+            session
+                .forward_token(&ctx, token)
+                .with_context(|| format!("forward DeepSeek V4 prompt token {prompt_index}"))?;
+        }
+        if packed_prefix_tokens == prompt_token_ids.len() {
+            "layer_major_128"
+        } else {
+            "layer_major_128_then_singleton"
+        }
     } else {
         for (index, &token) in prompt_token_ids.iter().enumerate() {
             session
@@ -6056,6 +6075,25 @@ mod tests {
         assert!(deepseek_v4_required_forwards(0, 1).is_err());
         assert!(deepseek_v4_required_forwards(1, 0).is_err());
         assert!(deepseek_v4_required_forwards(usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn deepseek_v4_prefill_uses_one_packed_prefix_then_singleton_continuation() {
+        assert_eq!(deepseek_v4_packed_prefix_tokens(0), 0);
+        assert_eq!(deepseek_v4_packed_prefix_tokens(1), 0);
+        assert_eq!(deepseek_v4_packed_prefix_tokens(2), 2);
+        assert_eq!(
+            deepseek_v4_packed_prefix_tokens(DEEPSEEK_V4_PREFILL_MAX_TOKENS),
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS
+        );
+        assert_eq!(
+            deepseek_v4_packed_prefix_tokens(DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1),
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS
+        );
+        assert_eq!(
+            deepseek_v4_packed_prefix_tokens(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS
+        );
     }
 
     #[test]

@@ -450,9 +450,9 @@ and one denominator-only-sink softmax over local raw rows plus every completed
 compressed row. The parallel indexer compressor publishes its normalized
 Hadamard row, but index scoring and top-512 selection remain deferred while the
 history is below 512 rows and dense-all is definitionally equivalent. The
-session now continues through four independently promoted HCA rows and the
-position-512 continuation after the fourth publication, then fails closed at
-position 513 before entering an unvalidated retained interval.
+session now continues through all 256 rows in the first compressed slab and the
+position-1024 continuation, then fails closed at position 1025. Position 1027,
+which would publish unallocated row 256, retains a more specific slab guard.
 
 Gate:
 
@@ -473,15 +473,15 @@ Gate:
 
 ### S4: HCA lane
 
-Status: first through fourth boundary decode slices promoted through positions
-126-129, 254-257, 382-385, and 510-512 on 2026-08-02. All 20 HCA layers use the
-retained ratio-128 frontier to pool, RMS-normalize, apply block-start
-adjacent-pair RoPE, publish F16 compressed rows, and include every published row
-in the same-token softmax over the 128-row local window plus dense compressed
-history. Position 510 is the pre-fourth-boundary control, position 511 publishes
-row 3 from the block beginning at position 384, and position 512 proves
-immediate retained continuation. The session fails closed at position 513; the
-next unvalidated HCA publication is position 639.
+Status: HCA rows 0-7 and the continuation through position 1024 promoted on
+2026-08-02. All 20 HCA layers use the retained ratio-128 frontier to pool,
+RMS-normalize, apply block-start adjacent-pair RoPE, publish F16 compressed
+rows, and include every published row in the same-token softmax over the
+128-row local window plus dense compressed history. The first four rows retain
+their named full-model boundary evidence. Rows 4-7 use generalized
+production-width operation properties and one strategic full-model endpoint
+rather than four more mechanical fixture campaigns. Position 1023 publishes
+HCA row 7 and CSA row 255; position 1024 proves immediate wrapped continuation.
 
 The long-prefix differential uses a different numerical gate from positions
 0-8. Singleton-versus-singleton drift accumulates before any HCA row exists:
@@ -568,17 +568,36 @@ Gate:
   510, and 511 use the existing 0.990 / 0.15 interval containment; publication
   must improve or preserve both measures, and position 512 must strictly
   recover both and satisfy the established 0.997 / 0.075 endpoint gate.
-- A real position-513 call rejects before mutation while preserving position
-  513 as the next index and retaining all completed position-512 logit bits.
-  As above, full-logit agreement is claimed only at named fixture positions.
+- A production-width ratio-128 property executes all 1,025 positions through
+  row 7. It rejects every early publication, compares every emitted row with
+  the independent CPU compressor after F16 storage, preserves all older rows,
+  validates block-start YaRN positions 0 through 896, and leaves the slab
+  unchanged at position 1024.
+- Serial publication-to-attention gates at positions 639 and 1023 materially
+  distinguish the newest row from a prior-count ablation. Tagged wrapped-ring
+  gates at 638/639/640 and 1022/1023/1024 independently match HCA counts
+  4/5/5 and 7/8/8 plus CSA counts 159/160/160 and 255/256/256.
+- Production-width ratio-4 attention and Hadamard-indexer properties publish
+  rows 0-255, match the overlap-roll CPU state through position 1024, preserve
+  the full slab on continuation, and synchronously reject row 256. Dense
+  attention accepts counts 255 and 256 and rejects 257.
+- Before increasing oracle capacity, the pinned position-512 b10222 vector was
+  recaptured at context 2,048 and remained byte-identical to context 1,024 at
+  SHA-256 `56f13995d0f9e0042a81e2015878164bd3d23a14515e093023f07edd87677376`.
+- Two fresh b10222 position-1024 captures were byte-identical at SHA-256
+  `6d6360c975b654d18408f262541a363a695087db4fef7722b31a5ecdf70dd03e`.
+  The native packed-prefix/singleton session preserved argmax 201 at cosine
+  0.998247840 and relative RMS 0.060068528.
+- A valid-token position-1025 call rejects before mutation, keeps
+  `next_position == 1025`, and preserves every completed position-1024 logit
+  bit. Position 1027 reports the unallocated CSA row-256 boundary before the
+  general continuation limit. Full-logit agreement remains limited to named
+  fixture positions.
 
-Further HCA promotion will not repeat a mechanical fixture campaign at every
-128-token boundary. The next extension gate generalizes production-width
-compressor, wrapped-ring, publication, and visibility properties through HCA
-row 7, then spends one full-model oracle endpoint at position 1024. Named
-full-layer intermediate states remain useful for an actual divergence. Batched
-prefill is a separate product-path gate; neither blocks the bounded
-singleton-decode generation slice.
+The next HCA publication at position 1151 is intentionally unreachable until
+compressed-history ownership grows past the first slab. Named full-layer
+intermediate states remain useful for an actual divergence, not as a mandatory
+campaign at every 128-token boundary.
 
 ### S5: full 0731 target generation
 
@@ -596,7 +615,7 @@ Qwen default.
 The CLI reserves `prompt_tokens + max_generated_tokens - 1` forwards before
 Metal residency or any token execution. This mirrors the generator's
 pending-final-token semantics and guarantees an accepted request cannot
-partially stream beyond the retained-session evidence through position 512.
+partially stream beyond the retained-session evidence through position 1024.
 The 103 GB split GGUF is already virtually mapped for family detection at that
 point; residency remains untouched on rejection. The promoted capacity is
 exported by the session implementation, so frontend and executor cannot drift
@@ -635,6 +654,12 @@ Gate:
   crossed the fourth HCA publication, consumed position 512, and generated
   oracle token 201 in 248.6 seconds; a request requiring 514 forwards rejected
   before Metal residency.
+- The exported session and CLI budget now accept exactly 1,025 forwards. A
+  native request used one proven 128-token layer-major prefix, continued by the
+  ordinary singleton path, published HCA row 7 and CSA row 255 at position
+  1023, and matched the position-1024 b10222 endpoint at 0.998247840 cosine /
+  0.060068528 relative RMS. A 1,026-forward request rejects before residency;
+  a direct valid-token call at position 1025 rejects before session mutation.
 - Ordinary 0731 messages match vLLM and SGLang byte-for-byte. On the Flash
   vocabulary, user-only, system/user, and multi-turn Unicode fixtures encode to
   exact token sequences of 5, 8, and 16 tokens. A live system/user request
@@ -693,9 +718,10 @@ for the minimum ordinary prompt-encoder gate.
 
 Status: first layer-major prefill slice promoted for fresh prompts of 2-128
 tokens on 2026-08-02. The physical scratch is sized and admitted once for 128;
-short requests use exact prefix views. The CLI retains singleton execution for
-one-token and longer-than-128 prompts until retained chunking earns a separate
-cache-preservation gate.
+short requests use exact prefix views. One-token prompts remain singleton. A
+longer prompt uses exactly one fresh packed prefix of 128, then continues with
+the already-promoted singleton path; it does not pretend subsequent chunks are
+packed or replay the prefix through a hidden fallback.
 
 The packed path is DS4-owned and never calls `forward_token`. Its outer loop is
 43 layers over a token matrix. Embedding, mHC function projections and controls,
@@ -737,6 +763,11 @@ Gate:
   singleton dispatches. A callback unwind after a completed layer leaves the
   batch at position zero with poison set, exposes no completed logits, and
   rejects subsequent decode.
+- The strategic position-1024 differential composes the same packed first 128
+  tokens with 897 ordinary singleton forwards and reaches the exact retained
+  endpoint without a delegated runner or a second packed chunk. This is a
+  reachability result, not a long-prompt TTFT claim; the run took 582.536
+  seconds after session construction.
 
 Broader S6 work remains:
 
@@ -802,14 +833,13 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Generalize production-width HCA compressor, wrapped-ring, publication, and
-   visibility coverage through row 7, then use one pinned full-model endpoint
-   at position 1024 instead of collecting every intermediate boundary.
-2. Keep position 1027 fail-closed. Promote compressed-history slab growth as a
+1. Keep position 1027 fail-closed. Promote compressed-history slab growth as a
    separate ownership milestone, then implement sparse CSA index scoring and
    top-512 selection before history can exceed 512 rows.
-3. Extend packed prefill past a fresh 128-token chunk only after the
+2. Extend packed prefill past a fresh 128-token chunk only after the
    pre-existing raw ring and compressed-history prefix have explicit packed
    visibility tests; do not hide retained chunking behind singleton replay.
+3. Attribute the now-dominant singleton suffix before choosing between retained
+   packed chunks, GPU routing, grouped experts, MXFP4 matmat, and kernel fusion.
 4. Extend the 0731 message encoder to reasoning and DSML tools only with exact
    release-derived byte fixtures and an end-to-end tool-call workload.

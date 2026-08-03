@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "purpose": "context_capacity_bridge",
+  "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs",
+  "model_shards_sha256": [
+    "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a",
+    "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd",
+    "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
+    "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
+  ],
+  "producer": {
+    "llm_commit": "e07acac20fcd2ee0faca90aa91078ff142724d63",
+    "llama_core_commit": "b1cd3a914175adedcc976388c7c638d9a2f9a189",
+    "llama_cpp_rs_commit": "553b8e4501c57c1be08a83b6b54e549a614df162",
+    "llama_cpp_commit": "8621ac725a0b6892ae44ea33377f14b6a7e0ebdf",
+    "effective_llama_cpp_build": "b10222",
+    "backend": "Metal",
+    "platform": "Apple M4 Max",
+    "captured_at": "2026-08-02"
+  },
+  "request": {
+    "prompt_raw": true,
+    "prompt_decode_mode": "singleton",
+    "prompt_tokenization": {
+      "pattern_text": "A\n\t@",
+      "pattern_token_ids": [35, 201, 200, 34],
+      "pattern_repetitions": 128,
+      "suffix_text": "",
+      "suffix_token_ids": [],
+      "expanded_token_count": 512,
+      "native_tokenizer_verified": true
+    },
+    "injected_token_id": 35,
+    "injection_position": 512,
+    "context_size": 2048,
+    "cache_type": "F16",
+    "seed": 42,
+    "temperature": 0.0,
+    "command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 128)' | llm --model MODEL --context 2048 --raw --prompt-geometry --snapshot OUT --snapshot-id dsv4_position512_ctx2048_token35_singleton --inject-token-id 35 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10"
+  },
+  "vector": {
+    "file": "deepseek_v4_pattern35_201_200_34_x128_then35_position512_b10222.f32",
+    "encoding": "f32-le",
+    "element_count": 129280,
+    "byte_count": 517120,
+    "sha256": "56f13995d0f9e0042a81e2015878164bd3d23a14515e093023f07edd87677376",
+    "argmax_token_id": 201,
+    "argmax_logit": 28.268883
+  },
+  "bridge": {
+    "source_manifest": "deepseek_v4_pattern35_201_200_34_x128_then35_position512_b10222.json",
+    "source_context_size": 1024,
+    "recapture_context_size": 2048,
+    "vectors_byte_identical": true
+  }
+}

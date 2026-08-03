@@ -37,10 +37,10 @@ pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
 pub const DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 pub use prefill::DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 /// Number of token forwards traversed by the longest retained-session
-/// differential, through the position-1024 continuation after HCA row seven.
+/// differential, through the position-2048 continuation after HCA row fifteen.
 /// Callers use this to reject requests before streaming beyond the current
 /// evidence boundary.
-pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 1_025;
+pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 2_049;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeepSeekV4MetalError {
@@ -603,21 +603,23 @@ const DEEPSEEK_V4_HIDDEN_SIZE: usize = 4_096;
 const DEEPSEEK_V4_VOCAB_SIZE: usize = 129_280;
 const DEEPSEEK_V4_LAYER_COUNT: usize = 43;
 const DEEPSEEK_V4_LOCAL_WINDOW: usize = 128;
-const DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS: usize = 256;
+const DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS: usize = 256;
+const DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS: usize =
+    DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS * 2;
 const DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION: u32 =
     DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32;
 const DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY: u32 =
-    ((DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS + 1) * 4 - 1) as u32;
+    ((DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS + 1) * 4 - 1) as u32;
 
 fn validate_promoted_session_position(position: u32) -> Result<(), DeepSeekV4MetalError> {
     if position >= DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY {
         return invalid(format!(
-            "native session stops before unallocated CSA row 256 at position {DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY}; next position is {position}"
+            "native session stops before unallocated CSA row {DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS} at position {DEEPSEEK_V4_FIRST_UNALLOCATED_CSA_BOUNDARY}; next position is {position}"
         ));
     }
     if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION {
         return invalid(format!(
-            "native session stops after the promoted row-seven HCA continuation at position 1024; next position is {position}"
+            "native session stops after the promoted two-slab continuation at position 2048; next position is {position}"
         ));
     }
     Ok(())
@@ -724,8 +726,8 @@ impl DeepSeekV4SessionPhase {
 
 /// Native qwen-owned DeepSeek V4 decode session.
 ///
-/// Dense-all CSA and eight HCA rows are promoted through the position-1024
-/// continuation. The session fails closed before position 1025 until the next
+/// Dense-all CSA and sixteen HCA rows are promoted through the position-2048
+/// continuation. The session fails closed before position 2049 until the next
 /// retained interval earns its own differential.
 pub struct DeepSeekV4Session {
     residency: DeepSeekV4MetalResidency,
@@ -1456,7 +1458,10 @@ impl DeepSeekV4CompressorFrontier {
             normalized: MetalTensor::zeros_f32(ctx, vec![head_dim as u64])?,
             published: MetalTensor::zeros_f16(
                 ctx,
-                vec![head_dim as u64, DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64],
+                vec![
+                    head_dim as u64,
+                    DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
+                ],
             )?,
         })
     }
@@ -1531,7 +1536,7 @@ impl DeepSeekV4CompressorFrontier {
             &self.published,
             &[
                 self.head_dim as u64,
-                DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64,
+                DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
             ],
             true,
             "published compressor rows",
@@ -1636,7 +1641,7 @@ impl DeepSeekV4CompressorFrontier {
             &self.published,
             &[
                 self.head_dim as u64,
-                DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64,
+                DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
             ],
             true,
             "published compressor rows",
@@ -1650,10 +1655,10 @@ impl DeepSeekV4CompressorFrontier {
         let boundary = (following_position as usize).is_multiple_of(self.ratio);
         let published_row = if boundary {
             let row = following_position as usize / self.ratio - 1;
-            if row >= DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS {
+            if row >= DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS {
                 return invalid(format!(
-                    "compressor published row {row} exceeds the first {}-row slab",
-                    DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS
+                    "compressor published row {row} exceeds the allocated {}-row history",
+                    DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS
                 ));
             }
             Some(row)
@@ -1888,10 +1893,10 @@ impl DeepSeekV4CompressorFrontiers {
         if count == 0 {
             return Ok(None);
         }
-        if count > DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS {
+        if count > DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS {
             return invalid(format!(
-                "visible compressed rows {count} exceed the first {}-row slab",
-                DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS
+                "visible compressed rows {count} exceed the allocated {}-row history",
+                DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS
             ));
         }
         Ok(Some(DeepSeekV4PublishedRows {
@@ -2367,12 +2372,12 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                 rows.cache,
                 &[
                     c.head_dim as u64,
-                    DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64,
+                    DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
                 ],
                 false,
                 "compressed attention cache",
             )?;
-            if rows.count == 0 || rows.count > DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS {
+            if rows.count == 0 || rows.count > DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS {
                 return invalid(format!(
                     "compressed attention row count {} is out of range",
                     rows.count
@@ -3971,12 +3976,12 @@ fn encode_dense_sink_attention_f16(
             rows.cache,
             &[
                 config.head_dim as u64,
-                DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64,
+                DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
             ],
             false,
             "dense compressed attention cache",
         )?;
-        if rows.count == 0 || rows.count > DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS {
+        if rows.count == 0 || rows.count > DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS {
             return invalid(format!(
                 "dense compressed attention count {} is out of range",
                 rows.count
@@ -4902,7 +4907,7 @@ fn append_compressor_frontier_allocations(
         format!("{prefix}.published"),
         checked_mul(
             head_dim,
-            DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS,
+            DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS,
             "published compressor history elements",
         )?,
         std::mem::size_of::<u16>(),
@@ -5403,22 +5408,22 @@ mod tests {
     }
 
     #[test]
-    fn session_position_guard_stops_after_position_1024_and_before_slab_growth() {
-        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 1_025);
+    fn session_position_guard_separates_evidence_from_physical_capacity() {
+        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 2_049);
         validate_promoted_session_position((DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY - 1) as u32)
             .unwrap();
         let continuation =
             validate_promoted_session_position(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32)
                 .unwrap_err();
-        assert!(continuation.to_string().contains("next position is 1025"));
-        let retained_interval = validate_promoted_session_position(1_026).unwrap_err();
+        assert!(continuation.to_string().contains("next position is 2049"));
+        let retained_interval = validate_promoted_session_position(2_050).unwrap_err();
         assert!(
             retained_interval
                 .to_string()
-                .contains("next position is 1026")
+                .contains("next position is 2050")
         );
-        let csa = validate_promoted_session_position(1027).unwrap_err();
-        assert!(csa.to_string().contains("CSA row 256 at position 1027"));
+        let csa = validate_promoted_session_position(2_051).unwrap_err();
+        assert!(csa.to_string().contains("CSA row 512 at position 2051"));
     }
 
     #[test]
@@ -5486,7 +5491,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            154_753_812
+            166_877_972
         );
         let names = requests
             .iter()
@@ -5499,7 +5504,7 @@ mod tests {
                 .filter(|request| request.name.ends_with(".published"))
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            12_124_160
+            24_248_320
         );
         assert_eq!(
             requests
@@ -7149,14 +7154,14 @@ mod tests {
     }
 
     #[test]
-    fn ratio128_frontier_preserves_eight_rows_and_publishes_before_attention() {
+    fn ratio128_frontier_preserves_sixteen_rows_and_publishes_before_attention() {
         let Some(ctx) = metal_context() else {
             return;
         };
         const HEADS: usize = 2;
         const HEAD_DIM: usize = 512;
         const RATIO: usize = 128;
-        const PUBLISHED_ROWS: usize = 8;
+        const PUBLISHED_ROWS: usize = 16;
         const POSITIONS: usize = PUBLISHED_ROWS * RATIO + 1;
         let rms_eps = 1.0e-5;
         let frontier = DeepSeekV4CompressorFrontier::new(
@@ -7319,7 +7324,7 @@ mod tests {
                 .collect::<Vec<_>>();
             expected_rows.extend_from_slice(&expected_row);
 
-            let integration = if matches!(boundary, 639 | 1023) {
+            let integration = if matches!(boundary, 639 | 1023 | 2047) {
                 let raw_start = boundary + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
                 let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
                 let mut raw_rows = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM);
@@ -7529,19 +7534,19 @@ mod tests {
         command.waitUntilCompleted();
         assert!(
             command.error().is_none(),
-            "position 1024 continuation command failed: {:?}",
+            "position {position} continuation command failed: {:?}",
             command.error()
         );
         assert_eq!(frontier.published_count(position as u32), PUBLISHED_ROWS);
         assert_eq!(read_f16(&frontier.published), before_continuation);
         assert_close(
-            "position 1024 HCA KV state",
+            &format!("position {position} HCA KV state"),
             &read_f32(&frontier.kv_state),
             oracle.kv_state(),
             4e-5,
         );
         assert_close(
-            "position 1024 HCA score state",
+            &format!("position {position} HCA score state"),
             &read_f32(&frontier.score_state),
             oracle.score_state(),
             4e-5,
@@ -7549,7 +7554,7 @@ mod tests {
     }
 
     #[test]
-    fn ratio4_frontiers_fill_first_slab_and_reject_row_256() {
+    fn ratio4_frontiers_fill_two_slabs_and_reject_row_512() {
         let Some(ctx) = metal_context() else {
             return;
         };
@@ -7560,7 +7565,7 @@ mod tests {
             publication: DeepSeekV4CompressorPublication,
         ) {
             const RATIO: usize = 4;
-            const POSITIONS: usize = 1_025;
+            const POSITIONS: usize = 2_049;
             let width = 2 * head_dim;
             let rms_eps = 1.0e-5;
             let label = match publication {
@@ -7631,10 +7636,10 @@ mod tests {
             );
             let mut oracle = CompressorState::new(RATIO, head_dim).unwrap();
             let mut expected_rows =
-                Vec::with_capacity(DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS * head_dim);
+                Vec::with_capacity(DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS * head_dim);
 
-            for chunk_start in (0..1_023).step_by(64) {
-                let chunk_end = (chunk_start + 64).min(1_023);
+            for chunk_start in (0..2_047).step_by(64) {
+                let chunk_end = (chunk_start + 64).min(2_047);
                 let command = ctx.queue.commandBuffer().unwrap();
                 let encoder = KernelEncoder::begin(&command);
                 for position in chunk_start..chunk_end {
@@ -7688,11 +7693,11 @@ mod tests {
                 );
             }
 
-            assert_eq!(frontier.published_count(1_022), 255);
-            assert_eq!(expected_rows.len(), 255 * head_dim);
+            assert_eq!(frontier.published_count(2_046), 511);
+            assert_eq!(expected_rows.len(), 511 * head_dim);
             let published = read_f16(&frontier.published);
             assert_close(
-                &format!("ratio-4 {label} rows before slab end"),
+                &format!("ratio-4 {label} rows before second-slab end"),
                 &published[..expected_rows.len()],
                 &expected_rows,
                 2e-3,
@@ -7701,22 +7706,22 @@ mod tests {
                 published[expected_rows.len()..]
                     .iter()
                     .all(|value| *value == 0.0),
-                "ratio-4 {label} row 255 published before position 1023"
+                "ratio-4 {label} row 511 published before position 2047"
             );
             assert_close(
-                &format!("ratio-4 {label} pre-slab-end KV state"),
+                &format!("ratio-4 {label} pre-second-slab-end KV state"),
                 &read_f32(&frontier.kv_state),
                 oracle.kv_state(),
                 4e-5,
             );
             assert_close(
-                &format!("ratio-4 {label} pre-slab-end score state"),
+                &format!("ratio-4 {label} pre-second-slab-end score state"),
                 &read_f32(&frontier.score_state),
                 oracle.score_state(),
                 4e-5,
             );
 
-            let position = 1_023usize;
+            let position = 2_047usize;
             let offset = position * width;
             let mut emitted = oracle
                 .push_projected(
@@ -7729,8 +7734,8 @@ mod tests {
                     oracle_rope,
                 )
                 .unwrap()
-                .expect("position 1023 must publish row 255");
-            assert_eq!(emitted.start_position, 1_020);
+                .expect("position 2047 must publish row 511");
+            assert_eq!(emitted.start_position, 2_044);
             if publication == DeepSeekV4CompressorPublication::IndexerHadamard {
                 hadamard_128_in_place(&mut emitted.value).unwrap();
             }
@@ -7762,31 +7767,31 @@ mod tests {
             command.waitUntilCompleted();
             assert!(
                 command.error().is_none(),
-                "ratio-4 {label} slab-end command failed: {:?}",
+                "ratio-4 {label} second-slab-end command failed: {:?}",
                 command.error()
             );
-            assert_eq!(frontier.published_count(position as u32), 256);
-            assert_eq!(expected_rows.len(), 256 * head_dim);
+            assert_eq!(frontier.published_count(position as u32), 512);
+            assert_eq!(expected_rows.len(), 512 * head_dim);
             assert_close(
-                &format!("ratio-4 {label} complete first slab"),
+                &format!("ratio-4 {label} complete second slab"),
                 &read_f16(&frontier.published),
                 &expected_rows,
                 2e-3,
             );
             assert_close(
-                &format!("ratio-4 {label} slab-end KV state"),
+                &format!("ratio-4 {label} second-slab-end KV state"),
                 &read_f32(&frontier.kv_state),
                 oracle.kv_state(),
                 4e-5,
             );
             assert_close(
-                &format!("ratio-4 {label} slab-end score state"),
+                &format!("ratio-4 {label} second-slab-end score state"),
                 &read_f32(&frontier.score_state),
                 oracle.score_state(),
                 4e-5,
             );
 
-            let position = 1_024usize;
+            let position = 2_048usize;
             let offset = position * width;
             assert!(
                 oracle
@@ -7825,19 +7830,19 @@ mod tests {
             command.waitUntilCompleted();
             assert!(
                 command.error().is_none(),
-                "ratio-4 {label} position-1024 command failed: {:?}",
+                "ratio-4 {label} position-2048 command failed: {:?}",
                 command.error()
             );
-            assert_eq!(frontier.published_count(position as u32), 256);
+            assert_eq!(frontier.published_count(position as u32), 512);
             assert_eq!(read_f16(&frontier.published), before_continuation);
             assert_close(
-                &format!("ratio-4 {label} position-1024 KV state"),
+                &format!("ratio-4 {label} position-2048 KV state"),
                 &read_f32(&frontier.kv_state),
                 oracle.kv_state(),
                 4e-5,
             );
             assert_close(
-                &format!("ratio-4 {label} position-1024 score state"),
+                &format!("ratio-4 {label} position-2048 score state"),
                 &read_f32(&frontier.score_state),
                 oracle.score_state(),
                 4e-5,
@@ -7850,7 +7855,7 @@ mod tests {
             let encoder = KernelEncoder::begin(&command);
             let error = frontier
                 .encode_projected(
-                    ctx, &encoder, &kv_row, &score_row, &ape, &norm, 1_027, rope, rms_eps,
+                    ctx, &encoder, &kv_row, &score_row, &ape, &norm, 2_051, rope, rms_eps,
                 )
                 .unwrap_err();
             encoder.end();
@@ -7861,7 +7866,7 @@ mod tests {
                 "ratio-4 {label} rejected-row command failed: {:?}",
                 command.error()
             );
-            assert!(error.to_string().contains("published row 256"));
+            assert!(error.to_string().contains("published row 512"));
             assert_eq!(read_f32(&frontier.kv_state), before_rejection_kv);
             assert_eq!(read_f32(&frontier.score_state), before_rejection_score);
             assert_eq!(read_f16(&frontier.published), before_rejection_rows);
@@ -7994,7 +7999,10 @@ mod tests {
                 .unwrap();
         let compressed_cache = MetalTensor::zeros_f16(
             &ctx,
-            vec![HEAD_DIM as u64, DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64],
+            vec![
+                HEAD_DIM as u64,
+                DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
+            ],
         )
         .unwrap();
         let raw_sources = raw_rows
@@ -8061,13 +8069,13 @@ mod tests {
     }
 
     #[test]
-    fn dense_attention_matches_wrapped_hca_geometries_through_row_seven() {
+    fn dense_attention_matches_wrapped_geometries_through_two_csa_slabs() {
         let Some(ctx) = metal_context() else {
             return;
         };
         const HEADS: usize = 2;
         const HEAD_DIM: usize = 512;
-        const COMPRESSED_ROWS: usize = DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS;
+        const COMPRESSED_ROWS: usize = DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS;
         let config = DeepSeekV4PositionZeroAttentionConfig {
             hidden_size: 1,
             q_lora_rank: 1,
@@ -8087,6 +8095,12 @@ mod tests {
             (1022, 7, 255),
             (1023, 8, 256),
             (1024, 8, 256),
+            (1026, 8, 256),
+            (1027, 8, 257),
+            (1028, 8, 257),
+            (2046, 15, 511),
+            (2047, 16, 512),
+            (2048, 16, 512),
         ] {
             let raw_start = position + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
             let mut raw_rows = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM);
@@ -8137,7 +8151,7 @@ mod tests {
             let csa_count = (position + 1) / 4;
             assert_eq!(hca_count, expected_hca_count);
             assert_eq!(csa_count, expected_csa_count);
-            if matches!(position, 639 | 1023) {
+            if matches!(position, 639 | 1023 | 1027 | 2047) {
                 for row in [hca_count - 1, csa_count - 1] {
                     for dimension in 0..HEAD_DIM {
                         compressed_rows[row * HEAD_DIM + dimension] =
@@ -8172,7 +8186,7 @@ mod tests {
                     .any(|(hca, csa)| (hca - csa).abs() > 1e-3),
                 "position {position} fixture must distinguish HCA and CSA row counts"
             );
-            if matches!(position, 639 | 1023) {
+            if matches!(position, 639 | 1023 | 1027 | 2047) {
                 let prior_hca = shared_kv_attention(
                     &queries,
                     HEADS,
@@ -8228,7 +8242,10 @@ mod tests {
             .unwrap();
             let compressed_cache = MetalTensor::zeros_f16(
                 &ctx,
-                vec![HEAD_DIM as u64, DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64],
+                vec![
+                    HEAD_DIM as u64,
+                    DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
+                ],
             )
             .unwrap();
             let hca_output = offset_f32(
@@ -8323,7 +8340,10 @@ mod tests {
                 .unwrap();
         let compressed_cache = MetalTensor::zeros_f16(
             &ctx,
-            vec![HEAD_DIM as u64, DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64],
+            vec![
+                HEAD_DIM as u64,
+                DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
+            ],
         )
         .unwrap();
         let sink_tensor = offset_f32(&ctx, &sinks, vec![HEADS as u64]);
@@ -8341,7 +8361,7 @@ mod tests {
             &raw_cache,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed_cache,
-                count: DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS + 1,
+                count: DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS + 1,
             }),
             &sink_tensor,
             &output,
@@ -8350,7 +8370,7 @@ mod tests {
         )
         .unwrap_err();
         encoder.end();
-        assert!(error.to_string().contains("count 257 is out of range"));
+        assert!(error.to_string().contains("count 513 is out of range"));
     }
 
     fn oracle_expert(

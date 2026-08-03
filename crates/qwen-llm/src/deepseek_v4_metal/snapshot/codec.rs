@@ -733,24 +733,37 @@ mod tests {
     }
 
     #[test]
-    fn production_terminal_layout_stays_bounded_and_exact() {
+    fn production_and_legacy_layouts_stay_bounded_and_exact() {
         let config = crate::deepseek_v4::flash_0731_config_fixture();
         let constraints = DeepSeekV4SnapshotCodecConstraints {
             config: &config,
             expected_model_content_id: DeepSeekV4ModelContentId::new([0x5a; 32]),
             max_record_bytes: 64 * 1024 * 1024,
         };
-        let layout = WireLayout::derive(
+        let legacy = WireLayout::derive(
             1_025,
             DeepSeekV4SnapshotObservation::Unavailable,
             constraints,
         )
         .unwrap();
-        assert_eq!(layout.prefix_bytes, 4_100);
-        assert_eq!(layout.raw_bytes, 5_636_096);
-        assert_eq!(layout.compressor_bytes, 12_206_080);
-        assert_eq!(layout.published_bytes, 7_045_120);
-        assert_eq!(layout.payload_bytes, 24_891_396);
-        assert_eq!(layout.record_bytes, 24_907_812);
+        assert_eq!(legacy.prefix_bytes, 4_100);
+        assert_eq!(legacy.raw_bytes, 5_636_096);
+        assert_eq!(legacy.compressor_bytes, 12_206_080);
+        assert_eq!(legacy.published_bytes, 7_045_120);
+        assert_eq!(legacy.payload_bytes, 24_891_396);
+        assert_eq!(legacy.record_bytes, 24_907_812);
+
+        let terminal = WireLayout::derive(
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32,
+            DeepSeekV4SnapshotObservation::Unavailable,
+            constraints,
+        )
+        .unwrap();
+        assert_eq!(terminal.prefix_bytes, 8_196);
+        assert_eq!(terminal.raw_bytes, 5_636_096);
+        assert_eq!(terminal.compressor_bytes, 12_206_080);
+        assert_eq!(terminal.published_bytes, 14_090_240);
+        assert_eq!(terminal.payload_bytes, 31_940_612);
+        assert_eq!(terminal.record_bytes, 31_957_028);
     }
 }

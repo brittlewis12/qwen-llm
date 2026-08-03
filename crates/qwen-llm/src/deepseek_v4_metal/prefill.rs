@@ -2074,7 +2074,7 @@ fn encode_packed_dense_sink_attention_f16(
                 rows.cache,
                 &[
                     config.head_dim as u64,
-                    DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64,
+                    DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
                 ],
                 false,
                 "packed compressed cache",
@@ -2100,11 +2100,13 @@ fn encode_packed_dense_sink_attention_f16(
         scale: f32,
     }
     let pso = ctx.pipeline("kernel_deepseek_v4_packed_dense_sink_attention_f16")?;
-    if pso.maxTotalThreadsPerThreadgroup() < config.head_dim {
+    let maximum_rows = DEEPSEEK_V4_LOCAL_WINDOW + DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS;
+    let threadgroup_width = config.head_dim.max(maximum_rows);
+    if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
         return invalid(format!(
             "packed attention pipeline supports {} threads, requires {}",
             pso.maxTotalThreadsPerThreadgroup(),
-            config.head_dim
+            threadgroup_width
         ));
     }
     enc.set_pipeline(&pso);
@@ -2126,8 +2128,7 @@ fn encode_packed_dense_sink_attention_f16(
     enc.set_tensor(4, compressed_cache);
     enc.set_tensor(5, sinks);
     enc.set_tensor(6, output);
-    let maximum_rows = DEEPSEEK_V4_LOCAL_WINDOW + DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS + 1;
-    enc.set_threadgroup_memory(0, maximum_rows * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(0, (maximum_rows + 1) * std::mem::size_of::<f32>());
     enc.dispatch(
         MTLSize {
             width: n_tokens,
@@ -2135,7 +2136,7 @@ fn encode_packed_dense_sink_attention_f16(
             depth: 1,
         },
         MTLSize {
-            width: config.head_dim,
+            width: threadgroup_width,
             height: 1,
             depth: 1,
         },
@@ -2642,7 +2643,7 @@ mod tests {
         let raw = (0..DEEPSEEK_V4_LOCAL_WINDOW * config.head_dim)
             .map(|index| ((index * 13 + 5) % 193) as f32 * 0.0011 - 0.09)
             .collect::<Vec<_>>();
-        let compressed = (0..DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS * config.head_dim)
+        let compressed = (0..DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS * config.head_dim)
             .map(|index| ((index * 19 + 3) % 211) as f32 * 0.0009 - 0.085)
             .collect::<Vec<_>>();
         let sinks = (0..config.head_count)
@@ -2680,7 +2681,7 @@ mod tests {
             bytemuck::cast_slice(&compressed_bits),
             vec![
                 config.head_dim as u64,
-                DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64,
+                DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
             ],
             GgmlType::F16,
         )
@@ -2851,7 +2852,8 @@ mod tests {
                 GgmlType::F32,
             )
             .unwrap();
-            let compressed_values = (0..DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS * config.head_dim)
+            let compressed_values = (0..DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS
+                * config.head_dim)
                 .map(|index| {
                     let row = index / config.head_dim;
                     let dimension = index % config.head_dim;
@@ -2868,7 +2870,7 @@ mod tests {
                 bytemuck::cast_slice(&compressed_bits),
                 vec![
                     config.head_dim as u64,
-                    DEEPSEEK_V4_COMPRESSED_HISTORY_ROWS as u64,
+                    DEEPSEEK_V4_COMPRESSED_HISTORY_CAPACITY_ROWS as u64,
                 ],
                 GgmlType::F16,
             )
@@ -2986,6 +2988,13 @@ mod tests {
             Some(&[0, 1, 63, 127]),
         );
         run_case(&ctx, AttentionKind::CompressedSparse, 1_020, 4, None);
+        run_case(
+            &ctx,
+            AttentionKind::CompressedSparse,
+            2_044,
+            4,
+            Some(&[0, 3]),
+        );
     }
 
     #[test]

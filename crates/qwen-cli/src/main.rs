@@ -6372,7 +6372,7 @@ mod tests {
         );
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
-            9
+            17
         );
     }
 

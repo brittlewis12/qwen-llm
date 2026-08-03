@@ -2714,6 +2714,9 @@ impl DeepSeekV4Session {
         emit_logits: bool,
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.decision_diagnostics
+            .ensure_no_active_capture("execute packed tokens")?;
         if ctx.device.registryID() != self.device_registry_id {
             return invalid(format!(
                 "DeepSeek V4 session belongs to Metal device registry {}, got {}",

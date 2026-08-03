@@ -1,0 +1,250 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 7f06917..fdd9698 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -5,5 +5,5 @@ edition = "2021"
+ 
+ [dependencies]
+ clap = { version = "4.5.18", features = ["derive"] }
+-llama_core = { version = "0.0.0", path = "../llama_core" }
++llama_core = { version = "0.0.0", path = "../llama_core-transcript" }
+ serde_json = "1"
+diff --git a/src/main.rs b/src/main.rs
+index e088c53..b195d0e 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,9 +1,9 @@
+ use std::io::{self, Read, Write};
+-use std::num::NonZeroUsize;
++use std::num::{NonZeroU32, NonZeroUsize};
+ use std::path::PathBuf;
+ use std::time::Instant;
+ 
+-use clap::Parser;
++use clap::{ArgGroup, Parser};
+ use llama_core::forest::{
+     BranchStatus, ForestBranchId, ForestConfig, ForestSnapshot, ForkPhase, LocalContinuationField,
+     LocalFieldConfig, ResponseForest, TerrainType,
+@@ -14,6 +14,11 @@ use llama_core::{Llama, LlamaChatMessage, ModelAndContextParams, SampleParams};
+ 
+ #[derive(Parser, Debug)]
+ #[command(about = "CLI for llama_core inference")]
++#[command(group(
++    ArgGroup::new("exact_injection")
++        .args(["inject_token_id", "inject_token"])
++        .multiple(false)
++))]
+ struct Cli {
+     /// Prompt text. If omitted, reads from stdin.
+     prompt: Option<String>,
+@@ -26,6 +31,14 @@ struct Cli {
+     #[clap(short, long, default_value = "2048")]
+     context: u32,
+ 
++    /// Maximum logical prompt batch size.
++    #[clap(long, default_value = "512")]
++    batch_size: NonZeroU32,
++
++    /// Maximum physical prompt microbatch size.
++    #[clap(long, default_value = "128")]
++    ubatch_size: NonZeroU32,
++
+     /// Fail when the context fills instead of discarding earlier tokens.
+     /// Automatically enabled for snapshot token injection.
+     #[clap(long)]
+@@ -206,6 +219,16 @@ struct Cli {
+     )]
+     inject_token: Option<String>,
+ 
++    /// Write DeepSeek V4 routing tensors from only the injected singleton decode.
++    /// Requires --snapshot and exactly one injection option.
++    #[clap(
++        long,
++        value_name = "PATH",
++        requires = "snapshot",
++        requires = "exact_injection"
++    )]
++    decision_transcript: Option<PathBuf>,
++
+     /// Identifier for the snapshot (used in filenames). Defaults to a timestamp.
+     #[clap(long)]
+     snapshot_id: Option<String>,
+@@ -286,6 +309,8 @@ fn main() {
+         !(cli.no_context_rotation || cli.inject_token_id.is_some() || cli.inject_token.is_some());
+ 
+     let mut sample_params = SampleParams::default();
++    sample_params.n_batch = cli.batch_size.get();
++    sample_params.n_ubatch = cli.ubatch_size.get();
+     sample_params.temp = if cli.temp <= 0.0 { -1.0 } else { cli.temp };
+     sample_params.top_k = cli.top_k;
+     sample_params.min_p = cli.min_p;
+@@ -693,6 +718,7 @@ fn run_snapshot(llm: &Llama, sample_params: SampleParams, prompt: &str, cli: &Cl
+ 
+     let n_repeats = cli.repeat.get();
+     let mut all_metadata = Vec::new();
++    let mut decision_artifacts = Vec::new();
+ 
+     for rep in 0..n_repeats {
+         let snapshot_id = if n_repeats > 1 {
+@@ -709,6 +735,7 @@ fn run_snapshot(llm: &Llama, sample_params: SampleParams, prompt: &str, cli: &Cl
+             record_trajectory: false,
+             capture_prompt_geometry: cli.prompt_geometry,
+             capture_mode: CaptureMode::Off,
++            decision_transcript: cli.decision_transcript.is_some(),
+             ..Default::default()
+         };
+ 
+@@ -749,7 +776,14 @@ fn run_snapshot(llm: &Llama, sample_params: SampleParams, prompt: &str, cli: &Cl
+                     std::process::exit(1);
+                 })
+         });
++        let mut decision_capture = None;
+         let injection_ms = injection.as_ref().map(|resolved| {
++            if cli.decision_transcript.is_some() {
++                session.arm_decision_transcript().unwrap_or_else(|e| {
++                    eprintln!("failed to arm decision transcript (repeat {rep}): {e}");
++                    std::process::exit(1);
++                });
++            }
+             let t_injection = Instant::now();
+             session
+                 .inject_token_id(resolved.token_id)
+@@ -757,9 +791,42 @@ fn run_snapshot(llm: &Llama, sample_params: SampleParams, prompt: &str, cli: &Cl
+                     eprintln!("token injection failed (repeat {rep}): {e}");
+                     std::process::exit(1);
+                 });
+-            t_injection.elapsed().as_secs_f64() * 1000.0
++            let elapsed = t_injection.elapsed().as_secs_f64() * 1000.0;
++            if cli.decision_transcript.is_some() {
++                decision_capture = Some(session.take_decision_transcript().unwrap_or_else(|e| {
++                    eprintln!("failed to take decision transcript (repeat {rep}): {e}");
++                    std::process::exit(1);
++                }));
++            }
++            elapsed
+         });
+ 
++        if let (Some(capture), Some(resolved), Some(position)) =
++            (decision_capture, injection.as_ref(), injection_position)
++        {
++            decision_artifacts.push(serde_json::json!({
++                "schema": "deepseek_v4_injected_decision_transcript/v1",
++                "snapshot_id": snapshot_id,
++                "repeat": rep,
++                "position": position,
++                "token_id": resolved.token_id,
++                "token_display_lossy": resolved.token_display_lossy,
++                "producer": {
++                    "batch_size": sample_params.n_batch,
++                    "ubatch_size": sample_params.n_ubatch,
++                    "decode_tokens": 1,
++                },
++                "effective_moe_weight_selection": [
++                    "ffn_moe_weights_scaled",
++                    "ffn_moe_weights_norm",
++                    "ffn_moe_weights_softmax",
++                    "ffn_moe_weights"
++                ],
++                "tensors": capture.tensors,
++                "capture_errors": capture.capture_errors,
++            }));
++        }
++
+         if rep == 0 {
+             std::fs::create_dir_all(output_dir).unwrap_or_else(|e| {
+                 eprintln!("failed to create output directory {output_dir}: {e}");
+@@ -855,6 +922,8 @@ fn run_snapshot(llm: &Llama, sample_params: SampleParams, prompt: &str, cli: &Cl
+             "n_context_tokens": session.n_past(),
+             "requested_context": cli.context,
+             "context_capacity": session.context_capacity(),
++            "batch_size": cli.batch_size.get(),
++            "ubatch_size": cli.ubatch_size.get(),
+             "context_rotation_enabled": llm.context_params.allow_context_rotation,
+             "seed": cli.seed,
+             "logit_precision": "f32",
+@@ -901,6 +970,26 @@ fn run_snapshot(llm: &Llama, sample_params: SampleParams, prompt: &str, cli: &Cl
+         let arr = serde_json::Value::Array(all_metadata);
+         println!("{}", serde_json::to_string_pretty(&arr).unwrap());
+     }
++
++    if let Some(path) = &cli.decision_transcript {
++        let artifact = if decision_artifacts.len() == 1 {
++            decision_artifacts.pop().unwrap()
++        } else {
++            serde_json::Value::Array(decision_artifacts)
++        };
++        let json = serde_json::to_string(&artifact).unwrap_or_else(|e| {
++            eprintln!("failed to serialize decision transcript: {e}");
++            std::process::exit(1);
++        });
++        std::fs::write(path, json).unwrap_or_else(|e| {
++            eprintln!(
++                "failed to write decision transcript {}: {e}",
++                path.display()
++            );
++            std::process::exit(1);
++        });
++        eprintln!("decision transcript written to {}", path.display());
++    }
+ }
+ 
+ fn run_predict(llm: &mut Llama, prompt: &str, cli: &Cli) {
+@@ -949,6 +1038,7 @@ fn run_session(llm: &Llama, sample_params: SampleParams, prompt: &str, cli: &Cli
+             capture_every: cli.trajectory_every,
+             ..Default::default()
+         },
++        decision_transcript: false,
+     };
+ 
+     let mut session = InferenceSession::from_llama_with_sample_params(llm, sample_params, config)
+@@ -2190,6 +2280,50 @@ mod tests {
+         assert!(error.to_string().contains("cannot be used with"));
+     }
+ 
++    #[test]
++    fn decision_transcript_requires_snapshot_and_exact_injection() {
++        for args in [
++            vec![
++                "llm",
++                "--model",
++                "model.gguf",
++                "--decision-transcript",
++                "decisions.json",
++                "prompt",
++            ],
++            vec![
++                "llm",
++                "--model",
++                "model.gguf",
++                "--snapshot",
++                "out",
++                "--decision-transcript",
++                "decisions.json",
++                "prompt",
++            ],
++        ] {
++            assert!(parse(&args).is_err());
++        }
++
++        let cli = parse(&[
++            "llm",
++            "--model",
++            "model.gguf",
++            "--snapshot",
++            "out",
++            "--inject-token-id",
++            "42",
++            "--decision-transcript",
++            "decisions.json",
++            "prompt",
++        ])
++        .unwrap();
++        assert_eq!(
++            cli.decision_transcript.as_deref(),
++            Some(std::path::Path::new("decisions.json"))
++        );
++    }
++
+     #[test]
+     fn injection_text_preserves_leading_whitespace() {
+         let cli = parse(&[

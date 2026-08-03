@@ -759,11 +759,11 @@ mod tests {
             constraints,
         )
         .unwrap();
-        assert_eq!(terminal.prefix_bytes, 8_708);
+        assert_eq!(terminal.prefix_bytes, 12_292);
         assert_eq!(terminal.raw_bytes, 5_636_096);
         assert_eq!(terminal.compressor_bytes, 12_206_080);
-        assert_eq!(terminal.published_bytes, 14_970_880);
-        assert_eq!(terminal.payload_bytes, 32_821_764);
-        assert_eq!(terminal.record_bytes, 32_838_180);
+        assert_eq!(terminal.published_bytes, 21_135_360);
+        assert_eq!(terminal.payload_bytes, 38_989_828);
+        assert_eq!(terminal.record_bytes, 39_006_244);
     }
 }

@@ -1,0 +1,222 @@
+{
+  "schema_version": 1,
+  "purpose": "long_sparse_schedule_envelope_and_cutoff_bifurcation",
+  "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs",
+  "model_shards_sha256": [
+    "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a",
+    "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd",
+    "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
+    "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
+  ],
+  "producer": {
+    "llm_commit": "e07acac20fcd2ee0faca90aa91078ff142724d63",
+    "llama_core_commit": "b1cd3a914175adedcc976388c7c638d9a2f9a189",
+    "llama_cpp_rs_commit": "553b8e4501c57c1be08a83b6b54e549a614df162",
+    "llama_cpp_commit": "8621ac725a0b6892ae44ea33377f14b6a7e0ebdf",
+    "effective_llama_cpp_build": "b10222",
+    "decision_transcript_llm_patch_file": "deepseek_v4_b10222_decision_transcript_llm.patch",
+    "decision_transcript_llm_patch_sha256": "1d68e1598d960b3c6b33f432ddf8aafae84d7d39a24c118ffab20bd40c3e05fd",
+    "decision_transcript_llama_core_patch_file": "deepseek_v4_b10222_decision_transcript_llama_core.patch",
+    "decision_transcript_llama_core_patch_sha256": "019683e293f156c445a39c1e42321e07d48939d89736916f0cc8b0af921e869b",
+    "backend": "Metal",
+    "platform": "Apple M4 Max",
+    "captured_at": "2026-08-03"
+  },
+  "request": {
+    "prompt_raw": true,
+    "pattern_text": "A\n\t@",
+    "pattern_token_ids": [35, 201, 200, 34],
+    "native_tokenizer_verified": true,
+    "context_size": 4096,
+    "cache_type": "F16",
+    "seed": 42,
+    "temperature": 0.0,
+    "batched_geometry": {
+      "logical_batch": 512,
+      "physical_ubatch": 128
+    }
+  },
+  "vectors": [
+    {
+      "position": 3070,
+      "prompt_decode_mode": "singleton",
+      "pattern_repetitions": 767,
+      "suffix_token_ids": [35, 201],
+      "injected_token_id": 200,
+      "file": "deepseek_v4_pattern35_201_200_34_pre_twenty_fourth_hca_position3070_b10222.f32",
+      "sha256": "aa93e4873521d4df1352e7d30dd8c28aba73f43bbfd2f4912dbb4c75d8f17dbd",
+      "argmax_token_id": 34,
+      "argmax_logit": 30.141613,
+      "fresh_process_repeats": 2,
+      "repeat_vectors_byte_identical": true,
+      "capture_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --prompt-geometry --snapshot OUT --snapshot-id deepseek_v4_pattern35_201_200_34_pre_twenty_fourth_hca_position3070_b10222 --inject-token-id 200 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10",
+      "repeat_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --prompt-geometry --snapshot OUT_REPEAT --snapshot-id deepseek_v4_pattern35_201_200_34_pre_twenty_fourth_hca_position3070_b10222 --inject-token-id 200 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10"
+    },
+    {
+      "position": 3070,
+      "prompt_decode_mode": "batched",
+      "pattern_repetitions": 767,
+      "suffix_token_ids": [35, 201],
+      "injected_token_id": 200,
+      "file": "deepseek_v4_pattern35_201_200_34_pre_twenty_fourth_hca_position3070_b10222_batched.f32",
+      "sha256": "808a7bc5162810ec7eb871a36a5efeed1972586a3ed75b261b835940568073e5",
+      "argmax_token_id": 34,
+      "argmax_logit": 30.499458,
+      "fresh_process_repeats": 2,
+      "repeat_vectors_byte_identical": true,
+      "fixed_128_vector_byte_identical": true,
+      "capture_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --snapshot OUT --snapshot-id deepseek_v4_pattern35_201_200_34_pre_twenty_fourth_hca_position3070_b10222_batched --inject-token-id 200 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10",
+      "repeat_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --snapshot OUT_REPEAT --snapshot-id deepseek_v4_pattern35_201_200_34_pre_twenty_fourth_hca_position3070_b10222_batched --inject-token-id 200 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10"
+    },
+    {
+      "position": 3071,
+      "prompt_decode_mode": "singleton",
+      "pattern_repetitions": 767,
+      "suffix_token_ids": [35, 201, 200],
+      "injected_token_id": 34,
+      "file": "deepseek_v4_pattern35_201_200_34_x768_position3071_b10222.f32",
+      "sha256": "1725b2286ed85de35533eb2d17efa8719b58474aa2e63df69ef25f5df7b59c32",
+      "argmax_token_id": 35,
+      "argmax_logit": 28.727154,
+      "fresh_process_repeats": 2,
+      "repeat_vectors_byte_identical": true,
+      "capture_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\\t\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --prompt-geometry --snapshot OUT --snapshot-id deepseek_v4_pattern35_201_200_34_x768_position3071_b10222 --inject-token-id 34 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10",
+      "repeat_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\\t\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --prompt-geometry --snapshot OUT_REPEAT --snapshot-id deepseek_v4_pattern35_201_200_34_x768_position3071_b10222 --inject-token-id 34 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10"
+    },
+    {
+      "position": 3071,
+      "prompt_decode_mode": "batched",
+      "pattern_repetitions": 767,
+      "suffix_token_ids": [35, 201, 200],
+      "injected_token_id": 34,
+      "file": "deepseek_v4_pattern35_201_200_34_x768_position3071_b10222_batched.f32",
+      "sha256": "0dc0dbd0a7792c5a037f9d0e4eb16e0081917808b651764dbaa1aa108091534d",
+      "argmax_token_id": 35,
+      "argmax_logit": 30.478004,
+      "fresh_process_repeats": 2,
+      "repeat_vectors_byte_identical": true,
+      "capture_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\\t\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --snapshot OUT --snapshot-id deepseek_v4_pattern35_201_200_34_x768_position3071_b10222_batched --inject-token-id 34 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10",
+      "repeat_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\\t\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --snapshot OUT_REPEAT --snapshot-id deepseek_v4_pattern35_201_200_34_x768_position3071_b10222_batched --inject-token-id 34 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10"
+    },
+    {
+      "position": 3072,
+      "prompt_decode_mode": "singleton",
+      "pattern_repetitions": 768,
+      "suffix_token_ids": [],
+      "injected_token_id": 35,
+      "file": "deepseek_v4_pattern35_201_200_34_x768_then35_position3072_b10222.f32",
+      "sha256": "5e04dfc1cbbc86699bcb696ae52894802ee7dffe6bbfacaed423b00c8252d728",
+      "argmax_token_id": 201,
+      "argmax_logit": 27.735268,
+      "fresh_process_repeats": 2,
+      "repeat_vectors_byte_identical": true,
+      "capture_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 768)' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --prompt-geometry --snapshot OUT --snapshot-id deepseek_v4_pattern35_201_200_34_x768_then35_position3072_b10222 --inject-token-id 35 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10",
+      "repeat_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 768)' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --prompt-geometry --snapshot OUT_REPEAT --snapshot-id deepseek_v4_pattern35_201_200_34_x768_then35_position3072_b10222 --inject-token-id 35 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10"
+    },
+    {
+      "position": 3072,
+      "prompt_decode_mode": "batched",
+      "pattern_repetitions": 768,
+      "suffix_token_ids": [],
+      "injected_token_id": 35,
+      "file": "deepseek_v4_pattern35_201_200_34_x768_then35_position3072_b10222_batched.f32",
+      "sha256": "edcfe0d22f8a3b24a699abeb112bb162890fce4c6acdbe22f6b406180a466c24",
+      "argmax_token_id": 201,
+      "argmax_logit": 27.777075,
+      "fresh_process_repeats": 2,
+      "repeat_vectors_byte_identical": true,
+      "capture_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 768)' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --snapshot OUT --snapshot-id deepseek_v4_pattern35_201_200_34_x768_then35_position3072_b10222_batched --inject-token-id 35 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10",
+      "repeat_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 768)' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --snapshot OUT_REPEAT --snapshot-id deepseek_v4_pattern35_201_200_34_x768_then35_position3072_b10222_batched --inject-token-id 35 --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10"
+    }
+  ],
+  "decision_transcripts": [
+    {
+      "schedule": "native_packed_prefix_singleton_target",
+      "file": "deepseek_v4_position3070_native_decisions.json",
+      "sha256": "c13043479c26ef5cc674d0ecf0f07e672bfca3fb9e2e56ddef09803507acaac3",
+      "fresh_process_repeats": 2,
+      "repeat_payloads_byte_identical": true,
+      "capture_command": "DSV4_NATIVE_DECISION_TRANSCRIPT=TRANSCRIPT cargo test --release -p qwen-llm --features dsv4-diagnostics --test deepseek_v4_position_zero_live native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab -- --ignored --exact --nocapture",
+      "repeat_command": "DSV4_NATIVE_DECISION_TRANSCRIPT=TRANSCRIPT_REPEAT cargo test --release -p qwen-llm --features dsv4-diagnostics --test deepseek_v4_position_zero_live native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab -- --ignored --exact --nocapture"
+    },
+    {
+      "schedule": "b10222_batched_prefix_singleton_target",
+      "file": "deepseek_v4_position3070_b10222_batched_decisions.json",
+      "sha256": "771f3c5333c928aba1a7211d1880677bc62ef1417c22b24c1060b24e849ec827",
+      "canonical_tensor_sha256": "560effbe77a6a90a5c986b1d816455540a03a75df500c8312b6613253c1bc11c",
+      "fresh_process_repeats": 2,
+      "repeat_tensor_payloads_byte_identical": true,
+      "capture_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --snapshot OUT --snapshot-id dsv4_position3070_ctx4096_token200_batched_trace --inject-token-id 200 --decision-transcript TRANSCRIPT --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10",
+      "repeat_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --snapshot OUT_REPEAT --snapshot-id dsv4_position3070_ctx4096_token200_batched_trace --inject-token-id 200 --decision-transcript TRANSCRIPT_REPEAT --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10"
+    },
+    {
+      "schedule": "b10222_singleton_prefix_singleton_target",
+      "file": "deepseek_v4_position3070_b10222_singleton_decisions.json",
+      "sha256": "7ca6a3f65506c7ee3ece13b7556a2b12277356ff303283ee95da27a9d842df4a",
+      "canonical_tensor_sha256": "16cc992f92183efaeb25be32ea63c116f5e43bdea37886941fb8f58d113fd3b0",
+      "fresh_process_repeats": 2,
+      "repeat_tensor_payloads_byte_identical": true,
+      "capture_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --prompt-geometry --snapshot OUT --snapshot-id dsv4_position3070_ctx4096_token200_singleton_trace --inject-token-id 200 --decision-transcript TRANSCRIPT --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10",
+      "repeat_command": "uv run --no-project python -c 'import sys; sys.stdout.write(\"A\\n\\t@\" * 767 + \"A\\n\")' | PATCHED_LLM --model MODEL --context 4096 --batch-size 512 --ubatch-size 128 --raw --prompt-geometry --snapshot OUT_REPEAT --snapshot-id dsv4_position3070_ctx4096_token200_singleton_trace --inject-token-id 200 --decision-transcript TRANSCRIPT_REPEAT --seed 42 --temp 0 --repeat 1 --snapshot-top-k 10"
+    }
+  ],
+  "mechanism_gate": {
+    "complete_csa_layers": 21,
+    "complete_moe_layers": 43,
+    "capture_errors": 0,
+    "common_csa_through_layer": 2,
+    "native_first_csa_set_difference_layer": 4,
+    "native_layer4_selected_only": [378, 381],
+    "b10222_layer4_selected_only": [383, 384],
+    "b10222_first_schedule_csa_set_difference_layer": 6,
+    "batched_layer6_selected_only": [386],
+    "singleton_layer6_selected_only": [295],
+    "first_route_slot_difference_layer": 5,
+    "first_route_set_difference_layer": 7,
+    "score_bifurcations": {
+      "native_vs_batched_layer4": {
+        "score_cosine": 0.999999867288,
+        "score_relative_rms": 0.000515665772,
+        "left_cutoff_margin": 0.0012743,
+        "right_cutoff_margin": 0.0021193,
+        "minimum_reversed_row_perturbation": 0.0042672,
+        "perturbation_exceeds_each_cutoff_margin": true
+      },
+      "native_vs_singleton_layer4": {
+        "score_cosine": 0.999999883622,
+        "score_relative_rms": 0.000484446507,
+        "left_cutoff_margin": 0.0012743,
+        "right_cutoff_margin": 0.0011115,
+        "minimum_reversed_row_perturbation": 0.0045111,
+        "perturbation_exceeds_each_cutoff_margin": true
+      },
+      "batched_vs_singleton_layer6": {
+        "score_cosine": 0.999997268400,
+        "score_relative_rms": 0.002497829743,
+        "left_cutoff_margin": 0.0002245,
+        "right_cutoff_margin": 0.0000520,
+        "minimum_reversed_row_perturbation": 0.0028656,
+        "perturbation_exceeds_each_cutoff_margin": true
+      }
+    }
+  },
+  "schedule_envelope": {
+    "angular_distance": "sqrt(2 - 2 * cosine)",
+    "l2_distance": "euclidean distance divided by singleton vector norm",
+    "rule": "expanded schedule diameter <= b10222 singleton/batched diameter + historical allowance",
+    "historical_allowance": {
+      "positions_3070_3071": { "cosine": 0.990, "relative_rms": 0.15 },
+      "position_3072": { "cosine": 0.997, "relative_rms": 0.08 }
+    }
+  },
+  "native_repeat_hashes": {
+    "position3070_singleton_target": "8228d621cb42d919d340301affa1430fdb25b82b5ab7cd2794bcdf2456453cf6",
+    "position3071_packed": "ee1a5814897a2d89bd884e6089cf40803939ac6140fca95906ce2349f9485126",
+    "position3071_split": "00012f61dea1fb6a047b6ed48e4ea5d816f78a2c12b60c734f940e9583b7332f",
+    "position3072_packed": "067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130",
+    "position3072_split": "33e1d2077e028b645cfc2f366222139113f7e679b4d80a856dfa059777fbc967",
+    "fresh_process_repeats": 2,
+    "repeat_vectors_byte_identical": true,
+    "packed_64_128_vectors_byte_identical": true
+  }
+}

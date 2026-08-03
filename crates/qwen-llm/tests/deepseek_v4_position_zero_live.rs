@@ -1,5 +1,7 @@
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::deepseek_v4::DeepSeekV4Model;
+#[cfg(feature = "dsv4-diagnostics")]
+use qwen_llm::deepseek_v4_metal::DeepSeekV4DecisionTranscript;
 use qwen_llm::deepseek_v4_metal::{
     DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4PositionZeroForward,
     DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotObservation, decode_causal_snapshot,
@@ -17,6 +19,7 @@ const DEFAULT_DURABLE_SNAPSHOT: &str = "target/dsv4-position1024.ds4c";
 const DEFAULT_DURABLE_POSITION_2048_SNAPSHOT: &str = "target/dsv4-position2048.ds4c";
 const DEFAULT_DURABLE_POSITION_2052_SNAPSHOT: &str = "target/dsv4-position2052.ds4c";
 const DEFAULT_DURABLE_POSITION_2176_SNAPSHOT: &str = "target/dsv4-position2176.ds4c";
+const DEFAULT_DURABLE_POSITION_3072_SNAPSHOT: &str = "target/dsv4-position3072.ds4c";
 const DEFAULT_DURABLE_IDENTITY_CACHE: &str = "target/.qwen-dsv4-model-identity-v2";
 const ORACLE_BYTES: &[u8] = include_bytes!("fixtures/deepseek_v4_token35_position0_b10222.f32");
 const ORACLE_MANIFEST: &str = include_str!("fixtures/deepseek_v4_token35_position0_b10222.json");
@@ -156,6 +159,29 @@ const POSITION_2176_ORACLE_BYTES: &[u8] =
     include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x544_then35_position2176_b10222.f32");
 const POSITION_2176_ORACLE_MANIFEST: &str =
     include_str!("fixtures/deepseek_v4_pattern35_201_200_34_x544_then35_position2176_b10222.json");
+#[cfg(feature = "dsv4-diagnostics")]
+const POSITION_3070_ORACLE_BYTES: &[u8] = include_bytes!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_pre_twenty_fourth_hca_position3070_b10222.f32"
+);
+#[cfg(feature = "dsv4-diagnostics")]
+const POSITION_3070_BATCHED_ORACLE_BYTES: &[u8] = include_bytes!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_pre_twenty_fourth_hca_position3070_b10222_batched.f32"
+);
+#[cfg(feature = "dsv4-diagnostics")]
+const POSITION_3071_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x768_position3071_b10222.f32");
+#[cfg(feature = "dsv4-diagnostics")]
+const POSITION_3071_BATCHED_ORACLE_BYTES: &[u8] = include_bytes!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_x768_position3071_b10222_batched.f32"
+);
+const POSITION_3072_ORACLE_BYTES: &[u8] =
+    include_bytes!("fixtures/deepseek_v4_pattern35_201_200_34_x768_then35_position3072_b10222.f32");
+const POSITION_3072_BATCHED_ORACLE_BYTES: &[u8] = include_bytes!(
+    "fixtures/deepseek_v4_pattern35_201_200_34_x768_then35_position3072_b10222_batched.f32"
+);
+#[cfg(feature = "dsv4-diagnostics")]
+const POSITION_3070_NATIVE_DECISION_SOURCE: &str =
+    include_str!("fixtures/deepseek_v4_position3070_native_decisions.json");
 const SINGLETON_ORACLE_LLM_COMMIT: &str = "e07acac20fcd2ee0faca90aa91078ff142724d63";
 const SINGLETON_ORACLE_LLAMA_CORE_COMMIT: &str = "b1cd3a914175adedcc976388c7c638d9a2f9a189";
 const SINGLETON_ORACLE_LLAMA_CPP_RS_COMMIT: &str = "553b8e4501c57c1be08a83b6b54e549a614df162";
@@ -287,6 +313,87 @@ fn compare_logits(label: &str, logits: &[f32], oracle_bytes: &[u8]) -> LogitComp
         mean_absolute_error,
         maximum_error,
     }
+}
+
+fn decode_f32_vector(bytes: &[u8]) -> Vec<f32> {
+    assert!(bytes.len().is_multiple_of(std::mem::size_of::<f32>()));
+    bytes
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect()
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+fn f32_sha256(values: &[f32]) -> String {
+    let mut hasher = Sha256::new();
+    for value in values {
+        hasher.update(value.to_le_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn assert_schedule_expanded_envelope(
+    label: &str,
+    singleton_bytes: &[u8],
+    batched_bytes: &[u8],
+    native_schedules: &[&[f32]],
+    historical_cosine: f64,
+    historical_relative_rms: f64,
+) {
+    let singleton = decode_f32_vector(singleton_bytes);
+    let batched = decode_f32_vector(batched_bytes);
+    let mut schedules = vec![singleton.as_slice(), batched.as_slice()];
+    schedules.extend_from_slice(native_schedules);
+    assert!(schedules.iter().all(|values| {
+        values.len() == singleton.len() && values.iter().all(|value| value.is_finite())
+    }));
+
+    let singleton_norm = singleton
+        .iter()
+        .map(|&value| f64::from(value).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!(singleton_norm.is_finite() && singleton_norm > 0.0);
+    let distance = |left: &[f32], right: &[f32]| {
+        let mut dot = 0.0f64;
+        let mut left_norm = 0.0f64;
+        let mut right_norm = 0.0f64;
+        let mut squared_error = 0.0f64;
+        for (&left, &right) in left.iter().zip(right) {
+            let left = f64::from(left);
+            let right = f64::from(right);
+            dot += left * right;
+            left_norm += left * left;
+            right_norm += right * right;
+            squared_error += (left - right).powi(2);
+        }
+        let cosine = (dot / (left_norm.sqrt() * right_norm.sqrt())).clamp(-1.0, 1.0);
+        (
+            (2.0 - 2.0 * cosine).max(0.0).sqrt(),
+            squared_error.sqrt() / singleton_norm,
+        )
+    };
+    let oracle_diameter = distance(&singleton, &batched);
+    let mut expanded_diameter = (0.0f64, 0.0f64);
+    for left in 0..schedules.len() {
+        for right in left + 1..schedules.len() {
+            let pair = distance(schedules[left], schedules[right]);
+            expanded_diameter.0 = expanded_diameter.0.max(pair.0);
+            expanded_diameter.1 = expanded_diameter.1.max(pair.1);
+        }
+    }
+    let historical_angular = (2.0 - 2.0 * historical_cosine).sqrt();
+    eprintln!(
+        "{label} schedule envelope oracle_angular={:.9} expanded_angular={:.9} angular_limit={:.9} oracle_l2={:.9} expanded_l2={:.9} l2_limit={:.9}",
+        oracle_diameter.0,
+        expanded_diameter.0,
+        oracle_diameter.0 + historical_angular,
+        oracle_diameter.1,
+        expanded_diameter.1,
+        oracle_diameter.1 + historical_relative_rms,
+    );
+    assert!(expanded_diameter.0 <= oracle_diameter.0 + historical_angular);
+    assert!(expanded_diameter.1 <= oracle_diameter.1 + historical_relative_rms);
 }
 
 fn assert_logits_match(label: &str, logits: &[f32], oracle_bytes: &[u8], expected_argmax: usize) {
@@ -2663,6 +2770,499 @@ fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
     );
     eprintln!(
         "durable_position_2176_elapsed={:.3}s identity_cache={:?}",
+        started.elapsed().as_secs_f64(),
+        content.outcome
+    );
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+#[test]
+#[ignore = "requires the local DS4 model and a published position-2176 snapshot"]
+fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let source_snapshot_path = std::env::var_os("DSV4_POSITION_2176_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_POSITION_2176_SNAPSHOT)
+        });
+    let destination_snapshot_path = std::env::var_os("DSV4_POSITION_3072_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_POSITION_3072_SNAPSHOT)
+        });
+    let identity_cache_path = std::env::var_os("DSV4_IDENTITY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_IDENTITY_CACHE)
+        });
+    assert!(model_path.exists(), "missing DS4 model");
+    assert!(
+        source_snapshot_path.exists(),
+        "missing durable position-2176 snapshot"
+    );
+
+    let started = Instant::now();
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+            .expect("resolve full-third-slab snapshot model identity");
+    let model_content_id = DeepSeekV4ModelContentId::new(content.content_id);
+    let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind DS4 config");
+    let source_snapshot = load_causal_snapshot_file(
+        &source_snapshot_path,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: &model.config,
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("load durable position-2176 snapshot");
+    assert_eq!(source_snapshot.next_position(), 2_176);
+
+    let ctx = MetalContext::new().expect("create Metal context");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("build full-third-slab session");
+    session
+        .restore_causal_snapshot(&source_snapshot)
+        .expect("restore durable position-2176 snapshot");
+
+    let chunk = [35, 201, 200, 34].repeat(32);
+    for chunk_index in 0..6 {
+        session
+            .advance_tokens(&ctx, &chunk)
+            .unwrap_or_else(|error| panic!("advance full-slab chunk {chunk_index}: {error}"));
+        eprintln!(
+            "full_third_slab chunk={} next_position={} elapsed={:.3}s",
+            chunk_index + 1,
+            session.next_position(),
+            started.elapsed().as_secs_f64()
+        );
+    }
+    let schedule_fork = session
+        .capture_causal_snapshot()
+        .expect("capture position-2944 schedule fork");
+    assert_eq!(schedule_fork.next_position(), 2_944);
+    session
+        .prefill_tokens(&ctx, &chunk)
+        .expect("execute observed full-third-slab boundary chunk");
+    assert_eq!(session.next_position(), 3_072);
+    let boundary_logits = session
+        .copy_logits_f32()
+        .expect("copy position-3071 logits");
+    assert!(boundary_logits.iter().all(|value| value.is_finite()));
+    let boundary_argmax = boundary_logits
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .unwrap()
+        .0;
+    let mut boundary_hasher = Sha256::new();
+    for value in &boundary_logits {
+        boundary_hasher.update(value.to_le_bytes());
+    }
+    let boundary_hash = format!("{:x}", boundary_hasher.finalize());
+    assert_eq!(boundary_argmax, 35);
+    assert_eq!(
+        boundary_hash,
+        "ee1a5814897a2d89bd884e6089cf40803939ac6140fca95906ce2349f9485126"
+    );
+    let boundary = compare_logits(
+        "position_3071",
+        &boundary_logits,
+        POSITION_3071_ORACLE_BYTES,
+    );
+    assert_eq!(boundary.argmax, boundary.oracle_argmax);
+    let batched_boundary = compare_logits(
+        "position_3071_vs_batched_b10222",
+        &boundary_logits,
+        POSITION_3071_BATCHED_ORACLE_BYTES,
+    );
+    assert_eq!(batched_boundary.argmax, batched_boundary.oracle_argmax);
+
+    let boundary_snapshot = session
+        .capture_causal_snapshot()
+        .expect("capture full-third-slab snapshot");
+    assert_eq!(boundary_snapshot.next_position(), 3_072);
+    assert_eq!(boundary_snapshot.payload_bytes(), 38_989_824);
+    session
+        .forward_token(&ctx, 35)
+        .expect("execute full-third-slab continuation at position 3072");
+    let continuation_logits = session
+        .copy_logits_f32()
+        .expect("copy position-3072 logits");
+    assert!(continuation_logits.iter().all(|value| value.is_finite()));
+    let continuation_argmax = continuation_logits
+        .iter()
+        .enumerate()
+        .max_by(|left, right| left.1.total_cmp(right.1))
+        .unwrap()
+        .0;
+    let mut continuation_hasher = Sha256::new();
+    for value in &continuation_logits {
+        continuation_hasher.update(value.to_le_bytes());
+    }
+    let continuation_hash = format!("{:x}", continuation_hasher.finalize());
+    let causal_digest = boundary_snapshot
+        .causal_digest()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(continuation_argmax, 201);
+    assert_eq!(
+        continuation_hash,
+        "067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130"
+    );
+    let continuation = compare_logits(
+        "position_3072",
+        &continuation_logits,
+        POSITION_3072_ORACLE_BYTES,
+    );
+    assert_eq!(continuation.argmax, continuation.oracle_argmax);
+    let batched_continuation = compare_logits(
+        "position_3072_vs_batched_b10222",
+        &continuation_logits,
+        POSITION_3072_BATCHED_ORACLE_BYTES,
+    );
+    assert_eq!(
+        batched_continuation.argmax,
+        batched_continuation.oracle_argmax
+    );
+    assert_eq!(
+        causal_digest,
+        "8ba373e16e2b9bde526d7b00326ae26331b2bedd68fee2fbfaf6055a2e4f8d25"
+    );
+    eprintln!(
+        "full_third_slab boundary_position=3071 argmax={boundary_argmax} sha256={boundary_hash} continuation_position=3072 argmax={continuation_argmax} sha256={continuation_hash} snapshot_digest={causal_digest} elapsed={:.3}s",
+        started.elapsed().as_secs_f64()
+    );
+
+    let error = session
+        .forward_token(&ctx, continuation_argmax as u32)
+        .err()
+        .expect("position 3073 must reject before mutation");
+    assert!(error.to_string().contains("next position is 3073"));
+    assert_eq!(session.next_position(), 3_073);
+    let retained_logits = session
+        .copy_logits_f32()
+        .expect("position-3072 logits remain completed after rejection");
+    assert!(
+        retained_logits
+            .iter()
+            .zip(&continuation_logits)
+            .all(|(retained, prior)| retained.to_bits() == prior.to_bits())
+    );
+
+    session
+        .restore_causal_snapshot(&schedule_fork)
+        .expect("restore position-2944 schedule fork");
+    session
+        .advance_tokens(&ctx, &chunk[..126])
+        .expect("advance to position-3070 decision fork");
+    assert_eq!(session.next_position(), 3_070);
+    {
+        session
+            .arm_decision_transcript(3_070)
+            .expect("arm position-3070 decision transcript");
+        let packed_error = session
+            .advance_tokens(&ctx, &[200])
+            .expect_err("armed capture must reject packed advancement");
+        assert!(
+            packed_error
+                .to_string()
+                .contains("decision capture is active and cannot execute packed tokens")
+        );
+        let restore_error = session
+            .restore_causal_snapshot(&schedule_fork)
+            .expect_err("armed capture must reject snapshot restore");
+        assert!(
+            restore_error
+                .to_string()
+                .contains("decision capture is active and cannot restore a causal snapshot")
+        );
+        assert_eq!(session.next_position(), 3_070);
+    }
+    session
+        .forward_token(&ctx, 200)
+        .expect("execute singleton position-3070 decision probe");
+    {
+        let transcript = session
+            .take_decision_transcript()
+            .expect("take complete position-3070 decision transcript");
+        let pinned = serde_json::from_str::<DeepSeekV4DecisionTranscript>(
+            POSITION_3070_NATIVE_DECISION_SOURCE,
+        )
+        .expect("parse pinned native decision transcript");
+        let transcript_canonical =
+            serde_json::to_vec(&transcript).expect("canonicalize live decision transcript");
+        let pinned_canonical =
+            serde_json::to_vec(&pinned).expect("canonicalize pinned decision transcript");
+        assert_eq!(transcript, pinned);
+        assert_eq!(transcript_canonical, pinned_canonical);
+        let transcript_path = std::env::var_os("DSV4_NATIVE_DECISION_TRANSCRIPT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("target/dsv4-position3070-native-decisions.json")
+            });
+        std::fs::write(
+            &transcript_path,
+            serde_json::to_vec_pretty(&transcript).expect("serialize native decision transcript"),
+        )
+        .expect("write native decision transcript");
+        eprintln!(
+            "native_position3070_decision_transcript={}",
+            transcript_path.display()
+        );
+    }
+    assert_eq!(session.next_position(), 3_071);
+    let control_logits = session
+        .copy_logits_f32()
+        .expect("copy position-3070 control logits");
+    assert_eq!(
+        f32_sha256(&control_logits),
+        "8228d621cb42d919d340301affa1430fdb25b82b5ab7cd2794bcdf2456453cf6"
+    );
+    let control = compare_logits(
+        "split_position_3070",
+        &control_logits,
+        POSITION_3070_ORACLE_BYTES,
+    );
+    assert_eq!(control.argmax, control.oracle_argmax);
+    let batched_control = compare_logits(
+        "split_position_3070_vs_batched_b10222",
+        &control_logits,
+        POSITION_3070_BATCHED_ORACLE_BYTES,
+    );
+    assert_eq!(batched_control.argmax, batched_control.oracle_argmax);
+
+    session
+        .forward_token(&ctx, 34)
+        .expect("execute split position-3071 publication");
+    let split_boundary_logits = session
+        .copy_logits_f32()
+        .expect("copy split position-3071 logits");
+    assert_eq!(
+        f32_sha256(&split_boundary_logits),
+        "00012f61dea1fb6a047b6ed48e4ea5d816f78a2c12b60c734f940e9583b7332f"
+    );
+    let split_boundary = compare_logits(
+        "split_position_3071",
+        &split_boundary_logits,
+        POSITION_3071_ORACLE_BYTES,
+    );
+    assert_eq!(split_boundary.argmax, split_boundary.oracle_argmax);
+    let packed_split_boundary = compare_logits(
+        "packed_vs_split_position_3071",
+        &boundary_logits,
+        bytemuck::cast_slice(&split_boundary_logits),
+    );
+    assert_eq!(
+        packed_split_boundary.argmax,
+        packed_split_boundary.oracle_argmax
+    );
+
+    session
+        .forward_token(&ctx, 35)
+        .expect("execute split position-3072 continuation");
+    let split_continuation_logits = session
+        .copy_logits_f32()
+        .expect("copy split position-3072 logits");
+    assert_eq!(
+        f32_sha256(&split_continuation_logits),
+        "33e1d2077e028b645cfc2f366222139113f7e679b4d80a856dfa059777fbc967"
+    );
+    let split_continuation = compare_logits(
+        "split_position_3072",
+        &split_continuation_logits,
+        POSITION_3072_ORACLE_BYTES,
+    );
+    assert_eq!(split_continuation.argmax, split_continuation.oracle_argmax);
+    let packed_split_continuation = compare_logits(
+        "packed_vs_split_position_3072",
+        &continuation_logits,
+        bytemuck::cast_slice(&split_continuation_logits),
+    );
+    assert_eq!(
+        packed_split_continuation.argmax,
+        packed_split_continuation.oracle_argmax
+    );
+
+    eprintln!(
+        "full_third_slab_split singleton_control_cosine={:.9} singleton_control_rel_rms={:.9} batched_control_cosine={:.9} batched_control_rel_rms={:.9} boundary_cosine={:.9} boundary_rel_rms={:.9} continuation_cosine={:.9} continuation_rel_rms={:.9} elapsed={:.3}s",
+        control.cosine,
+        control.relative_rms,
+        batched_control.cosine,
+        batched_control.relative_rms,
+        split_boundary.cosine,
+        split_boundary.relative_rms,
+        split_continuation.cosine,
+        split_continuation.relative_rms,
+        started.elapsed().as_secs_f64()
+    );
+
+    assert_schedule_expanded_envelope(
+        "position 3070",
+        POSITION_3070_ORACLE_BYTES,
+        POSITION_3070_BATCHED_ORACLE_BYTES,
+        &[&control_logits],
+        0.990,
+        0.15,
+    );
+    assert_schedule_expanded_envelope(
+        "position 3071",
+        POSITION_3071_ORACLE_BYTES,
+        POSITION_3071_BATCHED_ORACLE_BYTES,
+        &[&boundary_logits, &split_boundary_logits],
+        0.990,
+        0.15,
+    );
+    assert_schedule_expanded_envelope(
+        "position 3072",
+        POSITION_3072_ORACLE_BYTES,
+        POSITION_3072_BATCHED_ORACLE_BYTES,
+        &[&continuation_logits, &split_continuation_logits],
+        0.997,
+        0.08,
+    );
+    assert_packed_singleton_schedule_containment("position 3071", &packed_split_boundary);
+    assert_packed_singleton_schedule_containment("position 3072", &packed_split_continuation);
+    assert!(split_continuation.cosine > split_boundary.cosine);
+    assert!(split_continuation.relative_rms < split_boundary.relative_rms);
+
+    let report = publish_causal_snapshot_file(
+        &destination_snapshot_path,
+        &boundary_snapshot,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: session.residency().config(),
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("publish position-3072 snapshot after all gates");
+    assert_eq!(report.record_bytes, 39_006_240);
+}
+
+#[test]
+#[ignore = "requires the local DS4 model and a published position-3072 snapshot"]
+fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let snapshot_path = std::env::var_os("DSV4_POSITION_3072_SNAPSHOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_POSITION_3072_SNAPSHOT)
+        });
+    let identity_cache_path = std::env::var_os("DSV4_IDENTITY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_IDENTITY_CACHE)
+        });
+    assert!(model_path.exists(), "missing DS4 model");
+    assert!(snapshot_path.exists(), "missing position-3072 snapshot");
+
+    let started = Instant::now();
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+            .expect("resolve full-third-slab snapshot model identity");
+    let model_content_id = DeepSeekV4ModelContentId::new(content.content_id);
+    let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind DS4 config");
+    let snapshot = load_causal_snapshot_file(
+        &snapshot_path,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: &model.config,
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("load durable position-3072 snapshot");
+    assert_eq!(snapshot.next_position(), 3_072);
+    assert_eq!(
+        snapshot.prefix_tokens(),
+        [35, 201, 200, 34].repeat(768).as_slice()
+    );
+    assert_eq!(snapshot.payload_bytes(), 38_989_824);
+    assert_eq!(
+        snapshot.source_observation(),
+        DeepSeekV4SnapshotObservation::Available
+    );
+    assert_eq!(
+        snapshot
+            .causal_digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+        "8ba373e16e2b9bde526d7b00326ae26331b2bedd68fee2fbfaf6055a2e4f8d25"
+    );
+
+    let ctx = MetalContext::new().expect("create Metal context");
+    let residency = load_admitted_residency(&ctx, &gguf);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("build durable position-3072 session");
+    session
+        .restore_causal_snapshot(&snapshot)
+        .expect("restore durable position-3072 snapshot");
+    assert!(session.copy_logits_f32().is_err());
+    session
+        .forward_token(&ctx, 35)
+        .expect("execute restored position 3072");
+    let logits = session
+        .copy_logits_f32()
+        .expect("copy durable position-3072 logits");
+    let endpoint = compare_logits("durable_position_3072", &logits, POSITION_3072_ORACLE_BYTES);
+    assert_eq!(endpoint.oracle_argmax, 201);
+    assert_eq!(endpoint.argmax, endpoint.oracle_argmax);
+    assert_schedule_expanded_envelope(
+        "durable position 3072",
+        POSITION_3072_ORACLE_BYTES,
+        POSITION_3072_BATCHED_ORACLE_BYTES,
+        &[&logits],
+        0.997,
+        0.08,
+    );
+    let mut native_hasher = Sha256::new();
+    for value in &logits {
+        native_hasher.update(value.to_le_bytes());
+    }
+    assert_eq!(
+        format!("{:x}", native_hasher.finalize()),
+        "067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130"
+    );
+
+    let error = session
+        .forward_token(&ctx, endpoint.argmax as u32)
+        .err()
+        .expect("position 3073 must reject before mutation");
+    assert!(error.to_string().contains("next position is 3073"));
+    assert_eq!(session.next_position(), 3_073);
+    let retained = session
+        .copy_logits_f32()
+        .expect("restored position-3072 logits survive rejection");
+    assert!(
+        retained
+            .iter()
+            .zip(&logits)
+            .all(|(retained, prior)| retained.to_bits() == prior.to_bits())
+    );
+    eprintln!(
+        "durable_position_3072_elapsed={:.3}s identity_cache={:?}",
         started.elapsed().as_secs_f64(),
         content.outcome
     );

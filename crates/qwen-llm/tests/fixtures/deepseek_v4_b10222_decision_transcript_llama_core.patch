@@ -1,0 +1,518 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 3bd3d03..850f102 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,4 @@
++pub mod decision_transcript;
+ pub mod forest;
+ pub mod lens;
+ pub mod session;
+diff --git a/src/session.rs b/src/session.rs
+index d1fd0e5..2233ce1 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -260,6 +260,9 @@ pub struct SessionConfig {
+     /// Configuration for activation trajectory capture (capture frequency, layer filter).
+     /// Only used when `capture_mode` captures activations.
+     pub trajectory_config: TrajectoryConfig,
++    /// Install the bounded DeepSeek V4 decision callback. The collector remains
++    /// unarmed until explicitly armed for a singleton decode.
++    pub decision_transcript: bool,
+ }
+ 
+ impl Default for SessionConfig {
+@@ -272,6 +275,7 @@ impl Default for SessionConfig {
+             capture_prompt_geometry: false,
+             capture_mode: CaptureMode::Off,
+             trajectory_config: TrajectoryConfig::default(),
++            decision_transcript: false,
+         }
+     }
+ }
+@@ -340,6 +344,11 @@ pub struct InferenceSession<'a> {
+     /// `config.capture_mode` is not `Off`.
+     lens_state: Option<crate::lens::SharedLensState>,
+ 
++    /// Stable owned callback storage. `context` is declared first and therefore
++    /// drops before this allocation, so llama.cpp never retains a dangling pointer.
++    decision_transcript_collector:
++        Option<Box<crate::decision_transcript::OwnedDecisionTranscriptCollector>>,
++
+     // --- activation trajectory ---
+     /// Accumulated per-step activation snapshots. Only populated when
+     /// `config.capture_mode.captures_activations()` is true.
+@@ -403,6 +412,14 @@ impl<'a> InferenceSession<'a> {
+             .with_flash_attention(resolved_params.flash_attn)
+             .with_n_threads(n_threads);
+ 
++        if config.decision_transcript && config.capture_mode.needs_callback() {
++            return Err("decision transcript cannot share cb_eval with layer capture".into());
++        }
++
++        let mut decision_transcript_collector = config.decision_transcript.then(|| {
++            Box::new(crate::decision_transcript::OwnedDecisionTranscriptCollector::default())
++        });
++
+         // Set up cb_eval callback for any non-Off capture mode.
+         // The same callback serves both logit lens and activation trajectory —
+         // it captures raw l_out-{N} tensors; downstream code decides what to do with them.
+@@ -421,6 +438,15 @@ impl<'a> InferenceSession<'a> {
+             None
+         };
+ 
++        if let Some(collector) = decision_transcript_collector.as_mut() {
++            let user_data = collector.as_mut() as *mut _ as *mut std::ffi::c_void;
++            ctx_params = ctx_params
++                .with_cb_eval(Some(
++                    crate::decision_transcript::decision_transcript_cb_eval,
++                ))
++                .with_cb_eval_user_data(user_data);
++        }
++
+         let model2 = model.clone();
+         let context = unsafe {
+             let model_ref: &'a LlamaModel = std::mem::transmute(&*model2);
+@@ -460,6 +486,7 @@ impl<'a> InferenceSession<'a> {
+             prev_topk_tokens: Vec::new(),
+             n_vocab,
+             lens_state,
++            decision_transcript_collector,
+             activation_trajectory: Vec::new(),
+             activation_step_counter: 0,
+         })
+@@ -956,6 +983,34 @@ impl<'a> InferenceSession<'a> {
+         }
+     }
+ 
++    /// Arm a fresh decision capture. Until this is called, the callback requests
++    /// no graph tensors, including during prompt prefill.
++    pub fn arm_decision_transcript(&self) -> Result<(), String> {
++        let collector = self
++            .decision_transcript_collector
++            .as_ref()
++            .ok_or("decision transcript capture is not configured")?;
++        collector
++            .lock()
++            .map_err(|_| "decision transcript collector lock is poisoned".to_string())?
++            .arm();
++        Ok(())
++    }
++
++    /// Disarm and remove the tensors captured since the last arm.
++    pub fn take_decision_transcript(
++        &self,
++    ) -> Result<crate::decision_transcript::DecisionTranscript, String> {
++        let collector = self
++            .decision_transcript_collector
++            .as_ref()
++            .ok_or("decision transcript capture is not configured")?;
++        Ok(collector
++            .lock()
++            .map_err(|_| "decision transcript collector lock is poisoned".to_string())?
++            .take())
++    }
++
+     // --- activation trajectory accessors ---
+ 
+     /// The accumulated activation trajectory. Only populated when
+diff --git a/src/decision_transcript.rs b/src/decision_transcript.rs
+new file mode 100644
+index 0000000..e82095d
+--- /dev/null
++++ b/src/decision_transcript.rs
+@@ -0,0 +1,395 @@
++//! Bounded capture of DeepSeek V4 routing decisions for one decode.
++
++use serde::Serialize;
++use std::collections::BTreeMap;
++use std::ffi::{CStr, c_void};
++use std::sync::Mutex;
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
++enum TensorKind {
++    LidScoreMasked,
++    LidTopK,
++    MoeTopK,
++    MoeWeights,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
++enum WeightStage {
++    Raw,
++    Softmax,
++    Normalized,
++    Scaled,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++struct TensorMatch {
++    kind: TensorKind,
++    layer: u32,
++    weight_stage: Option<WeightStage>,
++}
++
++impl TensorMatch {
++    fn expected_type(self) -> u32 {
++        match self.kind {
++            TensorKind::LidTopK | TensorKind::MoeTopK => llama_cpp_sys_2::GGML_TYPE_I32,
++            TensorKind::LidScoreMasked | TensorKind::MoeWeights => llama_cpp_sys_2::GGML_TYPE_F32,
++        }
++    }
++}
++
++fn parse_layer_name(name: &str) -> Option<TensorMatch> {
++    let candidates = [
++        ("lid_score_masked-", TensorKind::LidScoreMasked, None),
++        ("lid_top_k-", TensorKind::LidTopK, None),
++        ("ffn_moe_topk-", TensorKind::MoeTopK, None),
++        (
++            "ffn_moe_weights_scaled-",
++            TensorKind::MoeWeights,
++            Some(WeightStage::Scaled),
++        ),
++        (
++            "ffn_moe_weights_norm-",
++            TensorKind::MoeWeights,
++            Some(WeightStage::Normalized),
++        ),
++        (
++            "ffn_moe_weights_softmax-",
++            TensorKind::MoeWeights,
++            Some(WeightStage::Softmax),
++        ),
++        (
++            "ffn_moe_weights-",
++            TensorKind::MoeWeights,
++            Some(WeightStage::Raw),
++        ),
++    ];
++    candidates.iter().find_map(|(prefix, kind, weight_stage)| {
++        let suffix = name.strip_prefix(prefix)?;
++        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
++            return None;
++        }
++        Some(TensorMatch {
++            kind: *kind,
++            layer: suffix.parse().ok()?,
++            weight_stage: *weight_stage,
++        })
++    })
++}
++
++#[derive(Clone, Debug, Serialize)]
++#[serde(untagged)]
++pub enum TensorValues {
++    F32(Vec<f32>),
++    I32(Vec<i32>),
++}
++
++#[derive(Clone, Debug, Serialize)]
++pub struct DecisionTensor {
++    pub name: String,
++    pub layer: u32,
++    pub dtype: &'static str,
++    /// GGML dimension order (`ne[0]` first), including all four dimensions.
++    pub shape: [usize; 4],
++    pub values: TensorValues,
++}
++
++#[derive(Clone, Debug, Serialize)]
++pub struct CaptureError {
++    pub tensor: Option<String>,
++    pub message: String,
++}
++
++#[derive(Clone, Debug, Default, Serialize)]
++pub struct DecisionTranscript {
++    pub tensors: Vec<DecisionTensor>,
++    pub capture_errors: Vec<CaptureError>,
++}
++
++#[derive(Default)]
++pub struct DecisionTranscriptCollector {
++    armed: bool,
++    tensors: BTreeMap<(TensorKind, u32, Option<WeightStage>), DecisionTensor>,
++    errors: Vec<CaptureError>,
++}
++
++impl DecisionTranscriptCollector {
++    pub fn arm(&mut self) {
++        self.tensors.clear();
++        self.errors.clear();
++        self.armed = true;
++    }
++
++    pub fn clear(&mut self) {
++        self.tensors.clear();
++        self.errors.clear();
++        self.armed = false;
++    }
++
++    pub fn take(&mut self) -> DecisionTranscript {
++        self.armed = false;
++        let captured = std::mem::take(&mut self.tensors);
++        let mut selected: BTreeMap<(TensorKind, u32), (Option<WeightStage>, DecisionTensor)> =
++            BTreeMap::new();
++        for ((kind, layer, stage), tensor) in captured {
++            let key = (kind, layer);
++            let replace = selected
++                .get(&key)
++                .is_none_or(|(current_stage, _)| stage > *current_stage);
++            if replace {
++                selected.insert(key, (stage, tensor));
++            }
++        }
++        DecisionTranscript {
++            tensors: selected.into_values().map(|(_, tensor)| tensor).collect(),
++            capture_errors: std::mem::take(&mut self.errors),
++        }
++    }
++
++    fn wants(&self, name: &str) -> bool {
++        self.armed && parse_layer_name(name).is_some()
++    }
++
++    fn record_error(&mut self, tensor: Option<String>, message: impl Into<String>) {
++        self.errors.push(CaptureError {
++            tensor,
++            message: message.into(),
++        });
++    }
++}
++
++pub(crate) type OwnedDecisionTranscriptCollector = Mutex<DecisionTranscriptCollector>;
++
++fn checked_element_count(shape: [usize; 4]) -> Result<usize, String> {
++    shape.into_iter().try_fold(1usize, |count, dim| {
++        count
++            .checked_mul(dim)
++            .ok_or_else(|| format!("tensor shape {shape:?} overflows usize"))
++    })
++}
++
++fn validate_layout(
++    shape: [usize; 4],
++    strides: [usize; 4],
++    element_size: usize,
++) -> Result<usize, String> {
++    let count = checked_element_count(shape)?;
++    let mut expected_stride = element_size;
++    for dimension in 0..4 {
++        if shape[dimension] != 1 && strides[dimension] != expected_stride {
++            return Err(format!(
++                "non-contiguous tensor: shape={shape:?}, strides={strides:?}, expected stride {expected_stride} at dimension {dimension}"
++            ));
++        }
++        expected_stride = expected_stride
++            .checked_mul(shape[dimension])
++            .ok_or_else(|| format!("tensor byte size for shape {shape:?} overflows usize"))?;
++    }
++    Ok(count)
++}
++
++unsafe fn capture_tensor(
++    tensor: *mut llama_cpp_sys_2::ggml_tensor,
++    matched: TensorMatch,
++    name: &str,
++) -> Result<DecisionTensor, String> {
++    let actual_type = unsafe { (*tensor).type_ };
++    if actual_type != matched.expected_type() {
++        return Err(format!(
++            "unexpected dtype {actual_type}; expected {}",
++            matched.expected_type()
++        ));
++    }
++
++    let shape = unsafe {
++        [
++            usize::try_from((*tensor).ne[0]).map_err(|_| "negative ne[0]")?,
++            usize::try_from((*tensor).ne[1]).map_err(|_| "negative ne[1]")?,
++            usize::try_from((*tensor).ne[2]).map_err(|_| "negative ne[2]")?,
++            usize::try_from((*tensor).ne[3]).map_err(|_| "negative ne[3]")?,
++        ]
++    };
++    let strides = unsafe { (*tensor).nb };
++    let count = validate_layout(shape, strides, std::mem::size_of::<f32>())?;
++    let byte_count = count
++        .checked_mul(std::mem::size_of::<f32>())
++        .ok_or_else(|| "tensor byte count overflow".to_string())?;
++    let actual_byte_count = unsafe { llama_cpp_sys_2::ggml_nbytes(tensor) };
++    if actual_byte_count != byte_count {
++        return Err(format!(
++            "unexpected byte count {actual_byte_count}; expected {byte_count} for shape {shape:?}"
++        ));
++    }
++
++    let (dtype, values) = if actual_type == llama_cpp_sys_2::GGML_TYPE_F32 {
++        let mut values = vec![0.0f32; count];
++        unsafe {
++            llama_cpp_sys_2::ggml_backend_tensor_get(
++                tensor,
++                values.as_mut_ptr().cast::<c_void>(),
++                0,
++                byte_count,
++            )
++        };
++        ("f32", TensorValues::F32(values))
++    } else {
++        let mut values = vec![0i32; count];
++        unsafe {
++            llama_cpp_sys_2::ggml_backend_tensor_get(
++                tensor,
++                values.as_mut_ptr().cast::<c_void>(),
++                0,
++                byte_count,
++            )
++        };
++        ("i32", TensorValues::I32(values))
++    };
++
++    Ok(DecisionTensor {
++        name: name.to_owned(),
++        layer: matched.layer,
++        dtype,
++        shape,
++        values,
++    })
++}
++
++/// Callback for one explicitly armed singleton decode. Unarmed callbacks ask for no tensors.
++pub unsafe extern "C" fn decision_transcript_cb_eval(
++    tensor: *mut llama_cpp_sys_2::ggml_tensor,
++    ask: bool,
++    user_data: *mut c_void,
++) -> bool {
++    if tensor.is_null() || user_data.is_null() {
++        return false;
++    }
++    let name = unsafe { CStr::from_ptr((*tensor).name.as_ptr()) };
++    let name = match name.to_str() {
++        Ok(name) => name,
++        Err(_) => return false,
++    };
++    let collector = unsafe { &*(user_data.cast::<OwnedDecisionTranscriptCollector>()) };
++    let mut collector = match collector.lock() {
++        Ok(collector) => collector,
++        Err(_) => return false,
++    };
++
++    if ask {
++        return collector.wants(name);
++    }
++    if !collector.armed {
++        return true;
++    }
++    let Some(matched) = parse_layer_name(name) else {
++        return true;
++    };
++    match unsafe { capture_tensor(tensor, matched, name) } {
++        Ok(captured) => {
++            collector.tensors.insert(
++                (matched.kind, matched.layer, matched.weight_stage),
++                captured,
++            );
++        }
++        Err(message) => collector.record_error(Some(name.to_owned()), message),
++    }
++    true
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn matches_only_bounded_tensor_names() {
++        assert_eq!(
++            parse_layer_name("lid_score_masked-12"),
++            Some(TensorMatch {
++                kind: TensorKind::LidScoreMasked,
++                layer: 12,
++                weight_stage: None,
++            })
++        );
++        assert_eq!(
++            parse_layer_name("lid_top_k-0").unwrap().kind,
++            TensorKind::LidTopK
++        );
++        assert_eq!(
++            parse_layer_name("ffn_moe_topk-7").unwrap().kind,
++            TensorKind::MoeTopK
++        );
++        assert_eq!(
++            parse_layer_name("ffn_moe_weights_scaled-3")
++                .unwrap()
++                .weight_stage,
++            Some(WeightStage::Scaled)
++        );
++        for name in [
++            "lid_score_masked",
++            "lid_score_masked-x",
++            "lid_score-1",
++            "ffn_moe_weights_sum-1",
++            "ffn_moe_topk-1-extra",
++            "l_out-1",
++        ] {
++            assert_eq!(parse_layer_name(name), None, "unexpected match: {name}");
++        }
++    }
++
++    #[test]
++    fn arm_clear_and_take_are_one_shot() {
++        let mut collector = DecisionTranscriptCollector::default();
++        assert!(!collector.wants("lid_top_k-1"));
++        collector.arm();
++        assert!(collector.wants("lid_top_k-1"));
++        collector.record_error(None, "test");
++        let transcript = collector.take();
++        assert_eq!(transcript.capture_errors.len(), 1);
++        assert!(!collector.wants("lid_top_k-1"));
++        assert!(collector.take().capture_errors.is_empty());
++        collector.arm();
++        collector.clear();
++        assert!(!collector.wants("lid_top_k-1"));
++    }
++
++    #[test]
++    fn take_prefers_scaled_effective_weights() {
++        let mut collector = DecisionTranscriptCollector::default();
++        collector.arm();
++        for (stage, name, value) in [
++            (WeightStage::Raw, "ffn_moe_weights-2", 1.0),
++            (WeightStage::Scaled, "ffn_moe_weights_scaled-2", 2.0),
++        ] {
++            collector.tensors.insert(
++                (TensorKind::MoeWeights, 2, Some(stage)),
++                DecisionTensor {
++                    name: name.into(),
++                    layer: 2,
++                    dtype: "f32",
++                    shape: [1, 1, 1, 1],
++                    values: TensorValues::F32(vec![value]),
++                },
++            );
++        }
++        let transcript = collector.take();
++        assert_eq!(transcript.tensors.len(), 1);
++        assert_eq!(transcript.tensors[0].name, "ffn_moe_weights_scaled-2");
++    }
++
++    #[test]
++    fn validates_shape_and_contiguous_layout() {
++        assert_eq!(checked_element_count([2, 3, 1, 1]), Ok(6));
++        assert_eq!(validate_layout([2, 3, 1, 1], [4, 8, 24, 24], 4), Ok(6));
++        assert!(validate_layout([2, 3, 1, 1], [4, 12, 24, 24], 4).is_err());
++    }
++
++    #[test]
++    fn tensor_value_variants_serialize_as_arrays() {
++        assert_eq!(
++            serde_json::to_value(TensorValues::F32(vec![1.0, 2.0])).unwrap(),
++            serde_json::json!([1.0, 2.0])
++        );
++        assert_eq!(
++            serde_json::to_value(TensorValues::I32(vec![1, 2])).unwrap(),
++            serde_json::json!([1, 2])
++        );
++    }
++}

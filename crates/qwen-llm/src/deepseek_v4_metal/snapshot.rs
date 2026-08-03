@@ -175,6 +175,9 @@ impl DeepSeekV4Session {
         &mut self,
         snapshot: &DeepSeekV4CausalSnapshot,
     ) -> Result<(), DeepSeekV4MetalError> {
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.decision_diagnostics
+            .ensure_no_active_capture("restore a causal snapshot")?;
         let model_content_id = self.snapshot_model_content_id.ok_or_else(|| {
             DeepSeekV4MetalError::Invalid(
                 "DeepSeek V4 session has no bound model-content identity".into(),
@@ -1449,6 +1452,9 @@ mod tests {
             (2_175, 128, 543, 16),
             (2_176, 128, 544, 17),
             (2_177, 128, 544, 17),
+            (3_071, 128, 767, 23),
+            (3_072, 128, 768, 24),
+            (3_073, 128, 768, 24),
         ] {
             let geometry = snapshot_geometry(&config, position).unwrap();
             assert_eq!(geometry.raw_rows, raw_rows, "position {position}");
@@ -1458,11 +1464,11 @@ mod tests {
                 "position {position}"
             );
         }
-        let terminal = snapshot_geometry(&config, 2_177).unwrap();
+        let terminal = snapshot_geometry(&config, 3_073).unwrap();
         assert_eq!(terminal.raw_elements, 2_818_048);
         assert_eq!(terminal.compressor_elements, 3_051_520);
-        assert_eq!(terminal.published_elements, 7_485_440);
-        assert!(snapshot_geometry(&config, 2_178).is_err());
+        assert_eq!(terminal.published_elements, 10_567_680);
+        assert!(snapshot_geometry(&config, 3_074).is_err());
     }
 
     #[test]
@@ -1498,7 +1504,7 @@ mod tests {
         };
         let config = crate::deepseek_v4::flash_0731_config_fixture();
         for &position in &[
-            0, 4, 127, 128, 129, 1_025, 1_028, 2_049, 2_052, 2_053, 2_176, 2_177,
+            0, 4, 127, 128, 129, 1_025, 1_028, 2_049, 2_052, 2_053, 2_176, 2_177, 3_072, 3_073,
         ] {
             let source = synthetic_state(
                 &ctx,

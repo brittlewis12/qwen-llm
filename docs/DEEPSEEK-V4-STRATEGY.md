@@ -429,8 +429,8 @@ The durable wire layer derives every section length before allocation, uses a
 256-byte versioned header at a 16 KiB payload boundary, requires zero padding and
 reserved fields, and closes the record with a BLAKE3 digest in addition to the
 typed prefix and causal digests. Its hard limit is 64 MiB. The current terminal
-position-2177 state encodes as a 32,838,180-byte record; the durable
-position-2176 development checkpoint is 32,838,176 bytes. Decode temporarily
+position-3073 state encodes as a 39,006,244-byte record; the durable
+position-3072 development checkpoint is 39,006,240 bytes. Decode temporarily
 retains byte sections while constructing typed arenas, so peak host allocation
 is about twice the payload. Request/sampler state remains deliberately outside
 this model-session checkpoint.
@@ -478,6 +478,13 @@ Gate:
   publishes as a 31,957,024-byte record with digest
   `a91f82475c5ecc18ae91fd607224a227c275b73745badfbf9451a63acc32e246`.
   Restoring it and executing the uncached endpoint takes 1.141 seconds.
+- Seven more retained chunks from position 2176 fill all 768 CSA rows and
+  publish HCA row 23 at position 3071. The next-position-3072 checkpoint has a
+  38,989,824-byte payload, 39,006,240-byte record, and causal digest
+  `8ba373e16e2b9bde526d7b00326ae26331b2bedd68fee2fbfaf6055a2e4f8d25`.
+  Fresh restore reproduces position-3072 logit SHA-256
+  `067580edf16306f7bfbbaf474039c13ee4b835574d4f53afcf25b782df2ac130`
+  in 2.561 seconds including identity-cache and model setup.
 
 ### S2: local-only Metal backbone
 
@@ -529,11 +536,12 @@ still deferred because no dispatch or numerical kernel changed.
 
 ### S3: CSA lane
 
-Status: the dense-all prefix and sparse selection through 544 visible rows are
-promoted through position 2176. Exact-token b10222 full-vocabulary fixtures
+Status: the dense-all prefix and sparse selection through all 768 physical rows
+are promoted through position 3072. Exact-token b10222 full-vocabulary fixtures
 at positions 3/4 first arbitrated same-token visibility; positions 7/8 made the
 overlap roll a live model differential; positions 2051/2052 now pin the first
-513-row history and its immediate continuation. Every named fixture has two
+513-row history and its immediate continuation; positions 3070/3071/3072 close
+the complete third slab. Every named fixture has two
 byte-identical fresh-session captures, full shard hashes, and pinned producer
 commits.
 
@@ -597,6 +605,27 @@ Gate:
   `52e0d3bcd450bff10443ac16a93937138e3f5fce224daab6e68c76b8a0d386e6`.
   Packed and singleton prefixes intentionally retain their own deterministic
   reduction histories; their snapshots need not be bit-identical.
+- At positions 3070/3071/3072, b10222's legal singleton and batched prompt
+  schedules differ materially even though all argmaxes agree. The old absolute
+  singleton-relative floor is therefore reported, not treated as a
+  schedule-invariant semantic oracle. A pinned three-schedule envelope uses
+  angular chord and common-singleton-norm L2 diameter: the expanded native
+  diameter must fit inside the independently measured b10222 schedule diameter
+  plus the already-established historical allowance. Measured expanded versus
+  allowed angular/L2 diameters are 0.202833/0.215392 versus
+  0.289972/0.298147 at position 3070, 0.261382/0.271941 versus
+  0.402803/0.421941 at position 3071, and 0.102988/0.105351 versus
+  0.161559/0.168516 at position 3072.
+- Complete position-3070 decision transcripts pin 21 CSA selectors and all 43
+  MoE routes for native, batched b10222, and singleton b10222. All three agree
+  through CSA layer 2 and routes through layer 4. Native first swaps two rows at
+  layer 4 under near-identical scores and milliscale cutoff margins; the two
+  b10222 schedules themselves first swap a cutoff row at layer 6. Route slot/set
+  divergence begins at layers 5/7 for both native/reference and
+  reference/reference comparisons. The first disagreement is therefore a
+  cutoff-sensitive numerical bifurcation, not a publication, ordering, or
+  large-margin semantic mismatch. Canonical vectors and transcripts are
+  byte-identical across two fresh processes and validated model-free.
 
 The official Hadamard-plus-MXFP4 indexer-QAT cache remains a separate future
 numerics ABI. It must not silently replace the executable b10222 F16 cache
@@ -607,7 +636,7 @@ numerics requires a version bump or explicit legacy acceptance.
 
 ### S4: HCA lane
 
-Status: HCA rows 0-16 and continuing execution through position 2176 are
+Status: HCA rows 0-23 and continuing execution through position 3072 are
 promoted. All 20 HCA layers use the retained ratio-128 frontier to pool,
 RMS-normalize, apply block-start adjacent-pair RoPE, publish F16 compressed
 rows, and include every published row in the same-token softmax over the
@@ -617,8 +646,9 @@ production-width operation properties and strategic full-model endpoints
 rather than a mechanical fixture campaign at every boundary. Position 2047
 publishes HCA row 15 and CSA row 511; position 2048 proves immediate wrapped
 continuation at the former dense-all limit, positions 2051/2052 prove HCA
-continues unchanged as CSA enters sparse selection, and positions 2174/2175/2176
-pin the first HCA publication reached while that sparse path is active.
+continues unchanged as CSA enters sparse selection, positions 2174/2175/2176
+pin the first HCA publication reached while that sparse path is active, and
+position 3071 publishes row 23 as CSA fills its third slab.
 
 The long-prefix differential uses a different numerical gate from positions
 0-8. Singleton-versus-singleton drift accumulates before any HCA row exists:
@@ -705,19 +735,20 @@ Gate:
   510, and 511 use the existing 0.990 / 0.15 interval containment; publication
   must improve or preserve both measures, and position 512 must strictly
   recover both and satisfy the established 0.997 / 0.075 endpoint gate.
-- A production-width ratio-128 property executes all 2,177 positions through
-  row 16. It rejects every early publication, compares every emitted row with
+- A production-width ratio-128 property executes all 3,073 positions through
+  row 23. It rejects every early publication, compares every emitted row with
   the independent CPU compressor after F16 storage, preserves all older rows,
-  validates block-start YaRN positions 0 through 2,048, and leaves the history
-  unchanged at position 2176.
-- Serial publication-to-attention gates at positions 639, 1023, 2047, and 2175
-  materially distinguish the newest row from a prior-count ablation. Tagged
+  validates block-start YaRN positions 0 through 2,944, and leaves the history
+  unchanged at position 3072.
+- Serial publication-to-attention gates at positions 639, 1023, 2047, 2175,
+  and 3071 materially distinguish the newest row from a prior-count ablation.
+  Tagged
   wrapped-ring gates at 638/639/640 and 1022/1023/1024 independently match HCA
   counts 4/5/5 and 7/8/8 plus CSA counts 159/160/160 and 255/256/256. The same gate now
   covers 1026/1027/1028 and 2046/2047/2048, including HCA counts 15/16/16 and
   CSA counts 511/512/512 at the second-slab endpoint.
 - Production-width ratio-4 attention and Hadamard-indexer properties publish
-  rows 0-512 into three fixed slabs, match the overlap-roll CPU state through
+  rows 0-767 into three fixed slabs, match the overlap-roll CPU state through
   the sparse boundary, and preserve all older rows. Dense attention accepts
   count 512 and rejects 513; the selected path accepts the 513-row physical
   history while still attending to exactly 512 compressed rows. Packed retained
@@ -764,11 +795,12 @@ Gate:
   position 2177 rejects before mutation and preserves every completed
   position-2176 logit bit.
 
-The next physical ownership boundary is CSA row 768 at position 3075. The
-strategic endpoint immediately before it is position 3072, where CSA has filled
-all 768 physical rows and HCA has published row 23. Named full-layer
-intermediate states remain useful for an actual divergence, not as a mandatory
-campaign at every ratio-4 boundary.
+The promoted strategic endpoint is position 3072, where CSA has filled all 768
+physical rows and HCA has published row 23. The next physical ownership boundary
+is unallocated CSA row 768 at position 3075; crossing it requires capacity
+generalization rather than another fixture campaign. Named full-layer
+intermediate states remain useful for an actual divergence, not at every
+ratio-4 boundary.
 
 ### S5: full 0731 target generation
 
@@ -786,7 +818,7 @@ Qwen default.
 The CLI reserves `prompt_tokens + max_generated_tokens - 1` forwards before
 Metal residency or any token execution. This mirrors the generator's
 pending-final-token semantics and guarantees an accepted request cannot
-partially stream beyond the retained-session evidence through position 2176.
+partially stream beyond the retained-session evidence through position 3072.
 The 103 GB split GGUF is already virtually mapped for family detection at that
 point; residency remains untouched on rejection. The promoted capacity is
 exported by the session implementation, so frontend and executor cannot drift
@@ -838,11 +870,18 @@ Gate:
   endpoint in 1,495.5 ms, and
   generated oracle ID 201 with `prefill_mode=causal_snapshot_restore`. The
   request reported `reserved_forwards=2053/2053`.
-- The exported budget now accepts exactly 2,177 forwards. The release CLI
+- The earlier exported budget accepted exactly 2,177 forwards. The release CLI
   validates the 32,838,176-byte position-2176 record before residency, restores
   2,176 tokens, consumes the uncached endpoint in 1,049.5 ms, and generates
   oracle ID 201. It reports `reserved_forwards=2177/2177`; position 2177 remains
-  rejected.
+  rejected in that historical build.
+- The exported budget now accepts exactly 3,073 forwards. A release CLI process
+  validates the 39,006,240-byte position-3072 record before residency, restores
+  3,072 tokens, executes the uncached endpoint in 1,389.9 ms, and generates
+  oracle ID 201 with `reserved_forwards=3073/3073` and
+  `prefill_mode=causal_snapshot_restore`. End-to-end process time is 1.79
+  seconds with zero reported swaps. Asking for one additional decode transition
+  requires 3,074 forwards and rejects before residency.
 - Ordinary 0731 messages match vLLM and SGLang byte-for-byte. On the Flash
   vocabulary, user-only, system/user, and multi-turn Unicode fixtures encode to
   exact token sequences of 5, 8, and 16 tokens. A live system/user request
@@ -904,7 +943,7 @@ for the minimum ordinary prompt-encoder gate.
 ### S6: Metal performance promotion
 
 Status: retained layer-major chunks of 1-128 tokens are promoted through the
-full 2,177-forward session capacity. The physical scratch is sized and
+full 3,073-forward session capacity. The physical scratch is sized and
 admitted once for 128; short chunks use exact prefix views. One-token prompts
 remain singleton only when they are the entire request. Longer prompts consume
 successive explicit packed chunks, with no singleton replay or hidden fallback.
@@ -1012,6 +1051,19 @@ Gate:
   argmaxes 35/201 at 0.995150607 / 0.098514095 and
   0.997213076 / 0.076756856; the immediate continuation recovers both measures.
   The complete checkpoint-producing live packet takes 23.324 seconds cold.
+- Starting from the durable position-2176 state, seven 128-token chunks fill
+  the third CSA slab and publish HCA row 23 in 26.7 seconds. Position 3071 and
+  its continuation preserve argmaxes 35/201; fixed 64- and 128-token partitions
+  are bit-identical. The pinned schedule-envelope and decision-transcript gates
+  explain the larger singleton-relative drift without relaxing operation
+  semantics. Layer-4 native/oracle CSA score cosines exceed 0.99999986 while
+  each reversed-row perturbation exceeds both schedules' cutoff margins; the
+  independent b10222 schedules repeat that mechanism at layer 6. Exact capture
+  and repeat commands plus the complete llm and llama_core instrumentation
+  patches are retained with the fixtures. The feature-enabled live producer
+  must reproduce the pinned native transcript canonically before publication.
+  Fresh durable restore reproduces the endpoint bits, and the release CLI
+  reaches the 3,073-forward ceiling in 1.79 seconds end to end.
 - A successful advance revokes the session's current logits and final hidden
   observation; vectors already copied to the host remain ordinary owned values.
   A callback unwind from retained position 2 leaves that position unchanged,
@@ -1081,14 +1133,18 @@ noise without reducing technical risk. Revisit after S5.
 
 ## Immediate next work
 
-1. Use the durable certified position-2176 checkpoint as the ordinary boundary
-   development loop; reopen fresh 2,176-token replay only for a causal-prefix or
+1. Use the durable certified position-3072 checkpoint as the ordinary boundary
+   development loop; reopen fresh 3,072-token replay only for a causal-prefix or
    restore-ABI change.
-2. Extend the generalized HCA property through row 23, then use retained chunks
-   to position 3072, immediately after all 768 CSA rows are populated and before
-   unallocated row 768 at position 3075.
-3. Add a named real-weight selected-ID/intermediate probe only if the next
-   full-logit endpoint diverges. The current operation-level exact-ID gate plus
-   independently captured sparse/HCA full-model endpoints own the current path.
-4. Extend the 0731 message encoder to reasoning and DSML tools only with exact
+2. Separate admitted physical capacity from the evidence ceiling, derive slab
+   and transcript sizes from a target context, and add a direct model-context
+   guard. Restore older slab-aligned snapshots into larger zeroed images.
+3. Allocate the fourth CSA slab and cross row 768 at positions 3075/3076. Pin
+   publication, immediate continuation, selected IDs, packed crossing, and
+   restore equivalence rather than every intervening ratio-4 boundary.
+4. Replace serial full-history top-k with deterministic parallel selection, then
+   replace the 512-row dense-HCA kernel with tiled online softmax before the
+   513th HCA row near position 65,664. Gate 32K, 65,536, 128K, and 1M only at
+   those real algorithm, YaRN, memory, and ownership discontinuities.
+5. Extend the 0731 message encoder to reasoning and DSML tools only with exact
    release-derived byte fixtures and an end-to-end tool-call workload.

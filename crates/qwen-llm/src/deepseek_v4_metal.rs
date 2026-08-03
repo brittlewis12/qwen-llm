@@ -4,8 +4,16 @@
 //! GGUF weights remain in their exact storage without dtype conversion. The
 //! execution bodies deliberately have no dependency on the Qwen Metal model.
 
+#[cfg(feature = "dsv4-diagnostics")]
+mod diagnostics;
 mod prefill;
 mod snapshot;
+
+#[cfg(feature = "dsv4-diagnostics")]
+pub use diagnostics::{
+    DeepSeekV4CsaDecision, DeepSeekV4DecisionLayer, DeepSeekV4DecisionTranscript,
+    DeepSeekV4DiagnosticsError, DeepSeekV4RankedCsaRow, DeepSeekV4RouteDecision,
+};
 
 pub use snapshot::{
     DeepSeekV4CausalSnapshot, DeepSeekV4CompatibilityDigest, DeepSeekV4EncodedSnapshot,
@@ -37,10 +45,10 @@ pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
 pub const DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 pub use prefill::DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 /// Number of token forwards traversed by the longest retained-session
-/// differential, through the HCA row-16 continuation at position 2176.
+/// differential, through the full third CSA slab continuation at position 3072.
 /// Callers use this to reject requests before streaming beyond the current
 /// evidence boundary.
-pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 2_177;
+pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 3_073;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DeepSeekV4MetalError {
@@ -52,6 +60,9 @@ pub enum DeepSeekV4MetalError {
     Metal(#[from] MetalError),
     #[error(transparent)]
     Schema(#[from] DeepSeekV4Error),
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[error(transparent)]
+    Diagnostics(#[from] DeepSeekV4DiagnosticsError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -620,7 +631,7 @@ fn validate_promoted_session_position(position: u32) -> Result<(), DeepSeekV4Met
     }
     if position >= DEEPSEEK_V4_NEXT_UNVALIDATED_CONTINUATION_POSITION {
         return invalid(format!(
-            "native session stops after the promoted HCA row-16 continuation at position 2176; next position is {position}"
+            "native session stops after the promoted full third-CSA-slab continuation at position 3072; next position is {position}"
         ));
     }
     Ok(())
@@ -732,8 +743,8 @@ impl DeepSeekV4SessionPhase {
 
 /// Native qwen-owned DeepSeek V4 decode session.
 ///
-/// Sparse CSA and seventeen HCA rows are promoted through the position-2176
-/// continuation. The session fails closed before position 2177 until the next
+/// Sparse CSA and twenty-four HCA rows are promoted through the position-3072
+/// continuation. The session fails closed before position 3073 until the next
 /// retained interval earns its own differential.
 pub struct DeepSeekV4Session {
     residency: DeepSeekV4MetalResidency,
@@ -755,6 +766,8 @@ pub struct DeepSeekV4Session {
     phase: DeepSeekV4SessionPhase,
     committed_tokens: Vec<u32>,
     snapshot_model_content_id: Option<DeepSeekV4ModelContentId>,
+    #[cfg(feature = "dsv4-diagnostics")]
+    decision_diagnostics: diagnostics::DeepSeekV4DecisionCapture,
 }
 
 /// Compatibility name retained for the position-zero live differential.
@@ -845,6 +858,8 @@ impl DeepSeekV4Session {
             phase: DeepSeekV4SessionPhase::fresh(),
             committed_tokens,
             snapshot_model_content_id,
+            #[cfg(feature = "dsv4-diagnostics")]
+            decision_diagnostics: diagnostics::DeepSeekV4DecisionCapture::default(),
         })
     }
 
@@ -872,6 +887,28 @@ impl DeepSeekV4Session {
 
     pub fn committed_tokens(&self) -> &[u32] {
         &self.committed_tokens
+    }
+
+    /// Arms the feature-gated, single-use decision capture for position 3070.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn arm_decision_transcript(&mut self, position: u32) -> Result<(), DeepSeekV4MetalError> {
+        if position != self.phase.ready_position()? {
+            return Err(DeepSeekV4DiagnosticsError::WrongPosition {
+                expected: position,
+                actual: self.phase.next_position(),
+            }
+            .into());
+        }
+        self.decision_diagnostics.arm(position)?;
+        Ok(())
+    }
+
+    /// Takes a complete owned transcript. Partial or duplicate takes fail closed.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn take_decision_transcript(
+        &mut self,
+    ) -> Result<DeepSeekV4DecisionTranscript, DeepSeekV4MetalError> {
+        Ok(self.decision_diagnostics.take()?)
     }
 
     pub fn cache_contract(&self) -> DeepSeekV4AttentionCacheContract {
@@ -943,6 +980,8 @@ impl DeepSeekV4Session {
             ));
         }
         validate_promoted_session_position(position)?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.decision_diagnostics.begin_forward(position)?;
         let next_position = position
             .checked_add(1)
             .ok_or_else(|| DeepSeekV4MetalError::Invalid("position overflow".into()))?;
@@ -1158,6 +1197,19 @@ impl DeepSeekV4Session {
                 self.sparse_csa.validate_completed()?;
             }
 
+            #[cfg(feature = "dsv4-diagnostics")]
+            let csa_decision = if self.decision_diagnostics.is_capturing()
+                && self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
+            {
+                let rows = self.compressor_frontiers.csa_rows(layer, position)?;
+                match rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
+                    Some(rows) => Some(self.sparse_csa.capture_decision(rows.count)?),
+                    None => None,
+                }
+            } else {
+                None
+            };
+
             if layer < self.residency.config().hash_layer_count as usize {
                 self.moe.route_hash(
                     token_id as usize,
@@ -1166,6 +1218,13 @@ impl DeepSeekV4Session {
             } else {
                 self.moe
                     .route_learned(self.layer_tensor(layer, "exp_probs_b.bias")?)?;
+            }
+
+            #[cfg(feature = "dsv4-diagnostics")]
+            if self.decision_diagnostics.is_capturing() {
+                let route = self.moe.capture_route_decision()?;
+                self.decision_diagnostics
+                    .capture_layer(layer, csa_decision, route)?;
             }
 
             let command = ctx.queue.commandBuffer().ok_or_else(|| {
@@ -1237,6 +1296,9 @@ impl DeepSeekV4Session {
             }
             layer_completed(layer);
         }
+
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.decision_diagnostics.finish()?;
 
         Ok(())
     }
@@ -2153,6 +2215,30 @@ impl DeepSeekV4SparseCsaScratch {
             ));
         }
         Ok(())
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    fn capture_decision(
+        &self,
+        visible_count: usize,
+    ) -> Result<DeepSeekV4CsaDecision, DeepSeekV4MetalError> {
+        let scores = host_read_f32(&self.scores, "diagnostic sparse CSA scores")?;
+        let selected_ids = host_read_i32(
+            &self.cache_order_ids,
+            "diagnostic sparse CSA cache-order IDs",
+        )?;
+        let selected_count = host_read_i32(
+            &self.selected_counts,
+            "diagnostic sparse CSA selected count",
+        )?;
+        let status = host_read_i32(&self.status, "diagnostic sparse CSA status")?;
+        Ok(diagnostics::build_csa_decision(
+            scores,
+            visible_count,
+            selected_ids,
+            selected_count,
+            status,
+        )?)
     }
 }
 
@@ -3561,6 +3647,16 @@ impl DeepSeekV4MoeScratch {
             .collect::<Result<Vec<_>, _>>()?;
         host_write_i32(&self.expert_ids, &ids, "selected expert IDs")?;
         host_write_f32(&self.weights, weights, "selected expert weights")
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    fn capture_route_decision(&self) -> Result<DeepSeekV4RouteDecision, DeepSeekV4MetalError> {
+        Ok(diagnostics::build_route_decision(
+            host_read_i32(&self.expert_ids, "diagnostic routed expert IDs")?,
+            host_read_f32(&self.weights, "diagnostic routed expert weights")?,
+            self.config.expert_count,
+            self.config.routed_scale,
+        )?)
     }
 
     fn validate_scratch(&self) -> Result<(), DeepSeekV4MetalError> {
@@ -6149,13 +6245,13 @@ mod tests {
 
     #[test]
     fn session_position_guard_separates_evidence_from_physical_capacity() {
-        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 2_177);
+        assert_eq!(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 3_073);
         validate_promoted_session_position((DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY - 1) as u32)
             .unwrap();
         let continuation =
             validate_promoted_session_position(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32)
                 .unwrap_err();
-        assert!(continuation.to_string().contains("next position is 2177"));
+        assert!(continuation.to_string().contains("next position is 3073"));
         let retained_interval = validate_promoted_session_position(3_074).unwrap_err();
         assert!(
             retained_interval
@@ -7894,14 +7990,14 @@ mod tests {
     }
 
     #[test]
-    fn ratio128_frontier_preserves_seventeen_rows_and_publishes_before_attention() {
+    fn ratio128_frontier_preserves_twenty_four_rows_and_publishes_before_attention() {
         let Some(ctx) = metal_context() else {
             return;
         };
         const HEADS: usize = 2;
         const HEAD_DIM: usize = 512;
         const RATIO: usize = 128;
-        const PUBLISHED_ROWS: usize = 17;
+        const PUBLISHED_ROWS: usize = 24;
         const POSITIONS: usize = PUBLISHED_ROWS * RATIO + 1;
         let rms_eps = 1.0e-5;
         let frontier = DeepSeekV4CompressorFrontier::new(
@@ -8064,7 +8160,7 @@ mod tests {
                 .collect::<Vec<_>>();
             expected_rows.extend_from_slice(&expected_row);
 
-            let integration = if matches!(boundary, 639 | 1023 | 2047 | 2175) {
+            let integration = if matches!(boundary, 639 | 1023 | 2047 | 2175 | 3071) {
                 let raw_start = boundary + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
                 let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
                 let mut raw_rows = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM);
@@ -8306,7 +8402,7 @@ mod tests {
             publication: DeepSeekV4CompressorPublication,
         ) {
             const RATIO: usize = 4;
-            const POSITIONS: usize = 2_052;
+            const POSITIONS: usize = 3_073;
             let width = 2 * head_dim;
             let rms_eps = 1.0e-5;
             let label = match publication {
@@ -8669,6 +8765,139 @@ mod tests {
             );
             assert_close(
                 &format!("ratio-4 {label} third-slab-entry score state"),
+                &read_f32(&frontier.score_state),
+                oracle.score_state(),
+                4e-5,
+            );
+
+            for chunk_start in (2_052usize..3_072).step_by(64) {
+                let chunk_end = (chunk_start + 64).min(3_072);
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                for position in chunk_start..chunk_end {
+                    let offset = position * width;
+                    if let Some(mut emitted) = oracle
+                        .push_projected(
+                            position as u32,
+                            &projected_kv_values[offset..offset + width],
+                            &projected_score_values[offset..offset + width],
+                            &ape_values,
+                            &norm_values,
+                            rms_eps,
+                            oracle_rope,
+                        )
+                        .unwrap()
+                    {
+                        if publication == DeepSeekV4CompressorPublication::IndexerHadamard {
+                            hadamard_128_in_place(&mut emitted.value).unwrap();
+                        }
+                        expected_rows.extend(
+                            emitted
+                                .value
+                                .into_iter()
+                                .map(|value| half::f16::from_f32(value).to_f32()),
+                        );
+                    }
+                    let kv_row = projected_kv.view_subrange(offset as u64, vec![width as u64]);
+                    let score_row =
+                        projected_score.view_subrange(offset as u64, vec![width as u64]);
+                    frontier
+                        .encode_projected(
+                            ctx,
+                            &encoder,
+                            &kv_row,
+                            &score_row,
+                            &ape,
+                            &norm,
+                            position as u32,
+                            rope,
+                            rms_eps,
+                        )
+                        .unwrap();
+                }
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(
+                    command.error().is_none(),
+                    "ratio-4 {label} full-third-slab chunk {chunk_start} failed: {:?}",
+                    command.error()
+                );
+            }
+
+            assert_eq!(frontier.published_count(3_071), 768);
+            assert_eq!(expected_rows.len(), 768 * head_dim);
+            let published = read_f16(&frontier.published);
+            assert_close(
+                &format!("ratio-4 {label} complete third slab"),
+                &published,
+                &expected_rows,
+                2e-3,
+            );
+            assert_close(
+                &format!("ratio-4 {label} third-slab-end KV state"),
+                &read_f32(&frontier.kv_state),
+                oracle.kv_state(),
+                4e-5,
+            );
+            assert_close(
+                &format!("ratio-4 {label} third-slab-end score state"),
+                &read_f32(&frontier.score_state),
+                oracle.score_state(),
+                4e-5,
+            );
+
+            let position = 3_072usize;
+            let offset = position * width;
+            assert!(
+                oracle
+                    .push_projected(
+                        position as u32,
+                        &projected_kv_values[offset..offset + width],
+                        &projected_score_values[offset..offset + width],
+                        &ape_values,
+                        &norm_values,
+                        rms_eps,
+                        oracle_rope,
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            let kv_row = projected_kv.view_subrange(offset as u64, vec![width as u64]);
+            let score_row = projected_score.view_subrange(offset as u64, vec![width as u64]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            frontier
+                .encode_projected(
+                    ctx,
+                    &encoder,
+                    &kv_row,
+                    &score_row,
+                    &ape,
+                    &norm,
+                    position as u32,
+                    rope,
+                    rms_eps,
+                )
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "ratio-4 {label} position-3072 command failed: {:?}",
+                command.error()
+            );
+            assert_eq!(frontier.published_count(position as u32), 768);
+            assert_eq!(read_f16(&frontier.published), published);
+            assert_close(
+                &format!("ratio-4 {label} position-3072 KV state"),
+                &read_f32(&frontier.kv_state),
+                oracle.kv_state(),
+                4e-5,
+            );
+            assert_close(
+                &format!("ratio-4 {label} position-3072 score state"),
                 &read_f32(&frontier.score_state),
                 oracle.score_state(),
                 4e-5,

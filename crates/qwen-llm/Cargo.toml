@@ -12,6 +12,10 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+[features]
+default = []
+dsv4-diagnostics = []
+
 [dependencies]
 objc2.workspace = true
 objc2-foundation.workspace = true

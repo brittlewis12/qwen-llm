@@ -5,10 +5,24 @@
 
 """Generate DeepSeek V4 0731 chat-encoding byte fixtures.
 
-Each case executes the pinned vLLM and SGLang release-derived encoders and
-requires byte-identical prompts before pinning. The fixture therefore records
-two independently maintained executable implementations, not a transcription.
-Only the ordinary chat subset plus release thinking modes are exercised:
+Every case is rendered by two independently maintained executable release
+encoders where the tier is expressible, and pinned only on byte agreement:
+
+- vLLM release-derived encoder at the three-tier reasoning-effort revision
+  (`77434861`): the primary contract.
+- SGLang release-derived encoder at its pinned pre-three-tier revision. Its
+  old two-tier surface maps onto the new contract (old default/`high` ==
+  new `low` bytes, old `max` == new `high` bytes), so it cross-checks every
+  tier except the new `max` text, which postdates it. Cases the old surface
+  cannot express are pinned by structural invariants derived from two-source
+  cases plus the sha-pinned effort text; re-pin SGLang and retire those
+  waivers when it adopts the three-tier contract.
+
+Encoder sources are read revision-addressed (`git show REV:PATH`) from the
+local checkouts, so working-tree state and current HEAD never matter; the
+pinned revisions only need to exist in each repository's object store.
+
+Only the ordinary chat subset plus release thinking tiers are exercised:
 tools, developer, latest-reminder, tasks, and continuation stay out of scope.
 """
 
@@ -26,39 +40,61 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = ROOT / "crates/qwen-cli/tests/fixtures/deepseek_v4_0731_chat_fixtures_v1.json"
 
-VLLM_REVISION = "b40d859c7b07ae244bcd8c6eecdcdbd9a3afaa07"
+VLLM_REVISION = "77434861904a9f01ea4818fe9f0c7b2a5c05686e"
 VLLM_ENCODER = "vllm/tokenizers/deepseek_v4_encoding.py"
-VLLM_ENCODER_SHA256 = "20eb61abe97be7607fd12e2b929faef91743cd2699ad9a4e032b54237d137694"
+VLLM_ENCODER_SHA256 = "25dc8cbd63023db12076a082f320882a36201acd058577644b0e607265c5e2cd"
 SGLANG_REVISION = "58974ca16ca2a4bb2f02f9ceb9622a0fd2ccf7f8"
 SGLANG_ENCODER = "python/sglang/srt/entrypoints/openai/encoding_dsv4.py"
 SGLANG_ENCODER_SHA256 = (
     "012e4dc254c4046f600674eaa799d59dffe5e4a46450da7b4629cf16706fc6c3"
 )
+BOS = "<｜begin▁of▁sentence｜>"
+
+# The old two-tier SGLang encoder expressed today's tiers under other names.
+SGLANG_TIER_REMAP = {None: None, "low": None, "high": "max"}
+
+# Cases whose tier the old SGLang surface cannot express, pinned instead by
+# structural invariants asserted after rendering (see the contract-invariant
+# block).
+STRUCTURALLY_PINNED = {
+    "thinking_max_single_user",
+    "thinking_max_system_user",
+    "thinking_max_preserve_multi_turn",
+}
 
 
-def checkout(env_name: str, default: str, revision: str) -> Path:
+def checkout(env_name: str, default: str) -> Path:
     path = Path(os.environ.get(env_name, os.path.expanduser(default))).resolve()
     if not path.is_dir():
         raise SystemExit(f"{env_name} checkout missing: {path}")
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=path,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    if head != revision:
-        raise SystemExit(f"{path} is at {head}, expected pinned revision {revision}")
     return path
 
 
-def load_module(name: str, path: Path, expected_sha256: str):
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+def load_pinned_module(
+    name: str,
+    repository: Path,
+    revision: str,
+    file_path: str,
+    expected_sha256: str,
+    scratch: Path,
+):
+    """Imports a module from `git show revision:path`, independent of the
+    repository's working tree and HEAD."""
+    blob = subprocess.run(
+        ["git", "show", f"{revision}:{file_path}"],
+        cwd=repository,
+        capture_output=True,
+        check=True,
+    ).stdout
+    digest = hashlib.sha256(blob).hexdigest()
     if digest != expected_sha256:
         raise SystemExit(
-            f"{path} sha256 {digest} does not match pinned {expected_sha256}"
+            f"{repository} {revision}:{file_path} sha256 {digest} does not "
+            f"match pinned {expected_sha256}"
         )
-    spec = importlib.util.spec_from_file_location(name, path)
+    staged = scratch / f"{name}.py"
+    staged.write_bytes(blob)
+    spec = importlib.util.spec_from_file_location(name, staged)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -67,9 +103,8 @@ def load_module(name: str, path: Path, expected_sha256: str):
 def assistant(content: str, reasoning: str | None = None) -> dict:
     message: dict = {"role": "assistant", "content": content}
     if reasoning is not None:
-        # vLLM reads `reasoning`; SGLang reads `reasoning_content`. Each
-        # encoder ignores the other's key, so setting both drives the same
-        # semantic input through both implementations.
+        # vLLM reads `reasoning`; SGLang and the llama.cpp template read
+        # `reasoning_content`. Each implementation ignores the other's key.
         message["reasoning"] = reasoning
         message["reasoning_content"] = reasoning
     return message
@@ -122,17 +157,26 @@ CASES = [
         None,
         True,
     ),
-    ("thinking_single_user", SINGLE, "thinking", None, True),
+    ("thinking_default_single_user", SINGLE, "thinking", None, True),
+    ("thinking_low_single_user", SINGLE, "thinking", "low", True),
     ("thinking_high_single_user", SINGLE, "thinking", "high", True),
+    ("thinking_high_system_user", SYSTEM_SINGLE, "thinking", "high", True),
     ("thinking_max_single_user", SINGLE, "thinking", "max", True),
     ("thinking_max_system_user", SYSTEM_SINGLE, "thinking", "max", True),
-    ("thinking_drop_multi_turn", MULTI_WITH_REASONING, "thinking", None, True),
-    ("thinking_drop_two_rounds", MULTI_TWO_ROUNDS, "thinking", "high", True),
-    ("thinking_preserve_multi_turn", MULTI_WITH_REASONING, "thinking", "high", False),
-    ("thinking_preserve_two_rounds", MULTI_TWO_ROUNDS, "thinking", "high", False),
+    ("thinking_drop_multi_turn", MULTI_WITH_REASONING, "thinking", "low", True),
+    ("thinking_drop_two_rounds", MULTI_TWO_ROUNDS, "thinking", "low", True),
+    ("thinking_preserve_multi_turn", MULTI_WITH_REASONING, "thinking", "low", False),
+    ("thinking_preserve_two_rounds", MULTI_TWO_ROUNDS, "thinking", "low", False),
     (
         "thinking_preserve_missing_reasoning",
         MULTI_MISSING_REASONING,
+        "thinking",
+        "low",
+        False,
+    ),
+    (
+        "thinking_high_preserve_multi_turn",
+        MULTI_WITH_REASONING,
         "thinking",
         "high",
         False,
@@ -149,48 +193,98 @@ CASES = [
 
 def main() -> None:
     check = "--check" in sys.argv[1:]
-    vllm_dir = checkout("DSV4_VLLM_DIR", "~/code/vllm", VLLM_REVISION)
-    sglang_dir = checkout("DSV4_SGLANG_DIR", "~/code/sglang", SGLANG_REVISION)
-    vllm_encoding = load_module(
-        "dsv4_vllm_encoding", vllm_dir / VLLM_ENCODER, VLLM_ENCODER_SHA256
-    )
-    sglang_encoding = load_module(
-        "dsv4_sglang_encoding", sglang_dir / SGLANG_ENCODER, SGLANG_ENCODER_SHA256
-    )
+    vllm_dir = checkout("DSV4_VLLM_DIR", "~/code/vllm")
+    sglang_dir = checkout("DSV4_SGLANG_DIR", "~/code/sglang")
 
+    with tempfile.TemporaryDirectory() as scratch_dir:
+        scratch = Path(scratch_dir)
+        vllm_encoding = load_pinned_module(
+            "dsv4_vllm_encoding",
+            vllm_dir,
+            VLLM_REVISION,
+            VLLM_ENCODER,
+            VLLM_ENCODER_SHA256,
+            scratch,
+        )
+        sglang_encoding = load_pinned_module(
+            "dsv4_sglang_encoding",
+            sglang_dir,
+            SGLANG_REVISION,
+            SGLANG_ENCODER,
+            SGLANG_ENCODER_SHA256,
+            scratch,
+        )
+        generate(check, vllm_encoding, sglang_encoding)
+
+
+def generate(check: bool, vllm_encoding, sglang_encoding) -> None:
     cases = []
     prompts: dict[str, str] = {}
     for name, messages, thinking_mode, reasoning_effort, drop_thinking in CASES:
-        rendered = {}
-        for source, module in (("vllm", vllm_encoding), ("sglang", sglang_encoding)):
-            rendered[source] = module.encode_messages(
+        thinking = thinking_mode == "thinking"
+        rendered: dict[str, str] = {}
+        rendered["vllm"] = vllm_encoding.encode_messages(
+            json.loads(json.dumps(messages)),
+            thinking_mode=thinking_mode,
+            drop_thinking=drop_thinking,
+            reasoning_effort=reasoning_effort,
+        )
+        if not thinking or reasoning_effort in SGLANG_TIER_REMAP:
+            rendered["sglang"] = sglang_encoding.encode_messages(
                 json.loads(json.dumps(messages)),
                 thinking_mode=thinking_mode,
                 drop_thinking=drop_thinking,
-                reasoning_effort=reasoning_effort,
+                reasoning_effort=SGLANG_TIER_REMAP[reasoning_effort]
+                if thinking
+                else None,
             )
-        if rendered["vllm"] != rendered["sglang"]:
-            raise SystemExit(
-                f"case {name}: vLLM and SGLang disagree\n"
-                f"vllm:   {rendered['vllm']!r}\n"
-                f"sglang: {rendered['sglang']!r}"
-            )
-        prompts[name] = rendered["vllm"]
+        reference = rendered["vllm"]
+        for source, prompt in rendered.items():
+            if prompt != reference:
+                raise SystemExit(
+                    f"case {name}: {source} disagrees with vllm\n"
+                    f"vllm:   {reference!r}\n"
+                    f"{source}: {prompt!r}"
+                )
+        if len(rendered) < 2 and name not in STRUCTURALLY_PINNED:
+            raise SystemExit(f"case {name} has fewer than two sources")
+        prompts[name] = reference
         cases.append(
             {
                 "name": name,
                 "thinking_mode": thinking_mode,
                 "reasoning_effort": reasoning_effort,
                 "drop_thinking": drop_thinking,
+                "sources": sorted(rendered),
                 "messages": messages,
-                "prompt": rendered["vllm"],
+                "prompt": reference,
             }
         )
 
-    # The release contract makes `high` template-invisible: it must be
-    # byte-identical to thinking mode without an effort level.
-    if prompts["thinking_high_single_user"] != prompts["thinking_single_user"]:
-        raise SystemExit("thinking+high diverged from thinking+None bytes")
+    # Contract invariants across tiers.
+    if prompts["thinking_default_single_user"] != prompts["thinking_low_single_user"]:
+        raise SystemExit("thinking default diverged from explicit low tier")
+    high_text = vllm_encoding.REASONING_EFFORT_PROMPTS["high"]
+    max_text = vllm_encoding.REASONING_EFFORT_PROMPTS["max"]
+    if prompts["thinking_high_single_user"] != prompts[
+        "thinking_low_single_user"
+    ].replace(BOS, BOS + high_text, 1):
+        raise SystemExit("high tier is not low tier plus the high effort prompt")
+    if prompts["thinking_max_single_user"] != prompts[
+        "thinking_low_single_user"
+    ].replace(BOS, BOS + max_text, 1):
+        raise SystemExit("max tier is not low tier plus the max effort prompt")
+    # Max-tier cases have one executable source until SGLang adopts the
+    # three-tier contract; pin each structurally to a two-source rendering
+    # with the sha-pinned effort text swapped.
+    if prompts["thinking_max_system_user"] != prompts[
+        "thinking_high_system_user"
+    ].replace(high_text, max_text, 1):
+        raise SystemExit("max-system does not match high-system with swapped text")
+    if prompts["thinking_max_preserve_multi_turn"] != prompts[
+        "thinking_high_preserve_multi_turn"
+    ].replace(high_text, max_text, 1):
+        raise SystemExit("max-preserve does not match high-preserve with swapped text")
     # History under drop-thinking must render byte-identically to chat mode
     # up to the final transition token.
     chat = prompts["chat_multi_turn_drops_reasoning_fields"]
@@ -210,6 +304,7 @@ def main() -> None:
                 "revision": SGLANG_REVISION,
                 "file": SGLANG_ENCODER,
                 "sha256": SGLANG_ENCODER_SHA256,
+                "tier_remap": {"low": "default", "high": "max"},
             },
         },
         "cases": cases,

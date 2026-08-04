@@ -20,14 +20,18 @@ pub(crate) struct ChatMessage {
 
 /// DeepSeek V4 0731 reasoning selection for `--messages` encoding.
 ///
-/// `High` and bare thinking mode are byte-identical in the release encoder;
-/// only `Max` adds template bytes (the effort instruction before the first
-/// message content). `None` is the release "chat" mode.
+/// Follows the three-tier release contract (vLLM `77434861`): `None` is
+/// chat mode; thinking tiers consult the effort-prompt table, where `Low`
+/// contributes no bytes
+/// (the release thinking default), `High` prepends the "Absolute maximum"
+/// text (labeled max in the earlier two-tier encoders), and `Max` prepends the
+/// stronger "Beyond maximum" text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 // Shared across binaries; qwen-bench never constructs the thinking modes.
 #[allow(dead_code)]
 pub(crate) enum DeepSeekV4Reasoning {
     None,
+    Low,
     High,
     Max,
 }
@@ -56,14 +60,35 @@ const DEEPSEEK_V4_USER: &str = "<｜User｜>";
 const DEEPSEEK_V4_ASSISTANT: &str = "<｜Assistant｜>";
 const DEEPSEEK_V4_THINK_START: &str = "<think>";
 const DEEPSEEK_V4_THINK_END: &str = "</think>";
-/// Byte-exact "Think Max" instruction from the 0731 release encoder
-/// (vLLM `deepseek_v4_encoding.py:68-72`, SGLang `encoding_dsv4.py:63-68`;
-/// both pinned revisions carry identical bytes).
-const DEEPSEEK_V4_REASONING_EFFORT_MAX: &str = concat!(
+/// Byte-exact "high" effort instruction from the 0731 release contract
+/// (vLLM `REASONING_EFFORT_PROMPTS["high"]` at `77434861`; identical bytes
+/// appeared as the max-tier text in the earlier two-tier encoders, e.g. the
+/// pinned SGLang revision).
+const DEEPSEEK_V4_REASONING_EFFORT_HIGH: &str = concat!(
     "Reasoning Effort: Absolute maximum with no shortcuts permitted.\n",
     "You MUST be very thorough in your thinking and comprehensively decompose the problem to resolve the root cause, rigorously stress-testing your logic against all potential paths, edge cases, and adversarial scenarios.\n",
     "Explicitly write out your entire deliberation process, documenting every intermediate step, considered alternative, and rejected hypothesis to ensure absolutely no assumption is left unchecked.\n\n",
 );
+/// Byte-exact "max" effort instruction from the 0731 release contract
+/// (vLLM `REASONING_EFFORT_PROMPTS["max"]` at `77434861`).
+const DEEPSEEK_V4_REASONING_EFFORT_MAX: &str = concat!(
+    "Reasoning Effort: Beyond maximum \u{2014} exhaustive, relentless, and uncompromising.\n",
+    "You MUST reason with the utmost depth and rigor, leaving absolutely nothing to chance: exhaustively decompose the problem into its most fundamental components, trace every causal chain to its root, and resolve the underlying cause rather than any surface symptom.\n",
+    "Do not stop reasoning until you have independently verified the solution from multiple angles and are certain that no assumption remains unchecked and no error remains undiscovered.\n\n",
+);
+
+impl DeepSeekV4Reasoning {
+    /// Effort prompt contributed before the first message's content in
+    /// thinking mode (vLLM `render_message` at `77434861`: consulted for
+    /// every thinking-tier request; the low tier maps to the empty string).
+    fn effort_prompt(self) -> &'static str {
+        match self {
+            DeepSeekV4Reasoning::None | DeepSeekV4Reasoning::Low => "",
+            DeepSeekV4Reasoning::High => DEEPSEEK_V4_REASONING_EFFORT_HIGH,
+            DeepSeekV4Reasoning::Max => DEEPSEEK_V4_REASONING_EFFORT_MAX,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum MessagesThinkingMode {
@@ -230,25 +255,29 @@ pub(crate) fn render_qwen_messages_prompt(
 /// including the release thinking modes.
 ///
 /// Semantics are ported from the pinned vLLM (`deepseek_v4_encoding.py`) and
-/// SGLang (`encoding_dsv4.py`) release-derived encoders, which agree byte for
-/// byte on this subset:
+/// SGLang (`encoding_dsv4.py`) release-derived encoders. They agree byte for
+/// byte for chat plus the default/low/high thinking tiers; the newer max tier
+/// is pinned to vLLM separately:
 /// - chat mode: every assistant transition is `</think>`; assistant
-///   `reasoning` fields are dropped (vLLM:314-318 renders no thinking part).
+///   `reasoning` fields are dropped (vLLM `render_message` renders no thinking
+///   part).
 /// - thinking + drop (release default without tools): history renders
 ///   byte-identically to chat mode; only the final user turn opens `<think>`
-///   (vLLM:354-362).
+///   (vLLM `render_message`).
 /// - thinking + preserve (`drop_thinking=False`): every transition opens
 ///   `<think>` and each assistant renders `reasoning</think>content`
-///   (vLLM:314-318, 356-358).
-/// - Max effort prepends the effort instruction before the first message
-///   content, only in thinking mode (vLLM:230-233).
+///   (vLLM `render_message`).
+/// - Thinking tiers prepend their effort instruction before the first
+///   message content (vLLM `77434861`: low contributes nothing, high the
+///   "Absolute maximum" text, max the "Beyond maximum" text); chat mode
+///   never consults the table.
 ///
 /// This still intentionally excludes tools, developer messages,
 /// latest-reminder, tasks, response formats, and continuation (`wo_eos`)
 /// until their richer schemas have independent byte fixtures. The subset
 /// keeps one structural simplification: because roles must alternate
 /// user/assistant and end with a user turn, the release lookahead transition
-/// rule (vLLM:336) reduces to "every user turn appends the assistant
+/// rule in `render_message` reduces to "every user turn appends the assistant
 /// transition", and the final user turn is always the conversation's last
 /// user index.
 #[allow(dead_code)]
@@ -259,7 +288,7 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
     let thinking = !matches!(options.reasoning, DeepSeekV4Reasoning::None);
     if options.preserve_reasoning && !thinking {
         bail!(
-            "preserve-reasoning requires reasoning high or max; the release encoder renders preserved reasoning only in thinking mode"
+            "preserve-reasoning requires reasoning low, high, or max; the release encoder renders preserved reasoning only in thinking mode"
         );
     }
     if messages.is_empty() {
@@ -267,10 +296,11 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
     }
 
     let mut output = String::from(DEEPSEEK_V4_BOS);
-    if thinking && matches!(options.reasoning, DeepSeekV4Reasoning::Max) {
-        // The release encoder prepends this inside the first message's
-        // render, before any role content (vLLM:230-233).
-        output.push_str(DEEPSEEK_V4_REASONING_EFFORT_MAX);
+    if thinking {
+        // The release encoder prepends the tier's effort prompt inside the
+        // first message's render, before any role content; the low tier is
+        // the empty string (vLLM `render_message` at `77434861`).
+        output.push_str(options.reasoning.effort_prompt());
     }
     let mut expect_user = true;
     let mut saw_user = false;
@@ -516,7 +546,7 @@ mod tests {
         ];
         let drop = render_deepseek_v4_0731_messages_prompt(
             &history,
-            options(DeepSeekV4Reasoning::High, false),
+            options(DeepSeekV4Reasoning::Low, false),
         )
         .unwrap();
         assert_eq!(
@@ -541,7 +571,7 @@ mod tests {
         // replay `reasoning</think>content`.
         let preserve = render_deepseek_v4_0731_messages_prompt(
             &history,
-            options(DeepSeekV4Reasoning::High, true),
+            options(DeepSeekV4Reasoning::Low, true),
         )
         .unwrap();
         assert_eq!(
@@ -563,7 +593,7 @@ mod tests {
                     message("assistant", "done"),
                     message("user", "two"),
                 ],
-                options(DeepSeekV4Reasoning::High, true),
+                options(DeepSeekV4Reasoning::Low, true),
             )
             .unwrap(),
             concat!(
@@ -582,14 +612,40 @@ mod tests {
         };
         let aliased = render_deepseek_v4_0731_messages_prompt(
             &[message("user", "Hello"), alias, message("user", "again")],
-            options(DeepSeekV4Reasoning::High, true),
+            options(DeepSeekV4Reasoning::Low, true),
         )
         .unwrap();
         assert!(aliased.contains("<think>hidden plan</think>Hi!"));
     }
 
     #[test]
-    fn deepseek_v4_reasoning_effort_max_prefixes_the_first_message() {
+    fn deepseek_v4_reasoning_effort_tiers_prefix_the_first_message() {
+        // Low is byte-identical to bare thinking mode: no effort bytes.
+        let low = render_deepseek_v4_0731_messages_prompt(
+            &[message("user", "Hello")],
+            options(DeepSeekV4Reasoning::Low, false),
+        )
+        .unwrap();
+        assert_eq!(
+            low,
+            "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think>"
+        );
+        // High carries the earlier two-tier encoder's max text.
+        let high = render_deepseek_v4_0731_messages_prompt(
+            &[message("user", "Hello")],
+            options(DeepSeekV4Reasoning::High, false),
+        )
+        .unwrap();
+        assert_eq!(
+            high,
+            format!(
+                "<｜begin▁of▁sentence｜>{DEEPSEEK_V4_REASONING_EFFORT_HIGH}<｜User｜>Hello<｜Assistant｜><think>"
+            )
+        );
+        assert!(
+            DEEPSEEK_V4_REASONING_EFFORT_HIGH.starts_with("Reasoning Effort: Absolute maximum")
+        );
+        // Max carries the stronger current release text.
         let single = render_deepseek_v4_0731_messages_prompt(
             &[message("user", "Hello")],
             options(DeepSeekV4Reasoning::Max, false),
@@ -601,6 +657,7 @@ mod tests {
                 "<｜begin▁of▁sentence｜>{DEEPSEEK_V4_REASONING_EFFORT_MAX}<｜User｜>Hello<｜Assistant｜><think>"
             )
         );
+        assert!(DEEPSEEK_V4_REASONING_EFFORT_MAX.starts_with("Reasoning Effort: Beyond maximum"));
         let with_system = render_deepseek_v4_0731_messages_prompt(
             &[message("system", "Be exact."), message("user", "Hello")],
             options(DeepSeekV4Reasoning::Max, false),
@@ -612,6 +669,13 @@ mod tests {
                 "<｜begin▁of▁sentence｜>{DEEPSEEK_V4_REASONING_EFFORT_MAX}Be exact.<｜User｜>Hello<｜Assistant｜><think>"
             )
         );
+        // Chat mode never consults the effort table.
+        let chat = render_deepseek_v4_0731_messages_prompt(
+            &[message("user", "Hello")],
+            DeepSeekV4EncodeOptions::default(),
+        )
+        .unwrap();
+        assert!(!chat.contains("Reasoning Effort"));
     }
 
     #[test]
@@ -623,7 +687,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("requires reasoning high or max"));
+        assert!(error.contains("requires reasoning low, high, or max"));
 
         // Reasoning fields on non-assistant roles are rejected.
         let mut user = message("user", "Hello");
@@ -668,7 +732,7 @@ mod tests {
         ];
         for opts in [
             DeepSeekV4EncodeOptions::default(),
-            options(DeepSeekV4Reasoning::High, false),
+            options(DeepSeekV4Reasoning::Low, false),
         ] {
             assert_eq!(
                 render_deepseek_v4_0731_messages_prompt(&with_reasoning, opts).unwrap(),
@@ -723,7 +787,7 @@ mod tests {
         ))
         .expect("parse chat fixture JSON");
         let cases = fixture["cases"].as_array().expect("fixture cases");
-        assert_eq!(cases.len(), 14, "fixture case census");
+        assert_eq!(cases.len(), 17, "fixture case census");
         for case in cases {
             let name = case["name"].as_str().expect("case name");
             let messages: Vec<ChatMessage> = serde_json::from_value(case["messages"].clone())
@@ -732,7 +796,8 @@ mod tests {
             let effort = case["reasoning_effort"].as_str();
             let reasoning = match (thinking_mode, effort) {
                 ("chat", None) => DeepSeekV4Reasoning::None,
-                ("thinking", None | Some("high")) => DeepSeekV4Reasoning::High,
+                ("thinking", None | Some("low")) => DeepSeekV4Reasoning::Low,
+                ("thinking", Some("high")) => DeepSeekV4Reasoning::High,
                 ("thinking", Some("max")) => DeepSeekV4Reasoning::Max,
                 other => panic!("unmapped fixture mode {other:?} in {name}"),
             };

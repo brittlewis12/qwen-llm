@@ -346,13 +346,16 @@ impl ExplicitCliOptions {
     }
 }
 
-/// CLI values for `--reasoning`, mapping to the DeepSeek V4 release encoder's
-/// reasoning-effort contract: `none` is chat mode, `high` opens `<think>`
-/// with no extra template bytes, and `max` additionally prepends the release
-/// effort instruction.
+/// CLI values for `--reasoning`, mapping to the DeepSeek V4 release
+/// three-tier effort contract (vLLM `77434861`): `none` is chat mode; `low`
+/// opens `<think>` with no effort bytes (the release thinking default);
+/// `high` additionally prepends the "Absolute maximum" instruction (labeled
+/// max in the earlier two-tier encoders); and
+/// `max` prepends the stronger "Beyond maximum" instruction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
 enum ReasoningLevelArg {
     None,
+    Low,
     High,
     Max,
 }
@@ -360,12 +363,13 @@ enum ReasoningLevelArg {
 fn deepseek_v4_encode_options(args: &Args) -> Result<DeepSeekV4EncodeOptions> {
     let reasoning = match args.reasoning {
         None | Some(ReasoningLevelArg::None) => DeepSeekV4Reasoning::None,
+        Some(ReasoningLevelArg::Low) => DeepSeekV4Reasoning::Low,
         Some(ReasoningLevelArg::High) => DeepSeekV4Reasoning::High,
         Some(ReasoningLevelArg::Max) => DeepSeekV4Reasoning::Max,
     };
     ensure!(
         !(args.preserve_reasoning && matches!(reasoning, DeepSeekV4Reasoning::None)),
-        "--preserve-reasoning requires --reasoning high or max"
+        "--preserve-reasoning requires --reasoning low, high, or max"
     );
     Ok(DeepSeekV4EncodeOptions {
         reasoning,
@@ -2393,7 +2397,9 @@ fn run_deepseek_v4_single_turn(
         PromptSource::Inline | PromptSource::File => "raw",
         PromptSource::Messages => match encode_options.reasoning {
             DeepSeekV4Reasoning::None => "messages_0731_chat",
-            DeepSeekV4Reasoning::High | DeepSeekV4Reasoning::Max => "messages_0731_thinking",
+            DeepSeekV4Reasoning::Low | DeepSeekV4Reasoning::High | DeepSeekV4Reasoning::Max => {
+                "messages_0731_thinking"
+            }
         },
     };
 
@@ -6675,6 +6681,7 @@ mod tests {
         for (level, expected) in [
             (None, DeepSeekV4Reasoning::None),
             (Some("none"), DeepSeekV4Reasoning::None),
+            (Some("low"), DeepSeekV4Reasoning::Low),
             (Some("high"), DeepSeekV4Reasoning::High),
             (Some("max"), DeepSeekV4Reasoning::Max),
         ] {
@@ -6706,7 +6713,7 @@ mod tests {
             deepseek_v4_encode_options(&preserve_without_thinking)
                 .unwrap_err()
                 .to_string()
-                .contains("requires --reasoning high or max")
+                .contains("requires --reasoning low, high, or max")
         );
         let preserve = Args::try_parse_from([
             "qwen",
@@ -6721,6 +6728,20 @@ mod tests {
         .unwrap();
         let options = deepseek_v4_encode_options(&preserve).unwrap();
         assert_eq!(options.reasoning, DeepSeekV4Reasoning::Max);
+        assert!(options.preserve_reasoning);
+        let preserve_low = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--reasoning",
+            "low",
+            "--preserve-reasoning",
+        ])
+        .unwrap();
+        let options = deepseek_v4_encode_options(&preserve_low).unwrap();
+        assert_eq!(options.reasoning, DeepSeekV4Reasoning::Low);
         assert!(options.preserve_reasoning);
 
         let matches = Args::command()

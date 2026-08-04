@@ -3579,6 +3579,48 @@ pub fn encode_mat_vec_q2_k_f32(
     )
 }
 
+crate::env_flag!(default_on matvec_iq2_xs_fast_enabled, "QWEN_MATVEC_IQ2_XS_FAST");
+
+pub fn encode_mat_vec_iq2_xs_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    if matvec_iq2_xs_fast_enabled() {
+        return encode_mat_vec_lowbit_fast_f32(
+            ctx,
+            enc,
+            weight,
+            x,
+            y,
+            n_in,
+            n_out,
+            256,
+            GgmlType::IQ2_XS,
+            "mat_vec_iq2_xs_fast",
+            "kernel_mat_vec_iq2_xs_f32_fast",
+            4,
+            2,
+            0,
+        );
+    }
+    encode_mat_vec_block256_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        GgmlType::IQ2_XS,
+        "kernel_mat_vec_iq2_xs_f32",
+    )
+}
+
 crate::env_flag!(default_on matvec_iq2_s_fast_enabled, "QWEN_MATVEC_IQ2_S_FAST");
 
 pub fn encode_mat_vec_iq2_s_f32(
@@ -4672,6 +4714,30 @@ fn encode_mat_mat_q2_k_f32_mm(
         "mat_mat_q2_k_mm",
         "kernel_mat_mat_q2_K_f32_mm",
         84,
+    )
+}
+
+pub fn encode_mat_mat_iq2_xs_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    encode_mat_mat_block256_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        GgmlType::IQ2_XS,
+        "kernel_mat_mat_iq2_xs_f32",
     )
 }
 
@@ -20452,6 +20518,152 @@ mod tests {
             *value = stored_d * f32::from(scale) * (f32::from(quant) - 32.0);
         }
         (block, decoded)
+    }
+
+    fn encode_iq2_xs_block(d: f32, seed: usize) -> [u8; 74] {
+        let mut block = [0u8; 74];
+        block[..2].copy_from_slice(&half::f16::from_f32(d).to_bits().to_le_bytes());
+        for word in 0..32usize {
+            let grid = (seed * 97 + word * 53 + word * word * 3) % 512;
+            let signs = (seed * 29 + word * 17 + 11) % 128;
+            let packed = (grid | (signs << 9)) as u16;
+            block[2 + 2 * word..4 + 2 * word].copy_from_slice(&packed.to_le_bytes());
+        }
+        for scale in 0..8usize {
+            let low = (seed * 7 + scale * 3 + 1) % 16;
+            let high = (seed * 11 + scale * 5 + 9) % 16;
+            block[66 + scale] = (low | (high << 4)) as u8;
+        }
+        block
+    }
+
+    #[test]
+    fn iq2_xs_mat_vec_and_mat_mat_match_cpu_codec_with_offsets() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        const N_IN: usize = 4_096;
+        const N_OUT: usize = 9;
+        let mut weight_bytes = Vec::new();
+        for row in 0..N_OUT {
+            for block in 0..N_IN / 256 {
+                weight_bytes.extend_from_slice(&encode_iq2_xs_block(
+                    0.001953125 * (1 + (row * 2 + block) % 7) as f32,
+                    row * (N_IN / 256) + block,
+                ));
+            }
+        }
+        let desc = TensorDesc {
+            name: "iq2_xs_test".into(),
+            shape: vec![N_IN as u64, N_OUT as u64],
+            dtype: GgmlType::IQ2_XS,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: weight_bytes.len() as u64,
+        };
+        let decoded = crate::codec::dequant_to_f32(&desc, &weight_bytes)
+            .expect("llama.cpp IQ2_XS reference dequantization");
+        let weight = offset_tensor(
+            &ctx,
+            32,
+            &weight_bytes,
+            19,
+            vec![N_IN as u64, N_OUT as u64],
+            GgmlType::IQ2_XS,
+        );
+        let input_values = (0..N_IN)
+            .map(|index| ((index * 37 + 5) % 251) as f32 * 0.001 - 0.125)
+            .collect::<Vec<_>>();
+        let input = offset_tensor(
+            &ctx,
+            16,
+            bytemuck::cast_slice(&input_values),
+            17,
+            vec![N_IN as u64],
+            GgmlType::F32,
+        );
+        let output = offset_tensor(
+            &ctx,
+            32,
+            &[0u8; N_OUT * size_of::<f32>()],
+            23,
+            vec![N_OUT as u64],
+            GgmlType::F32,
+        );
+        let command = ctx.queue.commandBuffer().expect("IQ2_XS mat-vec command");
+        let encoder = KernelEncoder::begin(&command);
+        crate::metal_forward::encode_mat_vec_dispatch(
+            &ctx, &encoder, &weight, &input, &output, N_IN, N_OUT,
+        )
+        .expect("IQ2_XS mat-vec dispatch");
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none(), "IQ2_XS mat-vec command failed");
+        let expected_row = |row: usize, input: &[f32]| {
+            decoded[row * N_IN..(row + 1) * N_IN]
+                .iter()
+                .zip(input)
+                .map(|(weight, value)| weight * value)
+                .sum::<f32>()
+        };
+        for (row, actual) in tensor_f32_at_offset(&output).into_iter().enumerate() {
+            let expected = expected_row(row, &input_values);
+            let tolerance = 3.0e-5 * expected.abs().max(1.0);
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "mat-vec row {row}: got {actual}, expected {expected}, tolerance {tolerance}"
+            );
+        }
+
+        for n_query in [1usize, 2, 6, 16, 32, 128] {
+            let inputs = (0..n_query * N_IN)
+                .map(|index| ((index * 41 + index / N_IN * 17 + 3) % 509) as f32 * 0.0005 - 0.127)
+                .collect::<Vec<_>>();
+            let x = offset_tensor(
+                &ctx,
+                16,
+                bytemuck::cast_slice(&inputs),
+                13,
+                vec![N_IN as u64, n_query as u64],
+                GgmlType::F32,
+            );
+            let y = offset_tensor(
+                &ctx,
+                32,
+                &vec![0u8; n_query * N_OUT * size_of::<f32>()],
+                29,
+                vec![N_OUT as u64, n_query as u64],
+                GgmlType::F32,
+            );
+            let command = ctx.queue.commandBuffer().expect("IQ2_XS mat-mat command");
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal_forward::encode_mat_mat_dispatch(
+                &ctx, &encoder, &weight, &x, &y, N_IN, N_OUT, n_query,
+            )
+            .unwrap_or_else(|error| panic!("IQ2_XS mat-mat N={n_query}: {error}"));
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "IQ2_XS mat-mat N={n_query} command failed"
+            );
+            let actual = tensor_f32_at_offset(&y);
+            for query in 0..n_query {
+                let input = &inputs[query * N_IN..(query + 1) * N_IN];
+                for row in 0..N_OUT {
+                    let expected = expected_row(row, input);
+                    let got = actual[query * N_OUT + row];
+                    let tolerance = 3.0e-5 * expected.abs().max(1.0);
+                    assert!(
+                        (got - expected).abs() <= tolerance,
+                        "mat-mat N={n_query} query={query} row={row}: got {got}, expected {expected}, tolerance {tolerance}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

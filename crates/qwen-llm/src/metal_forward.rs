@@ -12702,6 +12702,9 @@ pub fn encode_mat_vec_dispatch(
         GgmlType::Q3_K => Ok(crate::metal::encode_mat_vec_q3_k_f32(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
+        GgmlType::IQ2_XS => Ok(crate::metal::encode_mat_vec_iq2_xs_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?),
         GgmlType::IQ2_S => Ok(crate::metal::encode_mat_vec_iq2_s_f32(
             ctx, enc, weight, x, y, n_in, n_out,
         )?),
@@ -12854,6 +12857,9 @@ pub fn encode_mat_mat_dispatch(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
         GgmlType::Q3_K => Ok(crate::metal::encode_mat_mat_q3_k_f32(
+            ctx, enc, weight, x, y, n_in, n_out, n_query,
+        )?),
+        GgmlType::IQ2_XS => Ok(crate::metal::encode_mat_mat_iq2_xs_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
         GgmlType::IQ2_S => Ok(crate::metal::encode_mat_mat_iq2_s_f32(

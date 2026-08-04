@@ -89,6 +89,16 @@ the other shards. The GGUF split metadata and complete tensor schema validate,
 but reproducible benchmark packets must pin the four content hashes rather
 than claim one repository revision.
 
+A separately downloaded converter refresh at
+`/Users/tito/models/deepseek-v4-flash-0731-fresh/UD-IQ3_XXS/` is a compatibility
+asset, not a replacement for that frozen benchmark identity. Its four-shard
+census still has 1,328 tensors and the same architecture geometry, but totals
+104,207,848,032 file bytes and changes routed gate/up storage materially: 25
+layers use IQ2_XS, 17 use IQ3_XXS, and one uses IQ3_S. Routed down remains 41
+IQ3_XXS layers plus two MXFP4 layers. Model loading must therefore validate
+role-level dtype coverage from each artifact rather than infer a quant recipe
+from the directory name.
+
 ## Corrected architecture facts
 
 The April paper, official 0731 config, current llama.cpp, vLLM, SGLang, and
@@ -195,7 +205,7 @@ Directly reusable:
   admission infrastructure.
 - Ordinary Q/K/IQ projection matvec and matmul kernels where dimensions and
   dtypes match.
-- Q8_0, Q6_K, IQ3_XXS, IQ3_S, IQ2_S, MXFP4 decoding primitives.
+- Q8_0, Q6_K, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, and MXFP4 decoding primitives.
 - Existing output-head and GPU argmax structure after final HC collapse.
 - Parts of the routed-MoE scheduling and 256-expert top-k infrastructure.
 - Kernel tracing, benchmark packet, checkpoint identity, and promotion-gate
@@ -212,11 +222,12 @@ Not directly reusable:
 - Qwen's gated-attention and GDN scratch layouts.
 - Qwen's tokenizer pre-split and chat renderer.
 
-The frozen IQ3 asset also exposes a concrete MoE gap: 42 layers store routed
-gate/up banks as IQ2_S, while the current production grouped-expert path does
-not support IQ2_S gate/up. Routed down is mainly IQ3_XXS, with two MXFP4
-outliers. Generic matmul dtype coverage is not equivalent to grouped-expert
-coverage.
+The frozen IQ3 asset stores routed gate/up banks as IQ2_S in 42 layers and
+IQ3_S in one. The converter refresh instead mixes IQ2_XS, IQ3_XXS, and IQ3_S.
+Production singleton execution now has matching all-slot kernels for all four
+gate/up dtypes, while packed IQ2_XS uses the generic block-256 matrix path.
+Generic matrix coverage is a correctness contract, not a grouped-kernel
+performance claim; optimize that packed path only from measured TTFT evidence.
 
 ## Oracle hierarchy
 
@@ -1869,7 +1880,7 @@ noise without reducing technical risk. Revisit after S5.
 
 | Risk | Response |
 |---|---|
-| IQ2_S routed gate/up has no production grouped path | Bucket selected rows by expert and use generic IQ2_S matmul; add a grouped kernel only if profiling justifies it |
+| Converter refreshes change routed dtypes under the same recipe name | Census every artifact by role; require generic packed and all-slot singleton coverage before admission |
 | Existing Qwen session becomes branch-heavy | Keep DS4 model/session/forward types separate |
 | CSA indexer dominates decode | Attribute full-history score and top-k before changing tile shapes |
 | Generic Metal fallback hides memory blowups | Require explicit scratch accounting and resident-memory gates |

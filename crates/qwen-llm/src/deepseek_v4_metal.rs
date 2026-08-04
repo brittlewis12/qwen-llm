@@ -5780,10 +5780,13 @@ impl DeepSeekV4MoeScratch {
             "all-slot routed down bank",
         )?;
         if gate_bank.dtype != up_bank.dtype
-            || !matches!(gate_bank.dtype, GgmlType::IQ2_S | GgmlType::IQ3_S)
+            || !matches!(
+                gate_bank.dtype,
+                GgmlType::IQ2_XS | GgmlType::IQ2_S | GgmlType::IQ3_XXS | GgmlType::IQ3_S
+            )
         {
             return invalid(format!(
-                "all-slot routed gate/up require matching IQ2_S or IQ3_S storage, got {:?}/{:?}",
+                "all-slot routed gate/up require matching IQ2_XS, IQ2_S, IQ3_XXS, or IQ3_S storage, got {:?}/{:?}",
                 gate_bank.dtype, up_bank.dtype
             ));
         }
@@ -5794,7 +5797,9 @@ impl DeepSeekV4MoeScratch {
             ));
         }
         let gate_kernel = match gate_bank.dtype {
+            GgmlType::IQ2_XS => "kernel_deepseek_v4_all_slots_swiglu_iq2_xs_f32_fast",
             GgmlType::IQ2_S => "kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast",
+            GgmlType::IQ3_XXS => "kernel_deepseek_v4_all_slots_swiglu_iq3_xxs_f32_fast",
             GgmlType::IQ3_S => "kernel_deepseek_v4_all_slots_swiglu_iq3_s_f32_fast",
             _ => unreachable!("gate/up dtype was validated above"),
         };
@@ -6131,6 +6136,12 @@ fn encode_ds4_indexed_expert_projection(
     validate_f32(output, &[n_out as u64], true, &format!("{name} output"))?;
 
     let (kernel, rows_per_group, threads_per_group, block_size) = match bank.dtype {
+        GgmlType::IQ2_XS => (
+            "kernel_deepseek_v4_indexed_mat_vec_iq2_xs_f32_fast",
+            8,
+            64,
+            256,
+        ),
         GgmlType::IQ2_S => (
             "kernel_deepseek_v4_indexed_mat_vec_iq2_s_f32_fast",
             8,
@@ -6253,7 +6264,9 @@ fn encode_ds4_all_slots_gate_up_swiglu(
         ));
     }
     let kernel = match gate_bank.dtype {
+        GgmlType::IQ2_XS => "kernel_deepseek_v4_all_slots_swiglu_iq2_xs_f32_fast",
         GgmlType::IQ2_S => "kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast",
+        GgmlType::IQ3_XXS => "kernel_deepseek_v4_all_slots_swiglu_iq3_xxs_f32_fast",
         GgmlType::IQ3_S => "kernel_deepseek_v4_all_slots_swiglu_iq3_s_f32_fast",
         dtype => return invalid(format!("{NAME} does not support {dtype:?}")),
     };
@@ -6692,6 +6705,7 @@ fn supported_matvec_dtype(dtype: GgmlType) -> bool {
             | GgmlType::BF16
             | GgmlType::Q2_K
             | GgmlType::Q3_K
+            | GgmlType::IQ2_XS
             | GgmlType::IQ2_S
             | GgmlType::IQ3_XXS
             | GgmlType::IQ3_S
@@ -19871,6 +19885,7 @@ mod tests {
         let ready = offset_i32(&ctx, &[DEEPSEEK_V4_ROUTE_STATUS_READY], vec![1]);
 
         for dtype in [
+            GgmlType::IQ2_XS,
             GgmlType::IQ2_S,
             GgmlType::IQ3_XXS,
             GgmlType::IQ3_S,
@@ -20043,8 +20058,12 @@ mod tests {
         .unwrap();
 
         for (gate_dtype, down_dtype) in [
+            (GgmlType::IQ2_XS, GgmlType::IQ3_XXS),
+            (GgmlType::IQ2_XS, GgmlType::MXFP4),
             (GgmlType::IQ2_S, GgmlType::IQ3_XXS),
             (GgmlType::IQ2_S, GgmlType::MXFP4),
+            (GgmlType::IQ3_XXS, GgmlType::IQ3_XXS),
+            (GgmlType::IQ3_XXS, GgmlType::MXFP4),
             (GgmlType::IQ3_S, GgmlType::IQ3_XXS),
             (GgmlType::IQ3_S, GgmlType::MXFP4),
         ] {
@@ -20210,7 +20229,7 @@ mod tests {
                 &ctx, &encoder, &gate_bank, &mixed_up, &down_bank, CLAMP,
             )
             .unwrap_err();
-        assert!(mixed_error.to_string().contains("matching IQ2_S or IQ3_S"));
+        assert!(mixed_error.to_string().contains("require matching IQ2_XS"));
         let down_error = scratch
             .encode_routed_experts_all_slots(
                 &ctx, &encoder, &gate_bank, &up_bank, &gate_bank, CLAMP,
@@ -20230,6 +20249,115 @@ mod tests {
             .unwrap_err();
         assert!(top_k_error.to_string().contains("require top-k 6"));
         encoder.end();
+    }
+
+    #[test]
+    fn all_slot_iq2_xs_production_input_width_matches_cpu_codec() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const H: usize = 4_096;
+        const F: usize = 8;
+        const E: usize = 7;
+        const K: usize = 6;
+        const CLAMP: f32 = 0.25;
+
+        let make_bank = |seed: usize| {
+            let (_, block_bytes) = ggml_type_layout(GgmlType::IQ2_XS).unwrap();
+            let block_bytes = block_bytes as usize;
+            let blocks = H * F * E / 256;
+            let mut payload = vec![0u8; blocks * block_bytes];
+            for block in 0..blocks {
+                let start = block * block_bytes;
+                payload[start..start + 2].copy_from_slice(
+                    &half::f16::from_f32(0.000_244_140_63 * (1 + (block + seed) % 5) as f32)
+                        .to_bits()
+                        .to_le_bytes(),
+                );
+                for byte in 2..block_bytes {
+                    payload[start + byte] = (block * 31 + byte * 13 + seed * 19 + 5) as u8;
+                }
+            }
+            let desc = TensorDesc {
+                name: format!("iq2_xs_bank_{seed}"),
+                shape: vec![H as u64, F as u64, E as u64],
+                dtype: GgmlType::IQ2_XS,
+                shard_idx: 0,
+                data_offset: 0,
+                n_bytes: payload.len() as u64,
+            };
+            let decoded = crate::codec::dequant_to_f32(&desc, &payload).unwrap();
+            let prefix = 32usize;
+            let mut bytes = vec![0xA5; prefix];
+            bytes.extend_from_slice(&payload);
+            bytes.extend_from_slice(&[0x5A; 32]);
+            let tensor = MetalTensor {
+                buffer: ctx.buffer_from(&bytes).unwrap(),
+                offset: prefix as u64,
+                shape: desc.shape,
+                dtype: desc.dtype,
+                provenance: MetalTensorProvenance::OwnedWritable,
+            };
+            (tensor, decoded)
+        };
+        let (gate_bank, gate_decoded) = make_bank(1);
+        let (up_bank, up_decoded) = make_bank(3);
+        let input_values = (0..H)
+            .map(|index| ((index * 37 + 5) % 251) as f32 * 0.001 - 0.125)
+            .collect::<Vec<_>>();
+        let input = offset_f32(&ctx, &input_values, vec![H as u64]);
+        let ids = [6, 0, 5, 1, 4, 2];
+        let expert_ids = offset_i32(&ctx, &ids, vec![K as u64]);
+        let route_status = offset_i32(&ctx, &[DEEPSEEK_V4_ROUTE_STATUS_READY], vec![1]);
+        let output = offset_f32(&ctx, &[0.0; F * K], vec![F as u64, K as u64]);
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_ds4_all_slots_gate_up_swiglu(
+            &ctx,
+            &encoder,
+            &gate_bank,
+            &up_bank,
+            &input,
+            &expert_ids,
+            &route_status,
+            &output,
+            H,
+            F,
+            E,
+            CLAMP,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+
+        let mut expected = vec![0.0f32; F * K];
+        for (slot, &expert) in ids.iter().enumerate() {
+            for row in 0..F {
+                let start = (expert as usize * F + row) * H;
+                let gate = gate_decoded[start..start + H]
+                    .iter()
+                    .zip(&input_values)
+                    .map(|(weight, input)| weight * input)
+                    .sum::<f32>();
+                let up = up_decoded[start..start + H]
+                    .iter()
+                    .zip(&input_values)
+                    .map(|(weight, input)| weight * input)
+                    .sum::<f32>();
+                let gate = gate.min(CLAMP);
+                let up = up.clamp(-CLAMP, CLAMP);
+                expected[slot * F + row] = gate / (1.0 + (-gate).exp()) * up;
+            }
+        }
+        assert_close(
+            "production-width IQ2_XS all-slot",
+            &read_f32(&output),
+            &expected,
+            2e-5,
+        );
     }
 
     #[test]

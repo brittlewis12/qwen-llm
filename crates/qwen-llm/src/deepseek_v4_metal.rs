@@ -3830,6 +3830,15 @@ pub struct DeepSeekV4PositionZeroAttentionScratch {
     low_rank: MetalTensor,
     output: MetalTensor,
     head_norm_ones: MetalTensor,
+    #[cfg(test)]
+    hca_test_policy: DeepSeekV4HcaTestPolicy,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeepSeekV4HcaTestPolicy {
+    Production,
+    LegacyTiled,
 }
 
 impl DeepSeekV4PositionZeroAttentionScratch {
@@ -3864,6 +3873,8 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                 vec![config.head_dim as u64],
                 GgmlType::F32,
             )?,
+            #[cfg(test)]
+            hca_test_policy: DeepSeekV4HcaTestPolicy::Production,
         })
     }
 
@@ -3909,6 +3920,22 @@ impl DeepSeekV4PositionZeroAttentionScratch {
 
     pub fn output(&self) -> &MetalTensor {
         &self.output
+    }
+
+    #[cfg(test)]
+    fn set_hca_test_policy(&mut self, policy: DeepSeekV4HcaTestPolicy) {
+        self.hca_test_policy = policy;
+    }
+
+    fn use_online_hca(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.hca_test_policy == DeepSeekV4HcaTestPolicy::Production
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
     }
 
     /// Encode exactly the position-zero DS4 attention body. Forward and inverse
@@ -4204,10 +4231,17 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             let output = self
                 .attention
                 .view_subrange(0, vec![dims.query_width as u64, 1]);
-            encode_tiled_dense_sink_attention_f16(
-                ctx, enc, &queries, raw_cache, raw_cache, rows, sinks, &output, position, 0, 1,
-                128, c,
-            )?;
+            if self.use_online_hca() {
+                encode_online_dense_sink_attention_f16(
+                    ctx, enc, &queries, raw_cache, raw_cache, rows, sinks, &output, position, 0, 1,
+                    128, c,
+                )?;
+            } else {
+                encode_tiled_dense_sink_attention_f16(
+                    ctx, enc, &queries, raw_cache, raw_cache, rows, sinks, &output, position, 0, 1,
+                    128, c,
+                )?;
+            }
         } else if position == 0 {
             if compressed.is_some() {
                 return invalid("position-zero dense attention cannot have compressed rows");
@@ -7273,6 +7307,53 @@ fn encode_cooperative_dense_sink_attention_f16(
     Ok(())
 }
 
+const DEEPSEEK_V4_ONLINE_HCA_THREADS: usize = 32;
+const DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES: usize =
+    DEEPSEEK_V4_HCA_TILE_ROWS * std::mem::size_of::<half::f16>();
+
+fn validate_deepseek_v4_online_hca_request_geometry(
+    config: DeepSeekV4PositionZeroAttentionConfig,
+    compression_ratio: usize,
+    token_count: usize,
+    query_token_offset: usize,
+    query_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    if config.head_count != 64
+        || config.head_dim != DEEPSEEK_V4_HCA_TILE_ROWS
+        || compression_ratio != 128
+        || token_count != 1
+        || query_token_offset != 0
+        || query_count != 1
+    {
+        return invalid(
+            "online tiled HCA requires one complete 64-head x 512-dimension ratio-128 singleton query",
+        );
+    }
+    Ok(())
+}
+
+fn validate_deepseek_v4_online_hca_launch_geometry(
+    thread_execution_width: usize,
+    max_threads_per_group: usize,
+    max_threadgroup_bytes: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    if thread_execution_width != DEEPSEEK_V4_ONLINE_HCA_THREADS
+        || max_threads_per_group < DEEPSEEK_V4_ONLINE_HCA_THREADS
+    {
+        return invalid(format!(
+            "online tiled HCA requires SIMD width {} and {} threads, got width {thread_execution_width} max {max_threads_per_group}",
+            DEEPSEEK_V4_ONLINE_HCA_THREADS, DEEPSEEK_V4_ONLINE_HCA_THREADS,
+        ));
+    }
+    if max_threadgroup_bytes < DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES {
+        return invalid(format!(
+            "online tiled HCA requires {} threadgroup bytes, device allows {max_threadgroup_bytes}",
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_tiled_dense_sink_attention_f16(
     ctx: &MetalContext,
@@ -7289,6 +7370,75 @@ fn encode_tiled_dense_sink_attention_f16(
     compression_ratio: usize,
     config: DeepSeekV4PositionZeroAttentionConfig,
 ) -> Result<(), DeepSeekV4MetalError> {
+    encode_tiled_dense_sink_attention_f16_with_mode(
+        ctx,
+        enc,
+        queries,
+        raw_cache,
+        raw_cache_before_chunk,
+        compressed,
+        sinks,
+        output,
+        chunk_start_position,
+        query_token_offset,
+        query_count,
+        compression_ratio,
+        config,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_online_dense_sink_attention_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    raw_cache: &MetalTensor,
+    raw_cache_before_chunk: &MetalTensor,
+    compressed: DeepSeekV4PublishedRows<'_>,
+    sinks: &MetalTensor,
+    output: &MetalTensor,
+    chunk_start_position: u32,
+    query_token_offset: usize,
+    query_count: usize,
+    compression_ratio: usize,
+    config: DeepSeekV4PositionZeroAttentionConfig,
+) -> Result<(), DeepSeekV4MetalError> {
+    encode_tiled_dense_sink_attention_f16_with_mode(
+        ctx,
+        enc,
+        queries,
+        raw_cache,
+        raw_cache_before_chunk,
+        compressed,
+        sinks,
+        output,
+        chunk_start_position,
+        query_token_offset,
+        query_count,
+        compression_ratio,
+        config,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_tiled_dense_sink_attention_f16_with_mode(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    raw_cache: &MetalTensor,
+    raw_cache_before_chunk: &MetalTensor,
+    compressed: DeepSeekV4PublishedRows<'_>,
+    sinks: &MetalTensor,
+    output: &MetalTensor,
+    chunk_start_position: u32,
+    query_token_offset: usize,
+    query_count: usize,
+    compression_ratio: usize,
+    config: DeepSeekV4PositionZeroAttentionConfig,
+    online: bool,
+) -> Result<(), DeepSeekV4MetalError> {
     let query_width = checked_mul(config.head_count, config.head_dim, "tiled query width")?;
     if config.head_dim != DEEPSEEK_V4_HCA_TILE_ROWS || compression_ratio != 128 || query_count == 0
     {
@@ -7299,6 +7449,16 @@ fn encode_tiled_dense_sink_attention_f16(
     }
     let token_count = usize::try_from(queries.shape[1])
         .map_err(|_| DeepSeekV4MetalError::Invalid("tiled query count exceeds usize".into()))?;
+    if online {
+        validate_deepseek_v4_online_hca_request_geometry(
+            config,
+            compression_ratio,
+            token_count,
+            query_token_offset,
+            query_count,
+        )?;
+        require_serial(enc, "deepseek_v4_online_dense_sink_attention_f16")?;
+    }
     let query_end = query_token_offset
         .checked_add(query_count)
         .ok_or_else(|| DeepSeekV4MetalError::Invalid("tiled query range overflow".into()))?;
@@ -7378,43 +7538,57 @@ fn encode_tiled_dense_sink_attention_f16(
         compression_ratio: u32,
         scale: f32,
     }
-    let pso = ctx.pipeline("kernel_deepseek_v4_tiled_dense_sink_attention_f16")?;
-    if pso.maxTotalThreadsPerThreadgroup() < DEEPSEEK_V4_HCA_TILE_ROWS {
+    let args = Args {
+        head_count: u32::try_from(config.head_count).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("tiled HCA head count exceeds u32".into())
+        })?,
+        head_dim: DEEPSEEK_V4_HCA_TILE_ROWS as u32,
+        query_count: u32::try_from(query_count).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("tiled HCA query count exceeds u32".into())
+        })?,
+        query_token_offset: u32::try_from(query_token_offset).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("tiled HCA query offset exceeds u32".into())
+        })?,
+        chunk_start_position,
+        window: DEEPSEEK_V4_LOCAL_WINDOW as u32,
+        compression_ratio: compression_ratio as u32,
+        scale: 1.0 / (config.head_dim as f32).sqrt(),
+    };
+    let (kernel, threadgroup_width, threadgroup_bytes) = if online {
+        (
+            "kernel_deepseek_v4_online_dense_sink_attention_f16",
+            DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+        )
+    } else {
+        (
+            "kernel_deepseek_v4_tiled_dense_sink_attention_f16",
+            DEEPSEEK_V4_HCA_TILE_ROWS,
+            (2 * DEEPSEEK_V4_HCA_TILE_ROWS + 1) * std::mem::size_of::<f32>(),
+        )
+    };
+    let pso = ctx.pipeline(kernel)?;
+    if online {
+        validate_deepseek_v4_online_hca_launch_geometry(
+            pso.threadExecutionWidth(),
+            pso.maxTotalThreadsPerThreadgroup(),
+            ctx.device.maxThreadgroupMemoryLength(),
+        )?;
+    } else if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
         return invalid(format!(
-            "tiled HCA pipeline supports {} threads, requires {DEEPSEEK_V4_HCA_TILE_ROWS}",
+            "tiled HCA pipeline supports {} threads, requires {threadgroup_width}",
             pso.maxTotalThreadsPerThreadgroup()
         ));
     }
     enc.set_pipeline(&pso);
-    enc.set_bytes(
-        0,
-        &Args {
-            head_count: u32::try_from(config.head_count).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("tiled HCA head count exceeds u32".into())
-            })?,
-            head_dim: DEEPSEEK_V4_HCA_TILE_ROWS as u32,
-            query_count: u32::try_from(query_count).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("tiled HCA query count exceeds u32".into())
-            })?,
-            query_token_offset: u32::try_from(query_token_offset).map_err(|_| {
-                DeepSeekV4MetalError::Invalid("tiled HCA query offset exceeds u32".into())
-            })?,
-            chunk_start_position,
-            window: DEEPSEEK_V4_LOCAL_WINDOW as u32,
-            compression_ratio: compression_ratio as u32,
-            scale: 1.0 / (config.head_dim as f32).sqrt(),
-        },
-    );
+    enc.set_bytes(0, &args);
     enc.set_tensor(1, queries);
     enc.set_tensor(2, raw_cache);
     enc.set_tensor(3, raw_cache_before_chunk);
     enc.set_tensor(4, compressed.cache);
     enc.set_tensor(5, sinks);
     enc.set_tensor(6, output);
-    enc.set_threadgroup_memory(
-        0,
-        (2 * DEEPSEEK_V4_HCA_TILE_ROWS + 1) * std::mem::size_of::<f32>(),
-    );
+    enc.set_threadgroup_memory(0, threadgroup_bytes);
     enc.dispatch(
         MTLSize {
             width: query_count,
@@ -7422,7 +7596,7 @@ fn encode_tiled_dense_sink_attention_f16(
             depth: 1,
         },
         MTLSize {
-            width: DEEPSEEK_V4_HCA_TILE_ROWS,
+            width: threadgroup_width,
             height: 1,
             depth: 1,
         },
@@ -10033,7 +10207,7 @@ mod tests {
         eprintln!("deepseek_v4 synthetic_position_65663_sha256={hash}");
         assert_eq!(
             hash,
-            "1c0f5e0475314e693bfe0664b5454a2ece26d9a5913f9a5218cdf39da59582d4"
+            "92895a69787cc972880626ef391517236e4ee6d984c52113645d1d0e42824938"
         );
     }
 
@@ -10044,6 +10218,90 @@ mod tests {
         const TERMINAL_POSITION: u32 = START_POSITION + 1;
         const FORWARD_LIMIT: usize = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY;
         const TOKEN_ID: u32 = 35;
+        const LEGACY_LOGITS_SHA256: &str =
+            "4c54019668cb815036bd823ddee2c4156f481a48138b35896899d758184587be";
+        const ONLINE_LOGITS_SHA256: &str =
+            "c6a6075667623b0127d3b18383c5f4e11b136502ab53163d0d8b9edde3cb244c";
+
+        struct Evidence {
+            preterminal: DeepSeekV4WholeTokenProfile,
+            terminal: DeepSeekV4WholeTokenProfile,
+            logits: Vec<f32>,
+            logits_sha256: String,
+        }
+
+        fn vector_sha256(values: &[f32]) -> String {
+            let mut hasher = Sha256::new();
+            for value in values {
+                hasher.update(value.to_le_bytes());
+            }
+            format!("{:x}", hasher.finalize())
+        }
+
+        fn argmax(logits: &[f32]) -> usize {
+            logits
+                .iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
+                    if value > best.1 { (index, value) } else { best }
+                })
+                .0
+        }
+
+        fn logit_metrics(actual: &[f32], reference: &[f32]) -> (f64, f64) {
+            let mut dot = 0.0f64;
+            let mut actual_norm = 0.0f64;
+            let mut reference_norm = 0.0f64;
+            let mut squared_error = 0.0f64;
+            for (&actual, &reference) in actual.iter().zip(reference) {
+                assert!(actual.is_finite());
+                dot += f64::from(actual) * f64::from(reference);
+                actual_norm += f64::from(actual).powi(2);
+                reference_norm += f64::from(reference).powi(2);
+                squared_error += f64::from(actual - reference).powi(2);
+            }
+            (
+                dot / (actual_norm.sqrt() * reference_norm.sqrt()),
+                (squared_error / reference_norm).sqrt(),
+            )
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            residency: DeepSeekV4MetalResidency,
+            policy: DeepSeekV4HcaTestPolicy,
+        ) -> (DeepSeekV4MetalResidency, Evidence) {
+            let mut session = DeepSeekV4Session::new(ctx, residency)
+                .expect("construct terminal synthetic session");
+            session.attention.set_hca_test_policy(policy);
+            initialize_zero_synthetic_causal_state(&session);
+            session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
+                next_position: START_POSITION,
+            };
+            session
+                .committed_tokens
+                .extend(std::iter::repeat_n(TOKEN_ID, START_POSITION as usize));
+            let preterminal = session
+                .forward_token_whole_profiled(ctx, TOKEN_ID)
+                .expect("profile preterminal synthetic token");
+            assert_eq!(preterminal.position, START_POSITION);
+            let terminal = session
+                .forward_token_whole_profiled(ctx, TOKEN_ID)
+                .expect("profile terminal synthetic token");
+            assert_eq!(terminal.position, TERMINAL_POSITION);
+            assert_eq!(session.next_position(), TERMINAL_POSITION + 1);
+            let logits = session
+                .copy_logits_f32()
+                .expect("copy terminal synthetic logits");
+            assert!(logits.iter().all(|value| value.is_finite()));
+            let evidence = Evidence {
+                logits_sha256: vector_sha256(&logits),
+                logits,
+                preterminal,
+                terminal,
+            };
+            (session.residency, evidence)
+        }
 
         let model_path = std::env::var_os("DSV4_MODEL")
             .map(std::path::PathBuf::from)
@@ -10065,47 +10323,297 @@ mod tests {
         let residency = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
             .expect("realize terminal synthetic residency")
             .into_residency();
-        let mut session =
-            DeepSeekV4Session::new(&ctx, residency).expect("construct terminal synthetic session");
-        initialize_zero_synthetic_causal_state(&session);
-        session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
-            next_position: START_POSITION,
-        };
-        session
-            .committed_tokens
-            .extend(std::iter::repeat_n(TOKEN_ID, START_POSITION as usize));
+        let mut residency = residency;
+        let mut online_hash = None;
+        for packet in 0..2 {
+            let legacy_before;
+            (residency, legacy_before) =
+                execute(&ctx, residency, DeepSeekV4HcaTestPolicy::LegacyTiled);
+            let online;
+            (residency, online) = execute(&ctx, residency, DeepSeekV4HcaTestPolicy::Production);
+            let legacy_after;
+            (residency, legacy_after) =
+                execute(&ctx, residency, DeepSeekV4HcaTestPolicy::LegacyTiled);
+            for legacy in [&legacy_before, &legacy_after] {
+                assert_eq!(legacy.logits_sha256, LEGACY_LOGITS_SHA256);
+            }
+            match &online_hash {
+                Some(expected) => assert_eq!(&online.logits_sha256, expected),
+                None => online_hash = Some(online.logits_sha256.clone()),
+            }
+            assert_eq!(online.logits_sha256, ONLINE_LOGITS_SHA256);
+            let (cosine, relative_rms) = logit_metrics(&online.logits, &legacy_before.logits);
+            assert_eq!(argmax(&online.logits), argmax(&legacy_before.logits));
+            assert!(cosine >= 0.999_99, "terminal cosine {cosine}");
+            assert!(
+                relative_rms <= 0.005,
+                "terminal relative RMS {relative_rms}"
+            );
 
-        let cold_profile = session
-            .forward_token_whole_profiled(&ctx, TOKEN_ID)
-            .expect("profile preterminal synthetic token");
-        assert_eq!(cold_profile.position, START_POSITION);
-        let warm_profile = session
-            .forward_token_whole_profiled(&ctx, TOKEN_ID)
-            .expect("profile terminal synthetic token");
-        assert_eq!(warm_profile.position, TERMINAL_POSITION);
-        assert_eq!(session.next_position(), TERMINAL_POSITION + 1);
-        let logits = session
-            .copy_logits_f32()
-            .expect("copy terminal synthetic logits");
-        assert!(logits.iter().all(|value| value.is_finite()));
-        let mut hasher = Sha256::new();
-        for value in logits {
-            hasher.update(value.to_le_bytes());
+            let legacy_gpu_midpoint = (legacy_before.terminal.command_gpu_ms
+                + legacy_after.terminal.command_gpu_ms)
+                * 0.5;
+            let legacy_wall_midpoint = (legacy_before.terminal.forward_wall_ms
+                + legacy_after.terminal.forward_wall_ms)
+                * 0.5;
+            let legacy_outside_midpoint = (legacy_before.terminal.outside_gpu_ms()
+                + legacy_after.terminal.outside_gpu_ms())
+                * 0.5;
+            let gpu_savings = legacy_gpu_midpoint - online.terminal.command_gpu_ms;
+            let wall_savings = legacy_wall_midpoint - online.terminal.forward_wall_ms;
+            assert!(
+                gpu_savings >= 12.0,
+                "packet {packet} GPU savings {gpu_savings:.3} ms"
+            );
+            assert!(
+                wall_savings >= 9.0,
+                "packet {packet} wall savings {wall_savings:.3} ms"
+            );
+            assert!(
+                online.terminal.outside_gpu_ms() <= legacy_outside_midpoint + 1.0,
+                "packet {packet} outside-GPU regression"
+            );
+            eprintln!(
+                "deepseek_v4 online_hca_terminal packet={packet} legacy_before_preterminal_gpu_ms={:.3} legacy_before_preterminal_wall_ms={:.3} online_preterminal_gpu_ms={:.3} online_preterminal_wall_ms={:.3} legacy_after_preterminal_gpu_ms={:.3} legacy_after_preterminal_wall_ms={:.3} legacy_before_terminal_gpu_ms={:.3} online_terminal_gpu_ms={:.3} legacy_after_terminal_gpu_ms={:.3} gpu_savings_ms={gpu_savings:.3} legacy_before_terminal_wall_ms={:.3} online_terminal_wall_ms={:.3} legacy_after_terminal_wall_ms={:.3} wall_savings_ms={wall_savings:.3} legacy_outside_midpoint_ms={legacy_outside_midpoint:.3} online_outside_gpu_ms={:.3} argmax={} cosine={cosine:.9} rel_rms={relative_rms:.9} legacy_logits_sha256={} online_logits_sha256={}",
+                legacy_before.preterminal.command_gpu_ms,
+                legacy_before.preterminal.forward_wall_ms,
+                online.preterminal.command_gpu_ms,
+                online.preterminal.forward_wall_ms,
+                legacy_after.preterminal.command_gpu_ms,
+                legacy_after.preterminal.forward_wall_ms,
+                legacy_before.terminal.command_gpu_ms,
+                online.terminal.command_gpu_ms,
+                legacy_after.terminal.command_gpu_ms,
+                legacy_before.terminal.forward_wall_ms,
+                online.terminal.forward_wall_ms,
+                legacy_after.terminal.forward_wall_ms,
+                online.terminal.outside_gpu_ms(),
+                argmax(&online.logits),
+                legacy_before.logits_sha256,
+                online.logits_sha256,
+            );
         }
-        let hash = format!("{:x}", hasher.finalize());
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    #[ignore = "requires the local 95.93 GiB DS4 fixture and captures terminal decisions"]
+    fn online_hca_preserves_terminal_decisions_repeatably() {
+        const START_POSITION: u32 = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32 - 2;
+        const TERMINAL_POSITION: u32 = START_POSITION + 1;
+        const TOKEN_ID: u32 = 35;
+        const LEGACY_LOGITS_SHA256: &str =
+            "4c54019668cb815036bd823ddee2c4156f481a48138b35896899d758184587be";
+        const ONLINE_LOGITS_SHA256: &str =
+            "c6a6075667623b0127d3b18383c5f4e11b136502ab53163d0d8b9edde3cb244c";
+        const LEGACY_CAUSAL_SHA256: &str =
+            "359feb464d986d37f0556b88287582346075568119510fb4b97f000e8183122b";
+        const ONLINE_CAUSAL_SHA256: &str =
+            "adb621cb44f5ad957dc60568db9a346344d28995430518e0f9d641c7d7982317";
+
+        struct Evidence {
+            logits: Vec<f32>,
+            logits_sha256: String,
+            causal_digest: [u8; 32],
+            transcript: DeepSeekV4DecisionTranscript,
+        }
+
+        fn vector_sha256(values: &[f32]) -> String {
+            let mut hasher = Sha256::new();
+            for value in values {
+                hasher.update(value.to_le_bytes());
+            }
+            format!("{:x}", hasher.finalize())
+        }
+
+        fn digest_hex(digest: &[u8; 32]) -> String {
+            use std::fmt::Write as _;
+            let mut encoded = String::with_capacity(64);
+            for byte in digest {
+                write!(&mut encoded, "{byte:02x}").unwrap();
+            }
+            encoded
+        }
+
+        fn argmax(logits: &[f32]) -> usize {
+            logits
+                .iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
+                    if value > best.1 { (index, value) } else { best }
+                })
+                .0
+        }
+
+        fn logit_metrics(actual: &[f32], reference: &[f32]) -> (f64, f64) {
+            let mut dot = 0.0f64;
+            let mut actual_norm = 0.0f64;
+            let mut reference_norm = 0.0f64;
+            let mut squared_error = 0.0f64;
+            for (&actual, &reference) in actual.iter().zip(reference) {
+                assert!(actual.is_finite());
+                dot += f64::from(actual) * f64::from(reference);
+                actual_norm += f64::from(actual).powi(2);
+                reference_norm += f64::from(reference).powi(2);
+                squared_error += f64::from(actual - reference).powi(2);
+            }
+            (
+                dot / (actual_norm.sqrt() * reference_norm.sqrt()),
+                (squared_error / reference_norm).sqrt(),
+            )
+        }
+
+        fn decision_deltas(
+            actual: &DeepSeekV4DecisionTranscript,
+            reference: &DeepSeekV4DecisionTranscript,
+        ) -> (f32, f32, f32) {
+            assert_eq!(actual.position, reference.position);
+            assert_eq!(actual.layers.len(), reference.layers.len());
+            let mut max_score_delta = 0.0f32;
+            let mut max_route_weight_delta = 0.0f32;
+            let mut max_cutoff_margin_delta = 0.0f32;
+            for (actual, reference) in actual.layers.iter().zip(&reference.layers) {
+                assert_eq!(actual.layer, reference.layer);
+                assert_eq!(actual.route.expert_ids, reference.route.expert_ids);
+                for (&actual, &reference) in actual
+                    .route
+                    .normalized_scaled_weights
+                    .iter()
+                    .zip(&reference.route.normalized_scaled_weights)
+                {
+                    max_route_weight_delta = max_route_weight_delta.max((actual - reference).abs());
+                }
+                match (&actual.csa, &reference.csa) {
+                    (Some(actual), Some(reference)) => {
+                        assert_eq!(
+                            actual.cache_order_selected_ids,
+                            reference.cache_order_selected_ids
+                        );
+                        assert_eq!(actual.selected_count, reference.selected_count);
+                        assert_eq!(actual.selection_status, reference.selection_status);
+                        for (&actual, &reference) in
+                            actual.visible_scores.iter().zip(&reference.visible_scores)
+                        {
+                            max_score_delta = max_score_delta.max((actual - reference).abs());
+                        }
+                        max_cutoff_margin_delta = max_cutoff_margin_delta
+                            .max((actual.rank_512_margin - reference.rank_512_margin).abs());
+                    }
+                    (None, None) => {}
+                    _ => panic!("layer {} CSA decision shape changed", actual.layer),
+                }
+            }
+            (
+                max_score_delta,
+                max_route_weight_delta,
+                max_cutoff_margin_delta,
+            )
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            residency: DeepSeekV4MetalResidency,
+            policy: DeepSeekV4HcaTestPolicy,
+        ) -> (DeepSeekV4MetalResidency, Evidence) {
+            let mut session = DeepSeekV4Session::new_with_model_content_id(
+                ctx,
+                residency,
+                DeepSeekV4ModelContentId::new([0x10; 32]),
+            )
+            .expect("construct terminal decision session");
+            session.attention.set_hca_test_policy(policy);
+            initialize_zero_synthetic_causal_state(&session);
+            session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
+                next_position: START_POSITION,
+            };
+            session
+                .committed_tokens
+                .extend(std::iter::repeat_n(TOKEN_ID, START_POSITION as usize));
+            session
+                .forward_token(ctx, TOKEN_ID)
+                .expect("execute preterminal decision warmup");
+            session
+                .arm_decision_transcript(TERMINAL_POSITION)
+                .expect("arm terminal decision transcript");
+            session
+                .forward_token(ctx, TOKEN_ID)
+                .expect("execute terminal decision token");
+            let transcript = session
+                .take_decision_transcript()
+                .expect("take terminal decision transcript");
+            let logits = session
+                .copy_logits_f32()
+                .expect("copy terminal decision logits");
+            let causal_digest = *session
+                .capture_causal_snapshot()
+                .expect("capture terminal decision state")
+                .causal_digest();
+            let evidence = Evidence {
+                logits_sha256: vector_sha256(&logits),
+                logits,
+                causal_digest,
+                transcript,
+            };
+            (session.residency, evidence)
+        }
+
+        let model_path = std::env::var_os("DSV4_MODEL")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+            });
+        assert!(model_path.exists(), "missing DS4 model");
+        let ctx = MetalContext::new().expect("create Metal context");
+        let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(
+            &ctx,
+            &gguf,
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+        )
+        .expect("plan terminal decision session");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit terminal decision session");
+        let mut residency = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+            .expect("realize terminal decision residency")
+            .into_residency();
+
+        let legacy;
+        (residency, legacy) = execute(&ctx, residency, DeepSeekV4HcaTestPolicy::LegacyTiled);
+        let online_first;
+        (residency, online_first) = execute(&ctx, residency, DeepSeekV4HcaTestPolicy::Production);
+        let online_second;
+        (_, online_second) = execute(&ctx, residency, DeepSeekV4HcaTestPolicy::Production);
+
+        assert_eq!(legacy.logits_sha256, LEGACY_LOGITS_SHA256);
+        assert_eq!(online_first.logits_sha256, ONLINE_LOGITS_SHA256);
+        assert_eq!(online_second.logits_sha256, ONLINE_LOGITS_SHA256);
+        assert_eq!(digest_hex(&legacy.causal_digest), LEGACY_CAUSAL_SHA256);
         assert_eq!(
-            hash,
-            "4c54019668cb815036bd823ddee2c4156f481a48138b35896899d758184587be"
+            digest_hex(&online_first.causal_digest),
+            ONLINE_CAUSAL_SHA256
         );
+        assert_eq!(online_first.causal_digest, online_second.causal_digest);
+        assert_eq!(online_first.transcript, online_second.transcript);
+        let (cosine, relative_rms) = logit_metrics(&online_first.logits, &legacy.logits);
+        assert_eq!(argmax(&online_first.logits), argmax(&legacy.logits));
+        assert!(cosine >= 0.999_99, "terminal cosine {cosine}");
+        assert!(
+            relative_rms <= 0.005,
+            "terminal relative RMS {relative_rms}"
+        );
+        let (max_score_delta, max_route_weight_delta, max_cutoff_margin_delta) =
+            decision_deltas(&online_first.transcript, &legacy.transcript);
+
         eprintln!(
-            "deepseek_v4 terminal_start={START_POSITION} cold_gpu_ms={:.3} cold_wall_ms={:.3} cold_wait_residual_ms={:.3} terminal_position={TERMINAL_POSITION} warm_gpu_ms={:.3} warm_wall_ms={:.3} warm_wait_residual_ms={:.3} warm_outside_gpu_ms={:.3} logits_sha256={hash}",
-            cold_profile.command_gpu_ms,
-            cold_profile.forward_wall_ms,
-            cold_profile.wait_residual_ms(),
-            warm_profile.command_gpu_ms,
-            warm_profile.forward_wall_ms,
-            warm_profile.wait_residual_ms(),
-            warm_profile.outside_gpu_ms(),
+            "deepseek_v4 online_hca_terminal_decisions position={TERMINAL_POSITION} argmax={} cosine={cosine:.9} rel_rms={relative_rms:.9} max_csa_score_delta={max_score_delta:.9} max_route_weight_delta={max_route_weight_delta:.9} max_cutoff_margin_delta={max_cutoff_margin_delta:.9} legacy_logits_sha256={} online_logits_sha256={} legacy_causal_sha256={} online_causal_sha256={}",
+            argmax(&online_first.logits),
+            legacy.logits_sha256,
+            online_first.logits_sha256,
+            digest_hex(&legacy.causal_digest),
+            digest_hex(&online_first.causal_digest),
         );
     }
 
@@ -10157,6 +10665,7 @@ mod tests {
             residency: DeepSeekV4MetalResidency,
             score_policy: DeepSeekV4IndexerScoreTestPolicy,
             selector_policy: DeepSeekV4SelectorTestPolicy,
+            hca_policy: DeepSeekV4HcaTestPolicy,
             mode: RunMode,
         ) -> (DeepSeekV4MetalResidency, Evidence) {
             let mut session = DeepSeekV4Session::new_with_model_content_id(
@@ -10167,6 +10676,7 @@ mod tests {
             .expect("construct synthetic far-context session");
             session.sparse_csa.set_score_test_policy(score_policy);
             session.sparse_csa.set_selector_test_policy(selector_policy);
+            session.attention.set_hca_test_policy(hca_policy);
             initialize_zero_synthetic_causal_state(&session);
             session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
                 next_position: POSITION,
@@ -10251,6 +10761,7 @@ mod tests {
             residency,
             DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4SelectorTestPolicy::Production,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Timed,
         );
         let scalar_first;
@@ -10259,6 +10770,7 @@ mod tests {
             residency,
             DeepSeekV4IndexerScoreTestPolicy::ScalarOracle,
             DeepSeekV4SelectorTestPolicy::Production,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Timed,
         );
         let cooperative;
@@ -10267,6 +10779,7 @@ mod tests {
             residency,
             DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4SelectorTestPolicy::Production,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Timed,
         );
         let scalar_second;
@@ -10275,6 +10788,7 @@ mod tests {
             residency,
             DeepSeekV4IndexerScoreTestPolicy::ScalarOracle,
             DeepSeekV4SelectorTestPolicy::Production,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Timed,
         );
 
@@ -10305,6 +10819,7 @@ mod tests {
             residency,
             DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4SelectorTestPolicy::BitwiseOracle,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Timed,
         );
         let radix4;
@@ -10313,6 +10828,7 @@ mod tests {
             residency,
             DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4SelectorTestPolicy::Production,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Timed,
         );
         let bitwise_second;
@@ -10321,6 +10837,7 @@ mod tests {
             residency,
             DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4SelectorTestPolicy::BitwiseOracle,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Timed,
         );
         for evidence in [&bitwise_first, &radix4, &bitwise_second] {
@@ -10349,6 +10866,7 @@ mod tests {
             residency,
             DeepSeekV4IndexerScoreTestPolicy::ScalarOracle,
             DeepSeekV4SelectorTestPolicy::BitwiseOracle,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Transcript,
         );
         let cooperative_transcript;
@@ -10357,6 +10875,7 @@ mod tests {
             residency,
             DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4SelectorTestPolicy::Production,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Transcript,
         );
         assert_eq!(scalar_transcript.logits_sha256, PINNED_LOGITS_SHA256);
@@ -10387,6 +10906,287 @@ mod tests {
             bitwise_second.wall_ms.unwrap(),
             radix4.logits_sha256,
             digest_hex(&cooperative_transcript.causal_digest.unwrap()),
+        );
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    #[ignore = "requires the local 95.93 GiB DS4 fixture and executes a focused HCA differential"]
+    fn online_hca_preserves_real_weight_boundary_decisions() {
+        const POSITION: u32 = 65_663;
+        const FORWARD_LIMIT: usize = POSITION as usize + 1;
+        const TOKEN_ID: u32 = 35;
+        const LEGACY_LOGITS_SHA256: &str =
+            "1c0f5e0475314e693bfe0664b5454a2ece26d9a5913f9a5218cdf39da59582d4";
+        const LEGACY_CAUSAL_SHA256: &str =
+            "03f15887db83e4baf0ad5ba66f95b3e2a7fe461858d92aebe9f0b3009f83254e";
+        const ONLINE_LOGITS_SHA256: &str =
+            "92895a69787cc972880626ef391517236e4ee6d984c52113645d1d0e42824938";
+        const ONLINE_CAUSAL_SHA256: &str =
+            "1de21e0e3bfb6e16fa847879b298af85d21997ae9d992e13166116ea42b94c76";
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum RunMode {
+            Timed,
+            Transcript,
+        }
+
+        struct Evidence {
+            logits: Vec<f32>,
+            logits_sha256: String,
+            command_gpu_ms: Option<f64>,
+            wall_ms: Option<f64>,
+            causal_digest: Option<[u8; 32]>,
+            transcript: Option<DeepSeekV4DecisionTranscript>,
+        }
+
+        fn vector_sha256(values: &[f32]) -> String {
+            let mut hasher = Sha256::new();
+            for value in values {
+                hasher.update(value.to_le_bytes());
+            }
+            format!("{:x}", hasher.finalize())
+        }
+
+        fn digest_hex(digest: &[u8; 32]) -> String {
+            use std::fmt::Write as _;
+            let mut encoded = String::with_capacity(64);
+            for byte in digest {
+                write!(&mut encoded, "{byte:02x}").unwrap();
+            }
+            encoded
+        }
+
+        fn argmax(logits: &[f32]) -> usize {
+            logits
+                .iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |best, (index, &value)| {
+                    if value > best.1 { (index, value) } else { best }
+                })
+                .0
+        }
+
+        fn assert_logit_envelope(actual: &[f32], reference: &[f32]) -> (f64, f64) {
+            assert_eq!(actual.len(), reference.len());
+            let mut dot = 0.0f64;
+            let mut actual_norm = 0.0f64;
+            let mut reference_norm = 0.0f64;
+            let mut squared_error = 0.0f64;
+            for (&actual, &reference) in actual.iter().zip(reference) {
+                assert!(actual.is_finite());
+                dot += f64::from(actual) * f64::from(reference);
+                actual_norm += f64::from(actual).powi(2);
+                reference_norm += f64::from(reference).powi(2);
+                squared_error += f64::from(actual - reference).powi(2);
+            }
+            let cosine = dot / (actual_norm.sqrt() * reference_norm.sqrt());
+            let relative_rms = (squared_error / reference_norm).sqrt();
+            assert_eq!(argmax(actual), argmax(reference));
+            assert!(cosine >= 0.999_99, "logit cosine {cosine}");
+            assert!(relative_rms <= 0.005, "logit relative RMS {relative_rms}");
+            (cosine, relative_rms)
+        }
+
+        fn assert_consumed_decisions(
+            actual: &DeepSeekV4DecisionTranscript,
+            reference: &DeepSeekV4DecisionTranscript,
+        ) {
+            assert_eq!(actual.position, reference.position);
+            assert_eq!(actual.layers.len(), reference.layers.len());
+            for (actual, reference) in actual.layers.iter().zip(&reference.layers) {
+                assert_eq!(actual.layer, reference.layer);
+                assert_eq!(actual.route.expert_ids, reference.route.expert_ids);
+                match (&actual.csa, &reference.csa) {
+                    (Some(actual), Some(reference)) => {
+                        assert_eq!(
+                            actual.cache_order_selected_ids,
+                            reference.cache_order_selected_ids
+                        );
+                        assert_eq!(actual.selected_count, reference.selected_count);
+                        assert_eq!(actual.selection_status, reference.selection_status);
+                    }
+                    (None, None) => {}
+                    _ => panic!("layer {} CSA decision shape changed", actual.layer),
+                }
+            }
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            residency: DeepSeekV4MetalResidency,
+            policy: DeepSeekV4HcaTestPolicy,
+            mode: RunMode,
+        ) -> (DeepSeekV4MetalResidency, Evidence) {
+            let mut session = DeepSeekV4Session::new_with_model_content_id(
+                ctx,
+                residency,
+                DeepSeekV4ModelContentId::new([0x65; 32]),
+            )
+            .expect("construct online HCA boundary session");
+            session.attention.set_hca_test_policy(policy);
+            initialize_zero_synthetic_causal_state(&session);
+            session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
+                next_position: POSITION,
+            };
+            session
+                .committed_tokens
+                .extend(std::iter::repeat_n(TOKEN_ID, POSITION as usize));
+
+            let (command_gpu_ms, wall_ms, transcript) = match mode {
+                RunMode::Timed => {
+                    let profile = session
+                        .forward_token_whole_profiled(ctx, TOKEN_ID)
+                        .expect("profile online HCA boundary token");
+                    (
+                        Some(profile.command_gpu_ms),
+                        Some(profile.forward_wall_ms),
+                        None,
+                    )
+                }
+                RunMode::Transcript => {
+                    session
+                        .arm_decision_transcript(POSITION)
+                        .expect("arm online HCA boundary transcript");
+                    session
+                        .forward_token(ctx, TOKEN_ID)
+                        .expect("execute online HCA boundary transcript");
+                    (
+                        None,
+                        None,
+                        Some(
+                            session
+                                .take_decision_transcript()
+                                .expect("take online HCA boundary transcript"),
+                        ),
+                    )
+                }
+            };
+            let logits = session
+                .copy_logits_f32()
+                .expect("copy online HCA boundary logits");
+            let causal_digest = if mode == RunMode::Transcript {
+                Some(
+                    *session
+                        .capture_causal_snapshot()
+                        .expect("capture online HCA boundary causal state")
+                        .causal_digest(),
+                )
+            } else {
+                None
+            };
+            let evidence = Evidence {
+                logits_sha256: vector_sha256(&logits),
+                logits,
+                command_gpu_ms,
+                wall_ms,
+                causal_digest,
+                transcript,
+            };
+            (session.residency, evidence)
+        }
+
+        let model_path = std::env::var_os("DSV4_MODEL")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+            });
+        assert!(model_path.exists(), "missing DS4 model");
+        let ctx = MetalContext::new().expect("create Metal context");
+        let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
+            .expect("plan online HCA boundary session");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit online HCA boundary session");
+        let mut residency = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+            .expect("realize online HCA boundary residency")
+            .into_residency();
+
+        (residency, _) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
+            RunMode::Timed,
+        );
+        let legacy_first;
+        (residency, legacy_first) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
+            RunMode::Timed,
+        );
+        let online;
+        (residency, online) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4HcaTestPolicy::Production,
+            RunMode::Timed,
+        );
+        let legacy_second;
+        (residency, legacy_second) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
+            RunMode::Timed,
+        );
+        for legacy in [&legacy_first, &legacy_second] {
+            assert_eq!(legacy.logits_sha256, LEGACY_LOGITS_SHA256);
+        }
+        let (cosine, relative_rms) = assert_logit_envelope(&online.logits, &legacy_first.logits);
+        let legacy_gpu_midpoint =
+            (legacy_first.command_gpu_ms.unwrap() + legacy_second.command_gpu_ms.unwrap()) * 0.5;
+        let legacy_wall_midpoint =
+            (legacy_first.wall_ms.unwrap() + legacy_second.wall_ms.unwrap()) * 0.5;
+        let gpu_savings = legacy_gpu_midpoint - online.command_gpu_ms.unwrap();
+        let wall_savings = legacy_wall_midpoint - online.wall_ms.unwrap();
+
+        let legacy_transcript;
+        (residency, legacy_transcript) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4HcaTestPolicy::LegacyTiled,
+            RunMode::Transcript,
+        );
+        let online_transcript;
+        (_, online_transcript) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4HcaTestPolicy::Production,
+            RunMode::Transcript,
+        );
+        assert_eq!(legacy_transcript.logits_sha256, LEGACY_LOGITS_SHA256);
+        assert_eq!(
+            digest_hex(&legacy_transcript.causal_digest.unwrap()),
+            LEGACY_CAUSAL_SHA256
+        );
+        assert_eq!(online_transcript.logits_sha256, online.logits_sha256);
+        assert_eq!(online.logits_sha256, ONLINE_LOGITS_SHA256);
+        assert_eq!(
+            digest_hex(&online_transcript.causal_digest.unwrap()),
+            ONLINE_CAUSAL_SHA256
+        );
+        assert_logit_envelope(&online_transcript.logits, &legacy_transcript.logits);
+        assert_consumed_decisions(
+            online_transcript.transcript.as_ref().unwrap(),
+            legacy_transcript.transcript.as_ref().unwrap(),
+        );
+
+        eprintln!(
+            "deepseek_v4 online_hca_boundary position={POSITION} legacy_before_gpu_ms={:.3} online_gpu_ms={:.3} legacy_after_gpu_ms={:.3} gpu_savings_ms={gpu_savings:.3} legacy_before_wall_ms={:.3} online_wall_ms={:.3} legacy_after_wall_ms={:.3} wall_savings_ms={wall_savings:.3} argmax={} cosine={cosine:.9} rel_rms={relative_rms:.9} legacy_logits_sha256={} online_logits_sha256={} legacy_causal_sha256={} online_causal_sha256={}",
+            legacy_first.command_gpu_ms.unwrap(),
+            online.command_gpu_ms.unwrap(),
+            legacy_second.command_gpu_ms.unwrap(),
+            legacy_first.wall_ms.unwrap(),
+            online.wall_ms.unwrap(),
+            legacy_second.wall_ms.unwrap(),
+            argmax(&online.logits),
+            legacy_first.logits_sha256,
+            online.logits_sha256,
+            digest_hex(&legacy_transcript.causal_digest.unwrap()),
+            digest_hex(&online_transcript.causal_digest.unwrap()),
         );
     }
 
@@ -13604,6 +14404,47 @@ mod tests {
     }
 
     #[test]
+    fn online_hca_geometry_fails_closed_before_encoding() {
+        let config = deepseek_v4_session_attention_config();
+        validate_deepseek_v4_online_hca_request_geometry(config, 128, 1, 0, 1).unwrap();
+        validate_deepseek_v4_online_hca_launch_geometry(
+            DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+        )
+        .unwrap();
+
+        let width_error = validate_deepseek_v4_online_hca_launch_geometry(
+            16,
+            DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+        )
+        .unwrap_err();
+        assert!(width_error.to_string().contains("SIMD width 32"));
+        let thread_error = validate_deepseek_v4_online_hca_launch_geometry(
+            DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            DEEPSEEK_V4_ONLINE_HCA_THREADS - 1,
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+        )
+        .unwrap_err();
+        assert!(thread_error.to_string().contains("max 31"));
+        let memory_error = validate_deepseek_v4_online_hca_launch_geometry(
+            DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES - 1,
+        )
+        .unwrap_err();
+        assert!(memory_error.to_string().contains("device allows 1023"));
+
+        let non_singleton =
+            validate_deepseek_v4_online_hca_request_geometry(config, 128, 2, 0, 2).unwrap_err();
+        assert!(non_singleton.to_string().contains("singleton query"));
+        let offset =
+            validate_deepseek_v4_online_hca_request_geometry(config, 128, 2, 1, 1).unwrap_err();
+        assert!(offset.to_string().contains("singleton query"));
+    }
+
+    #[test]
     fn tiled_hca_is_bit_identical_to_legacy_through_512_rows() {
         let Some(ctx) = metal_context() else {
             return;
@@ -13861,6 +14702,246 @@ mod tests {
                 &read_f32(&output),
                 &expected,
                 8e-5,
+            );
+        }
+    }
+
+    #[test]
+    fn online_hca_matches_legacy_envelope_at_structural_boundaries() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const HEAD_DIM: usize = 512;
+        const CAPACITY: usize = 8_192;
+
+        fn assert_envelope(label: &str, actual: &[f32], reference: &[f32]) {
+            assert_eq!(actual.len(), reference.len());
+            let mut dot = 0.0f64;
+            let mut actual_norm = 0.0f64;
+            let mut reference_norm = 0.0f64;
+            let mut squared_error = 0.0f64;
+            let mut max_scaled_error = 0.0f64;
+            for (&actual, &reference) in actual.iter().zip(reference) {
+                assert!(actual.is_finite(), "{label} produced nonfinite output");
+                dot += f64::from(actual) * f64::from(reference);
+                actual_norm += f64::from(actual).powi(2);
+                reference_norm += f64::from(reference).powi(2);
+                squared_error += f64::from(actual - reference).powi(2);
+                max_scaled_error = max_scaled_error.max(f64::from(
+                    (actual - reference).abs() / reference.abs().max(1.0),
+                ));
+            }
+            let relative_rms = (squared_error / reference_norm).sqrt();
+            let cosine = dot / (actual_norm.sqrt() * reference_norm.sqrt());
+            eprintln!(
+                "deepseek_v4 {label} cosine={cosine:.9} rel_rms={relative_rms:.9} max_scaled={max_scaled_error:.9}"
+            );
+            assert!(max_scaled_error <= 8e-5, "{label} scaled error");
+            assert!(relative_rms <= 1e-3, "{label} relative RMS");
+            assert!(cosine >= 0.999_999, "{label} cosine");
+        }
+
+        let config = deepseek_v4_session_attention_config();
+        assert_eq!((config.head_count, config.head_dim), (HEADS, HEAD_DIM));
+        let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
+        let queries = (0..HEADS * HEAD_DIM)
+            .map(|index| {
+                let head = index / HEAD_DIM;
+                let dimension = index % HEAD_DIM;
+                0.024 + head as f32 * 0.00002 - (dimension % 29) as f32 * 0.0007
+            })
+            .collect::<Vec<_>>();
+        let head_zero_query = &queries[..HEAD_DIM];
+        let mut compressed = (0..CAPACITY * HEAD_DIM)
+            .map(|index| {
+                let row = index / HEAD_DIM;
+                let dimension = index % HEAD_DIM;
+                let tag = (row * 41 + dimension * 13 + row / 7) % 139;
+                round_f16((tag as f32 - 69.0) * 0.0011)
+            })
+            .collect::<Vec<_>>();
+        for (row, strength) in [
+            (511usize, 64.0f32),
+            (512, 64.01),
+            (526, 96.0),
+            (527, 96.01),
+            (894, 128.0),
+            (895, 127.99),
+            (896, 128.01),
+            (2_047, 160.0),
+            (8_190, 192.0),
+            (8_191, 192.01),
+        ] {
+            for dimension in 0..HEAD_DIM {
+                compressed[row * HEAD_DIM + dimension] =
+                    round_f16(head_zero_query[dimension] * strength);
+            }
+        }
+        let compressed_bits = compressed
+            .iter()
+            .map(|value| half::f16::from_f32(*value).to_bits())
+            .collect::<Vec<_>>();
+        let compressed_cache = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&compressed_bits),
+            vec![HEAD_DIM as u64, CAPACITY as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let query_tensor = offset_f32(&ctx, &queries, vec![(HEADS * HEAD_DIM) as u64, 1]);
+        let mut sink_values = (0..HEADS)
+            .map(|head| -0.41 + head as f32 * 0.002)
+            .collect::<Vec<_>>();
+        sink_values[HEADS - 1] = 4.0;
+        let sinks = offset_f32(&ctx, &sink_values, vec![HEADS as u64]);
+
+        for count in [512usize, 513, 527, 528, 895, 896, 897, 2_048, 8_191, 8_192] {
+            let position = count * 128 - 1;
+            let raw_start = position + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
+            let mut preserved_raw = vec![0.0f32; DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM];
+            let mut current_raw = vec![0.0f32; DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM];
+            let mut chronological_raw = Vec::with_capacity(DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM);
+            for logical_position in raw_start..=position {
+                let row = (0..HEAD_DIM)
+                    .map(|dimension| {
+                        let tag =
+                            (logical_position * 17 + dimension * 5 + logical_position / 11) % 127;
+                        round_f16((tag as f32 - 63.0) * 0.0009)
+                    })
+                    .collect::<Vec<_>>();
+                chronological_raw.extend_from_slice(&row);
+                let slot = logical_position % DEEPSEEK_V4_LOCAL_WINDOW;
+                let range = slot * HEAD_DIM..(slot + 1) * HEAD_DIM;
+                current_raw[range.clone()].copy_from_slice(&row);
+                if logical_position < position {
+                    preserved_raw[range].copy_from_slice(&row);
+                } else {
+                    for (dimension, value) in preserved_raw[range].iter_mut().enumerate() {
+                        let tag = (slot * 31 + dimension * 7 + count / 3) % 131;
+                        *value = round_f16((tag as f32 - 65.0) * 0.0013);
+                    }
+                }
+            }
+            let expected_head_zero = shared_kv_attention(
+                head_zero_query,
+                1,
+                HEAD_DIM,
+                &chronological_raw,
+                &compressed[..count * HEAD_DIM],
+                None,
+                &sink_values[..1],
+            )
+            .unwrap();
+            let prior_head_zero = shared_kv_attention(
+                head_zero_query,
+                1,
+                HEAD_DIM,
+                &chronological_raw,
+                &compressed[..(count - 1) * HEAD_DIM],
+                None,
+                &sink_values[..1],
+            )
+            .unwrap();
+            assert!(
+                expected_head_zero
+                    .iter()
+                    .zip(&prior_head_zero)
+                    .any(|(current, prior)| (current - prior).abs() > 1e-3),
+                "{count}-row fixture does not expose its final HCA row"
+            );
+            let to_f16_tensor = |values: &[f32], label: &str| {
+                let bits = values
+                    .iter()
+                    .map(|value| half::f16::from_f32(*value).to_bits())
+                    .collect::<Vec<_>>();
+                MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&bits),
+                    vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+                    GgmlType::F16,
+                )
+                .unwrap_or_else(|error| panic!("allocate {label}: {error}"))
+            };
+            let current_raw = to_f16_tensor(&current_raw, "current raw cache");
+            let preserved_raw = to_f16_tensor(&preserved_raw, "preserved raw cache");
+            let legacy = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
+            let online = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
+            let online_repeat =
+                MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
+            let rows = DeepSeekV4PublishedRows {
+                cache: &compressed_cache,
+                count,
+                capacity_rows: CAPACITY,
+            };
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_tiled_dense_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &query_tensor,
+                &current_raw,
+                &preserved_raw,
+                rows,
+                &sinks,
+                &legacy,
+                position as u32,
+                0,
+                1,
+                128,
+                config,
+            )
+            .unwrap();
+            for output in [&online, &online_repeat] {
+                encode_online_dense_sink_attention_f16(
+                    &ctx,
+                    &encoder,
+                    &query_tensor,
+                    &current_raw,
+                    &preserved_raw,
+                    rows,
+                    &sinks,
+                    output,
+                    position as u32,
+                    0,
+                    1,
+                    128,
+                    config,
+                )
+                .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "{count}-row online HCA command failed: {:?}",
+                command.error()
+            );
+            let legacy = read_f32(&legacy);
+            let online = read_f32(&online);
+            assert_eq!(
+                online
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                read_f32(&online_repeat)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{count}-row online HCA is not bit-stable"
+            );
+            assert_close(
+                &format!("{count}-row legacy HCA head zero"),
+                &legacy[..HEAD_DIM],
+                &expected_head_zero,
+                8e-5,
+            );
+            assert_envelope(&format!("online HCA rows={count}"), &online, &legacy);
+            assert_envelope(
+                &format!("online HCA CPU head zero rows={count}"),
+                &online[..HEAD_DIM],
+                &expected_head_zero,
             );
         }
     }
@@ -16487,6 +17568,18 @@ mod tests {
             (median, p95)
         }
 
+        fn profile_arm<F>(ctx: &MetalContext, encode: F) -> (Vec<f64>, f64, f64)
+        where
+            F: Fn(&KernelEncoder) -> Result<(), DeepSeekV4MetalError> + Copy,
+        {
+            for _ in 0..5 {
+                let _ = timed_gpu(ctx, encode);
+            }
+            let samples = (0..20).map(|_| timed_gpu(ctx, encode)).collect::<Vec<_>>();
+            let (median, p95) = median_and_p95(samples.clone());
+            (samples, median, p95)
+        }
+
         let config = deepseek_v4_session_attention_config();
         assert_eq!((config.head_count, config.head_dim), (HEADS, HEAD_DIM));
         let query_values = (0..HEADS * HEAD_DIM)
@@ -16543,10 +17636,12 @@ mod tests {
         );
         let output = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1])
             .expect("allocate HCA profile output");
+        let online_output = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1])
+            .expect("allocate online HCA profile output");
 
         for count in [513usize, 2_048, CAPACITY] {
             let position = u32::try_from(count * 128 - 1).unwrap();
-            let encode = |encoder: &KernelEncoder| {
+            let legacy = |encoder: &KernelEncoder| {
                 encode_tiled_dense_sink_attention_f16(
                     &ctx,
                     encoder,
@@ -16567,15 +17662,34 @@ mod tests {
                     config,
                 )
             };
-            for _ in 0..5 {
-                let _ = timed_gpu(&ctx, encode);
-            }
-            let samples = (0..20).map(|_| timed_gpu(&ctx, encode)).collect::<Vec<_>>();
-            let (median_ms, p95_ms) = median_and_p95(samples.clone());
+            let online = |encoder: &KernelEncoder| {
+                encode_online_dense_sink_attention_f16(
+                    &ctx,
+                    encoder,
+                    &queries,
+                    &raw_cache,
+                    &preserved_raw_cache,
+                    DeepSeekV4PublishedRows {
+                        cache: &compressed_cache,
+                        count,
+                        capacity_rows: CAPACITY,
+                    },
+                    &sinks,
+                    &online_output,
+                    position,
+                    0,
+                    1,
+                    128,
+                    config,
+                )
+            };
+            let (before_samples, before_ms, before_p95_ms) = profile_arm(&ctx, legacy);
+            let (online_samples, online_ms, online_p95_ms) = profile_arm(&ctx, online);
+            let (after_samples, after_ms, after_p95_ms) = profile_arm(&ctx, legacy);
             let output_values = read_f32(&output);
             assert!(output_values.iter().all(|value| value.is_finite()));
             let mut hasher = Sha256::new();
-            for value in output_values {
+            for value in &output_values {
                 hasher.update(value.to_le_bytes());
             }
             let output_hash = format!("{:x}", hasher.finalize());
@@ -16586,11 +17700,45 @@ mod tests {
                 _ => unreachable!(),
             };
             assert_eq!(output_hash, expected_hash, "{count}-row HCA output drift");
+            let online_values = read_f32(&online_output);
+            assert!(online_values.iter().all(|value| value.is_finite()));
+            let mut online_hasher = Sha256::new();
+            let mut dot = 0.0f64;
+            let mut online_norm = 0.0f64;
+            let mut reference_norm = 0.0f64;
+            let mut squared_error = 0.0f64;
+            let mut max_scaled_error = 0.0f64;
+            for (&actual, &reference) in online_values.iter().zip(&output_values) {
+                online_hasher.update(actual.to_le_bytes());
+                dot += f64::from(actual) * f64::from(reference);
+                online_norm += f64::from(actual).powi(2);
+                reference_norm += f64::from(reference).powi(2);
+                squared_error += f64::from(actual - reference).powi(2);
+                max_scaled_error = max_scaled_error.max(f64::from(
+                    (actual - reference).abs() / reference.abs().max(1.0),
+                ));
+            }
+            let online_hash = format!("{:x}", online_hasher.finalize());
+            let cosine = dot / (online_norm.sqrt() * reference_norm.sqrt());
+            let relative_rms = (squared_error / reference_norm).sqrt();
+            let baseline_midpoint_ms = (before_ms + after_ms) * 0.5;
+            let saving_ms = baseline_midpoint_ms - online_ms;
             eprintln!(
-                "deepseek_v4 tiled_hca_profile rows={count} token_equivalent={} median_ms={median_ms:.3} p95_ms={p95_ms:.3} projected_20_hca_ms={:.3} output_sha256={output_hash} samples_ms={samples:?}",
+                "deepseek_v4 tiled_hca_profile rows={count} token_equivalent={} legacy_before_ms={before_ms:.3} legacy_before_p95_ms={before_p95_ms:.3} online_ms={online_ms:.3} online_p95_ms={online_p95_ms:.3} legacy_after_ms={after_ms:.3} legacy_after_p95_ms={after_p95_ms:.3} saving_ms={saving_ms:.3} online_cosine={cosine:.9} online_rel_rms={relative_rms:.9} online_max_scaled={max_scaled_error:.9} legacy_sha256={output_hash} online_sha256={online_hash} legacy_before_samples_ms={before_samples:?} online_samples_ms={online_samples:?} legacy_after_samples_ms={after_samples:?}",
                 count * 128,
-                median_ms * 20.0,
             );
+            assert!(max_scaled_error <= 8e-5, "{count}-row scaled error");
+            assert!(relative_rms <= 1e-3, "{count}-row relative RMS");
+            assert!(cosine >= 0.999_999, "{count}-row cosine");
+            match count {
+                513 => assert!(online_ms <= baseline_midpoint_ms + 0.05),
+                2_048 => assert!(saving_ms >= 0.20),
+                CAPACITY => {
+                    assert!(saving_ms >= 1.50);
+                    assert!(online_p95_ms < before_ms.min(after_ms));
+                }
+                _ => unreachable!(),
+            }
         }
     }
 

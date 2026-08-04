@@ -6,6 +6,59 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 Online Singleton HCA GO
+
+Status: promoted `GO` for singleton HCA above 512 compressed rows. Base is the
+terminal-attribution checkpoint `5826769`. Packed HCA retains the exact legacy
+tiled kernel; the legacy singleton schedule remains an executable differential.
+No persistent scratch, cache-layout, memory-plan, or snapshot-ABI change.
+
+- One 32-lane simdgroup owns each query/head. Its lanes retain F32 query and
+  output slices, stage one 512-value F16 shared-KV row in 1 KiB of threadgroup
+  memory, and use that row for both the QK reduction and online value update.
+  The sink initializes `(max, denominator, output)` as a zero-valued pseudo-row;
+  raw rows remain chronological and precede dense compressed rows.
+- Production-width old/online/old medians are 0.732/0.418/0.777 ms at 513 rows,
+  1.721/0.899/1.435 at 2,048, and 5.258/3.410/5.256 at 8,192. Terminal online
+  p95 is 3.413 ms. The 1.848 ms/layer terminal saving clears the frozen
+  1.50 ms gate; isolated 20-layer HCA falls from about 105.2 to 68.2 ms/token.
+- Counts 512, 513, 527/528, 895/896/897, 2,048, and 8,191/8,192 cover distinct
+  preserved/current raw rings, sink dominance, near-equal scores, early/late
+  maxima, and newest-row visibility. All outputs are finite and repeat
+  bit-for-bit. Worst production-width legacy-relative cosine is 0.999999998,
+  relative RMS 0.000058730, and scaled maximum error 0.000001041, inside the
+  preregistered `0.999999 / 0.001 / 0.00008` envelope.
+- At the first tiled boundary, real-weight legacy/online/legacy command-GPU is
+  57.804/55.215/57.629 ms and wall is 61.119/59.233/61.326. The online schedule
+  preserves argmax 7,249, every consumed CSA/MoE ID and status, and logits at
+  cosine 1.0 / relative RMS 2.28e-7. Online logits pin to
+  `92895a69787cc972880626ef391517236e4ee6d984c52113645d1d0e42824938`;
+  causal state pins to
+  `1de21e0e3bfb6e16fa847879b298af85d21997ae9d992e13166116ea42b94c76`.
+- Four complete warm terminal legacy/online/legacy packets measure command-GPU
+  233.992/211.168/233.432, 232.863/211.680/236.064,
+  233.806/210.081/235.093, and 235.090/211.433/235.105 ms. Wall packets are
+  235.409/212.286/234.632, 233.967/212.862/237.128,
+  235.305/211.244/236.196, and 236.205/212.491/236.257 ms. Midpoint savings are
+  22.545-24.368 ms GPU and 22.686-24.506 ms wall. Online outside-GPU time is
+  1.058-1.182 ms versus legacy midpoints 1.084-1.308 ms. Every packet clears the
+  preregistered 12/9 ms gates without consuming first-touch timings.
+- Two terminal online transcripts are bit-identical. Against legacy they retain
+  every consumed CSA cache-order ID, MoE expert ID, and status plus argmax 201;
+  maximum CSA-score, route-weight, and cutoff-margin deltas are
+  2.861e-6, 6.11e-7, and zero. Terminal logits pin to
+  `c6a6075667623b0127d3b18383c5f4e11b136502ab53163d0d8b9edde3cb244c`
+  at cosine 1.0 / relative RMS 3.26e-7; causal state pins to
+  `adb621cb44f5ad957dc60568db9a346344d28995430518e0f9d641c7d7982317`.
+
+Decision: retain the simple no-split online kernel and defer the higher-complexity
+heads8/rows16 split-K design. Warm terminal decode is now about 210-213 ms, or
+4.70-4.73 token/s. The unchanged 93.4 ms terminal CSA subtotal again exceeds
+the 68.2 ms HCA subtotal, so packed/FP4 Lightning scoring becomes the primary
+far-context lane. GPU-resident deterministic packed routing and grouped MXFP4
+down remain the independent TTFT lane. Review session:
+`019fc50a-a944-7c60-9ac8-8083aad4b983`.
+
 ## 2026-08-04 - DeepSeek V4 Terminal/HCA Attribution and Exact-Reuse KILL
 
 Status: terminal attribution `GO`; bounded `KILL` for the exact tiled-HCA

@@ -1194,8 +1194,10 @@ sparse suffix always has 128 raw plus 512 selected rows and uses the full
 lanes also write output. HCA queries through 512 compressed rows retain the
 cooperative reduction. Above 512, the packed scheduler keeps any cooperative
 prefix and dispatches only the suffix from the first 513-row query to a
-512-thread tiled two-pass kernel. The suffix retains the original chunk start so
-future raw-ring writes cannot leak into an earlier query.
+512-thread tiled two-pass kernel. Singleton HCA above 512 instead uses the
+promoted 32-lane online kernel; no packed caller enters that schedule. The packed
+suffix retains the original chunk start so future raw-ring writes cannot leak
+into an earlier query.
 
 Intermediate teacher-forced chunks use the typed `advance_tokens` transition.
 It executes every causal layer state but omits final HC collapse, output norm,
@@ -1319,6 +1321,38 @@ combining both preserve every named output bit but save only 0.978, 1.191, and
 candidate changes the schedule materially through online softmax/value tiling
 under an explicit numerical envelope; the gate is not weakened and pair-four is
 not a mechanical follow-up.
+
+The promoted singleton schedule assigns one 32-lane simdgroup to every head.
+Each lane retains four F32 query/output vectors while the group stages one
+512-value F16 shared-KV row in 1 KiB of threadgroup memory, computes its QK
+reduction, and immediately updates F32 online-softmax/value state. The sink is
+the initial zero-valued pseudo-row; chronological raw rows still precede dense
+compressed rows. This reduces three logical cache traversals to one without a
+split reducer, persistent scratch, cache-layout change, or snapshot-ABI change.
+Packed multi-query HCA remains on the exact tiled schedule.
+
+At 513/2,048/8,192 rows, old/online/old production-width medians are
+0.732/0.418/0.777, 1.721/0.899/1.435, and 5.258/3.410/5.256 ms/layer. Terminal
+online p95 is 3.413 ms; the 1.848 ms/layer midpoint saving clears the frozen
+1.50 ms gate and reduces isolated 20-layer HCA from about 105.2 to 68.2 ms.
+Ten structural boundaries cover sink dominance, near-equal and moving maxima,
+wrapped/distinct raw buffers, and newest-row visibility. Worst production-width
+legacy-relative cosine is 0.999999998, relative RMS 5.873e-5, and scaled maximum
+error 1.041e-6; repeats are bit-identical.
+
+The real-weight position-65,663 transcript preserves every consumed CSA/MoE ID
+and status plus argmax 7,249 at logit cosine 1.0 and relative RMS 2.28e-7. Two
+terminal campaigns comprising four legacy/online/legacy packets save
+22.5-24.5 ms in command-GPU and wall time, moving warm inference from 233-237
+to 210-213 ms, about 4.70-4.73 token/s, without an outside-GPU regression. Two
+terminal online transcripts are exact
+repeats and preserve every legacy consumed ID/status plus argmax 201; maximum
+CSA score, route-weight, and cutoff-margin deltas are 2.861e-6, 6.11e-7, and
+zero. The online terminal logit and causal pins are
+`c6a6075667623b0127d3b18383c5f4e11b136502ab53163d0d8b9edde3cb244c`
+and `adb621cb44f5ad957dc60568db9a346344d28995430518e0f9d641c7d7982317`.
+CSA's unchanged 93.4 ms subtotal therefore leads online HCA's 68.2 ms subtotal;
+the higher-complexity heads8/rows16 split-K HCA design remains deferred.
 
 The retained legacy selected-attention differential still measures 43.36 ms at
 the 128-raw-plus-512-compressed shape. Singleton dense attention had the same
@@ -1618,9 +1652,10 @@ results close sub-threshold short-context kernel tuning under the current gate;
 the promoted cooperative Lightning scorer reduces the measured 262,144-row
 operation from 8.3-8.4 to 2.102 ms per CSA layer, while four-bit radix reduces
 mixed selection from about 4.58 to 1.875 ms. Complete terminal attribution now
-puts tiled HCA at 5.26 ms/layer and about 105.2 ms/token, ahead of the complete
-93.4 ms CSA subtotal. Schedule-changing HCA therefore precedes another local
-CSA optimization.
+puts exact tiled HCA at 5.26 ms/layer and about 105.2 ms/token. Promoted online
+singleton HCA reduces that to 3.410 ms/layer and about 68.2 ms/token, below the
+complete 93.4 ms CSA subtotal. Packed/FP4 Lightning scoring therefore becomes
+the primary far-context optimization lane.
 
 The pinned llama.cpp depth command is not a free decode-only bracket. Its
 `--n-depth` implementation executes `test_prompt(n_depth)` and serializes the
@@ -1769,10 +1804,10 @@ Broader S6 work remains:
   per-layer route/selector failure records, and verified-prefix callbacks are
   promoted. An asynchronously immutable SSD-streaming ticket remains a separate
   product contract.
-- Replace terminal tiled HCA only with a schedule-changing candidate that clears
-  the frozen product gate. Exact score materialization and two-head KV sharing
-  are closed; online softmax/value tiling is next. The legacy HCA kernel, scalar
-  scorer, and bitwise selector remain executable differentials.
+- Preserve promoted online singleton HCA and the exact packed/legacy tiled
+  differential. Defer heads8/rows16 split-K while HCA remains below CSA; reopen
+  packed/FP4 Lightning scoring first under its own numerical contract. The
+  scalar scorer and bitwise selector also remain executable differentials.
 
 Gates:
 
@@ -1845,22 +1880,23 @@ noise without reducing technical risk. Revisit after S5.
 3. Preserve the promoted dense-attention checkpoint: singleton position zero
    remains on its exact legacy lineage; SWA uses cooperative attention
    thereafter; CSA uses it through position 2050 before sparse selection starts
-   at 2051; and HCA uses it through position 65,662 before tiled attention starts
-   at 65,663 without a numerical seam.
+   at 2051; and HCA uses it through position 65,662 before online singleton
+   attention starts at 65,663 under its explicit envelope. Packed HCA retains
+   exact tiled attention above that boundary.
 4. Treat short-context execution as bounded near-parity rather than the primary
    optimization lane. The one-command path is about 37-38 ms of GPU work versus
    llama.cpp's 36.1 ms total at depths 128/512; barrier, row-shape, geometry,
    and vector-decode probes all miss the 0.75 ms/token two-depth gate.
 5. Preserve the promoted cooperative Lightning scorer and four-bit radix
-   selector, including their scalar and bitwise differentials. The isolated
-   terminal measurements put tiled HCA above the projected CSA subtotal, while
-   the whole-token packet is consistent in scale with both. Pursue
-   schedule-changing online HCA before deepening either near-peer CSA phase; do
-   not infer a new deep-token curve from a local microprofile alone.
-6. Keep the external depth bracket and packed-prompt dispatch reduction as
-   independent lanes. `llama-bench --n-depth` performs the full cold prefix at
-   each new depth, so do not pay that loop until a reusable state or a gating
-   cross-engine question justifies it. Packed prefill still needs a warm-matched
-   comparator before promoting a ratio.
+   selector, including their scalar and bitwise differentials. Online HCA moves
+   the terminal lead back to the 93.4 ms CSA subtotal; open packed/FP4 Lightning
+   scoring before multi-group selection or split-K HCA, and require a new
+   whole-token packet rather than extrapolating only from microprofiles.
+6. Keep the external depth bracket and packed-prompt optimization as independent
+   lanes. `llama-bench --n-depth` performs the full cold prefix at each new
+   depth, so do not pay that loop until a reusable state or gating cross-engine
+   question justifies it. For native TTFT, replace the packed router CPU seam
+   with deterministic expert/token/slot GPU scheduling and grouped MXFP4 down;
+   do not revive a monolithic Metal FFN kernel.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

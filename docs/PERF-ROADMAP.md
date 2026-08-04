@@ -132,36 +132,34 @@ four complete position-65,663 brackets save 1.06-1.29 ms command-GPU and
 1.06-1.70 ms wall. The conservative isolated 21-layer CSA projection is now
 about 12.6/29.2/93.4 ms at 64K/262K/1M-token-equivalent histories.
 
-Terminal attribution is complete. A warm position-1,048,575 token over real
-weights and zero-initialized synthetic causal history takes 232.989-235.787 ms
-command-GPU and 235.998-237.261 ms wall, about 4.22-4.24 token/s. Legacy tiled
-HCA is stable at 5.26 ms/layer over 8,192 compressed rows, or about 105.2 ms
-across 20 layers, and is now the largest terminal phase. The total is consistent
-in scale with the non-disjoint short-context + CSA + HCA estimates; the
-short-context command already contains shallow attention. First-token wall time
-varies by seconds while GPU work remains about 240 ms, an unattributed
-first-touch wait consistent with residency effects. Do not mix it into warm
-kernel claims.
+Online singleton HCA is promoted. One simdgroup scans shared KV once while
+maintaining F32 online-softmax state; packed HCA remains on the exact tiled
+kernel. At 8,192 rows it reduces 5.26 to 3.410 ms/layer, moving the isolated
+20-layer subtotal from about 105.2 to 68.2 ms. Two complete warm terminal
+legacy/online/legacy campaigns (four packets total) save 22.5-24.5 ms
+command-GPU and wall and put the online endpoint at 210-213 ms, about
+4.70-4.73 token/s. Terminal transcripts repeat
+bit-for-bit and preserve every consumed CSA/MoE ID and status. First-touch wait
+remains an independent unattributed cold-start observation.
 
 Force-ranked queue:
 
-1. **Schedule-changing tiled HCA.** Exact F32 score materialization, paired-head
-   KV reuse, and their combination save at most 1.191 ms/layer at 8,192 rows and
-   fail the frozen 1.50 ms/layer terminal gate; all prototypes were removed.
-   Move to online softmax/value tiling with an explicit numerical envelope and
-   retain the exact two-pass kernel as the differential. Do not weaken the gate
-   or continue mechanically to four-head sharing.
-2. **Packed indexer-cache representation and scoring.** F16 scoring is now the
-   largest terminal CSA phase at 2.102 ms/layer, narrowly ahead of mixed radix4
-   selection at 1.875 ms. Reopen the paper's FP4 index-cache lane only with an
-   explicit numerical contract after the larger HCA phase moves or a candidate
-   demonstrates a higher product ceiling.
+1. **Packed indexer-cache representation and scoring.** The unchanged 93.4 ms
+   terminal CSA subtotal now exceeds online HCA's 68.2 ms. F16 scoring at
+   2.102 ms/layer narrowly leads mixed radix4 selection at 1.875 ms. Reopen the
+   paper's FP4 index-cache lane with an explicit numerical contract and preserve
+   the F16 scorer as the differential.
+2. **GPU-resident deterministic packed routing.** Remove prefill's router
+   commit/wait and CPU schedule construction with integer counts, deterministic
+   expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,
+   and slot-order reduction. Follow with grouped MXFP4 down. Mixture-of-Kittens
+   informs scheduling and determinism, not a CUDA-style monolithic Metal kernel.
 3. **Multi-group selection.** Radix4 remains one threadgroup per query. Defer
    global histograms, query-scaled scratch, and producer/reducer dispatches until
    scoring moves enough for the retained 1.875 ms selector to lead again.
-4. **Packed prefill dispatch reduction.** Retain as an independent TTFT lane;
-   require a warm-matched comparator and named prompt archetype before a ratio
-   gets product authority.
+4. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+   below CSA. Reopen only if later attribution returns HCA to the lead or the
+   simpler online recurrence stops scaling on another supported device.
 
 Short-context local tuning is bounded-KILL under the current 0.75 ms/token
 two-depth gate: all-slot barrier removal, larger IQ2 row groups, fixed-geometry

@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-pub const TARGET_POSITION: u32 = 3070;
+#[cfg(test)]
+const TEST_POSITION: u32 = 3070;
 pub const LAYER_COUNT: usize = 43;
 pub const CSA_LAYER_COUNT: usize = 21;
 pub const CSA_TOP_K: usize = 512;
 pub const ROUTE_TOP_K: usize = 6;
 const SCHEMA_VERSION: u32 = 1;
+const FIRST_SPARSE_CSA_POSITION: u32 = (CSA_TOP_K as u32) * 4 + 3;
 
 fn is_csa_layer(layer: usize) -> bool {
     (2..LAYER_COUNT).contains(&layer) && layer.is_multiple_of(2)
@@ -54,8 +56,10 @@ pub struct DeepSeekV4DecisionTranscript {
 
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
 pub enum DeepSeekV4DiagnosticsError {
-    #[error("DeepSeek V4 decision capture only supports absolute position 3070, got {0}")]
-    UnsupportedPosition(u32),
+    #[error(
+        "DeepSeek V4 decision capture requires sparse CSA at or after position {minimum}, got {actual}"
+    )]
+    SparseSelectionUnavailable { minimum: u32, actual: u32 },
     #[error("DeepSeek V4 decision capture expected position {expected}, got {actual}")]
     WrongPosition { expected: u32, actual: u32 },
     #[error("DeepSeek V4 decision capture is already armed, complete, or consumed")]
@@ -100,8 +104,11 @@ impl DeepSeekV4DecisionCapture {
     }
 
     pub(crate) fn arm(&mut self, position: u32) -> Result<(), DeepSeekV4DiagnosticsError> {
-        if position != TARGET_POSITION {
-            return Err(DeepSeekV4DiagnosticsError::UnsupportedPosition(position));
+        if position < FIRST_SPARSE_CSA_POSITION {
+            return Err(DeepSeekV4DiagnosticsError::SparseSelectionUnavailable {
+                minimum: FIRST_SPARSE_CSA_POSITION,
+                actual: position,
+            });
         }
         if !matches!(self.state, CaptureState::Idle) {
             return Err(DeepSeekV4DiagnosticsError::DuplicateCapture);
@@ -472,14 +479,20 @@ mod tests {
             .ensure_no_active_capture("restore a snapshot")
             .unwrap();
         assert_eq!(
-            capture.arm(TARGET_POSITION - 1).unwrap_err(),
-            DeepSeekV4DiagnosticsError::UnsupportedPosition(TARGET_POSITION - 1)
+            capture.arm(FIRST_SPARSE_CSA_POSITION - 1).unwrap_err(),
+            DeepSeekV4DiagnosticsError::SparseSelectionUnavailable {
+                minimum: FIRST_SPARSE_CSA_POSITION,
+                actual: FIRST_SPARSE_CSA_POSITION - 1,
+            }
         );
+        capture
+            .ensure_no_active_capture("restore a snapshot")
+            .unwrap();
         assert_eq!(
             capture.take().unwrap_err(),
             DeepSeekV4DiagnosticsError::NotArmed
         );
-        capture.arm(TARGET_POSITION).unwrap();
+        capture.arm(FIRST_SPARSE_CSA_POSITION).unwrap();
         assert_eq!(
             capture
                 .ensure_no_active_capture("execute packed tokens")
@@ -489,14 +502,16 @@ mod tests {
             }
         );
         assert_eq!(
-            capture.begin_forward(TARGET_POSITION + 1).unwrap_err(),
+            capture
+                .begin_forward(FIRST_SPARSE_CSA_POSITION + 1)
+                .unwrap_err(),
             DeepSeekV4DiagnosticsError::WrongPosition {
-                expected: TARGET_POSITION,
-                actual: TARGET_POSITION + 1
+                expected: FIRST_SPARSE_CSA_POSITION,
+                actual: FIRST_SPARSE_CSA_POSITION + 1
             }
         );
         assert_eq!(
-            capture.arm(TARGET_POSITION).unwrap_err(),
+            capture.arm(FIRST_SPARSE_CSA_POSITION).unwrap_err(),
             DeepSeekV4DiagnosticsError::DuplicateCapture
         );
         assert_eq!(
@@ -506,7 +521,7 @@ mod tests {
                 expected: LAYER_COUNT
             }
         );
-        capture.begin_forward(TARGET_POSITION).unwrap();
+        capture.begin_forward(FIRST_SPARSE_CSA_POSITION).unwrap();
         assert_eq!(
             capture
                 .ensure_no_active_capture("restore a snapshot")
@@ -528,8 +543,8 @@ mod tests {
     #[test]
     fn schema_geometry_is_serializable_and_requires_all_layers() {
         let mut capture = DeepSeekV4DecisionCapture::default();
-        capture.arm(TARGET_POSITION).unwrap();
-        capture.begin_forward(TARGET_POSITION).unwrap();
+        capture.arm(TEST_POSITION).unwrap();
+        capture.begin_forward(TEST_POSITION).unwrap();
         for layer in 0..LAYER_COUNT {
             let csa = is_csa_layer(layer).then(csa);
             capture.capture_layer(layer, csa, route()).unwrap();
@@ -552,7 +567,7 @@ mod tests {
             CSA_LAYER_COUNT
         );
         let value = serde_json::to_value(transcript).unwrap();
-        assert_eq!(value["position"], TARGET_POSITION);
+        assert_eq!(value["position"], TEST_POSITION);
         assert_eq!(value["layer_count"], LAYER_COUNT as u32);
         assert_eq!(
             capture.take().unwrap_err(),

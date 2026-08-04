@@ -1508,7 +1508,8 @@ impl DeepSeekV4Session {
         self.capacity
     }
 
-    /// Arms the feature-gated, single-use decision capture for position 3070.
+    /// Arms the feature-gated, single-use decision capture for the next sparse
+    /// CSA token.
     #[cfg(feature = "dsv4-diagnostics")]
     pub fn arm_decision_transcript(&mut self, position: u32) -> Result<(), DeepSeekV4MetalError> {
         self.capacity.validate_position(position)?;
@@ -3502,6 +3503,15 @@ struct DeepSeekV4SparseCsaScratch {
     cache_order_ids: MetalTensor,
     selected_counts: MetalTensor,
     status: MetalTensor,
+    #[cfg(test)]
+    score_test_policy: DeepSeekV4IndexerScoreTestPolicy,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeepSeekV4IndexerScoreTestPolicy {
+    Production,
+    ScalarOracle,
 }
 
 impl DeepSeekV4SparseCsaScratch {
@@ -3523,7 +3533,25 @@ impl DeepSeekV4SparseCsaScratch {
             cache_order_ids: MetalTensor::zeros_i32(ctx, vec![DEEPSEEK_V4_CSA_TOP_K as u64, 1])?,
             selected_counts: MetalTensor::zeros_i32(ctx, vec![1])?,
             status: MetalTensor::zeros_i32(ctx, vec![1])?,
+            #[cfg(test)]
+            score_test_policy: DeepSeekV4IndexerScoreTestPolicy::Production,
         })
+    }
+
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    fn set_score_test_policy(&mut self, policy: DeepSeekV4IndexerScoreTestPolicy) {
+        self.score_test_policy = policy;
+    }
+
+    fn force_scalar_score_kernel(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.score_test_policy == DeepSeekV4IndexerScoreTestPolicy::ScalarOracle
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3612,7 +3640,7 @@ impl DeepSeekV4SparseCsaScratch {
             1.0 / (64.0f32 * 128.0).sqrt(),
             "indexer head weights",
         )?;
-        encode_lightning_indexer_scores_f16(
+        encode_lightning_indexer_scores_f16_with_policy(
             ctx,
             enc,
             &self.index_queries,
@@ -3624,6 +3652,7 @@ impl DeepSeekV4SparseCsaScratch {
             128,
             rows.capacity_rows,
             1,
+            self.force_scalar_score_kernel(),
         )?;
         encode_select_top_k_f32(
             ctx,
@@ -7682,6 +7711,37 @@ fn encode_lightning_indexer_scores_f16(
     row_capacity: usize,
     query_count: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
+    encode_lightning_indexer_scores_f16_with_policy(
+        ctx,
+        enc,
+        queries,
+        head_weights,
+        keys,
+        visible_counts,
+        scores,
+        head_count,
+        head_dim,
+        row_capacity,
+        query_count,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_lightning_indexer_scores_f16_with_policy(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    head_weights: &MetalTensor,
+    keys: &MetalTensor,
+    visible_counts: &MetalTensor,
+    scores: &MetalTensor,
+    head_count: usize,
+    head_dim: usize,
+    row_capacity: usize,
+    query_count: usize,
+    force_scalar: bool,
+) -> Result<(), DeepSeekV4MetalError> {
     for (name, value) in [
         ("indexer head count", head_count),
         ("indexer head dimension", head_dim),
@@ -7692,6 +7752,7 @@ fn encode_lightning_indexer_scores_f16(
             return invalid(format!("{name} must be nonzero and fit u32"));
         }
     }
+    validate_lightning_indexer_score_offsets(head_count, head_dim, row_capacity, query_count)?;
     validate_f32(
         queries,
         &[head_dim as u64, head_count as u64, query_count as u64],
@@ -7730,7 +7791,21 @@ fn encode_lightning_indexer_scores_f16(
         row_capacity: u32,
         query_count: u32,
     }
-    let pso = ctx.pipeline("kernel_deepseek_v4_lightning_indexer_scores_f16")?;
+    let cooperative = !force_scalar && head_count == 64 && head_dim == 128;
+    let kernel = if cooperative {
+        "kernel_deepseek_v4_lightning_indexer_scores_f16_cooperative"
+    } else {
+        "kernel_deepseek_v4_lightning_indexer_scores_f16"
+    };
+    let pso = ctx.pipeline(kernel)?;
+    if cooperative {
+        validate_cooperative_lightning_score_geometry(
+            kernel,
+            pso.threadExecutionWidth(),
+            pso.maxTotalThreadsPerThreadgroup(),
+            ctx.device.maxThreadgroupMemoryLength(),
+        )?;
+    }
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
@@ -7746,18 +7821,92 @@ fn encode_lightning_indexer_scores_f16(
     enc.set_tensor(3, keys);
     enc.set_tensor(4, visible_counts);
     enc.set_tensor(5, scores);
-    enc.dispatch(
-        MTLSize {
-            width: row_capacity.div_ceil(256),
-            height: query_count,
-            depth: 1,
-        },
-        MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        },
-    );
+    if cooperative {
+        enc.set_threadgroup_memory(0, 8 * 128 * std::mem::size_of::<u16>());
+        enc.set_threadgroup_memory(1, 8 * 64 * std::mem::size_of::<f32>());
+        enc.dispatch(
+            MTLSize {
+                width: row_capacity.div_ceil(8),
+                height: query_count,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+    } else {
+        enc.dispatch(
+            MTLSize {
+                width: row_capacity.div_ceil(256),
+                height: query_count,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn validate_lightning_indexer_score_offsets(
+    head_count: usize,
+    head_dim: usize,
+    row_capacity: usize,
+    query_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    let query_width = checked_mul(head_count, head_dim, "indexer score query width")?;
+    let products = [
+        (
+            "indexer score elements",
+            checked_mul(row_capacity, query_count, "indexer score elements")?,
+        ),
+        (
+            "indexer score weight elements",
+            checked_mul(head_count, query_count, "indexer score weight elements")?,
+        ),
+        (
+            "indexer score query elements",
+            checked_mul(query_width, query_count, "indexer score query elements")?,
+        ),
+        (
+            "indexer score key elements",
+            checked_mul(row_capacity, head_dim, "indexer score key elements")?,
+        ),
+    ];
+    for (name, elements) in products {
+        if u32::try_from(elements).is_err() {
+            return invalid(format!("{name} exceed u32 shader offsets"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_cooperative_lightning_score_geometry(
+    kernel: &str,
+    thread_execution_width: usize,
+    max_threads_per_group: usize,
+    max_threadgroup_bytes: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const THREADS: usize = 256;
+    const KEY_BYTES: usize = 8 * 128 * std::mem::size_of::<u16>();
+    const DOT_BYTES: usize = 8 * 64 * std::mem::size_of::<f32>();
+    const THREADGROUP_BYTES: usize = KEY_BYTES + DOT_BYTES;
+
+    if thread_execution_width != 32 || max_threads_per_group < THREADS {
+        return invalid(format!(
+            "{kernel} requires SIMD width 32 and {THREADS} threads, got width {thread_execution_width} max {max_threads_per_group}"
+        ));
+    }
+    if max_threadgroup_bytes < THREADGROUP_BYTES {
+        return invalid(format!(
+            "{kernel} requires {THREADGROUP_BYTES} threadgroup bytes, device allows {max_threadgroup_bytes}"
+        ));
+    }
     Ok(())
 }
 
@@ -9418,6 +9567,43 @@ mod tests {
         }
     }
 
+    fn zero_tensor_bytes(tensor: &MetalTensor) {
+        let bytes = usize::try_from(tensor.n_bytes()).expect("test tensor byte count fits usize");
+        unsafe {
+            let destination = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize);
+            std::ptr::write_bytes(destination, 0, bytes);
+        }
+    }
+
+    fn initialize_zero_synthetic_causal_state(session: &DeepSeekV4Session) {
+        fn zero_frontier(frontier: &DeepSeekV4CompressorFrontier) {
+            zero_tensor_bytes(&frontier.kv_state);
+            zero_tensor_bytes(&frontier.score_state);
+            zero_tensor_bytes(&frontier.published);
+        }
+
+        // Scratch allocations are uninitialized; a direct phase jump must
+        // define every causal byte and every phase-visible compressor score.
+        zero_tensor_bytes(&session.raw_cache);
+        for layer in &session.compressor_frontiers.layers {
+            match layer {
+                DeepSeekV4LayerCompressorFrontiers::SlidingWindow => {}
+                DeepSeekV4LayerCompressorFrontiers::CompressedSparse { attention, indexer } => {
+                    zero_frontier(attention);
+                    zero_frontier(indexer);
+                }
+                DeepSeekV4LayerCompressorFrontiers::HeavilyCompressed { attention } => {
+                    zero_frontier(attention);
+                }
+            }
+        }
+    }
+
     fn read_f16(tensor: &MetalTensor) -> Vec<f32> {
         assert_eq!(tensor.dtype, GgmlType::F16);
         unsafe {
@@ -9737,6 +9923,7 @@ mod tests {
                 .into_residency();
             let mut session = DeepSeekV4Session::new(&ctx, residency)
                 .expect("construct first tiled-HCA boundary session");
+            initialize_zero_synthetic_causal_state(&session);
             session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
                 next_position: POSITION,
             };
@@ -9777,11 +9964,236 @@ mod tests {
             hasher.update(value.to_le_bytes());
         }
         let hash = format!("{:x}", hasher.finalize());
+        eprintln!("deepseek_v4 synthetic_position_65663_sha256={hash}");
         assert_eq!(
             hash,
-            "4c00cbe4653402abc3e05bb5d01cf353cc0b96a910cd03d50e54024f95829fd2"
+            "1c0f5e0475314e693bfe0664b5454a2ece26d9a5913f9a5218cdf39da59582d4"
         );
-        eprintln!("deepseek_v4 synthetic_position_65663_sha256={hash}");
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    #[ignore = "requires the local 95.93 GiB DS4 fixture and executes focused far-context differentials"]
+    fn cooperative_lightning_scores_preserve_far_context_token_and_save_eight_ms() {
+        const POSITION: u32 = 65_663;
+        const FORWARD_LIMIT: usize = POSITION as usize + 1;
+        const TOKEN_ID: u32 = 35;
+        const PINNED_LOGITS_SHA256: &str =
+            "1c0f5e0475314e693bfe0664b5454a2ece26d9a5913f9a5218cdf39da59582d4";
+        const PINNED_CAUSAL_SHA256: &str =
+            "03f15887db83e4baf0ad5ba66f95b3e2a7fe461858d92aebe9f0b3009f83254e";
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum RunMode {
+            Timed,
+            Transcript,
+        }
+
+        struct Evidence {
+            logits_sha256: String,
+            command_gpu_ms: Option<f64>,
+            wall_ms: Option<f64>,
+            causal_digest: Option<[u8; 32]>,
+            transcript: Option<DeepSeekV4DecisionTranscript>,
+        }
+
+        fn logits_sha256(logits: &[f32]) -> String {
+            let mut hasher = Sha256::new();
+            for value in logits {
+                hasher.update(value.to_le_bytes());
+            }
+            format!("{:x}", hasher.finalize())
+        }
+
+        fn digest_hex(digest: &[u8; 32]) -> String {
+            use std::fmt::Write as _;
+            let mut encoded = String::with_capacity(64);
+            for byte in digest {
+                write!(&mut encoded, "{byte:02x}").unwrap();
+            }
+            encoded
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            residency: DeepSeekV4MetalResidency,
+            policy: DeepSeekV4IndexerScoreTestPolicy,
+            mode: RunMode,
+        ) -> (DeepSeekV4MetalResidency, Evidence) {
+            let mut session = DeepSeekV4Session::new_with_model_content_id(
+                ctx,
+                residency,
+                DeepSeekV4ModelContentId::new([0x65; 32]),
+            )
+            .expect("construct synthetic far-context session");
+            session.sparse_csa.set_score_test_policy(policy);
+            initialize_zero_synthetic_causal_state(&session);
+            session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
+                next_position: POSITION,
+            };
+            session
+                .committed_tokens
+                .extend(std::iter::repeat_n(TOKEN_ID, POSITION as usize));
+
+            let (command_gpu_ms, wall_ms, transcript) = match mode {
+                RunMode::Timed => {
+                    let profile = session
+                        .forward_token_whole_profiled(ctx, TOKEN_ID)
+                        .expect("profile synthetic far-context token");
+                    (
+                        Some(profile.command_gpu_ms),
+                        Some(profile.forward_wall_ms),
+                        None,
+                    )
+                }
+                RunMode::Transcript => {
+                    session
+                        .arm_decision_transcript(POSITION)
+                        .expect("arm far-context decision transcript");
+                    session
+                        .forward_token(ctx, TOKEN_ID)
+                        .expect("execute synthetic far-context transcript token");
+                    (
+                        None,
+                        None,
+                        Some(
+                            session
+                                .take_decision_transcript()
+                                .expect("take far-context decision transcript"),
+                        ),
+                    )
+                }
+            };
+            let logits = session
+                .copy_logits_f32()
+                .expect("copy synthetic far-context logits");
+            let causal_digest = if mode == RunMode::Transcript {
+                Some(
+                    *session
+                        .capture_causal_snapshot()
+                        .expect("capture synthetic far-context causal state")
+                        .causal_digest(),
+                )
+            } else {
+                None
+            };
+            let evidence = Evidence {
+                logits_sha256: logits_sha256(&logits),
+                command_gpu_ms,
+                wall_ms,
+                causal_digest,
+                transcript,
+            };
+            (session.residency, evidence)
+        }
+
+        let model_path = std::env::var_os("DSV4_MODEL")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+            });
+        assert!(model_path.exists(), "missing DS4 model");
+        let ctx = MetalContext::new().expect("create Metal context");
+        let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
+            .expect("plan far-context differential session");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit far-context differential session");
+        let mut residency = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+            .expect("realize far-context differential residency")
+            .into_residency();
+
+        (residency, _) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
+            RunMode::Timed,
+        );
+        let scalar_first;
+        (residency, scalar_first) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4IndexerScoreTestPolicy::ScalarOracle,
+            RunMode::Timed,
+        );
+        let cooperative;
+        (residency, cooperative) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
+            RunMode::Timed,
+        );
+        let scalar_second;
+        (residency, scalar_second) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4IndexerScoreTestPolicy::ScalarOracle,
+            RunMode::Timed,
+        );
+
+        for evidence in [&scalar_first, &cooperative, &scalar_second] {
+            assert_eq!(evidence.logits_sha256, PINNED_LOGITS_SHA256);
+        }
+        let cooperative_gpu = cooperative.command_gpu_ms.unwrap();
+        let cooperative_wall = cooperative.wall_ms.unwrap();
+        for (label, scalar) in [
+            ("scalar-before", &scalar_first),
+            ("scalar-after", &scalar_second),
+        ] {
+            let gpu_savings = scalar.command_gpu_ms.unwrap() - cooperative_gpu;
+            let wall_savings = scalar.wall_ms.unwrap() - cooperative_wall;
+            assert!(
+                gpu_savings >= 8.0,
+                "{label} command-GPU savings were {gpu_savings:.3} ms, need at least 8.0 ms"
+            );
+            assert!(
+                wall_savings >= 8.0,
+                "{label} wall savings were {wall_savings:.3} ms, need at least 8.0 ms"
+            );
+        }
+
+        let scalar_transcript;
+        (residency, scalar_transcript) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4IndexerScoreTestPolicy::ScalarOracle,
+            RunMode::Transcript,
+        );
+        let cooperative_transcript;
+        (_, cooperative_transcript) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
+            RunMode::Transcript,
+        );
+        assert_eq!(scalar_transcript.logits_sha256, PINNED_LOGITS_SHA256);
+        assert_eq!(cooperative_transcript.logits_sha256, PINNED_LOGITS_SHA256);
+        assert_eq!(
+            cooperative_transcript.transcript, scalar_transcript.transcript,
+            "all CSA scores, selected IDs, statuses, and route decisions must remain exact"
+        );
+        assert_eq!(
+            cooperative_transcript.causal_digest, scalar_transcript.causal_digest,
+            "cooperative scoring cannot change causal state"
+        );
+        assert_eq!(
+            digest_hex(&cooperative_transcript.causal_digest.unwrap()),
+            PINNED_CAUSAL_SHA256,
+            "canonical synthetic causal state drifted"
+        );
+
+        eprintln!(
+            "deepseek_v4 far_score_position={POSITION} scalar_before_gpu_ms={:.3} cooperative_gpu_ms={cooperative_gpu:.3} scalar_after_gpu_ms={:.3} scalar_before_wall_ms={:.3} cooperative_wall_ms={cooperative_wall:.3} scalar_after_wall_ms={:.3} logits_sha256={} causal_sha256={}",
+            scalar_first.command_gpu_ms.unwrap(),
+            scalar_second.command_gpu_ms.unwrap(),
+            scalar_first.wall_ms.unwrap(),
+            scalar_second.wall_ms.unwrap(),
+            cooperative.logits_sha256,
+            digest_hex(&cooperative_transcript.causal_digest.unwrap()),
+        );
     }
 
     #[test]
@@ -15143,6 +15555,182 @@ mod tests {
     }
 
     #[test]
+    fn cooperative_lightning_scores_match_scalar_for_packed_visibility() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const DIM: usize = 128;
+        const ROWS: usize = 19;
+        const QUERIES: usize = 4;
+        const TOP_K: usize = 8;
+
+        let query_values = (0..QUERIES * HEADS * DIM)
+            .map(|index| {
+                let tag = (index * 17 + index / DIM * 11 + 3) % 251;
+                (tag as f32 - 125.0) * 0.0007
+            })
+            .collect::<Vec<_>>();
+        let mut weight_values = (0..QUERIES * HEADS)
+            .map(|index| 0.003 + (index * 13 % 29) as f32 * 0.0004)
+            .collect::<Vec<_>>();
+        weight_values[3 * HEADS] = f32::NAN;
+        let key_bits = (0..ROWS * DIM)
+            .map(|index| {
+                let tag = (index * 23 + index / DIM * 19 + 7) % 257;
+                half::f16::from_f32((tag as f32 - 128.0) * 0.0009).to_bits()
+            })
+            .collect::<Vec<_>>();
+        let queries = offset_f32(
+            &ctx,
+            &query_values,
+            vec![DIM as u64, HEADS as u64, QUERIES as u64],
+        );
+        let head_weights = offset_f32(&ctx, &weight_values, vec![HEADS as u64, QUERIES as u64]);
+        let keys = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&key_bits),
+            vec![DIM as u64, ROWS as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let visible_counts = offset_i32(
+            &ctx,
+            &[ROWS as i32, 9, -1, ROWS as i32],
+            vec![QUERIES as u64],
+        );
+        let scalar_scores =
+            MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+        let cooperative_scores =
+            MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+        let make_selection = || {
+            (
+                MetalTensor::zeros_i32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap(),
+            )
+        };
+        let (scalar_mask, scalar_ids, scalar_counts, scalar_status) = make_selection();
+        let (cooperative_mask, cooperative_ids, cooperative_counts, cooperative_status) =
+            make_selection();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_lightning_indexer_scores_f16_with_policy(
+            &ctx,
+            &encoder,
+            &queries,
+            &head_weights,
+            &keys,
+            &visible_counts,
+            &scalar_scores,
+            HEADS,
+            DIM,
+            ROWS,
+            QUERIES,
+            true,
+        )
+        .unwrap();
+        encode_lightning_indexer_scores_f16(
+            &ctx,
+            &encoder,
+            &queries,
+            &head_weights,
+            &keys,
+            &visible_counts,
+            &cooperative_scores,
+            HEADS,
+            DIM,
+            ROWS,
+            QUERIES,
+        )
+        .unwrap();
+        encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &scalar_scores,
+            &visible_counts,
+            &scalar_mask,
+            None,
+            &scalar_ids,
+            &scalar_counts,
+            &scalar_status,
+            ROWS,
+            ROWS,
+            TOP_K,
+            QUERIES,
+        )
+        .unwrap();
+        encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &cooperative_scores,
+            &visible_counts,
+            &cooperative_mask,
+            None,
+            &cooperative_ids,
+            &cooperative_counts,
+            &cooperative_status,
+            ROWS,
+            ROWS,
+            TOP_K,
+            QUERIES,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "cooperative Lightning score command failed: {:?}",
+            command.error()
+        );
+
+        let scalar = read_f32(&scalar_scores);
+        let cooperative = read_f32(&cooperative_scores);
+        assert_eq!(
+            cooperative
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            scalar
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert!(cooperative[..ROWS].iter().any(|value| *value != 0.0));
+        assert!(
+            cooperative[ROWS + 9..2 * ROWS]
+                .iter()
+                .all(|value| *value == f32::NEG_INFINITY)
+        );
+        assert!(
+            cooperative[2 * ROWS..][..ROWS]
+                .iter()
+                .all(|value| *value == f32::NEG_INFINITY)
+        );
+        assert!(
+            cooperative[3 * ROWS..]
+                .iter()
+                .all(|value| !value.is_finite())
+        );
+        assert_eq!(read_i32(&cooperative_mask), read_i32(&scalar_mask));
+        assert_eq!(read_i32(&cooperative_ids), read_i32(&scalar_ids));
+        assert_eq!(read_i32(&cooperative_counts), read_i32(&scalar_counts));
+        assert_eq!(read_i32(&cooperative_status), read_i32(&scalar_status));
+        assert_eq!(
+            read_i32(&cooperative_counts),
+            vec![TOP_K as i32, TOP_K as i32, 0, TOP_K as i32]
+        );
+        assert_eq!(read_i32(&cooperative_status), vec![0, 0, 1, 2]);
+        assert_eq!(
+            &read_i32(&cooperative_ids)[3 * TOP_K..],
+            &(0..TOP_K as i32).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     #[ignore = "focused production-shape GPU profiler; run explicitly with --nocapture"]
     fn profile_sparse_csa_decode_phases_at_far_context() {
         let Some(ctx) = metal_context() else {
@@ -15198,10 +15786,29 @@ mod tests {
             &vec![index_scale; INDEX_HEADS],
             vec![INDEX_HEADS as u64, 1],
         );
-        let index_keys = MetalTensor::zeros_f16(&ctx, vec![INDEX_DIM as u64, MAX_ROWS as u64])
-            .expect("allocate profile index keys");
+        let index_keys = {
+            let bits = (0..MAX_ROWS * INDEX_DIM)
+                .map(|index| {
+                    let row = index / INDEX_DIM;
+                    let dimension = index % INDEX_DIM;
+                    let tag = (row * 13 + dimension * 7 + row / 251) % 257;
+                    half::f16::from_f32((tag as f32 - 128.0) * 0.0002).to_bits()
+                })
+                .collect::<Vec<_>>();
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&bits),
+                vec![INDEX_DIM as u64, MAX_ROWS as u64],
+                GgmlType::F16,
+            )
+            .expect("allocate profile index keys")
+        };
         let scores = MetalTensor::zeros_f32(&ctx, vec![MAX_ROWS as u64, 1])
             .expect("allocate profile scores");
+        let scalar_scores = MetalTensor::zeros_f32(&ctx, vec![MAX_ROWS as u64, 1])
+            .expect("allocate scalar profile scores");
+        let tied_scores = MetalTensor::zeros_f32(&ctx, vec![MAX_ROWS as u64, 1])
+            .expect("allocate tied profile scores");
         let mixed_score_values = (0..MAX_ROWS)
             .map(|row| {
                 let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
@@ -15260,6 +15867,8 @@ mod tests {
             let visible_counts = offset_i32(&ctx, &[row_count as i32], vec![1]);
             let keys = index_keys.view_subrange(0, vec![INDEX_DIM as u64, row_count as u64]);
             let score_rows = scores.view_subrange(0, vec![row_count as u64, 1]);
+            let scalar_score_rows = scalar_scores.view_subrange(0, vec![row_count as u64, 1]);
+            let tied_score_rows = tied_scores.view_subrange(0, vec![row_count as u64, 1]);
             let mixed_score_rows = mixed_scores.view_subrange(0, vec![row_count as u64, 1]);
             let mask_rows = selected_mask.view_subrange(0, vec![row_count as u64, 1]);
             let compressed_rows =
@@ -15269,6 +15878,21 @@ mod tests {
 
             let warm = ctx.queue.commandBuffer().expect("profile warm command");
             let encoder = KernelEncoder::begin(&warm);
+            encode_lightning_indexer_scores_f16_with_policy(
+                &ctx,
+                &encoder,
+                &index_queries,
+                &head_weights,
+                &keys,
+                &visible_counts,
+                &scalar_score_rows,
+                INDEX_HEADS,
+                INDEX_DIM,
+                row_count,
+                1,
+                true,
+            )
+            .unwrap();
             encode_lightning_indexer_scores_f16(
                 &ctx,
                 &encoder,
@@ -15286,7 +15910,7 @@ mod tests {
             encode_select_top_k_f32(
                 &ctx,
                 &encoder,
-                &score_rows,
+                &tied_score_rows,
                 &visible_counts,
                 &mask_rows,
                 None,
@@ -15340,9 +15964,43 @@ mod tests {
             warm.commit();
             warm.waitUntilCompleted();
             assert!(warm.error().is_none());
+            assert_eq!(
+                read_f32(&score_rows)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                read_f32(&scalar_score_rows)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "cooperative/scalar index scores differ at {row_count} rows"
+            );
 
-            let score_ms = median_and_p95(
+            let scalar_score_before_ms = median_and_p95(
                 (0..3)
+                    .map(|_| {
+                        timed_gpu(&ctx, 1, |encoder| {
+                            encode_lightning_indexer_scores_f16_with_policy(
+                                &ctx,
+                                encoder,
+                                &index_queries,
+                                &head_weights,
+                                &keys,
+                                &visible_counts,
+                                &scalar_score_rows,
+                                INDEX_HEADS,
+                                INDEX_DIM,
+                                row_count,
+                                1,
+                                true,
+                            )
+                        })
+                    })
+                    .collect(),
+            )
+            .0;
+            let (score_ms, score_p95_ms) = median_and_p95(
+                (0..20)
                     .map(|_| {
                         timed_gpu(&ctx, 1, |encoder| {
                             encode_lightning_indexer_scores_f16(
@@ -15361,6 +16019,28 @@ mod tests {
                         })
                     })
                     .collect(),
+            );
+            let scalar_score_after_ms = median_and_p95(
+                (0..3)
+                    .map(|_| {
+                        timed_gpu(&ctx, 1, |encoder| {
+                            encode_lightning_indexer_scores_f16_with_policy(
+                                &ctx,
+                                encoder,
+                                &index_queries,
+                                &head_weights,
+                                &keys,
+                                &visible_counts,
+                                &scalar_score_rows,
+                                INDEX_HEADS,
+                                INDEX_DIM,
+                                row_count,
+                                1,
+                                true,
+                            )
+                        })
+                    })
+                    .collect(),
             )
             .0;
             for _ in 0..5 {
@@ -15368,7 +16048,7 @@ mod tests {
                     encode_select_top_k_f32(
                         &ctx,
                         encoder,
-                        &score_rows,
+                        &tied_score_rows,
                         &visible_counts,
                         &mask_rows,
                         None,
@@ -15389,7 +16069,7 @@ mod tests {
                             encode_select_top_k_f32(
                                 &ctx,
                                 encoder,
-                                &score_rows,
+                                &tied_score_rows,
                                 &visible_counts,
                                 &mask_rows,
                                 None,
@@ -15530,8 +16210,9 @@ mod tests {
             );
             let conservative_select_ms = tied_select_ms.max(mixed_select_ms);
             eprintln!(
-                "deepseek_v4 sparse_profile rows={row_count} token_equivalent={} score_ms={score_ms:.3} tied_select_ms={tied_select_ms:.3} tied_select_p95_ms={tied_select_p95_ms:.3} mixed_select_ms={mixed_select_ms:.3} mixed_select_p95_ms={mixed_select_p95_ms:.3} legacy_attention_ms={legacy_attention_ms:.3} cooperative_attention_ms={cooperative_attention_ms:.3} attention_speedup={:.2} conservative_projected_21_csa_ms={:.3}",
+                "deepseek_v4 sparse_profile rows={row_count} token_equivalent={} scalar_score_before_ms={scalar_score_before_ms:.3} score_ms={score_ms:.3} score_p95_ms={score_p95_ms:.3} scalar_score_after_ms={scalar_score_after_ms:.3} score_speedup={:.2} tied_select_ms={tied_select_ms:.3} tied_select_p95_ms={tied_select_p95_ms:.3} mixed_select_ms={mixed_select_ms:.3} mixed_select_p95_ms={mixed_select_p95_ms:.3} legacy_attention_ms={legacy_attention_ms:.3} cooperative_attention_ms={cooperative_attention_ms:.3} attention_speedup={:.2} conservative_projected_21_csa_ms={:.3}",
                 row_count * 4,
+                ((scalar_score_before_ms + scalar_score_after_ms) * 0.5) / score_ms,
                 legacy_attention_ms / cooperative_attention_ms,
                 (score_ms + conservative_select_ms + cooperative_attention_ms) * 21.0,
             );
@@ -16423,6 +17104,60 @@ mod tests {
                 .unwrap_err();
         assert!(capacity_error.to_string().contains("only 128 threads"));
         validate_deepseek_v4_route_pipeline_geometry("hash route", 16, 1, 1).unwrap();
+    }
+
+    #[test]
+    fn cooperative_lightning_score_geometry_fails_closed() {
+        const KERNEL: &str = "cooperative Lightning scorer";
+        validate_cooperative_lightning_score_geometry(KERNEL, 32, 256, 4_096).unwrap();
+        assert!(
+            validate_cooperative_lightning_score_geometry(KERNEL, 16, 256, 4_096)
+                .unwrap_err()
+                .to_string()
+                .contains("SIMD width 32")
+        );
+        assert!(
+            validate_cooperative_lightning_score_geometry(KERNEL, 32, 255, 4_096)
+                .unwrap_err()
+                .to_string()
+                .contains("256 threads")
+        );
+        assert!(
+            validate_cooperative_lightning_score_geometry(KERNEL, 32, 256, 4_095)
+                .unwrap_err()
+                .to_string()
+                .contains("4096 threadgroup bytes")
+        );
+    }
+
+    #[test]
+    fn lightning_score_offsets_reject_u32_shader_overflow() {
+        validate_lightning_indexer_score_offsets(64, 128, 262_144, 1).unwrap();
+        let over_u32 = u32::MAX as usize + 1;
+        assert!(
+            validate_lightning_indexer_score_offsets(1, 1, over_u32, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("score elements exceed u32")
+        );
+        assert!(
+            validate_lightning_indexer_score_offsets(65_536, 65_536, 1, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("query elements exceed u32")
+        );
+        assert!(
+            validate_lightning_indexer_score_offsets(65_536, 1, 1, 65_536)
+                .unwrap_err()
+                .to_string()
+                .contains("weight elements exceed u32")
+        );
+        assert!(
+            validate_lightning_indexer_score_offsets(1, 65_536, 65_536, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("key elements exceed u32")
+        );
     }
 
     #[test]

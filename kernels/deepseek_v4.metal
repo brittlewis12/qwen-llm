@@ -993,6 +993,58 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16(
     scores[score_index] = score;
 }
 
+kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_cooperative(
+        constant ds4_indexer_score_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const float * head_weights [[buffer(2)]],
+        device const half * keys [[buffer(3)]],
+        device const int * visible_counts [[buffer(4)]],
+        device float * scores [[buffer(5)]],
+        threadgroup half * staged_keys [[threadgroup(0)]],
+        threadgroup float * head_dots [[threadgroup(1)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]]) {
+    const uint rows_per_group = 8u;
+    const uint row = group.x * rows_per_group + uint(simdgroup);
+    const uint query = group.y;
+    if (row >= args.row_capacity || query >= args.query_count) return;
+    const uint score_index = query * args.row_capacity + row;
+    const int visible = visible_counts[query];
+    if (visible < 0 || row >= uint(visible)) {
+        if (lane == 0) scores[score_index] = -INFINITY;
+        return;
+    }
+
+    threadgroup half * key_row = staged_keys + uint(simdgroup) * 128u;
+    for (uint dimension = uint(lane); dimension < 128u; dimension += 32u) {
+        key_row[dimension] = keys[row * 128u + dimension];
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint query_base = query * 64u * 128u;
+    threadgroup float * dots = head_dots + uint(simdgroup) * 64u;
+    for (uint head_group = 0u; head_group < 2u; ++head_group) {
+        const uint head = uint(lane) + head_group * 32u;
+        const uint head_base = query_base + head * 128u;
+        float dot = 0.0f;
+        for (uint dimension = 0u; dimension < 128u; ++dimension) {
+            dot += queries[head_base + dimension] * float(key_row[dimension]);
+        }
+        dots[head] = dot;
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane == 0) {
+        const uint weight_base = query * 64u;
+        float score = 0.0f;
+        for (uint head = 0u; head < 64u; ++head) {
+            score += max(dots[head], 0.0f) * head_weights[weight_base + head];
+        }
+        scores[score_index] = score;
+    }
+}
+
 kernel void kernel_deepseek_v4_select_top_k_f32(
         constant ds4_indexer_select_args & args [[buffer(0)]],
         device const float * scores [[buffer(1)]],

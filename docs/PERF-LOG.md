@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 Cooperative Lightning Scoring GO
+
+Status: promoted `GO` for production 64-head x 128-dimension Lightning
+Indexer scoring. Base is clean checkpoint `e3f0718`; the scalar kernel remains
+an executable differential but has no production caller at Flash-0731 geometry.
+
+- One 256-thread group owns eight rows, one per simdgroup. Each row's 128 F16
+  key values are staged once; every lane computes two complete heads in original
+  dimension order; lane zero accumulates all 64 weighted head terms in original
+  head order. Full score words are bit-identical to the scalar kernel.
+- Deterministic nonzero production-shape scoring falls from 0.701-0.703 to
+  0.141 ms at 16,384 rows, 1.999-2.217 to 0.533 ms at 65,536 rows, and
+  8.323-8.410 to 2.102 ms at 262,144 rows. Scalar-bracket midpoint speedup is
+  3.95-4.99x; the raw 65,536-row endpoints span 3.75-4.16x. Terminal mixed
+  radix selection at 4.576 ms is now the leading isolated CSA phase.
+- At real-weight position 65,663, scalar/cooperative/scalar command-GPU times
+  are 69.670/58.712/70.360 ms and wall times are 74.083/62.497/74.074 ms.
+  A fresh-process repeat gives 70.311/58.872/70.242 ms GPU and
+  74.558/63.053/73.882 ms wall. Every comparison clears the preregistered
+  8 ms/token product gate.
+- Both score schedules preserve every visible score bit, selected ID, selector
+  status, route decision, and logit bit. Canonical synthetic logits pin to
+  `1c0f5e0475314e693bfe0664b5454a2ece26d9a5913f9a5218cdf39da59582d4`;
+  causal state pins to
+  `03f15887db83e4baf0ad5ba66f95b3e2a7fe461858d92aebe9f0b3009f83254e`.
+- The far-state fixture now initializes causal history explicitly. Metal
+  scratch constructors are uninitialized by contract, so a direct phase jump
+  may not infer zero history from a `zeros_*` method name. The former synthetic
+  hash was retired as fixture-undefined, not treated as a model regression.
+- Packed visibility, negative visibility, finite-visibility nonfinite fallback,
+  u32 shader offsets, SIMD width, thread capacity, and threadgroup-memory limits
+  fail closed in focused gates. Strict all-target/all-feature release Clippy is
+  warning-free.
+
+Decision: preserve the exact cooperative scorer and move the primary terminal
+CSA lane to exact radix selection. Reopen scoring only for a changed cache
+representation or a candidate with a measured product ceiling above the active
+selector/HCA lanes. Review session:
+`019fc50a-a944-7c60-9ac8-8083aad4b983`.
+
 ## 2026-08-04 - DeepSeek V4 Short-Context Kernel Lane Bounded KILL
 
 Status: bounded `KILL` for the measured all-slot IQ2/short-command hypotheses.

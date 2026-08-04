@@ -119,20 +119,28 @@ decode uses one Metal command/encoder and runs at about 37-38 ms command-GPU /
 36.1 ms wall floor. Practical long context is the leading measured optimization
 opportunity, not yet a demonstrated product-speed differentiator.
 
+Cooperative Lightning scoring is promoted. It preserves every production score
+bit and cuts the operation from 0.701/2.0-2.2/8.3-8.4 ms to
+0.141/0.533/2.102 ms per CSA layer at 16,384/65,536/262,144 rows. A real-weight
+position-65,663 bracket saves 10.8-11.6 ms in both command-GPU and wall time
+across two fresh processes with exact decisions, logits, and causal state.
+
 Force-ranked queue:
 
-1. **Cooperative Lightning Indexer scoring.** The scalar production kernel
-   costs 1.961 ms at 65,536 rows and 8.232 ms at 262,144 rows per CSA layer.
-   Give one simdgroup each row, stage its 128 F16 key values once, compute two
-   complete heads per lane in original dimension order, and have lane zero sum
-   64 published head terms in original head order. Require bit-identical scores,
-   selected IDs, and failure semantics before measuring speed.
-2. **Reprice exact radix selection after scoring.** Selection is already exact
-   and bounded at 1.172/4.582 ms for 65,536/262,144 rows. Optimize it only after
-   cooperative scoring lands and it becomes the measured leading CSA phase.
-3. **Tiled HCA and million-row latency.** The tiled kernel is structurally exact
+1. **Exact radix selection at terminal history.** Mixed-score selection remains
+   exact but now leads the isolated terminal packet at about 4.576 ms versus
+   2.102 ms scoring and 0.346 ms selected attention per CSA layer. Preserve
+   stable lower-ID ties, bounded nonfinite fallback, cache-order output, and all
+   selected IDs; require a product-visible far-state win rather than only a
+   synthetic selector ratio.
+2. **Tiled HCA and million-row latency.** The tiled kernel is structurally exact
    beyond 512 compressed rows, but practical latency above 65,536 context is a
-   separate measured phase. Do not conflate it with CSA scoring.
+   separate measured phase. Attribute a constructed deep token before choosing
+   score recomputation, tiling, or cache bandwidth work.
+3. **Packed indexer-cache representation.** F16 scoring is no longer serial but
+   still traverses every visible key row in 21 CSA layers. Reopen the paper's
+   FP4 index-cache lane only with an explicit numerical contract and after the
+   selector/HCA measurements establish its product ceiling.
 4. **Packed prefill dispatch reduction.** Retain as an independent TTFT lane;
    require a warm-matched comparator and named prompt archetype before a ratio
    gets product authority.

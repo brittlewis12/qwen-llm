@@ -1171,22 +1171,23 @@ static inline uint ds4_selector_order_key(float value) {
     return (bits & 0x80000000u) != 0u ? ~bits : (bits ^ 0x80000000u);
 }
 
-kernel void kernel_deepseek_v4_select_top_k_parallel_f32(
-        constant ds4_indexer_select_args & args [[buffer(0)]],
-        device const float * scores [[buffer(1)]],
-        device const int * visible_counts [[buffer(2)]],
-        device int * selected_mask [[buffer(3)]],
-        device int * ranked_ids [[buffer(4)]],
-        device int * cache_order_ids [[buffer(5)]],
-        device int * selected_counts [[buffer(6)]],
-        device int * status [[buffer(7)]],
-        threadgroup uint * lane_scratch [[threadgroup(0)]],
-        threadgroup uint * shared [[threadgroup(1)]],
-        uint lane [[thread_index_in_threadgroup]],
-        uint query [[threadgroup_position_in_grid]],
-        uint width [[threads_per_threadgroup]],
-        ushort simdgroup [[simdgroup_index_in_threadgroup]],
-        ushort simd_lane [[thread_index_in_simdgroup]]) {
+template <bool Radix4>
+__attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
+        constant ds4_indexer_select_args & args,
+        device const float * scores,
+        device const int * visible_counts,
+        device int * selected_mask,
+        device int * ranked_ids,
+        device int * cache_order_ids,
+        device int * selected_counts,
+        device int * status,
+        threadgroup uint * lane_scratch,
+        threadgroup uint * shared,
+        uint lane,
+        uint query,
+        uint width,
+        ushort simdgroup,
+        ushort simd_lane) {
     if (query >= args.query_count) return;
     const uint simdgroup_count = (width + 31u) / 32u;
     const uint mask_base = query * args.row_capacity;
@@ -1248,34 +1249,101 @@ kernel void kernel_deepseek_v4_select_top_k_parallel_f32(
     uint prefix = 0u;
     uint prefix_mask = 0u;
     uint rank = selected_count;
-    // Resolve the 1-based kth score by counting one radix bit per pass.
-    for (int bit = 31; bit >= 0; --bit) {
-        const uint bit_mask = 1u << uint(bit);
-        uint local_ones = 0u;
-        for (uint row = lane; row < visible; row += width) {
-            const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
-            if ((key & prefix_mask) == prefix && (key & bit_mask) != 0u) {
-                ++local_ones;
+    if (Radix4) {
+        for (int shift = 28; shift >= 0; shift -= 4) {
+            uint local_bins[16];
+            for (uint bin = 0u; bin < 16u; ++bin) local_bins[bin] = 0u;
+            for (uint row = lane; row < visible; row += width) {
+                const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
+                if ((key & prefix_mask) == prefix) {
+                    ++local_bins[(key >> uint(shift)) & 0xfu];
+                }
             }
+            for (uint bin = 0u; bin < 16u; ++bin) {
+                const uint simd_count = simd_sum(local_bins[bin]);
+                if (simd_lane == 0u) {
+                    lane_scratch[uint(simdgroup) * 16u + bin] = simd_count;
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (simdgroup == 0u && simd_lane < 16u) {
+                uint total = 0u;
+                for (uint group = 0u; group < simdgroup_count; ++group) {
+                    total += lane_scratch[group * 16u + uint(simd_lane)];
+                }
+                shared[simd_lane] = total;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (lane == 0u) {
+                uint remaining = rank;
+                uint chosen = 0u;
+                bool found = false;
+                for (int bin = 15; bin >= 0; --bin) {
+                    const uint count = shared[uint(bin)];
+                    if (remaining <= count) {
+                        chosen = uint(bin);
+                        found = true;
+                        break;
+                    }
+                    remaining -= count;
+                }
+                shared[16] = chosen;
+                shared[17] = remaining;
+                shared[18] = found ? 0u : 3u;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            error = int(shared[18]);
+            if (error != 0) break;
+            prefix |= shared[16] << uint(shift);
+            rank = shared[17];
+            prefix_mask |= 0xfu << uint(shift);
         }
-        const uint simd_ones = simd_sum(local_ones);
-        if (simd_lane == 0u) lane_scratch[simdgroup] = simd_ones;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (simdgroup == 0u) {
-            const uint group_ones = simd_lane < simdgroup_count
-                ? lane_scratch[simd_lane]
-                : 0u;
-            const uint total_ones = simd_sum(group_ones);
-            if (simd_lane == 0u) shared[0] = total_ones;
+    } else {
+        // Resolve the 1-based kth score by counting one radix bit per pass.
+        for (int bit = 31; bit >= 0; --bit) {
+            const uint bit_mask = 1u << uint(bit);
+            uint local_ones = 0u;
+            for (uint row = lane; row < visible; row += width) {
+                const uint key = ds4_selector_order_key(scores[query * args.row_capacity + row]);
+                if ((key & prefix_mask) == prefix && (key & bit_mask) != 0u) {
+                    ++local_ones;
+                }
+            }
+            const uint simd_ones = simd_sum(local_ones);
+            if (simd_lane == 0u) lane_scratch[simdgroup] = simd_ones;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (simdgroup == 0u) {
+                const uint group_ones = simd_lane < simdgroup_count
+                    ? lane_scratch[simd_lane]
+                    : 0u;
+                const uint total_ones = simd_sum(group_ones);
+                if (simd_lane == 0u) shared[0] = total_ones;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            const uint ones = shared[0];
+            if (rank <= ones) {
+                prefix |= bit_mask;
+            } else {
+                rank -= ones;
+            }
+            prefix_mask |= bit_mask;
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        const uint ones = shared[0];
-        if (rank <= ones) {
-            prefix |= bit_mask;
-        } else {
-            rank -= ones;
+    }
+    if (error != 0) {
+        for (uint row = lane; row < args.row_capacity; row += width) {
+            selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
         }
-        prefix_mask |= bit_mask;
+        for (uint slot = lane; slot < args.top_k; slot += width) {
+            const int id = slot < selected_count ? int(slot) : -1;
+            if (args.emit_ranked != 0u) ranked_ids[ids_base + slot] = id;
+            cache_order_ids[ids_base + slot] = id;
+        }
+        threadgroup_barrier(mem_flags::mem_device);
+        if (lane == 0u) {
+            selected_counts[query] = int(selected_count);
+            status[query] = error;
+        }
+        return;
     }
 
     const uint threshold_key = prefix;
@@ -1391,6 +1459,50 @@ kernel void kernel_deepseek_v4_select_top_k_parallel_f32(
         selected_counts[query] = int(selected_count);
         status[query] = 0;
     }
+}
+
+kernel void kernel_deepseek_v4_select_top_k_parallel_f32(
+        constant ds4_indexer_select_args & args [[buffer(0)]],
+        device const float * scores [[buffer(1)]],
+        device const int * visible_counts [[buffer(2)]],
+        device int * selected_mask [[buffer(3)]],
+        device int * ranked_ids [[buffer(4)]],
+        device int * cache_order_ids [[buffer(5)]],
+        device int * selected_counts [[buffer(6)]],
+        device int * status [[buffer(7)]],
+        threadgroup uint * lane_scratch [[threadgroup(0)]],
+        threadgroup uint * shared [[threadgroup(1)]],
+        uint lane [[thread_index_in_threadgroup]],
+        uint query [[threadgroup_position_in_grid]],
+        uint width [[threads_per_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
+    ds4_select_top_k_parallel_impl<false>(
+        args, scores, visible_counts, selected_mask, ranked_ids,
+        cache_order_ids, selected_counts, status, lane_scratch, shared,
+        lane, query, width, simdgroup, simd_lane);
+}
+
+kernel void kernel_deepseek_v4_select_top_k_radix4_f32(
+        constant ds4_indexer_select_args & args [[buffer(0)]],
+        device const float * scores [[buffer(1)]],
+        device const int * visible_counts [[buffer(2)]],
+        device int * selected_mask [[buffer(3)]],
+        device int * ranked_ids [[buffer(4)]],
+        device int * cache_order_ids [[buffer(5)]],
+        device int * selected_counts [[buffer(6)]],
+        device int * status [[buffer(7)]],
+        threadgroup uint * lane_scratch [[threadgroup(0)]],
+        threadgroup uint * shared [[threadgroup(1)]],
+        uint lane [[thread_index_in_threadgroup]],
+        uint query [[threadgroup_position_in_grid]],
+        uint width [[threads_per_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
+    ds4_select_top_k_parallel_impl<true>(
+        args, scores, visible_counts, selected_mask, ranked_ids,
+        cache_order_ids, selected_counts, status, lane_scratch, shared,
+        lane, query, width, simdgroup, simd_lane);
 }
 
 kernel void kernel_deepseek_v4_selected_sink_attention_f16(

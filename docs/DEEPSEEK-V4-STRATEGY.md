@@ -1255,8 +1255,8 @@ scalar score bit while reducing 16,384/65,536/262,144-row medians to
 0.141/0.533/2.102 ms, a 3.95-4.99x scalar-bracket midpoint speedup; the raw
 65,536-row endpoints span 3.75-4.16x. The resulting conservative
 score-plus-select-plus-attention projection across 21 CSA layers is about
-13.7/42.5/147.5 ms at 64K/262K/1M-token-equivalent histories. Exact radix
-selection, not scoring, now leads the terminal isolated packet.
+13.7/42.5/147.5 ms at 64K/262K/1M-token-equivalent histories. At this checkpoint
+exact radix selection, not scoring, led the terminal isolated packet.
 
 A real-weight synthetic state at position 65,663 proves the integrated effect.
 Across two fresh-process scalar/cooperative/scalar brackets, cooperative scoring
@@ -1269,6 +1269,25 @@ and causal state at
 Because Metal scratch allocation is intentionally uninitialized, constructed
 deep states now initialize raw history, compressor state, and published rows
 explicitly rather than relying on a misleading `zeros_*` constructor name.
+
+The promoted selector resolves four key bits per pass instead of one. Each lane
+keeps 16 private counts; eight simdgroups reduce an 8x16 table in existing
+threadgroup storage; lane zero applies the same one-based descending rank.
+Threshold equality, lower-row tie retention, cache-order compaction, optional
+ranked output, and bounded statuses remain unchanged. Separate compile-time
+instantiations keep the original bitwise kernel as an executable differential
+without a production switch.
+
+At 16,384/65,536/262,144 rows, mixed radix4 selection takes
+0.123/0.499/1.875 ms versus bitwise 0.190/1.173/4.58 ms; all-tied radix4 takes
+0.137/0.539/2.019 ms with terminal p95 2.035 ms. Packed 128-query geometry is
+also exact and improves from a 1.593 ms bitwise-bracket midpoint to 1.251 ms.
+Four complete real-weight position-65,663 brackets remove 1.06-1.29 ms
+command-GPU and 1.06-1.70 ms wall while preserving the full decision
+transcript, logits, and causal state. The conservative isolated 21-layer CSA
+projection is now about 12.6/29.2/93.4 ms. Scoring and selection are near peers
+at terminal history, so the next decision requires complete-token and tiled-HCA
+attribution rather than immediately deepening either local kernel.
 
 The retained legacy selected-attention differential still measures 43.36 ms at
 the 128-raw-plus-512-compressed shape. Singleton dense attention had the same
@@ -1566,8 +1585,9 @@ about 0.112 ms/layer, IQ3_XXS down about 0.062 ms/layer, and MXFP4 down about
 product trace because each operation is warmed and timed independently. These
 results close sub-threshold short-context kernel tuning under the current gate;
 the promoted cooperative Lightning scorer reduces the measured 262,144-row
-operation from 8.3-8.4 to 2.102 ms per CSA layer. Exact radix selection at about
-4.576 ms is now the primary terminal CSA lane.
+operation from 8.3-8.4 to 2.102 ms per CSA layer, while four-bit radix reduces
+mixed selection from about 4.58 to 1.875 ms. Complete terminal-token and
+tiled-HCA attribution now precede another local CSA optimization.
 
 The pinned llama.cpp depth command is not a free decode-only bracket. Its
 `--n-depth` implementation executes `test_prompt(n_depth)` and serializes the
@@ -1692,9 +1712,9 @@ Gate:
   Production head counts and widths are covered by separate composition gates;
   together they avoid replaying 8,192 semantically redundant packed chunks.
 - A real-weight session constructed directly at position 65,663 executes the
-  radix selector inside every sparse CSA layer and the first tiled HCA query.
-  Its explicitly initialized zero causal state remains exact across scalar and
-  cooperative scoring at full-logit SHA-256
+  selector inside every sparse CSA layer and the first tiled HCA query. Its
+  explicitly initialized zero causal state remains exact across scalar/bitwise
+  and cooperative/radix4 schedules at full-logit SHA-256
   `1c0f5e0475314e693bfe0664b5454a2ece26d9a5913f9a5218cdf39da59582d4`
   and causal SHA-256
   `03f15887db83e4baf0ad5ba66f95b3e2a7fe461858d92aebe9f0b3009f83254e`.
@@ -1716,12 +1736,10 @@ Broader S6 work remains:
   per-layer route/selector failure records, and verified-prefix callbacks are
   promoted. An asynchronously immutable SSD-streaming ticket remains a separate
   product contract.
-- Reduce the measured 4.576 ms terminal exact-radix selector while preserving
-  stable ties, bounded failure behavior, and the complete selected-ID
-  transcript. Cooperative scoring is promoted and remains an executable exact
-  scalar differential.
-- Attribute tiled HCA score recomputation and retained-chunk routing before
-  choosing their next fusion or scheduling target.
+- Attribute a complete constructed terminal token and production-width tiled
+  HCA before choosing between the near-peer 2.102 ms scorer and 1.875-2.019 ms
+  selector. Scalar scoring and bitwise selection remain executable exact
+  differentials.
 
 Gates:
 
@@ -1800,11 +1818,11 @@ noise without reducing technical risk. Revisit after S5.
    optimization lane. The one-command path is about 37-38 ms of GPU work versus
    llama.cpp's 36.1 ms total at depths 128/512; barrier, row-shape, geometry,
    and vector-decode probes all miss the 0.75 ms/token two-depth gate.
-5. Preserve the promoted cooperative Lightning scorer and move the terminal CSA
-   lane to exact radix selection. Any selector replacement must preserve stable
-   ties, nonfinite fallback, cache-order IDs, and the complete live decision
-   transcript, then clear a product-visible far-state gate. Attribute tiled HCA
-   independently before assuming CSA owns the complete deep-token curve.
+5. Preserve the promoted cooperative Lightning scorer and four-bit radix
+   selector, including their scalar and bitwise differentials. Attribute a
+   constructed terminal token and production-width tiled HCA before deepening
+   either near-peer CSA phase; do not infer the full deep-token curve from an
+   additive microprofile alone.
 6. Keep the external depth bracket and packed-prompt dispatch reduction as
    independent lanes. `llama-bench --n-depth` performs the full cold prefix at
    each new depth, so do not pay that loop until a reusable state or a gating

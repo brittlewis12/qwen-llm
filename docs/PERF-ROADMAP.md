@@ -125,22 +125,28 @@ bit and cuts the operation from 0.701/2.0-2.2/8.3-8.4 ms to
 position-65,663 bracket saves 10.8-11.6 ms in both command-GPU and wall time
 across two fresh processes with exact decisions, logits, and causal state.
 
+Four-bit radix selection is also promoted. It replaces 32 full-history bit
+scans with eight nibble scans while preserving the exact threshold and stable
+tie contract. Mixed terminal selection falls from about 4.58 to 1.88 ms/layer;
+four complete position-65,663 brackets save 1.06-1.29 ms command-GPU and
+1.06-1.70 ms wall. The conservative isolated 21-layer CSA projection is now
+about 12.6/29.2/93.4 ms at 64K/262K/1M-token-equivalent histories.
+
 Force-ranked queue:
 
-1. **Exact radix selection at terminal history.** Mixed-score selection remains
-   exact but now leads the isolated terminal packet at about 4.576 ms versus
-   2.102 ms scoring and 0.346 ms selected attention per CSA layer. Preserve
-   stable lower-ID ties, bounded nonfinite fallback, cache-order output, and all
-   selected IDs; require a product-visible far-state win rather than only a
-   synthetic selector ratio.
-2. **Tiled HCA and million-row latency.** The tiled kernel is structurally exact
+1. **Tiled HCA and million-token attribution.** The tiled kernel is structurally exact
    beyond 512 compressed rows, but practical latency above 65,536 context is a
-   separate measured phase. Attribute a constructed deep token before choosing
-   score recomputation, tiling, or cache bandwidth work.
-3. **Packed indexer-cache representation.** F16 scoring is no longer serial but
-   still traverses every visible key row in 21 CSA layers. Reopen the paper's
-   FP4 index-cache lane only with an explicit numerical contract and after the
-   selector/HCA measurements establish its product ceiling.
+   separate measured phase. Run a constructed terminal token and production-
+   width HCA profile before choosing score recomputation, tiling, or cache
+   bandwidth work.
+2. **Packed indexer-cache representation and scoring.** F16 scoring is now the
+   largest measured terminal CSA phase at 2.102 ms/layer, narrowly ahead of
+   mixed radix4 selection at 1.875 ms. Reopen the paper's FP4 index-cache lane
+   only with an explicit numerical contract and after terminal HCA attribution
+   establishes its product ceiling.
+3. **Multi-group selection.** Radix4 remains one threadgroup per query. Defer
+   global histograms, query-scaled scratch, and producer/reducer dispatches until
+   scoring moves enough for the retained 1.875 ms selector to lead again.
 4. **Packed prefill dispatch reduction.** Retain as an independent TTFT lane;
    require a warm-matched comparator and named prompt archetype before a ratio
    gets product authority.

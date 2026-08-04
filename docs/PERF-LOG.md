@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 Four-Bit Radix Selection GO
+
+Status: promoted `GO` for parallel top-512 selection. Base is cooperative-score
+checkpoint `f5e4df7`; the original one-bit radix remains a separate compile-time
+kernel and test oracle but has no production caller above 1,024 visible rows.
+
+- Replace 32 MSB-first one-bit scans with eight MSB-first four-bit scans inside
+  the same 256-thread group. Sixteen private counters per lane reduce into an
+  existing 8x16 threadgroup table; lane zero preserves one-based descending
+  rank. Exact threshold ties, lower-row stability, cache-order compaction,
+  ranked output, and statuses 1/2/3 are unchanged.
+- Deterministic nonzero bitwise/radix4/bitwise medians are
+  0.190/0.123-0.137/0.189-0.190 ms at 16,384 rows,
+  1.147-1.173/0.499-0.539/1.147-1.173 at 65,536 rows, and
+  4.481-4.580/1.875-2.019/4.475-4.576 at 262,144 rows. Terminal p95 is
+  1.880 ms mixed and 2.035 ms all-tied. The candidate clears the bounded 2x
+  gate without private-counter spill defeating the reduced scan count.
+- Packed 128-query, 16,384-row selection remains exact and measures
+  1.593/1.251/1.592 ms command-GPU. Mixed/tied packed cases, optional ranked
+  output, nonfinite fallback, signed zeros, and subnormals agree with the
+  bitwise and scalar contracts.
+- Four complete fresh-process real-weight position-65,663
+  bitwise/radix4/bitwise packets measure command-GPU
+  58.784/57.500/58.790, 58.337/57.384/58.544, and
+  57.408/56.402/57.627, and 57.671/56.513/57.658 ms. Wall packets are
+  63.204/61.484/63.158, 62.230/61.228/62.342,
+  62.278/61.263/62.469, and 62.622/61.354/63.306 ms. Bracket-midpoint
+  savings are 1.06-1.29 ms GPU and 1.06-1.70 ms wall.
+- One intervening process stopped after its first comparison because the
+  bitwise-before arm was only 0.966 ms above the candidate under an
+  over-strict per-arm gate. It has no after arm and is excluded from complete
+  bracket statistics; the corrected midpoint gate passes all complete packets.
+- The full scalar-score+bitwise-selector versus cooperative-score+radix4
+  transcript preserves every score, selected ID/status, route decision, logit
+  bit, and causal bit at the existing `1c0f5e...82d4` / `03f158...254e` pins.
+
+Decision: preserve radix4 and the bitwise differential. The isolated terminal
+CSA projection falls from about 147.5 to 93.4 ms/token; cooperative scoring at
+2.102 ms/layer now slightly exceeds mixed selection at 1.875 ms/layer. Attribute
+the complete terminal token and tiled HCA before reopening either near-peer.
+Test-only status-3 radix-bin fault injection remains optional because the shared
+fallback and host fail-stop paths are already covered. Review session:
+`019fc50a-a944-7c60-9ac8-8083aad4b983`.
+
 ## 2026-08-04 - DeepSeek V4 Cooperative Lightning Scoring GO
 
 Status: promoted `GO` for production 64-head x 128-dimension Lightning

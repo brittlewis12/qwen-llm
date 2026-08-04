@@ -3505,6 +3505,8 @@ struct DeepSeekV4SparseCsaScratch {
     status: MetalTensor,
     #[cfg(test)]
     score_test_policy: DeepSeekV4IndexerScoreTestPolicy,
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    selector_test_policy: DeepSeekV4SelectorTestPolicy,
 }
 
 #[cfg(test)]
@@ -3512,6 +3514,13 @@ struct DeepSeekV4SparseCsaScratch {
 enum DeepSeekV4IndexerScoreTestPolicy {
     Production,
     ScalarOracle,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeepSeekV4SelectorTestPolicy {
+    Production,
+    BitwiseOracle,
 }
 
 impl DeepSeekV4SparseCsaScratch {
@@ -3535,12 +3544,19 @@ impl DeepSeekV4SparseCsaScratch {
             status: MetalTensor::zeros_i32(ctx, vec![1])?,
             #[cfg(test)]
             score_test_policy: DeepSeekV4IndexerScoreTestPolicy::Production,
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            selector_test_policy: DeepSeekV4SelectorTestPolicy::Production,
         })
     }
 
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
     fn set_score_test_policy(&mut self, policy: DeepSeekV4IndexerScoreTestPolicy) {
         self.score_test_policy = policy;
+    }
+
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    fn set_selector_test_policy(&mut self, policy: DeepSeekV4SelectorTestPolicy) {
+        self.selector_test_policy = policy;
     }
 
     fn force_scalar_score_kernel(&self) -> bool {
@@ -3551,6 +3567,17 @@ impl DeepSeekV4SparseCsaScratch {
         #[cfg(not(test))]
         {
             false
+        }
+    }
+
+    fn use_radix4_selector(&self) -> bool {
+        #[cfg(all(test, feature = "dsv4-diagnostics"))]
+        {
+            self.selector_test_policy == DeepSeekV4SelectorTestPolicy::Production
+        }
+        #[cfg(any(not(test), all(test, not(feature = "dsv4-diagnostics"))))]
+        {
+            true
         }
     }
 
@@ -3654,7 +3681,7 @@ impl DeepSeekV4SparseCsaScratch {
             1,
             self.force_scalar_score_kernel(),
         )?;
-        encode_select_top_k_f32(
+        encode_select_top_k_f32_with_policy(
             ctx,
             enc,
             &self.scores,
@@ -3668,6 +3695,7 @@ impl DeepSeekV4SparseCsaScratch {
             rows.count,
             DEEPSEEK_V4_CSA_TOP_K,
             1,
+            self.use_radix4_selector(),
         )
     }
 
@@ -7926,6 +7954,41 @@ fn encode_select_top_k_f32(
     top_k: usize,
     query_count: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
+    encode_select_top_k_f32_with_policy(
+        ctx,
+        enc,
+        scores,
+        visible_counts,
+        selected_mask,
+        ranked_ids,
+        cache_order_ids,
+        selected_counts,
+        status,
+        row_capacity,
+        max_visible_rows,
+        top_k,
+        query_count,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_select_top_k_f32_with_policy(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    visible_counts: &MetalTensor,
+    selected_mask: &MetalTensor,
+    ranked_ids: Option<&MetalTensor>,
+    cache_order_ids: &MetalTensor,
+    selected_counts: &MetalTensor,
+    status: &MetalTensor,
+    row_capacity: usize,
+    max_visible_rows: usize,
+    top_k: usize,
+    query_count: usize,
+    radix4: bool,
+) -> Result<(), DeepSeekV4MetalError> {
     if row_capacity == 0
         || max_visible_rows == 0
         || max_visible_rows > row_capacity
@@ -8002,7 +8065,10 @@ fn encode_select_top_k_f32(
     let emit_ranked = ranked_ids.is_some();
     let ranked_ids = ranked_ids.unwrap_or(cache_order_ids);
     let parallel = max_visible_rows > 1_024;
-    let pso = ctx.pipeline(if parallel {
+    let radix4 = radix4 && parallel;
+    let pso = ctx.pipeline(if radix4 {
+        "kernel_deepseek_v4_select_top_k_radix4_f32"
+    } else if parallel {
         "kernel_deepseek_v4_select_top_k_parallel_f32"
     } else {
         "kernel_deepseek_v4_select_top_k_f32"
@@ -9974,7 +10040,7 @@ mod tests {
     #[cfg(feature = "dsv4-diagnostics")]
     #[test]
     #[ignore = "requires the local 95.93 GiB DS4 fixture and executes focused far-context differentials"]
-    fn cooperative_lightning_scores_preserve_far_context_token_and_save_eight_ms() {
+    fn sparse_csa_optimizations_preserve_far_context_token_and_causal_state() {
         const POSITION: u32 = 65_663;
         const FORWARD_LIMIT: usize = POSITION as usize + 1;
         const TOKEN_ID: u32 = 35;
@@ -10017,7 +10083,8 @@ mod tests {
         fn execute(
             ctx: &MetalContext,
             residency: DeepSeekV4MetalResidency,
-            policy: DeepSeekV4IndexerScoreTestPolicy,
+            score_policy: DeepSeekV4IndexerScoreTestPolicy,
+            selector_policy: DeepSeekV4SelectorTestPolicy,
             mode: RunMode,
         ) -> (DeepSeekV4MetalResidency, Evidence) {
             let mut session = DeepSeekV4Session::new_with_model_content_id(
@@ -10026,7 +10093,8 @@ mod tests {
                 DeepSeekV4ModelContentId::new([0x65; 32]),
             )
             .expect("construct synthetic far-context session");
-            session.sparse_csa.set_score_test_policy(policy);
+            session.sparse_csa.set_score_test_policy(score_policy);
+            session.sparse_csa.set_selector_test_policy(selector_policy);
             initialize_zero_synthetic_causal_state(&session);
             session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
                 next_position: POSITION,
@@ -10110,6 +10178,7 @@ mod tests {
             &ctx,
             residency,
             DeepSeekV4IndexerScoreTestPolicy::Production,
+            DeepSeekV4SelectorTestPolicy::Production,
             RunMode::Timed,
         );
         let scalar_first;
@@ -10117,6 +10186,7 @@ mod tests {
             &ctx,
             residency,
             DeepSeekV4IndexerScoreTestPolicy::ScalarOracle,
+            DeepSeekV4SelectorTestPolicy::Production,
             RunMode::Timed,
         );
         let cooperative;
@@ -10124,6 +10194,7 @@ mod tests {
             &ctx,
             residency,
             DeepSeekV4IndexerScoreTestPolicy::Production,
+            DeepSeekV4SelectorTestPolicy::Production,
             RunMode::Timed,
         );
         let scalar_second;
@@ -10131,6 +10202,7 @@ mod tests {
             &ctx,
             residency,
             DeepSeekV4IndexerScoreTestPolicy::ScalarOracle,
+            DeepSeekV4SelectorTestPolicy::Production,
             RunMode::Timed,
         );
 
@@ -10155,11 +10227,56 @@ mod tests {
             );
         }
 
+        let bitwise_first;
+        (residency, bitwise_first) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
+            DeepSeekV4SelectorTestPolicy::BitwiseOracle,
+            RunMode::Timed,
+        );
+        let radix4;
+        (residency, radix4) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
+            DeepSeekV4SelectorTestPolicy::Production,
+            RunMode::Timed,
+        );
+        let bitwise_second;
+        (residency, bitwise_second) = execute(
+            &ctx,
+            residency,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
+            DeepSeekV4SelectorTestPolicy::BitwiseOracle,
+            RunMode::Timed,
+        );
+        for evidence in [&bitwise_first, &radix4, &bitwise_second] {
+            assert_eq!(evidence.logits_sha256, PINNED_LOGITS_SHA256);
+        }
+        let radix4_gpu = radix4.command_gpu_ms.unwrap();
+        let radix4_wall = radix4.wall_ms.unwrap();
+        let bitwise_gpu_midpoint =
+            (bitwise_first.command_gpu_ms.unwrap() + bitwise_second.command_gpu_ms.unwrap()) * 0.5;
+        let bitwise_wall_midpoint =
+            (bitwise_first.wall_ms.unwrap() + bitwise_second.wall_ms.unwrap()) * 0.5;
+        let gpu_savings = bitwise_gpu_midpoint - radix4_gpu;
+        let wall_savings = bitwise_wall_midpoint - radix4_wall;
+        assert!(
+            gpu_savings >= 1.0,
+            "bitwise-bracket command-GPU savings were {gpu_savings:.3} ms, need at least 1.0 ms"
+        );
+        assert!(
+            wall_savings >= 1.0,
+            "bitwise-bracket wall savings were {wall_savings:.3} ms, need at least 1.0 ms"
+        );
+
         let scalar_transcript;
         (residency, scalar_transcript) = execute(
             &ctx,
             residency,
             DeepSeekV4IndexerScoreTestPolicy::ScalarOracle,
+            DeepSeekV4SelectorTestPolicy::BitwiseOracle,
             RunMode::Transcript,
         );
         let cooperative_transcript;
@@ -10167,6 +10284,7 @@ mod tests {
             &ctx,
             residency,
             DeepSeekV4IndexerScoreTestPolicy::Production,
+            DeepSeekV4SelectorTestPolicy::Production,
             RunMode::Transcript,
         );
         assert_eq!(scalar_transcript.logits_sha256, PINNED_LOGITS_SHA256);
@@ -10186,12 +10304,16 @@ mod tests {
         );
 
         eprintln!(
-            "deepseek_v4 far_score_position={POSITION} scalar_before_gpu_ms={:.3} cooperative_gpu_ms={cooperative_gpu:.3} scalar_after_gpu_ms={:.3} scalar_before_wall_ms={:.3} cooperative_wall_ms={cooperative_wall:.3} scalar_after_wall_ms={:.3} logits_sha256={} causal_sha256={}",
+            "deepseek_v4 far_score_position={POSITION} scalar_before_gpu_ms={:.3} cooperative_gpu_ms={cooperative_gpu:.3} scalar_after_gpu_ms={:.3} scalar_before_wall_ms={:.3} cooperative_wall_ms={cooperative_wall:.3} scalar_after_wall_ms={:.3} bitwise_before_gpu_ms={:.3} radix4_gpu_ms={radix4_gpu:.3} bitwise_after_gpu_ms={:.3} bitwise_before_wall_ms={:.3} radix4_wall_ms={radix4_wall:.3} bitwise_after_wall_ms={:.3} logits_sha256={} causal_sha256={}",
             scalar_first.command_gpu_ms.unwrap(),
             scalar_second.command_gpu_ms.unwrap(),
             scalar_first.wall_ms.unwrap(),
             scalar_second.wall_ms.unwrap(),
-            cooperative.logits_sha256,
+            bitwise_first.command_gpu_ms.unwrap(),
+            bitwise_second.command_gpu_ms.unwrap(),
+            bitwise_first.wall_ms.unwrap(),
+            bitwise_second.wall_ms.unwrap(),
+            radix4.logits_sha256,
             digest_hex(&cooperative_transcript.causal_digest.unwrap()),
         );
     }
@@ -14176,10 +14298,10 @@ mod tests {
         let cache_order = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap();
         let counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
         let status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
-        let run = || {
+        let run = |radix4| {
             let command = ctx.queue.commandBuffer().unwrap();
             let encoder = KernelEncoder::begin(&command);
-            encode_select_top_k_f32(
+            encode_select_top_k_f32_with_policy(
                 &ctx,
                 &encoder,
                 &scores,
@@ -14193,6 +14315,7 @@ mod tests {
                 CAPACITY,
                 TOP_K,
                 QUERIES,
+                radix4,
             )
             .unwrap();
             encoder.end();
@@ -14207,9 +14330,11 @@ mod tests {
                 read_i32(&status),
             )
         };
-        let first = run();
-        let second = run();
+        let first = run(false);
+        let second = run(false);
+        let radix4 = run(true);
         assert_eq!(second, first);
+        assert_eq!(radix4, first);
         let (actual_mask, actual_ranked, actual_cache_order, actual_counts, actual_status) = first;
 
         for query in 0..QUERIES {
@@ -14314,10 +14439,15 @@ mod tests {
         };
         let scalar = allocate_outputs();
         let radix = allocate_outputs();
+        let radix4 = allocate_outputs();
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
-        for (max_visible, outputs) in [(VISIBLE, &scalar), (CAPACITY, &radix)] {
-            encode_select_top_k_f32(
+        for (max_visible, use_radix4, outputs) in [
+            (VISIBLE, false, &scalar),
+            (CAPACITY, false, &radix),
+            (CAPACITY, true, &radix4),
+        ] {
+            encode_select_top_k_f32_with_policy(
                 &ctx,
                 &encoder,
                 &scores,
@@ -14331,6 +14461,7 @@ mod tests {
                 max_visible,
                 TOP_K,
                 1,
+                use_radix4,
             )
             .unwrap();
         }
@@ -14344,6 +14475,11 @@ mod tests {
             ("cache order", &scalar.2, &radix.2),
             ("count", &scalar.3, &radix.3),
             ("status", &scalar.4, &radix.4),
+            ("radix4 mask", &scalar.0, &radix4.0),
+            ("radix4 ranked", &scalar.1, &radix4.1),
+            ("radix4 cache order", &scalar.2, &radix4.2),
+            ("radix4 count", &scalar.3, &radix4.3),
+            ("radix4 status", &scalar.4, &radix4.4),
         ] {
             assert_eq!(read_i32(left), read_i32(right), "{label}");
         }
@@ -14485,11 +14621,10 @@ mod tests {
         let cache_order = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap();
         let counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
         let status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
-        let run = || {
-            let started = std::time::Instant::now();
+        let run = |radix4| {
             let command = ctx.queue.commandBuffer().unwrap();
             let encoder = KernelEncoder::begin(&command);
-            encode_select_top_k_f32(
+            encode_select_top_k_f32_with_policy(
                 &ctx,
                 &encoder,
                 &scores,
@@ -14503,19 +14638,41 @@ mod tests {
                 CAPACITY,
                 TOP_K,
                 QUERIES,
+                radix4,
             )
             .unwrap();
             encoder.end();
             command.commit();
             command.waitUntilCompleted();
             assert!(command.error().is_none());
-            started.elapsed()
+            (
+                (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
+                read_i32(&mask),
+                read_i32(&cache_order),
+                read_i32(&counts),
+                read_i32(&status),
+            )
         };
-        let cold = run();
-        let warm = run();
-        assert_eq!(read_i32(&status), vec![0; QUERIES]);
-        assert_eq!(read_i32(&counts), vec![TOP_K as i32; QUERIES]);
-        let ids = read_i32(&cache_order);
+        run(false);
+        run(true);
+        let bitwise_before = run(false);
+        let radix4 = run(true);
+        let bitwise_after = run(false);
+        for (label, candidate, baseline) in [
+            ("mask before", &radix4.1, &bitwise_before.1),
+            ("IDs before", &radix4.2, &bitwise_before.2),
+            ("counts before", &radix4.3, &bitwise_before.3),
+            ("status before", &radix4.4, &bitwise_before.4),
+            ("mask after", &radix4.1, &bitwise_after.1),
+            ("IDs after", &radix4.2, &bitwise_after.2),
+            ("counts after", &radix4.3, &bitwise_after.3),
+            ("status after", &radix4.4, &bitwise_after.4),
+        ] {
+            assert_eq!(candidate, baseline, "{label}");
+        }
+        assert_eq!(radix4.4, vec![0; QUERIES]);
+        assert_eq!(radix4.3, vec![TOP_K as i32; QUERIES]);
+        let ids = radix4.2;
         let high = (CAPACITY - TOP_K..CAPACITY)
             .map(|row| row as i32)
             .collect::<Vec<_>>();
@@ -14524,10 +14681,15 @@ mod tests {
             let expected = if query.is_multiple_of(2) { &high } else { &low };
             assert_eq!(&ids[query * TOP_K..(query + 1) * TOP_K], expected);
         }
+        let bitwise_midpoint = (bitwise_before.0 + bitwise_after.0) * 0.5;
+        assert!(
+            radix4.0 <= bitwise_midpoint * 1.1,
+            "packed radix4 regressed from {bitwise_midpoint:.3} to {:.3} ms",
+            radix4.0
+        );
         eprintln!(
-            "deepseek_v4 packed_full_64k_top512 cold_ms={:.3} warm_ms={:.3}",
-            cold.as_secs_f64() * 1e3,
-            warm.as_secs_f64() * 1e3,
+            "deepseek_v4 packed_full_64k_top512 bitwise_before_gpu_ms={:.3} radix4_gpu_ms={:.3} bitwise_after_gpu_ms={:.3}",
+            bitwise_before.0, radix4.0, bitwise_after.0,
         );
     }
 
@@ -16043,12 +16205,12 @@ mod tests {
                     .collect(),
             )
             .0;
-            for _ in 0..5 {
+            let time_selector = |selector_scores: &MetalTensor, radix4: bool| {
                 timed_gpu(&ctx, 1, |encoder| {
-                    encode_select_top_k_f32(
+                    encode_select_top_k_f32_with_policy(
                         &ctx,
                         encoder,
-                        &tied_score_rows,
+                        selector_scores,
                         &visible_counts,
                         &mask_rows,
                         None,
@@ -16059,32 +16221,31 @@ mod tests {
                         row_count,
                         TOP_K,
                         1,
+                        radix4,
                     )
-                });
+                })
+            };
+            for _ in 0..5 {
+                time_selector(&tied_score_rows, false);
+                time_selector(&tied_score_rows, true);
             }
+            let tied_select_before_ms = median_and_p95(
+                (0..5)
+                    .map(|_| time_selector(&tied_score_rows, false))
+                    .collect(),
+            )
+            .0;
             let (tied_select_ms, tied_select_p95_ms) = median_and_p95(
                 (0..20)
-                    .map(|_| {
-                        timed_gpu(&ctx, 1, |encoder| {
-                            encode_select_top_k_f32(
-                                &ctx,
-                                encoder,
-                                &tied_score_rows,
-                                &visible_counts,
-                                &mask_rows,
-                                None,
-                                &cache_order_ids,
-                                &selected_counts,
-                                &status,
-                                row_count,
-                                row_count,
-                                TOP_K,
-                                1,
-                            )
-                        })
-                    })
+                    .map(|_| time_selector(&tied_score_rows, true))
                     .collect(),
             );
+            let tied_select_after_ms = median_and_p95(
+                (0..5)
+                    .map(|_| time_selector(&tied_score_rows, false))
+                    .collect(),
+            )
+            .0;
             assert_eq!(read_i32(&status), vec![0]);
             assert_eq!(read_i32(&selected_counts), vec![TOP_K as i32]);
             assert_eq!(
@@ -16092,46 +16253,42 @@ mod tests {
                 (0..TOP_K as i32).collect::<Vec<_>>()
             );
             for _ in 0..5 {
-                timed_gpu(&ctx, 1, |encoder| {
-                    encode_select_top_k_f32(
-                        &ctx,
-                        encoder,
-                        &mixed_score_rows,
-                        &visible_counts,
-                        &mask_rows,
-                        None,
-                        &cache_order_ids,
-                        &selected_counts,
-                        &status,
-                        row_count,
-                        row_count,
-                        TOP_K,
-                        1,
-                    )
-                });
+                time_selector(&mixed_score_rows, false);
+                time_selector(&mixed_score_rows, true);
             }
+            let mixed_select_before_ms = median_and_p95(
+                (0..5)
+                    .map(|_| time_selector(&mixed_score_rows, false))
+                    .collect(),
+            )
+            .0;
             let (mixed_select_ms, mixed_select_p95_ms) = median_and_p95(
                 (0..20)
-                    .map(|_| {
-                        timed_gpu(&ctx, 1, |encoder| {
-                            encode_select_top_k_f32(
-                                &ctx,
-                                encoder,
-                                &mixed_score_rows,
-                                &visible_counts,
-                                &mask_rows,
-                                None,
-                                &cache_order_ids,
-                                &selected_counts,
-                                &status,
-                                row_count,
-                                row_count,
-                                TOP_K,
-                                1,
-                            )
-                        })
-                    })
+                    .map(|_| time_selector(&mixed_score_rows, true))
                     .collect(),
+            );
+            let mixed_select_after_ms = median_and_p95(
+                (0..5)
+                    .map(|_| time_selector(&mixed_score_rows, false))
+                    .collect(),
+            )
+            .0;
+            let bitwise_selection = (
+                read_i32(&mask_rows),
+                read_i32(&cache_order_ids),
+                read_i32(&selected_counts),
+                read_i32(&status),
+            );
+            time_selector(&mixed_score_rows, true);
+            let radix4_selection = (
+                read_i32(&mask_rows),
+                read_i32(&cache_order_ids),
+                read_i32(&selected_counts),
+                read_i32(&status),
+            );
+            assert_eq!(
+                radix4_selection, bitwise_selection,
+                "four-bit/bitwise selection differs at {row_count} rows"
             );
             let mut expected_mixed =
                 deployed_selector_top_k_indices(&mixed_score_values[..row_count], TOP_K);
@@ -16210,9 +16367,11 @@ mod tests {
             );
             let conservative_select_ms = tied_select_ms.max(mixed_select_ms);
             eprintln!(
-                "deepseek_v4 sparse_profile rows={row_count} token_equivalent={} scalar_score_before_ms={scalar_score_before_ms:.3} score_ms={score_ms:.3} score_p95_ms={score_p95_ms:.3} scalar_score_after_ms={scalar_score_after_ms:.3} score_speedup={:.2} tied_select_ms={tied_select_ms:.3} tied_select_p95_ms={tied_select_p95_ms:.3} mixed_select_ms={mixed_select_ms:.3} mixed_select_p95_ms={mixed_select_p95_ms:.3} legacy_attention_ms={legacy_attention_ms:.3} cooperative_attention_ms={cooperative_attention_ms:.3} attention_speedup={:.2} conservative_projected_21_csa_ms={:.3}",
+                "deepseek_v4 sparse_profile rows={row_count} token_equivalent={} scalar_score_before_ms={scalar_score_before_ms:.3} score_ms={score_ms:.3} score_p95_ms={score_p95_ms:.3} scalar_score_after_ms={scalar_score_after_ms:.3} score_speedup={:.2} tied_bit_before_ms={tied_select_before_ms:.3} tied_radix4_ms={tied_select_ms:.3} tied_radix4_p95_ms={tied_select_p95_ms:.3} tied_bit_after_ms={tied_select_after_ms:.3} tied_speedup={:.2} mixed_bit_before_ms={mixed_select_before_ms:.3} mixed_radix4_ms={mixed_select_ms:.3} mixed_radix4_p95_ms={mixed_select_p95_ms:.3} mixed_bit_after_ms={mixed_select_after_ms:.3} mixed_speedup={:.2} legacy_attention_ms={legacy_attention_ms:.3} cooperative_attention_ms={cooperative_attention_ms:.3} attention_speedup={:.2} conservative_projected_21_csa_ms={:.3}",
                 row_count * 4,
                 ((scalar_score_before_ms + scalar_score_after_ms) * 0.5) / score_ms,
+                ((tied_select_before_ms + tied_select_after_ms) * 0.5) / tied_select_ms,
+                ((mixed_select_before_ms + mixed_select_after_ms) * 0.5) / mixed_select_ms,
                 legacy_attention_ms / cooperative_attention_ms,
                 (score_ms + conservative_select_ms + cooperative_attention_ms) * 21.0,
             );

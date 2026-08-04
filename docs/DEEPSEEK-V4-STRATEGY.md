@@ -1657,6 +1657,19 @@ singleton HCA reduces that to 3.410 ms/layer and about 68.2 ms/token, below the
 complete 93.4 ms CSA subtotal. Packed/FP4 Lightning scoring therefore becomes
 the primary far-context optimization lane.
 
+The first bounded packed-lane experiment separates schedule ceiling from cache
+semantics. An eight-simdgroup matrix scorer over already-decoded F16 K and one
+F16-rounded query reduces 262,144-row scoring from a 2.102 ms bracket midpoint
+to 0.518-0.519 ms/layer across two campaigns; terminal saving is
+1.584-1.586 ms/layer and the separate per-layer query conversion costs about
+0.008 ms. It also clears the shallower frozen gates and repeats bit-for-bit.
+This establishes about 1.585 ms/layer of available schedule budget and
+justifies testing whether packed decode fits inside it; it does not prove that
+it will. The probe is not the paper contract and has no production caller. The
+next experiment must quantize both Q and K under the official 68-byte-row bit
+contract and compare against a packed-semantic oracle before changing cache or
+snapshot ABI.
+
 The pinned llama.cpp depth command is not a free decode-only bracket. Its
 `--n-depth` implementation executes `test_prompt(n_depth)` and serializes the
 resulting state before timed generation on the first repetition at every new
@@ -1888,10 +1901,11 @@ noise without reducing technical risk. Revisit after S5.
    llama.cpp's 36.1 ms total at depths 128/512; barrier, row-shape, geometry,
    and vector-decode probes all miss the 0.75 ms/token two-depth gate.
 5. Preserve the promoted cooperative Lightning scorer and four-bit radix
-   selector, including their scalar and bitwise differentials. Online HCA moves
-   the terminal lead back to the 93.4 ms CSA subtotal; open packed/FP4 Lightning
-   scoring before multi-group selection or split-K HCA, and require a new
-   whole-token packet rather than extrapolating only from microprofiles.
+   selector, including their scalar and bitwise differentials. The idealized
+   matrix-score ceiling is now established but remains test-only. Freeze and
+   execute the official packed Q/K FP4 contract next; do not migrate snapshots
+   until packed-semantic decisions clear, and require a new whole-token packet
+   rather than extrapolating only from microprofiles.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine

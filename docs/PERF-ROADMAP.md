@@ -142,13 +142,23 @@ command-GPU and wall and put the online endpoint at 210-213 ms, about
 bit-for-bit and preserve every consumed CSA/MoE ID and status. First-touch wait
 remains an independent unattributed cold-start observation.
 
+The packed-indexer lane's optimistic matrix ceiling is also established. With
+Q rounded to F16 once and current F16 K already decoded, an eight-simdgroup
+64-head x 8-row scorer takes 0.166/0.197/0.518-0.519 ms at
+16,384/65,536/262,144 rows versus current brackets around
+0.658/0.797/2.102 ms. Terminal saving is 1.584-1.586 ms/layer and per-layer Q
+conversion is about 0.008 ms. This is feasibility evidence only, not production: it does
+not implement official Q/K FP4 QAT or change the v1 F16 cache contract.
+
 Force-ranked queue:
 
-1. **Packed indexer-cache representation and scoring.** The unchanged 93.4 ms
-   terminal CSA subtotal now exceeds online HCA's 68.2 ms. F16 scoring at
-   2.102 ms/layer narrowly leads mixed radix4 selection at 1.875 ms. Reopen the
-   paper's FP4 index-cache lane with an explicit numerical contract and preserve
-   the F16 scorer as the differential.
+1. **Official FP4 indexer shadow and matrix scoring.** Freeze the adjacent-pair
+   E2M1 plus four-UE8M0 68-byte row contract, quantize Q/K from post-Hadamard
+   pre-F16 values, and include packed decode plus query quantization in the
+   matrix timing. Preserve the F16 scorer as the differential and defer the
+   snapshot-v2 migration until packed-semantic decisions and a new whole-token
+   packet clear their gates. The idealized matrix ceiling has already passed;
+   do not spend a separate experiment on packed bytes under the scalar scorer.
 2. **GPU-resident deterministic packed routing.** Remove prefill's router
    commit/wait and CPU schedule construction with integer counts, deterministic
    expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,

@@ -1156,6 +1156,74 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_cooperative(
     }
 }
 
+// Optimistic schedule-ceiling probe for the packed-indexer lane. Queries are
+// rounded to F16 once outside this kernel; eight simdgroups compute the 64x8
+// head/row dot tile with matrix instructions. This is not the official FP4
+// numerical contract and is never selected by production.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling(
+        constant ds4_indexer_score_args & args [[buffer(0)]],
+        device const half * queries [[buffer(1)]],
+        device const float * head_weights [[buffer(2)]],
+        device const half * keys [[buffer(3)]],
+        device const int * visible_counts [[buffer(4)]],
+        device float * scores [[buffer(5)]],
+        threadgroup half * staged_keys [[threadgroup(0)]],
+        threadgroup float * head_dots [[threadgroup(1)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort thread_index [[thread_index_in_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]]) {
+    const uint rows_per_group = 8u;
+    const uint row_base = group.x * rows_per_group;
+    const uint query = group.y;
+    const int visible = visible_counts[query];
+
+    // Store K transposed as [dimension, local row], which is the right-hand
+    // 128x8 operand consumed by simdgroup matrix multiplication.
+    for (uint element = uint(thread_index); element < 8u * 128u; element += 256u) {
+        const uint local_row = element / 128u;
+        const uint dimension = element - local_row * 128u;
+        const uint row = row_base + local_row;
+        const bool row_visible = visible >= 0 && row < args.row_capacity && row < uint(visible);
+        staged_keys[dimension * 8u + local_row] = row_visible
+            ? keys[row * 128u + dimension]
+            : (half)0.0h;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint head_base = uint(simdgroup) * 8u;
+    const uint query_base = query * 64u * 128u + head_base * 128u;
+    simdgroup_float8x8 dots = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    for (uint dimension = 0u; dimension < 128u; dimension += 8u) {
+        simdgroup_half8x8 query_tile;
+        simdgroup_half8x8 key_tile;
+        simdgroup_load(query_tile, queries + query_base + dimension, 128u, 0u, false);
+        simdgroup_load(key_tile, staged_keys + dimension * 8u, 8u, 0u, false);
+        simdgroup_multiply_accumulate(dots, query_tile, key_tile, dots);
+    }
+    simdgroup_store(dots, head_dots + head_base * 8u, 8u, 0u, false);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (thread_index < 8u) {
+        const uint local_row = uint(thread_index);
+        const uint row = row_base + local_row;
+        if (row < args.row_capacity) {
+            const uint score_index = query * args.row_capacity + row;
+            if (visible < 0 || row >= uint(visible)) {
+                scores[score_index] = -INFINITY;
+            } else {
+                const uint weight_base = query * 64u;
+                float score = 0.0f;
+                for (uint head = 0u; head < 64u; ++head) {
+                    score += max(head_dots[head * 8u + local_row], 0.0f)
+                        * head_weights[weight_base + head];
+                }
+                scores[score_index] = score;
+            }
+        }
+    }
+}
+
 kernel void kernel_deepseek_v4_select_top_k_f32(
         constant ds4_indexer_select_args & args [[buffer(0)]],
         device const float * scores [[buffer(1)]],

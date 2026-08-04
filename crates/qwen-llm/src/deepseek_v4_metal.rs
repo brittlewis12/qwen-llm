@@ -8068,6 +8068,115 @@ fn encode_lightning_indexer_scores_f16_with_policy(
     Ok(())
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_lightning_indexer_scores_f16_matrix_ceiling(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    head_weights: &MetalTensor,
+    keys: &MetalTensor,
+    visible_counts: &MetalTensor,
+    scores: &MetalTensor,
+    head_count: usize,
+    head_dim: usize,
+    row_capacity: usize,
+    query_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const KERNEL: &str = "kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling";
+    if head_count != 64 || head_dim != 128 {
+        return invalid(format!(
+            "{KERNEL} requires 64 heads of width 128, got {head_count}x{head_dim}"
+        ));
+    }
+    for (name, value) in [
+        ("indexer row capacity", row_capacity),
+        ("indexer query count", query_count),
+    ] {
+        if value == 0 || u32::try_from(value).is_err() {
+            return invalid(format!("{name} must be nonzero and fit u32"));
+        }
+    }
+    validate_lightning_indexer_score_offsets(head_count, head_dim, row_capacity, query_count)?;
+    validate_f16(
+        queries,
+        &[head_dim as u64, head_count as u64, query_count as u64],
+        false,
+        "matrix-ceiling indexer queries",
+    )?;
+    validate_f32(
+        head_weights,
+        &[head_count as u64, query_count as u64],
+        false,
+        "matrix-ceiling indexer head weights",
+    )?;
+    validate_f16(
+        keys,
+        &[head_dim as u64, row_capacity as u64],
+        false,
+        "matrix-ceiling indexer keys",
+    )?;
+    validate_i32(
+        visible_counts,
+        &[query_count as u64],
+        false,
+        "matrix-ceiling indexer visible counts",
+    )?;
+    validate_f32(
+        scores,
+        &[row_capacity as u64, query_count as u64],
+        true,
+        "matrix-ceiling indexer scores",
+    )?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        head_count: u32,
+        head_dim: u32,
+        row_capacity: u32,
+        query_count: u32,
+    }
+
+    let pso = ctx.pipeline(KERNEL)?;
+    validate_cooperative_lightning_score_geometry(
+        KERNEL,
+        pso.threadExecutionWidth(),
+        pso.maxTotalThreadsPerThreadgroup(),
+        ctx.device.maxThreadgroupMemoryLength(),
+    )?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            head_count: head_count as u32,
+            head_dim: head_dim as u32,
+            row_capacity: row_capacity as u32,
+            query_count: query_count as u32,
+        },
+    );
+    enc.set_tensor(1, queries);
+    enc.set_tensor(2, head_weights);
+    enc.set_tensor(3, keys);
+    enc.set_tensor(4, visible_counts);
+    enc.set_tensor(5, scores);
+    enc.set_threadgroup_memory(0, 8 * 128 * std::mem::size_of::<u16>());
+    enc.set_threadgroup_memory(1, 8 * 64 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: row_capacity.div_ceil(8),
+            height: query_count,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn validate_lightning_indexer_score_offsets(
     head_count: usize,
     head_dim: usize,
@@ -9803,6 +9912,24 @@ mod tests {
             offset: prefix as u64,
             shape,
             dtype: GgmlType::F32,
+            provenance: MetalTensorProvenance::OwnedWritable,
+        }
+    }
+
+    fn offset_f16(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
+        let prefix = 16usize;
+        let mut bytes = vec![0xA5u8; prefix];
+        bytes.extend(
+            values
+                .iter()
+                .flat_map(|value| half::f16::from_f32(*value).to_bits().to_ne_bytes()),
+        );
+        bytes.extend_from_slice(&[0x5Au8; 20]);
+        MetalTensor {
+            buffer: ctx.buffer_from(&bytes).expect("offset F16 buffer"),
+            offset: prefix as u64,
+            shape,
+            dtype: GgmlType::F16,
             provenance: MetalTensorProvenance::OwnedWritable,
         }
     }
@@ -17055,6 +17182,521 @@ mod tests {
         assert_eq!(
             &read_i32(&cooperative_ids)[3 * TOP_K..],
             &(0..TOP_K as i32).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn matrix_ceiling_lightning_scores_match_f16_cpu_oracle() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const DIM: usize = 128;
+        const ROWS: usize = 9;
+        const QUERIES: usize = 3;
+
+        let query_values = (0..QUERIES * HEADS * DIM)
+            .map(|index| {
+                let head = (index / DIM) % HEADS;
+                let dimension = index % DIM;
+                let tag = (index * 17 + head * 11 + dimension * 3 + 5) % 257;
+                half::f16::from_f32((tag as f32 - 128.0) * 0.0009).to_f32()
+            })
+            .collect::<Vec<_>>();
+        let weight_values = (0..QUERIES * HEADS)
+            .map(|index| 0.002 + (index * 13 % 31) as f32 * 0.0005)
+            .collect::<Vec<_>>();
+        let key_values = (0..ROWS * DIM)
+            .map(|index| {
+                let row = index / DIM;
+                let dimension = index % DIM;
+                let tag = (row * 29 + dimension * 7 + row * dimension + 3) % 263;
+                half::f16::from_f32((tag as f32 - 131.0) * 0.0008).to_f32()
+            })
+            .collect::<Vec<_>>();
+        let queries = offset_f16(
+            &ctx,
+            &query_values,
+            vec![DIM as u64, HEADS as u64, QUERIES as u64],
+        );
+        let head_weights = offset_f32(&ctx, &weight_values, vec![HEADS as u64, QUERIES as u64]);
+        let keys = offset_f16(&ctx, &key_values, vec![DIM as u64, ROWS as u64]);
+        let visible = [ROWS as i32, 7, -1];
+        let visible_counts = offset_i32(&ctx, &visible, vec![QUERIES as u64]);
+        let first = MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+        let second = MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for output in [&first, &second] {
+            encode_lightning_indexer_scores_f16_matrix_ceiling(
+                &ctx,
+                &encoder,
+                &queries,
+                &head_weights,
+                &keys,
+                &visible_counts,
+                output,
+                HEADS,
+                DIM,
+                ROWS,
+                QUERIES,
+            )
+            .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "matrix-ceiling Lightning score command failed: {:?}",
+            command.error()
+        );
+
+        let actual = read_f32(&first);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            read_f32(&second)
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "matrix-ceiling scorer must repeat bit-for-bit"
+        );
+        let mut expected = vec![f32::NEG_INFINITY; ROWS * QUERIES];
+        for query in 0..QUERIES {
+            if visible[query] < 0 {
+                continue;
+            }
+            for row in 0..usize::try_from(visible[query]).unwrap() {
+                let mut score = 0.0f32;
+                for head in 0..HEADS {
+                    let mut dot = 0.0f32;
+                    for dimension in 0..DIM {
+                        dot += query_values[(query * HEADS + head) * DIM + dimension]
+                            * key_values[row * DIM + dimension];
+                    }
+                    score += dot.max(0.0) * weight_values[query * HEADS + head];
+                }
+                expected[query * ROWS + row] = score;
+            }
+        }
+        let mut max_abs = 0.0f32;
+        let mut squared_error = 0.0f64;
+        let mut reference_norm = 0.0f64;
+        for (&actual, &expected) in actual.iter().zip(&expected) {
+            if expected == f32::NEG_INFINITY {
+                assert_eq!(actual, f32::NEG_INFINITY);
+                continue;
+            }
+            let error = (actual - expected).abs();
+            max_abs = max_abs.max(error);
+            squared_error += f64::from(error).powi(2);
+            reference_norm += f64::from(expected).powi(2);
+        }
+        let relative_rms = (squared_error / reference_norm).sqrt();
+        eprintln!(
+            "matrix-ceiling Lightning CPU differential max_abs={max_abs:.9} rel_rms={relative_rms:.9}"
+        );
+        assert!(max_abs <= 2.0e-5, "matrix-ceiling max abs {max_abs}");
+        assert!(
+            relative_rms <= 2.0e-4,
+            "matrix-ceiling relative RMS {relative_rms}"
+        );
+    }
+
+    #[test]
+    fn matrix_ceiling_lightning_scores_preserve_selector_contracts() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const DIM: usize = 128;
+        const ROWS: usize = 1_025;
+        const QUERIES: usize = 3;
+        const TOP_K: usize = 512;
+
+        let mut query_values = vec![0.0f32; QUERIES * HEADS * DIM];
+        query_values[0] = 1.0;
+        query_values[2 * HEADS * DIM] = 1.0;
+        let mut weight_values = vec![0.0f32; QUERIES * HEADS];
+        weight_values[0] = 1.0;
+        weight_values[2 * HEADS] = f32::NAN;
+        let mut key_values = vec![0.0f32; ROWS * DIM];
+        for row in 0..ROWS {
+            key_values[row * DIM] = half::f16::from_f32((row as f32 - 512.0) * 0.001).to_f32();
+        }
+
+        let queries = offset_f16(
+            &ctx,
+            &query_values,
+            vec![DIM as u64, HEADS as u64, QUERIES as u64],
+        );
+        let head_weights = offset_f32(&ctx, &weight_values, vec![HEADS as u64, QUERIES as u64]);
+        let keys = offset_f16(&ctx, &key_values, vec![DIM as u64, ROWS as u64]);
+        let visible_counts = offset_i32(&ctx, &[ROWS as i32; QUERIES], vec![QUERIES as u64]);
+        let scores = MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+        let selected_mask =
+            MetalTensor::zeros_i32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+        let selected_ids =
+            MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap();
+        let selected_counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_lightning_indexer_scores_f16_matrix_ceiling(
+            &ctx,
+            &encoder,
+            &queries,
+            &head_weights,
+            &keys,
+            &visible_counts,
+            &scores,
+            HEADS,
+            DIM,
+            ROWS,
+            QUERIES,
+        )
+        .unwrap();
+        encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &scores,
+            &visible_counts,
+            &selected_mask,
+            None,
+            &selected_ids,
+            &selected_counts,
+            &status,
+            ROWS,
+            ROWS,
+            TOP_K,
+            QUERIES,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+
+        let scores = read_f32(&scores);
+        assert_eq!(scores[0], 0.0);
+        assert_eq!(scores[512], 0.0);
+        assert!(scores[513] > 0.0);
+        assert!(scores[ROWS..2 * ROWS].iter().all(|score| *score == 0.0));
+        assert!(scores[2 * ROWS..].iter().all(|score| !score.is_finite()));
+        assert_eq!(read_i32(&status), vec![0, 0, 2]);
+        assert_eq!(read_i32(&selected_counts), vec![TOP_K as i32; QUERIES]);
+        let ids = read_i32(&selected_ids);
+        assert_eq!(
+            &ids[..TOP_K],
+            &(513..=1_024).collect::<Vec<i32>>(),
+            "large-margin scores must select the 512 positive rows"
+        );
+        let stable_tie = (0..TOP_K as i32).collect::<Vec<_>>();
+        assert_eq!(&ids[TOP_K..2 * TOP_K], &stable_tie);
+        assert_eq!(&ids[2 * TOP_K..], &stable_tie);
+    }
+
+    #[test]
+    fn matrix_ceiling_lightning_scores_cover_batched_query_tail_geometry() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const DIM: usize = 128;
+        const ROWS: usize = 9;
+        const QUERIES: usize = 128;
+
+        let query_values = (0..QUERIES * HEADS * DIM)
+            .map(|index| {
+                let tag = (index * 19 + index / DIM * 7 + 11) % 127;
+                half::f16::from_f32((tag as f32 - 63.0) * 0.0011).to_f32()
+            })
+            .collect::<Vec<_>>();
+        let weight_values = (0..QUERIES * HEADS)
+            .map(|index| 0.001 + (index * 11 % 23) as f32 * 0.0003)
+            .collect::<Vec<_>>();
+        let key_values = (0..ROWS * DIM)
+            .map(|index| {
+                let tag = (index * 31 + index / DIM * 5 + 13) % 131;
+                half::f16::from_f32((tag as f32 - 65.0) * 0.0013).to_f32()
+            })
+            .collect::<Vec<_>>();
+        let visible = (0..QUERIES)
+            .map(|query| [1, 7, 8, 9][query % 4])
+            .collect::<Vec<i32>>();
+        let queries = offset_f16(
+            &ctx,
+            &query_values,
+            vec![DIM as u64, HEADS as u64, QUERIES as u64],
+        );
+        let head_weights = offset_f32(&ctx, &weight_values, vec![HEADS as u64, QUERIES as u64]);
+        let keys = offset_f16(&ctx, &key_values, vec![DIM as u64, ROWS as u64]);
+        let visible_counts = offset_i32(&ctx, &visible, vec![QUERIES as u64]);
+        let output_shape = vec![ROWS as u64, QUERIES as u64];
+        let first = offset_f32(&ctx, &vec![0.0; ROWS * QUERIES], output_shape.clone());
+        let second = offset_f32(&ctx, &vec![0.0; ROWS * QUERIES], output_shape);
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for output in [&first, &second] {
+            encode_lightning_indexer_scores_f16_matrix_ceiling(
+                &ctx,
+                &encoder,
+                &queries,
+                &head_weights,
+                &keys,
+                &visible_counts,
+                output,
+                HEADS,
+                DIM,
+                ROWS,
+                QUERIES,
+            )
+            .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+
+        let actual = read_f32(&first);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            read_f32(&second)
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let mut max_abs = 0.0f32;
+        for query in 0..QUERIES {
+            let visible_rows = usize::try_from(visible[query]).unwrap();
+            for row in 0..ROWS {
+                let value = actual[query * ROWS + row];
+                if row >= visible_rows {
+                    assert_eq!(value, f32::NEG_INFINITY);
+                    continue;
+                }
+                let mut expected = 0.0f32;
+                for head in 0..HEADS {
+                    let mut dot = 0.0f32;
+                    for dimension in 0..DIM {
+                        dot += query_values[(query * HEADS + head) * DIM + dimension]
+                            * key_values[row * DIM + dimension];
+                    }
+                    expected += dot.max(0.0) * weight_values[query * HEADS + head];
+                }
+                max_abs = max_abs.max((value - expected).abs());
+            }
+        }
+        assert!(max_abs <= 2.0e-5, "batched-query max abs {max_abs}");
+    }
+
+    #[test]
+    #[ignore = "focused production-shape matrix-ceiling profiler; run explicitly with --nocapture"]
+    fn profile_lightning_matrix_ceiling_at_far_context() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const DIM: usize = 128;
+        const MAX_ROWS: usize = 262_144;
+
+        fn timed_gpu<F>(ctx: &MetalContext, repeats: usize, encode: F) -> f64
+        where
+            F: Fn(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        {
+            let command = ctx.queue.commandBuffer().expect("profile command buffer");
+            let encoder = KernelEncoder::begin(&command);
+            for _ in 0..repeats {
+                encode(&encoder).expect("encode profiled phase");
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "profile command failed: {:?}",
+                command.error()
+            );
+            let elapsed_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            assert!(elapsed_ms.is_finite() && elapsed_ms > 0.0);
+            elapsed_ms / repeats as f64
+        }
+
+        fn median_and_p95(mut samples: Vec<f64>) -> (f64, f64) {
+            samples.sort_by(f64::total_cmp);
+            let median = samples[samples.len() / 2];
+            let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+            (median, p95)
+        }
+
+        let query_values = (0..HEADS * DIM)
+            .map(|index| ((index * 17 + 3) % 113) as f32 * 0.0007 - 0.037)
+            .collect::<Vec<_>>();
+        let queries = offset_f32(&ctx, &query_values, vec![DIM as u64, HEADS as u64, 1]);
+        let queries_f16 = MetalTensor::zeros_f16(&ctx, vec![DIM as u64, HEADS as u64, 1])
+            .expect("allocate matrix-ceiling F16 queries");
+        let scale = 1.0 / ((HEADS * DIM) as f32).sqrt();
+        let head_weights = offset_f32(&ctx, &vec![scale; HEADS], vec![HEADS as u64, 1]);
+        let keys = {
+            let bits = (0..MAX_ROWS * DIM)
+                .map(|index| {
+                    let row = index / DIM;
+                    let dimension = index % DIM;
+                    let tag = (row * 13 + dimension * 7 + row / 251) % 257;
+                    half::f16::from_f32((tag as f32 - 128.0) * 0.0002).to_bits()
+                })
+                .collect::<Vec<_>>();
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&bits),
+                vec![DIM as u64, MAX_ROWS as u64],
+                GgmlType::F16,
+            )
+            .expect("allocate matrix-ceiling profile keys")
+        };
+        let current_scores = MetalTensor::zeros_f32(&ctx, vec![MAX_ROWS as u64, 1])
+            .expect("allocate current profile scores");
+        let matrix_scores = MetalTensor::zeros_f32(&ctx, vec![MAX_ROWS as u64, 1])
+            .expect("allocate matrix profile scores");
+
+        let convert_query = |encoder: &KernelEncoder| {
+            encode_scatter_offset_f32_to_f16(&ctx, encoder, &queries, &queries_f16, 0, HEADS * DIM)
+                .map_err(DeepSeekV4MetalError::from)
+        };
+        timed_gpu(&ctx, 1, convert_query);
+        let query_conversion_samples = (0..20)
+            .map(|_| timed_gpu(&ctx, 1, convert_query))
+            .collect::<Vec<_>>();
+        let (query_conversion_ms, query_conversion_p95_ms) =
+            median_and_p95(query_conversion_samples.clone());
+
+        for row_count in [16_384usize, 65_536, MAX_ROWS] {
+            let visible_counts = offset_i32(&ctx, &[row_count as i32], vec![1]);
+            let key_rows = keys.view_subrange(0, vec![DIM as u64, row_count as u64]);
+            let current_score_rows = current_scores.view_subrange(0, vec![row_count as u64, 1]);
+            let matrix_score_rows = matrix_scores.view_subrange(0, vec![row_count as u64, 1]);
+            let current = |encoder: &KernelEncoder| {
+                encode_lightning_indexer_scores_f16(
+                    &ctx,
+                    encoder,
+                    &queries,
+                    &head_weights,
+                    &key_rows,
+                    &visible_counts,
+                    &current_score_rows,
+                    HEADS,
+                    DIM,
+                    row_count,
+                    1,
+                )
+            };
+            let matrix = |encoder: &KernelEncoder| {
+                encode_lightning_indexer_scores_f16_matrix_ceiling(
+                    &ctx,
+                    encoder,
+                    &queries_f16,
+                    &head_weights,
+                    &key_rows,
+                    &visible_counts,
+                    &matrix_score_rows,
+                    HEADS,
+                    DIM,
+                    row_count,
+                    1,
+                )
+            };
+
+            for _ in 0..5 {
+                timed_gpu(&ctx, 1, current);
+                timed_gpu(&ctx, 1, matrix);
+            }
+            let current_before_samples = (0..20)
+                .map(|_| timed_gpu(&ctx, 1, current))
+                .collect::<Vec<_>>();
+            let matrix_samples = (0..20)
+                .map(|_| timed_gpu(&ctx, 1, matrix))
+                .collect::<Vec<_>>();
+            let current_after_samples = (0..20)
+                .map(|_| timed_gpu(&ctx, 1, current))
+                .collect::<Vec<_>>();
+            let (current_before_ms, current_before_p95_ms) =
+                median_and_p95(current_before_samples.clone());
+            let (matrix_ms, matrix_p95_ms) = median_and_p95(matrix_samples.clone());
+            let (current_after_ms, current_after_p95_ms) =
+                median_and_p95(current_after_samples.clone());
+            let current_midpoint_ms = (current_before_ms + current_after_ms) * 0.5;
+            let saving_ms = current_midpoint_ms - matrix_ms;
+
+            timed_gpu(&ctx, 1, current);
+            let current_values = read_f32(&current_score_rows);
+            timed_gpu(&ctx, 1, matrix);
+            let matrix_values = read_f32(&matrix_score_rows);
+            let squared_error = current_values
+                .iter()
+                .zip(&matrix_values)
+                .map(|(current, matrix)| f64::from(current - matrix).powi(2))
+                .sum::<f64>();
+            let reference_norm = current_values
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>();
+            let relative_rms = (squared_error / reference_norm).sqrt();
+            let max_abs = current_values
+                .iter()
+                .zip(&matrix_values)
+                .map(|(current, matrix)| (current - matrix).abs())
+                .fold(0.0f32, f32::max);
+
+            eprintln!(
+                "deepseek_v4 matrix_ceiling rows={row_count} token_equivalent={} current_before_ms={current_before_ms:.3} current_before_p95_ms={current_before_p95_ms:.3} matrix_ms={matrix_ms:.3} matrix_p95_ms={matrix_p95_ms:.3} current_after_ms={current_after_ms:.3} current_after_p95_ms={current_after_p95_ms:.3} saving_ms={saving_ms:.3} query_conversion_ms={query_conversion_ms:.4} query_conversion_p95_ms={query_conversion_p95_ms:.4} max_abs={max_abs:.9} rel_rms={relative_rms:.9}",
+                row_count * 4,
+            );
+            eprintln!(
+                "deepseek_v4 matrix_ceiling current_before_samples_ms={current_before_samples:?}"
+            );
+            eprintln!("deepseek_v4 matrix_ceiling candidate_samples_ms={matrix_samples:?}");
+            eprintln!(
+                "deepseek_v4 matrix_ceiling current_after_samples_ms={current_after_samples:?}"
+            );
+
+            match row_count {
+                16_384 => assert!(
+                    matrix_ms - current_midpoint_ms <= 0.05,
+                    "16K matrix ceiling regressed by {:.3} ms",
+                    matrix_ms - current_midpoint_ms
+                ),
+                65_536 => assert!(
+                    saving_ms >= 0.15,
+                    "65K matrix ceiling saved only {saving_ms:.3} ms"
+                ),
+                MAX_ROWS => {
+                    assert!(
+                        saving_ms >= 0.80,
+                        "terminal matrix ceiling saved only {saving_ms:.3} ms"
+                    );
+                    assert!(
+                        matrix_ms <= 1.30,
+                        "terminal matrix ceiling median {matrix_ms:.3} ms"
+                    );
+                    assert!(
+                        matrix_p95_ms < current_before_ms && matrix_p95_ms < current_after_ms,
+                        "terminal matrix p95 {matrix_p95_ms:.3} is not below both current medians {current_before_ms:.3}/{current_after_ms:.3}"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+        eprintln!(
+            "deepseek_v4 matrix_ceiling query_conversion_samples_ms={query_conversion_samples:?}"
         );
     }
 

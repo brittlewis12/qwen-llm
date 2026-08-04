@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 Lightning Matrix Ceiling GO
+
+Status: `GO` for the schedule-ceiling falsifier, not for a production numerical
+or cache contract. The exact cooperative F32-query/F16-key scorer remains the
+only production path. No cache representation, memory plan, snapshot ABI,
+selector, or full-model schedule changes.
+
+- The probe rounds the 64x128 query to F16 once, then assigns one simdgroup to
+  each eight-head block. Eight simdgroups share an eight-row F16 K tile, produce
+  the complete 64x8 dot slab with simdgroup matrix instructions, and preserve
+  the scalar head-order ReLU/weight reduction. Every thread crosses both
+  threadgroup barriers; partial and invisible rows are masked rather than
+  returning early.
+- The preimplementation design review froze current/matrix/current gates that
+  allowed at most 0.05 ms/layer
+  regression at 16,384 rows, required at least 0.15 ms saving at 65,536, and at
+  262,144 required at least 0.80 ms saving, candidate median at most 1.30 ms,
+  and candidate p95 below both current arms. Per-layer Q conversion is measured
+  independently rather than hidden in either scorer arm.
+- Two complete production-shape brackets measure 0.660/0.167/0.658 and
+  0.659/0.166/0.657 ms at 16,384 rows; 0.803/0.197/0.797 and
+  0.799/0.197/0.796 at 65,536; and 2.104/0.519/2.101 and
+  2.107/0.518/2.103 at 262,144. Terminal midpoint savings are 1.584 and
+  1.586 ms/layer; candidate p95 is 0.520-0.522 ms. Per-layer query conversion is
+  0.0080-0.0082 ms median with 0.0082-0.0084 ms p95.
+- Candidate outputs repeat bit-for-bit. Against a direct F16-rounded CPU oracle,
+  maximum absolute error is 1e-9 and relative RMS is 1.9e-8. Against the current
+  F32-query scorer at all three profile depths, maximum absolute delta is
+  3.69e-7 and relative RMS is about 3.005e-4. Tests cover 1/7/8/9-row tails,
+  128 batched dense F16 queries with nonzero tensor offsets, negative visibility,
+  negative, and zero ReLU inputs, large-margin and exact-cutoff-tie selection,
+  and nonfinite fallback.
+
+Decision: skip a packed scalar/cooperative K experiment. The idealized matrix
+schedule clears its terminal gate by roughly 2x and establishes about
+1.585 ms/layer of budget, enough to justify testing the official FP4 shadow.
+This probe is not that contract:
+half-rounded Q plus matrix accumulation changes lineage, and it consumes already
+decoded F16 K. The next gate must pin adjacent E2M1 bytes plus four UE8M0 scales,
+quantize Q and K from their pre-F16 post-Hadamard values, include packed decode
+and query quantization in timing, and compare against a packed-semantic oracle
+before any snapshot-v2 migration. The frozen protocol, exact commands, machine
+identity, and both raw campaign transcripts are retained in
+`docs/bench/2026-08-04-dsv4-lightning-matrix-ceiling.md`.
+
 ## 2026-08-04 - DeepSeek V4 Online Singleton HCA GO
 
 Status: promoted `GO` for singleton HCA above 512 compressed rows. Base is the

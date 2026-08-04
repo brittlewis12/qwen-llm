@@ -119,6 +119,9 @@ struct ArmScore {
     traces: Option<Vec<(f64, f64)>>, // mean (rms, kurt) per reverse span idx
 }
 
+type RowPair<'a> = (usize, (&'a [f32], &'a mut [f32]));
+type ArmResult = (String, String, u64, f64, f64);
+
 #[allow(clippy::too_many_arguments)]
 fn run_arm(
     w_basis: &[f32], // rows already in the arm's encode basis
@@ -137,8 +140,7 @@ fn run_arm(
     {
         let rows_in: Vec<&[f32]> = w_basis.chunks(d).collect();
         let rows_out: Vec<&mut [f32]> = w_hat.chunks_mut(d).collect();
-        let mut pairs: Vec<(usize, (&[f32], &mut [f32]))> =
-            rows_in.into_iter().zip(rows_out).enumerate().collect();
+        let mut pairs: Vec<RowPair<'_>> = rows_in.into_iter().zip(rows_out).enumerate().collect();
         let chunk = n_out.div_ceil(n_threads.max(1));
         let results: Vec<Vec<(usize, LdlqRowResult)>> = std::thread::scope(|scope| {
             let handles: Vec<_> = pairs
@@ -374,16 +376,16 @@ fn main() {
 
     // Run arms.
     let mut json_rows: Vec<String> = Vec::new();
-    let mut results: Vec<(String, String, u64, f64, f64)> = Vec::new(); // (arm, class, seed, P, r_H)
+    let mut results: Vec<ArmResult> = Vec::new(); // (arm, class, seed, P, r_H)
     let mut trace_lines: Vec<String> = Vec::new();
 
-    let mut run_case = |arm: &str,
-                        seed: u64,
-                        basis: &BasisCtx,
-                        use_ldlq: bool,
-                        results: &mut Vec<(String, String, u64, f64, f64)>,
-                        json_rows: &mut Vec<String>,
-                        trace_lines: &mut Vec<String>| {
+    let run_case = |arm: &str,
+                    seed: u64,
+                    basis: &BasisCtx,
+                    use_ldlq: bool,
+                    results: &mut Vec<ArmResult>,
+                    json_rows: &mut Vec<String>,
+                    trace_lines: &mut Vec<String>| {
         for (ci, w, n_out, d) in weights.iter() {
             let (name, space, _) = classes[*ci];
             let si = space_idx(space);
@@ -526,23 +528,22 @@ fn main() {
     }
 
     // Aggregation: per arm per class, median across seeds; then macro-mean.
-    let agg =
-        |arm: &str, metric: &dyn Fn(&(String, String, u64, f64, f64)) -> f64| -> (f64, Vec<f64>) {
-            let mut per_class = Vec::new();
-            for (name, _, _) in classes.iter() {
-                let mut vals: Vec<f64> = results
-                    .iter()
-                    .filter(|r| r.0 == arm && r.1 == *name)
-                    .map(metric)
-                    .collect();
-                vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                if !vals.is_empty() {
-                    per_class.push(vals[vals.len() / 2]);
-                }
+    let agg = |arm: &str, metric: &dyn Fn(&ArmResult) -> f64| -> (f64, Vec<f64>) {
+        let mut per_class = Vec::new();
+        for (name, _, _) in classes.iter() {
+            let mut vals: Vec<f64> = results
+                .iter()
+                .filter(|r| r.0 == arm && r.1 == *name)
+                .map(metric)
+                .collect();
+            vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            if !vals.is_empty() {
+                per_class.push(vals[vals.len() / 2]);
             }
-            let mean = per_class.iter().sum::<f64>() / per_class.len().max(1) as f64;
-            (mean, per_class)
-        };
+        }
+        let mean = per_class.iter().sum::<f64>() / per_class.len().max(1) as f64;
+        (mean, per_class)
+    };
 
     println!("\n== T9 Stage A summary (seed-median then macro-mean over 6 classes) ==");
     let mut summary = Vec::new();

@@ -183,7 +183,7 @@ pub(crate) fn checked_u64_div_exact(
     if denominator == 0 {
         return Err(alloc_shape_error(detail));
     }
-    if numerator % denominator != 0 {
+    if !numerator.is_multiple_of(denominator) {
         return Err(alloc_shape_error(detail));
     }
     Ok(numerator / denominator)
@@ -302,8 +302,8 @@ fn native_quant_embedding_supported(dtype: GgmlType, shape: &[u64]) -> bool {
     shape.len() == 2
         && shape[0] > 0
         && shape[1] > 0
-        && ((dtype == GgmlType::Q4_K && shape[0] % 256 == 0)
-            || (dtype == GgmlType::Q8_0 && shape[0] % 32 == 0))
+        && ((dtype == GgmlType::Q4_K && shape[0].is_multiple_of(256))
+            || (dtype == GgmlType::Q8_0 && shape[0].is_multiple_of(32)))
 }
 
 fn native_quant_embedding_default_promoted(
@@ -2680,7 +2680,7 @@ fn owned_arena_four_worker_boundaries(
     length: usize,
     page_size: usize,
 ) -> Result<[usize; 5], MfError> {
-    if page_size == 0 || length % page_size != 0 {
+    if page_size == 0 || !length.is_multiple_of(page_size) {
         return Err(MfError::LoadPolicy(
             "owned arena range is not page aligned".to_string(),
         ));
@@ -3807,9 +3807,10 @@ fn planned_owned_storage_for_load(
 
     let ready_started = std::time::Instant::now();
     let allocation_started = std::time::Instant::now();
-    let mut resources = Vec::with_capacity(2);
-    resources.push(ctx.buffer_uninit(plan.windows[0].length)?);
-    resources.push(ctx.buffer_uninit(GGUF_OWNED_A3B_FALLBACK_BYTES as usize)?);
+    let resources = vec![
+        ctx.buffer_uninit(plan.windows[0].length)?,
+        ctx.buffer_uninit(GGUF_OWNED_A3B_FALLBACK_BYTES as usize)?,
+    ];
     let allocation_ms = allocation_started.elapsed().as_secs_f64() * 1e3;
     let copy_started = std::time::Instant::now();
     let window = &plan.windows[0];
@@ -4980,7 +4981,7 @@ impl MetalModel {
                 }
             }
         }
-        loader.finish(exact_sentinel, &expected_storage_requests)?;
+        loader.finish(exact_sentinel, expected_storage_requests)?;
 
         Ok(Self {
             arch: model.arch,
@@ -6560,15 +6561,10 @@ impl<'a> MetalForward<'a> {
         ffn_gate: &MetalTensor,
         ffn_up: &MetalTensor,
         moe: &MetalMoeFfn,
-        mut stage_recorder: Option<&mut DecodeStageRecorder>,
+        stage_recorder: Option<&mut DecodeStageRecorder>,
         stage_meta: Option<DecodeStageMeta>,
     ) -> Result<bool, MfError> {
-        let enc = begin_decode_stage(
-            cmd_buf,
-            stage_recorder.as_mut().map(|recorder| &mut **recorder),
-            stage_meta,
-            true,
-        )?;
+        let enc = begin_decode_stage(cmd_buf, stage_recorder, stage_meta, true)?;
         self.encode_moe_routed_gate_up_q4_gpu(&enc, session, moe)?;
         let shared_inner_fused =
             self.encode_moe_shared_ffn_gate_up_gpu(&enc, session, ffn_gate, ffn_up)?;
@@ -6600,12 +6596,7 @@ impl<'a> MetalForward<'a> {
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
 
         if decode_moe_noop_routed_down_enabled() {
-            let enc = begin_decode_stage(
-                cmd_buf,
-                stage_recorder.as_mut().map(|recorder| &mut **recorder),
-                stage_meta,
-                true,
-            )?;
+            let enc = begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
             encode_fill_f32(self.ctx, &enc, &session.mixer_out, 0.0)?;
             self.encode_moe_shared_ffn_down_gpu(&enc, session, ffn_down)?;
             enc.end();
@@ -6614,12 +6605,8 @@ impl<'a> MetalForward<'a> {
 
         let pending = match moe.down_exps.dtype {
             GgmlType::Q4_K => {
-                let enc = begin_decode_stage(
-                    cmd_buf,
-                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
-                    stage_meta,
-                    true,
-                )?;
+                let enc =
+                    begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 encode_moe_down_q4_K_f32(
                     self.ctx,
                     &enc,
@@ -6637,12 +6624,8 @@ impl<'a> MetalForward<'a> {
                 true
             }
             GgmlType::Q5_K => {
-                let enc = begin_decode_stage(
-                    cmd_buf,
-                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
-                    stage_meta,
-                    true,
-                )?;
+                let enc =
+                    begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 let pending = if decode_moe_q5_down_fused_enabled() {
                     if f_exp == 512 && decode_moe_q5_down_k512_r2_enabled() {
                         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2(
@@ -6696,12 +6679,8 @@ impl<'a> MetalForward<'a> {
                 pending
             }
             GgmlType::Q6_K => {
-                let enc = begin_decode_stage(
-                    cmd_buf,
-                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
-                    stage_meta,
-                    true,
-                )?;
+                let enc =
+                    begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 encode_moe_down_weighted_sum_q6_K_f32(
                     self.ctx,
                     &enc,
@@ -6720,12 +6699,8 @@ impl<'a> MetalForward<'a> {
                 false
             }
             GgmlType::Q8_0 => {
-                let enc = begin_decode_stage(
-                    cmd_buf,
-                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
-                    stage_meta,
-                    true,
-                )?;
+                let enc =
+                    begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 encode_moe_down_weighted_sum_q8_0_f32(
                     self.ctx,
                     &enc,
@@ -6744,12 +6719,8 @@ impl<'a> MetalForward<'a> {
                 false
             }
             GgmlType::IQ4_XS => {
-                let enc = begin_decode_stage(
-                    cmd_buf,
-                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
-                    stage_meta,
-                    true,
-                )?;
+                let enc =
+                    begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 if decode_moe_iq4_down_fast_enabled() {
                     encode_moe_down_iq4_xs_f32_fast(
                         self.ctx,
@@ -6782,12 +6753,8 @@ impl<'a> MetalForward<'a> {
                 true
             }
             GgmlType::F32 => {
-                let enc = begin_decode_stage(
-                    cmd_buf,
-                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
-                    stage_meta,
-                    true,
-                )?;
+                let enc =
+                    begin_decode_stage(cmd_buf, stage_recorder.as_deref_mut(), stage_meta, true)?;
                 encode_moe_down_f32_f32(
                     self.ctx,
                     &enc,
@@ -6805,12 +6772,7 @@ impl<'a> MetalForward<'a> {
                 true
             }
             GgmlType::BF16 => {
-                let enc = begin_decode_stage(
-                    cmd_buf,
-                    stage_recorder.as_mut().map(|recorder| &mut **recorder),
-                    stage_meta,
-                    true,
-                )?;
+                let enc = begin_decode_stage(cmd_buf, stage_recorder, stage_meta, true)?;
                 encode_moe_down_bf16_f32(
                     self.ctx,
                     &enc,
@@ -6837,7 +6799,7 @@ impl<'a> MetalForward<'a> {
         cmd_buf: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         session: &mut MetalSession,
         routed_weighted_sum_is_pending: bool,
-        mut stage_recorder: Option<&mut DecodeStageRecorder>,
+        stage_recorder: Option<&mut DecodeStageRecorder>,
         stage_meta: Option<DecodeStageMeta>,
     ) -> Result<(), MfError> {
         let h = self.model.arch.hidden_size as usize;
@@ -6851,12 +6813,7 @@ impl<'a> MetalForward<'a> {
             .view_subrange(0, vec![(topk * h) as u64]);
         let topk_w = session.moe_topk_weight.view_subrange(0, vec![topk as u64]);
 
-        let enc = begin_decode_stage(
-            cmd_buf,
-            stage_recorder.as_mut().map(|recorder| &mut **recorder),
-            stage_meta,
-            false,
-        )?;
+        let enc = begin_decode_stage(cmd_buf, stage_recorder, stage_meta, false)?;
         if routed_weighted_sum_is_pending {
             if decode_moe_grouped_finalizer_enabled() {
                 let shared_out = session.ffn_out.view_subrange(0, vec![h as u64]);
@@ -7525,7 +7482,7 @@ impl<'a> MetalForward<'a> {
                 }
                 let n_out = usize::try_from(weight.shape[1])
                     .map_err(|_| lm_head_tail_error("compact width does not fit usize"))?;
-                if h % 256 != 0 {
+                if !h.is_multiple_of(256) {
                     return Err(lm_head_tail_error(
                         "compact input width is not Q6_K block aligned",
                     ));
@@ -7541,11 +7498,17 @@ impl<'a> MetalForward<'a> {
                 if session.h.dtype != GgmlType::F32
                     || session.h.shape.as_slice() != [h as u64]
                     || !session.h.is_writable()
-                    || session.h.offset % std::mem::align_of::<f32>() as u64 != 0
+                    || !session
+                        .h
+                        .offset
+                        .is_multiple_of(std::mem::align_of::<f32>() as u64)
                     || session.x.dtype != GgmlType::F32
                     || session.x.shape.as_slice() != [h as u64]
                     || !session.x.is_writable()
-                    || session.x.offset % std::mem::align_of::<f32>() as u64 != 0
+                    || !session
+                        .x
+                        .offset
+                        .is_multiple_of(std::mem::align_of::<f32>() as u64)
                 {
                     return Err(lm_head_tail_error("session hidden contract mismatch"));
                 }
@@ -7987,14 +7950,7 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
         sampler: &mut Sampler,
-    ) -> Result<
-        (
-            Result<(SampledToken, BoundedTopKEvidence), SamplingError>,
-            TokenProfile,
-            StructuralRowEvidence,
-        ),
-        MfError,
-    > {
+    ) -> Result<SampledStructuralOutcome, MfError> {
         self.single_token_sampled_structural_scoped(token_id, position, session, |row| {
             sampler.sample_bounded_top_k(row)
         })
@@ -8020,8 +7976,10 @@ impl<'a> MetalForward<'a> {
                 false,
             )?;
         debug_assert_eq!(evidence.kind, LmHeadTailKind::Resident);
-        let mut structural_evidence = StructuralRowEvidence::default();
-        structural_evidence.resident_head_wait_calls = 1;
+        let mut structural_evidence = StructuralRowEvidence {
+            resident_head_wait_calls: 1,
+            ..StructuralRowEvidence::default()
+        };
         let validated = self.validate_sampled_structural_logits(session)?;
         structural_evidence.validated_shared_row_calls = 1;
         let row = unsafe { std::slice::from_raw_parts(validated.source.as_ptr(), validated.len) };
@@ -8055,7 +8013,7 @@ impl<'a> MetalForward<'a> {
                 lm_head_tail_error("sampled structural logits have null host contents")
             })?;
         let source = unsafe { base.as_ptr().add(source_start) };
-        if (source as usize) % std::mem::align_of::<f32>() != 0 {
+        if !(source as usize).is_multiple_of(std::mem::align_of::<f32>()) {
             return Err(lm_head_tail_error(
                 "sampled structural logits source is not aligned for F32 access",
             ));
@@ -12530,6 +12488,12 @@ pub struct StructuralRowEvidence {
     pub gpu_sampling_dispatches: u64,
 }
 
+pub type SampledStructuralOutcome = (
+    Result<(SampledToken, BoundedTopKEvidence), SamplingError>,
+    TokenProfile,
+    StructuralRowEvidence,
+);
+
 struct ValidatedSharedLogits {
     source: std::ptr::NonNull<f32>,
     len: usize,
@@ -12798,7 +12762,6 @@ crate::env_flag!(default_on matmat_smalln_table_enabled, "QWEN_MATMAT_SMALLN_TAB
 ///   * Q6_K (ffn_down, lm_head)
 ///   * Q8_0 (DFlash drafter projections, lm_head — added by v0.73b.0)
 ///   * IQ4_NL/IQ4_XS (IQ quant compatibility)
-
 pub fn encode_mat_mat_dispatch(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -12821,7 +12784,7 @@ pub fn encode_mat_mat_dispatch(
     // QWEN_MATMAT_SMALLN_TABLE=0.
     if matmat_smalln_table_enabled()
         && matches!(weight.dtype, GgmlType::Q4_K | GgmlType::Q6_K)
-        && n_in % 256 == 0
+        && n_in.is_multiple_of(256)
     {
         match n_query {
             2 if weight.dtype == GgmlType::Q4_K => {
@@ -12836,13 +12799,13 @@ pub fn encode_mat_mat_dispatch(
                     ctx, enc, weight, x, y, n_in, n_out, n_query,
                 )?);
             }
-            8 if weight.dtype == GgmlType::Q6_K && n_out % 8 == 0 => {
+            8 if weight.dtype == GgmlType::Q6_K && n_out.is_multiple_of(8) => {
                 // r1c1k128: flat c ~1.6-1.8 across N on Q6_K shapes.
                 return Ok(crate::metal::encode_mat_mat_mma8_variant(
                     ctx, enc, weight, x, y, n_in, n_out, "r1c1k128",
                 )?);
             }
-            8 if weight.dtype == GgmlType::Q4_K && n_out % 16 == 0 => {
+            8 if weight.dtype == GgmlType::Q4_K && n_out.is_multiple_of(16) => {
                 // r1c1k64_sg2: the Q4_K N=8 all-rounder (2.25-2.78,
                 // never worst) vs generic 5.1-8.3.
                 return Ok(crate::metal::encode_mat_mat_mma8_variant(
@@ -12856,7 +12819,7 @@ pub fn encode_mat_mat_dispatch(
                     "r1c1k64_sg2",
                 )?);
             }
-            16 if n_out % 16 == 0 && n_out < 100_000 => {
+            16 if n_out.is_multiple_of(16) && n_out < 100_000 => {
                 // r2c2k64 beats n16 by 8-35% on ffn/gdn/attn shapes;
                 // n16 retained for lm_head-class (n_out >= 100k) where
                 // it still wins (2.35 vs 2.81).
@@ -12877,7 +12840,9 @@ pub fn encode_mat_mat_dispatch(
         GgmlType::F16 => Ok(crate::metal::encode_mat_mat_f16_f32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
         )?),
-        GgmlType::BF16 if matmat_bf16_bfloat_act_enabled() && n_in % 32 == 0 && n_query >= 16 => {
+        GgmlType::BF16
+            if matmat_bf16_bfloat_act_enabled() && n_in.is_multiple_of(32) && n_query >= 16 =>
+        {
             Ok(crate::metal::encode_mat_mat_bf16_bfloat_act_f32(
                 ctx, enc, weight, x, y, n_in, n_out, n_query,
             )?)

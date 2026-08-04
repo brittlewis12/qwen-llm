@@ -2009,7 +2009,7 @@ fn packed_verify_skinny_gemm_micro_27b() {
         }),
     ];
 
-    let timed = |encode: &dyn Fn(&KernelEncoder) -> ()| -> f64 {
+    let timed = |encode: &dyn Fn(&KernelEncoder)| -> f64 {
         const ITERS: usize = 16;
         let mut best = f64::INFINITY;
         for _ in 0..3 {
@@ -2138,7 +2138,7 @@ fn multicol_gemv_micro_27b() {
     // best-of-5 x 32 iters: the mv1 reference is ~0.04-0.18 ms/dispatch and
     // showed +/-20% run-to-run at 3x16; the nc kernels were stable. Deeper
     // sampling keeps the c(N) ratios honest for the record.
-    let timed = |encode: &dyn Fn(&KernelEncoder) -> ()| -> f64 {
+    let timed = |encode: &dyn Fn(&KernelEncoder)| -> f64 {
         const ITERS: usize = 32;
         let mut best = f64::INFINITY;
         for _ in 0..5 {
@@ -2378,7 +2378,7 @@ fn smalln_mma_micro_27b() {
         ("attn_q   ", &attn.q, h, false),
     ];
 
-    let timed = |encode: &dyn Fn(&KernelEncoder) -> ()| -> f64 {
+    let timed = |encode: &dyn Fn(&KernelEncoder)| -> f64 {
         const ITERS: usize = 32;
         let mut best = f64::INFINITY;
         for _ in 0..5 {
@@ -2599,7 +2599,7 @@ fn smalln_selection_sweep_27b() {
     ];
 
     #[allow(clippy::type_complexity)]
-    let timed = |encode: &dyn Fn(&KernelEncoder) -> (), iters: usize, reps: usize| -> f64 {
+    let timed = |encode: &dyn Fn(&KernelEncoder), iters: usize, reps: usize| -> f64 {
         let mut best = f64::INFINITY;
         for _ in 0..reps {
             let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
@@ -2736,7 +2736,7 @@ fn smalln_selection_sweep_27b() {
                 ));
             }
             // mma8 (8-col) at N <= 8; composed 2x at N=16.
-            if matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K) && n_out % 8 == 0 {
+            if matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K) && n_out.is_multiple_of(8) {
                 if n <= 8 {
                     let xn = x.view_subrange(0, vec![(8 * n_in) as u64]);
                     let yn = y_test.view_subrange(0, vec![(8 * n_out) as u64]);
@@ -2753,7 +2753,7 @@ fn smalln_selection_sweep_27b() {
                     // (16 for r2c1k64/sg2) are re-checked below and in the
                     // encode fn; all swept shapes satisfy n_out % 16 == 0.
                     for v in ["r2c1k64", "r1c1k128", "r1c1k64_sg2", "r2c1k128", "r4c1k64"] {
-                        if v == "r4c1k64" && n_out % 32 != 0 {
+                        if v == "r4c1k64" && !n_out.is_multiple_of(32) {
                             continue;
                         }
                         let xn = x.view_subrange(0, vec![(8 * n_in) as u64]);
@@ -2809,7 +2809,7 @@ fn smalln_selection_sweep_27b() {
                 // Skip variants whose row constraint fails (encode returns Err
                 // inside closure would panic; pre-check the common one).
                 if (cfg == "mma8v-r2c1k64" || cfg == "mma8v-r1c1k64_sg2" || cfg == "mma8v-r2c2k64")
-                    && n_out % 16 != 0
+                    && !n_out.is_multiple_of(16)
                 {
                     continue;
                 }
@@ -2847,9 +2847,14 @@ fn smalln_selection_sweep_27b() {
                     }
                     min_cos = min_cos.min(dot / (n2g.sqrt() * n2w.sqrt()).max(1e-30));
                 }
-                for i in n * n_out..cols_computed * n_out {
+                for (i, value) in got
+                    .iter()
+                    .enumerate()
+                    .take(cols_computed * n_out)
+                    .skip(n * n_out)
+                {
                     assert!(
-                        got[i].is_finite(),
+                        value.is_finite(),
                         "[sweep {label}] {cfg} N{n}: padded output not finite at {i}"
                     );
                 }

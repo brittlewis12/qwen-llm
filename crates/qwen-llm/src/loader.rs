@@ -144,7 +144,7 @@ fn ensure_divisible(
     divisor_key: &'static str,
     divisor: u32,
 ) -> Result<(), LoadError> {
-    if numerator % divisor != 0 {
+    if !numerator.is_multiple_of(divisor) {
         return Err(LoadError::MetadataNotDivisible {
             key,
             numerator: numerator as u64,

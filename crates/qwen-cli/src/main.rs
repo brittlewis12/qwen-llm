@@ -4846,7 +4846,7 @@ fn run_jsonl_request(
     let mut sequence = allocated.sequence;
     let forward = loaded.forward();
 
-    let prompt_hash = token_hash_hex(&prompt_ids);
+    let prompt_hash = token_hash_hex(prompt_ids);
     let cache_prefix_hash = cache_prefix_tokens.map(|n| token_hash_hex(&prompt_ids[..n]));
 
     let mut cache_hit = false;
@@ -4860,7 +4860,7 @@ fn run_jsonl_request(
     let logits = {
         let restore_t0 = Instant::now();
         let hit = loaded
-            .restore_cached_prefix(&mut sequence, &prompt_ids)
+            .restore_cached_prefix(&mut sequence, prompt_ids)
             .context("restore prefix cache")?;
         restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
         if let Some(hit) = hit {
@@ -4940,7 +4940,7 @@ fn run_jsonl_request(
                 logits
             }
         } else {
-            let (logits, ms) = prefill_span(&forward, &mut sequence, &mut scratch, &prompt_ids, 0)?;
+            let (logits, ms) = prefill_span(&forward, &mut sequence, &mut scratch, prompt_ids, 0)?;
             prefill_ms += ms;
             logits
         }
@@ -6018,7 +6018,7 @@ fn argmax_i32(xs: &[f32]) -> i32 {
 }
 
 fn print_model_info(model_path: &Path) -> Result<()> {
-    let gguf = qwen_llm::gguf::GgufFile::open(&model_path)?;
+    let gguf = qwen_llm::gguf::GgufFile::open(model_path)?;
     println!(
         "loaded {}: arch={} {} tensors, {} shard(s), mmap={} MiB, primary tensor-data starts at {}",
         model_path.display(),
@@ -6039,12 +6039,11 @@ fn print_model_info(model_path: &Path) -> Result<()> {
     use std::collections::BTreeMap;
     let mut by_layer: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
     for t in &gguf.tensors {
-        if let Some(rest) = t.name.strip_prefix("blk.") {
-            if let Some(dot) = rest.find('.') {
-                if let Ok(idx) = rest[..dot].parse::<u32>() {
-                    by_layer.entry(idx).or_default().push(&rest[dot + 1..]);
-                }
-            }
+        if let Some(rest) = t.name.strip_prefix("blk.")
+            && let Some(dot) = rest.find('.')
+            && let Ok(idx) = rest[..dot].parse::<u32>()
+        {
+            by_layer.entry(idx).or_default().push(&rest[dot + 1..]);
         }
     }
     let n_layers = by_layer.len();

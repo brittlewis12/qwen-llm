@@ -770,7 +770,7 @@ impl NativeTokenizer {
     pub fn try_decode_piece(&self, token: i32) -> Result<String, TokError> {
         let token = self.checked_token(token)?;
         let bytes = self.decode_token_bytes(token);
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        Ok(String::from_utf8_lossy(bytes).into_owned())
     }
 
     /// Return the exact decoded bytes for one token.
@@ -1096,7 +1096,7 @@ fn qwen35_pretokenize(text: &str) -> Vec<&str> {
             let next = chars[pos + 1].ch.to_ascii_lowercase();
             if matches!(next, 's' | 't' | 'm' | 'd') {
                 push_token(text, &chars, &mut out, &mut prev, pos + 2);
-                pos = pos + 2;
+                pos += 2;
                 continue;
             }
             if pos + 2 < chars.len() {
@@ -1106,7 +1106,7 @@ fn qwen35_pretokenize(text: &str) -> Vec<&str> {
                     || (next == 'l' && next2 == 'l')
                 {
                     push_token(text, &chars, &mut out, &mut prev, pos + 3);
-                    pos = pos + 3;
+                    pos += 3;
                     continue;
                 }
             }
@@ -1421,10 +1421,10 @@ fn decode_token_bytes_uncached(data: &NativeToken) -> Vec<u8> {
     if matches!(data.attr, TokenAttr::Unused | TokenAttr::Undefined) {
         return Vec::new();
     }
-    if data.attr == TokenAttr::Byte {
-        if let Some(byte) = parse_hex_byte_token(&data.text) {
-            return vec![byte];
-        }
+    if data.attr == TokenAttr::Byte
+        && let Some(byte) = parse_hex_byte_token(&data.text)
+    {
+        return vec![byte];
     }
 
     let mut out = Vec::with_capacity(data.text.len());

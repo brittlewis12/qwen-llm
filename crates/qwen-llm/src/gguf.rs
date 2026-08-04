@@ -961,7 +961,7 @@ fn validate_tensor_storage_size(
             "tensor {name:?} declares removed GGML type {kind}"
         )));
     }
-    if elements % block_size != 0 {
+    if !elements.is_multiple_of(block_size) {
         return Err(GgufError::Decode(format!(
             "tensor {name:?} element count {elements} is not divisible by GGML block size {block_size} for type {kind}"
         )));

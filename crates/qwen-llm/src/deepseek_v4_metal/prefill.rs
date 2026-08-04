@@ -3875,13 +3875,9 @@ mod tests {
                 let local = token - query_offset;
                 let mut mask = vec![false; compressed_count];
                 if local == 0 {
-                    for row in 1..=DEEPSEEK_V4_CSA_TOP_K {
-                        mask[row] = true;
-                    }
+                    mask[1..=DEEPSEEK_V4_CSA_TOP_K].fill(true);
                 } else {
-                    for row in 0..DEEPSEEK_V4_CSA_TOP_K {
-                        mask[row] = true;
-                    }
+                    mask[..DEEPSEEK_V4_CSA_TOP_K].fill(true);
                 }
                 mask
             });
@@ -4027,7 +4023,7 @@ mod tests {
             let output =
                 MetalTensor::zeros_f32(ctx, vec![dims.query_width as u64, n_tokens as u64])
                     .unwrap();
-            let final_compressed_count = if ratio == 0 { 0 } else { end_position / ratio };
+            let final_compressed_count = end_position.checked_div(ratio).unwrap_or(0);
             let command = ctx.queue.commandBuffer().unwrap();
             let encoder = KernelEncoder::begin(&command);
             encode_copy_raw_ring_f16_bits(ctx, &encoder, &raw_cache, &raw_cache_before_chunk)
@@ -4091,11 +4087,7 @@ mod tests {
                             .map(move |dimension| round_f16(raw_value(logical_position, dimension)))
                     })
                     .collect::<Vec<_>>();
-                let compressed_count = if ratio == 0 {
-                    0
-                } else {
-                    (position + 1) / ratio
-                };
+                let compressed_count = (position + 1).checked_div(ratio).unwrap_or(0);
                 let expected = crate::deepseek_v4_oracle::shared_kv_attention(
                     &queries_values[token * dims.query_width..(token + 1) * dims.query_width],
                     config.head_count,

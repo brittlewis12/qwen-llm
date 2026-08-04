@@ -617,7 +617,7 @@ mod tests {
     fn default_budget_is_generous() {
         // Guard against accidentally shipping a tiny default that would
         // silently change bench behavior.
-        assert!(super::DEFAULT_MAX_BYTES >= (8u64 << 30));
+        const { assert!(super::DEFAULT_MAX_BYTES >= (8u64 << 30)) };
     }
 
     #[test]

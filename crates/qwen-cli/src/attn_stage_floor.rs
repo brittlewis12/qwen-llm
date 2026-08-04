@@ -233,7 +233,7 @@ fn validate_checksum(reference: &[f32], actual: &[f32]) -> Result<Value> {
 
 fn median(sorted: &[f64]) -> f64 {
     let middle = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         (sorted[middle - 1] + sorted[middle]) * 0.5
     } else {
         sorted[middle]
@@ -302,7 +302,7 @@ pub fn run(args: AttnStageFloorArgs, build_identity: Value) -> Result<()> {
 
     let encode = |enc: &KernelEncoder| -> Result<()> {
         Ok(encode_attn_stage_floor_g16(
-            &ctx, &enc, &k, &v, &checksum, CONTEXT, N_KV, NWG,
+            &ctx, enc, &k, &v, &checksum, CONTEXT, N_KV, NWG,
         )?)
     };
     let dispatch = || -> Result<f64> {

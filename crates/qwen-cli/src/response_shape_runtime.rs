@@ -684,7 +684,7 @@ fn decode_sha256(value: &str) -> Result<[u8; 32]> {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>> {
-    ensure!(value.len() % 2 == 0, "hex string has odd length");
+    ensure!(value.len().is_multiple_of(2), "hex string has odd length");
     ensure!(
         value
             .bytes()

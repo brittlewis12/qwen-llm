@@ -1738,7 +1738,7 @@ impl DeepSeekV4Session {
                 self.commit_tokens(&[token_id]);
                 self.phase
                     .complete_mutation(position, next_position, true)?;
-                if let Some(profile) = whole_profile.as_deref_mut() {
+                if let Some(profile) = whole_profile {
                     profile.causal_commit_cpu_ms = causal_commit_started
                         .expect("whole-token profile requires a causal-commit timer")
                         .elapsed()
@@ -2454,7 +2454,7 @@ impl DeepSeekV4Session {
             layer_completed(layer);
         }
 
-        if let Some(recorder) = stage_recorder.as_deref_mut() {
+        if let Some(recorder) = stage_recorder {
             recorder.resolve(ctx)?;
         }
 
@@ -2591,7 +2591,7 @@ impl DeepSeekV4Session {
 
         #[cfg(feature = "dsv4-diagnostics")]
         self.decision_diagnostics.finish()?;
-        if let Some(profile) = whole_profile.as_deref_mut() {
+        if let Some(profile) = whole_profile {
             profile.record_validate_callback_cpu_ms = validate_started
                 .expect("whole-token profile requires a validation timer")
                 .elapsed()
@@ -3164,11 +3164,11 @@ fn compressor_frontier_geometry(
 enum DeepSeekV4LayerCompressorFrontiers {
     SlidingWindow,
     CompressedSparse {
-        attention: DeepSeekV4CompressorFrontier,
-        indexer: DeepSeekV4CompressorFrontier,
+        attention: Box<DeepSeekV4CompressorFrontier>,
+        indexer: Box<DeepSeekV4CompressorFrontier>,
     },
     HeavilyCompressed {
-        attention: DeepSeekV4CompressorFrontier,
+        attention: Box<DeepSeekV4CompressorFrontier>,
     },
 }
 
@@ -3192,31 +3192,31 @@ impl DeepSeekV4CompressorFrontiers {
                 AttentionKind::SlidingWindow => DeepSeekV4LayerCompressorFrontiers::SlidingWindow,
                 AttentionKind::CompressedSparse => {
                     DeepSeekV4LayerCompressorFrontiers::CompressedSparse {
-                        attention: DeepSeekV4CompressorFrontier::new(
+                        attention: Box::new(DeepSeekV4CompressorFrontier::new(
                             ctx,
                             4,
                             attention_dim,
                             DeepSeekV4CompressorPublication::Attention,
                             capacity.csa_physical_rows(),
-                        )?,
-                        indexer: DeepSeekV4CompressorFrontier::new(
+                        )?),
+                        indexer: Box::new(DeepSeekV4CompressorFrontier::new(
                             ctx,
                             4,
                             indexer_dim,
                             DeepSeekV4CompressorPublication::IndexerHadamard,
                             capacity.csa_physical_rows(),
-                        )?,
+                        )?),
                     }
                 }
                 AttentionKind::HeavilyCompressed => {
                     DeepSeekV4LayerCompressorFrontiers::HeavilyCompressed {
-                        attention: DeepSeekV4CompressorFrontier::new(
+                        attention: Box::new(DeepSeekV4CompressorFrontier::new(
                             ctx,
                             128,
                             attention_dim,
                             DeepSeekV4CompressorPublication::Attention,
                             capacity.hca_physical_rows(),
-                        )?,
+                        )?),
                     }
                 }
             });
@@ -7127,11 +7127,7 @@ fn encode_cooperative_dense_sink_attention_f16(
     let end_position = start_position.checked_add(token_count_u32).ok_or_else(|| {
         DeepSeekV4MetalError::Invalid("cooperative dense position overflow".into())
     })?;
-    let expected_rows = if ratio == 0 {
-        0
-    } else {
-        end_position as usize / ratio
-    };
+    let expected_rows = (end_position as usize).checked_div(ratio).unwrap_or(0);
     let compressed_cache = match compressed {
         None if expected_rows == 0 => raw_cache,
         Some(rows) if rows.count == expected_rows => {
@@ -8331,7 +8327,10 @@ fn validate_f32(
     if writable && !tensor.is_writable() {
         return invalid(format!("{name} must be writable"));
     }
-    if tensor.offset % std::mem::align_of::<f32>() as u64 != 0 {
+    if !tensor
+        .offset
+        .is_multiple_of(std::mem::align_of::<f32>() as u64)
+    {
         return invalid(format!(
             "{name} offset {} is not F32-aligned",
             tensor.offset
@@ -9995,7 +9994,11 @@ mod tests {
                 let column = i % group_width;
                 (row as f32 - 2.1) * 0.17
                     + (column as f32 - 1.7) * 0.09
-                    + if (row + column) % 2 == 0 { 0.14 } else { -0.08 }
+                    + if (row + column).is_multiple_of(2) {
+                        0.14
+                    } else {
+                        -0.08
+                    }
             })
             .collect::<Vec<_>>();
         let output_b_values = (0..low_rank_width * c.hidden_size)
@@ -10099,20 +10102,20 @@ mod tests {
         assert_eq!(read_f32(&scratch.head_norm_ones), vec![1.0; c.head_dim]);
 
         let mut cache_fixture = (0..c.head_dim)
-            .map(|i| (i as f32 - 91.0) * 0.000_061_035_156_25)
+            .map(|i| (i as f32 - 91.0) * 0.000_061_035_156)
             .collect::<Vec<_>>();
-        cache_fixture[0] = 1.00390625;
-        cache_fixture[1] = 0.004150390625;
-        cache_fixture[2] = 0.004638671875;
-        cache_fixture[3] = -0.004150390625;
+        cache_fixture[0] = 1.003_906_3;
+        cache_fixture[1] = 0.004_150_390_6;
+        cache_fixture[2] = 0.004_638_672;
+        cache_fixture[3] = -0.004_150_390_6;
         cache_fixture[63] = 1.5;
         cache_fixture[64] = 1.0625;
         cache_fixture[65] = 1.1875;
         cache_fixture[66] = -1.0625;
         cache_fixture[127] = 448.0;
-        cache_fixture[128] = 1.00390625;
-        cache_fixture[129] = 1.01171875;
-        cache_fixture[130] = -1.00390625;
+        cache_fixture[128] = 1.003_906_3;
+        cache_fixture[129] = 1.011_718_8;
+        cache_fixture[130] = -1.003_906_3;
         let mut expected_cache_fixture = cache_fixture.clone();
         attention_fp8_nope_bf16_rope_roundtrip_in_place(&mut expected_cache_fixture, c.rotary_dim)
             .unwrap();
@@ -13570,11 +13573,8 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         let actual_mask = read_i32(&mask);
-        for row in 0..CAPACITY {
-            assert_eq!(
-                actual_mask[row],
-                i32::from(expected_cache_order.contains(&row))
-            );
+        for (row, &actual) in actual_mask.iter().enumerate().take(CAPACITY) {
+            assert_eq!(actual, i32::from(expected_cache_order.contains(&row)));
         }
     }
 
@@ -17513,14 +17513,14 @@ mod tests {
             let serial = || {
                 measure(&|encoder| {
                     scratch.encode_routed_experts_indexed(
-                        &ctx, &encoder, &gate_bank, &up_bank, &down_bank, 10.0,
+                        &ctx, encoder, &gate_bank, &up_bank, &down_bank, 10.0,
                     )
                 })
             };
             let all_slot = || {
                 measure(&|encoder| {
                     scratch.encode_routed_experts_all_slots(
-                        &ctx, &encoder, &gate_bank, &up_bank, &down_bank, 10.0,
+                        &ctx, encoder, &gate_bank, &up_bank, &down_bank, 10.0,
                     )
                 })
             };
@@ -17665,11 +17665,11 @@ mod tests {
         let scale = offset_f32(&ctx, &scale_values, vec![3]);
         let base = offset_f32(&ctx, &base_values, vec![24]);
         let block = offset_f32(&ctx, &block_values, vec![H as u64]);
-        let post_output = offset_f32(&ctx, &vec![0.0; N], vec![H as u64, 4]);
+        let post_output = offset_f32(&ctx, &[0.0; N], vec![H as u64, 4]);
         let head_function_tensor = offset_f32(&ctx, &head_function, vec![N as u64, 4]);
         let head_scale = offset_f32(&ctx, &head_scale_values, vec![1]);
         let head_base = offset_f32(&ctx, &head_base_values, vec![4]);
-        let head_output = offset_f32(&ctx, &vec![0.0; H], vec![H as u64]);
+        let head_output = offset_f32(&ctx, &[0.0; H], vec![H as u64]);
         let scratch = DeepSeekV4HyperConnectionScratch::new(&ctx, H).expect("HC scratch");
         assert_eq!(read_f32(&residual), residual_values);
         assert_eq!(read_f32(&scratch.ones), vec![1.0; N]);
@@ -17802,7 +17802,7 @@ mod tests {
         );
         assert_close("final head", &read_f32(&head_output), &expected_head, 4e-5);
 
-        let mut transposed_post = vec![0.0; N];
+        let mut transposed_post = [0.0; N];
         for destination in 0..4 {
             for dimension in 0..H {
                 let mut value = block_values[dimension] * expected_pre.controls.post[destination];
@@ -17874,7 +17874,7 @@ mod tests {
         .expect("equal stream oracle");
 
         let embedding = offset_f32(&ctx, &embedding_values, vec![H as u64]);
-        let residual = offset_f32(&ctx, &vec![0.0; N], vec![H as u64, 4]);
+        let residual = offset_f32(&ctx, &[0.0; N], vec![H as u64, 4]);
         let function = offset_f32(&ctx, &function, vec![N as u64, 24]);
         let scale = offset_f32(&ctx, &scale_values, vec![3]);
         let base = offset_f32(&ctx, &base_values, vec![24]);

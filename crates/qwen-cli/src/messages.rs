@@ -342,10 +342,7 @@ pub(crate) fn render_deepseek_v4_0731_messages_prompt(
     Ok(output)
 }
 
-fn deepseek_v4_message_reasoning<'m>(
-    index: usize,
-    message: &'m ChatMessage,
-) -> Result<Option<&'m str>> {
+fn deepseek_v4_message_reasoning(index: usize, message: &ChatMessage) -> Result<Option<&str>> {
     match (&message.reasoning, &message.reasoning_content) {
         (Some(reasoning), Some(alias)) if reasoning != alias => bail!(
             "DeepSeek V4 message {index} sets conflicting `reasoning` and `reasoning_content` fields"

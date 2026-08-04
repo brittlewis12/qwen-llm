@@ -288,7 +288,7 @@ fn valid_sha256(value: &str) -> bool {
 }
 
 fn parse_hex(value: &str) -> Result<Vec<u8>> {
-    ensure!(value.len() % 2 == 0, "hex string has odd length");
+    ensure!(value.len().is_multiple_of(2), "hex string has odd length");
     ensure!(
         value.bytes().all(|byte| byte.is_ascii_hexdigit())
             && value.bytes().all(|byte| !byte.is_ascii_uppercase()),
@@ -749,7 +749,7 @@ fn checked_align_up(value: usize, alignment: usize) -> Result<usize> {
 
 fn build_bank_layout(manifest: &ValidatedManifest, profile: ProfileSpec) -> Result<BankLayout> {
     ensure!(
-        profile.hidden > 0 && profile.hidden % Q6_BLOCK_ELEMENTS == 0,
+        profile.hidden > 0 && profile.hidden.is_multiple_of(Q6_BLOCK_ELEMENTS),
         "profile hidden size is not Q6_K row-aligned"
     );
     let row_bytes = profile
@@ -774,7 +774,7 @@ fn build_bank_layout(manifest: &ValidatedManifest, profile: ProfileSpec) -> Resu
             .context("state payload overflow")?;
         let span_bytes = checked_align_up(payload_bytes, BANK_ALIGNMENT)?;
         ensure!(
-            offset % BANK_ALIGNMENT == 0,
+            offset.is_multiple_of(BANK_ALIGNMENT),
             "bank state offset is misaligned"
         );
         states.push(StateLayout {
@@ -1807,7 +1807,7 @@ fn ordered_widths(round: usize) -> [usize; WIDTHS.len()] {
 }
 
 fn arm_order(round: usize) -> [Arm; 2] {
-    if round % 2 == 0 {
+    if round.is_multiple_of(2) {
         [Arm::Full, Arm::Compact]
     } else {
         [Arm::Compact, Arm::Full]
@@ -1831,7 +1831,7 @@ fn median(values: &[f64]) -> Result<f64> {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     let middle = sorted.len() / 2;
-    Ok(if sorted.len() % 2 == 0 {
+    Ok(if sorted.len().is_multiple_of(2) {
         (sorted[middle - 1] + sorted[middle]) / 2.0
     } else {
         sorted[middle]

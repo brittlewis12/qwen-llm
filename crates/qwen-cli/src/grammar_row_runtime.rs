@@ -410,7 +410,8 @@ impl RowSource for A3bOutputWeightRows<'_> {
 
 fn build_bank_plan(states: Vec<(u32, u32, Vec<i32>)>) -> Result<BankPlan> {
     ensure!(
-        HIDDEN % Q6_BLOCK_ELEMENTS == 0 && HIDDEN / Q6_BLOCK_ELEMENTS * Q6_BLOCK_BYTES == ROW_BYTES,
+        HIDDEN.is_multiple_of(Q6_BLOCK_ELEMENTS)
+            && HIDDEN / Q6_BLOCK_ELEMENTS * Q6_BLOCK_BYTES == ROW_BYTES,
         "frozen Q6_K row geometry mismatch"
     );
     let mut layouts = Vec::with_capacity(states.len());
@@ -437,7 +438,10 @@ fn build_bank_plan(states: Vec<(u32, u32, Vec<i32>)>) -> Result<BankPlan> {
             .checked_mul(ROW_BYTES)
             .context("bank state payload overflow")?;
         let span_bytes = checked_align_up(payload_bytes, BANK_ALIGNMENT)?;
-        ensure!(offset % BANK_ALIGNMENT == 0, "bank state is misaligned");
+        ensure!(
+            offset.is_multiple_of(BANK_ALIGNMENT),
+            "bank state is misaligned"
+        );
         layouts.push(BankStatePlan {
             runtime_state_index,
             bank_state_index,
@@ -699,7 +703,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>> {
-    ensure!(value.len() % 2 == 0, "hex string has odd length");
+    ensure!(value.len().is_multiple_of(2), "hex string has odd length");
     ensure!(
         value
             .bytes()

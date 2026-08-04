@@ -43,7 +43,7 @@ fn sign_vec(n: usize, seed: u64) -> Vec<f32> {
 /// inverse (signs after/before Hadamard swap accordingly).
 pub fn rht_two_sided(w: &mut [f32], n_out: usize, n_in: usize, seed: u64, forward: bool) {
     assert_eq!(w.len(), n_out * n_in);
-    assert!(n_in % 128 == 0 && n_out % 128 == 0);
+    assert!(n_in.is_multiple_of(128) && n_out.is_multiple_of(128));
     let s_in = sign_vec(n_in, seed ^ 0x1157);
     let s_out = sign_vec(n_out, seed ^ 0x2263);
     // Input side (rows): x -> Hbd (S x). Inverse: x -> S (Hbd x).
@@ -87,7 +87,7 @@ pub fn rht_two_sided(w: &mut [f32], n_out: usize, n_in: usize, seed: u64, forwar
 /// matching the input side of [`rht_two_sided`] (needed to score r_H in
 /// the rotated domain: E~ x~ = U E x, and ||U z|| = ||z||).
 pub fn rht_rotate_activation(x: &mut [f32], seed: u64) {
-    assert!(x.len() % 128 == 0);
+    assert!(x.len().is_multiple_of(128));
     let s_in = sign_vec(x.len(), seed ^ 0x1157);
     for (v, s) in x.iter_mut().zip(&s_in) {
         *v *= s;
@@ -383,7 +383,7 @@ pub fn fwht128_blocks_f64(x: &mut [f64]) {
 pub fn rotate_hessian_input_f64(h: &mut [f64], d: usize, signs: &[f32]) {
     assert_eq!(h.len(), d * d);
     assert_eq!(signs.len(), d);
-    assert!(d % 128 == 0);
+    assert!(d.is_multiple_of(128));
     for i in 0..d {
         let si = signs[i] as f64;
         for j in 0..d {

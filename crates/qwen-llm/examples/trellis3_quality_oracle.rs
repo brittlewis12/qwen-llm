@@ -19,7 +19,7 @@ const L: usize = 16;
 const NSTATES: usize = 1 << L;
 const GROUP_W: usize = 256;
 const N_GROUPS: usize = 64;
-const SEED: u64 = 0x7E11_15;
+const SEED: u64 = 0x007E_1115;
 
 const LCG_A: u32 = 89_226_354;
 const LCG_B: u32 = 64_248_484;
@@ -144,12 +144,12 @@ fn viterbi_pass(x: &[f32], scale: f32, code: &Code, pin_lead: Option<u32>) -> (V
     let mut dp_new = vec![f32::INFINITY; NSTATES];
     let mut bp = vec![0u8; steps * NSTATES];
 
-    for st in 0..NSTATES {
+    for (st, value) in dp_old.iter_mut().enumerate() {
         let ok = match pin_lead {
             Some(l) => (st as u32 & lead_mask) == l,
             None => true,
         };
-        dp_old[st] = if ok { cost(0, st) } else { f32::INFINITY };
+        *value = if ok { cost(0, st) } else { f32::INFINITY };
     }
 
     // Right-shift bitshift trellis (matches the kernel window convention:
@@ -225,9 +225,9 @@ fn decode_span(words: &[u32], code: &Code, span_w: usize) -> Vec<f32> {
     let ring = span_w * 3; // 3 bits/weight at K=3 regardless of V
     let mut out = vec![0f32; span_w];
     if code.v == 1 {
-        for j in 0..span_w {
+        for (j, value) in out.iter_mut().enumerate().take(span_w) {
             let st = ring_state(words, ring, (3 * (j + 1)) % ring) as usize;
-            out[j] = code.vx[st];
+            *value = code.vx[st];
         }
     } else {
         for t in 0..span_w / 2 {

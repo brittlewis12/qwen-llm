@@ -1896,10 +1896,10 @@ fn profile_native_deepseek_v4_whole_token_breakdown_at_128_and_512() {
                 .restore_causal_snapshot(snapshot)
                 .expect("restore whole-token control state");
             let mut wall_ms = Vec::with_capacity(SAMPLES);
-            for position in start_position..start_position + SAMPLES {
+            for &token_id in prompt.iter().skip(start_position).take(SAMPLES) {
                 let started = Instant::now();
                 session
-                    .forward_token(ctx, prompt[position])
+                    .forward_token(ctx, token_id)
                     .expect("execute whole-token control");
                 wall_ms.push(started.elapsed().as_secs_f64() * 1e3);
             }
@@ -1923,9 +1923,9 @@ fn profile_native_deepseek_v4_whole_token_breakdown_at_128_and_512() {
             .restore_causal_snapshot(snapshot)
             .expect("restore whole-token profiled state");
         let mut profiles = Vec::with_capacity(SAMPLES);
-        for position in start_position..start_position + SAMPLES {
+        for (position, &token_id) in prompt.iter().enumerate().skip(start_position).take(SAMPLES) {
             let profile = session
-                .forward_token_whole_profiled(ctx, prompt[position])
+                .forward_token_whole_profiled(ctx, token_id)
                 .expect("execute whole-token profiled token");
             assert_eq!(profile.position as usize, position);
             assert!(profile.command_gpu_ms.is_finite() && profile.command_gpu_ms > 0.0);
@@ -2077,10 +2077,10 @@ fn profile_native_deepseek_v4_single_command_at_128_and_512() {
                 .restore_causal_snapshot(snapshot)
                 .expect("restore routing-profile endpoint");
             let mut milliseconds = Vec::with_capacity(SAMPLES);
-            for position in start_position..start_position + SAMPLES {
+            for &token_id in prompt.iter().skip(start_position).take(SAMPLES) {
                 let started = Instant::now();
                 session
-                    .forward_token(ctx, prompt[position])
+                    .forward_token(ctx, token_id)
                     .expect("execute routing-profile control token");
                 milliseconds.push(started.elapsed().as_secs_f64() * 1e3);
             }
@@ -2104,9 +2104,9 @@ fn profile_native_deepseek_v4_single_command_at_128_and_512() {
             .restore_causal_snapshot(snapshot)
             .expect("restore routing-profile measured state");
         let mut profiled = Vec::with_capacity(SAMPLES);
-        for position in start_position..start_position + SAMPLES {
+        for (position, &token_id) in prompt.iter().enumerate().skip(start_position).take(SAMPLES) {
             let profile = session
-                .forward_token_profiled(ctx, prompt[position])
+                .forward_token_profiled(ctx, token_id)
                 .expect("execute routing-profile token");
             assert_eq!(profile.position as usize, position);
             assert_eq!(profile.layers.len(), 43);
@@ -2327,9 +2327,14 @@ fn profile_native_deepseek_v4_stage_families_at_128_and_512() {
                 .restore_causal_snapshot(snapshot)
                 .expect("restore stage-profile control state");
             let mut profiles = Vec::with_capacity(REPEATS * GROUPS);
-            for position in start_position..start_position + REPEATS * GROUPS {
+            for (position, &token_id) in prompt
+                .iter()
+                .enumerate()
+                .skip(start_position)
+                .take(REPEATS * GROUPS)
+            {
                 let profile = session
-                    .forward_token_profiled(ctx, prompt[position])
+                    .forward_token_profiled(ctx, token_id)
                     .expect("execute stage-profile control token");
                 assert_eq!(profile.position as usize, position);
                 profiles.push(profile);

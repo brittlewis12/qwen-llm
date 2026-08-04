@@ -279,10 +279,10 @@ fn dflash_swa_ctx_scan_start(
         if pos < 0 {
             return 0;
         }
-        if let Some(prev) = prev {
-            if pos < prev {
-                return 0;
-            }
+        if let Some(prev) = prev
+            && pos < prev
+        {
+            return 0;
         }
         prev = Some(pos);
     }
@@ -313,7 +313,7 @@ fn prefill_gdn_proj_oracle_layer_enabled(layer_idx: usize) -> bool {
 crate::env_flag!(default_off prefill_noop_ffn_enabled, "QWEN_PREFILL_NOOP_FFN");
 
 thread_local! {
-    static PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_OVERRIDE: Cell<Option<bool>> = Cell::new(None);
+    static PREFILL_DENSE_FFN_FUSED_SWIGLU_Q4_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
 }
 
 pub fn with_prefill_dense_ffn_fused_swiglu_q4_override<R>(
@@ -405,9 +405,9 @@ fn prefill_gdn_matvec_layer_enabled(layer_idx: usize) -> bool {
             .collect();
         (!parsed.is_empty()).then_some(parsed)
     });
-    layers.as_ref().map_or(true, |layers| {
-        layers.contains(&usize::MAX) || layers.contains(&layer_idx)
-    })
+    layers
+        .as_ref()
+        .is_none_or(|layers| layers.contains(&usize::MAX) || layers.contains(&layer_idx))
 }
 
 fn prefill_gdn_matvec_projection_enabled(proj: &str, layer_idx: usize) -> bool {
@@ -1749,7 +1749,11 @@ fn encode_moe_route_logits_dispatch(
             n_query >= min_query
         }
     };
-    if enabled && weight.dtype == GgmlType::F32 && n_in % 4 == 0 && n_out % 8 == 0 && n_query >= 32
+    if enabled
+        && weight.dtype == GgmlType::F32
+        && n_in.is_multiple_of(4)
+        && n_out.is_multiple_of(8)
+        && n_query >= 32
     {
         Ok(encode_mat_mat_f32_router_e8p32(
             ctx, enc, weight, x, y, n_in, n_out, n_query,
@@ -3051,8 +3055,10 @@ fn checked_overlay_tensor(
         })?;
     let backing_bytes = backing.buffer.length() as u64;
     if bytes != range.bytes
-        || range.offset % elem_bytes != 0
-        || range.offset % PREFILL_SCRATCH_OVERLAY_ALIGNMENT != 0
+        || !range.offset.is_multiple_of(elem_bytes)
+        || !range
+            .offset
+            .is_multiple_of(PREFILL_SCRATCH_OVERLAY_ALIGNMENT)
         || end > backing_bytes
     {
         return Err(MetalError::BadShape {
@@ -5401,29 +5407,29 @@ fn encode_packed_verify_inner_impl(
     Ok(out)
 }
 
-/// H5.3a rollback primitive — low-level entrypoint that takes
-/// everything explicitly. `DFlashDecoder::restore_after_partial_accept`
-/// is the production wrapper; this exists so unit tests can exercise
-/// the rollback algorithm without standing up a full DFlash drafter.
-///
-/// See `DFlashDecoder::restore_after_partial_accept` for the indexing
-/// spec and `n_keep` semantics — they are identical.
-///
-/// Algorithm:
-///   1. Validate dims (n_keep ∈ [1, N], scratch matches model, etc.).
-///   2. Open one MTLCommandBuffer + BlitEncoder.
-///   3. For each GDN layer k:
-///        gdn_state[k] ← gdn_ckpt_slot(k, n_keep - 1)
-///        gdn_conv[k]  ← conv_ckpt_slot(k, n_keep - 1)
-///   4. End blit encoder, commit, wait.
-///   5. CPU update: kv_n_pos[i] := start_position + n_keep for every
-///      attn layer i.
-///
-/// Step 5 is host-side because `MetalSession::kv_n_pos` is a
-/// `Vec<usize>` on the host (matches the existing `encode_attn`
-/// pattern where it's read at encode time, not GPU-side). KV slot
-/// bytes at [start_position + n_keep, ...) physically remain but
-/// become unreachable; next packed_verify call overwrites them.
+// H5.3a rollback primitive — low-level entrypoint that takes
+// everything explicitly. `DFlashDecoder::restore_after_partial_accept`
+// is the production wrapper; this exists so unit tests can exercise
+// the rollback algorithm without standing up a full DFlash drafter.
+//
+// See `DFlashDecoder::restore_after_partial_accept` for the indexing
+// spec and `n_keep` semantics — they are identical.
+//
+// Algorithm:
+//   1. Validate dims (n_keep ∈ [1, N], scratch matches model, etc.).
+//   2. Open one MTLCommandBuffer + BlitEncoder.
+//   3. For each GDN layer k:
+//        gdn_state[k] ← gdn_ckpt_slot(k, n_keep - 1)
+//        gdn_conv[k]  ← conv_ckpt_slot(k, n_keep - 1)
+//   4. End blit encoder, commit, wait.
+//   5. CPU update: kv_n_pos[i] := start_position + n_keep for every
+//      attn layer i.
+//
+// Step 5 is host-side because `MetalSession::kv_n_pos` is a
+// `Vec<usize>` on the host (matches the existing `encode_attn`
+// pattern where it's read at encode time, not GPU-side). KV slot
+// bytes at [start_position + n_keep, ...) physically remain but
+// become unreachable; next packed_verify call overwrites them.
 // =============================================================================
 // encode_packed_verify_layer_major_inner — H5.3b.4-5 layer-major path
 // =============================================================================
@@ -5464,7 +5470,12 @@ fn encode_packed_verify_moe_grouped_ffn_after_mixer(
     let n_expert = arch.expert_count as usize;
     let f_exp = arch.expert_feed_forward_length as usize;
     let f_shared = arch.expert_shared_feed_forward_length as usize;
-    if topk == 0 || topk > 16 || n_expert == 0 || n_expert > 256 || h % 256 != 0 || f_exp % 256 != 0
+    if topk == 0
+        || topk > 16
+        || n_expert == 0
+        || n_expert > 256
+        || !h.is_multiple_of(256)
+        || !f_exp.is_multiple_of(256)
     {
         return Ok(false);
     }
@@ -5834,13 +5845,13 @@ pub fn encode_packed_verify_layer_major_inner(
             }));
         }
     }
-    if let Some(dst) = debug_logits_dst {
-        if dst.shape != vec![n as u64, v as u64] {
-            return Err(DFlashError::Metal(MetalError::BadShape {
-                kernel: "packed_verify_layer_major.debug_logits_dst",
-                detail: format!("expected [{n}, {v}], got {:?}", dst.shape),
-            }));
-        }
+    if let Some(dst) = debug_logits_dst
+        && dst.shape != vec![n as u64, v as u64]
+    {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "packed_verify_layer_major.debug_logits_dst",
+            detail: format!("expected [{n}, {v}], got {:?}", dst.shape),
+        }));
     }
 
     // -- Stage all N token ids into packed_ids_buf (host write before
@@ -7277,6 +7288,8 @@ pub fn prefill_tokens_attention_capture(
     Ok(gpu_ms)
 }
 
+type ProfiledPrefillResult = (Option<Vec<f32>>, f64, Option<LmHeadTailEvidence>);
+
 fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
     base: &MetalForward<'_>,
     token_ids: &[i32],
@@ -7287,7 +7300,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
     hidden_dst: Option<&MetalTensor>,
     tail_mode: PrefillTailMode<'a>,
     mut attention_capture: Option<&mut AttentionCapture>,
-) -> Result<(Option<Vec<f32>>, f64, Option<LmHeadTailEvidence>), DFlashError> {
+) -> Result<ProfiledPrefillResult, DFlashError> {
     let arch = &base.model.arch;
     let total_n = token_ids.len();
     let h = arch.hidden_size as usize;
@@ -7365,20 +7378,19 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
         && arch.attn_head_dim as usize == 256
         && arch.n_q_heads == 32
         && arch.n_kv_heads == 2;
-    if attn_matrix_g4_force_on
+    if (attn_matrix_g4_force_on
         || attn_matrix_g8_force_on
         || attn_matrix_g6_force_on
-        || attn_matrix_g16_force_on
+        || attn_matrix_g16_force_on)
+        && layer_scratch.attn_matrix_max_pos < last_pos as u64
     {
-        if layer_scratch.attn_matrix_max_pos < last_pos as u64 {
-            return Err(DFlashError::Metal(MetalError::BadShape {
-                kernel: "prefill_attn_matrix",
-                detail: format!(
-                    "matrix scratch max_pos={} < required last_pos={last_pos}; set QWEN_PREFILL_ATTN_MATRIX_MAX_POS before scratch allocation",
-                    layer_scratch.attn_matrix_max_pos
-                ),
-            }));
-        }
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "prefill_attn_matrix",
+            detail: format!(
+                "matrix scratch max_pos={} < required last_pos={last_pos}; set QWEN_PREFILL_ATTN_MATRIX_MAX_POS before scratch allocation",
+                layer_scratch.attn_matrix_max_pos
+            ),
+        }));
     }
     for (i, &kp) in target_session.kv_n_pos.iter().enumerate() {
         if kp != start_position as usize {
@@ -7471,8 +7483,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
      -> Result<(), DFlashError> {
         if prefill_gdn_skinny_f32_e8p32_enabled()
             && weight.dtype == GgmlType::F32
-            && n_in % 4 == 0
-            && n_out % 8 == 0
+            && n_in.is_multiple_of(4)
+            && n_out.is_multiple_of(8)
         {
             crate::metal::encode_mat_mat_f32_router_e8p32(
                 base.ctx, enc, weight, x, y, n_in, n_out, n_query,
@@ -9557,145 +9569,141 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 );
                             }
 
-                            if let Some(capture) = attention_capture.as_deref_mut() {
-                                if let Some(block_index) =
+                            if let Some(capture) = attention_capture.as_deref_mut()
+                                && let Some(block_index) =
                                     capture.blocks.iter().position(|&block| block == il)
-                                {
-                                    let capture_packed =
-                                        (use_packed_g8 || use_packed_g16) && !use_matrix;
-                                    let capture_packed_rows = if use_packed_g8 {
-                                        prefill_attn_packed_g8_rows()
-                                    } else if use_packed_g16 {
-                                        prefill_attn_packed_g16_rows()
-                                    } else {
-                                        0
-                                    };
-                                    let capture_packed_qt = if use_packed_g8 {
-                                        prefill_attn_packed_g8_qt()
-                                    } else if use_packed_g16 {
-                                        prefill_attn_packed_g16_qt()
-                                    } else {
-                                        0
-                                    };
-                                    let capture_nwg = if use_packed_g8 {
-                                        prefill_attn_packed_g8_nwg()
-                                    } else if use_packed_g16 {
-                                        prefill_attn_packed_g16_nwg()
-                                    } else {
-                                        0
-                                    };
-                                    let capture_group = n_q / n_kv;
-                                    let rows: Vec<(usize, usize)> = capture
-                                        .positions
-                                        .iter()
-                                        .copied()
-                                        .enumerate()
-                                        .filter_map(|(capture_row, position)| {
-                                            let in_chunk = position >= chunk_start as usize
-                                                && position < chunk_start as usize + chunk_p;
-                                            in_chunk.then_some((capture_row, position))
-                                        })
-                                        .collect();
-                                    if !rows.is_empty() {
-                                        let enc = KernelEncoder::begin(&cmd_buf);
-                                        for (capture_row, position) in rows {
-                                            let seen_index =
-                                                block_index * capture.positions.len() + capture_row;
-                                            if capture.seen[seen_index] {
-                                                return Err(DFlashError::Metal(
-                                                    MetalError::BadShape {
-                                                        kernel: "attention_capture",
-                                                        detail: format!(
-                                                            "duplicate block={il} \
+                            {
+                                let capture_packed =
+                                    (use_packed_g8 || use_packed_g16) && !use_matrix;
+                                let capture_packed_rows = if use_packed_g8 {
+                                    prefill_attn_packed_g8_rows()
+                                } else if use_packed_g16 {
+                                    prefill_attn_packed_g16_rows()
+                                } else {
+                                    0
+                                };
+                                let capture_packed_qt = if use_packed_g8 {
+                                    prefill_attn_packed_g8_qt()
+                                } else if use_packed_g16 {
+                                    prefill_attn_packed_g16_qt()
+                                } else {
+                                    0
+                                };
+                                let capture_nwg = if use_packed_g8 {
+                                    prefill_attn_packed_g8_nwg()
+                                } else if use_packed_g16 {
+                                    prefill_attn_packed_g16_nwg()
+                                } else {
+                                    0
+                                };
+                                let capture_group = n_q / n_kv;
+                                let rows: Vec<(usize, usize)> = capture
+                                    .positions
+                                    .iter()
+                                    .copied()
+                                    .enumerate()
+                                    .filter_map(|(capture_row, position)| {
+                                        let in_chunk = position >= chunk_start as usize
+                                            && position < chunk_start as usize + chunk_p;
+                                        in_chunk.then_some((capture_row, position))
+                                    })
+                                    .collect();
+                                if !rows.is_empty() {
+                                    let enc = KernelEncoder::begin(&cmd_buf);
+                                    for (capture_row, position) in rows {
+                                        let seen_index =
+                                            block_index * capture.positions.len() + capture_row;
+                                        if capture.seen[seen_index] {
+                                            return Err(DFlashError::Metal(MetalError::BadShape {
+                                                kernel: "attention_capture",
+                                                detail: format!(
+                                                    "duplicate block={il} \
                                                              position={position}"
-                                                        ),
-                                                    },
-                                                ));
-                                            }
-                                            let source_row = position - chunk_start as usize;
-                                            let q_dst = capture.q[block_index].view_subrange(
-                                                (capture_row * capture.q_dim) as u64,
-                                                vec![capture.q_dim as u64],
-                                            );
-                                            let o_dst = capture.o[block_index].view_subrange(
-                                                (capture_row * capture.q_dim) as u64,
-                                                vec![capture.q_dim as u64],
-                                            );
-                                            encode_copy_offset_f32(
-                                                base.ctx,
-                                                &enc,
-                                                &q_normed_pack_p,
-                                                source_row * capture.q_dim,
-                                                &q_dst,
-                                                capture.q_dim,
-                                            )?;
-                                            encode_copy_offset_f32(
-                                                base.ctx,
-                                                &enc,
-                                                &attn_o_pack_p,
-                                                source_row * capture.q_dim,
-                                                &o_dst,
-                                                capture.q_dim,
-                                            )?;
-                                            let causal_length = position + 1;
-                                            let capture_fallback = !use_matrix && !capture_packed;
-                                            let fallback_nwg = capture_fallback.then(|| {
-                                                crate::metal::attn_v4_choose_nwg(
-                                                    causal_length,
-                                                    capture_group,
-                                                )
-                                            });
-                                            let fallback_tile_c = capture_fallback.then(|| {
-                                                crate::metal::attn_v4_choose_tile_c(
-                                                    causal_length,
-                                                    capture_group,
-                                                )
-                                            });
-                                            let fallback_group_tile = capture_fallback.then(|| {
-                                                crate::metal::attn_v4_choose_group_tile_prefill(
-                                                    causal_length,
-                                                    capture_group,
-                                                )
-                                            });
-                                            capture.provenance.push(AttentionCaptureProvenance {
-                                                position,
-                                                causal_length,
-                                                block: il,
-                                                kv_slot: ai,
-                                                path: if use_matrix {
-                                                    "matrix"
-                                                } else if capture_packed {
-                                                    "packed"
-                                                } else {
-                                                    "decode_fallback"
-                                                },
-                                                online_matrix: use_matrix
-                                                    && layer_scratch
-                                                        .scratch_plan
-                                                        .modes
-                                                        .attn_matrix_online,
-                                                query_tiled: use_matrix
-                                                    && layer_scratch.attn_matrix_query_rows
-                                                        < chunk_p as u32,
-                                                query_rows: use_matrix.then_some(
-                                                    layer_scratch.attn_matrix_query_rows as usize,
                                                 ),
-                                                packed_rows: capture_packed
-                                                    .then_some(capture_packed_rows),
-                                                packed_qt: capture_packed
-                                                    .then_some(capture_packed_qt),
-                                                nwg: capture_packed
-                                                    .then_some(capture_nwg)
-                                                    .or(fallback_nwg),
-                                                tile_c: fallback_tile_c,
-                                                group_tile: fallback_group_tile,
-                                                matrix_causal_skip: use_matrix
-                                                    && prefill_attn_matrix_causal_skip_enabled(),
-                                            });
-                                            capture.seen[seen_index] = true;
+                                            }));
                                         }
-                                        enc.end();
+                                        let source_row = position - chunk_start as usize;
+                                        let q_dst = capture.q[block_index].view_subrange(
+                                            (capture_row * capture.q_dim) as u64,
+                                            vec![capture.q_dim as u64],
+                                        );
+                                        let o_dst = capture.o[block_index].view_subrange(
+                                            (capture_row * capture.q_dim) as u64,
+                                            vec![capture.q_dim as u64],
+                                        );
+                                        encode_copy_offset_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &q_normed_pack_p,
+                                            source_row * capture.q_dim,
+                                            &q_dst,
+                                            capture.q_dim,
+                                        )?;
+                                        encode_copy_offset_f32(
+                                            base.ctx,
+                                            &enc,
+                                            &attn_o_pack_p,
+                                            source_row * capture.q_dim,
+                                            &o_dst,
+                                            capture.q_dim,
+                                        )?;
+                                        let causal_length = position + 1;
+                                        let capture_fallback = !use_matrix && !capture_packed;
+                                        let fallback_nwg = capture_fallback.then(|| {
+                                            crate::metal::attn_v4_choose_nwg(
+                                                causal_length,
+                                                capture_group,
+                                            )
+                                        });
+                                        let fallback_tile_c = capture_fallback.then(|| {
+                                            crate::metal::attn_v4_choose_tile_c(
+                                                causal_length,
+                                                capture_group,
+                                            )
+                                        });
+                                        let fallback_group_tile = capture_fallback.then(|| {
+                                            crate::metal::attn_v4_choose_group_tile_prefill(
+                                                causal_length,
+                                                capture_group,
+                                            )
+                                        });
+                                        capture.provenance.push(AttentionCaptureProvenance {
+                                            position,
+                                            causal_length,
+                                            block: il,
+                                            kv_slot: ai,
+                                            path: if use_matrix {
+                                                "matrix"
+                                            } else if capture_packed {
+                                                "packed"
+                                            } else {
+                                                "decode_fallback"
+                                            },
+                                            online_matrix: use_matrix
+                                                && layer_scratch
+                                                    .scratch_plan
+                                                    .modes
+                                                    .attn_matrix_online,
+                                            query_tiled: use_matrix
+                                                && layer_scratch.attn_matrix_query_rows
+                                                    < chunk_p as u32,
+                                            query_rows: use_matrix.then_some(
+                                                layer_scratch.attn_matrix_query_rows as usize,
+                                            ),
+                                            packed_rows: capture_packed
+                                                .then_some(capture_packed_rows),
+                                            packed_qt: capture_packed.then_some(capture_packed_qt),
+                                            nwg: capture_packed
+                                                .then_some(capture_nwg)
+                                                .or(fallback_nwg),
+                                            tile_c: fallback_tile_c,
+                                            group_tile: fallback_group_tile,
+                                            matrix_causal_skip: use_matrix
+                                                && prefill_attn_matrix_causal_skip_enabled(),
+                                        });
+                                        capture.seen[seen_index] = true;
                                     }
+                                    enc.end();
                                 }
                             }
 
@@ -9903,8 +9911,8 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                 let grouped_routed_path = prefill_moe_grouped_enabled()
                     && grouped_gate_up_dtype_eligible
                     && grouped_down_dtype_eligible
-                    && h % 256 == 0
-                    && f_exp % 256 == 0;
+                    && h.is_multiple_of(256)
+                    && f_exp.is_multiple_of(256);
 
                 if !skip_ffn && (packed_routed_path || grouped_routed_path) {
                     let skip_moe_routed = prefill_noop_moe_routed_enabled();
@@ -11533,7 +11541,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                     let use_fused_swiglu = prefill_dense_ffn_fused_swiglu_q4_enabled(h)
                         && g_w.dtype == GgmlType::Q4_K
                         && u_w.dtype == GgmlType::Q4_K
-                        && h % 256 == 0
+                        && h.is_multiple_of(256)
                         && chunk_p >= 32;
                     let split_ffn_subphases =
                         prefill_trace_ffn_subphases_enabled() && !use_fused_swiglu && !skip_ffn;
@@ -11786,7 +11794,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                         if prefill_dense_ffn_fused_swiglu_q4_enabled(h)
                             && g_w.dtype == GgmlType::Q4_K
                             && u_w.dtype == GgmlType::Q4_K
-                            && h % 256 == 0
+                            && h.is_multiple_of(256)
                             && chunk_p >= 32
                         {
                             crate::metal::encode_ffn_fused_swiglu_q4_K_mm_f32(
@@ -13165,6 +13173,7 @@ impl<'a> DFlashDecoder<'a> {
         Ok(logits)
     }
 }
+const ATTN_PREFILL_V4_PACKED_ROWS: usize = 8;
 
 // H5.1.5 metal_drafter_cosine_vs_cpu moved to tests/dflash_correctness.rs
 // (slow: ~142s on 27B-Q4_K_M prefill + drafter forward; not a fast-
@@ -15473,8 +15482,8 @@ mod tests {
         let slot_count = chunk_p * topk;
         let total_count: usize = split_counts_cpu.iter().map(|&c| c.max(0) as usize).sum();
         let active_experts = split_counts_cpu.iter().filter(|&&c| c > 0).count();
-        for expert in 0..n_expert {
-            let count = split_counts_cpu[expert] as usize;
+        for (expert, &count) in split_counts_cpu.iter().enumerate().take(n_expert) {
+            let count = count as usize;
             let base = expert * chunk_p;
             let split_slice = &split_ids_cpu[base..base + count];
             let fused_slice = &fused_ids_cpu[base..base + count];
@@ -18313,8 +18322,7 @@ mod tests {
         let slot_count = chunk_p * topk;
         let mut seen = vec![0u8; slot_count];
         let mut total = 0usize;
-        for expert in 0..n_expert {
-            let count = counts[expert];
+        for (expert, &count) in counts.iter().enumerate().take(n_expert) {
             assert!(count >= 0, "{label}: negative count for expert {expert}");
             let count = count as usize;
             assert!(
@@ -24726,4 +24734,3 @@ mod tests {
             .expect("fused q4k gate/up")
     }
 }
-const ATTN_PREFILL_V4_PACKED_ROWS: usize = 8;

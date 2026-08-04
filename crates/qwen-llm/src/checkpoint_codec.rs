@@ -183,8 +183,8 @@ impl WireLayout {
             });
         }
         Ok(Self {
-            flags: u64::from(pending_token.is_some()) * FLAG_PENDING_TOKEN
-                | u64::from(has_logits) * FLAG_FINAL_LOGITS,
+            flags: (u64::from(pending_token.is_some()) * FLAG_PENDING_TOKEN)
+                | (u64::from(has_logits) * FLAG_FINAL_LOGITS),
             prefix_count,
             pending_token: pending_token.unwrap_or(0),
             prefix_bytes,
@@ -578,7 +578,7 @@ fn read_hashed_vec<R: Read>(
 }
 
 fn parse_i32_le(section: &'static str, bytes: &[u8]) -> Result<Vec<i32>, SnapshotCodecError> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(SnapshotCodecError::InvalidHeader("i32 section alignment"));
     }
     let count = bytes.len() / 4;
@@ -597,7 +597,7 @@ fn parse_i32_le(section: &'static str, bytes: &[u8]) -> Result<Vec<i32>, Snapsho
 }
 
 fn parse_f32_le(section: &'static str, bytes: &[u8]) -> Result<Vec<f32>, SnapshotCodecError> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(SnapshotCodecError::InvalidHeader("f32 section alignment"));
     }
     let count = bytes.len() / 4;

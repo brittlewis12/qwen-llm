@@ -2964,16 +2964,16 @@ impl<'a> SpeculativeDecoder<'a> {
         }
         stats.prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
 
-        if let PackedDraftPlan::Oracle(oracle) = plan {
-            if oracle.first().copied() != Some(next_bootstrap_tok) {
-                return Err(MtpError::Metal(MetalError::BadShape {
-                    kernel: "mtp_decode_packed_n_planned.oracle",
-                    detail: format!(
-                        "oracle first token {:?} != bootstrap {next_bootstrap_tok}",
-                        oracle.first()
-                    ),
-                }));
-            }
+        if let PackedDraftPlan::Oracle(oracle) = plan
+            && oracle.first().copied() != Some(next_bootstrap_tok)
+        {
+            return Err(MtpError::Metal(MetalError::BadShape {
+                kernel: "mtp_decode_packed_n_planned.oracle",
+                detail: format!(
+                    "oracle first token {:?} != bootstrap {next_bootstrap_tok}",
+                    oracle.first()
+                ),
+            }));
         }
 
         let last_layer = [(self.base.model.blocks.len() - 1) as u32];

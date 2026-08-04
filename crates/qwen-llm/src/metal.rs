@@ -570,28 +570,29 @@ pub fn evaluate_metal_memory_admission(
     let working_set_headroom_bytes = signals
         .recommended_max_bytes
         .checked_sub(signals.current_allocated_bytes);
-    let reason = if required_bytes.is_none() {
-        MetalMemoryAdmissionReason::RequiredBytesOverflow
-    } else if signals.recommended_max_bytes == 0 || working_set_headroom_bytes.is_none() {
-        MetalMemoryAdmissionReason::InvalidWorkingSetSignal
-    } else {
-        let required = required_bytes.expect("checked above");
-        let working_set_headroom = working_set_headroom_bytes.expect("checked above");
-        let working_set_fits = working_set_headroom > 0 && required <= working_set_headroom;
-        match signals.process_limit_remaining_bytes {
-            None => MetalMemoryAdmissionReason::ProcessSignalUnavailable,
-            Some(0) => match (working_set_fits, allow_zero_process_budget) {
-                (true, true) => MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted,
-                (false, true) => MetalMemoryAdmissionReason::WorkingSetInsufficient,
-                (_, false) => MetalMemoryAdmissionReason::ProcessSignalUnavailable,
-            },
-            Some(process_available) => {
-                let process_fits = required <= process_available;
-                match (working_set_fits, process_fits) {
-                    (true, true) => MetalMemoryAdmissionReason::AdmittedWithProcessBudget,
+    let reason = match (required_bytes, working_set_headroom_bytes) {
+        (None, _) => MetalMemoryAdmissionReason::RequiredBytesOverflow,
+        (Some(_), _) if signals.recommended_max_bytes == 0 => {
+            MetalMemoryAdmissionReason::InvalidWorkingSetSignal
+        }
+        (Some(_), None) => MetalMemoryAdmissionReason::InvalidWorkingSetSignal,
+        (Some(required), Some(working_set_headroom)) => {
+            let working_set_fits = working_set_headroom > 0 && required <= working_set_headroom;
+            match signals.process_limit_remaining_bytes {
+                None => MetalMemoryAdmissionReason::ProcessSignalUnavailable,
+                Some(0) => match (working_set_fits, allow_zero_process_budget) {
+                    (true, true) => MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted,
                     (false, true) => MetalMemoryAdmissionReason::WorkingSetInsufficient,
-                    (true, false) => MetalMemoryAdmissionReason::ProcessInsufficient,
-                    (false, false) => MetalMemoryAdmissionReason::BothInsufficient,
+                    (_, false) => MetalMemoryAdmissionReason::ProcessSignalUnavailable,
+                },
+                Some(process_available) => {
+                    let process_fits = required <= process_available;
+                    match (working_set_fits, process_fits) {
+                        (true, true) => MetalMemoryAdmissionReason::AdmittedWithProcessBudget,
+                        (false, true) => MetalMemoryAdmissionReason::WorkingSetInsufficient,
+                        (true, false) => MetalMemoryAdmissionReason::ProcessInsufficient,
+                        (false, false) => MetalMemoryAdmissionReason::BothInsufficient,
+                    }
                 }
             }
         }
@@ -957,7 +958,7 @@ impl MetalContext {
             unsafe { mmap.as_ptr().add(geometry.mmap_offset()) } as *mut c_void,
         )
         .ok_or_else(|| MetalError::GgufNoCopy("mmap pointer is null".to_string()))?;
-        if ptr.as_ptr() as usize % geometry.page_size() != 0 {
+        if !(ptr.as_ptr() as usize).is_multiple_of(geometry.page_size()) {
             return Err(MetalError::GgufNoCopy(format!(
                 "window pointer {:p} is not aligned to host page size {}",
                 ptr.as_ptr(),
@@ -1328,7 +1329,7 @@ pub fn plan_retained_storage(
             "required binding alignment {required_alignment} is not a power of two"
         )));
     }
-    if page_size % required_alignment != 0 {
+    if !page_size.is_multiple_of(required_alignment) {
         return Err(MetalError::GgufNoCopy(format!(
             "required binding alignment {required_alignment} does not divide page size {page_size}"
         )));
@@ -1429,7 +1430,7 @@ pub fn plan_retained_storage(
         previous_end_by_shard.insert(desc.shard_idx, (end, desc.name.clone()));
         let candidate_window_start = checked_page_floor(start, page_size);
         let candidate_buffer_offset = start - candidate_window_start;
-        if candidate_buffer_offset % required_alignment != 0 {
+        if !candidate_buffer_offset.is_multiple_of(required_alignment) {
             canonical[canonical_index].disposition =
                 Some(RetainedStorageDisposition::CopyFallback {
                     reason: RetainedStorageFallback::BindingMisalignment,
@@ -1627,13 +1628,13 @@ impl GgufBackingGeometry {
                 "required binding alignment {required_alignment} is not a power of two"
             )));
         }
-        if page_size % required_alignment != 0 {
+        if !page_size.is_multiple_of(required_alignment) {
             return Err(MetalError::GgufNoCopy(format!(
                 "required binding alignment {required_alignment} does not divide \
                  page size {page_size}"
             )));
         }
-        if mmap_offset % page_size != 0 {
+        if !mmap_offset.is_multiple_of(page_size) {
             return Err(MetalError::GgufNoCopy(format!(
                 "window offset {mmap_offset} is not page aligned to {page_size}"
             )));
@@ -1643,7 +1644,7 @@ impl GgufBackingGeometry {
                 "window length must contain at least one complete {page_size}-byte page"
             )));
         }
-        if exposed_len % page_size != 0 {
+        if !exposed_len.is_multiple_of(page_size) {
             return Err(MetalError::GgufNoCopy(format!(
                 "window length {exposed_len} is not page aligned to {page_size}"
             )));
@@ -1942,7 +1943,7 @@ fn classify_gguf_backing(
         return Ok(GgufBackingEligibility::OutsideBacking);
     }
     let buffer_offset = start - geometry.mmap_offset;
-    if buffer_offset % geometry.required_alignment != 0 {
+    if !buffer_offset.is_multiple_of(geometry.required_alignment) {
         return Ok(GgufBackingEligibility::BindingMisalignment);
     }
     Ok(GgufBackingEligibility::Eligible)
@@ -2130,7 +2131,7 @@ impl MetalTensor {
         n_in: usize,
         n_out: usize,
     ) -> Result<Self, MetalError> {
-        if n_in == 0 || n_out == 0 || n_in % 256 != 0 {
+        if n_in == 0 || n_out == 0 || !n_in.is_multiple_of(256) {
             return Err(MetalError::BadShape {
                 kernel: "q6_k_row_bank_weight_view",
                 detail: format!(
@@ -2850,7 +2851,6 @@ crate::env_flag!(default_on mat_vec_f32_lcpp_r2_enabled, "QWEN_MATVEC_F32_LCPP_R
 /// `y` is `[n_out]`.
 ///
 /// CPU oracle: [`crate::forward::mat_vec_pub`].
-
 pub fn encode_mat_vec_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -3149,7 +3149,7 @@ pub fn encode_mat_vec_mxfp4_f32(
 ) -> Result<(), MetalError> {
     const BLOCK_ELEMENTS: usize = 32;
     const KERNEL: &str = "mat_vec_mxfp4";
-    if n_in == 0 || n_out == 0 || n_in % BLOCK_ELEMENTS != 0 {
+    if n_in == 0 || n_out == 0 || !n_in.is_multiple_of(BLOCK_ELEMENTS) {
         return Err(MetalError::BadShape {
             kernel: KERNEL,
             detail: format!(
@@ -3193,8 +3193,8 @@ pub fn encode_mat_vec_mxfp4_f32(
         });
     }
     debug_assert_eq!(weight.n_elements() as usize, weight_elements);
-    if x.offset % std::mem::align_of::<f32>() as u64 != 0
-        || y.offset % std::mem::align_of::<f32>() as u64 != 0
+    if !x.offset.is_multiple_of(std::mem::align_of::<f32>() as u64)
+        || !y.offset.is_multiple_of(std::mem::align_of::<f32>() as u64)
         || !y.is_writable()
     {
         return Err(MetalError::BadShape {
@@ -3274,7 +3274,7 @@ fn encode_mat_vec_block32_f32(
     expected: GgmlType,
     kernel_name: &'static str,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: kernel_name,
             detail: format!("n_in={n_in} not divisible by 32"),
@@ -3342,7 +3342,7 @@ pub fn encode_mtp_draft_affine_q4_gs64_f32(
     const PACK_FACTOR: usize = 8;
     const ROWS_PER_TG: usize = 8;
     let kernel_name = "kernel_mtp_draft_affine_q4_gs64_f32";
-    if n_in % GROUP_SIZE != 0 {
+    if !n_in.is_multiple_of(GROUP_SIZE) {
         return Err(MetalError::BadShape {
             kernel: kernel_name,
             detail: format!("n_in={n_in} not divisible by {GROUP_SIZE}"),
@@ -3486,7 +3486,7 @@ fn encode_mat_vec_block256_f32(
     expected: GgmlType,
     kernel_name: &'static str,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: kernel_name,
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -3763,7 +3763,7 @@ fn encode_mat_vec_lowbit_fast_f32(
     simdgroups: usize,
     threadgroup_bytes: usize,
 ) -> Result<(), MetalError> {
-    if n_in % block_multiple != 0 {
+    if !n_in.is_multiple_of(block_multiple) {
         return Err(MetalError::BadShape {
             kernel: error_kernel,
             detail: format!("n_in={n_in} not divisible by {block_multiple}"),
@@ -3999,7 +3999,7 @@ pub fn encode_mat_mat_f16_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    if mat_mat_f16_half_act_enabled() && n_in % 32 == 0 && n_query >= 16 {
+    if mat_mat_f16_half_act_enabled() && n_in.is_multiple_of(32) && n_query >= 16 {
         return encode_mat_mat_f16_half_act_f32(ctx, enc, weight, x, y, n_in, n_out, n_query);
     }
     encode_mat_mat_16bit_weight_f32(
@@ -4035,7 +4035,7 @@ pub fn encode_mat_mat_f16_half_act_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_f16_half_act_f32",
             detail: format!("n_in={n_in} not divisible by 32"),
@@ -4136,7 +4136,7 @@ pub fn encode_mat_mat_bf16_bfloat_act_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_bf16_bfloat_act_f32",
             detail: format!("n_in={n_in} not divisible by 32"),
@@ -4215,7 +4215,7 @@ fn encode_mat_mat_block32_f32(
     expected: GgmlType,
     kernel_name: &'static str,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: kernel_name,
             detail: format!("n_in={n_in} not divisible by 32"),
@@ -4335,7 +4335,7 @@ fn encode_mat_mat_q4_legacy_mm_f32(
     kernel_name: &'static str,
     block_bytes: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: kernel_name,
             detail: format!("n_in={n_in} not divisible by 32"),
@@ -4453,7 +4453,7 @@ fn encode_mat_mat_iq4_nl_f32_mm(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_iq4_nl_mm",
             detail: format!("n_in={n_in} not divisible by 32"),
@@ -4545,7 +4545,7 @@ fn encode_mat_mat_block256_f32(
     expected: GgmlType,
     kernel_name: &'static str,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: kernel_name,
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -4815,7 +4815,7 @@ fn encode_mat_mat_qk_lowbit_mm(
     metal_kernel: &'static str,
     block_bytes: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: error_kernel,
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -4934,7 +4934,7 @@ fn encode_mat_mat_iq4_xs_f32_mm(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_iq4_xs_mm",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -5036,7 +5036,7 @@ pub fn encode_mat_mat_f32_router_e8p32(
             detail: format!("x/y expected F32, got {:?}/{:?}", x.dtype, y.dtype),
         });
     }
-    if n_in % 4 != 0 || n_out % 8 != 0 {
+    if !n_in.is_multiple_of(4) || !n_out.is_multiple_of(8) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_f32_router_e8p32",
             detail: format!(
@@ -5110,7 +5110,7 @@ pub fn encode_mat_vec_q4_k_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "mat_vec_q4_k",
             detail: format!("n_in={n_in} not divisible by 256 (Q4_K super-block)"),
@@ -5183,7 +5183,7 @@ pub fn encode_mat_vec_q4_k_nc_f32(
     n_out: usize,
     n_cols: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "mat_vec_q4_k_nc",
             detail: format!("n_in={n_in} not divisible by 256 (Q4_K super-block)"),
@@ -5295,7 +5295,7 @@ pub fn encode_mat_vec_q6_k_nc_f32(
     n_out: usize,
     n_cols: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "mat_vec_q6_k_nc",
             detail: format!("n_in={n_in} not divisible by 256 (Q6_K super-block)"),
@@ -5432,13 +5432,13 @@ pub fn encode_mat_mat_mma8_dispatch(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_mma8",
             detail: format!("n_in={n_in} not divisible by 256 (K-quant super-block)"),
         });
     }
-    if n_out % 8 != 0 {
+    if !n_out.is_multiple_of(8) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_mma8",
             detail: format!("n_out={n_out} not divisible by 8 (tile rows)"),
@@ -5565,7 +5565,7 @@ pub fn encode_mat_mat_mma8_variant(
             ),
         });
     }
-    if n_in % 256 != 0 || n_out % rows_per_tg != 0 {
+    if !n_in.is_multiple_of(256) || !n_out.is_multiple_of(rows_per_tg) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_mma8v",
             detail: format!("n_in={n_in} % 256 or n_out={n_out} % rows_per_tg={rows_per_tg} != 0"),
@@ -5638,7 +5638,7 @@ pub fn encode_mat_vec_q4_k_nc2_rp4_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 || weight.dtype != GgmlType::Q4_K {
+    if !n_in.is_multiple_of(256) || weight.dtype != GgmlType::Q4_K {
         return Err(MetalError::BadShape {
             kernel: "mat_vec_q4_k_nc2_rp4",
             detail: format!("n_in={n_in} % 256 != 0 or dtype {:?}", weight.dtype),
@@ -5741,7 +5741,6 @@ crate::env_flag!(default_off matmat_qk_llama_smem_enabled, "QWEN_MATMAT_QK_LLAMA
 /// through half before float accumulation; cosine ≥ 0.999 vs
 /// scalar-float mat-vec is the gate (vs cos ≥ 0.9999 against a
 /// CPU mat-mat oracle that uses the same staging).
-
 fn mat_mat_qk_threadgroup_memory(n_out: usize, n_query: usize, nr1: usize) -> usize {
     mat_mat_qk_threadgroup_memory_with_policy(n_out, n_query, nr1, matmat_qk_llama_smem_enabled())
 }
@@ -5755,7 +5754,7 @@ fn mat_mat_qk_threadgroup_memory_with_policy(
     if !llama_smem {
         return 8192;
     }
-    if n_out % 64 == 0 && n_query % nr1 == 0 {
+    if n_out.is_multiple_of(64) && n_query.is_multiple_of(nr1) {
         if nr1 == 16 { 5120 } else { 6144 }
     } else {
         8192
@@ -5834,13 +5833,13 @@ pub fn encode_mat_mat_q4_k_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_q4_k",
             detail: format!("n_in={n_in} not divisible by 256 (Q4_K super-block)"),
         });
     }
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_q4_k",
             detail: format!("n_in={n_in} not divisible by 32 (NK_MM tile)"),
@@ -5885,13 +5884,15 @@ pub fn encode_mat_mat_q4_k_f32(
     let nb01 = ((n_in / 256) * 144) as u32;
     let stride_b = n_in as u32;
 
-    let use_n64 =
-        mat_mat_q4_k_use_n64(n_in, n_out, n_query) && n_query % 64 == 0 && n_out % 64 == 0;
+    let use_n64 = mat_mat_q4_k_use_n64(n_in, n_out, n_query)
+        && n_query.is_multiple_of(64)
+        && n_out.is_multiple_of(64);
     // H5.6 M2a: raw-block-staged N16 kernel (v2). The v1 A-path dequants
     // straight from device with ~2.7x byte amplification; v2 stages raw
     // super-blocks to threadgroup memory coalesced. K must cover whole
     // super-blocks. Rollback: QWEN_MATMAT_N16_V2=0.
-    let use_n16_v2 = n_query == 16 && !use_n64 && n_in % 256 == 0 && mat_mat_n16_v2_enabled();
+    let use_n16_v2 =
+        n_query == 16 && !use_n64 && n_in.is_multiple_of(256) && mat_mat_n16_v2_enabled();
     let kernel_name = if use_n64 {
         "kernel_mat_mat_q4_K_f32_n64"
     } else if use_n16_v2 {
@@ -6113,7 +6114,7 @@ pub fn encode_mat_mat_q4_k_no_dequant(
 
     if weight.dtype != GgmlType::Q4_K
         || weight.shape.as_slice() != [N_IN as u64, N_OUT as u64]
-        || weight.offset % 16 != 0
+        || !weight.offset.is_multiple_of(16)
     {
         return Err(MetalError::BadShape {
             kernel: arm.kernel_name(),
@@ -6125,7 +6126,7 @@ pub fn encode_mat_mat_q4_k_no_dequant(
     }
     if x.dtype != GgmlType::F32
         || x.shape.as_slice() != [N_QUERY as u64, N_IN as u64]
-        || x.offset % 16 != 0
+        || !x.offset.is_multiple_of(16)
     {
         return Err(MetalError::BadShape {
             kernel: arm.kernel_name(),
@@ -6138,7 +6139,7 @@ pub fn encode_mat_mat_q4_k_no_dequant(
     if y.dtype != GgmlType::F32
         || !y.is_writable()
         || y.shape.as_slice() != [N_QUERY as u64, N_OUT as u64]
-        || y.offset % 4 != 0
+        || !y.offset.is_multiple_of(4)
     {
         return Err(MetalError::BadShape {
             kernel: arm.kernel_name(),
@@ -6240,7 +6241,7 @@ pub fn encode_ffn_swiglu_q4_K_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "ffn_swiglu_q4_K",
             detail: format!("n_in={n_in} not divisible by 256 (Q4_K super-block)"),
@@ -6322,7 +6323,7 @@ pub fn encode_moe_swiglu_q4_K_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q4_K",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -6412,7 +6413,7 @@ pub fn encode_moe_swiglu_q4_K_f32_packed_slots(
     topk: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q4_K_packed_slots",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -6547,7 +6548,7 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n16_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q4_K_grouped_slots_n16",
             detail: format!("n_hidden={n_hidden} not divisible by 256"),
@@ -6688,7 +6689,7 @@ pub fn encode_moe_swiglu_iq3_xxs_f32_grouped_slots_n16_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_iq3_xxs_grouped_slots_n16",
             detail: format!("n_hidden={n_hidden} not divisible by 256"),
@@ -6829,7 +6830,7 @@ pub fn encode_moe_swiglu_iq3_s_f32_grouped_slots_n16_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_iq3_s_grouped_slots_n16",
             detail: format!("n_hidden={n_hidden} not divisible by 256"),
@@ -6970,7 +6971,7 @@ pub fn encode_moe_swiglu_q5_K_f32_grouped_slots_n16_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q5_K_grouped_slots_n16",
             detail: format!("n_hidden={n_hidden} not divisible by 256"),
@@ -7111,7 +7112,7 @@ pub fn encode_moe_swiglu_q6_K_f32_grouped_slots_n16_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q6_K_grouped_slots_n16",
             detail: format!("n_hidden={n_hidden} not divisible by 256"),
@@ -7250,7 +7251,7 @@ pub fn encode_moe_swiglu_q8_0_f32_grouped_slots_n16_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 32 != 0 {
+    if !n_hidden.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q8_0_grouped_slots_n16",
             detail: format!("n_hidden={n_hidden} not divisible by 32"),
@@ -7583,13 +7584,13 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_fused_n16_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q4_K_grouped_slots_fused_n16",
             detail: format!("n_hidden={n_hidden} not divisible by 256"),
         });
     }
-    if n_ffn % 64 != 0 {
+    if !n_ffn.is_multiple_of(64) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q4_K_grouped_slots_fused_n16",
             detail: format!("n_ffn={n_ffn} not divisible by 64"),
@@ -7732,7 +7733,7 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_n32_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q4_K_grouped_slots_n32",
             detail: format!("n_hidden={n_hidden} not divisible by 256"),
@@ -7837,13 +7838,13 @@ pub fn encode_moe_swiglu_q4_K_f32_grouped_slots_fused_n32_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q4_K_grouped_slots_fused_n32",
             detail: format!("n_hidden={n_hidden} not divisible by 256"),
         });
     }
-    if n_ffn % 64 != 0 {
+    if !n_ffn.is_multiple_of(64) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q4_K_grouped_slots_fused_n32",
             detail: format!("n_ffn={n_ffn} not divisible by 64"),
@@ -7983,7 +7984,7 @@ pub fn encode_moe_matmul_q4_K_f32_grouped_slots_n16_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_matmul_q4_K_grouped_slots_n16",
             detail: format!("n_hidden={n_hidden} not divisible by 256"),
@@ -8117,7 +8118,7 @@ pub fn encode_moe_matmul_q4_K_f32_grouped_slots_n32_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_matmul_q4_K_grouped_slots_n32",
             detail: format!("n_hidden={n_hidden} not divisible by 256"),
@@ -8218,7 +8219,7 @@ pub fn encode_moe_fused_routed_q4q5_token_f32(
     topk: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
-    if n_hidden % 256 != 0 || n_ffn % 256 != 0 {
+    if !n_hidden.is_multiple_of(256) || !n_ffn.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_fused_routed_q4q5_token",
             detail: format!("n_hidden={n_hidden} and n_ffn={n_ffn} must both be divisible by 256"),
@@ -8312,7 +8313,7 @@ pub fn encode_moe_down_q4_K_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_q4_K",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -8395,7 +8396,7 @@ pub fn encode_moe_down_q5_K_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_q5_K",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -8478,7 +8479,7 @@ pub fn encode_moe_down_q5_K_f32_grouped_rows(
     n_expert: usize,
     n_rows: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_q5_K_grouped_rows",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -8596,7 +8597,7 @@ pub fn encode_moe_down_q5_K_f32_grouped_slots_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_q5_K_grouped_slots",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -8693,7 +8694,7 @@ pub fn encode_moe_down_q5_K_f32_grouped_slots_tiny8_r16(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_q5_K_grouped_slots_tiny8_r16",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -8790,7 +8791,7 @@ pub fn encode_moe_down_q6_K_f32_grouped_slots(
     n_expert: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_q6_K_grouped_slots",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -8880,7 +8881,7 @@ pub fn encode_moe_down_q8_0_f32_grouped_slots(
     n_expert: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_q8_0_grouped_slots",
             detail: format!("n_in={n_in} not divisible by 32"),
@@ -9002,7 +9003,7 @@ pub fn encode_moe_down_bf16_f32_grouped_slots_range(
     min_count: u32,
     max_count: u32,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_bf16_grouped_slots",
             detail: format!("n_in={n_in} not divisible by 32"),
@@ -9096,7 +9097,7 @@ pub fn encode_moe_down_iq4_xs_f32_grouped_slots(
     n_expert: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_iq4_xs_grouped_slots",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -9191,7 +9192,7 @@ pub fn encode_moe_down_weighted_sum_q5_K_f32_packed_slots(
     topk: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_weighted_sum_q5_K_packed_slots",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -9371,7 +9372,7 @@ pub fn encode_moe_mat_vec_q5_K_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_mat_vec_q5_K",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -9452,7 +9453,7 @@ pub fn encode_moe_mat_vec_iq3_xxs_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_mat_vec_iq3_xxs",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -9532,7 +9533,7 @@ pub fn encode_moe_mat_vec_iq3_s_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_mat_vec_iq3_s",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -9613,7 +9614,7 @@ pub fn encode_moe_swiglu_iq3_xxs_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_iq3_xxs",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -9698,7 +9699,7 @@ pub fn encode_moe_swiglu_iq3_xxs_f32_fast(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_iq3_xxs_fast",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -9784,7 +9785,7 @@ pub fn encode_moe_swiglu_iq3_s_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_iq3_s",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -9869,7 +9870,7 @@ pub fn encode_moe_swiglu_iq3_s_f32_fast(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_iq3_s_fast",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -9956,7 +9957,7 @@ pub fn encode_moe_swiglu_q6_K_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q6_K",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -10042,7 +10043,7 @@ pub fn encode_moe_swiglu_q8_0_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "moe_swiglu_q8_0",
             detail: format!("n_in={n_in} not divisible by 32"),
@@ -10427,7 +10428,7 @@ pub fn encode_moe_down_q6_K_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_q6_K",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -10510,7 +10511,7 @@ pub fn encode_moe_down_iq4_xs_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_iq4_xs",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -10592,7 +10593,7 @@ pub fn encode_moe_down_iq4_xs_f32_fast(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_iq4_xs_fast",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -10677,7 +10678,7 @@ pub fn encode_moe_down_weighted_sum_q6_K_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_weighted_sum_q6_K",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -10762,7 +10763,7 @@ pub fn encode_moe_down_weighted_sum_q8_0_f32(
     n_expert: usize,
     topk: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "moe_down_weighted_sum_q8_0",
             detail: format!("n_in={n_in} not divisible by 32"),
@@ -11039,7 +11040,7 @@ pub fn encode_scatter_rows_f32_unique(
     let n = n_cols * n_rows;
     if x.n_elements() as usize != n
         || rows.n_elements() as usize != n_rows
-        || out.n_elements() as usize % n_cols != 0
+        || !(out.n_elements() as usize).is_multiple_of(n_cols)
     {
         return Err(MetalError::BadShape {
             kernel: "scatter_rows_unique",
@@ -11777,7 +11778,7 @@ pub fn encode_ffn_fused_swiglu_q4_K_mm_n16_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "ffn_fused_swiglu_q4_K_mm_n16",
             detail: format!("n_in={n_in} not divisible by 256 (Q4_K super-block)"),
@@ -11871,7 +11872,7 @@ pub fn encode_ffn_fused_swiglu_q4_K_mm_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "ffn_fused_swiglu_q4_K_mm",
             detail: format!("n_in={n_in} not divisible by 256 (Q4_K super-block)"),
@@ -12760,7 +12761,7 @@ pub fn encode_scatter_axpy_rows_unique_f32(
     if x.n_elements() as usize != n
         || rows.n_elements() as usize != n_rows
         || scales.n_elements() as usize != n_rows
-        || accum.n_elements() as usize % n_cols != 0
+        || !(accum.n_elements() as usize).is_multiple_of(n_cols)
     {
         return Err(MetalError::BadShape {
             kernel: "scatter_axpy_rows_unique",
@@ -12926,7 +12927,9 @@ fn validate_i32_output(
     }
     if output.dtype != GgmlType::I32
         || !output.is_writable()
-        || output.offset % std::mem::align_of::<i32>() as u64 != 0
+        || !output
+            .offset
+            .is_multiple_of(std::mem::align_of::<i32>() as u64)
     {
         return Err(MetalError::BadShape {
             kernel,
@@ -13637,7 +13640,7 @@ pub fn encode_attn_decode_f16kv_f32(
     head_dim: usize,
     n_pos: usize,
 ) -> Result<(), MetalError> {
-    if n_q_heads % n_kv_heads != 0 {
+    if !n_q_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_f16kv",
             detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
@@ -13756,9 +13759,9 @@ pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
 
     if group == 8 && n_pos >= 16_384 {
         256
-    } else if matches!(group, 8 | 16) && n_pos >= attn_v4_subgroup_min_pos() {
-        64
-    } else if matches!(group, 4 | 6) && n_pos >= 4096 {
+    } else if (matches!(group, 8 | 16) && n_pos >= attn_v4_subgroup_min_pos())
+        || (matches!(group, 4 | 6) && n_pos >= 4096)
+    {
         64
     } else if n_pos < 256 {
         16
@@ -13778,10 +13781,10 @@ pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
 ///
 /// `QWEN_ATTN_V4_TILE_C={16,32,64,128}` is an A/B knob for whole-model sweeps.
 pub fn attn_v4_choose_tile_c(n_pos: usize, group: usize) -> usize {
-    if group == 8 {
-        if let Some(tile_c) = attn_v4_g8_vstage_c() {
-            return tile_c;
-        }
+    if group == 8
+        && let Some(tile_c) = attn_v4_g8_vstage_c()
+    {
+        return tile_c;
     }
     static TILE_C_OVERRIDE: OnceLock<Option<usize>> = OnceLock::new();
     if let Some(tile_c) = *TILE_C_OVERRIDE.get_or_init(|| {
@@ -13944,7 +13947,7 @@ pub fn encode_attn_decode_v4_f32(
 ) -> Result<(), MetalError> {
     // Hardcoded shape preconditions.
     const DK: usize = 256;
-    if n_q_heads % n_kv_heads != 0 {
+    if !n_q_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4",
             detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
@@ -13986,7 +13989,7 @@ pub fn encode_attn_decode_v4_f32(
         });
     }
     let group_tile = attn_v4_choose_group_tile(n_pos, group);
-    if group_tile == 0 || group % group_tile != 0 {
+    if group_tile == 0 || !group.is_multiple_of(group_tile) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4",
             detail: format!("group_tile={group_tile} must divide group={group}"),
@@ -14332,7 +14335,7 @@ pub fn encode_attn_decode_v4_main_only_f32(
     tile_c: usize,
 ) -> Result<(), MetalError> {
     const DK: usize = 256;
-    if n_q_heads % n_kv_heads != 0 {
+    if !n_q_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_main",
             detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
@@ -14374,7 +14377,7 @@ pub fn encode_attn_decode_v4_main_only_f32(
         });
     }
     let group_tile = attn_v4_choose_group_tile(n_pos, group);
-    if group_tile == 0 || group % group_tile != 0 {
+    if group_tile == 0 || !group.is_multiple_of(group_tile) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_main",
             detail: format!("group_tile={group_tile} must divide group={group}"),
@@ -14737,7 +14740,7 @@ pub fn encode_attn_decode_v4_main_only_f32_head_major(
     tile_c: usize,
 ) -> Result<(), MetalError> {
     const DK: usize = 256;
-    if n_q_heads % n_kv_heads != 0 {
+    if !n_q_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_main_hm",
             detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
@@ -14871,7 +14874,7 @@ pub fn encode_attn_decode_v4_reduce_only_f32(
     nwg: usize,
 ) -> Result<(), MetalError> {
     const DK: usize = 256;
-    if n_q_heads % n_kv_heads != 0 {
+    if !n_q_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode_v4_reduce",
             detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
@@ -15892,7 +15895,8 @@ pub fn encode_attn_matrix_kq_f32(
             ),
         });
     }
-    let full_tiles = n_pos % 64 == 0 && (n_rows * group) % 32 == 0 && head_dim == 256;
+    let full_tiles =
+        n_pos.is_multiple_of(64) && (n_rows * group).is_multiple_of(32) && head_dim == 256;
     let kernel = if full_tiles {
         "kernel_attn_matrix_kq_f32_full_tiles"
     } else {
@@ -16071,7 +16075,8 @@ pub fn encode_attn_matrix_kq_online_f32(
         });
     }
     let scale = (1.0f32 / (head_dim as f32).sqrt()) * std::f32::consts::LOG2_E;
-    let full_tiles = n_pos % 64 == 0 && (n_rows * group) % 32 == 0 && head_dim == 256;
+    let full_tiles =
+        n_pos.is_multiple_of(64) && (n_rows * group).is_multiple_of(32) && head_dim == 256;
     let kernel = if full_tiles {
         "kernel_attn_matrix_kq_online_f32_full_tiles"
     } else {
@@ -16189,7 +16194,8 @@ pub fn encode_attn_matrix_kqv_norm_f32(
             ),
         });
     }
-    let full_tiles = n_pos % 32 == 0 && (n_rows * group) % 32 == 0 && head_dim == 256;
+    let full_tiles =
+        n_pos.is_multiple_of(32) && (n_rows * group).is_multiple_of(32) && head_dim == 256;
     let kernel = if full_tiles {
         "kernel_attn_matrix_kqv_norm_f32_full_tiles"
     } else {
@@ -16292,7 +16298,8 @@ pub fn encode_attn_matrix_kqv_f32(
             ),
         });
     }
-    let full_tiles = n_pos % 32 == 0 && (n_rows * group) % 32 == 0 && head_dim == 256;
+    let full_tiles =
+        n_pos.is_multiple_of(32) && (n_rows * group).is_multiple_of(32) && head_dim == 256;
     let kernel = if full_tiles {
         "kernel_attn_matrix_kqv_f32_full_tiles"
     } else {
@@ -16706,7 +16713,7 @@ pub fn encode_scatter_offset_f32_to_q8_0_kv(
             ),
         });
     }
-    if dst_off % QK8_0 != 0 || n % QK8_0 != 0 {
+    if !dst_off.is_multiple_of(QK8_0) || !n.is_multiple_of(QK8_0) {
         return Err(MetalError::BadShape {
             kernel: "scatter_offset_f32_to_q8_0_kv",
             detail: format!("dst_off={dst_off} and n={n} must both be multiples of {QK8_0}"),
@@ -16793,7 +16800,7 @@ pub fn encode_attn_decode_f32(
     head_dim: usize,
     n_pos: usize,
 ) -> Result<(), MetalError> {
-    if n_q_heads % n_kv_heads != 0 {
+    if !n_q_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::BadShape {
             kernel: "attn_decode",
             detail: format!("n_q_heads={n_q_heads} not multiple of n_kv_heads={n_kv_heads}"),
@@ -16892,7 +16899,7 @@ pub fn encode_dflash_attn_f32(
     noise_start_pos: u32,
     swa_window: u32,
 ) -> Result<(), MetalError> {
-    if head_dim % 32 != 0 {
+    if !head_dim.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "dflash_attn",
             detail: format!("head_dim={head_dim} not divisible by 32"),
@@ -16910,7 +16917,7 @@ pub fn encode_dflash_attn_f32(
             ),
         });
     }
-    if n_q_heads % n_kv_heads != 0 {
+    if !n_q_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::BadShape {
             kernel: "dflash_attn",
             detail: format!("n_q_heads={n_q_heads} not divisible by n_kv_heads={n_kv_heads}"),
@@ -17167,7 +17174,7 @@ fn encode_dflash_attn_two_range_pipeline(
     kernel_label: &'static str,
     pipeline_name: &'static str,
 ) -> Result<(), MetalError> {
-    if head_dim % 32 != 0 {
+    if !head_dim.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: kernel_label,
             detail: format!("head_dim={head_dim} not divisible by 32"),
@@ -17181,7 +17188,7 @@ fn encode_dflash_attn_two_range_pipeline(
             ),
         });
     }
-    if n_q_heads % n_kv_heads != 0 {
+    if !n_q_heads.is_multiple_of(n_kv_heads) {
         return Err(MetalError::BadShape {
             kernel: kernel_label,
             detail: format!("n_q_heads={n_q_heads} not divisible by n_kv_heads={n_kv_heads}"),
@@ -17661,7 +17668,11 @@ pub fn encode_get_rows_f32(
             detail: format!("ids.n={} != n_rows={n_rows}", ids.n_elements()),
         });
     }
-    if ids.dtype != GgmlType::I32 || ids.offset % std::mem::align_of::<i32>() as u64 != 0 {
+    if ids.dtype != GgmlType::I32
+        || !ids
+            .offset
+            .is_multiple_of(std::mem::align_of::<i32>() as u64)
+    {
         return Err(MetalError::BadShape {
             kernel: "get_rows",
             detail: format!(
@@ -17695,7 +17706,7 @@ pub fn encode_get_rows_f32(
     }
     if y.dtype != GgmlType::F32
         || !y.is_writable()
-        || y.offset % std::mem::align_of::<f32>() as u64 != 0
+        || !y.offset.is_multiple_of(std::mem::align_of::<f32>() as u64)
     {
         return Err(MetalError::BadShape {
             kernel: "get_rows",
@@ -17762,7 +17773,7 @@ pub fn encode_get_rows_f32(
         }
     };
     let (block_elements, block_bytes) = block_layout;
-    if n_cols % block_elements != 0 {
+    if !n_cols.is_multiple_of(block_elements) {
         return Err(MetalError::BadShape {
             kernel: "get_rows",
             detail: format!(
@@ -17888,7 +17899,7 @@ pub fn encode_rope_neox_f32(
             ),
         });
     }
-    if n_rot % 2 != 0 || n_rot > head_dim {
+    if !n_rot.is_multiple_of(2) || n_rot > head_dim {
         return Err(MetalError::BadShape {
             kernel: "rope_neox",
             detail: format!("n_rot={n_rot} must be even and ≤ head_dim={head_dim}"),
@@ -17973,7 +17984,7 @@ pub fn encode_rope_neox_pair_f32(
             ),
         });
     }
-    if n_rot % 2 != 0 || n_rot > head_dim {
+    if !n_rot.is_multiple_of(2) || n_rot > head_dim {
         return Err(MetalError::BadShape {
             kernel: "rope_neox_pair",
             detail: format!("n_rot={n_rot} must be even and <= head_dim={head_dim}"),
@@ -18044,7 +18055,7 @@ pub fn encode_rope_neox_f32_packed_consecutive(
             ),
         });
     }
-    if n_rot % 2 != 0 || n_rot > head_dim {
+    if !n_rot.is_multiple_of(2) || n_rot > head_dim {
         return Err(MetalError::BadShape {
             kernel: "rope_neox_packed_consecutive",
             detail: format!("n_rot={n_rot} must be even and ≤ head_dim={head_dim}"),
@@ -18339,7 +18350,6 @@ crate::env_flag!(default_on rmsnorm_gated_hd128_r4_enabled, "QWEN_RMSNORM_GATED_
 ///
 /// CPU oracle: per-head loop in `forward::Forward::gdn_step` (the
 /// "RMSNormGated" block).
-
 pub fn encode_rmsnorm_gated_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -18480,7 +18490,7 @@ pub fn encode_gdn_step_f32(
             detail: format!("head_dim={head_dim} but kernel hardcodes 128"),
         });
     }
-    if n_v_heads % n_k_heads != 0 {
+    if !n_v_heads.is_multiple_of(n_k_heads) {
         return Err(MetalError::BadShape {
             kernel: "gdn_step",
             detail: format!("n_v_heads={n_v_heads} not multiple of n_k_heads={n_k_heads}"),
@@ -18581,7 +18591,7 @@ pub fn encode_gdn_step_decay_f32(
             detail: format!("head_dim={head_dim} but kernel hardcodes 128"),
         });
     }
-    if n_v_heads % n_k_heads != 0 {
+    if !n_v_heads.is_multiple_of(n_k_heads) {
         return Err(MetalError::BadShape {
             kernel: "gdn_step_decay",
             detail: format!("n_v_heads={n_v_heads} not multiple of n_k_heads={n_k_heads}"),
@@ -18680,7 +18690,7 @@ pub fn encode_gdn_step_decay_packed_f32(
             detail: format!("head_dim={head_dim} but kernel hardcodes 128"),
         });
     }
-    if n_v_heads % n_k_heads != 0 {
+    if !n_v_heads.is_multiple_of(n_k_heads) {
         return Err(MetalError::BadShape {
             kernel: "gdn_step_decay_packed",
             detail: format!("n_v_heads={n_v_heads} not multiple of n_k_heads={n_k_heads}"),
@@ -18731,7 +18741,7 @@ pub fn encode_gdn_step_decay_packed_f32(
         n_v_heads: u32,
         n_k_heads: u32,
     }
-    let use_nsg4 = n_v_heads % 4 == 0 && head_dim == 128;
+    let use_nsg4 = n_v_heads.is_multiple_of(4) && head_dim == 128;
     let kernel = if use_nsg4 {
         "kernel_gdn_step_decay_packed_nsg4_f32"
     } else {
@@ -18795,7 +18805,7 @@ pub fn encode_mat_vec_q5_k_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "mat_vec_q5_k",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -18872,7 +18882,7 @@ pub fn encode_mat_vec_q8_0_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "mat_vec_q8_0",
             detail: format!("n_in={n_in} not divisible by 32 (Q8_0 super-block)"),
@@ -18942,7 +18952,7 @@ pub fn encode_mat_vec_q8_0_batch_f32(
     n_out: usize,
     n_tokens: usize,
 ) -> Result<(), MetalError> {
-    if n_tokens == 0 || n_in % 32 != 0 {
+    if n_tokens == 0 || !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "mat_vec_q8_0_batch",
             detail: format!("n_tokens={n_tokens} must be nonzero and n_in={n_in} divisible by 32"),
@@ -19017,7 +19027,7 @@ pub fn encode_shared_swiglu_q8_0_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "shared_swiglu_q8_0",
             detail: format!("n_in={n_in} not divisible by 32 (Q8_0 super-block)"),
@@ -19135,7 +19145,7 @@ pub fn encode_mat_vec_q6_k_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "mat_vec_q6_k",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -19202,13 +19212,13 @@ pub fn encode_mat_mat_q6_k_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_q6_k",
             detail: format!("n_in={n_in} not divisible by 256 (Q6_K super-block)"),
         });
     }
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_q6_k",
             detail: format!("n_in={n_in} not divisible by 32 (NK_MM tile)"),
@@ -19243,8 +19253,8 @@ pub fn encode_mat_mat_q6_k_f32(
 
     let use_n64 = mat_mat_q6_k_n64_enabled()
         && n_query >= mat_mat_q6_k_n64_min_query()
-        && n_query % 64 == 0
-        && n_out % 64 == 0;
+        && n_query.is_multiple_of(64)
+        && n_out.is_multiple_of(64);
     let kernel_name = if use_n64 {
         "kernel_mat_mat_q6_K_f32_n64"
     } else if n_query == 16 {
@@ -19337,13 +19347,13 @@ pub fn encode_mat_mat_q5_k_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 256 != 0 {
+    if !n_in.is_multiple_of(256) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_q5_k",
             detail: format!("n_in={n_in} not divisible by 256 (Q5_K super-block)"),
         });
     }
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_q5_k",
             detail: format!("n_in={n_in} not divisible by 32 (NK_MM tile)"),
@@ -19378,8 +19388,8 @@ pub fn encode_mat_mat_q5_k_f32(
 
     let use_n64 = mat_mat_q5_k_n64_enabled()
         && n_query >= mat_mat_q5_k_n64_min_query()
-        && n_query % 64 == 0
-        && n_out % 64 == 0;
+        && n_query.is_multiple_of(64)
+        && n_out.is_multiple_of(64);
     let kernel_name = if use_n64 {
         "kernel_mat_mat_q5_K_f32_n64"
     } else if n_query == 16 {
@@ -19474,7 +19484,7 @@ pub fn encode_mat_mat_q8_0_f32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
-    if n_in % 32 != 0 {
+    if !n_in.is_multiple_of(32) {
         return Err(MetalError::BadShape {
             kernel: "mat_mat_q8_0",
             detail: format!("n_in={n_in} not divisible by 32 (Q8_0 super-block / NK_MM tile)"),
@@ -20148,7 +20158,7 @@ pub fn trellis3_cpu_reference(
                             let h = st.wrapping_mul(st).wrapping_add(st);
                             let idx = ((h >> 6) & 511) as usize;
                             let vx = lut(2 * idx);
-                            let vy_bits = lut(2 * idx + 1).to_bits() ^ ((h >> 0) & 0x8000) as u16;
+                            let vy_bits = lut(2 * idx + 1).to_bits() ^ (h & 0x8000) as u16;
                             let vy = half::f16::from_bits(vy_bits);
                             let y0 = half::f16::from_f32(
                                 x[ib * T3_GROUP_W + span * 32 + 2 * t as usize],
@@ -20233,7 +20243,7 @@ pub fn encode_mat_vec_trellis3_f32(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), MetalError> {
-    if n_in % T3_GROUP_W != 0 {
+    if !n_in.is_multiple_of(T3_GROUP_W) {
         return Err(MetalError::BadShape {
             kernel: "mat_vec_trellis3",
             detail: format!("n_in={n_in} not divisible by 256"),
@@ -23962,7 +23972,7 @@ mod tests {
         // exercise the row guards, and multiple groups along n_in.
         let n_in = 512;
         let n_out = 66;
-        let syn = trellis3_synthetic(n_in, n_out, 0x7E11_15);
+        let syn = trellis3_synthetic(n_in, n_out, 0x007E_1115);
         let x: Vec<f32> = (0..n_in).map(|i| ((i % 29) as f32 - 14.0) * 3e-2).collect();
         for variant in [
             Trellis3Variant::ThreeInst,
@@ -30374,7 +30384,7 @@ mod tests {
     }
 
     fn greedy_total_order_key(bits: u32) -> Option<u32> {
-        ((bits & 0x7fff_ffff) <= 0x7f80_0000).then(|| {
+        ((bits & 0x7fff_ffff) <= 0x7f80_0000).then_some({
             if bits & 0x8000_0000 != 0 {
                 !bits
             } else {

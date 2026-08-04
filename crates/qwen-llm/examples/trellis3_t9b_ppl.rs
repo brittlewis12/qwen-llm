@@ -10,7 +10,6 @@
 //! Env: T9B_MODEL, T9B_TEXT, T9B_OUT_NLL, T9B_SEGMENTS (64),
 //! T9B_SEG_LEN (512).
 
-use objc2_metal::MTLBuffer as _;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::Model;
 use qwen_llm::metal::MetalContext;

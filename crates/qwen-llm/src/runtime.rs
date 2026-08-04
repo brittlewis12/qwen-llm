@@ -720,7 +720,7 @@ impl ResidencyThreshold {
     /// Construct a threshold from a fraction in `[0.0, 1.0]`. Rejects
     /// non-finite (NaN or infinity) and out-of-range values.
     pub fn new(value: f64) -> Result<Self, InvalidResidencyThreshold> {
-        if !value.is_finite() || value < 0.0 || value > 1.0 {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
             return Err(InvalidResidencyThreshold(value));
         }
         Ok(Self(value))
@@ -761,10 +761,11 @@ impl std::hash::Hash for ResidencyThreshold {
 /// `ColdOnly` gates on `mincore` residency to preserve warm-load
 /// performance; this is the recommended default when the loader
 /// callsite doesn't otherwise know cache state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
 pub enum PrefetchPolicy {
     /// Do not prefetch. Loader behaves exactly as before this option
     /// existed.
+    #[default]
     Off,
     /// Prefetch regardless of current residency.
     Always,
@@ -782,12 +783,6 @@ impl PrefetchPolicy {
         Ok(Self::ColdOnly {
             threshold: ResidencyThreshold::new(threshold)?,
         })
-    }
-}
-
-impl Default for PrefetchPolicy {
-    fn default() -> Self {
-        Self::Off
     }
 }
 

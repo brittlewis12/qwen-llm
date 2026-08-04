@@ -694,7 +694,7 @@ impl DeepSeekV4CensusV1 {
                     .collect::<Vec<_>>(),
             ),
         ] {
-            if aggregate_tensor_storage(rows.into_iter())? != self.roles[role as usize].storage {
+            if aggregate_tensor_storage(rows)? != self.roles[role as usize].storage {
                 return Err(DeepSeekV4CensusError::Invalid(format!(
                     "layer storage does not match role {}",
                     role.as_str()
@@ -996,7 +996,7 @@ fn validate_dtype_storage(
     let (block_size, type_size) = ggml_type_layout(dtype).ok_or_else(|| {
         DeepSeekV4CensusError::Invalid(format!("dtype {wire_name} has no storage layout"))
     })?;
-    if block_size == 0 || element_count % block_size != 0 {
+    if block_size == 0 || !element_count.is_multiple_of(block_size) {
         return Err(DeepSeekV4CensusError::Invalid(format!(
             "{wire_name} element count {element_count} is not block aligned"
         )));

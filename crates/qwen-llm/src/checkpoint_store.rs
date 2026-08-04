@@ -258,13 +258,13 @@ impl DurableCheckpointStore {
                     operation: "stat staged blob after publication",
                     source,
                 })?
-                .ok_or_else(|| CheckpointStoreError::PostCommit("staged blob disappeared"))?;
+                .ok_or(CheckpointStoreError::PostCommit("staged blob disappeared"))?;
             let final_meta = metadata_nofollow(final_path)
                 .map_err(|source| CheckpointStoreError::PostMutationIo {
                     operation: "stat final blob after publication",
                     source,
                 })?
-                .ok_or_else(|| CheckpointStoreError::PostCommit("final disappeared"))?;
+                .ok_or(CheckpointStoreError::PostCommit("final disappeared"))?;
             let fd_stamp = FileStamp::from_metadata(&staged.file.metadata().map_err(|source| {
                 CheckpointStoreError::PostMutationIo {
                     operation: "stat staged descriptor after publication",
@@ -390,9 +390,7 @@ impl DurableCheckpointStore {
         let digests = request_prefix_keys(context.compatibility_id, request_tokens, &lengths);
         let mut candidates = Vec::new();
         for (path, parsed) in found {
-            if parsed.matched_len == request_tokens.len()
-                && parsed.mode == SnapshotMode::ConsumedNoLogits
-            {
+            if parsed.matched_len == request_tokens.len() && parsed.mode == SnapshotMode::Consumed {
                 continue;
             }
             if digests.get(&parsed.matched_len) == Some(&parsed.digest) {
@@ -701,10 +699,10 @@ pub enum CheckpointStoreError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum SnapshotMode {
-    ConsumedNoLogits,
-    ConsumedLogits,
-    PendingNoLogits,
-    PendingLogits,
+    Consumed,
+    ConsumedWithLogits,
+    Pending,
+    PendingWithLogits,
 }
 
 impl SnapshotMode {
@@ -713,34 +711,34 @@ impl SnapshotMode {
             snapshot.pending_token.is_some(),
             snapshot.final_logits.is_some(),
         ) {
-            (false, false) => Self::ConsumedNoLogits,
-            (false, true) => Self::ConsumedLogits,
-            (true, false) => Self::PendingNoLogits,
-            (true, true) => Self::PendingLogits,
+            (false, false) => Self::Consumed,
+            (false, true) => Self::ConsumedWithLogits,
+            (true, false) => Self::Pending,
+            (true, true) => Self::PendingWithLogits,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::ConsumedNoLogits => "c0",
-            Self::ConsumedLogits => "c1",
-            Self::PendingNoLogits => "p0",
-            Self::PendingLogits => "p1",
+            Self::Consumed => "c0",
+            Self::ConsumedWithLogits => "c1",
+            Self::Pending => "p0",
+            Self::PendingWithLogits => "p1",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
         match value {
-            "c0" => Some(Self::ConsumedNoLogits),
-            "c1" => Some(Self::ConsumedLogits),
-            "p0" => Some(Self::PendingNoLogits),
-            "p1" => Some(Self::PendingLogits),
+            "c0" => Some(Self::Consumed),
+            "c1" => Some(Self::ConsumedWithLogits),
+            "p0" => Some(Self::Pending),
+            "p1" => Some(Self::PendingWithLogits),
             _ => None,
         }
     }
 
     fn restored_len(self, matched_len: usize) -> usize {
-        if matches!(self, Self::PendingNoLogits | Self::PendingLogits) {
+        if matches!(self, Self::Pending | Self::PendingWithLogits) {
             matched_len.saturating_sub(1)
         } else {
             matched_len
@@ -751,17 +749,17 @@ impl SnapshotMode {
 fn mode_rank(mode: SnapshotMode, exact: bool) -> usize {
     if exact {
         match mode {
-            SnapshotMode::ConsumedLogits => 0,
-            SnapshotMode::PendingNoLogits => 1,
-            SnapshotMode::PendingLogits => 2,
-            SnapshotMode::ConsumedNoLogits => 3,
+            SnapshotMode::ConsumedWithLogits => 0,
+            SnapshotMode::Pending => 1,
+            SnapshotMode::PendingWithLogits => 2,
+            SnapshotMode::Consumed => 3,
         }
     } else {
         match mode {
-            SnapshotMode::ConsumedLogits => 0,
-            SnapshotMode::ConsumedNoLogits => 1,
-            SnapshotMode::PendingNoLogits => 2,
-            SnapshotMode::PendingLogits => 3,
+            SnapshotMode::ConsumedWithLogits => 0,
+            SnapshotMode::Consumed => 1,
+            SnapshotMode::Pending => 2,
+            SnapshotMode::PendingWithLogits => 3,
         }
     }
 }
@@ -2042,7 +2040,7 @@ mod tests {
                 section: "test",
                 bytes: 1,
             }),
-            SnapshotCodecError::Io(io::Error::new(io::ErrorKind::Other, "transient")),
+            SnapshotCodecError::Io(io::Error::other("transient")),
         ] {
             assert!(!codec_error_proves_invalid_blob(&error));
         }
@@ -2199,10 +2197,10 @@ mod tests {
     #[test]
     fn store_blob_name_parser_is_canonical() {
         let digest = [0xab; 32];
-        let valid = blob_name(12, SnapshotMode::PendingNoLogits, &digest);
+        let valid = blob_name(12, SnapshotMode::Pending, &digest);
         let parsed = parse_blob_name(std::ffi::OsStr::new(&valid)).unwrap();
         assert_eq!(parsed.matched_len, 12);
-        assert_eq!(parsed.mode, SnapshotMode::PendingNoLogits);
+        assert_eq!(parsed.mode, SnapshotMode::Pending);
         assert_eq!(parsed.digest, digest);
         for invalid in [
             "012-p0-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.qcp",

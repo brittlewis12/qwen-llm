@@ -835,7 +835,7 @@ fn authenticate_model_path(path: &Path) -> Result<(PathBuf, String)> {
     Ok((actual, sha256))
 }
 
-fn validate_loaded_model<'a>(loaded: &'a LoadedModel) -> Result<(&'a [u8], String)> {
+fn validate_loaded_model(loaded: &LoadedModel) -> Result<(&[u8], String)> {
     let bound = Model::from_gguf(loaded.gguf()).context("bind loaded A3B model")?;
     ensure!(loaded.gguf().shard_count() == 1);
     ensure!(
@@ -1595,11 +1595,9 @@ fn run_request(
 
         let teardown_start = Instant::now();
         drop(candidate);
-        drop(sampler);
         drop(sink);
         drop(scratch);
         drop(sequence);
-        drop(forward);
         drop(runtime);
         drop(runtime_bytes);
         drop(parsed_prompt);
@@ -1745,7 +1743,7 @@ fn run_pair(
     };
     let b = arms.remove(adjusted_b_index);
     compare_request_outputs(&a, &b)?;
-    if scored && let Some(progress) = progress.as_deref_mut() {
+    if scored && let Some(progress) = progress {
         progress.completed_scored_pairs += 1;
     }
     let request_saving_ms = a.timing.total_request_ms - b.timing.total_request_ms;
@@ -1767,7 +1765,7 @@ fn run_pair(
 }
 
 fn pair_order(pair_index: usize) -> [Arm; 2] {
-    if pair_index % 2 == 0 {
+    if pair_index.is_multiple_of(2) {
         [Arm::A, Arm::B]
     } else {
         [Arm::B, Arm::A]
@@ -2351,7 +2349,7 @@ fn median(values: &[f64]) -> Result<f64> {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     let middle = sorted.len() / 2;
-    Ok(if sorted.len() % 2 == 0 {
+    Ok(if sorted.len().is_multiple_of(2) {
         (sorted[middle - 1] + sorted[middle]) / 2.0
     } else {
         sorted[middle]

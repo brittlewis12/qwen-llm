@@ -56,7 +56,7 @@ fn inv_phi(p: f64) -> f64 {
         -3.969683028665376e+01,
         2.209460984245205e+02,
         -2.759285104469687e+02,
-        1.383577518672690e+02,
+        1.383_577_518_672_69e2,
         -3.066479806614716e+01,
         2.506628277459239e+00,
     ];
@@ -448,7 +448,7 @@ fn main() {
     let rows = build_rows();
 
     // Phase 1: screen at 64 groups, seed A.
-    let xa = gaussian(64 * 256, 0x7E11_15);
+    let xa = gaussian(64 * 256, 0x007E_1115);
     println!("== T8a screen (64 groups, seed A) ==");
     let mut screen: Vec<(usize, f64)> = Vec::new();
     let mut v1_base = 0f64;
@@ -472,7 +472,7 @@ fn main() {
 
     // Phase 2: confirm every row within 1.10x of V1 at 256 groups x 2 seeds.
     println!("\n== T8a confirm (256 groups x seeds A,B) for rows <= 1.10x V1 ==");
-    let xa2 = gaussian(256 * 256, 0x7E11_15);
+    let xa2 = gaussian(256 * 256, 0x007E_1115);
     let xb2 = gaussian(256 * 256, 0xB0B_CAFE);
     let mut confirm_v1 = 0f64;
     let mut results: Vec<(String, f64, bool, f64)> = Vec::new();

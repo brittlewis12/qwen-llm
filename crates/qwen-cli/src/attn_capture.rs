@@ -54,7 +54,9 @@ fn view_positions(context: usize) -> Result<Vec<usize>> {
     Ok(positions)
 }
 
-fn capture_layout(context: usize) -> Result<(Vec<usize>, Vec<(usize, Vec<usize>)>)> {
+type CaptureLayout = (Vec<usize>, Vec<(usize, Vec<usize>)>);
+
+fn capture_layout(context: usize) -> Result<CaptureLayout> {
     let contexts = if context < 32768 {
         vec![context]
     } else if context == 32768 {
@@ -181,7 +183,7 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 }
 
 fn validate_f16_tensor(name: &str, bytes: &[u8]) -> Result<()> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         bail!("{name} has an odd F16 byte length");
     }
     let mut nonzero = false;
@@ -269,7 +271,7 @@ fn validate_provenance(
 fn tensor_bytes(tensor: &MetalTensor) -> Result<&[u8]> {
     let offset = usize::try_from(tensor.offset)?;
     let length = usize::try_from(tensor.n_bytes())?;
-    let buffer_len = usize::try_from(tensor.buffer.length())?;
+    let buffer_len = tensor.buffer.length();
     let end = offset
         .checked_add(length)
         .ok_or_else(|| anyhow!("tensor byte overflow"))?;

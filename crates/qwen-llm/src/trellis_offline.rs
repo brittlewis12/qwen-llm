@@ -317,7 +317,7 @@ impl EncodedGroupSub {
 /// min is preserved by keeping whichever encode won).
 pub fn encode_group_sub_full(x: &[f32], code: &TrellisCode, n_sub: usize) -> EncodedGroupSub {
     assert_eq!(x.len(), GROUP_W);
-    assert!(GROUP_W % n_sub == 0);
+    assert!(GROUP_W.is_multiple_of(n_sub));
     let sub = GROUP_W / n_sub;
     let crms = code.value_rms().max(1e-12);
     let scales0: Vec<f32> = x
@@ -399,7 +399,7 @@ mod tests {
     /// `metal::trellis3_cpu_reference` (which is itself GPU-validated).
     #[test]
     fn offline_encode_bridges_to_kernel_reference() {
-        let mut s = 0xB21D_6Eu64;
+        let mut s = 0x00B2_1D6E_u64;
         let mut next = move || {
             s = s.wrapping_add(0x9E37_79B9_7F4A_7C15);
             let mut z = s;

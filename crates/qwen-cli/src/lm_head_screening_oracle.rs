@@ -454,11 +454,11 @@ impl<'a> Q6Block<'a> {
         let d = half::f16::from_bits(self.d_bits()).to_f64();
         ensure!(d.is_finite());
         let mut terms = [0.0f64; BLOCK];
-        for i in 0..BLOCK {
+        for (i, term) in terms.iter_mut().enumerate().take(BLOCK) {
             let w = d * f64::from(self.coefficient(i)?);
             let square = w * w;
             ensure!(square.is_finite() && square >= 0.0);
-            terms[i] = square;
+            *term = square;
         }
         let sum_up = gamma_sum_upper(&terms)?;
         f32_upper(next_up_f64(sum_up.sqrt()))
@@ -1948,7 +1948,7 @@ fn validate_survivors(ids: &[u32], vocab: usize, winner: usize) -> Result<()> {
 
 fn bound_survives(upper_bound: f64, winner_lower: f64) -> Result<bool> {
     ensure!(upper_bound.is_finite() && winner_lower.is_finite());
-    Ok(!(upper_bound < winner_lower))
+    Ok(upper_bound >= winner_lower)
 }
 
 fn compact_active(active: &[u8], winner: usize) -> Result<Vec<u32>> {
@@ -3853,7 +3853,7 @@ fn publish_decision_exclusive(packet: &Packet, bytes: &[u8]) -> Result<()> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(&temporary)?;
-    file.write_all(&bytes)?;
+    file.write_all(bytes)?;
     file.sync_all()?;
     let old = CString::new(temporary.as_os_str().as_bytes())?;
     let new = CString::new(terminal.as_os_str().as_bytes())?;
@@ -4322,8 +4322,9 @@ fn run_analyzer(output_weight: &[u8], captures: Vec<AnalyzerCapture>) -> Result<
     let mut retained_survivor_ids_bytes = 0usize;
     let mut retained_survivor_cmp_bytes = 0usize;
     let mut retained_ledger_stream_bytes = 0usize;
-    let mut bigint_tracker = BigIntPayloadTracker::default();
-    bigint_tracker.largest_observed_coefficient_payload_bits = norm_exact_high_water_bits;
+    let mut bigint_tracker = BigIntPayloadTracker {
+        largest_observed_coefficient_payload_bits: norm_exact_high_water_bits,
+    };
     let mut exact_dot_calls = 0u64;
     let screening_start = Instant::now();
     for capture in &analyzer.captures {

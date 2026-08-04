@@ -1108,14 +1108,13 @@ mod tests {
         assert_eq!(bounded_result, ordinary_result);
         assert_eq!(bounded.draws(), ordinary.draws());
 
-        let ordinary_next = ordinary.sample(&continuation);
-        let bounded_next =
-            bounded
-                .sample_bounded_top_k(&continuation)
-                .map(|(sampled, evidence)| {
-                    assert!(evidence.used_bounded_path);
-                    sampled
-                });
+        let ordinary_next = ordinary.sample(continuation);
+        let bounded_next = bounded
+            .sample_bounded_top_k(continuation)
+            .map(|(sampled, evidence)| {
+                assert!(evidence.used_bounded_path);
+                sampled
+            });
         assert_eq!(bounded_next, ordinary_next);
         assert_eq!(bounded.draws(), ordinary.draws());
     }

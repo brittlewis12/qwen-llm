@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn csa_boundary_ranks_and_margin_follow_cpu_semantics() {
         let scores = (0..513).map(|row| row as f32).collect::<Vec<_>>();
-        let selected_ids = (1..513).map(|id| id as i32).collect::<Vec<_>>();
+        let selected_ids = (1..513).collect::<Vec<_>>();
         let decision = build_csa_decision(scores, 513, selected_ids, vec![512], vec![0]).unwrap();
         assert_eq!(decision.rank_512.row_id, 1);
         assert_eq!(decision.rank_513.row_id, 0);

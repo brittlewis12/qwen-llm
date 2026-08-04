@@ -100,6 +100,10 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+type MetalQueue = Retained<ProtocolObject<dyn MTLCommandQueue>>;
+type MetalCommand = Retained<ProtocolObject<dyn MTLCommandBuffer>>;
+type CapturedDownRouteTensors = (usize, Vec<(MetalTensor, MetalTensor, MetalTensor)>);
+
 fn env_flag_enabled(name: &str) -> bool {
     matches!(
         std::env::var(name).as_deref(),
@@ -231,8 +235,8 @@ fn captured_gateup_tensors(
             if slot_order == MoeBatchSlotOrder::ExpertSortedPerfOnly {
                 sorted_slots.reserve(slots);
             }
-            for tok in 0..tokens {
-                let route = routes_by_token[tok]
+            for (tok, routes) in routes_by_token.iter().enumerate() {
+                let route = routes
                     .get(moe_i)
                     .ok_or_else(|| anyhow!("captured route missing layer {moe_i}"))?;
                 if route.hidden.len() != h {
@@ -297,8 +301,8 @@ fn captured_down_tensors(
             if slot_order == MoeBatchSlotOrder::ExpertSortedPerfOnly {
                 sorted_slots.reserve(slots);
             }
-            for tok in 0..tokens {
-                let route = routes_by_token[tok]
+            for (tok, routes) in routes_by_token.iter().enumerate() {
+                let route = routes
                     .get(moe_i)
                     .ok_or_else(|| anyhow!("captured route missing layer {moe_i}"))?;
                 if route.topk_idx.len() != topk || route.topk_weight.len() != topk {
@@ -1634,12 +1638,12 @@ fn render_qwen_single_turn_prompt(
     enable_thinking: bool,
 ) -> String {
     let mut out = String::new();
-    if let Some(system) = system_prompt {
-        if !system.is_empty() {
-            out.push_str("<|im_start|>system\n");
-            out.push_str(system);
-            out.push_str("<|im_end|>\n");
-        }
+    if let Some(system) = system_prompt
+        && !system.is_empty()
+    {
+        out.push_str("<|im_start|>system\n");
+        out.push_str(system);
+        out.push_str("<|im_end|>\n");
     }
     out.push_str("<|im_start|>user\n");
     out.push_str(user_prompt);
@@ -3513,10 +3517,7 @@ fn tp_background_traffic(
     traffic_mask: u32,
     target_ms: f64,
     resident_est: u32,
-) -> Result<(
-    Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-)> {
+) -> Result<(MetalQueue, MetalCommand)> {
     let q2 = ctx.device.newCommandQueue().context("bg queue")?;
     let g: usize = 10240;
     let waves = (g as f64 / resident_est.max(1) as f64).ceil().max(1.0);
@@ -4845,7 +4846,7 @@ fn run_decode_proj_batch(args: DecodeProjBatchArgs) -> Result<()> {
     if iters == 0 {
         return Err(anyhow!("--iters must be >= 1"));
     }
-    if tokens.is_empty() || tokens.iter().any(|&n| n == 0) {
+    if tokens.is_empty() || tokens.contains(&0) {
         return Err(anyhow!("--tokens entries must be >= 1"));
     }
     tokens.sort_unstable();
@@ -5761,7 +5762,7 @@ fn run_decode_gdn_layer_replay(args: DecodeGdnLayerReplayArgs) -> Result<()> {
     if iters == 0 {
         return Err(anyhow!("--iters must be >= 1"));
     }
-    if tokens.is_empty() || tokens.iter().any(|&n| n == 0) {
+    if tokens.is_empty() || tokens.contains(&0) {
         return Err(anyhow!("--tokens entries must be >= 1"));
     }
     if block.is_some() && (!gdn_indexes.is_empty() || sample_gdn_layers) {
@@ -6040,7 +6041,7 @@ fn run_decode_gdn_chain_replay(args: DecodeGdnChainReplayArgs) -> Result<()> {
     if n_layers == 0 {
         return Err(anyhow!("--layers must be >= 1"));
     }
-    if tokens.is_empty() || tokens.iter().any(|&n| n == 0) {
+    if tokens.is_empty() || tokens.contains(&0) {
         return Err(anyhow!("--tokens entries must be >= 1"));
     }
     tokens.sort_unstable();
@@ -6332,7 +6333,7 @@ fn run_decode_block_slice_replay(args: DecodeBlockSliceReplayArgs) -> Result<()>
     if n_blocks == 0 {
         return Err(anyhow!("--blocks must be >= 1"));
     }
-    if tokens.is_empty() || tokens.iter().any(|&n| n == 0) {
+    if tokens.is_empty() || tokens.contains(&0) {
         return Err(anyhow!("--tokens entries must be >= 1"));
     }
     tokens.sort_unstable();
@@ -7393,7 +7394,7 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
     }
     slot_counts.sort_unstable();
     slot_counts.dedup();
-    if slot_counts.iter().any(|&count| count == 0) {
+    if slot_counts.contains(&0) {
         return Err(anyhow!("--slot-counts must all be >= 1"));
     }
     let max_slots = *slot_counts.iter().max().expect("non-empty slot_counts");
@@ -7574,8 +7575,8 @@ fn run_decode_block_slice_real_margin(args: DecodeBlockSliceRealMarginArgs) -> R
                 let mut s = MetalSession::fresh(&ctx, &mm, kv_capacity)
                     .with_context(|| format!("real prefix session slot {slot}"))?;
                 copy_recurrent_session_state(&ctx, &prefix_sessions[slot - 1], &mut s)?;
-                for p in prev_pos..pos {
-                    let _ = mf.single_token_argmax_profiled(ids[p], p as u32, &mut s)?;
+                for (p, &token_id) in ids.iter().enumerate().take(pos).skip(prev_pos) {
+                    let _ = mf.single_token_argmax_profiled(token_id, p as u32, &mut s)?;
                 }
                 prefix_sessions.push(s);
                 prev_pos = pos;
@@ -7929,7 +7930,7 @@ fn cpu_route_fingerprint(
         exp_vals.push(e);
         sum += e;
     }
-    let inv = 1.0 / sum.max(6.103515625e-5);
+    let inv = 1.0 / sum.max(6.103_515_6e-5);
     let shared_dot: f32 = h_cpu
         .iter()
         .zip(&moe.gate_inp_shexp_cpu[..h_cpu.len()])
@@ -8063,8 +8064,7 @@ fn run_decode_moe_router_repack_check(args: DecodeMoeRouterRepackCheckArgs) -> R
     for &context in &contexts {
         let kv_capacity = context + 32;
         let mut sessions = Vec::with_capacity(tokens);
-        for slot in 0..tokens {
-            let ids = &prompt_ids[slot];
+        for (slot, ids) in prompt_ids.iter().enumerate().take(tokens) {
             let mut s = MetalSession::fresh(&ctx, &mm, kv_capacity)
                 .with_context(|| format!("router check session slot {slot}"))?;
             for (p, &token_id) in ids.iter().take(context).enumerate() {
@@ -8291,108 +8291,108 @@ fn run_moe_down_micro(args: MoeDownMicroArgs) -> Result<()> {
     }
 
     let mut captured_route_stats = None;
-    let captured_routes: Option<(usize, Vec<(MetalTensor, MetalTensor, MetalTensor)>)> =
-        if let Some(capture_ctx) = route_capture_ctx {
-            let mf = MetalForward::new(&ctx, &mm);
-            let mut capture_s = MetalSession::fresh(&ctx, &mm, capture_ctx + tokens + 16)
-                .context("route-capture session")?;
-            for pos in 0..capture_ctx {
-                let _ = mf.single_token(0, pos as u32, &mut capture_s)?;
-            }
-            let mut all_routes_by_token = Vec::with_capacity(tokens);
-            for tok in 0..tokens {
-                let token_id =
-                    capture_replay_token(route_capture_token_pattern, tok, arch.vocab_size);
-                let all_routes = mf.capture_moe_gateup_replay_for_token(
-                    token_id,
-                    (capture_ctx + tok) as u32,
-                    &mut capture_s,
-                )?;
-                if all_routes.len() != moe_blocks.len() {
-                    return Err(anyhow!(
-                        "captured {} MoE route rows, expected {}",
-                        all_routes.len(),
-                        moe_blocks.len()
-                    ));
-                }
-                all_routes_by_token.push(all_routes);
-            }
-            let eligible_indices: Vec<_> = moe_blocks
-                .iter()
-                .enumerate()
-                .filter_map(|(i, moe)| {
-                    let eligible = if fused_routed_q4q5 {
-                        moe.gate_exps.dtype == GgmlType::Q4_K
-                            && moe.up_exps.dtype == GgmlType::Q4_K
-                            && moe.down_exps.dtype == GgmlType::Q5_K
-                    } else {
-                        moe.down_exps.dtype == GgmlType::Q5_K
-                    };
-                    if eligible { Some(i) } else { None }
-                })
-                .collect();
-            if eligible_indices.len() != bench_moes.len() {
+    let captured_routes: Option<CapturedDownRouteTensors> = if let Some(capture_ctx) =
+        route_capture_ctx
+    {
+        let mf = MetalForward::new(&ctx, &mm);
+        let mut capture_s = MetalSession::fresh(&ctx, &mm, capture_ctx + tokens + 16)
+            .context("route-capture session")?;
+        for pos in 0..capture_ctx {
+            let _ = mf.single_token(0, pos as u32, &mut capture_s)?;
+        }
+        let mut all_routes_by_token = Vec::with_capacity(tokens);
+        for tok in 0..tokens {
+            let token_id = capture_replay_token(route_capture_token_pattern, tok, arch.vocab_size);
+            let all_routes = mf.capture_moe_gateup_replay_for_token(
+                token_id,
+                (capture_ctx + tok) as u32,
+                &mut capture_s,
+            )?;
+            if all_routes.len() != moe_blocks.len() {
                 return Err(anyhow!(
-                    "captured {} eligible route rows, expected {}",
-                    eligible_indices.len(),
-                    bench_moes.len()
+                    "captured {} MoE route rows, expected {}",
+                    all_routes.len(),
+                    moe_blocks.len()
                 ));
             }
-            captured_route_stats = Some(summarize_moe_route_batch(
-                &all_routes_by_token,
-                &eligible_indices,
-                n_expert,
-                topk,
-            )?);
+            all_routes_by_token.push(all_routes);
+        }
+        let eligible_indices: Vec<_> = moe_blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, moe)| {
+                let eligible = if fused_routed_q4q5 {
+                    moe.gate_exps.dtype == GgmlType::Q4_K
+                        && moe.up_exps.dtype == GgmlType::Q4_K
+                        && moe.down_exps.dtype == GgmlType::Q5_K
+                } else {
+                    moe.down_exps.dtype == GgmlType::Q5_K
+                };
+                if eligible { Some(i) } else { None }
+            })
+            .collect();
+        if eligible_indices.len() != bench_moes.len() {
+            return Err(anyhow!(
+                "captured {} eligible route rows, expected {}",
+                eligible_indices.len(),
+                bench_moes.len()
+            ));
+        }
+        captured_route_stats = Some(summarize_moe_route_batch(
+            &all_routes_by_token,
+            &eligible_indices,
+            n_expert,
+            topk,
+        )?);
 
-            let mut tensors = Vec::with_capacity(eligible_indices.len());
-            for &moe_i in &eligible_indices {
-                let idx = MetalTensor::zeros_f32(&ctx, vec![slots as u64])?;
-                let weight = MetalTensor::zeros_f32(&ctx, vec![slots as u64])?;
-                let hidden = MetalTensor::zeros_f32(&ctx, vec![(tokens * h_run) as u64])?;
-                unsafe {
-                    let idx_ptr = idx.buffer.contents().as_ptr() as *mut i32;
-                    let w_ptr = weight.buffer.contents().as_ptr() as *mut f32;
-                    let h_ptr = hidden.buffer.contents().as_ptr() as *mut f32;
-                    for tok in 0..tokens {
-                        let route = &all_routes_by_token[tok][moe_i];
-                        if route.topk_idx.len() != topk || route.topk_weight.len() != topk {
+        let mut tensors = Vec::with_capacity(eligible_indices.len());
+        for &moe_i in &eligible_indices {
+            let idx = MetalTensor::zeros_f32(&ctx, vec![slots as u64])?;
+            let weight = MetalTensor::zeros_f32(&ctx, vec![slots as u64])?;
+            let hidden = MetalTensor::zeros_f32(&ctx, vec![(tokens * h_run) as u64])?;
+            unsafe {
+                let idx_ptr = idx.buffer.contents().as_ptr() as *mut i32;
+                let w_ptr = weight.buffer.contents().as_ptr() as *mut f32;
+                let h_ptr = hidden.buffer.contents().as_ptr() as *mut f32;
+                for (tok, routes) in all_routes_by_token.iter().enumerate().take(tokens) {
+                    let route = &routes[moe_i];
+                    if route.topk_idx.len() != topk || route.topk_weight.len() != topk {
+                        return Err(anyhow!(
+                            "captured route has idx={} weight={}, expected topk={topk}",
+                            route.topk_idx.len(),
+                            route.topk_weight.len()
+                        ));
+                    }
+                    if route.hidden.len() != h_run {
+                        return Err(anyhow!(
+                            "captured hidden has {}, expected h={h_run}",
+                            route.hidden.len()
+                        ));
+                    }
+                    std::ptr::copy_nonoverlapping(
+                        route.hidden.as_ptr(),
+                        h_ptr.add(tok * h_run),
+                        h_run,
+                    );
+                    for slot in 0..topk {
+                        let expert = route.topk_idx[slot];
+                        if expert < 0 || expert as usize >= n_expert {
                             return Err(anyhow!(
-                                "captured route has idx={} weight={}, expected topk={topk}",
-                                route.topk_idx.len(),
-                                route.topk_weight.len()
+                                "captured expert id {expert} outside n_expert={n_expert}"
                             ));
                         }
-                        if route.hidden.len() != h_run {
-                            return Err(anyhow!(
-                                "captured hidden has {}, expected h={h_run}",
-                                route.hidden.len()
-                            ));
-                        }
-                        std::ptr::copy_nonoverlapping(
-                            route.hidden.as_ptr(),
-                            h_ptr.add(tok * h_run),
-                            h_run,
-                        );
-                        for slot in 0..topk {
-                            let expert = route.topk_idx[slot];
-                            if expert < 0 || expert as usize >= n_expert {
-                                return Err(anyhow!(
-                                    "captured expert id {expert} outside n_expert={n_expert}"
-                                ));
-                            }
-                            let out_slot = tok * topk + slot;
-                            *idx_ptr.add(out_slot) = expert;
-                            *w_ptr.add(out_slot) = route.topk_weight[slot];
-                        }
+                        let out_slot = tok * topk + slot;
+                        *idx_ptr.add(out_slot) = expert;
+                        *w_ptr.add(out_slot) = route.topk_weight[slot];
                     }
                 }
-                tensors.push((idx, weight, hidden));
             }
-            Some((capture_ctx, tensors))
-        } else {
-            None
-        };
+            tensors.push((idx, weight, hidden));
+        }
+        Some((capture_ctx, tensors))
+    } else {
+        None
+    };
 
     let active_weight_bytes: f64 = if let Some(weight) = synthetic_weight.as_ref() {
         weight.n_bytes() as f64 * layer_count as f64 * tokens as f64 * topk as f64 / n_expert as f64
@@ -8656,7 +8656,7 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
     if iters == 0 {
         return Err(anyhow!("--iters must be >= 1"));
     }
-    if tokens.is_empty() || tokens.iter().any(|&n| n == 0) {
+    if tokens.is_empty() || tokens.contains(&0) {
         return Err(anyhow!("--tokens entries must be >= 1"));
     }
     if route_capture_stride == 0 {
@@ -8728,7 +8728,7 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
             "moe-batch-sweep requires Q4_K gate/up and Q5_K down expert banks"
         ));
     }
-    if f_exp % 256 != 0 {
+    if !f_exp.is_multiple_of(256) {
         return Err(anyhow!("routed f_exp must be divisible by 256"));
     }
     let use_k512_r2 = f_exp == 512;
@@ -8779,8 +8779,7 @@ fn run_moe_batch_sweep(args: MoeBatchSweepArgs) -> Result<()> {
     let mf = MetalForward::new(&ctx, &mm);
     let mut all_routes_by_token = Vec::with_capacity(max_tokens);
     if prompt_ids.len() > 1 {
-        for tok in 0..max_tokens {
-            let ids = &prompt_ids[tok];
+        for ids in prompt_ids.iter().take(max_tokens) {
             let mut capture_s = MetalSession::fresh(&ctx, &mm, route_capture_ctx + 17)
                 .context("route-capture session")?;
             for (pos, &token_id) in ids.iter().take(route_capture_ctx).enumerate() {
@@ -9132,8 +9131,8 @@ fn run_moe_gateup_micro(args: MoeGateupMicroArgs) -> Result<()> {
                 unsafe {
                     let dst = hidden_t.buffer.contents().as_ptr() as *mut f32;
                     let ptr = idx.buffer.contents().as_ptr() as *mut i32;
-                    for tok in 0..tokens {
-                        let route = &all_routes_by_token[tok][moe_i];
+                    for (tok, routes) in all_routes_by_token.iter().enumerate().take(tokens) {
+                        let route = &routes[moe_i];
                         if route.topk_idx.len() != topk {
                             return Err(anyhow!(
                                 "captured route has {} experts, expected topk={topk}",
@@ -11080,13 +11079,11 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         anyhow::bail!("choose at most one draft lm_head override");
     }
     let planned_verify_n = mtp_physical_n.unwrap_or(spec_tokens + 1);
-    if spec_tokens >= 2 {
-        if !(spec_tokens + 1..=16).contains(&planned_verify_n) {
-            anyhow::bail!(
-                "--mtp-physical-n must be in {}..=16 for --spec-tokens {spec_tokens}",
-                spec_tokens + 1
-            );
-        }
+    if spec_tokens >= 2 && !(spec_tokens + 1..=16).contains(&planned_verify_n) {
+        anyhow::bail!(
+            "--mtp-physical-n must be in {}..=16 for --spec-tokens {spec_tokens}",
+            spec_tokens + 1
+        );
     }
 
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
@@ -15420,7 +15417,7 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
     let mut selected: Option<(usize, usize)> = None;
     for (idx, b) in mm.blocks.iter().enumerate() {
         if matches!(b, MetalBlock::Attn(_)) {
-            if block.map_or(true, |want| want == idx) {
+            if block.is_none_or(|want| want == idx) {
                 selected = Some((idx, attn_seen));
                 break;
             }
@@ -16916,14 +16913,14 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         effective_suffix_mode
     );
 
-    let mf = MetalForward::new(&ctx, &mm);
+    let mf = MetalForward::new(ctx, mm);
     let cap = total_len + tokens + 16;
 
     let prefill_chunk = default_prefill_chunk(mm.arch.kind, total_len);
     let mut cold_scratch = if prefill_mode == PrefixCachePrefillMode::Packed {
         Some(fresh_prefill_scratch_for_prompt(
-            &ctx,
-            &mm,
+            ctx,
+            mm,
             total_len,
             prefill_chunk,
         )?)
@@ -16932,8 +16929,8 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     };
     let mut prefix_scratch = if prefill_mode == PrefixCachePrefillMode::Packed {
         Some(fresh_prefill_scratch_for_prompt(
-            &ctx,
-            &mm,
+            ctx,
+            mm,
             total_len,
             prefill_chunk,
         )?)
@@ -16942,8 +16939,8 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     };
     let mut suffix_scratch = if effective_suffix_mode == PrefixCachePrefillMode::Packed {
         Some(fresh_prefill_scratch_for_prompt(
-            &ctx,
-            &mm,
+            ctx,
+            mm,
             total_len,
             prefill_chunk,
         )?)
@@ -16955,7 +16952,7 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     {
         let mut s = loaded.create_sequence(SequenceConfig::new(32))?;
         if prefill_mode == PrefixCachePrefillMode::Packed {
-            let mut warm_scratch = fresh_prefill_scratch_for_prompt(&ctx, &mm, 1, 1)?;
+            let mut warm_scratch = fresh_prefill_scratch_for_prompt(ctx, mm, 1, 1)?;
             let _ = prefill_tokens_with_multi_hidden(
                 &mf,
                 &[prefix_ids[0]],

@@ -222,7 +222,7 @@ fn bench_q4k_mat_mat(c: &mut Criterion) {
 
         // Skip shapes whose n_out isn't a multiple of NR0_MM=64; the lifted
         // tile requires this for correctness without a partial-row path.
-        if n_out % 64 != 0 {
+        if !n_out.is_multiple_of(64) {
             eprintln!("[bench q4_k mat_mat] skip {label} (n_out={n_out} not % 64)");
             continue;
         }

@@ -1286,8 +1286,39 @@ Four complete real-weight position-65,663 brackets remove 1.06-1.29 ms
 command-GPU and 1.06-1.70 ms wall while preserving the full decision
 transcript, logits, and causal state. The conservative isolated 21-layer CSA
 projection is now about 12.6/29.2/93.4 ms. Scoring and selection are near peers
-at terminal history, so the next decision requires complete-token and tiled-HCA
-attribution rather than immediately deepening either local kernel.
+at terminal history; complete-token attribution shows that neither is the
+largest remaining far-context phase.
+
+At production 64-head x 512-dimension geometry, the exact tiled-HCA kernel takes
+about 0.68/1.44/5.26 ms per layer at 513/2,048/8,192 compressed rows. A retained
+deterministic nonzero repeat measures 0.763/1.637/5.259 ms median and
+0.777/1.904/5.263 ms p95. The stable terminal endpoint projects to about
+105.2 ms over all 20 HCA layers, above the 93.4 ms terminal CSA subtotal.
+
+A real-weight session with zero-initialized synthetic causal history constructed
+for the final two context positions separates a first-touch observation from
+warm inference. Across two packets, its first token takes 240.053-241.613 ms
+command-GPU while wall time varies from 1.024 to 17.549 seconds. The excess wait
+is consistent with residency effects but remains unattributed. The immediately
+following terminal token takes 232.989-235.787 ms command-GPU and
+235.998-237.261 ms wall, with only 1.474-3.009 ms outside the GPU. The repeated
+terminal logit SHA-256 is
+`4c54019668cb815036bd823ddee2c4156f481a48138b35896899d758184587be`.
+This roughly 4.22-4.24 token/s endpoint passes a rough scale check against
+37 ms short-context + 93.4 ms CSA + 105.2 ms HCA estimates. The terms are not
+disjoint because the short-context command already includes shallow attention;
+the check is not a phase decomposition. The first-touch wait is a separate
+cold-start observation, not hidden Metal execution.
+
+Three exact-reduction HCA candidates were bounded under one frozen gate: no more
+than 0.05 ms/layer regression at 513 rows, at least 0.20 ms/layer saving at
+2,048, and at least 1.50 ms/layer at 8,192 with terminal p95 below both baseline
+arms. Reusing an F32 score slab, pairing two heads to share KV loads, and
+combining both preserve every named output bit but save only 0.978, 1.191, and
+0.954 ms/layer at terminal history. All were removed. The next bounded HCA
+candidate changes the schedule materially through online softmax/value tiling
+under an explicit numerical envelope; the gate is not weakened and pair-four is
+not a mechanical follow-up.
 
 The retained legacy selected-attention differential still measures 43.36 ms at
 the 128-raw-plus-512-compressed shape. Singleton dense attention had the same
@@ -1586,8 +1617,10 @@ product trace because each operation is warmed and timed independently. These
 results close sub-threshold short-context kernel tuning under the current gate;
 the promoted cooperative Lightning scorer reduces the measured 262,144-row
 operation from 8.3-8.4 to 2.102 ms per CSA layer, while four-bit radix reduces
-mixed selection from about 4.58 to 1.875 ms. Complete terminal-token and
-tiled-HCA attribution now precede another local CSA optimization.
+mixed selection from about 4.58 to 1.875 ms. Complete terminal attribution now
+puts tiled HCA at 5.26 ms/layer and about 105.2 ms/token, ahead of the complete
+93.4 ms CSA subtotal. Schedule-changing HCA therefore precedes another local
+CSA optimization.
 
 The pinned llama.cpp depth command is not a free decode-only bracket. Its
 `--n-depth` implementation executes `test_prompt(n_depth)` and serializes the
@@ -1736,10 +1769,10 @@ Broader S6 work remains:
   per-layer route/selector failure records, and verified-prefix callbacks are
   promoted. An asynchronously immutable SSD-streaming ticket remains a separate
   product contract.
-- Attribute a complete constructed terminal token and production-width tiled
-  HCA before choosing between the near-peer 2.102 ms scorer and 1.875-2.019 ms
-  selector. Scalar scoring and bitwise selection remain executable exact
-  differentials.
+- Replace terminal tiled HCA only with a schedule-changing candidate that clears
+  the frozen product gate. Exact score materialization and two-head KV sharing
+  are closed; online softmax/value tiling is next. The legacy HCA kernel, scalar
+  scorer, and bitwise selector remain executable differentials.
 
 Gates:
 
@@ -1805,10 +1838,10 @@ noise without reducing technical risk. Revisit after S5.
    the synthetic position-65,663 token as a mechanical integration gate, and
    terminal operation properties as the deep-index gate. Do not resume fixture
    ladders or require a cold million-token replay without a new discontinuity.
-2. Profile representative dense, sparse, and tiled-HCA depths with named phase
-   attribution. Use durable or constructed deep states to measure the mechanism
-   under study directly; optimization, not another position unlock, is now the
-   critical path to useful long-context inference.
+2. Preserve the completed representative dense, sparse, tiled-HCA, and terminal
+   attribution packets. Use durable or constructed deep states to measure the
+   mechanism under study directly; optimization, not another position unlock,
+   remains the critical path to useful long-context inference.
 3. Preserve the promoted dense-attention checkpoint: singleton position zero
    remains on its exact legacy lineage; SWA uses cooperative attention
    thereafter; CSA uses it through position 2050 before sparse selection starts
@@ -1819,10 +1852,11 @@ noise without reducing technical risk. Revisit after S5.
    llama.cpp's 36.1 ms total at depths 128/512; barrier, row-shape, geometry,
    and vector-decode probes all miss the 0.75 ms/token two-depth gate.
 5. Preserve the promoted cooperative Lightning scorer and four-bit radix
-   selector, including their scalar and bitwise differentials. Attribute a
-   constructed terminal token and production-width tiled HCA before deepening
-   either near-peer CSA phase; do not infer the full deep-token curve from an
-   additive microprofile alone.
+   selector, including their scalar and bitwise differentials. The isolated
+   terminal measurements put tiled HCA above the projected CSA subtotal, while
+   the whole-token packet is consistent in scale with both. Pursue
+   schedule-changing online HCA before deepening either near-peer CSA phase; do
+   not infer a new deep-token curve from a local microprofile alone.
 6. Keep the external depth bracket and packed-prompt dispatch reduction as
    independent lanes. `llama-bench --n-depth` performs the full cold prefix at
    each new depth, so do not pay that loop until a reusable state or a gating

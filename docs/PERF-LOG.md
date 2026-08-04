@@ -6,6 +6,56 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 Terminal/HCA Attribution and Exact-Reuse KILL
+
+Status: terminal attribution `GO`; bounded `KILL` for the exact tiled-HCA
+recomputation/load-sharing family. Base is radix4 checkpoint `972eefe`. No
+experimental HCA kernel remains in production; the focused production-width
+profiler and two-token terminal packet are retained.
+
+- The legacy exact tiled-HCA kernel measures about 0.68/1.44/5.26 ms per layer
+  at 513/2,048/8,192 compressed rows in the original packet. A fresh nonzero
+  repeat measures 0.763/1.637/5.259 ms median and 0.777/1.904/5.263 ms p95.
+  The terminal endpoint is stable at 5.258-5.264 ms/layer, or about 105.2 ms
+  across all 20 HCA layers. The retained test emits every raw sample and pins
+  output SHA-256 at `9ce264...6d54d`, `a87bda...77586`, and
+  `7344ff...52590` for the three depths.
+- A frozen promotion gate allowed at most 0.05 ms/layer regression at 513 rows,
+  required at least 0.20 ms/layer midpoint saving at 2,048, and required at
+  least 1.50 ms/layer at 8,192 with candidate p95 below both baseline arms.
+  Every candidate preserved exact outputs at rows 513, 527/528, 895/896/897,
+  2,048, and 8,191/8,192.
+- Materializing each F32 score once measures old/new/old terminal medians
+  5.262/4.285/5.264 ms. Pairing two heads to share KV loads measures
+  5.260/4.069/5.260. Combining the score slab with paired value consumption
+  measures 5.263/4.309/5.264. The best 1.191 ms/layer terminal saving misses
+  the preregistered 1.50 ms gate; no pair-four sweep or weakened gate follows.
+- The canonical two-token packet uses real weights with zero-initialized
+  synthetic causal history. It repeats with preterminal command-GPU
+  241.613/240.053 ms while first-token wall varies from 1.024 to 17.549 seconds
+  under different first-touch conditions. This wait is consistent with
+  residency effects but remains unattributed. The immediately following
+  terminal token measures 235.787/232.989 ms command-GPU,
+  237.261/235.998 ms wall, and only 1.474/3.009 ms outside the GPU: about
+  4.22-4.24 token/s warm.
+- Terminal logits repeat at SHA-256
+  `4c54019668cb815036bd823ddee2c4156f481a48138b35896899d758184587be`.
+  A separate direct-terminal cold observation took 37.557 seconds wall versus
+  240.991 ms GPU but used a different constructed causal path and is excluded
+  from the canonical product packet.
+- The measured whole-token total passes a rough scale check against
+  approximately 37 ms short-context work + 93.4 ms terminal CSA + 105.2 ms
+  terminal HCA. These are not disjoint terms because the 37 ms command already
+  includes shallow attention. HCA is still the largest isolated terminal phase;
+  the first-touch wait is a separate, unattributed cold-start concern.
+
+Decision: close exact score-reuse and two-head load-sharing as local HCA lanes.
+The next bounded candidate changes the schedule materially through online
+softmax/value tiling under an explicit numerical envelope. Retain the exact
+legacy kernel as the differential and do not reopen scalar/cooperative CSA
+until the now-larger HCA phase moves. Review session:
+`019fc50a-a944-7c60-9ac8-8083aad4b983`.
+
 ## 2026-08-04 - DeepSeek V4 Four-Bit Radix Selection GO
 
 Status: promoted `GO` for parallel top-512 selection. Base is cooperative-score

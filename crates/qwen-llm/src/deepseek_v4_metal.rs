@@ -10037,6 +10037,78 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "requires the local 95.93 GiB DS4 fixture and a full-context session allocation"]
+    fn native_synthetic_terminal_state_profiles_cold_and_warm_tokens() {
+        const START_POSITION: u32 = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32 - 2;
+        const TERMINAL_POSITION: u32 = START_POSITION + 1;
+        const FORWARD_LIMIT: usize = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY;
+        const TOKEN_ID: u32 = 35;
+
+        let model_path = std::env::var_os("DSV4_MODEL")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+            });
+        assert!(model_path.exists(), "missing DS4 model");
+        let ctx = MetalContext::new().expect("create Metal context");
+        let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
+            .expect("plan terminal synthetic session");
+        assert_eq!(plan.session_capacity().csa_physical_rows(), 262_144);
+        assert_eq!(plan.session_capacity().hca_physical_rows(), 8_192);
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit terminal synthetic session");
+        let residency = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+            .expect("realize terminal synthetic residency")
+            .into_residency();
+        let mut session =
+            DeepSeekV4Session::new(&ctx, residency).expect("construct terminal synthetic session");
+        initialize_zero_synthetic_causal_state(&session);
+        session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
+            next_position: START_POSITION,
+        };
+        session
+            .committed_tokens
+            .extend(std::iter::repeat_n(TOKEN_ID, START_POSITION as usize));
+
+        let cold_profile = session
+            .forward_token_whole_profiled(&ctx, TOKEN_ID)
+            .expect("profile preterminal synthetic token");
+        assert_eq!(cold_profile.position, START_POSITION);
+        let warm_profile = session
+            .forward_token_whole_profiled(&ctx, TOKEN_ID)
+            .expect("profile terminal synthetic token");
+        assert_eq!(warm_profile.position, TERMINAL_POSITION);
+        assert_eq!(session.next_position(), TERMINAL_POSITION + 1);
+        let logits = session
+            .copy_logits_f32()
+            .expect("copy terminal synthetic logits");
+        assert!(logits.iter().all(|value| value.is_finite()));
+        let mut hasher = Sha256::new();
+        for value in logits {
+            hasher.update(value.to_le_bytes());
+        }
+        let hash = format!("{:x}", hasher.finalize());
+        assert_eq!(
+            hash,
+            "4c54019668cb815036bd823ddee2c4156f481a48138b35896899d758184587be"
+        );
+        eprintln!(
+            "deepseek_v4 terminal_start={START_POSITION} cold_gpu_ms={:.3} cold_wall_ms={:.3} cold_wait_residual_ms={:.3} terminal_position={TERMINAL_POSITION} warm_gpu_ms={:.3} warm_wall_ms={:.3} warm_wait_residual_ms={:.3} warm_outside_gpu_ms={:.3} logits_sha256={hash}",
+            cold_profile.command_gpu_ms,
+            cold_profile.forward_wall_ms,
+            cold_profile.wait_residual_ms(),
+            warm_profile.command_gpu_ms,
+            warm_profile.forward_wall_ms,
+            warm_profile.wait_residual_ms(),
+            warm_profile.outside_gpu_ms(),
+        );
+    }
+
     #[cfg(feature = "dsv4-diagnostics")]
     #[test]
     #[ignore = "requires the local 95.93 GiB DS4 fixture and executes focused far-context differentials"]
@@ -16374,6 +16446,150 @@ mod tests {
                 ((mixed_select_before_ms + mixed_select_after_ms) * 0.5) / mixed_select_ms,
                 legacy_attention_ms / cooperative_attention_ms,
                 (score_ms + conservative_select_ms + cooperative_attention_ms) * 21.0,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "focused production-width tiled-HCA GPU profiler; run explicitly with --nocapture"]
+    fn profile_tiled_hca_at_far_context() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const HEAD_DIM: usize = 512;
+        const CAPACITY: usize = 8_192;
+
+        fn timed_gpu<F>(ctx: &MetalContext, encode: F) -> f64
+        where
+            F: FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        {
+            let command = ctx.queue.commandBuffer().expect("HCA profile command");
+            let encoder = KernelEncoder::begin(&command);
+            encode(&encoder).expect("encode HCA profile phase");
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "HCA profile command failed: {:?}",
+                command.error()
+            );
+            let elapsed_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            assert!(elapsed_ms.is_finite() && elapsed_ms > 0.0);
+            elapsed_ms
+        }
+
+        fn median_and_p95(mut samples: Vec<f64>) -> (f64, f64) {
+            samples.sort_by(f64::total_cmp);
+            let median = samples[samples.len() / 2];
+            let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+            (median, p95)
+        }
+
+        let config = deepseek_v4_session_attention_config();
+        assert_eq!((config.head_count, config.head_dim), (HEADS, HEAD_DIM));
+        let query_values = (0..HEADS * HEAD_DIM)
+            .map(|index| ((index * 17 + index / 29 + 3) % 257) as f32 * 0.0003 - 0.038)
+            .collect::<Vec<_>>();
+        let queries = offset_f32(&ctx, &query_values, vec![(HEADS * HEAD_DIM) as u64, 1]);
+        let f16_tensor = |values: Vec<f32>, shape: Vec<u64>, label: &str| {
+            let bits = values
+                .into_iter()
+                .map(|value| half::f16::from_f32(value).to_bits())
+                .collect::<Vec<_>>();
+            MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&bits), shape, GgmlType::F16)
+                .unwrap_or_else(|error| panic!("allocate {label}: {error}"))
+        };
+        let raw_cache = f16_tensor(
+            (0..DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM)
+                .map(|index| {
+                    let slot = index / HEAD_DIM;
+                    let dimension = index % HEAD_DIM;
+                    ((slot * 23 + dimension * 11 + slot / 7) % 251) as f32 * 0.0004 - 0.05
+                })
+                .collect(),
+            vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+            "current raw cache",
+        );
+        let preserved_raw_cache = f16_tensor(
+            (0..DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM)
+                .map(|index| {
+                    let slot = index / HEAD_DIM;
+                    let dimension = index % HEAD_DIM;
+                    ((slot * 31 + dimension * 7 + dimension / 13) % 241) as f32 * 0.0005 - 0.06
+                })
+                .collect(),
+            vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+            "preserved raw cache",
+        );
+        let compressed_cache = f16_tensor(
+            (0..CAPACITY * HEAD_DIM)
+                .map(|index| {
+                    let row = index / HEAD_DIM;
+                    let dimension = index % HEAD_DIM;
+                    ((row * 37 + dimension * 13 + row / 17) % 263) as f32 * 0.0003 - 0.039
+                })
+                .collect(),
+            vec![HEAD_DIM as u64, CAPACITY as u64],
+            "compressed cache",
+        );
+        let sinks = offset_f32(
+            &ctx,
+            &(0..HEADS)
+                .map(|head| -0.41 + head as f32 * 0.002)
+                .collect::<Vec<_>>(),
+            vec![HEADS as u64],
+        );
+        let output = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1])
+            .expect("allocate HCA profile output");
+
+        for count in [513usize, 2_048, CAPACITY] {
+            let position = u32::try_from(count * 128 - 1).unwrap();
+            let encode = |encoder: &KernelEncoder| {
+                encode_tiled_dense_sink_attention_f16(
+                    &ctx,
+                    encoder,
+                    &queries,
+                    &raw_cache,
+                    &preserved_raw_cache,
+                    DeepSeekV4PublishedRows {
+                        cache: &compressed_cache,
+                        count,
+                        capacity_rows: CAPACITY,
+                    },
+                    &sinks,
+                    &output,
+                    position,
+                    0,
+                    1,
+                    128,
+                    config,
+                )
+            };
+            for _ in 0..5 {
+                let _ = timed_gpu(&ctx, encode);
+            }
+            let samples = (0..20).map(|_| timed_gpu(&ctx, encode)).collect::<Vec<_>>();
+            let (median_ms, p95_ms) = median_and_p95(samples.clone());
+            let output_values = read_f32(&output);
+            assert!(output_values.iter().all(|value| value.is_finite()));
+            let mut hasher = Sha256::new();
+            for value in output_values {
+                hasher.update(value.to_le_bytes());
+            }
+            let output_hash = format!("{:x}", hasher.finalize());
+            let expected_hash = match count {
+                513 => "9ce26438499d531557fec9b8a25914cba70a363e2ac4b187c165e8cf5896d54d",
+                2_048 => "a87bda8fb2745802832806b922ab67a71c7b4ffd2890b1fd822f000a3cf77586",
+                CAPACITY => "7344fffbdf7e8350aee2a96e1f3d9f69d406f7c32d9bf65dbd86717ee3252590",
+                _ => unreachable!(),
+            };
+            assert_eq!(output_hash, expected_hash, "{count}-row HCA output drift");
+            eprintln!(
+                "deepseek_v4 tiled_hca_profile rows={count} token_equivalent={} median_ms={median_ms:.3} p95_ms={p95_ms:.3} projected_20_hca_ms={:.3} output_sha256={output_hash} samples_ms={samples:?}",
+                count * 128,
+                median_ms * 20.0,
             );
         }
     }

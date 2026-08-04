@@ -132,18 +132,30 @@ four complete position-65,663 brackets save 1.06-1.29 ms command-GPU and
 1.06-1.70 ms wall. The conservative isolated 21-layer CSA projection is now
 about 12.6/29.2/93.4 ms at 64K/262K/1M-token-equivalent histories.
 
+Terminal attribution is complete. A warm position-1,048,575 token over real
+weights and zero-initialized synthetic causal history takes 232.989-235.787 ms
+command-GPU and 235.998-237.261 ms wall, about 4.22-4.24 token/s. Legacy tiled
+HCA is stable at 5.26 ms/layer over 8,192 compressed rows, or about 105.2 ms
+across 20 layers, and is now the largest terminal phase. The total is consistent
+in scale with the non-disjoint short-context + CSA + HCA estimates; the
+short-context command already contains shallow attention. First-token wall time
+varies by seconds while GPU work remains about 240 ms, an unattributed
+first-touch wait consistent with residency effects. Do not mix it into warm
+kernel claims.
+
 Force-ranked queue:
 
-1. **Tiled HCA and million-token attribution.** The tiled kernel is structurally exact
-   beyond 512 compressed rows, but practical latency above 65,536 context is a
-   separate measured phase. Run a constructed terminal token and production-
-   width HCA profile before choosing score recomputation, tiling, or cache
-   bandwidth work.
+1. **Schedule-changing tiled HCA.** Exact F32 score materialization, paired-head
+   KV reuse, and their combination save at most 1.191 ms/layer at 8,192 rows and
+   fail the frozen 1.50 ms/layer terminal gate; all prototypes were removed.
+   Move to online softmax/value tiling with an explicit numerical envelope and
+   retain the exact two-pass kernel as the differential. Do not weaken the gate
+   or continue mechanically to four-head sharing.
 2. **Packed indexer-cache representation and scoring.** F16 scoring is now the
-   largest measured terminal CSA phase at 2.102 ms/layer, narrowly ahead of
-   mixed radix4 selection at 1.875 ms. Reopen the paper's FP4 index-cache lane
-   only with an explicit numerical contract and after terminal HCA attribution
-   establishes its product ceiling.
+   largest terminal CSA phase at 2.102 ms/layer, narrowly ahead of mixed radix4
+   selection at 1.875 ms. Reopen the paper's FP4 index-cache lane only with an
+   explicit numerical contract after the larger HCA phase moves or a candidate
+   demonstrates a higher product ceiling.
 3. **Multi-group selection.** Radix4 remains one threadgroup per query. Defer
    global histograms, query-scaled scratch, and producer/reducer dispatches until
    scoring moves enough for the retained 1.875 ms selector to lead again.

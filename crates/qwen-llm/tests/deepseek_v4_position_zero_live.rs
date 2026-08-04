@@ -1,12 +1,13 @@
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
-use qwen_llm::deepseek_v4::DeepSeekV4Model;
+use qwen_llm::deepseek_v4::{AttentionKind, DeepSeekV4Model};
 #[cfg(feature = "dsv4-diagnostics")]
 use qwen_llm::deepseek_v4_metal::DeepSeekV4DecisionTranscript;
 use qwen_llm::deepseek_v4_metal::{
     DeepSeekV4CausalSnapshot, DeepSeekV4CommandProfile, DeepSeekV4MetalResidency,
     DeepSeekV4ModelContentId, DeepSeekV4PositionZeroForward, DeepSeekV4RoutingKind,
-    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotObservation, decode_causal_snapshot,
-    encode_causal_snapshot, load_causal_snapshot_file, publish_causal_snapshot_file,
+    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotObservation, DeepSeekV4StageKind,
+    DeepSeekV4StageProfile, decode_causal_snapshot, encode_causal_snapshot,
+    load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
@@ -1833,7 +1834,8 @@ fn profile_native_deepseek_v4_single_command_at_128_and_512() {
         logits_sha256: String,
     }
 
-    fn median(mut values: Vec<f64>) -> f64 {
+    fn median(values: &[f64]) -> f64 {
+        let mut values = values.to_vec();
         values.sort_by(f64::total_cmp);
         values[values.len() / 2]
     }
@@ -1886,6 +1888,14 @@ fn profile_native_deepseek_v4_single_command_at_128_and_512() {
             for (layer, record) in profile.layers.iter().enumerate() {
                 assert_eq!(record.layer, layer);
                 assert_eq!(
+                    record.attention_kind,
+                    match layer {
+                        0 | 1 => AttentionKind::SlidingWindow,
+                        layer if layer.is_multiple_of(2) => AttentionKind::CompressedSparse,
+                        _ => AttentionKind::HeavilyCompressed,
+                    }
+                );
+                assert_eq!(
                     record.routing_kind,
                     if layer < 3 {
                         DeepSeekV4RoutingKind::Hash
@@ -1932,16 +1942,73 @@ fn profile_native_deepseek_v4_single_command_at_128_and_512() {
             .iter()
             .map(DeepSeekV4CommandProfile::command_gpu_ms)
             .collect::<Vec<_>>();
-        let control_before_median = median(endpoint.control_before_ms.clone());
-        let profiled_wall_median = median(profiled_wall.clone());
-        let control_after_median = median(endpoint.control_after_ms.clone());
+        let attention_gpu = |kind| {
+            endpoint
+                .profiled
+                .iter()
+                .map(|profile| {
+                    profile
+                        .layers
+                        .iter()
+                        .filter(|layer| layer.attention_kind == kind)
+                        .map(|layer| layer.command_gpu_ms)
+                        .sum::<f64>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let routing_gpu = |kind| {
+            endpoint
+                .profiled
+                .iter()
+                .map(|profile| {
+                    profile
+                        .layers
+                        .iter()
+                        .filter(|layer| layer.routing_kind == kind)
+                        .map(|layer| layer.command_gpu_ms)
+                        .sum::<f64>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let swa_gpu = attention_gpu(AttentionKind::SlidingWindow);
+        let csa_gpu = attention_gpu(AttentionKind::CompressedSparse);
+        let hca_gpu = attention_gpu(AttentionKind::HeavilyCompressed);
+        let hash_gpu = routing_gpu(DeepSeekV4RoutingKind::Hash);
+        let learned_gpu = routing_gpu(DeepSeekV4RoutingKind::Learned);
+        let layer_42_gpu = endpoint
+            .profiled
+            .iter()
+            .map(|profile| profile.layers[42].command_gpu_ms)
+            .collect::<Vec<_>>();
+        for profile in &endpoint.profiled {
+            let layer_gpu_ms = profile
+                .layers
+                .iter()
+                .map(|layer| layer.command_gpu_ms)
+                .collect::<Vec<_>>();
+            eprintln!(
+                "deepseek_v4 single_command_layers {label} position={} csa_publication={} hca_publication={} layer_gpu_ms={layer_gpu_ms:?}",
+                profile.position,
+                (profile.position as usize + 1).is_multiple_of(4),
+                (profile.position as usize + 1).is_multiple_of(128),
+            );
+        }
+        let control_before_median = median(&endpoint.control_before_ms);
+        let profiled_wall_median = median(&profiled_wall);
+        let control_after_median = median(&endpoint.control_after_ms);
         eprintln!(
-            "deepseek_v4 single_command {label} control_before_ms={:?} control_before_median_ms={:.3} profiled_wall_ms={profiled_wall:?} profiled_wall_median_ms={:.3} control_after_ms={:?} control_after_median_ms={:.3} encode_cpu_ms={encode_cpu:?} command_gpu_ms={command_gpu:?} command_buffers_per_token=43 logits_sha256={}",
+            "deepseek_v4 single_command {label} control_before_ms={:?} control_before_median_ms={:.3} profiled_wall_ms={profiled_wall:?} profiled_wall_median_ms={:.3} control_after_ms={:?} control_after_median_ms={:.3} encode_cpu_ms={encode_cpu:?} command_gpu_ms={command_gpu:?} swa_gpu_ms={swa_gpu:?} swa_gpu_median_ms={:.3} csa_gpu_ms={csa_gpu:?} csa_gpu_median_ms={:.3} hca_gpu_ms={hca_gpu:?} hca_gpu_median_ms={:.3} hash_gpu_ms={hash_gpu:?} hash_gpu_median_ms={:.3} learned_gpu_ms={learned_gpu:?} learned_gpu_median_ms={:.3} layer42_gpu_ms={layer_42_gpu:?} layer42_gpu_median_ms={:.3} command_buffers_per_token=43 logits_sha256={}",
             endpoint.control_before_ms,
             control_before_median,
             profiled_wall_median,
             endpoint.control_after_ms,
             control_after_median,
+            median(&swa_gpu),
+            median(&csa_gpu),
+            median(&hca_gpu),
+            median(&hash_gpu),
+            median(&learned_gpu),
+            median(&layer_42_gpu),
             endpoint.logits_sha256,
         );
     }
@@ -1980,6 +2047,332 @@ fn profile_native_deepseek_v4_single_command_at_128_and_512() {
     let context_512 = session
         .capture_causal_snapshot()
         .expect("capture context-512 routing state");
+    let endpoint_512 = measure_endpoint(&ctx, &mut session, &context_512, &prompt, 512);
+
+    report("context128", &endpoint_128);
+    report("context512", &endpoint_512);
+}
+
+#[test]
+#[ignore = "focused release profiler requires the local 95.93 GiB DS4 fixture"]
+fn profile_native_deepseek_v4_stage_families_at_128_and_512() {
+    const FORWARD_LIMIT: usize = 532;
+    const REPEATS: usize = 5;
+    const GROUPS: usize = 4;
+
+    #[derive(Debug)]
+    struct EndpointProfile {
+        controls_before: Vec<DeepSeekV4CommandProfile>,
+        rotations: Vec<Vec<DeepSeekV4StageProfile>>,
+        controls_after: Vec<DeepSeekV4CommandProfile>,
+        logits_sha256: String,
+    }
+
+    fn median(values: &[f64]) -> f64 {
+        let mut values = values.to_vec();
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    }
+
+    fn command_gpu_ms(profile: &DeepSeekV4CommandProfile) -> f64 {
+        profile
+            .layers
+            .iter()
+            .map(|layer| layer.command_gpu_ms)
+            .sum()
+    }
+
+    fn stage_command_gpu_ms(profile: &DeepSeekV4StageProfile) -> f64 {
+        profile
+            .layers
+            .iter()
+            .map(|layer| layer.command_gpu_ms)
+            .sum()
+    }
+
+    fn measure_endpoint(
+        ctx: &MetalContext,
+        session: &mut DeepSeekV4PositionZeroForward,
+        snapshot: &DeepSeekV4CausalSnapshot,
+        prompt: &[u32],
+        start_position: usize,
+    ) -> EndpointProfile {
+        let run_control = |session: &mut DeepSeekV4PositionZeroForward| {
+            session
+                .restore_causal_snapshot(snapshot)
+                .expect("restore stage-profile control state");
+            let mut profiles = Vec::with_capacity(REPEATS * GROUPS);
+            for position in start_position..start_position + REPEATS * GROUPS {
+                let profile = session
+                    .forward_token_profiled(ctx, prompt[position])
+                    .expect("execute stage-profile control token");
+                assert_eq!(profile.position as usize, position);
+                profiles.push(profile);
+            }
+            let hash = f32_sha256(
+                &session
+                    .copy_logits_f32()
+                    .expect("copy stage-profile control logits"),
+            );
+            (profiles, hash)
+        };
+
+        session
+            .restore_causal_snapshot(snapshot)
+            .expect("restore stage-profile warm state");
+        session
+            .forward_token(ctx, prompt[start_position])
+            .expect("warm stage-profile endpoint");
+
+        let (controls_before, expected_hash) = run_control(session);
+
+        session
+            .restore_causal_snapshot(snapshot)
+            .expect("restore stage-profile sampled state");
+        let mut rotations = Vec::with_capacity(REPEATS);
+        for repeat_index in 0..REPEATS {
+            let mut repeat = Vec::with_capacity(GROUPS);
+            for step in 0..GROUPS {
+                let group = (repeat_index + step) % GROUPS;
+                let position = start_position + repeat_index * GROUPS + step;
+                let sampled_layers = (0..43)
+                    .filter(|layer| layer % GROUPS == group)
+                    .collect::<Vec<_>>();
+                let profile = session
+                    .forward_token_stage_profiled(ctx, prompt[position], &sampled_layers)
+                    .expect("execute sampled stage-profile token");
+                assert_eq!(profile.position as usize, position);
+                assert_eq!(profile.sampled_layers.len(), sampled_layers.len());
+                assert_eq!(
+                    profile
+                        .sampled_layers
+                        .iter()
+                        .map(|layer| layer.layer)
+                        .collect::<Vec<_>>(),
+                    sampled_layers
+                );
+                for layer in &profile.sampled_layers {
+                    assert_eq!(layer.stages.len(), 10);
+                    assert_eq!(
+                        layer
+                            .stages
+                            .iter()
+                            .map(|stage| stage.kind)
+                            .collect::<Vec<_>>(),
+                        vec![
+                            DeepSeekV4StageKind::AttentionHyperConnection,
+                            DeepSeekV4StageKind::AttentionPrepare,
+                            DeepSeekV4StageKind::AttentionCore,
+                            DeepSeekV4StageKind::AttentionOutput,
+                            DeepSeekV4StageKind::HyperConnectionBridge,
+                            DeepSeekV4StageKind::MoeRouter,
+                            DeepSeekV4StageKind::MoeRoutedExperts,
+                            DeepSeekV4StageKind::MoeSharedExpert,
+                            DeepSeekV4StageKind::MoeCombine,
+                            DeepSeekV4StageKind::LayerTail,
+                        ]
+                    );
+                    assert!(
+                        layer.raw_coverage_assuming_ns.is_finite()
+                            && layer.raw_coverage_assuming_ns > 0.0
+                    );
+                    let accounted = layer.encoder_boundary_ms_scaled
+                        + layer
+                            .stages
+                            .iter()
+                            .map(|stage| stage.duration_ms_scaled)
+                            .sum::<f64>();
+                    assert!((accounted - layer.command_gpu_ms).abs() <= 1e-9);
+                }
+                repeat.push(profile);
+            }
+            rotations.push(repeat);
+        }
+        let sampled_hash = f32_sha256(
+            &session
+                .copy_logits_f32()
+                .expect("copy sampled stage-profile logits"),
+        );
+        assert_eq!(sampled_hash, expected_hash);
+
+        let (controls_after, control_after_hash) = run_control(session);
+        assert_eq!(control_after_hash, expected_hash);
+        EndpointProfile {
+            controls_before,
+            rotations,
+            controls_after,
+            logits_sha256: expected_hash,
+        }
+    }
+
+    fn report(label: &str, endpoint: &EndpointProfile) {
+        let control_before_wall = endpoint
+            .controls_before
+            .iter()
+            .map(|profile| profile.forward_wall_ms)
+            .collect::<Vec<_>>();
+        let control_after_wall = endpoint
+            .controls_after
+            .iter()
+            .map(|profile| profile.forward_wall_ms)
+            .collect::<Vec<_>>();
+        let control_before_gpu = endpoint
+            .controls_before
+            .iter()
+            .map(command_gpu_ms)
+            .collect::<Vec<_>>();
+        let control_after_gpu = endpoint
+            .controls_after
+            .iter()
+            .map(command_gpu_ms)
+            .collect::<Vec<_>>();
+        let sampled_wall = endpoint
+            .rotations
+            .iter()
+            .flatten()
+            .map(|profile| profile.forward_wall_ms)
+            .collect::<Vec<_>>();
+        let sampled_gpu = endpoint
+            .rotations
+            .iter()
+            .flatten()
+            .map(stage_command_gpu_ms)
+            .collect::<Vec<_>>();
+
+        let mut attention_hc_ms = Vec::with_capacity(REPEATS);
+        let mut attention_prepare_ms = Vec::with_capacity(REPEATS);
+        let mut attention_core_ms = Vec::with_capacity(REPEATS);
+        let mut attention_output_ms = Vec::with_capacity(REPEATS);
+        let mut attention_ms = Vec::with_capacity(REPEATS);
+        let mut bridge_ms = Vec::with_capacity(REPEATS);
+        let mut moe_router_ms = Vec::with_capacity(REPEATS);
+        let mut moe_routed_ms = Vec::with_capacity(REPEATS);
+        let mut moe_shared_ms = Vec::with_capacity(REPEATS);
+        let mut moe_combine_ms = Vec::with_capacity(REPEATS);
+        let mut moe_ms = Vec::with_capacity(REPEATS);
+        let mut tail_ms = Vec::with_capacity(REPEATS);
+        let mut boundary_ms = Vec::with_capacity(REPEATS);
+        let mut reconstructed_gpu_ms = Vec::with_capacity(REPEATS);
+        let mut raw_coverage = Vec::with_capacity(REPEATS * 43);
+        for repeat in &endpoint.rotations {
+            let mut stages = [0.0; 10];
+            let mut boundary = 0.0;
+            let mut reconstructed = 0.0;
+            let mut seen = [false; 43];
+            for profile in repeat {
+                for layer in &profile.sampled_layers {
+                    assert!(!std::mem::replace(&mut seen[layer.layer], true));
+                    reconstructed += layer.command_gpu_ms;
+                    boundary += layer.encoder_boundary_ms_scaled;
+                    raw_coverage.push(layer.raw_coverage_assuming_ns);
+                    for stage in &layer.stages {
+                        let index = match stage.kind {
+                            DeepSeekV4StageKind::AttentionHyperConnection => 0,
+                            DeepSeekV4StageKind::AttentionPrepare => 1,
+                            DeepSeekV4StageKind::AttentionCore => 2,
+                            DeepSeekV4StageKind::AttentionOutput => 3,
+                            DeepSeekV4StageKind::HyperConnectionBridge => 4,
+                            DeepSeekV4StageKind::MoeRouter => 5,
+                            DeepSeekV4StageKind::MoeRoutedExperts => 6,
+                            DeepSeekV4StageKind::MoeSharedExpert => 7,
+                            DeepSeekV4StageKind::MoeCombine => 8,
+                            DeepSeekV4StageKind::LayerTail => 9,
+                        };
+                        stages[index] += stage.duration_ms_scaled;
+                    }
+                }
+            }
+            assert!(seen.into_iter().all(|value| value));
+            assert!((stages.iter().sum::<f64>() + boundary - reconstructed).abs() <= 1e-8);
+            attention_hc_ms.push(stages[0]);
+            attention_prepare_ms.push(stages[1]);
+            attention_core_ms.push(stages[2]);
+            attention_output_ms.push(stages[3]);
+            attention_ms.push(stages[0] + stages[1] + stages[2] + stages[3]);
+            bridge_ms.push(stages[4]);
+            moe_router_ms.push(stages[5]);
+            moe_routed_ms.push(stages[6]);
+            moe_shared_ms.push(stages[7]);
+            moe_combine_ms.push(stages[8]);
+            moe_ms.push(stages[5] + stages[6] + stages[7] + stages[8]);
+            tail_ms.push(stages[9]);
+            boundary_ms.push(boundary);
+            reconstructed_gpu_ms.push(reconstructed);
+        }
+        let stage_total_median = median(&reconstructed_gpu_ms);
+        eprintln!(
+            "deepseek_v4 stage_profile {label} control_before_wall_ms={control_before_wall:?} control_before_wall_median_ms={:.3} control_after_wall_ms={control_after_wall:?} control_after_wall_median_ms={:.3} control_before_gpu_ms={control_before_gpu:?} control_before_gpu_median_ms={:.3} control_after_gpu_ms={control_after_gpu:?} control_after_gpu_median_ms={:.3} sampled_wall_ms={sampled_wall:?} sampled_wall_median_ms={:.3} sampled_gpu_ms={sampled_gpu:?} sampled_gpu_median_ms={:.3} reconstructed_gpu_ms={reconstructed_gpu_ms:?} reconstructed_gpu_median_ms={stage_total_median:.3} attention_hc_ms={attention_hc_ms:?} attention_hc_median_ms={:.3} attention_hc_share={:.4} attention_prepare_ms={attention_prepare_ms:?} attention_prepare_median_ms={:.3} attention_prepare_share={:.4} attention_core_ms={attention_core_ms:?} attention_core_median_ms={:.3} attention_core_share={:.4} attention_output_ms={attention_output_ms:?} attention_output_median_ms={:.3} attention_output_share={:.4} attention_ms={attention_ms:?} attention_median_ms={:.3} attention_share={:.4} bridge_ms={bridge_ms:?} bridge_median_ms={:.3} bridge_share={:.4} moe_router_ms={moe_router_ms:?} moe_router_median_ms={:.3} moe_router_share={:.4} moe_routed_ms={moe_routed_ms:?} moe_routed_median_ms={:.3} moe_routed_share={:.4} moe_shared_ms={moe_shared_ms:?} moe_shared_median_ms={:.3} moe_shared_share={:.4} moe_combine_ms={moe_combine_ms:?} moe_combine_median_ms={:.3} moe_combine_share={:.4} moe_ms={moe_ms:?} moe_median_ms={:.3} moe_share={:.4} tail_ms={tail_ms:?} tail_median_ms={:.3} tail_share={:.4} encoder_boundary_ms={boundary_ms:?} encoder_boundary_median_ms={:.3} encoder_boundary_share={:.4} raw_coverage_median={:.4} logits_sha256={}",
+            median(&control_before_wall),
+            median(&control_after_wall),
+            median(&control_before_gpu),
+            median(&control_after_gpu),
+            median(&sampled_wall),
+            median(&sampled_gpu),
+            median(&attention_hc_ms),
+            median(&attention_hc_ms) / stage_total_median,
+            median(&attention_prepare_ms),
+            median(&attention_prepare_ms) / stage_total_median,
+            median(&attention_core_ms),
+            median(&attention_core_ms) / stage_total_median,
+            median(&attention_output_ms),
+            median(&attention_output_ms) / stage_total_median,
+            median(&attention_ms),
+            median(&attention_ms) / stage_total_median,
+            median(&bridge_ms),
+            median(&bridge_ms) / stage_total_median,
+            median(&moe_router_ms),
+            median(&moe_router_ms) / stage_total_median,
+            median(&moe_routed_ms),
+            median(&moe_routed_ms) / stage_total_median,
+            median(&moe_shared_ms),
+            median(&moe_shared_ms) / stage_total_median,
+            median(&moe_combine_ms),
+            median(&moe_combine_ms) / stage_total_median,
+            median(&moe_ms),
+            median(&moe_ms) / stage_total_median,
+            median(&tail_ms),
+            median(&tail_ms) / stage_total_median,
+            median(&boundary_ms),
+            median(&boundary_ms) / stage_total_median,
+            median(&raw_coverage),
+            endpoint.logits_sha256,
+        );
+    }
+
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(model_path.exists(), "missing DS4 model");
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
+    let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
+        &ctx,
+        residency,
+        frozen_model_content_id(),
+    )
+    .expect("build stage-profile session");
+    let prompt = [35, 201, 200, 34].repeat(FORWARD_LIMIT.div_ceil(4));
+
+    session
+        .advance_tokens(&ctx, &prompt[..128])
+        .expect("advance stage profile to context 128");
+    let context_128 = session
+        .capture_causal_snapshot()
+        .expect("capture context-128 stage-profile state");
+    let endpoint_128 = measure_endpoint(&ctx, &mut session, &context_128, &prompt, 128);
+
+    session
+        .restore_causal_snapshot(&context_128)
+        .expect("restore context-128 stage-profile state");
+    for chunk in prompt[128..512].chunks(128) {
+        session
+            .advance_tokens(&ctx, chunk)
+            .expect("advance stage profile to context 512");
+    }
+    let context_512 = session
+        .capture_causal_snapshot()
+        .expect("capture context-512 stage-profile state");
     let endpoint_512 = measure_endpoint(&ctx, &mut session, &context_512, &prompt, 512);
 
     report("context128", &endpoint_128);

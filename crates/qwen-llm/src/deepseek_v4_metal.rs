@@ -27,13 +27,14 @@ use crate::deepseek_v4::{AttentionKind, DeepSeekV4Config, DeepSeekV4Error, DeepS
 use crate::gguf::{GgufError, GgufFile};
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalGgufBacking, MetalMemoryAdmission,
-    MetalMemorySignals, MetalTensor, MetalTensorProvenance, RetainedStorageDisposition,
-    RetainedStorageFallback, RetainedStoragePlan, encode_get_rows_f32, encode_rms_norm_batched_f32,
-    encode_rms_norm_mul_f32, encode_scatter_offset_f32_to_f16, evaluate_metal_memory_admission,
-    host_page_size_bytes, plan_retained_storage,
+    MetalMemorySignals, MetalTensor, MetalTensorProvenance, MetalTimestampSampleBuffer,
+    RetainedStorageDisposition, RetainedStorageFallback, RetainedStoragePlan, encode_get_rows_f32,
+    encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_scatter_offset_f32_to_f16,
+    evaluate_metal_memory_admission, host_page_size_bytes, plan_retained_storage,
 };
 use crate::tensor::{GgmlType, ggml_type_layout};
 use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLSize,
 };
@@ -886,6 +887,7 @@ pub enum DeepSeekV4RoutingKind {
 #[doc(hidden)]
 pub struct DeepSeekV4LayerCommandProfile {
     pub layer: usize,
+    pub attention_kind: AttentionKind,
     pub routing_kind: DeepSeekV4RoutingKind,
     pub encode_cpu_ms: f64,
     pub command_gpu_ms: f64,
@@ -897,6 +899,331 @@ pub struct DeepSeekV4CommandProfile {
     pub position: u32,
     pub forward_wall_ms: f64,
     pub layers: Vec<DeepSeekV4LayerCommandProfile>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum DeepSeekV4StageKind {
+    AttentionHyperConnection,
+    AttentionPrepare,
+    AttentionCore,
+    AttentionOutput,
+    HyperConnectionBridge,
+    MoeRouter,
+    MoeRoutedExperts,
+    MoeSharedExpert,
+    MoeCombine,
+    LayerTail,
+}
+
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub struct DeepSeekV4StageTiming {
+    pub kind: DeepSeekV4StageKind,
+    pub start_timestamp: u64,
+    pub end_timestamp: u64,
+    pub duration_ticks: u64,
+    pub duration_ms_scaled: f64,
+    pub fraction_of_layer_gpu: f64,
+}
+
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub struct DeepSeekV4SampledLayerProfile {
+    pub layer: usize,
+    pub command_gpu_ms: f64,
+    pub sampled_span_ticks: u64,
+    pub raw_span_ms_assuming_ns: f64,
+    pub raw_coverage_assuming_ns: f64,
+    pub encoder_boundary_ms_scaled: f64,
+    pub stages: Vec<DeepSeekV4StageTiming>,
+}
+
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub struct DeepSeekV4StageProfile {
+    pub position: u32,
+    pub forward_wall_ms: f64,
+    pub layers: Vec<DeepSeekV4LayerCommandProfile>,
+    pub sampled_layers: Vec<DeepSeekV4SampledLayerProfile>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeepSeekV4PendingStageSample {
+    layer: usize,
+    kind: DeepSeekV4StageKind,
+    start_sample: usize,
+    end_sample: usize,
+}
+
+const DEEPSEEK_V4_STAGE_KINDS: [DeepSeekV4StageKind; 10] = [
+    DeepSeekV4StageKind::AttentionHyperConnection,
+    DeepSeekV4StageKind::AttentionPrepare,
+    DeepSeekV4StageKind::AttentionCore,
+    DeepSeekV4StageKind::AttentionOutput,
+    DeepSeekV4StageKind::HyperConnectionBridge,
+    DeepSeekV4StageKind::MoeRouter,
+    DeepSeekV4StageKind::MoeRoutedExperts,
+    DeepSeekV4StageKind::MoeSharedExpert,
+    DeepSeekV4StageKind::MoeCombine,
+    DeepSeekV4StageKind::LayerTail,
+];
+
+fn resolve_deepseek_v4_layer_stage_samples(
+    layer: usize,
+    records: &[DeepSeekV4PendingStageSample],
+    timestamps: &[u64],
+    command_gpu_ms: f64,
+) -> Result<DeepSeekV4SampledLayerProfile, DeepSeekV4MetalError> {
+    if records.len() != DEEPSEEK_V4_STAGE_KINDS.len() {
+        return invalid(format!(
+            "DeepSeek V4 sampled layer {layer} produced {} stages, expected {}",
+            records.len(),
+            DEEPSEEK_V4_STAGE_KINDS.len()
+        ));
+    }
+    if !command_gpu_ms.is_finite() || command_gpu_ms <= 0.0 {
+        return invalid(format!(
+            "DeepSeek V4 sampled layer {layer} has invalid command GPU duration {command_gpu_ms}"
+        ));
+    }
+    for (record, expected) in records.iter().zip(DEEPSEEK_V4_STAGE_KINDS) {
+        if record.layer != layer {
+            return invalid(format!(
+                "DeepSeek V4 sampled layer {layer} contains a record for layer {}",
+                record.layer
+            ));
+        }
+        if record.kind != expected {
+            return invalid(format!(
+                "DeepSeek V4 sampled layer {layer} recorded {:?}, expected {expected:?}",
+                record.kind
+            ));
+        }
+        if record.start_sample >= timestamps.len() || record.end_sample >= timestamps.len() {
+            return invalid(format!(
+                "DeepSeek V4 sampled layer {layer} stage {:?} indexes samples {}..{} from {} timestamps",
+                record.kind,
+                record.start_sample,
+                record.end_sample,
+                timestamps.len()
+            ));
+        }
+    }
+
+    let first_timestamp = timestamps[records[0].start_sample];
+    let last_timestamp = timestamps[records[records.len() - 1].end_sample];
+    let sampled_span_ticks = last_timestamp.checked_sub(first_timestamp).ok_or_else(|| {
+        DeepSeekV4MetalError::Invalid(format!(
+            "DeepSeek V4 sampled layer {layer} returned non-monotonic span timestamps"
+        ))
+    })?;
+    if sampled_span_ticks == 0 {
+        return invalid(format!(
+            "DeepSeek V4 sampled layer {layer} returned a zero timestamp span"
+        ));
+    }
+
+    let scale_ms_per_tick = command_gpu_ms / sampled_span_ticks as f64;
+    let mut stage_ticks = 0u64;
+    let mut boundary_ticks = 0u64;
+    let mut stages = Vec::with_capacity(records.len());
+    let mut previous_end = None;
+    for record in records {
+        let start_timestamp = timestamps[record.start_sample];
+        let end_timestamp = timestamps[record.end_sample];
+        let duration_ticks = end_timestamp.checked_sub(start_timestamp).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "DeepSeek V4 sampled layer {layer} stage {:?} returned inverted timestamps",
+                record.kind
+            ))
+        })?;
+        if let Some(previous_end) = previous_end {
+            let gap = start_timestamp.checked_sub(previous_end).ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(format!(
+                    "DeepSeek V4 sampled layer {layer} stage {:?} overlaps its predecessor",
+                    record.kind
+                ))
+            })?;
+            boundary_ticks = boundary_ticks.checked_add(gap).ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(format!(
+                    "DeepSeek V4 sampled layer {layer} encoder-gap tick total overflow"
+                ))
+            })?;
+        }
+        previous_end = Some(end_timestamp);
+        stage_ticks = stage_ticks.checked_add(duration_ticks).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "DeepSeek V4 sampled layer {layer} stage tick total overflow"
+            ))
+        })?;
+        let duration_ms_scaled = duration_ticks as f64 * scale_ms_per_tick;
+        stages.push(DeepSeekV4StageTiming {
+            kind: record.kind,
+            start_timestamp,
+            end_timestamp,
+            duration_ticks,
+            duration_ms_scaled,
+            fraction_of_layer_gpu: duration_ms_scaled / command_gpu_ms,
+        });
+    }
+    let accounted_ticks = stage_ticks.checked_add(boundary_ticks).ok_or_else(|| {
+        DeepSeekV4MetalError::Invalid(format!(
+            "DeepSeek V4 sampled layer {layer} accounted tick total overflow"
+        ))
+    })?;
+    if accounted_ticks != sampled_span_ticks {
+        return invalid(format!(
+            "DeepSeek V4 sampled layer {layer} accounts for {accounted_ticks} ticks across a {sampled_span_ticks}-tick span"
+        ));
+    }
+    let raw_span_ms_assuming_ns = sampled_span_ticks as f64 * 1e-6;
+    Ok(DeepSeekV4SampledLayerProfile {
+        layer,
+        command_gpu_ms,
+        sampled_span_ticks,
+        raw_span_ms_assuming_ns,
+        raw_coverage_assuming_ns: raw_span_ms_assuming_ns / command_gpu_ms,
+        encoder_boundary_ms_scaled: boundary_ticks as f64 * scale_ms_per_tick,
+        stages,
+    })
+}
+
+struct DeepSeekV4StageRecorder {
+    samples: MetalTimestampSampleBuffer,
+    sampled_layer_mask: [bool; DEEPSEEK_V4_LAYER_COUNT],
+    next_sample: usize,
+    records: Vec<DeepSeekV4PendingStageSample>,
+    command_gpu_ms: [Option<f64>; DEEPSEEK_V4_LAYER_COUNT],
+    resolved: Option<Vec<DeepSeekV4SampledLayerProfile>>,
+}
+
+impl DeepSeekV4StageRecorder {
+    const STAGES_PER_LAYER: usize = DEEPSEEK_V4_STAGE_KINDS.len();
+
+    fn new(ctx: &MetalContext, sampled_layers: &[usize]) -> Result<Self, DeepSeekV4MetalError> {
+        if sampled_layers.is_empty() {
+            return invalid("DeepSeek V4 stage profile requires at least one sampled layer");
+        }
+        let mut sampled_layer_mask = [false; DEEPSEEK_V4_LAYER_COUNT];
+        for &layer in sampled_layers {
+            if layer >= DEEPSEEK_V4_LAYER_COUNT {
+                return invalid(format!(
+                    "DeepSeek V4 stage-profile layer {layer} is outside 0..{DEEPSEEK_V4_LAYER_COUNT}"
+                ));
+            }
+            if std::mem::replace(&mut sampled_layer_mask[layer], true) {
+                return invalid(format!(
+                    "DeepSeek V4 stage-profile layer {layer} was requested twice"
+                ));
+            }
+        }
+        let sample_count = sampled_layers
+            .len()
+            .checked_mul(Self::STAGES_PER_LAYER)
+            .and_then(|count| count.checked_mul(2))
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid("DeepSeek V4 stage sample count overflow".into())
+            })?;
+        Ok(Self {
+            samples: ctx.timestamp_sample_buffer(sample_count)?,
+            sampled_layer_mask,
+            next_sample: 0,
+            records: Vec::with_capacity(sample_count / 2),
+            command_gpu_ms: [None; DEEPSEEK_V4_LAYER_COUNT],
+            resolved: None,
+        })
+    }
+
+    fn samples_layer(&self, layer: usize) -> bool {
+        self.sampled_layer_mask[layer]
+    }
+
+    fn begin(
+        &mut self,
+        command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        layer: usize,
+        kind: DeepSeekV4StageKind,
+    ) -> Result<KernelEncoder, DeepSeekV4MetalError> {
+        if !self.samples_layer(layer) {
+            return invalid(format!(
+                "DeepSeek V4 stage recorder was asked to sample unselected layer {layer}"
+            ));
+        }
+        let start_sample = self.next_sample;
+        let end_sample = start_sample.checked_add(1).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("DeepSeek V4 stage sample index overflow".into())
+        })?;
+        if end_sample >= self.samples.sample_count() {
+            return invalid(format!(
+                "DeepSeek V4 stage timestamp buffer exhausted at sample {end_sample}"
+            ));
+        }
+        self.next_sample = end_sample + 1;
+        self.records.push(DeepSeekV4PendingStageSample {
+            layer,
+            kind,
+            start_sample,
+            end_sample,
+        });
+        Ok(KernelEncoder::begin_sampled(
+            command,
+            &self.samples,
+            start_sample,
+            end_sample,
+            false,
+        ))
+    }
+
+    fn record_command_gpu_ms(&mut self, layer: usize, command_gpu_ms: f64) {
+        if self.samples_layer(layer) {
+            self.command_gpu_ms[layer] = Some(command_gpu_ms);
+        }
+    }
+
+    fn resolve(&mut self, ctx: &MetalContext) -> Result<(), DeepSeekV4MetalError> {
+        let timestamps = ctx.resolve_timestamp_samples(&self.samples, self.next_sample)?;
+        let mut resolved = Vec::with_capacity(
+            self.sampled_layer_mask
+                .iter()
+                .filter(|sampled| **sampled)
+                .count(),
+        );
+        for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
+            if !self.samples_layer(layer) {
+                continue;
+            }
+            let records = self
+                .records
+                .iter()
+                .filter(|record| record.layer == layer)
+                .copied()
+                .collect::<Vec<_>>();
+            let command_gpu_ms = self.command_gpu_ms[layer].ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(format!(
+                    "DeepSeek V4 sampled layer {layer} has no command GPU duration"
+                ))
+            })?;
+            resolved.push(resolve_deepseek_v4_layer_stage_samples(
+                layer,
+                &records,
+                &timestamps,
+                command_gpu_ms,
+            )?);
+        }
+        self.resolved = Some(resolved);
+        Ok(())
+    }
+
+    fn take_resolved(
+        &mut self,
+    ) -> Result<Vec<DeepSeekV4SampledLayerProfile>, DeepSeekV4MetalError> {
+        self.resolved.take().ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "DeepSeek V4 stage samples were not resolved before forward completion".into(),
+            )
+        })
+    }
 }
 
 impl DeepSeekV4CommandProfile {
@@ -1138,7 +1465,7 @@ impl DeepSeekV4Session {
         token_id: u32,
         layer_completed: impl FnMut(usize),
     ) -> Result<&MetalTensor, DeepSeekV4MetalError> {
-        self.forward_token_with_progress_and_profile(ctx, token_id, layer_completed, None)
+        self.forward_token_with_progress_and_profile(ctx, token_id, layer_completed, None, None)
     }
 
     /// Execute one singleton token while timing the one-command-per-layer path.
@@ -1152,12 +1479,48 @@ impl DeepSeekV4Session {
         let position = self.phase.next_position();
         let started = std::time::Instant::now();
         let mut layers = Vec::with_capacity(DEEPSEEK_V4_LAYER_COUNT);
-        self.forward_token_with_progress_and_profile(ctx, token_id, |_| {}, Some(&mut layers))?;
+        self.forward_token_with_progress_and_profile(
+            ctx,
+            token_id,
+            |_| {},
+            Some(&mut layers),
+            None,
+        )?;
         debug_assert_eq!(layers.len(), DEEPSEEK_V4_LAYER_COUNT);
         Ok(DeepSeekV4CommandProfile {
             position,
             forward_wall_ms: started.elapsed().as_secs_f64() * 1e3,
             layers,
+        })
+    }
+
+    /// Execute one singleton token while sampling ten encoder-delimited stages
+    /// in only the requested layers. Unsampled layers retain the production
+    /// one-encoder command shape.
+    #[doc(hidden)]
+    pub fn forward_token_stage_profiled(
+        &mut self,
+        ctx: &MetalContext,
+        token_id: u32,
+        sampled_layers: &[usize],
+    ) -> Result<DeepSeekV4StageProfile, DeepSeekV4MetalError> {
+        let mut recorder = DeepSeekV4StageRecorder::new(ctx, sampled_layers)?;
+        let position = self.phase.next_position();
+        let started = std::time::Instant::now();
+        let mut layers = Vec::with_capacity(DEEPSEEK_V4_LAYER_COUNT);
+        self.forward_token_with_progress_and_profile(
+            ctx,
+            token_id,
+            |_| {},
+            Some(&mut layers),
+            Some(&mut recorder),
+        )?;
+        debug_assert_eq!(layers.len(), DEEPSEEK_V4_LAYER_COUNT);
+        Ok(DeepSeekV4StageProfile {
+            position,
+            forward_wall_ms: started.elapsed().as_secs_f64() * 1e3,
+            layers,
+            sampled_layers: recorder.take_resolved()?,
         })
     }
 
@@ -1167,6 +1530,7 @@ impl DeepSeekV4Session {
         token_id: u32,
         mut layer_completed: impl FnMut(usize),
         routing_profile: Option<&mut Vec<DeepSeekV4LayerCommandProfile>>,
+        stage_recorder: Option<&mut DeepSeekV4StageRecorder>,
     ) -> Result<&MetalTensor, DeepSeekV4MetalError> {
         if ctx.device.registryID() != self.device_registry_id {
             return invalid(format!(
@@ -1198,6 +1562,7 @@ impl DeepSeekV4Session {
             position,
             &mut layer_completed,
             routing_profile,
+            stage_recorder,
         );
         match result {
             Ok(()) => {
@@ -1259,6 +1624,7 @@ impl DeepSeekV4Session {
         position: u32,
         layer_completed: &mut impl FnMut(usize),
         mut routing_profile: Option<&mut Vec<DeepSeekV4LayerCommandProfile>>,
+        mut stage_recorder: Option<&mut DeepSeekV4StageRecorder>,
     ) -> Result<(), DeepSeekV4MetalError> {
         let rms_eps = self.residency.config().attention_rms_epsilon;
         let hc_eps = self.residency.config().hyper_connection_epsilon;
@@ -1272,200 +1638,290 @@ impl DeepSeekV4Session {
                     "failed to allocate layer {layer} command buffer"
                 ))
             })?;
-            let encoder = KernelEncoder::begin(&command);
-            let encode_result = (|| {
-                if layer == 0 {
-                    encode_get_rows_f32(
-                        ctx,
-                        &encoder,
-                        self.residency.require_tensor("token_embd.weight")?,
-                        &self.token_id,
-                        &self.embedding,
-                        1,
-                        DEEPSEEK_V4_HIDDEN_SIZE,
-                    )?;
-                    self.hyper_connection.encode_initial_repeat(
-                        ctx,
-                        &encoder,
-                        &self.embedding,
-                        &self.residual_primary,
-                    )?;
-                }
-
-                self.hyper_connection.encode_pre(
+            let stage_sampled = stage_recorder
+                .as_ref()
+                .is_some_and(|recorder| recorder.samples_layer(layer));
+            let mut encoder = if stage_sampled {
+                stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .begin(
+                        &command,
+                        layer,
+                        DeepSeekV4StageKind::AttentionHyperConnection,
+                    )?
+            } else {
+                KernelEncoder::begin(&command)
+            };
+            if layer == 0 {
+                encode_get_rows_f32(
                     ctx,
                     &encoder,
+                    self.residency.require_tensor("token_embd.weight")?,
+                    &self.token_id,
+                    &self.embedding,
+                    1,
+                    DEEPSEEK_V4_HIDDEN_SIZE,
+                )?;
+                self.hyper_connection.encode_initial_repeat(
+                    ctx,
+                    &encoder,
+                    &self.embedding,
                     &self.residual_primary,
-                    self.layer_tensor(layer, "hc_attn_fn.weight")?,
-                    self.layer_tensor(layer, "hc_attn_scale.weight")?,
-                    self.layer_tensor(layer, "hc_attn_base.weight")?,
-                    rms_eps,
-                    hc_eps,
                 )?;
-                self.attention.encode_prepare_local_f16(
+            }
+
+            self.hyper_connection.encode_pre(
+                ctx,
+                &encoder,
+                &self.residual_primary,
+                self.layer_tensor(layer, "hc_attn_fn.weight")?,
+                self.layer_tensor(layer, "hc_attn_scale.weight")?,
+                self.layer_tensor(layer, "hc_attn_base.weight")?,
+                rms_eps,
+                hc_eps,
+            )?;
+            if stage_sampled {
+                encoder.end();
+                encoder = stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .begin(&command, layer, DeepSeekV4StageKind::AttentionPrepare)?;
+            }
+            self.attention.encode_prepare_local_f16(
+                ctx,
+                &encoder,
+                self.hyper_connection.collapsed_input(),
+                self.layer_tensor(layer, "attn_norm.weight")?,
+                self.layer_tensor(layer, "attn_q_a.weight")?,
+                self.layer_tensor(layer, "attn_q_a_norm.weight")?,
+                self.layer_tensor(layer, "attn_q_b.weight")?,
+                self.layer_tensor(layer, "attn_kv.weight")?,
+                self.layer_tensor(layer, "attn_kv_a_norm.weight")?,
+                &raw_cache,
+                position,
+                rope,
+                rms_eps,
+            )?;
+            self.compressor_frontiers.encode_layer(
+                ctx,
+                &encoder,
+                &self.residency,
+                layer,
+                position,
+                self.attention.normalized_input(),
+                rope,
+                rms_eps,
+            )?;
+            if stage_sampled {
+                encoder.end();
+                encoder = stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .begin(&command, layer, DeepSeekV4StageKind::AttentionCore)?;
+            }
+            let csa_rows = self.compressor_frontiers.csa_rows(layer, position)?;
+            if let Some(rows) = csa_rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
+                self.sparse_csa.encode(
                     ctx,
                     &encoder,
-                    self.hyper_connection.collapsed_input(),
-                    self.layer_tensor(layer, "attn_norm.weight")?,
-                    self.layer_tensor(layer, "attn_q_a.weight")?,
-                    self.layer_tensor(layer, "attn_q_a_norm.weight")?,
-                    self.layer_tensor(layer, "attn_q_b.weight")?,
-                    self.layer_tensor(layer, "attn_kv.weight")?,
-                    self.layer_tensor(layer, "attn_kv_a_norm.weight")?,
-                    &raw_cache,
-                    position,
-                    rope,
-                    rms_eps,
-                )?;
-                self.compressor_frontiers.encode_layer(
-                    ctx,
-                    &encoder,
-                    &self.residency,
-                    layer,
-                    position,
+                    self.attention.q_lora(),
                     self.attention.normalized_input(),
+                    self.layer_tensor(layer, "indexer.attn_q_b.weight")?,
+                    self.layer_tensor(layer, "indexer.proj.weight")?,
+                    rows,
+                    position,
                     rope,
-                    rms_eps,
                 )?;
-                let csa_rows = self.compressor_frontiers.csa_rows(layer, position)?;
-                let attention_output = if let Some(rows) =
-                    csa_rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K)
-                {
-                    self.sparse_csa.encode(
-                        ctx,
-                        &encoder,
-                        self.attention.q_lora(),
-                        self.attention.normalized_input(),
-                        self.layer_tensor(layer, "indexer.attn_q_b.weight")?,
-                        self.layer_tensor(layer, "indexer.proj.weight")?,
-                        rows,
-                        position,
-                        rope,
-                    )?;
-                    self.attention.encode_finish_selected_f16(
-                        ctx,
-                        &encoder,
-                        &raw_cache,
-                        rows,
-                        &self.sparse_csa,
-                        self.layer_tensor(layer, "attn_sinks.weight")?,
-                        self.layer_tensor(layer, "attn_output_a.weight")?,
-                        self.layer_tensor(layer, "attn_output_b.weight")?,
-                        position,
-                        rope,
-                    )?
-                } else {
-                    let compressed = self.compressor_frontiers.attention_rows(layer, position)?;
-                    self.attention.encode_finish_dense_f16(
-                        ctx,
-                        &encoder,
-                        &raw_cache,
-                        compressed,
-                        self.residency.config().attention_kinds[layer],
-                        self.layer_tensor(layer, "attn_sinks.weight")?,
-                        self.layer_tensor(layer, "attn_output_a.weight")?,
-                        self.layer_tensor(layer, "attn_output_b.weight")?,
-                        position,
-                        rope,
-                    )?
-                };
-                self.hyper_connection.encode_post(
+                self.attention.encode_selected_attention_f16(
                     ctx,
                     &encoder,
-                    attention_output,
+                    &raw_cache,
+                    rows,
+                    &self.sparse_csa,
+                    self.layer_tensor(layer, "attn_sinks.weight")?,
+                    position,
+                    rope,
+                )?;
+            } else {
+                let compressed = self.compressor_frontiers.attention_rows(layer, position)?;
+                self.attention.encode_dense_attention_f16(
+                    ctx,
+                    &encoder,
+                    &raw_cache,
+                    compressed,
+                    self.residency.config().attention_kinds[layer],
+                    self.layer_tensor(layer, "attn_sinks.weight")?,
+                    position,
+                    rope,
+                )?;
+            }
+            if stage_sampled {
+                encoder.end();
+                encoder = stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .begin(&command, layer, DeepSeekV4StageKind::AttentionOutput)?;
+            }
+            let attention_output = self.attention.encode_attention_output(
+                ctx,
+                &encoder,
+                self.layer_tensor(layer, "attn_output_a.weight")?,
+                self.layer_tensor(layer, "attn_output_b.weight")?,
+                position,
+                rope,
+            )?;
+            if stage_sampled {
+                encoder.end();
+                encoder = stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .begin(&command, layer, DeepSeekV4StageKind::HyperConnectionBridge)?;
+            }
+            self.hyper_connection.encode_post(
+                ctx,
+                &encoder,
+                attention_output,
+                &self.residual_primary,
+                &self.residual_secondary,
+            )?;
+            self.hyper_connection.encode_pre(
+                ctx,
+                &encoder,
+                &self.residual_secondary,
+                self.layer_tensor(layer, "hc_ffn_fn.weight")?,
+                self.layer_tensor(layer, "hc_ffn_scale.weight")?,
+                self.layer_tensor(layer, "hc_ffn_base.weight")?,
+                rms_eps,
+                hc_eps,
+            )?;
+            if stage_sampled {
+                encoder.end();
+                encoder = stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .begin(&command, layer, DeepSeekV4StageKind::MoeRouter)?;
+            }
+            self.moe.encode_router(
+                ctx,
+                &encoder,
+                self.hyper_connection.collapsed_input(),
+                self.layer_tensor(layer, "ffn_norm.weight")?,
+                self.layer_tensor(layer, "ffn_gate_inp.weight")?,
+                rms_eps,
+            )?;
+            if layer < self.residency.config().hash_layer_count as usize {
+                self.moe.encode_route_hash_gpu(
+                    ctx,
+                    &encoder,
+                    token_id as usize,
+                    self.layer_tensor(layer, "ffn_gate_tid2eid.weight")?,
+                )?;
+            } else {
+                self.moe.encode_route_learned_gpu(
+                    ctx,
+                    &encoder,
+                    self.layer_tensor(layer, "exp_probs_b.bias")?,
+                )?;
+            }
+            self.moe.validate_indexed_experts(
+                self.layer_tensor(layer, "ffn_gate_exps.weight")?,
+                self.layer_tensor(layer, "ffn_up_exps.weight")?,
+                self.layer_tensor(layer, "ffn_down_exps.weight")?,
+                self.layer_tensor(layer, "ffn_gate_shexp.weight")?,
+                self.layer_tensor(layer, "ffn_up_shexp.weight")?,
+                self.layer_tensor(layer, "ffn_down_shexp.weight")?,
+                self.residency.config().swiglu_clamp_experts[layer],
+                self.residency.config().swiglu_clamp_shared[layer],
+            )?;
+            if stage_sampled {
+                encoder.end();
+                encoder = stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .begin(&command, layer, DeepSeekV4StageKind::MoeRoutedExperts)?;
+            }
+            self.moe.encode_routed_experts_indexed(
+                ctx,
+                &encoder,
+                self.layer_tensor(layer, "ffn_gate_exps.weight")?,
+                self.layer_tensor(layer, "ffn_up_exps.weight")?,
+                self.layer_tensor(layer, "ffn_down_exps.weight")?,
+                self.residency.config().swiglu_clamp_experts[layer],
+            )?;
+            if stage_sampled {
+                encoder.end();
+                encoder = stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .begin(&command, layer, DeepSeekV4StageKind::MoeSharedExpert)?;
+            }
+            self.moe.encode_shared_expert(
+                ctx,
+                &encoder,
+                self.layer_tensor(layer, "ffn_gate_shexp.weight")?,
+                self.layer_tensor(layer, "ffn_up_shexp.weight")?,
+                self.layer_tensor(layer, "ffn_down_shexp.weight")?,
+                self.residency.config().swiglu_clamp_shared[layer],
+            )?;
+            if stage_sampled {
+                encoder.end();
+                encoder = stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .begin(&command, layer, DeepSeekV4StageKind::MoeCombine)?;
+            }
+            let moe_output = self.moe.encode_expert_combine(ctx, &encoder)?;
+            if stage_sampled {
+                encoder.end();
+                encoder = stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .begin(&command, layer, DeepSeekV4StageKind::LayerTail)?;
+            }
+            self.hyper_connection.encode_post(
+                ctx,
+                &encoder,
+                moe_output,
+                &self.residual_secondary,
+                &self.residual_primary,
+            )?;
+
+            if layer + 1 == DEEPSEEK_V4_LAYER_COUNT {
+                self.hyper_connection.encode_head(
+                    ctx,
+                    &encoder,
                     &self.residual_primary,
-                    &self.residual_secondary,
-                )?;
-                self.hyper_connection.encode_pre(
-                    ctx,
-                    &encoder,
-                    &self.residual_secondary,
-                    self.layer_tensor(layer, "hc_ffn_fn.weight")?,
-                    self.layer_tensor(layer, "hc_ffn_scale.weight")?,
-                    self.layer_tensor(layer, "hc_ffn_base.weight")?,
+                    self.residency.require_tensor("output_hc_fn.weight")?,
+                    self.residency.require_tensor("output_hc_scale.weight")?,
+                    self.residency.require_tensor("output_hc_base.weight")?,
+                    &self.final_hidden,
                     rms_eps,
                     hc_eps,
                 )?;
-                self.moe.encode_router(
+                encode_rms_norm_mul_f32(
                     ctx,
                     &encoder,
-                    self.hyper_connection.collapsed_input(),
-                    self.layer_tensor(layer, "ffn_norm.weight")?,
-                    self.layer_tensor(layer, "ffn_gate_inp.weight")?,
+                    &self.final_hidden,
+                    self.residency.require_tensor("output_norm.weight")?,
+                    &self.final_normalized_hidden,
                     rms_eps,
                 )?;
-                if layer < self.residency.config().hash_layer_count as usize {
-                    self.moe.encode_route_hash_gpu(
-                        ctx,
-                        &encoder,
-                        token_id as usize,
-                        self.layer_tensor(layer, "ffn_gate_tid2eid.weight")?,
-                    )?;
-                } else {
-                    self.moe.encode_route_learned_gpu(
-                        ctx,
-                        &encoder,
-                        self.layer_tensor(layer, "exp_probs_b.bias")?,
-                    )?;
-                }
-                let moe_output = self.moe.encode_experts_indexed(
+                encode_projection(
                     ctx,
                     &encoder,
-                    self.layer_tensor(layer, "ffn_gate_exps.weight")?,
-                    self.layer_tensor(layer, "ffn_up_exps.weight")?,
-                    self.layer_tensor(layer, "ffn_down_exps.weight")?,
-                    self.layer_tensor(layer, "ffn_gate_shexp.weight")?,
-                    self.layer_tensor(layer, "ffn_up_shexp.weight")?,
-                    self.layer_tensor(layer, "ffn_down_shexp.weight")?,
-                    self.residency.config().swiglu_clamp_experts[layer],
-                    self.residency.config().swiglu_clamp_shared[layer],
+                    self.residency.require_tensor("output.weight")?,
+                    &self.final_normalized_hidden,
+                    &self.logits,
+                    DEEPSEEK_V4_HIDDEN_SIZE,
+                    DEEPSEEK_V4_VOCAB_SIZE,
+                    "output logits",
                 )?;
-                self.hyper_connection.encode_post(
-                    ctx,
-                    &encoder,
-                    moe_output,
-                    &self.residual_secondary,
-                    &self.residual_primary,
-                )?;
-
-                if layer + 1 == DEEPSEEK_V4_LAYER_COUNT {
-                    self.hyper_connection.encode_head(
-                        ctx,
-                        &encoder,
-                        &self.residual_primary,
-                        self.residency.require_tensor("output_hc_fn.weight")?,
-                        self.residency.require_tensor("output_hc_scale.weight")?,
-                        self.residency.require_tensor("output_hc_base.weight")?,
-                        &self.final_hidden,
-                        rms_eps,
-                        hc_eps,
-                    )?;
-                    encode_rms_norm_mul_f32(
-                        ctx,
-                        &encoder,
-                        &self.final_hidden,
-                        self.residency.require_tensor("output_norm.weight")?,
-                        &self.final_normalized_hidden,
-                        rms_eps,
-                    )?;
-                    encode_projection(
-                        ctx,
-                        &encoder,
-                        self.residency.require_tensor("output.weight")?,
-                        &self.final_normalized_hidden,
-                        &self.logits,
-                        DEEPSEEK_V4_HIDDEN_SIZE,
-                        DEEPSEEK_V4_VOCAB_SIZE,
-                        "output logits",
-                    )?;
-                }
-                Ok::<(), DeepSeekV4MetalError>(())
-            })();
+            }
             encoder.end();
             let encode_cpu_ms = encode_started
                 .map(|started| started.elapsed().as_secs_f64() * 1e3)
                 .unwrap_or_default();
-            encode_result?;
             command.commit();
             command.waitUntilCompleted();
             if let Some(error) = command.error() {
@@ -1498,27 +1954,47 @@ impl DeepSeekV4Session {
                     .capture_layer(layer, csa_decision, route)?;
             }
 
-            if let Some(profile) = routing_profile.as_deref_mut() {
+            let command_gpu_ms = if routing_profile.is_some() || stage_sampled {
                 let gpu_seconds = command.GPUEndTime() - command.GPUStartTime();
-                if !gpu_seconds.is_finite() || gpu_seconds < 0.0 {
+                if !gpu_seconds.is_finite() || gpu_seconds <= 0.0 {
                     return invalid(format!(
                         "layer {layer} returned invalid Metal command timestamps: ({}, {})",
                         command.GPUStartTime(),
                         command.GPUEndTime()
                     ));
                 }
+                Some(gpu_seconds * 1e3)
+            } else {
+                None
+            };
+            if let Some(profile) = routing_profile.as_deref_mut() {
                 profile.push(DeepSeekV4LayerCommandProfile {
                     layer,
+                    attention_kind: self.residency.config().attention_kinds[layer],
                     routing_kind: if layer < self.residency.config().hash_layer_count as usize {
                         DeepSeekV4RoutingKind::Hash
                     } else {
                         DeepSeekV4RoutingKind::Learned
                     },
                     encode_cpu_ms,
-                    command_gpu_ms: gpu_seconds * 1e3,
+                    command_gpu_ms: command_gpu_ms
+                        .expect("profiled command requires a GPU duration"),
                 });
             }
+            if stage_sampled {
+                stage_recorder
+                    .as_deref_mut()
+                    .expect("sampled layer requires a stage recorder")
+                    .record_command_gpu_ms(
+                        layer,
+                        command_gpu_ms.expect("sampled command requires a GPU duration"),
+                    );
+            }
             layer_completed(layer);
+        }
+
+        if let Some(recorder) = stage_recorder.as_deref_mut() {
+            recorder.resolve(ctx)?;
         }
 
         #[cfg(feature = "dsv4-diagnostics")]
@@ -2879,19 +3355,17 @@ impl DeepSeekV4PositionZeroAttentionScratch {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn encode_finish_dense_f16<'a>(
-        &'a self,
+    fn encode_dense_attention_f16(
+        &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
         raw_cache: &MetalTensor,
         compressed: Option<DeepSeekV4PublishedRows<'_>>,
         kind: AttentionKind,
         sinks: &MetalTensor,
-        output_a: &MetalTensor,
-        output_b: &MetalTensor,
         position: u32,
         rope: DeepSeekV4RopeParameters,
-    ) -> Result<&'a MetalTensor, DeepSeekV4MetalError> {
+    ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_attention_finish")?;
         let c = self.config;
         let dims = c.checked()?;
@@ -2904,18 +3378,6 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             "local raw cache",
         )?;
         validate_f32(sinks, &[c.head_count as u64], false, "attention sinks")?;
-        validate_matvec_weight(
-            output_a,
-            dims.group_width,
-            dims.low_rank_width,
-            "output A weight",
-        )?;
-        validate_matvec_weight(
-            output_b,
-            dims.low_rank_width,
-            c.hidden_size,
-            "output B weight",
-        )?;
         if let Some(rows) = compressed {
             validate_f16(
                 rows.cache,
@@ -2972,23 +3434,21 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                 position, 1, c,
             )?;
         }
-        self.encode_attention_output(ctx, enc, output_a, output_b, position, rope)
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn encode_finish_selected_f16<'a>(
-        &'a self,
+    fn encode_selected_attention_f16(
+        &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
         raw_cache: &MetalTensor,
         rows: DeepSeekV4CsaRows<'_>,
         selection: &DeepSeekV4SparseCsaScratch,
         sinks: &MetalTensor,
-        output_a: &MetalTensor,
-        output_b: &MetalTensor,
         position: u32,
         rope: DeepSeekV4RopeParameters,
-    ) -> Result<&'a MetalTensor, DeepSeekV4MetalError> {
+    ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_selected_attention_finish")?;
         let c = self.config;
         let dims = c.checked()?;
@@ -3026,7 +3486,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             DEEPSEEK_V4_CSA_TOP_K,
             c,
         )?;
-        self.encode_attention_output(ctx, enc, output_a, output_b, position, rope)
+        Ok(())
     }
 
     fn encode_attention_output<'a>(
@@ -4049,10 +4509,8 @@ impl DeepSeekV4MoeScratch {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn encode_experts_indexed<'a>(
-        &'a self,
-        ctx: &MetalContext,
-        enc: &KernelEncoder,
+    fn validate_indexed_experts(
+        &self,
         gate_bank: &MetalTensor,
         up_bank: &MetalTensor,
         down_bank: &MetalTensor,
@@ -4061,8 +4519,7 @@ impl DeepSeekV4MoeScratch {
         shared_down: &MetalTensor,
         expert_clamp: f32,
         shared_clamp: f32,
-    ) -> Result<&'a MetalTensor, DeepSeekV4MetalError> {
-        require_serial(enc, "deepseek_v4_moe_experts_indexed")?;
+    ) -> Result<(), DeepSeekV4MetalError> {
         if !expert_clamp.is_finite() || expert_clamp <= 0.0 {
             return invalid("indexed MoE expert clamp must be finite and positive");
         }
@@ -4095,7 +4552,20 @@ impl DeepSeekV4MoeScratch {
         validate_matvec_weight(shared_gate, c.hidden_size, c.ffn_size, "shared gate")?;
         validate_matvec_weight(shared_up, c.hidden_size, c.ffn_size, "shared up")?;
         validate_matvec_weight(shared_down, c.ffn_size, c.hidden_size, "shared down")?;
+        Ok(())
+    }
 
+    fn encode_routed_experts_indexed(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        gate_bank: &MetalTensor,
+        up_bank: &MetalTensor,
+        down_bank: &MetalTensor,
+        expert_clamp: f32,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        require_serial(enc, "deepseek_v4_moe_routed_experts_indexed")?;
+        let c = self.config;
         for slot in 0..c.top_k {
             encode_ds4_indexed_expert_projection(
                 ctx,
@@ -4144,7 +4614,20 @@ impl DeepSeekV4MoeScratch {
                 "indexed routed down",
             )?;
         }
+        Ok(())
+    }
 
+    fn encode_shared_expert(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        shared_gate: &MetalTensor,
+        shared_up: &MetalTensor,
+        shared_down: &MetalTensor,
+        shared_clamp: f32,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        require_serial(enc, "deepseek_v4_moe_shared_expert")?;
+        let c = self.config;
         encode_projection(
             ctx,
             enc,
@@ -4176,6 +4659,16 @@ impl DeepSeekV4MoeScratch {
             c.hidden_size,
             "shared down",
         )?;
+        Ok(())
+    }
+
+    fn encode_expert_combine<'a>(
+        &'a self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+    ) -> Result<&'a MetalTensor, DeepSeekV4MetalError> {
+        require_serial(enc, "deepseek_v4_moe_expert_combine")?;
+        let c = self.config;
         crate::metal::encode_moe_weighted_sum_f32(
             ctx,
             enc,
@@ -4193,6 +4686,36 @@ impl DeepSeekV4MoeScratch {
             &self.final_output,
         )?;
         Ok(&self.final_output)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn encode_experts_indexed<'a>(
+        &'a self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        gate_bank: &MetalTensor,
+        up_bank: &MetalTensor,
+        down_bank: &MetalTensor,
+        shared_gate: &MetalTensor,
+        shared_up: &MetalTensor,
+        shared_down: &MetalTensor,
+        expert_clamp: f32,
+        shared_clamp: f32,
+    ) -> Result<&'a MetalTensor, DeepSeekV4MetalError> {
+        self.validate_indexed_experts(
+            gate_bank,
+            up_bank,
+            down_bank,
+            shared_gate,
+            shared_up,
+            shared_down,
+            expert_clamp,
+            shared_clamp,
+        )?;
+        self.encode_routed_experts_indexed(ctx, enc, gate_bank, up_bank, down_bank, expert_clamp)?;
+        self.encode_shared_expert(ctx, enc, shared_gate, shared_up, shared_down, shared_clamp)?;
+        self.encode_expert_combine(ctx, enc)
     }
 
     fn store_route(
@@ -14385,6 +14908,88 @@ mod tests {
             &read_f32(scratch.weights()),
             &expected.weights,
             1e-6,
+        );
+    }
+
+    #[test]
+    fn stage_recorder_rejects_empty_duplicate_and_out_of_range_layers() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let reject = |layers: &[usize]| match DeepSeekV4StageRecorder::new(&ctx, layers) {
+            Ok(_) => panic!("stage recorder unexpectedly accepted {layers:?}"),
+            Err(error) => error.to_string(),
+        };
+        assert!(reject(&[]).contains("at least one sampled layer"));
+        assert!(reject(&[4, 4]).contains("requested twice"));
+        assert!(reject(&[DEEPSEEK_V4_LAYER_COUNT]).contains("outside"));
+        let recorder = DeepSeekV4StageRecorder::new(&ctx, &[0, 4, 42]).unwrap();
+        assert!(recorder.samples_layer(0));
+        assert!(recorder.samples_layer(4));
+        assert!(recorder.samples_layer(42));
+        assert!(!recorder.samples_layer(3));
+        assert_eq!(recorder.samples.sample_count(), 3 * 10 * 2);
+    }
+
+    #[test]
+    fn stage_sample_resolver_rejects_overlap_inversion_and_zero_duration() {
+        let records = DEEPSEEK_V4_STAGE_KINDS
+            .iter()
+            .enumerate()
+            .map(|(index, &kind)| DeepSeekV4PendingStageSample {
+                layer: 7,
+                kind,
+                start_sample: index * 2,
+                end_sample: index * 2 + 1,
+            })
+            .collect::<Vec<_>>();
+        let timestamps = (0..DEEPSEEK_V4_STAGE_KINDS.len())
+            .flat_map(|index| [index as u64 * 20, index as u64 * 20 + 10])
+            .collect::<Vec<_>>();
+        let valid = resolve_deepseek_v4_layer_stage_samples(7, &records, &timestamps, 1.9).unwrap();
+        assert_eq!(valid.sampled_span_ticks, 190);
+        assert_eq!(
+            valid
+                .stages
+                .iter()
+                .map(|stage| stage.duration_ticks)
+                .sum::<u64>(),
+            100
+        );
+        assert!((valid.encoder_boundary_ms_scaled - 0.9).abs() <= 1e-12);
+
+        let mut overlap = timestamps.clone();
+        overlap[2] = 9;
+        assert!(
+            resolve_deepseek_v4_layer_stage_samples(7, &records, &overlap, 1.9)
+                .unwrap_err()
+                .to_string()
+                .contains("overlaps")
+        );
+
+        let mut compensated_overlap = timestamps.clone();
+        compensated_overlap[2] = 5;
+        compensated_overlap[3] = 15;
+        assert!(
+            resolve_deepseek_v4_layer_stage_samples(7, &records, &compensated_overlap, 1.9)
+                .unwrap_err()
+                .to_string()
+                .contains("overlaps")
+        );
+
+        let mut inverted = timestamps.clone();
+        inverted[5] = inverted[4] - 1;
+        assert!(
+            resolve_deepseek_v4_layer_stage_samples(7, &records, &inverted, 1.9)
+                .unwrap_err()
+                .to_string()
+                .contains("inverted")
+        );
+        assert!(
+            resolve_deepseek_v4_layer_stage_samples(7, &records, &timestamps, 0.0)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid command GPU duration")
         );
     }
 

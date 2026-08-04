@@ -1338,6 +1338,68 @@ The current decomposition command is:
 cargo test --release -p qwen-llm --test deepseek_v4_position_zero_live profile_native_deepseek_v4_single_command_at_128_and_512 -- --ignored --exact --nocapture
 ```
 
+The per-layer map found no matched cohort with a 1.5x / 5 ms excess: after the
+first visibly cold token, ordinary layers cluster near 0.86-0.94 ms, CSA
+publication adds about 0.05 ms to each affected layer, and layer 42's final
+head adds about 0.9 ms. Attribution therefore advances to encoder-boundary
+timestamps rather than assigning attention or MoE cost from layer parity.
+Dispatch-boundary counters are unavailable on this M4 Max, so the profiler
+rotates four disjoint layer strata across 20 sequential product-warm tokens.
+Only the sampled quarter of a token is split; all other layers retain the
+production encoder shape. Timestamps are resolved and scaled independently
+against each layer command, never across the 43 host-separated commands.
+
+Ten named stages cover attention HC-pre, Q/KV preparation, attention core,
+attention output, the attention-to-FFN HC bridge, router, routed experts, shared
+expert, MoE combination, and layer tail. The split schedule and both ordinary
+controls produce identical final vectors at SHA-256
+`4a76e44320e1bfc6fb6a23ff2e5009d13d74ce9bdf5105d3a96ccabbb782e638`
+near context 128 and
+`e0c536148b2a1fb6b41623a2240d5ba5a8857c61f6813752a03d41d8a0207925`
+near context 512. Median raw counter coverage is 1.0000. Four-token cadence
+reconstructed GPU medians are 43.549/45.242 ms; sampled encoder gaps account
+for only 0.401/0.394 ms.
+
+| Four-token cadence reconstructed GPU stage, ms/token | ctx~128 | ctx~512 |
+|---|---:|---:|
+| attention HC-pre | 2.186 | 2.187 |
+| Q/KV prepare + compressor frontier | 8.190 | 8.236 |
+| dense attention core | 3.891 | 4.733 |
+| inverse RoPE + output A/B | 8.059 | 8.226 |
+| HC attention-post + FFN-pre | 2.384 | 2.396 |
+| router projection + route | 0.992 | 1.019 |
+| six routed experts | **14.030** | **13.929** |
+| shared expert | 2.575 | 2.583 |
+| routed/shared combine | 0.336 | 0.338 |
+| layer tail + final head | 1.034 | 1.039 |
+
+The census makes routed experts the highest-value next falsifier. Attention
+output reads 3.066 GB of Q8_0 weights at roughly 369-386 GB/s, and the 0.894 GB
+shared expert runs at about 346 GB/s. The six selected routed banks read 2.241
+GB/token but realize only 159-164 GB/s, consistent with fragmentation across 24
+serial gate/up/SwiGLU/down dispatches per layer while leaving quantized memory
+access as a competing explanation. Router selection itself is no longer
+material.
+
+The next prototype therefore batches all six route slots while preserving each
+row's existing accumulation order: one indexed gate+up+clamped-SwiGLU dispatch
+and one indexed down dispatch per layer, with slot-private intermediate rows and
+the established weighted reduction order. Every `(slot, FFN row)` computes both
+gate/up reductions and SwiGLU inside one threadgroup synchronization domain;
+the following down dispatch is the only cross-dispatch dependency. It earns a
+production switch only if all four routed storage families remain bit-identical
+to the serial indexed path, invalid status/IDs still zero every slot, the
+routed-expert stage falls by at least 2 ms/token at both depths, and paired
+product-warm decode does not regress. Otherwise the serial indexed path remains
+the production baseline and the next measured candidates are Q/KV preparation
+or whole-token submission.
+
+The stage-attribution command is:
+
+```bash
+cargo test --release -p qwen-llm --test deepseek_v4_position_zero_live profile_native_deepseek_v4_stage_families_at_128_and_512 -- --ignored --exact --nocapture
+```
+
 Gate:
 
 - Packed N=1 preserves position-zero argmax 201 at cosine 0.999999548 and

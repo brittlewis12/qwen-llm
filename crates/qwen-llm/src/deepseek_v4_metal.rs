@@ -1482,6 +1482,19 @@ impl DeepSeekV4Session {
         &self.residency
     }
 
+    /// Consumes the session and returns its retained weight residency.
+    ///
+    /// This is the multi-request lifecycle primitive: sessions are rebuilt
+    /// per request from one long-lived residency rather than reset in place.
+    /// It is deliberately valid from **any** phase, including poisoned:
+    /// residency tensors are immutable weight views that no session mutation
+    /// path can touch, so recovering the residency from a failed session and
+    /// constructing a fresh session is the sanctioned poison-recovery story.
+    /// All session-owned scratch, cache, and transcript state is dropped.
+    pub fn into_residency(self) -> DeepSeekV4MetalResidency {
+        self.residency
+    }
+
     pub fn logits(&self) -> Result<&MetalTensor, DeepSeekV4MetalError> {
         if !self.phase.observation_valid() {
             return invalid("DeepSeek V4 logits have not completed");

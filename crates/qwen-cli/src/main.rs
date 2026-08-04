@@ -314,7 +314,7 @@ struct Args {
     #[arg(long)]
     no_special_tokens: bool,
 
-    /// Append a FIFO request-trace row after single-turn generation completes.
+    /// Append a FIFO request-trace row after each completed generation.
     ///
     /// Format is compatible with `scripts/profile/replay_economics.py
     /// --request-trace`: `arrival_ms tokens id ...`.
@@ -1902,7 +1902,11 @@ fn main() -> Result<()> {
     let gguf = GgufFile::open(model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
     if ModelFamily::detect(&gguf) == Some(ModelFamily::DeepSeek4) {
-        return run_deepseek_v4_single_turn(model_path, gguf, &args, explicit_options);
+        return if args.requests_jsonl.is_some() {
+            run_deepseek_v4_requests_jsonl(model_path, gguf, &args, explicit_options)
+        } else {
+            run_deepseek_v4_single_turn(model_path, gguf, &args, explicit_options)
+        };
     }
     ensure!(
         args.deepseek_v4_snapshot.is_none(),
@@ -2133,19 +2137,19 @@ fn prompt_add_special_tokens(args: &Args, source: PromptSource) -> bool {
     source != PromptSource::Messages && !args.no_special_tokens
 }
 
-fn validate_deepseek_v4_generation_mode(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
+/// Options unsupported for every DeepSeek V4 execution mode. Mode-specific
+/// options (`--requests-jsonl`, `--max-context-tokens`) are validated by the
+/// single-turn and requests-mode validators respectively.
+fn deepseek_v4_shared_unsupported_options(
+    args: &Args,
+    explicit: ExplicitCliOptions,
+) -> Vec<&'static str> {
     let mut unsupported = Vec::new();
-    if args.requests_jsonl.is_some() {
-        unsupported.push("--requests-jsonl");
-    }
     if args.prompt_lookup {
         unsupported.push("--prompt-lookup");
     }
     if explicit.prefill_chunk || args.prefill_chunk != PrefillChunkArg::Fixed(1024) {
         unsupported.push("--prefill-chunk");
-    }
-    if args.max_context_tokens.is_some() {
-        unsupported.push("--max-context-tokens");
     }
     if explicit.prefix_cache_max_mib || args.prefix_cache_max_mib != 16 * 1024 {
         unsupported.push("--prefix-cache-max-mib");
@@ -2188,6 +2192,17 @@ fn validate_deepseek_v4_generation_mode(args: &Args, explicit: ExplicitCliOption
     if args.messages_no_generation_prompt {
         unsupported.push("--messages-no-generation-prompt");
     }
+    unsupported
+}
+
+fn validate_deepseek_v4_generation_mode(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
+    let mut unsupported = deepseek_v4_shared_unsupported_options(args, explicit);
+    if args.requests_jsonl.is_some() {
+        unsupported.push("--requests-jsonl");
+    }
+    if args.max_context_tokens.is_some() {
+        unsupported.push("--max-context-tokens");
+    }
     ensure!(
         unsupported.is_empty(),
         "DeepSeek V4 currently supports bounded raw or ordinary-message single-turn generation only; unsupported options: {}",
@@ -2198,6 +2213,40 @@ fn validate_deepseek_v4_generation_mode(args: &Args, explicit: ExplicitCliOption
         "DeepSeek V4 generation requires --prompt, --prompt-file, or --messages"
     );
     Ok(())
+}
+
+fn validate_deepseek_v4_requests_mode(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
+    let mut unsupported = deepseek_v4_shared_unsupported_options(args, explicit);
+    if args.deepseek_v4_snapshot.is_some() {
+        // Also excluded at the parser level; kept as a defensive invariant.
+        unsupported.push("--deepseek-v4-snapshot");
+    }
+    ensure!(
+        unsupported.is_empty(),
+        "DeepSeek V4 --requests-jsonl supports raw prompt requests only; unsupported options: {}",
+        unsupported.join(", ")
+    );
+    let stdin = deepseek_v4_requests_reads_stdin(args)?;
+    if stdin {
+        ensure!(
+            args.max_context_tokens.is_some(),
+            "DeepSeek V4 --requests-jsonl from stdin cannot derive a context budget by lookahead; supply --max-context-tokens as the shared logical token capacity"
+        );
+    } else {
+        ensure!(
+            args.max_context_tokens.is_none(),
+            "DeepSeek V4 --requests-jsonl file mode derives the forward budget from the request set; remove --max-context-tokens"
+        );
+    }
+    Ok(())
+}
+
+fn deepseek_v4_requests_reads_stdin(args: &Args) -> Result<bool> {
+    let path = args
+        .requests_jsonl
+        .as_ref()
+        .context("DeepSeek V4 requests mode requires --requests-jsonl")?;
+    Ok(path.as_os_str() == "-")
 }
 
 fn deepseek_v4_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Result<usize> {
@@ -2215,6 +2264,31 @@ fn deepseek_v4_required_forwards(prompt_tokens: usize, max_tokens: usize) -> Res
         DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
     );
     Ok(required)
+}
+
+fn deepseek_v4_forward_budget_for_context_limit(context_tokens: usize) -> Result<usize> {
+    ensure!(
+        (2..=DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY).contains(&context_tokens),
+        "--max-context-tokens must be in 2..={} for DeepSeek V4 requests",
+        DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+    );
+    Ok(context_tokens - 1)
+}
+
+fn validate_deepseek_v4_request_context_limit(
+    request_id: &str,
+    prompt_tokens: usize,
+    max_tokens: usize,
+    context_limit: usize,
+) -> Result<()> {
+    let required_context_tokens = prompt_tokens
+        .checked_add(max_tokens)
+        .context("DeepSeek V4 logical context requirement overflow")?;
+    ensure!(
+        required_context_tokens <= context_limit,
+        "request {request_id} requires {required_context_tokens} logical context tokens ({prompt_tokens} prompt + {max_tokens} generation), beyond --max-context-tokens {context_limit}",
+    );
+    Ok(())
 }
 
 fn deepseek_v4_packed_chunk_count(prompt_tokens: usize) -> usize {
@@ -2742,6 +2816,392 @@ fn run_deepseek_v4_single_turn(
     if let Some(path) = args.trace_request.as_ref() {
         append_request_trace(path, arrival_ms, prompt_ids.len(), generation.tokens.len())?;
     }
+    Ok(())
+}
+
+struct DeepSeekV4PreparedRequest {
+    id: String,
+    line: usize,
+    prompt_tokens: usize,
+    prompt_token_ids: Vec<u32>,
+    max_tokens: usize,
+    required_forwards: usize,
+    sampling: SamplingConfig,
+}
+
+/// DS4 request preparation deliberately diverges from the Qwen preparer in
+/// two ways: prompts always tokenize without automatic specials (DS4 prompts
+/// carry explicit BOS bytes), and `cache_prefix_tokens` fails closed until
+/// the DS4 durable prefix lane lands.
+fn prepare_deepseek_v4_jsonl_request_line(
+    tokenizer: &Tokenizer,
+    vocab_size: u32,
+    args: &Args,
+    line: &str,
+    line_no: usize,
+) -> Result<Option<DeepSeekV4PreparedRequest>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Ok(None);
+    }
+    let request: JsonlRequest =
+        serde_json::from_str(trimmed).with_context(|| format!("parse requests line {line_no}"))?;
+    let id = request
+        .id
+        .clone()
+        .unwrap_or_else(|| format!("line-{line_no}"));
+    ensure!(
+        request.cache_prefix_tokens.is_none(),
+        "request {id} sets cache_prefix_tokens, which DeepSeek V4 requests do not support yet"
+    );
+    let prompt = request_prompt(&request, line_no)
+        .with_context(|| format!("resolve request {id} prompt at line {line_no}"))?;
+    let prompt_ids = tokenizer
+        .encode(&prompt, false)
+        .with_context(|| format!("tokenize request {id}"))?;
+    ensure!(
+        !prompt_ids.is_empty(),
+        "request {id} tokenized to zero tokens"
+    );
+    let prompt_token_ids = prompt_ids
+        .iter()
+        .enumerate()
+        .map(|(index, &token)| {
+            checked_deepseek_v4_token_id(token, vocab_size, &format!("{id} prompt[{index}]"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let max_tokens = request.tokens.unwrap_or(args.tokens);
+    ensure!(max_tokens > 0, "request {id} requires tokens >= 1");
+    let required_forwards = deepseek_v4_required_forwards(prompt_token_ids.len(), max_tokens)
+        .with_context(|| format!("derive forward budget for request {id}"))?;
+    let sampling = request_sampling_config(&request, args)
+        .with_context(|| format!("validate sampling for request {id}"))?;
+    Ok(Some(DeepSeekV4PreparedRequest {
+        id,
+        line: line_no,
+        prompt_tokens: prompt_ids.len(),
+        prompt_token_ids,
+        max_tokens,
+        required_forwards,
+        sampling,
+    }))
+}
+
+/// Executes prepared requests sequentially against one long-lived residency,
+/// rebuilding a fresh session per request. Mirrors the Qwen JSONL contract:
+/// buffered per-request output lines, fail-fast on the first error, and no
+/// token streaming.
+fn run_deepseek_v4_requests_jsonl(
+    model_path: &Path,
+    gguf: GgufFile,
+    args: &Args,
+    explicit: ExplicitCliOptions,
+) -> Result<()> {
+    validate_deepseek_v4_requests_mode(args, explicit)?;
+    ensure!(args.tokens > 0, "--tokens must be >= 1");
+    cli_sampling_config(args)?;
+    let stdin_mode = deepseek_v4_requests_reads_stdin(args)?;
+    let requests_path = args
+        .requests_jsonl
+        .clone()
+        .expect("requests mode requires --requests-jsonl");
+
+    let tokenizer = Tokenizer::from_gguf(&gguf).context("load DeepSeek V4 tokenizer")?;
+    let vocab_size = tokenizer.n_vocab();
+    let stop_tokens = gguf
+        .stop_token_ids()
+        .context("load producer-declared DeepSeek V4 stop tokens")?;
+    for &token in &stop_tokens {
+        checked_deepseek_v4_token_id(token, vocab_size, "stop")?;
+    }
+
+    let (prepared, forward_budget, logical_context_limit) = if stdin_mode {
+        let context_limit = args
+            .max_context_tokens
+            .expect("stdin requests mode validated --max-context-tokens");
+        let forward_budget = deepseek_v4_forward_budget_for_context_limit(context_limit)?;
+        (None, forward_budget, Some(context_limit))
+    } else {
+        let raw = std::fs::read_to_string(&requests_path)
+            .with_context(|| format!("read requests file {}", requests_path.display()))?;
+        let mut prepared = Vec::new();
+        for (index, line) in raw.lines().enumerate() {
+            if let Some(request) = prepare_deepseek_v4_jsonl_request_line(
+                &tokenizer,
+                vocab_size,
+                args,
+                line,
+                index + 1,
+            )? {
+                prepared.push(request);
+            }
+        }
+        ensure!(
+            !prepared.is_empty(),
+            "requests file {} contains no requests",
+            requests_path.display()
+        );
+        let budget = prepared
+            .iter()
+            .map(|request| request.required_forwards)
+            .max()
+            .expect("nonempty prepared requests");
+        (Some(prepared), budget, None)
+    };
+
+    eprintln!(
+        "deepseek_v4: loading {} for requests; source={} forward_budget={} logical_context_limit={:?} promoted_capacity={}",
+        model_path.display(),
+        if stdin_mode { "stdin" } else { "file" },
+        forward_budget,
+        logical_context_limit,
+        DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+    );
+    let load_t0 = Instant::now();
+    let ctx = MetalContext::new().context("init Metal context for DeepSeek V4")?;
+    let load_plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, forward_budget)
+        .context("plan strict DeepSeek V4 Metal residency and session")?;
+    let session_capacity = load_plan.session_capacity();
+    eprintln!(
+        "deepseek_v4: session capacity forwards={} csa_physical_rows={} hca_physical_rows={}",
+        session_capacity.forward_limit(),
+        session_capacity.csa_physical_rows(),
+        session_capacity.hca_physical_rows(),
+    );
+    let memory_plan = load_plan.memory_plan().clone();
+    let initial_memory_signals = ctx.memory_signals();
+    eprintln!("deepseek_v4: memory plan; {memory_plan}");
+    let admitted_load_plan = load_plan
+        .admit(initial_memory_signals)
+        .context("admit strict DeepSeek V4 Metal residency and session")?;
+    let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted_load_plan)
+        .context("load admitted strict DeepSeek V4 Metal residency")?;
+    let (residency, memory_admission, after_residency_bytes) = realized.into_parts();
+    let memory_signals = memory_admission.signals;
+    eprintln!(
+        "deepseek_v4: memory admission admitted={} reason={} recommended={} current={} process_remaining={:?} working_set_headroom={:?} required={:?}",
+        memory_admission.admitted,
+        memory_admission.reason.as_str(),
+        memory_signals.recommended_max_bytes,
+        memory_signals.current_allocated_bytes,
+        memory_signals.process_limit_remaining_bytes,
+        memory_admission.working_set_headroom_bytes,
+        memory_admission.required_bytes,
+    );
+    let before_residency_bytes = memory_signals.current_allocated_bytes;
+    memory_plan
+        .reconcile_residency(before_residency_bytes, after_residency_bytes)
+        .context("reconcile DeepSeek V4 residency allocation")?;
+    ensure!(
+        residency.config().vocab_size == vocab_size,
+        "DeepSeek V4 tokenizer vocabulary {} differs from resident model vocabulary {}",
+        vocab_size,
+        residency.config().vocab_size,
+    );
+    eprintln!(
+        "deepseek_v4: resident on {} in {:.1} ms; {}",
+        ctx.describe(),
+        load_t0.elapsed().as_secs_f64() * 1e3,
+        residency.report(),
+    );
+
+    let stdout_handle = std::io::stdout();
+    let mut residency_slot = Some(residency);
+    let mut reconcile_first_session = Some((before_residency_bytes, after_residency_bytes));
+    let mut executed = 0usize;
+    let mut execute = |request: DeepSeekV4PreparedRequest| -> Result<()> {
+        if let Some(limit) = logical_context_limit {
+            validate_deepseek_v4_request_context_limit(
+                &request.id,
+                request.prompt_tokens,
+                request.max_tokens,
+                limit,
+            )?;
+        }
+        ensure!(
+            request.required_forwards <= session_capacity.forward_limit(),
+            "request {} requires {} forwards, beyond the run's shared session budget {}",
+            request.id,
+            request.required_forwards,
+            session_capacity.forward_limit(),
+        );
+        let arrival_ms = unix_epoch_ms()?;
+        let residency = residency_slot
+            .take()
+            .expect("residency is returned after every request");
+        let session_t0 = Instant::now();
+        let mut session = DeepSeekV4Session::new(&ctx, residency)
+            .with_context(|| format!("create DeepSeek V4 session for request {}", request.id))?;
+        let first_memory_sample =
+            reconcile_first_session
+                .take()
+                .map(|(before, after_residency)| {
+                    (before, after_residency, ctx.current_allocated_size())
+                });
+        let session_ms = session_t0.elapsed().as_secs_f64() * 1e3;
+
+        let request_execution = (|| -> Result<(GenerationResult, Vec<u8>, &'static str, f64)> {
+            if let Some((before, after_residency, after_session)) = first_memory_sample {
+                memory_plan
+                    .reconcile_session(before, after_residency, after_session)
+                    .context("reconcile DeepSeek V4 request session allocation")?;
+            }
+            let prefill_t0 = Instant::now();
+            let packed_chunk_count = deepseek_v4_packed_chunk_count(request.prompt_token_ids.len());
+            let prefill_mode = if packed_chunk_count > 0 {
+                execute_deepseek_v4_prompt_suffix(&mut session, &ctx, &request.prompt_token_ids)
+                    .with_context(|| format!("prefill request {}", request.id))?;
+                if packed_chunk_count == 1 {
+                    "layer_major_128"
+                } else {
+                    "layer_major_128_chunks"
+                }
+            } else {
+                for (index, &token) in request.prompt_token_ids.iter().enumerate() {
+                    session.forward_token(&ctx, token).with_context(|| {
+                        format!("forward request {} prompt token {index}", request.id)
+                    })?;
+                }
+                "singleton"
+            };
+            if let Some((before, after_residency, after_session)) = first_memory_sample {
+                let reconciliation = memory_plan
+                    .reconcile(DeepSeekV4MemorySamples {
+                        before_residency_bytes: before,
+                        after_residency_bytes: after_residency,
+                        after_session_bytes: after_session,
+                        after_first_forward_bytes: ctx.current_allocated_size(),
+                    })
+                    .context("reconcile admitted DeepSeek V4 request memory")?;
+                eprintln!("deepseek_v4: request memory reconciliation; {reconciliation}");
+            }
+            let logits = copy_deepseek_v4_logits(&session, vocab_size, "prompt")
+                .with_context(|| format!("copy request {} prompt logits", request.id))?;
+            let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+
+            let mut sampler = Sampler::new(request.sampling)
+                .with_context(|| format!("initialize sampler for request {}", request.id))?;
+            let mut generated_bytes = Vec::new();
+            let mut transition_index = 0usize;
+            let generation = generate_serial(
+                logits,
+                request.max_tokens,
+                &stop_tokens,
+                &mut sampler,
+                |token| {
+                    let piece = tokenizer
+                        .try_decode_piece_bytes_exact(token)
+                        .with_context(|| format!("decode request {} token {token}", request.id))?;
+                    generated_bytes.extend_from_slice(piece);
+                    Ok(())
+                },
+                |token| {
+                    let current_transition = transition_index;
+                    let token = checked_deepseek_v4_token_id(
+                        token,
+                        vocab_size,
+                        &format!(
+                            "request {} generated transition {current_transition}",
+                            request.id
+                        ),
+                    )?;
+                    session.forward_token(&ctx, token).with_context(|| {
+                        format!(
+                            "forward request {} generated transition {current_transition}",
+                            request.id
+                        )
+                    })?;
+                    let logits = copy_deepseek_v4_logits(&session, vocab_size, "continuing")
+                        .with_context(|| {
+                            format!(
+                                "copy request {} continuing logits after transition {current_transition}",
+                                request.id
+                            )
+                        })?;
+                    transition_index += 1;
+                    Ok(logits)
+                },
+            )?;
+            Ok((generation, generated_bytes, prefill_mode, prefill_ms))
+        })();
+        residency_slot = Some(session.into_residency());
+        let (generation, generated_bytes, prefill_mode, prefill_ms) = request_execution
+            .with_context(|| format!("execute request {} at line {}", request.id, request.line))?;
+
+        let decode_tps = if generation.wall_ms > 0.0 {
+            generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
+        } else {
+            0.0
+        };
+        let output = RequestOutput {
+            id: request.id.clone(),
+            prompt_tokens: request.prompt_tokens,
+            generated_tokens: generation.tokens.len(),
+            generated_token_sha256: generated_token_sha256(&generation.tokens),
+            generated_text: String::from_utf8_lossy(&generated_bytes).into_owned(),
+            stop_reason: generation.stop_reason,
+            terminal_token_target_transition_consumed: false,
+        };
+        {
+            let mut stdout = stdout_handle.lock();
+            serde_json::to_writer(&mut stdout, &output)
+                .with_context(|| format!("serialize output for request {}", request.id))?;
+            stdout
+                .write_all(b"\n")
+                .and_then(|_| stdout.flush())
+                .with_context(|| format!("write output for request {}", request.id))?;
+        }
+        eprintln!(
+            concat!(
+                "deepseek_v4 stats: request={} line={} prompt_kind=raw prefill_mode={} prompt_tokens={} ",
+                "generated_tokens={} transitions={} stop_reason={} session_ms={:.1} prefill_ms={:.1} ",
+                "generation_ms={:.1} decode_tps={:.2}"
+            ),
+            output.id,
+            request.line,
+            prefill_mode,
+            output.prompt_tokens,
+            output.generated_tokens,
+            generation.transitions,
+            generation.stop_reason.as_str(),
+            session_ms,
+            prefill_ms,
+            generation.wall_ms,
+            decode_tps,
+        );
+        if let Some(path) = args.trace_request.as_ref() {
+            append_request_trace(
+                path,
+                arrival_ms,
+                output.prompt_tokens,
+                output.generated_tokens,
+            )?;
+        }
+        executed += 1;
+        Ok(())
+    };
+
+    if let Some(prepared) = prepared {
+        for request in prepared {
+            execute(request)?;
+        }
+    } else {
+        let stdin = std::io::stdin();
+        for (index, line) in stdin.lock().lines().enumerate() {
+            let line = line.context("read requests line from stdin")?;
+            if let Some(request) = prepare_deepseek_v4_jsonl_request_line(
+                &tokenizer,
+                vocab_size,
+                args,
+                &line,
+                index + 1,
+            )? {
+                execute(request)?;
+            }
+        }
+        ensure!(executed > 0, "stdin request stream contained no requests");
+    }
+    eprintln!("deepseek_v4: requests complete; executed={executed}");
     Ok(())
 }
 
@@ -6643,6 +7103,111 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("--requests-jsonl")
+        );
+
+        // Requests mode: file mode derives its budget and rejects the stdin
+        // override; stdin mode requires it; shared unsupported flags still
+        // fail closed; the snapshot flag stays parser-excluded.
+        let file_mode_with_budget = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--max-context-tokens",
+            "4096",
+        ])
+        .unwrap();
+        assert!(
+            validate_deepseek_v4_requests_mode(
+                &file_mode_with_budget,
+                ExplicitCliOptions::default(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("remove --max-context-tokens")
+        );
+        let stdin_without_budget =
+            Args::try_parse_from(["qwen", "--model", "model.gguf", "--requests-jsonl", "-"])
+                .unwrap();
+        assert!(
+            validate_deepseek_v4_requests_mode(
+                &stdin_without_budget,
+                ExplicitCliOptions::default(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("supply --max-context-tokens")
+        );
+        let stdin_with_budget = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--requests-jsonl",
+            "-",
+            "--max-context-tokens",
+            "4096",
+        ])
+        .unwrap();
+        validate_deepseek_v4_requests_mode(&stdin_with_budget, ExplicitCliOptions::default())
+            .unwrap();
+        assert_eq!(
+            deepseek_v4_forward_budget_for_context_limit(4_096).unwrap(),
+            4_095
+        );
+        assert_eq!(
+            deepseek_v4_forward_budget_for_context_limit(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY)
+                .unwrap(),
+            DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY - 1
+        );
+        assert!(deepseek_v4_forward_budget_for_context_limit(1).is_err());
+        assert!(
+            deepseek_v4_forward_budget_for_context_limit(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY + 1)
+                .is_err()
+        );
+        validate_deepseek_v4_request_context_limit("exact", 4_000, 96, 4_096).unwrap();
+        let context_error =
+            validate_deepseek_v4_request_context_limit("overflow", 4_000, 97, 4_096)
+                .unwrap_err()
+                .to_string();
+        assert!(context_error.contains("4097 logical context tokens"));
+        assert!(
+            validate_deepseek_v4_request_context_limit("checked-add", usize::MAX, 1, usize::MAX,)
+                .unwrap_err()
+                .to_string()
+                .contains("overflow")
+        );
+        let requests_with_durable_cache = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--durable-prefix-cache",
+            "/tmp/cache",
+        ])
+        .unwrap();
+        assert!(
+            validate_deepseek_v4_requests_mode(
+                &requests_with_durable_cache,
+                ExplicitCliOptions::default(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("--durable-prefix-cache")
+        );
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "--model",
+                "model.gguf",
+                "--requests-jsonl",
+                "requests.jsonl",
+                "--deepseek-v4-snapshot",
+                "/tmp/s.ds4ckpt",
+            ])
+            .is_err(),
+            "snapshot flag must stay parser-excluded from requests mode"
         );
 
         // `--reasoning`/`--preserve-reasoning` require `--messages` in

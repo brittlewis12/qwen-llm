@@ -1624,6 +1624,14 @@ fn native_deepseek_v4_packed_callback_unwind_poison_is_fail_stop() {
         Ok(_) => panic!("poisoned session unexpectedly accepted a token"),
     };
     assert!(error.to_string().contains("poisoned"));
+    let residency = session.into_residency();
+    let mut fresh =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("rebuild after poison");
+    fresh
+        .prefill_tokens(&ctx, &[35])
+        .expect("fresh session executes after poisoned residency recovery");
+    assert_eq!(fresh.next_position(), 1);
+    assert!(fresh.copy_logits_f32().is_ok());
 }
 
 #[test]

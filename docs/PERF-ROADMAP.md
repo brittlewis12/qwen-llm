@@ -157,15 +157,26 @@ Q rounded to F16 once and current F16 K already decoded, an eight-simdgroup
 conversion is about 0.008 ms. This is feasibility evidence only, not production: it does
 not implement official Q/K FP4 QAT or change the v1 F16 cache contract.
 
+The scalar packed contract is now frozen. Revision-addressed official, vLLM,
+and DwarfStar sources pin BF16-before-amax semantics, four 32-value blocks,
+adjacent low/even and high/odd E2M1 nibbles, four UE8M0 scales, the
+`6 * 2^-126` floor, round-to-nearest-even, and signed zero. The strict generated
+fixture is SHA-256
+`0e5e2b251a960d417e7977608a363b83e072e2d90bc286cc52820b0ea7dc2b1f`.
+Its 68-byte row is an oracle envelope, not an upstream cache-layout claim; the
+score vectors are explicitly deterministic scalar transcriptions over decoded
+packed operands with already-normalized head weights. Scoreable rows reject any
+physical encoding that would overflow finite F32 dequantization.
+
 Force-ranked queue:
 
-1. **Official FP4 indexer shadow and matrix scoring.** Freeze the adjacent-pair
-   E2M1 plus four-UE8M0 68-byte row contract, quantize Q/K from post-Hadamard
-   pre-F16 values, and include packed decode plus query quantization in the
-   matrix timing. Preserve the F16 scorer as the differential and defer the
-   snapshot-v2 migration until packed-semantic decisions and a new whole-token
-   packet clear their gates. The idealized matrix ceiling has already passed;
-   do not spend a separate experiment on packed bytes under the scalar scorer.
+1. **Official FP4 indexer Metal shadow and matrix scoring.** Quantize Q/K from
+   post-Hadamard pre-F16 values under the frozen scalar contract, decode packed
+   operands inside the matrix schedule, and include query packing in timing.
+   Preserve the F16 scorer as the differential and defer snapshot-v2 migration
+   until packed-semantic decisions and a new whole-token packet clear their
+   gates. The idealized matrix ceiling has already passed; do not spend a
+   separate experiment on packed bytes under the scalar scorer.
 2. **GPU-resident deterministic packed routing.** Remove prefill's router
    commit/wait and CPU schedule construction with integer counts, deterministic
    expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,

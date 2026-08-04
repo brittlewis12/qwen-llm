@@ -439,13 +439,14 @@ terminal snapshots, continuation equivalence, and adversarial snapshot
 corruption. Ratio-4 restore also validates untouched overlap rows between exact
 boundaries, not only full-lane equality at positions divisible by four.
 
-One known reference difference is frozen explicitly: the oracle follows vLLM
-MXFP4 and DwarfStar for the indexer (UE8M0 power-of-two scale floor near
-`2^-126`, E2M1 round-to-nearest-even). SGLang's current
-`fp4_indexer.py` uses a `1e-4` pre-rounded scale floor and chooses the lower code
-at exact E2M1 midpoints. This does not affect ordinary non-tiny activations. It
-must be resolved against the official contract or an explicit bit-level spec
-before packed-cache promotion; it does not create an accelerator requirement.
+The former FP4 reference difference is resolved for this profile. Official
+revision `7872f01b` and the independent vLLM packed implementation at
+`b40d859c` establish BF16 input semantics, the `6 * 2^-126` amax floor, UE8M0
+power-of-two scales, adjacent E2M1 pairs, and round-to-nearest-even including
+signed zero. DwarfStar `54b36ed9` independently cross-checks the Hadamard plus
+FP4-simulation graph. SGLang's `1e-4` floor and lower-code midpoint policy are
+therefore not the Flash-0731 packed contract; no accelerator is required to
+arbitrate them.
 
 ### Evidence cadence
 
@@ -789,10 +790,20 @@ Gate:
   and position 3077 rejects before mutation in that deliberately bounded test
   session.
 
-The official Hadamard-plus-MXFP4 indexer-QAT cache remains a separate future
-numerics ABI. It must not silently replace the executable b10222 F16 cache
-contract used by these vanilla-GGUF full-model fixtures. Causal-snapshot
-numerics ABI v1 semantically includes
+The official Hadamard-plus-MXFP4 scalar contract is frozen separately from the
+production cache. Its generated fixture pins four 32-value blocks, 64 packed
+value bytes, four UE8M0 scale bytes, BF16-before-amax semantics, exact midpoint
+and scale boundaries, malformed-row rejection, and a decoded packed-score
+transcription at SHA-256
+`0e5e2b251a960d417e7977608a363b83e072e2d90bc286cc52820b0ea7dc2b1f`.
+The fixture's contiguous 68-byte envelope is an oracle representation: upstream
+Q uses separate value/scale tensors and paged K segregates values from scales at
+the cache-block level. The scalar row type is intentionally narrower than the
+physical encoding: any row whose decoded values overflow F32 is rejected before
+scoring, including a BF16-maximum pack input. Packed Metal execution remains a
+future numerics ABI and
+must not silently replace the executable b10222 F16 cache contract used by
+these vanilla-GGUF full-model fixtures. Causal-snapshot numerics ABI v1 includes
 `LlamaCppB10222F16HadamardV1`; changing scoring, tie/order, or index-cache
 numerics requires a version bump or explicit legacy acceptance.
 
@@ -1698,9 +1709,9 @@ to 0.518-0.519 ms/layer across two campaigns; terminal saving is
 This establishes about 1.585 ms/layer of available schedule budget and
 justifies testing whether packed decode fits inside it; it does not prove that
 it will. The probe is not the paper contract and has no production caller. The
-next experiment must quantize both Q and K under the official 68-byte-row bit
-contract and compare against a packed-semantic oracle before changing cache or
-snapshot ABI.
+next experiment must quantize both Q and K using the repo-local 68-byte scalar
+envelope that implements the official value/scale semantics, then compare
+against its packed oracle before changing cache or snapshot ABI.
 
 The pinned llama.cpp depth command is not a free decode-only bracket. Its
 `--n-depth` implementation executes `test_prompt(n_depth)` and serializes the
@@ -1840,7 +1851,9 @@ Gate:
 
 Broader S6 work remains:
 
-- Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
+- Implement the official FP4 indexer as a shadow Metal pack/score path, then
+  migrate the cache only after packed decisions and whole-token timing clear.
+  Pack the remaining intended mixed FP8/BF16 attention cache independently.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention. All-slot routed experts have closed the first measured MoE
   boundary without changing reduction lineage.
@@ -1934,10 +1947,12 @@ noise without reducing technical risk. Revisit after S5.
    and vector-decode probes all miss the 0.75 ms/token two-depth gate.
 5. Preserve the promoted cooperative Lightning scorer and four-bit radix
    selector, including their scalar and bitwise differentials. The idealized
-   matrix-score ceiling is now established but remains test-only. Freeze and
-   execute the official packed Q/K FP4 contract next; do not migrate snapshots
-   until packed-semantic decisions clear, and require a new whole-token packet
-   rather than extrapolating only from microprofiles.
+   matrix-score ceiling is now established but remains test-only. The official
+   scalar Q/K FP4 contract is frozen at fixture SHA-256
+   `0e5e2b251a960d417e7977608a363b83e072e2d90bc286cc52820b0ea7dc2b1f`;
+   implement its Metal pack/score shadow next. Do not migrate snapshots until
+   packed-semantic decisions clear, and require a new whole-token packet rather
+   than extrapolating only from microprofiles.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine

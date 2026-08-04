@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 Packed Indexer Scalar Contract GO
+
+Status: `GO` for the source-pinned scalar format and decoded-score contract, not
+for a Metal schedule, packed production cache, or snapshot ABI. The production
+cooperative F32-query/F16-key scorer and causal snapshot v1 remain unchanged.
+
+- Official revision `7872f01b`, vLLM `b40d859c`, and DwarfStar `54b36ed9` are
+  read with revision-addressed `git show`, independent of checkout HEAD and
+  worktree state. SHA-pinned official code establishes model placement and
+  BF16-input QAT; vLLM independently pins packed Q and paged K representation;
+  DwarfStar cross-checks Hadamard plus FP4 simulation.
+- One 128-value row has four 32-value blocks. Adjacent even/odd dimensions use
+  low/high E2M1 nibbles; each block carries one UE8M0 power-of-two scale using
+  the `6 * 2^-126` amax floor. E2M1 conversion is round-to-nearest-even and
+  preserves signed zero. BF16 rounding precedes amax and scale selection.
+- The generated fixture pins every midpoint neighbor, sampled exact/next-power
+  scale boundaries at five exponents plus zero/floor/BF16-maximum endpoints,
+  canonical scale codes 1..=253, BF16-before-amax transitions, all four block
+  slots, malformed/overflow rejection, and targeted decoded packed-score cases.
+  Its SHA-256 is
+  `0e5e2b251a960d417e7977608a363b83e072e2d90bc286cc52820b0ea7dc2b1f`.
+- The fixture's contiguous `[64 value bytes | 4 scale bytes]` row is deliberately
+  an oracle envelope. Upstream Q uses separate tensors; paged K stores all
+  token value payloads before all token scale payloads within each cache page.
+  Score cases are labeled scalar transcriptions with projection weights scaled
+  once before dot weighting, not independent executable scorers. The scalar row
+  domain rejects physically encodable values that would overflow F32 decode.
+
+Decision: proceed directly to the packed Metal pack/score shadow inside the
+already-promoted matrix schedule. Include Q packing and K decode in timing,
+compare packed decisions against both the scalar packed oracle and retained F16
+differential, and do not migrate cache allocation or snapshots before a later
+whole-token gate.
+
 ## 2026-08-04 - DeepSeek V4 Lightning Matrix Ceiling GO
 
 Status: `GO` for the schedule-ceiling falsifier, not for a production numerical

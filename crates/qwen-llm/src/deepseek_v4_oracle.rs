@@ -8,6 +8,17 @@ use half::bf16;
 
 const ROUTER_NORM_FLOOR: f32 = 6.103_515_6e-5;
 
+pub const INDEXER_FP4_VALUES_PER_ROW: usize = 128;
+pub const INDEXER_FP4_BLOCK_VALUES: usize = 32;
+pub const INDEXER_FP4_BLOCK_COUNT: usize = 4;
+pub const INDEXER_FP4_VALUE_BYTES: usize = 64;
+pub const INDEXER_FP4_SCALE_BYTES: usize = 4;
+pub const INDEXER_FP4_ROW_BYTES: usize = 68;
+
+const INDEXER_FP4_AMAX_FLOOR: f32 = f32::from_bits(0x01c0_0000);
+const INDEXER_FP4_MIN_SCALE_CODE: u8 = 1;
+const INDEXER_FP4_MAX_SCALE_CODE: u8 = 253;
+
 pub type OracleResult<T> = Result<T, DeepSeekV4OracleError>;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -22,6 +33,30 @@ pub enum DeepSeekV4OracleError {
     Invalid { name: &'static str, detail: String },
     #[error("dimension calculation overflowed for {0}")]
     DimensionOverflow(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Repo-local packed scalar envelope. Construction requires every decoded
+/// value to remain finite in F32; this is stricter than physical E2M1/UE8M0
+/// encodability so scalar scoring cannot admit an overflowing row.
+pub struct DeepSeekV4IndexerFp4Row {
+    bytes: [u8; INDEXER_FP4_ROW_BYTES],
+}
+
+impl DeepSeekV4IndexerFp4Row {
+    pub fn from_bytes(bytes: [u8; INDEXER_FP4_ROW_BYTES]) -> OracleResult<Self> {
+        let row = Self { bytes };
+        unpack_indexer_fp4_row(&row)?;
+        Ok(row)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; INDEXER_FP4_ROW_BYTES] {
+        &self.bytes
+    }
+
+    pub const fn into_bytes(self) -> [u8; INDEXER_FP4_ROW_BYTES] {
+        self.bytes
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1182,6 +1217,107 @@ pub fn fp4_activation_roundtrip_in_place(values: &mut [f32]) -> OracleResult<()>
     Ok(())
 }
 
+pub fn indexer_fp4_e2m1_code(value: f32) -> OracleResult<u8> {
+    if !value.is_finite() {
+        return invalid("indexer E2M1 value", "must be finite");
+    }
+    Ok(encode_indexer_e2m1_rne(value.clamp(-6.0, 6.0)))
+}
+
+/// Encode an already-BF16-rounded, nonnegative block amax as UE8M0.
+pub fn indexer_fp4_ue8m0_scale_code(maximum: f32) -> OracleResult<u8> {
+    encode_indexer_ue8m0_scale(maximum)
+}
+
+pub fn indexer_fp4_ue8m0_scale(code: u8) -> OracleResult<f32> {
+    decode_indexer_ue8m0_scale(code)
+}
+
+/// Pack one post-Hadamard indexer row using the official BF16-input MXFP4
+/// activation contract. Values are rounded to BF16 before block scaling.
+pub fn pack_indexer_fp4_row(values: &[f32]) -> OracleResult<DeepSeekV4IndexerFp4Row> {
+    require_len("indexer FP4 row", values, INDEXER_FP4_VALUES_PER_ROW)?;
+    require_finite("indexer FP4 row", values)?;
+
+    let mut rounded = [0.0f32; INDEXER_FP4_VALUES_PER_ROW];
+    for (output, &value) in rounded.iter_mut().zip(values) {
+        *output = bf16::from_f32(value).to_f32();
+    }
+    require_finite("indexer FP4 BF16 row", &rounded)?;
+
+    let mut bytes = [0u8; INDEXER_FP4_ROW_BYTES];
+    for block_index in 0..INDEXER_FP4_BLOCK_COUNT {
+        let value_start = block_index * INDEXER_FP4_BLOCK_VALUES;
+        let block = &rounded[value_start..value_start + INDEXER_FP4_BLOCK_VALUES];
+        let maximum = block.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let scale_code = encode_indexer_ue8m0_scale(maximum)?;
+        let scale = decode_indexer_ue8m0_scale(scale_code)?;
+        bytes[INDEXER_FP4_VALUE_BYTES + block_index] = scale_code;
+        let byte_start = block_index * (INDEXER_FP4_BLOCK_VALUES / 2);
+        for pair in 0..INDEXER_FP4_BLOCK_VALUES / 2 {
+            let low = encode_indexer_e2m1_rne((block[2 * pair] / scale).clamp(-6.0, 6.0));
+            let high = encode_indexer_e2m1_rne((block[2 * pair + 1] / scale).clamp(-6.0, 6.0));
+            bytes[byte_start + pair] = low | (high << 4);
+        }
+    }
+    DeepSeekV4IndexerFp4Row::from_bytes(bytes)
+}
+
+pub fn unpack_indexer_fp4_row(
+    row: &DeepSeekV4IndexerFp4Row,
+) -> OracleResult<[f32; INDEXER_FP4_VALUES_PER_ROW]> {
+    let mut values = [0.0f32; INDEXER_FP4_VALUES_PER_ROW];
+    for block_index in 0..INDEXER_FP4_BLOCK_COUNT {
+        let scale = decode_indexer_ue8m0_scale(row.bytes[INDEXER_FP4_VALUE_BYTES + block_index])?;
+        let value_start = block_index * INDEXER_FP4_BLOCK_VALUES;
+        let byte_start = block_index * (INDEXER_FP4_BLOCK_VALUES / 2);
+        for pair in 0..INDEXER_FP4_BLOCK_VALUES / 2 {
+            let packed = row.bytes[byte_start + pair];
+            values[value_start + 2 * pair] = decode_indexer_e2m1(packed & 0x0f, scale);
+            values[value_start + 2 * pair + 1] = decode_indexer_e2m1(packed >> 4, scale);
+        }
+    }
+    require_finite("decoded indexer FP4 row", &values)?;
+    Ok(values)
+}
+
+pub fn packed_indexer_scores(
+    query_heads: &[DeepSeekV4IndexerFp4Row],
+    scaled_head_weights: &[f32],
+    key_rows: &[DeepSeekV4IndexerFp4Row],
+) -> OracleResult<Vec<f32>> {
+    if query_heads.is_empty() {
+        return invalid("packed indexer query heads", "must be nonempty");
+    }
+    require_len(
+        "packed indexer head weights",
+        scaled_head_weights,
+        query_heads.len(),
+    )?;
+    require_finite("packed indexer head weights", scaled_head_weights)?;
+
+    let mut queries = Vec::with_capacity(query_heads.len() * INDEXER_FP4_VALUES_PER_ROW);
+    for row in query_heads {
+        queries.extend_from_slice(&unpack_indexer_fp4_row(row)?);
+    }
+    let mut keys = Vec::with_capacity(key_rows.len() * INDEXER_FP4_VALUES_PER_ROW);
+    for row in key_rows {
+        keys.extend_from_slice(&unpack_indexer_fp4_row(row)?);
+    }
+    let mut scores = Vec::with_capacity(key_rows.len());
+    for key in keys.chunks_exact(INDEXER_FP4_VALUES_PER_ROW) {
+        let mut score = 0.0f32;
+        for (head, &weight) in scaled_head_weights.iter().enumerate() {
+            let query_start = head * INDEXER_FP4_VALUES_PER_ROW;
+            let query = &queries[query_start..query_start + INDEXER_FP4_VALUES_PER_ROW];
+            score += dot(query, key).max(0.0) * weight;
+        }
+        scores.push(score);
+    }
+    require_finite("packed indexer scores", &scores)?;
+    Ok(scores)
+}
+
 pub fn indexer_qat_roundtrip_in_place(values: &mut [f32]) -> OracleResult<()> {
     let mut output = values.to_vec();
     hadamard_128_in_place(&mut output)?;
@@ -1463,6 +1599,67 @@ fn e4m3fn_roundtrip(value: f32) -> f32 {
         }
     }
     sign * e4m3fn_value(best)
+}
+
+fn encode_indexer_e2m1_rne(value: f32) -> u8 {
+    let absolute = value.abs().min(6.0);
+    let magnitude = if absolute > 5.0 {
+        7
+    } else if absolute >= 3.5 {
+        6
+    } else if absolute > 2.5 {
+        5
+    } else if absolute >= 1.75 {
+        4
+    } else if absolute > 1.25 {
+        3
+    } else if absolute >= 0.75 {
+        2
+    } else if absolute > 0.25 {
+        1
+    } else {
+        0
+    };
+    let sign = u8::from(value.is_sign_negative()) << 3;
+    magnitude | sign
+}
+
+fn decode_indexer_e2m1(code: u8, scale: f32) -> f32 {
+    const VALUES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+    let magnitude = VALUES[usize::from(code & 0x07)] * scale;
+    if code & 0x08 == 0 {
+        magnitude
+    } else {
+        -magnitude
+    }
+}
+
+fn encode_indexer_ue8m0_scale(maximum: f32) -> OracleResult<u8> {
+    if !maximum.is_finite() || maximum.is_sign_negative() {
+        return invalid("indexer UE8M0 maximum", "must be finite and nonnegative");
+    }
+    let ratio = maximum.max(INDEXER_FP4_AMAX_FLOOR) * (1.0f32 / 6.0);
+    let bits = ratio.to_bits();
+    let exponent_field = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x007f_ffff;
+    if exponent_field == 0 || exponent_field == 0xff {
+        return invalid("indexer UE8M0 ratio", "must be finite and normal");
+    }
+    let exponent = exponent_field - 127 + i32::from(mantissa != 0);
+    let code = exponent + 127;
+    if !(i32::from(INDEXER_FP4_MIN_SCALE_CODE)..=i32::from(INDEXER_FP4_MAX_SCALE_CODE))
+        .contains(&code)
+    {
+        return invalid("indexer UE8M0 scale", "canonical code is outside 1..=253");
+    }
+    Ok(code as u8)
+}
+
+fn decode_indexer_ue8m0_scale(code: u8) -> OracleResult<f32> {
+    if !(INDEXER_FP4_MIN_SCALE_CODE..=INDEXER_FP4_MAX_SCALE_CODE).contains(&code) {
+        return invalid("indexer UE8M0 scale", "canonical code must be in 1..=253");
+    }
+    Ok(f32::from_bits(u32::from(code) << 23))
 }
 
 fn e2m1_roundtrip(value: f32) -> f32 {
@@ -1860,6 +2057,152 @@ mod tests {
         indexer_qat_roundtrip_in_place(&mut repeated).unwrap();
         assert_eq!(values, repeated);
         assert!(values.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn indexer_fp4_row_layout_and_signed_zero_are_bit_exact() {
+        assert_eq!(INDEXER_FP4_VALUES_PER_ROW, 128);
+        assert_eq!(INDEXER_FP4_BLOCK_VALUES, 32);
+        assert_eq!(INDEXER_FP4_BLOCK_COUNT, 4);
+        assert_eq!(INDEXER_FP4_VALUE_BYTES, 64);
+        assert_eq!(INDEXER_FP4_SCALE_BYTES, 4);
+        assert_eq!(INDEXER_FP4_ROW_BYTES, 68);
+        assert_eq!(INDEXER_FP4_AMAX_FLOOR.to_bits(), 0x01c0_0000);
+
+        let mut values = [0.0f32; INDEXER_FP4_VALUES_PER_ROW];
+        values[..16].copy_from_slice(&[
+            0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -0.0,
+            -0.125,
+        ]);
+        let row = pack_indexer_fp4_row(&values).unwrap();
+        assert_eq!(
+            &row.as_bytes()[..16],
+            &[
+                0x10, 0x32, 0x54, 0x76, 0xa9, 0xcb, 0xed, 0x88, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
+        assert!(row.as_bytes()[16..64].iter().all(|&byte| byte == 0));
+        assert_eq!(&row.as_bytes()[64..], &[127, 1, 1, 1]);
+
+        let decoded = unpack_indexer_fp4_row(&row).unwrap();
+        assert_eq!(decoded[14].to_bits(), (-0.0f32).to_bits());
+        assert_eq!(decoded[15].to_bits(), (-0.0f32).to_bits());
+        for (actual, expected) in decoded[..14].iter().zip(&values[..14]) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn indexer_fp4_rounding_and_ue8m0_boundaries_are_bit_exact() {
+        let midpoints = [0.25f32, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0];
+        let expected = [0u8, 2, 2, 4, 4, 6, 6];
+        for (&midpoint, &code) in midpoints.iter().zip(&expected) {
+            assert_eq!(encode_indexer_e2m1_rne(midpoint), code);
+            assert_eq!(encode_indexer_e2m1_rne(-midpoint), code | 0x08);
+            let below = f32::from_bits(midpoint.to_bits() - 1);
+            let above = f32::from_bits(midpoint.to_bits() + 1);
+            assert!(encode_indexer_e2m1_rne(below) <= code);
+            assert!(encode_indexer_e2m1_rne(above) >= code);
+        }
+        assert_eq!(encode_indexer_e2m1_rne(-0.0), 0x08);
+        assert_eq!(
+            decode_indexer_e2m1(0x08, 1.0).to_bits(),
+            (-0.0f32).to_bits()
+        );
+
+        assert_eq!(encode_indexer_ue8m0_scale(0.0).unwrap(), 1);
+        assert_eq!(
+            encode_indexer_ue8m0_scale(INDEXER_FP4_AMAX_FLOOR).unwrap(),
+            1
+        );
+        for exponent in [-80i32, -20, 0, 42, 100] {
+            let scale = 2.0f32.powi(exponent);
+            let maximum = 6.0 * scale;
+            let code = (exponent + 127) as u8;
+            assert_eq!(encode_indexer_ue8m0_scale(maximum).unwrap(), code);
+            assert_eq!(
+                decode_indexer_ue8m0_scale(code).unwrap().to_bits(),
+                scale.to_bits()
+            );
+            assert_eq!(
+                encode_indexer_ue8m0_scale(f32::from_bits(maximum.to_bits() + 1)).unwrap(),
+                code + 1
+            );
+        }
+        assert_eq!(
+            encode_indexer_ue8m0_scale(bf16::MAX.to_f32()).unwrap(),
+            INDEXER_FP4_MAX_SCALE_CODE
+        );
+        for code in [0, 254, 255] {
+            assert!(decode_indexer_ue8m0_scale(code).is_err());
+        }
+    }
+
+    #[test]
+    fn indexer_fp4_pack_is_bf16_semantic_transactional_and_scoreable() {
+        let mut large = [0.0f32; INDEXER_FP4_VALUES_PER_ROW];
+        large[0] = 70_000.0;
+        let packed = pack_indexer_fp4_row(&large).unwrap();
+        assert!(half::f16::from_f32(large[0]).is_infinite());
+        assert_eq!(unpack_indexer_fp4_row(&packed).unwrap()[0], 65_536.0);
+
+        for invalid in [f32::NAN, f32::INFINITY, -f32::INFINITY, f32::MAX] {
+            let mut values = [0.0f32; INDEXER_FP4_VALUES_PER_ROW];
+            values[17] = invalid;
+            assert!(pack_indexer_fp4_row(&values).is_err());
+        }
+        let mut malformed = packed.into_bytes();
+        malformed[64] = 0;
+        assert!(DeepSeekV4IndexerFp4Row::from_bytes(malformed).is_err());
+        let mut overflowing = [0u8; INDEXER_FP4_ROW_BYTES];
+        overflowing[0] = 0x07;
+        overflowing[64..].fill(INDEXER_FP4_MAX_SCALE_CODE);
+        assert!(DeepSeekV4IndexerFp4Row::from_bytes(overflowing).is_err());
+
+        let query_values = [
+            (0..128)
+                .map(|index| (index as f32 - 63.5) / 32.0)
+                .collect::<Vec<_>>(),
+            (0..128)
+                .map(|index| ((index * 17 % 43) as f32 - 21.0) / 16.0)
+                .collect(),
+        ];
+        let key_values = [
+            (0..128)
+                .map(|index| ((index * 7 % 31) as f32 - 15.0) / 8.0)
+                .collect::<Vec<_>>(),
+            (0..128)
+                .map(|index| ((index * 11 % 37) as f32 - 18.0) / 8.0)
+                .collect(),
+            (0..128)
+                .map(|index| ((index * 13 % 41) as f32 - 20.0) / 8.0)
+                .collect(),
+        ];
+        let queries = query_values
+            .iter()
+            .map(|values| pack_indexer_fp4_row(values).unwrap())
+            .collect::<Vec<_>>();
+        let keys = key_values
+            .iter()
+            .map(|values| pack_indexer_fp4_row(values).unwrap())
+            .collect::<Vec<_>>();
+        let raw_weights = [0.75, -0.25];
+        let normalization = 1.0 / (2.0f32 * 128.0).sqrt();
+        let scaled_weights = raw_weights.map(|weight| weight * normalization);
+        let scores = packed_indexer_scores(&queries, &scaled_weights, &keys).unwrap();
+        let decoded_queries = queries
+            .iter()
+            .flat_map(|row| unpack_indexer_fp4_row(row).unwrap())
+            .collect::<Vec<_>>();
+        let decoded_keys = keys
+            .iter()
+            .flat_map(|row| unpack_indexer_fp4_row(row).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scores,
+            indexer_scores(&decoded_queries, &raw_weights, &decoded_keys, 2, 128).unwrap()
+        );
+        assert_eq!(top_k_indices(&scores, 2).unwrap(), [1, 0]);
     }
 
     #[test]

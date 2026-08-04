@@ -1078,14 +1078,15 @@ Gate:
   by Qwen benchmarks.
 - Allocation-free full-context planning inventories 7 resident buffers (3
   retained no-copy windows and 4 final-page copies) at 102,994,608,640 logical /
-  102,994,624,512 priced-upper bytes and 538 unique session buffers at
-  7,631,890,980 logical / 7,636,369,408 priced-upper bytes. Of the logical
+  102,994,624,512 priced-upper bytes and 539 unique session buffers at
+  7,631,940,132 logical / 7,636,418,560 priced-upper bytes. Of the logical
   session total, 7,214,202,880 bytes are published-history storage. The
   remainder includes the complete physical 128-token packed scratch,
   sparse-index score/selection matrices, and 131,072-byte pre-chunk raw-ring
   snapshot rather than charging them to reserve. The complete priced upper
-  bound is 110,630,993,920 bytes; a 536,870,912-byte dynamic reserve makes the
-  admission requirement 111,167,864,832 bytes.
+  bound is 110,631,043,072 bytes; a 536,870,912-byte dynamic reserve makes the
+  admission requirement 111,167,913,984 bytes. The final 49,152 logical bytes
+  are the six slot-private routed FFN rows used by all-slot expert execution.
 - The load plan freezes configuration plus every descriptor's name, shape,
   dtype, shard, offset, and byte length. Realization revalidates those values,
   fallback policy, all view/alias/window geometry, and a deterministic planner
@@ -1094,8 +1095,8 @@ Gate:
   475,136-byte baseline, giving 126,701,060,096 bytes of working-set headroom.
   The process signal was `Some(0)`, the established omitted-limit convention,
   so the explicit reason was `admitted_process_budget_omitted`.
-- Live full-context reconciliation observed 7,631,896,576 session bytes and
-  110,626,504,704 cumulative residency-plus-session bytes, both below their
+- Live full-context reconciliation observed 7,631,945,728 session bytes and
+  110,626,553,856 cumulative residency-plus-session bytes, both below their
   priced inventories. Residency and session must fit those inventories without
   the reserve; only the first-forward endpoint gate may use the reserve.
   Residency is reconciled inside realization, before an unaccounted resident
@@ -1394,6 +1395,39 @@ product-warm decode does not regress. Otherwise the serial indexed path remains
 the production baseline and the next measured candidates are Q/KV preparation
 or whole-token submission.
 
+The prototype clears every promotion gate. IQ2_S and IQ3_S gate/up kernels
+retain the exact per-row quantized accumulation and materialize independent F32
+gate/up totals before applying the established clamp/SwiGLU expression. One
+two-dimensional dispatch covers six slot-private FFN rows; a second dispatch
+applies either IQ3_XXS or MXFP4 down projection into the existing slot-major
+expert outputs. This removes 22 dispatches/layer, or 946 dispatches/token,
+without changing weighted reduction order.
+
+All four production storage combinations are bit-identical to 24 serial indexed
+dispatches for both the six intermediate FFN rows and final expert outputs.
+Non-ready status zeros all six rows, and negative/oversized IDs zero exactly the
+invalid slot before any bank pointer is formed. Production-shape warm probes
+move IQ2_S+IQ3_XXS from 0.322 to 0.174 ms/layer, IQ2_S+MXFP4 from 0.326 to
+0.190, IQ3_S+IQ3_XXS from 0.320 to 0.175, and IQ3_S+MXFP4 from 0.314 to 0.192.
+
+The live product-warm routed stage falls from 14.030/13.929 to 7.729/7.751 ms
+at contexts about 128/512, a 6.301/6.178 ms/token reduction. Reconstructed GPU
+time falls from 43.549/45.242 to 37.548/39.301 ms. Ordinary candidate controls
+run in about 44.6-47.0 ms at context 128 and 45.9-46.4 ms at context 512, while
+the exact control/profile vectors remain `4a76e443...` and `e0c53614...`.
+Position zero remains `dc2fd6f1...`; the position-3075/3076 continuation and
+terminal causal digest remain `068c670b...`, `bfc09a03...`, and `73d2c01d...`.
+
+The next measured seam is now host synchronization rather than another weight
+kernel. Ordinary CPU encoding is about 1.7-1.8 ms/token, while
+`wall - aggregate_command_GPU - encode_CPU` remains 6.3-7.7 ms at context 128
+and 6.5-6.9 ms at context 512, clearing the 5 ms whole-token submission gate.
+The first collapse must retain 43 ordered serial encoders in one command and
+replace reusable route and sparse-selector statuses with snapshot-excluded
+per-layer records; after completion the host scans them in layer order and
+poisons on the first failure. A later successful layer must not overwrite an
+earlier failure, and progress callbacks may report only the verified prefix.
+
 The stage-attribution command is:
 
 ```bash
@@ -1523,12 +1557,13 @@ Gate:
 Broader S6 work remains:
 
 - Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
-- Fuse mHC split/Sinkhorn/collapse, compressor projection/store, shared-KV
-  sparse attention, and high-value MoE boundaries.
-- Attribute dispatch-level GPU stages inside the remaining 43 layer commands,
-  then fuse measured small-kernel chains and collapse whole-token submission
-  without weakening per-layer route failure records. An asynchronously
-  immutable SSD-streaming ticket remains a separate product contract.
+- Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
+  sparse attention. All-slot routed experts have closed the first measured MoE
+  boundary without changing reduction lineage.
+- Collapse the measured 43-command host seam into one whole-token command with
+  per-layer route/selector failure records and verified-prefix callbacks. An
+  asynchronously immutable SSD-streaming ticket remains a separate product
+  contract.
 - Parallelize or tile the measured 8.232 ms terminal Lightning Indexer scoring
   kernel while preserving scalar head/dimension accumulation semantics and the
   exact selected-ID transcript. It is now the primary measured CSA target.

@@ -507,14 +507,14 @@ fn native_deepseek_v4_full_context_session_plan_is_exact_and_admitted() {
     assert_eq!(plan.session_capacity().hca_physical_rows(), 8_192);
     let memory = plan.memory_plan().clone();
     eprintln!("deepseek_v4 full-context planned memory={memory}");
-    assert_eq!(memory.session_allocations().len(), 538);
-    assert_eq!(memory.session_logical_bytes(), 7_631_890_980);
-    assert_eq!(memory.session_priced_upper_bytes(), 7_636_369_408);
-    assert_eq!(memory.total_priced_upper_bytes(), 110_630_993_920);
+    assert_eq!(memory.session_allocations().len(), 539);
+    assert_eq!(memory.session_logical_bytes(), 7_631_940_132);
+    assert_eq!(memory.session_priced_upper_bytes(), 7_636_418_560);
+    assert_eq!(memory.total_priced_upper_bytes(), 110_631_043_072);
     let required = memory
         .required_with_reserve_bytes()
         .expect("price full-context plan with reserve");
-    assert_eq!(required, 111_167_864_832);
+    assert_eq!(required, 111_167_913_984);
     let admission = memory.admission(ctx.memory_signals());
     assert!(
         admission.admitted,
@@ -1190,16 +1190,16 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         "memory planning must not realize Metal buffers"
     );
     let memory_plan = load_plan.memory_plan().clone();
-    assert_eq!(memory_plan.session_allocations().len(), 538);
-    assert_eq!(memory_plan.session_logical_bytes(), 179_077_668);
-    assert_eq!(memory_plan.session_priced_upper_bytes(), 183_582_720);
+    assert_eq!(memory_plan.session_allocations().len(), 539);
+    assert_eq!(memory_plan.session_logical_bytes(), 179_126_820);
+    assert_eq!(memory_plan.session_priced_upper_bytes(), 183_631_872);
     assert_eq!(memory_plan.residency_buffer_count(), 7);
     assert_eq!(memory_plan.residency_logical_bytes(), 102_994_608_640);
     assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_624_512);
-    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_207_232);
+    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_256_384);
     assert_eq!(
         memory_plan.required_with_reserve_bytes().unwrap(),
-        103_715_078_144
+        103_715_127_296
     );
     assert_eq!(load_plan.residency_report().window_count, 3);
     assert_eq!(load_plan.residency_report().fallback_count, 4);
@@ -2238,6 +2238,40 @@ fn profile_native_deepseek_v4_stage_families_at_128_and_512() {
             .flatten()
             .map(stage_command_gpu_ms)
             .collect::<Vec<_>>();
+        let control_before_encode = endpoint
+            .controls_before
+            .iter()
+            .map(DeepSeekV4CommandProfile::encode_cpu_ms)
+            .collect::<Vec<_>>();
+        let control_after_encode = endpoint
+            .controls_after
+            .iter()
+            .map(DeepSeekV4CommandProfile::encode_cpu_ms)
+            .collect::<Vec<_>>();
+        let sampled_encode = endpoint
+            .rotations
+            .iter()
+            .flatten()
+            .map(|profile| profile.layers.iter().map(|layer| layer.encode_cpu_ms).sum())
+            .collect::<Vec<f64>>();
+        let residual = |wall: &[f64], gpu: &[f64], encode: &[f64]| {
+            wall.iter()
+                .zip(gpu)
+                .zip(encode)
+                .map(|((&wall, &gpu), &encode)| wall - gpu - encode)
+                .collect::<Vec<_>>()
+        };
+        let control_before_residual = residual(
+            &control_before_wall,
+            &control_before_gpu,
+            &control_before_encode,
+        );
+        let control_after_residual = residual(
+            &control_after_wall,
+            &control_after_gpu,
+            &control_after_encode,
+        );
+        let sampled_residual = residual(&sampled_wall, &sampled_gpu, &sampled_encode);
 
         let mut attention_hc_ms = Vec::with_capacity(REPEATS);
         let mut attention_prepare_ms = Vec::with_capacity(REPEATS);
@@ -2300,6 +2334,15 @@ fn profile_native_deepseek_v4_stage_families_at_128_and_512() {
             reconstructed_gpu_ms.push(reconstructed);
         }
         let stage_total_median = median(&reconstructed_gpu_ms);
+        eprintln!(
+            "deepseek_v4 host_profile {label} control_before_encode_ms={control_before_encode:?} control_before_encode_median_ms={:.3} control_before_residual_ms={control_before_residual:?} control_before_residual_median_ms={:.3} control_after_encode_ms={control_after_encode:?} control_after_encode_median_ms={:.3} control_after_residual_ms={control_after_residual:?} control_after_residual_median_ms={:.3} sampled_encode_ms={sampled_encode:?} sampled_encode_median_ms={:.3} sampled_residual_ms={sampled_residual:?} sampled_residual_median_ms={:.3}",
+            median(&control_before_encode),
+            median(&control_before_residual),
+            median(&control_after_encode),
+            median(&control_after_residual),
+            median(&sampled_encode),
+            median(&sampled_residual),
+        );
         eprintln!(
             "deepseek_v4 stage_profile {label} control_before_wall_ms={control_before_wall:?} control_before_wall_median_ms={:.3} control_after_wall_ms={control_after_wall:?} control_after_wall_median_ms={:.3} control_before_gpu_ms={control_before_gpu:?} control_before_gpu_median_ms={:.3} control_after_gpu_ms={control_after_gpu:?} control_after_gpu_median_ms={:.3} sampled_wall_ms={sampled_wall:?} sampled_wall_median_ms={:.3} sampled_gpu_ms={sampled_gpu:?} sampled_gpu_median_ms={:.3} reconstructed_gpu_ms={reconstructed_gpu_ms:?} reconstructed_gpu_median_ms={stage_total_median:.3} attention_hc_ms={attention_hc_ms:?} attention_hc_median_ms={:.3} attention_hc_share={:.4} attention_prepare_ms={attention_prepare_ms:?} attention_prepare_median_ms={:.3} attention_prepare_share={:.4} attention_core_ms={attention_core_ms:?} attention_core_median_ms={:.3} attention_core_share={:.4} attention_output_ms={attention_output_ms:?} attention_output_median_ms={:.3} attention_output_share={:.4} attention_ms={attention_ms:?} attention_median_ms={:.3} attention_share={:.4} bridge_ms={bridge_ms:?} bridge_median_ms={:.3} bridge_share={:.4} moe_router_ms={moe_router_ms:?} moe_router_median_ms={:.3} moe_router_share={:.4} moe_routed_ms={moe_routed_ms:?} moe_routed_median_ms={:.3} moe_routed_share={:.4} moe_shared_ms={moe_shared_ms:?} moe_shared_median_ms={:.3} moe_shared_share={:.4} moe_combine_ms={moe_combine_ms:?} moe_combine_median_ms={:.3} moe_combine_share={:.4} moe_ms={moe_ms:?} moe_median_ms={:.3} moe_share={:.4} tail_ms={tail_ms:?} tail_median_ms={:.3} tail_share={:.4} encoder_boundary_ms={boundary_ms:?} encoder_boundary_median_ms={:.3} encoder_boundary_share={:.4} raw_coverage_median={:.4} logits_sha256={}",
             median(&control_before_wall),

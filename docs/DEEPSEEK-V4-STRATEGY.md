@@ -521,7 +521,10 @@ Gate:
   Fresh restore under the cooperative singleton schedule reproduces
   position-3072 logit SHA-256
   `7ec53d29a78a4d6ee932f292d67dc67c1d15bdd31c050ef2aa625f57fd257764`
-  without changing the snapshot ABI or causal digest.
+  without changing the snapshot ABI or causal digest. The later GPU-route
+  schedule preserves that causal record and produces
+  `2ecde5de747a8637d38c2cd38538670b3e15932cee15b243b6e25f1b3dfe4c43`
+  inside the same independent schedule envelope.
 
 ### S2: local-only Metal backbone
 
@@ -722,13 +725,16 @@ Gate:
   maximum route-weight delta is 0.00002378. The regenerated transcript is
   byte-identical across fresh runs at SHA-256
   `7ce0ab84f262d5e9ce8cd3098452872156f180a53d5282d71c68d4b97ce9e393`.
+  GPU route publication later supersedes only the floating schedule: all
+  consumed IDs remain exact and two fresh transcripts repeat at
+  `e9d17dc01a3b05057020d552e1bd81359c5a27ed8b60495b50a40f0b605b1284`.
 - The certified position-3072 v1 snapshot restores into a 1,024-row CSA session
   and reproduces its existing full-logit hash before crossing the old fixed
   allocation. Packed and singleton schedules then publish row 768 at position
   3075 and continue through 3076 at cosine / relative-RMS pairs
-  0.999998275 / 0.001868266 and 0.999999752 / 0.000723981. Fresh restore of the
+  0.999999986 / 0.000169229 and 0.999999998 / 0.000063240. Fresh restore of the
   row-768 state reproduces continuation bits exactly; the terminal causal digest
-  is `f95010dec44698e956328325d7372454042353186d5415f508b838985b4d3deb`,
+  is `73d2c01d1db99d5a84e3da691fd8bdb7a7ea720ee6fc49c9926ade6f55a838a3`,
   and position 3077 rejects before mutation in that deliberately bounded test
   session.
 
@@ -1072,14 +1078,14 @@ Gate:
   by Qwen benchmarks.
 - Allocation-free full-context planning inventories 7 resident buffers (3
   retained no-copy windows and 4 final-page copies) at 102,994,608,640 logical /
-  102,994,624,512 priced-upper bytes and 537 unique session buffers at
-  7,631,890,976 logical / 7,636,353,024 priced-upper bytes. Of the logical
+  102,994,624,512 priced-upper bytes and 538 unique session buffers at
+  7,631,890,980 logical / 7,636,369,408 priced-upper bytes. Of the logical
   session total, 7,214,202,880 bytes are published-history storage. The
   remainder includes the complete physical 128-token packed scratch,
   sparse-index score/selection matrices, and 131,072-byte pre-chunk raw-ring
   snapshot rather than charging them to reserve. The complete priced upper
-  bound is 110,630,977,536 bytes; a 536,870,912-byte dynamic reserve makes the
-  admission requirement 111,167,848,448 bytes.
+  bound is 110,630,993,920 bytes; a 536,870,912-byte dynamic reserve makes the
+  admission requirement 111,167,864,832 bytes.
 - The load plan freezes configuration plus every descriptor's name, shape,
   dtype, shard, offset, and byte length. Realization revalidates those values,
   fallback policy, all view/alias/window geometry, and a deterministic planner
@@ -1279,10 +1285,57 @@ by dynamically indexed experts in one command per layer. Parallel expert-slot
 execution, packed GPU bucketization, whole-token submission, and an externally
 observable SSD-streaming ticket remain separate, measured follow-ons.
 
-The release command is:
+The attribution command at checkpoint `7040e03` is:
 
 ```bash
 cargo test --release -p qwen-llm --test deepseek_v4_position_zero_live profile_native_deepseek_v4_routing_seam_at_128_and_512 -- --ignored --exact --nocapture
+```
+
+The promoted implementation publishes hash and learned routes on the GPU and
+feeds their six IDs directly into indexed IQ2_S, IQ3_S, IQ3_XXS, and MXFP4
+expert projections. Router, route, serial six-slot experts, shared expert, and
+residual update now occupy one command per layer, reducing singleton
+commit/completion boundaries from 86 to 43. Invalid route status or IDs zero all
+routed outputs before the host observes and poisons the failed layer.
+
+The first learned-route kernel was correctly rejected: a scalar six-pass scan
+took 0.318 ms/layer and moved the removed idle interval into GPU work. A stable
+eight-simdgroup reduction computes direct F32 GPU-schedule `sqrt(softplus)`
+selection scores,
+breaks ties by lower expert ID, and takes 0.0183 ms/layer in the same 100-dispatch
+release probe. Hash routing takes 0.0943 ms/layer and occurs in only three
+layers. Production-shape indexed-versus-static projection ratios are 1.017 for
+IQ2_S gate/up, 1.029 for IQ3_S gate/up, 1.047 for IQ3_XXS down, and 1.034 for
+MXFP4 down; every output bit is identical to the default fast static IQ2/IQ3
+configuration or the sole MXFP4 static kernel.
+
+Paired warmed packets place the new singleton path around 51.5-54.9 ms at depth
+128 and 52.3-52.7 ms at depth 512, versus 59.498/59.865 ms before routing moved
+to the GPU. A command-timestamp packet measures about 43.0/43.9 ms of aggregate
+GPU work and 2.5/2.4 ms of CPU encoding at the two depths. The curve remains
+flat and delivers roughly 19 tokens/s; current llama.cpp remains ahead at about
+27.6 tokens/s, so this is a promoted seam removal rather than the S6 throughput
+endpoint.
+
+The latest five-sample singleton arrays are
+`[56.411,54.937,56.051,54.550,51.702]` at depth 128 and
+`[52.431,52.709,53.850,53.162,52.624]` at depth 512. The paired command-profile
+arrays are `[64.775,51.773,50.918,52.924,51.902]` and
+`[61.166,53.058,52.280,54.473,53.255]`; the first restored observation in each
+series remains visibly cold and is retained rather than discarded.
+
+The GPU numerical schedule preserves all 258 routed expert IDs, all 21 CSA
+selected lists, and every rank-512/513 row ID at position 3070. Route weights
+move by at most 2.217e-5 absolute / 8.870e-5 relative; downstream CSA scores and
+cutoff margins move by at most 2.822e-4 and 4.840e-5 without changing a consumed
+decision. Two fresh transcripts are byte-identical at SHA-256
+`e9d17dc01a3b05057020d552e1bd81359c5a27ed8b60495b50a40f0b605b1284`.
+The full deep endpoint remains inside the preregistered three-schedule envelope.
+
+The current decomposition command is:
+
+```bash
+cargo test --release -p qwen-llm --test deepseek_v4_position_zero_live profile_native_deepseek_v4_single_command_at_128_and_512 -- --ignored --exact --nocapture
 ```
 
 Gate:
@@ -1364,6 +1417,9 @@ Gate:
   Singleton position zero keeps argmax 201, cosine 0.999999999, relative RMS
   0.000049306, and full-vector
   SHA-256 `33ec463aee992d3b557a58bd5710080d6a42f85ba14c9ceb07d5f772ab1cfd37`.
+  GPU route publication later keeps argmax 201, improves relative RMS to
+  0.000007494, and establishes its own deterministic full-vector SHA-256
+  `dc2fd6f18c5ba761cef7cc39c3ecb364addf6ef6be3b469bf70db6ff27d6f630`.
   The position-4 singleton continuation and named SWA production shape exercise
   the new path; newest-row, local-only, wrapped-CSA, and invalid-count ablations
   re-pin visibility rather than assuming it from the packed implementation.
@@ -1392,9 +1448,11 @@ Gate:
 - A real-weight session constructed directly at position 65,663 executes the
   radix selector inside every sparse CSA layer and the first tiled HCA query.
   Two fresh sessions remain byte-identical at full-logit SHA-256
+  `4c00cbe4653402abc3e05bb5d01cf353cc0b96a910cd03d50e54024f95829fd2`
+  under GPU routing. The prior CPU-route schedule produced
   `915be9ad610710c4bcb3cfb661ef1fcdd35e2ccebca82c20e15b05336528997a`;
-  a clean pre-radix cooperative-attention worktree produces the same hash,
-  isolating selector exactness from the earlier reduction-schedule change.
+  both execute the same terminal attention geometry and reject the next
+  position before mutation.
 - A successful advance revokes the session's current logits and final hidden
   observation; vectors already copied to the host remain ordinary owned values.
   A callback unwind from retained position 2 leaves that position unchanged,
@@ -1405,11 +1463,10 @@ Broader S6 work remains:
 - Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, shared-KV
   sparse attention, and high-value MoE boundaries.
-- Replace the measured 9.563-9.827 ms singleton routing seam with a private GPU
-  route record and dynamically indexed experts, preserving the current
-  six-slot projection and reduction order. The first production switch keeps
-  one command and one completion boundary per layer; it does not yet promise an
-  asynchronously immutable SSD-streaming record.
+- Attribute dispatch-level GPU stages inside the remaining 43 layer commands,
+  then fuse measured small-kernel chains and collapse whole-token submission
+  without weakening per-layer route failure records. An asynchronously
+  immutable SSD-streaming ticket remains a separate product contract.
 - Parallelize or tile the measured 8.232 ms terminal Lightning Indexer scoring
   kernel while preserving scalar head/dimension accumulation semantics and the
   exact selected-ID transcript. It is now the primary measured CSA target.

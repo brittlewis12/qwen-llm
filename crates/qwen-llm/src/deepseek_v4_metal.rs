@@ -46,6 +46,15 @@ pub const DEEPSEEK_V4_CONNECTION_COUNT: usize = 4;
 pub const DEEPSEEK_V4_HC_PARAMETER_COUNT: usize = 24;
 pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
 pub const DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+const DEEPSEEK_V4_ROUTE_STATUS_READY: i32 = 1;
+const DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_LOGIT: i32 = -1;
+const DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_BIAS: i32 = -2;
+const DEEPSEEK_V4_ROUTE_STATUS_INVALID_TOKEN: i32 = -3;
+const DEEPSEEK_V4_ROUTE_STATUS_INVALID_EXPERT: i32 = -4;
+const DEEPSEEK_V4_ROUTE_STATUS_DUPLICATE_EXPERT: i32 = -5;
+const DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_WEIGHT: i32 = -6;
+const DEEPSEEK_V4_ROUTE_MAX_EXPERTS: usize = 256;
+const DEEPSEEK_V4_ROUTE_MAX_TOP_K: usize = 6;
 pub use prefill::DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 /// Engine-owned evidence ceiling through the model's exact context length.
 /// A request may allocate less, but allocation never authorizes execution past
@@ -873,63 +882,30 @@ pub enum DeepSeekV4RoutingKind {
     Learned,
 }
 
-/// One layer's command-boundary attribution from a profiled singleton forward.
-///
-/// `inter_command_idle_ms` is measured in Metal's command-buffer clock as the
-/// expert command's GPU start minus the router command's GPU end. It includes
-/// host routing, command construction and submission, rather than claiming to
-/// be pure CPU routing time.
 #[derive(Clone, Copy, Debug)]
 #[doc(hidden)]
-pub struct DeepSeekV4RoutingLayerProfile {
+pub struct DeepSeekV4LayerCommandProfile {
     pub layer: usize,
-    pub kind: DeepSeekV4RoutingKind,
-    pub router_command_gpu_ms: f64,
-    pub route_cpu_ms: f64,
-    pub expert_encode_cpu_ms: f64,
-    pub inter_command_idle_ms: f64,
-    pub expert_command_gpu_ms: f64,
+    pub routing_kind: DeepSeekV4RoutingKind,
+    pub encode_cpu_ms: f64,
+    pub command_gpu_ms: f64,
 }
 
 #[derive(Clone, Debug)]
 #[doc(hidden)]
-pub struct DeepSeekV4RoutingProfile {
+pub struct DeepSeekV4CommandProfile {
     pub position: u32,
     pub forward_wall_ms: f64,
-    pub layers: Vec<DeepSeekV4RoutingLayerProfile>,
+    pub layers: Vec<DeepSeekV4LayerCommandProfile>,
 }
 
-impl DeepSeekV4RoutingProfile {
-    pub fn route_cpu_ms(&self) -> f64 {
-        self.layers.iter().map(|layer| layer.route_cpu_ms).sum()
+impl DeepSeekV4CommandProfile {
+    pub fn encode_cpu_ms(&self) -> f64 {
+        self.layers.iter().map(|layer| layer.encode_cpu_ms).sum()
     }
 
-    pub fn expert_encode_cpu_ms(&self) -> f64 {
-        self.layers
-            .iter()
-            .map(|layer| layer.expert_encode_cpu_ms)
-            .sum()
-    }
-
-    pub fn inter_command_idle_ms(&self) -> f64 {
-        self.layers
-            .iter()
-            .map(|layer| layer.inter_command_idle_ms)
-            .sum()
-    }
-
-    pub fn router_command_gpu_ms(&self) -> f64 {
-        self.layers
-            .iter()
-            .map(|layer| layer.router_command_gpu_ms)
-            .sum()
-    }
-
-    pub fn expert_command_gpu_ms(&self) -> f64 {
-        self.layers
-            .iter()
-            .map(|layer| layer.expert_command_gpu_ms)
-            .sum()
+    pub fn command_gpu_ms(&self) -> f64 {
+        self.layers.iter().map(|layer| layer.command_gpu_ms).sum()
     }
 }
 
@@ -1154,8 +1130,8 @@ impl DeepSeekV4Session {
     }
 
     /// Execute one complete token and retain the raw cache and every compressor
-    /// frontier needed by the next position. Each layer completes its router
-    /// command before host selection and then runs a fresh expert command.
+    /// frontier needed by the next position. Each layer publishes its route and
+    /// consumes dynamically indexed experts in one ordered Metal command.
     pub fn forward_token_with_progress(
         &mut self,
         ctx: &MetalContext,
@@ -1165,21 +1141,20 @@ impl DeepSeekV4Session {
         self.forward_token_with_progress_and_profile(ctx, token_id, layer_completed, None)
     }
 
-    /// Execute one singleton token while attributing the existing two-command
-    /// routing seam. The ordinary forward path does not allocate or sample
-    /// clocks; this entry point is intended for focused release profiling.
+    /// Execute one singleton token while timing the one-command-per-layer path.
+    /// The ordinary forward path does not allocate or sample clocks.
     #[doc(hidden)]
     pub fn forward_token_profiled(
         &mut self,
         ctx: &MetalContext,
         token_id: u32,
-    ) -> Result<DeepSeekV4RoutingProfile, DeepSeekV4MetalError> {
+    ) -> Result<DeepSeekV4CommandProfile, DeepSeekV4MetalError> {
         let position = self.phase.next_position();
         let started = std::time::Instant::now();
         let mut layers = Vec::with_capacity(DEEPSEEK_V4_LAYER_COUNT);
         self.forward_token_with_progress_and_profile(ctx, token_id, |_| {}, Some(&mut layers))?;
         debug_assert_eq!(layers.len(), DEEPSEEK_V4_LAYER_COUNT);
-        Ok(DeepSeekV4RoutingProfile {
+        Ok(DeepSeekV4CommandProfile {
             position,
             forward_wall_ms: started.elapsed().as_secs_f64() * 1e3,
             layers,
@@ -1191,7 +1166,7 @@ impl DeepSeekV4Session {
         ctx: &MetalContext,
         token_id: u32,
         mut layer_completed: impl FnMut(usize),
-        routing_profile: Option<&mut Vec<DeepSeekV4RoutingLayerProfile>>,
+        routing_profile: Option<&mut Vec<DeepSeekV4LayerCommandProfile>>,
     ) -> Result<&MetalTensor, DeepSeekV4MetalError> {
         if ctx.device.registryID() != self.device_registry_id {
             return invalid(format!(
@@ -1283,7 +1258,7 @@ impl DeepSeekV4Session {
         token_id: u32,
         position: u32,
         layer_completed: &mut impl FnMut(usize),
-        mut routing_profile: Option<&mut Vec<DeepSeekV4RoutingLayerProfile>>,
+        mut routing_profile: Option<&mut Vec<DeepSeekV4LayerCommandProfile>>,
     ) -> Result<(), DeepSeekV4MetalError> {
         let rms_eps = self.residency.config().attention_rms_epsilon;
         let hc_eps = self.residency.config().hyper_connection_epsilon;
@@ -1291,12 +1266,13 @@ impl DeepSeekV4Session {
         for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
             let raw_cache = self.raw_cache_layer(layer)?;
             let rope = deepseek_v4_layer_rope(self.residency.config(), layer)?;
-            let router_command = ctx.queue.commandBuffer().ok_or_else(|| {
+            let encode_started = routing_profile.as_ref().map(|_| std::time::Instant::now());
+            let command = ctx.queue.commandBuffer().ok_or_else(|| {
                 DeepSeekV4MetalError::Invalid(format!(
-                    "failed to allocate layer {layer} router command buffer"
+                    "failed to allocate layer {layer} command buffer"
                 ))
             })?;
-            let encoder = KernelEncoder::begin(&router_command);
+            let encoder = KernelEncoder::begin(&command);
             let encode_result = (|| {
                 if layer == 0 {
                     encode_get_rows_f32(
@@ -1418,69 +1394,21 @@ impl DeepSeekV4Session {
                     self.layer_tensor(layer, "ffn_gate_inp.weight")?,
                     rms_eps,
                 )?;
-                Ok::<(), DeepSeekV4MetalError>(())
-            })();
-            encoder.end();
-            encode_result?;
-            router_command.commit();
-            router_command.waitUntilCompleted();
-            if let Some(error) = router_command.error() {
-                return invalid(format!("layer {layer} router command failed: {error:?}"));
-            }
-            if self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
-                && (position as usize + 1) / 4 > DEEPSEEK_V4_CSA_TOP_K
-            {
-                self.sparse_csa.validate_completed()?;
-            }
-
-            #[cfg(feature = "dsv4-diagnostics")]
-            let csa_decision = if self.decision_diagnostics.is_capturing()
-                && self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
-            {
-                let rows = self.compressor_frontiers.csa_rows(layer, position)?;
-                match rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
-                    Some(rows) => Some(self.sparse_csa.capture_decision(rows.count)?),
-                    None => None,
+                if layer < self.residency.config().hash_layer_count as usize {
+                    self.moe.encode_route_hash_gpu(
+                        ctx,
+                        &encoder,
+                        token_id as usize,
+                        self.layer_tensor(layer, "ffn_gate_tid2eid.weight")?,
+                    )?;
+                } else {
+                    self.moe.encode_route_learned_gpu(
+                        ctx,
+                        &encoder,
+                        self.layer_tensor(layer, "exp_probs_b.bias")?,
+                    )?;
                 }
-            } else {
-                None
-            };
-
-            let routing_kind = if layer < self.residency.config().hash_layer_count as usize {
-                DeepSeekV4RoutingKind::Hash
-            } else {
-                DeepSeekV4RoutingKind::Learned
-            };
-            let route_started = routing_profile.as_ref().map(|_| std::time::Instant::now());
-            if routing_kind == DeepSeekV4RoutingKind::Hash {
-                self.moe.route_hash(
-                    token_id as usize,
-                    self.layer_tensor(layer, "ffn_gate_tid2eid.weight")?,
-                )?;
-            } else {
-                self.moe
-                    .route_learned(self.layer_tensor(layer, "exp_probs_b.bias")?)?;
-            }
-            let route_cpu_ms = route_started
-                .map(|started| started.elapsed().as_secs_f64() * 1e3)
-                .unwrap_or_default();
-
-            #[cfg(feature = "dsv4-diagnostics")]
-            if self.decision_diagnostics.is_capturing() {
-                let route = self.moe.capture_route_decision()?;
-                self.decision_diagnostics
-                    .capture_layer(layer, csa_decision, route)?;
-            }
-
-            let expert_encode_started = routing_profile.as_ref().map(|_| std::time::Instant::now());
-            let expert_command = ctx.queue.commandBuffer().ok_or_else(|| {
-                DeepSeekV4MetalError::Invalid(format!(
-                    "failed to allocate layer {layer} expert command buffer"
-                ))
-            })?;
-            let encoder = KernelEncoder::begin(&expert_command);
-            let encode_result = (|| {
-                let moe_output = self.moe.encode_experts(
+                let moe_output = self.moe.encode_experts_indexed(
                     ctx,
                     &encoder,
                     self.layer_tensor(layer, "ffn_gate_exps.weight")?,
@@ -1534,41 +1462,60 @@ impl DeepSeekV4Session {
                 Ok::<(), DeepSeekV4MetalError>(())
             })();
             encoder.end();
-            let expert_encode_cpu_ms = expert_encode_started
+            let encode_cpu_ms = encode_started
                 .map(|started| started.elapsed().as_secs_f64() * 1e3)
                 .unwrap_or_default();
             encode_result?;
-            expert_command.commit();
-            expert_command.waitUntilCompleted();
-            if let Some(error) = expert_command.error() {
-                return invalid(format!("layer {layer} expert command failed: {error:?}"));
+            command.commit();
+            command.waitUntilCompleted();
+            if let Some(error) = command.error() {
+                return invalid(format!("layer {layer} command failed: {error:?}"));
             }
+            self.moe.validate_gpu_route_completed()?;
+            if self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
+                && (position as usize + 1) / 4 > DEEPSEEK_V4_CSA_TOP_K
+            {
+                self.sparse_csa.validate_completed()?;
+            }
+
+            #[cfg(feature = "dsv4-diagnostics")]
+            let csa_decision = if self.decision_diagnostics.is_capturing()
+                && self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
+            {
+                let rows = self.compressor_frontiers.csa_rows(layer, position)?;
+                match rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
+                    Some(rows) => Some(self.sparse_csa.capture_decision(rows.count)?),
+                    None => None,
+                }
+            } else {
+                None
+            };
+
+            #[cfg(feature = "dsv4-diagnostics")]
+            if self.decision_diagnostics.is_capturing() {
+                let route = self.moe.capture_route_decision()?;
+                self.decision_diagnostics
+                    .capture_layer(layer, csa_decision, route)?;
+            }
+
             if let Some(profile) = routing_profile.as_deref_mut() {
-                let router_start = router_command.GPUStartTime();
-                let router_end = router_command.GPUEndTime();
-                let expert_start = expert_command.GPUStartTime();
-                let expert_end = expert_command.GPUEndTime();
-                let timings = [
-                    router_end - router_start,
-                    expert_start - router_end,
-                    expert_end - expert_start,
-                ];
-                if timings
-                    .iter()
-                    .any(|seconds| !seconds.is_finite() || *seconds < 0.0)
-                {
+                let gpu_seconds = command.GPUEndTime() - command.GPUStartTime();
+                if !gpu_seconds.is_finite() || gpu_seconds < 0.0 {
                     return invalid(format!(
-                        "layer {layer} returned invalid Metal command timestamps: router=({router_start}, {router_end}) expert=({expert_start}, {expert_end})"
+                        "layer {layer} returned invalid Metal command timestamps: ({}, {})",
+                        command.GPUStartTime(),
+                        command.GPUEndTime()
                     ));
                 }
-                profile.push(DeepSeekV4RoutingLayerProfile {
+                profile.push(DeepSeekV4LayerCommandProfile {
                     layer,
-                    kind: routing_kind,
-                    router_command_gpu_ms: timings[0] * 1e3,
-                    route_cpu_ms,
-                    expert_encode_cpu_ms,
-                    inter_command_idle_ms: timings[1] * 1e3,
-                    expert_command_gpu_ms: timings[2] * 1e3,
+                    routing_kind: if layer < self.residency.config().hash_layer_count as usize {
+                        DeepSeekV4RoutingKind::Hash
+                    } else {
+                        DeepSeekV4RoutingKind::Learned
+                    },
+                    encode_cpu_ms,
+                    command_gpu_ms: gpu_seconds * 1e3,
                 });
             }
             layer_completed(layer);
@@ -3598,6 +3545,18 @@ impl DeepSeekV4MoeConfig {
         if self.top_k > self.expert_count {
             return invalid("MoE top-k must not exceed expert count");
         }
+        if self.expert_count > DEEPSEEK_V4_ROUTE_MAX_EXPERTS {
+            return invalid(format!(
+                "MoE expert count {} exceeds GPU route capacity {DEEPSEEK_V4_ROUTE_MAX_EXPERTS}",
+                self.expert_count
+            ));
+        }
+        if self.top_k > DEEPSEEK_V4_ROUTE_MAX_TOP_K {
+            return invalid(format!(
+                "MoE top-k {} exceeds GPU route capacity {DEEPSEEK_V4_ROUTE_MAX_TOP_K}",
+                self.top_k
+            ));
+        }
         if !self.routed_scale.is_finite() || self.routed_scale <= 0.0 {
             return invalid("MoE routed scale must be finite and positive");
         }
@@ -3608,17 +3567,16 @@ impl DeepSeekV4MoeConfig {
 
 /// Reusable session-owned storage for one native DS4 single-token MoE body.
 ///
-/// CPU routing is an intentional correctness seam. After `encode_router`, the
-/// caller must end encoding, commit, and wait for that command buffer before
-/// calling either `route_*` method. The route methods perform narrowly scoped
-/// host access to shared Metal buffers. A subsequent `encode_experts` must be
-/// placed in a new serial command encoder so those host writes are visible.
+/// Production routing publishes a transient GPU record consumed by indexed
+/// expert projections in the same serial command. The host `route_*` and static
+/// `encode_experts` methods remain independent differential oracles.
 pub struct DeepSeekV4MoeScratch {
     config: DeepSeekV4MoeConfig,
     normalized_input: MetalTensor,
     logits: MetalTensor,
     expert_ids: MetalTensor,
     weights: MetalTensor,
+    route_status: MetalTensor,
     gate: MetalTensor,
     up: MetalTensor,
     inner: MetalTensor,
@@ -3647,6 +3605,7 @@ impl DeepSeekV4MoeScratch {
                 GgmlType::I32,
             )?,
             weights: MetalTensor::zeros_f32(ctx, vec![c.top_k as u64])?,
+            route_status: MetalTensor::zeros_i32(ctx, vec![1])?,
             gate: MetalTensor::zeros_f32(ctx, vec![c.ffn_size as u64])?,
             up: MetalTensor::zeros_f32(ctx, vec![c.ffn_size as u64])?,
             inner: MetalTensor::zeros_f32(ctx, vec![c.ffn_size as u64])?,
@@ -3728,8 +3687,141 @@ impl DeepSeekV4MoeScratch {
         Ok((&self.normalized_input, &self.logits))
     }
 
-    /// Route from token-major contiguous `[K,V]` I32 physical storage.
-    /// Requires the completed command boundary documented on this type.
+    fn encode_route_learned_gpu(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        correction_bias: &MetalTensor,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        let c = self.config;
+        validate_f32(
+            correction_bias,
+            &[c.expert_count as u64],
+            false,
+            "GPU router correction bias",
+        )?;
+        self.encode_route_gpu(
+            ctx,
+            enc,
+            correction_bias,
+            0,
+            c.expert_count,
+            "kernel_deepseek_v4_route_learned",
+            DEEPSEEK_V4_ROUTE_MAX_EXPERTS,
+        )
+    }
+
+    fn encode_route_hash_gpu(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        token_id: usize,
+        token_to_expert: &MetalTensor,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        let c = self.config;
+        validate_i32_bank(token_to_expert, c.top_k, "GPU token-to-expert map")?;
+        let vocab_size = usize::try_from(token_to_expert.shape[1]).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("GPU hash vocabulary exceeds usize".into())
+        })?;
+        self.encode_route_gpu(
+            ctx,
+            enc,
+            token_to_expert,
+            token_id,
+            vocab_size,
+            "kernel_deepseek_v4_route_hash",
+            1,
+        )
+    }
+
+    fn encode_route_gpu(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        auxiliary: &MetalTensor,
+        token_id: usize,
+        vocab_size: usize,
+        kernel: &'static str,
+        threads_per_group: usize,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        require_serial(enc, kernel)?;
+        self.validate_scratch()?;
+        let c = self.config;
+        #[repr(C)]
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        struct Args {
+            expert_count: u32,
+            top_k: u32,
+            token_id: u32,
+            vocab_size: u32,
+            routed_scale: f32,
+        }
+        let args = Args {
+            expert_count: u32::try_from(c.expert_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("GPU route expert count exceeds u32".into())
+            })?,
+            top_k: u32::try_from(c.top_k)
+                .map_err(|_| DeepSeekV4MetalError::Invalid("GPU route top-k exceeds u32".into()))?,
+            token_id: u32::try_from(token_id).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("GPU route token ID exceeds u32".into())
+            })?,
+            vocab_size: u32::try_from(vocab_size).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("GPU route vocabulary exceeds u32".into())
+            })?,
+            routed_scale: c.routed_scale,
+        };
+        let pso = ctx.pipeline(kernel)?;
+        validate_deepseek_v4_route_pipeline_geometry(
+            kernel,
+            pso.threadExecutionWidth(),
+            pso.maxTotalThreadsPerThreadgroup(),
+            threads_per_group,
+        )?;
+        enc.set_pipeline(&pso);
+        enc.set_bytes(0, &args);
+        enc.set_tensor(1, &self.logits);
+        enc.set_tensor(2, auxiliary);
+        enc.set_tensor(3, &self.expert_ids);
+        enc.set_tensor(4, &self.weights);
+        enc.set_tensor(5, &self.route_status);
+        enc.dispatch(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: threads_per_group,
+                height: 1,
+                depth: 1,
+            },
+        );
+        Ok(())
+    }
+
+    fn validate_gpu_route_completed(&self) -> Result<(), DeepSeekV4MetalError> {
+        let status = host_read_i32(&self.route_status, "GPU route status")?;
+        if status.as_slice() != [DEEPSEEK_V4_ROUTE_STATUS_READY] {
+            return invalid(format!(
+                "GPU route failed with status {} ({})",
+                status[0],
+                deepseek_v4_route_status_name(status[0])
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn capture_gpu_route_record(&self) -> Result<DeepSeekV4GpuRouteRecord, DeepSeekV4MetalError> {
+        let status = host_read_i32(&self.route_status, "GPU route status")?;
+        Ok(DeepSeekV4GpuRouteRecord {
+            status: status[0],
+            expert_ids: host_read_i32(&self.expert_ids, "GPU selected expert IDs")?,
+            weights: host_read_f32(&self.weights, "GPU selected expert weights")?,
+        })
+    }
+
+    /// Host differential for token-major contiguous `[K,V]` I32 storage.
     pub fn route_hash(
         &self,
         token_id: usize,
@@ -3767,8 +3859,8 @@ impl DeepSeekV4MoeScratch {
         self.store_route(&decision.expert_ids, &decision.weights)
     }
 
-    /// Tie-stable learned routing by `sqrt(softplus(logit)) + bias`; selected
-    /// weights remain the unbiased scores. Requires a completed router command.
+    /// Host differential for tie-stable learned routing. Selected weights use
+    /// the unbiased `sqrt(softplus(logit))` score.
     pub fn route_learned(&self, correction_bias: &MetalTensor) -> Result<(), DeepSeekV4MetalError> {
         let c = self.config;
         validate_f32(
@@ -3789,8 +3881,7 @@ impl DeepSeekV4MoeScratch {
         self.store_route(&decision.expert_ids, &decision.weights)
     }
 
-    /// Execute selected expert slices and the shared expert with generic native
-    /// Metal matvecs, then form `weighted_routed + shared`.
+    /// Static-view differential for selected and shared expert execution.
     #[allow(clippy::too_many_arguments)]
     pub fn encode_experts<'a>(
         &'a self,
@@ -3957,6 +4048,153 @@ impl DeepSeekV4MoeScratch {
         Ok(&self.final_output)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn encode_experts_indexed<'a>(
+        &'a self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        gate_bank: &MetalTensor,
+        up_bank: &MetalTensor,
+        down_bank: &MetalTensor,
+        shared_gate: &MetalTensor,
+        shared_up: &MetalTensor,
+        shared_down: &MetalTensor,
+        expert_clamp: f32,
+        shared_clamp: f32,
+    ) -> Result<&'a MetalTensor, DeepSeekV4MetalError> {
+        require_serial(enc, "deepseek_v4_moe_experts_indexed")?;
+        if !expert_clamp.is_finite() || expert_clamp <= 0.0 {
+            return invalid("indexed MoE expert clamp must be finite and positive");
+        }
+        if !shared_clamp.is_finite() || shared_clamp <= 0.0 {
+            return invalid("indexed MoE shared clamp must be finite and positive");
+        }
+        let c = self.config;
+        self.validate_scratch()?;
+        validate_expert_bank(
+            gate_bank,
+            c.hidden_size,
+            c.ffn_size,
+            c.expert_count,
+            "indexed routed gate bank",
+        )?;
+        validate_expert_bank(
+            up_bank,
+            c.hidden_size,
+            c.ffn_size,
+            c.expert_count,
+            "indexed routed up bank",
+        )?;
+        validate_expert_bank(
+            down_bank,
+            c.ffn_size,
+            c.hidden_size,
+            c.expert_count,
+            "indexed routed down bank",
+        )?;
+        validate_matvec_weight(shared_gate, c.hidden_size, c.ffn_size, "shared gate")?;
+        validate_matvec_weight(shared_up, c.hidden_size, c.ffn_size, "shared up")?;
+        validate_matvec_weight(shared_down, c.ffn_size, c.hidden_size, "shared down")?;
+
+        for slot in 0..c.top_k {
+            encode_ds4_indexed_expert_projection(
+                ctx,
+                enc,
+                gate_bank,
+                &self.normalized_input,
+                &self.expert_ids,
+                &self.route_status,
+                &self.gate,
+                c.hidden_size,
+                c.ffn_size,
+                c.expert_count,
+                slot,
+                "indexed routed gate",
+            )?;
+            encode_ds4_indexed_expert_projection(
+                ctx,
+                enc,
+                up_bank,
+                &self.normalized_input,
+                &self.expert_ids,
+                &self.route_status,
+                &self.up,
+                c.hidden_size,
+                c.ffn_size,
+                c.expert_count,
+                slot,
+                "indexed routed up",
+            )?;
+            encode_ds4_clamped_swiglu(ctx, enc, &self.gate, &self.up, &self.inner, expert_clamp)?;
+            let output = self
+                .expert_outputs
+                .view_subrange((slot * c.hidden_size) as u64, vec![c.hidden_size as u64]);
+            encode_ds4_indexed_expert_projection(
+                ctx,
+                enc,
+                down_bank,
+                &self.inner,
+                &self.expert_ids,
+                &self.route_status,
+                &output,
+                c.ffn_size,
+                c.hidden_size,
+                c.expert_count,
+                slot,
+                "indexed routed down",
+            )?;
+        }
+
+        encode_projection(
+            ctx,
+            enc,
+            shared_gate,
+            &self.normalized_input,
+            &self.gate,
+            c.hidden_size,
+            c.ffn_size,
+            "shared gate",
+        )?;
+        encode_projection(
+            ctx,
+            enc,
+            shared_up,
+            &self.normalized_input,
+            &self.up,
+            c.hidden_size,
+            c.ffn_size,
+            "shared up",
+        )?;
+        encode_ds4_clamped_swiglu(ctx, enc, &self.gate, &self.up, &self.inner, shared_clamp)?;
+        encode_projection(
+            ctx,
+            enc,
+            shared_down,
+            &self.inner,
+            &self.shared_output,
+            c.ffn_size,
+            c.hidden_size,
+            "shared down",
+        )?;
+        crate::metal::encode_moe_weighted_sum_f32(
+            ctx,
+            enc,
+            &self.expert_outputs,
+            &self.weights,
+            &self.routed_output,
+            c.hidden_size,
+            c.top_k,
+        )?;
+        crate::metal::encode_add_f32(
+            ctx,
+            enc,
+            &self.routed_output,
+            &self.shared_output,
+            &self.final_output,
+        )?;
+        Ok(&self.final_output)
+    }
+
     fn store_route(
         &self,
         expert_ids: &[usize],
@@ -4004,6 +4242,7 @@ impl DeepSeekV4MoeScratch {
         )?;
         validate_i32(&self.expert_ids, &[c.top_k as u64], true, "MoE ID scratch")?;
         validate_f32(&self.weights, &[c.top_k as u64], true, "MoE weight scratch")?;
+        validate_i32(&self.route_status, &[1], true, "MoE route status")?;
         for (tensor, name) in [
             (&self.gate, "MoE gate scratch"),
             (&self.up, "MoE up scratch"),
@@ -4026,6 +4265,165 @@ impl DeepSeekV4MoeScratch {
         }
         Ok(())
     }
+}
+
+fn validate_deepseek_v4_route_pipeline_geometry(
+    kernel: &str,
+    thread_execution_width: usize,
+    max_threads_per_group: usize,
+    requested_threads: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    if max_threads_per_group < requested_threads {
+        return invalid(format!(
+            "{kernel} supports only {max_threads_per_group} threads, need {requested_threads}"
+        ));
+    }
+    if requested_threads == DEEPSEEK_V4_ROUTE_MAX_EXPERTS && thread_execution_width != 32 {
+        return invalid(format!(
+            "{kernel} requires 32-lane simdgroups for eight-group reduction, got {thread_execution_width}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct DeepSeekV4GpuRouteRecord {
+    status: i32,
+    expert_ids: Vec<i32>,
+    weights: Vec<f32>,
+}
+
+fn deepseek_v4_route_status_name(status: i32) -> &'static str {
+    match status {
+        0 => "pending",
+        DEEPSEEK_V4_ROUTE_STATUS_READY => "ready",
+        DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_LOGIT => "non-finite logit",
+        DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_BIAS => "non-finite bias or corrected score",
+        DEEPSEEK_V4_ROUTE_STATUS_INVALID_TOKEN => "invalid hash token",
+        DEEPSEEK_V4_ROUTE_STATUS_INVALID_EXPERT => "invalid hash expert",
+        DEEPSEEK_V4_ROUTE_STATUS_DUPLICATE_EXPERT => "duplicate hash expert",
+        DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_WEIGHT => "non-finite normalized weight",
+        _ => "unknown",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_ds4_indexed_expert_projection(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    expert_ids: &MetalTensor,
+    route_status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    expert_count: usize,
+    slot: usize,
+    name: &str,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, name)?;
+    if expert_ids.shape.len() != 1 || expert_ids.shape[0] == 0 {
+        return invalid(format!(
+            "{name} expert IDs must be a nonempty I32 vector, got {:?}",
+            expert_ids.shape
+        ));
+    }
+    validate_i32(
+        expert_ids,
+        &expert_ids.shape,
+        false,
+        &format!("{name} expert IDs"),
+    )?;
+    validate_i32(route_status, &[1], false, &format!("{name} route status"))?;
+    let top_k = usize::try_from(expert_ids.shape[0])
+        .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{name} top-k exceeds usize")))?;
+    if slot >= top_k {
+        return invalid(format!("{name} slot {slot} exceeds top-k {top_k}"));
+    }
+    validate_expert_bank(bank, n_in, n_out, expert_count, name)?;
+    validate_f32(input, &[n_in as u64], false, &format!("{name} input"))?;
+    validate_f32(output, &[n_out as u64], true, &format!("{name} output"))?;
+
+    let (kernel, rows_per_group, threads_per_group, block_size) = match bank.dtype {
+        GgmlType::IQ2_S => (
+            "kernel_deepseek_v4_indexed_mat_vec_iq2_s_f32_fast",
+            8,
+            64,
+            256,
+        ),
+        GgmlType::IQ3_XXS => (
+            "kernel_deepseek_v4_indexed_mat_vec_iq3_xxs_f32_fast",
+            8,
+            64,
+            256,
+        ),
+        GgmlType::IQ3_S => (
+            "kernel_deepseek_v4_indexed_mat_vec_iq3_s_f32_fast",
+            8,
+            64,
+            256,
+        ),
+        GgmlType::MXFP4 => ("kernel_deepseek_v4_indexed_mat_vec_mxfp4_f32", 4, 128, 32),
+        dtype => {
+            return invalid(format!(
+                "{name} has unsupported indexed expert dtype {dtype:?}"
+            ));
+        }
+    };
+    if !n_in.is_multiple_of(block_size) {
+        return invalid(format!(
+            "{name} input width {n_in} is not divisible by block size {block_size}"
+        ));
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        n_expert: u32,
+        slot: u32,
+    }
+    let args = Args {
+        n_in: u32::try_from(n_in)
+            .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{name} n_in exceeds u32")))?,
+        n_out: u32::try_from(n_out)
+            .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{name} n_out exceeds u32")))?,
+        n_expert: u32::try_from(expert_count).map_err(|_| {
+            DeepSeekV4MetalError::Invalid(format!("{name} expert count exceeds u32"))
+        })?,
+        slot: u32::try_from(slot)
+            .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{name} slot exceeds u32")))?,
+    };
+    let pso = ctx.pipeline(kernel)?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < threads_per_group {
+        return invalid(format!(
+            "{kernel} requires SIMD width 32 and {threads_per_group} threads, got width {} max {}",
+            pso.threadExecutionWidth(),
+            pso.maxTotalThreadsPerThreadgroup()
+        ));
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, bank);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, expert_ids);
+    enc.set_tensor(4, route_status);
+    enc.set_tensor(5, output);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(rows_per_group),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: threads_per_group,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
 }
 
 fn encode_ds4_clamped_swiglu(
@@ -6836,6 +7234,7 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
     push_session_allocation(&mut requests, "moe.logits", moe.expert_count, f32_bytes)?;
     push_session_allocation(&mut requests, "moe.expert_ids", moe.top_k, i32_bytes)?;
     push_session_allocation(&mut requests, "moe.weights", moe.top_k, f32_bytes)?;
+    push_session_allocation(&mut requests, "moe.route_status", 1, i32_bytes)?;
     for name in ["moe.gate", "moe.up", "moe.inner"] {
         push_session_allocation(&mut requests, name, moe.ffn_size, f32_bytes)?;
     }
@@ -7314,13 +7713,13 @@ mod tests {
         let capacity =
             DeepSeekV4SessionCapacity::for_forward_limit(3_073, config.context_length).unwrap();
         let requests = deepseek_v4_session_allocation_requests_for_kinds(&kinds, capacity).unwrap();
-        assert_eq!(requests.len(), 537);
+        assert_eq!(requests.len(), 538);
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            179_077_664
+            179_077_668
         );
         let names = requests
             .iter()
@@ -7357,7 +7756,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            7_631_890_976
+            7_631_890_980
         );
         assert_eq!(
             promoted
@@ -7463,7 +7862,7 @@ mod tests {
         let hash = format!("{:x}", hasher.finalize());
         assert_eq!(
             hash,
-            "915be9ad610710c4bcb3cfb661ef1fcdd35e2ccebca82c20e15b05336528997a"
+            "4c00cbe4653402abc3e05bb5d01cf353cc0b96a910cd03d50e54024f95829fd2"
         );
         eprintln!("deepseek_v4 synthetic_position_65663_sha256={hash}");
     }
@@ -13958,6 +14357,7 @@ mod tests {
             routed_scale: 1.0,
         };
         let scratch = DeepSeekV4MoeScratch::new(&ctx, config).unwrap();
+
         let input = offset_f32(&ctx, &[0.7, -0.2], vec![2]);
         let norm = offset_f32(&ctx, &[1.0, 1.0], vec![2]);
         let zero_router = offset_f32(&ctx, &[0.0; 8], vec![2, 4]);
@@ -13986,6 +14386,662 @@ mod tests {
             &expected.weights,
             1e-6,
         );
+    }
+
+    #[test]
+    fn learned_route_pipeline_rejects_non_32_lane_geometry() {
+        validate_deepseek_v4_route_pipeline_geometry("learned route", 32, 256, 256).unwrap();
+        let width_error =
+            validate_deepseek_v4_route_pipeline_geometry("learned route", 16, 256, 256)
+                .unwrap_err();
+        assert!(width_error.to_string().contains("32-lane simdgroups"));
+        let capacity_error =
+            validate_deepseek_v4_route_pipeline_geometry("learned route", 32, 128, 256)
+                .unwrap_err();
+        assert!(capacity_error.to_string().contains("only 128 threads"));
+        validate_deepseek_v4_route_pipeline_geometry("hash route", 16, 1, 1).unwrap();
+    }
+
+    #[test]
+    fn gpu_moe_route_records_match_oracle_and_fail_closed() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const E: usize = 8;
+        const K: usize = 3;
+        let config = DeepSeekV4MoeConfig {
+            hidden_size: 2,
+            ffn_size: 2,
+            expert_count: E,
+            top_k: K,
+            routed_scale: 1.5,
+        };
+        let scratch = DeepSeekV4MoeScratch::new(&ctx, config).unwrap();
+
+        let write_raw_f32 = |values: &[f32]| {
+            assert_eq!(values.len(), E);
+            let destination = unsafe {
+                scratch
+                    .logits
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .add(usize::try_from(scratch.logits.offset).unwrap())
+                    as *mut f32
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(values.as_ptr(), destination, values.len());
+            }
+        };
+
+        let run = |encode: &dyn Fn(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>| {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode(&encoder).unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "GPU route command failed: {:?}",
+                command.error()
+            );
+            scratch.capture_gpu_route_record().unwrap()
+        };
+
+        let logits = [-3.0, 0.5, 1.25, -0.75, 2.0, 0.125, -1.5, 0.875];
+        write_raw_f32(&logits);
+        let bias_values = [0.0, 0.3, -0.2, 0.1, -0.4, 0.0, 0.2, -0.1];
+        let bias = offset_f32(&ctx, &bias_values, vec![E as u64]);
+        let learned = run(&|encoder| scratch.encode_route_learned_gpu(&ctx, encoder, &bias));
+        let scores = crate::deepseek_v4_oracle::sqrt_softplus_scores(&logits).unwrap();
+        let expected =
+            crate::deepseek_v4_oracle::learned_route(&scores, &bias_values, K, 1.5).unwrap();
+        assert_eq!(learned.status, DEEPSEEK_V4_ROUTE_STATUS_READY);
+        assert_eq!(
+            learned.expert_ids,
+            expected
+                .expert_ids
+                .iter()
+                .map(|&expert| expert as i32)
+                .collect::<Vec<_>>()
+        );
+        assert_close(
+            "GPU learned route",
+            &learned.weights,
+            &expected.weights,
+            2e-6,
+        );
+        let learned_repeat = run(&|encoder| scratch.encode_route_learned_gpu(&ctx, encoder, &bias));
+        assert_eq!(learned_repeat.expert_ids, learned.expert_ids);
+        assert_eq!(
+            learned_repeat
+                .weights
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            learned
+                .weights
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+
+        let hash_values = [0, 2, 4, 1, 7, 3, 6, 5, 4];
+        let hash_map = offset_i32(&ctx, &hash_values, vec![K as u64, 3]);
+        let hash = run(&|encoder| scratch.encode_route_hash_gpu(&ctx, encoder, 1, &hash_map));
+        let expected = crate::deepseek_v4_oracle::hash_route(&scores, &[1, 7, 3], 1.5).unwrap();
+        assert_eq!(hash.status, DEEPSEEK_V4_ROUTE_STATUS_READY);
+        assert_eq!(hash.expert_ids, vec![1, 7, 3]);
+        assert_close("GPU hash route", &hash.weights, &expected.weights, 2e-6);
+
+        write_raw_f32(&[f32::NAN, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let failed = run(&|encoder| scratch.encode_route_learned_gpu(&ctx, encoder, &bias));
+        assert_eq!(failed.status, DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_LOGIT);
+        assert_eq!(failed.expert_ids, vec![-1; K]);
+        assert_eq!(failed.weights, vec![0.0; K]);
+
+        write_raw_f32(&logits);
+        let nonfinite_bias = offset_f32(
+            &ctx,
+            &[0.0, 0.0, f32::INFINITY, 0.0, 0.0, 0.0, 0.0, 0.0],
+            vec![E as u64],
+        );
+        assert_eq!(
+            run(&|encoder| scratch.encode_route_learned_gpu(&ctx, encoder, &nonfinite_bias)).status,
+            DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_BIAS
+        );
+        assert_eq!(
+            run(&|encoder| scratch.encode_route_hash_gpu(&ctx, encoder, 3, &hash_map)).status,
+            DEEPSEEK_V4_ROUTE_STATUS_INVALID_TOKEN
+        );
+        let invalid_map = offset_i32(&ctx, &[0, 2, 4, 1, 8, 3], vec![K as u64, 2]);
+        assert_eq!(
+            run(&|encoder| scratch.encode_route_hash_gpu(&ctx, encoder, 1, &invalid_map)).status,
+            DEEPSEEK_V4_ROUTE_STATUS_INVALID_EXPERT
+        );
+        let duplicate_map = offset_i32(&ctx, &[0, 2, 4, 1, 1, 3], vec![K as u64, 2]);
+        assert_eq!(
+            run(&|encoder| scratch.encode_route_hash_gpu(&ctx, encoder, 1, &duplicate_map)).status,
+            DEEPSEEK_V4_ROUTE_STATUS_DUPLICATE_EXPERT
+        );
+    }
+
+    #[test]
+    fn failed_gpu_route_zeros_all_indexed_experts_and_rejects_after_completion() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const H: usize = 256;
+        const F: usize = 256;
+        const E: usize = 3;
+        const K: usize = 3;
+        let config = DeepSeekV4MoeConfig {
+            hidden_size: H,
+            ffn_size: F,
+            expert_count: E,
+            top_k: K,
+            routed_scale: 1.5,
+        };
+        let scratch = DeepSeekV4MoeScratch::new(&ctx, config).unwrap();
+        host_write_f32(
+            &scratch.normalized_input,
+            &vec![0.25; H],
+            "failed-route normalized input",
+        )
+        .unwrap();
+        host_write_f32(
+            &scratch.expert_outputs,
+            &vec![7.0; H * K],
+            "stale expert outputs",
+        )
+        .unwrap();
+        host_write_f32(&scratch.routed_output, &vec![9.0; H], "stale routed output").unwrap();
+        let logits_destination = unsafe {
+            scratch
+                .logits
+                .buffer
+                .contents()
+                .as_ptr()
+                .add(usize::try_from(scratch.logits.offset).unwrap()) as *mut f32
+        };
+        let bad_logits = [f32::NAN, 0.0, 0.0];
+        unsafe {
+            std::ptr::copy_nonoverlapping(bad_logits.as_ptr(), logits_destination, E);
+        }
+
+        let zero_bank = |dtype: GgmlType, n_in: usize, n_out: usize| {
+            let (block_elements, block_bytes) = ggml_type_layout(dtype).unwrap();
+            let bytes = n_in * n_out * E / block_elements as usize * block_bytes as usize;
+            MetalTensor::from_bytes(
+                &ctx,
+                &vec![0u8; bytes],
+                vec![n_in as u64, n_out as u64, E as u64],
+                dtype,
+            )
+            .unwrap()
+        };
+        let gate_bank = zero_bank(GgmlType::IQ2_S, H, F);
+        let up_bank = zero_bank(GgmlType::IQ2_S, H, F);
+        let down_bank = zero_bank(GgmlType::IQ3_XXS, F, H);
+        let shared_gate = offset_f32(&ctx, &vec![0.0; H * F], vec![H as u64, F as u64]);
+        let shared_up = offset_f32(&ctx, &vec![0.0; H * F], vec![H as u64, F as u64]);
+        let shared_down = offset_f32(&ctx, &vec![0.0; F * H], vec![F as u64, H as u64]);
+        let bias = offset_f32(&ctx, &[0.0; E], vec![E as u64]);
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        scratch
+            .encode_route_learned_gpu(&ctx, &encoder, &bias)
+            .unwrap();
+        scratch
+            .encode_experts_indexed(
+                &ctx,
+                &encoder,
+                &gate_bank,
+                &up_bank,
+                &down_bank,
+                &shared_gate,
+                &shared_up,
+                &shared_down,
+                10.0,
+                10.0,
+            )
+            .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "failed-route composition command failed: {:?}",
+            command.error()
+        );
+        assert_eq!(read_f32(scratch.expert_outputs()), vec![0.0; H * K]);
+        assert_eq!(read_f32(scratch.routed_output()), vec![0.0; H]);
+        let error = scratch.validate_gpu_route_completed().unwrap_err();
+        assert!(error.to_string().contains("non-finite logit"));
+    }
+
+    #[test]
+    #[ignore = "focused GPU route-dispatch profiler; run explicitly with --nocapture"]
+    fn profile_gpu_moe_route_dispatches() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const REPEATS: usize = 100;
+        let config = DeepSeekV4MoeConfig {
+            hidden_size: 1,
+            ffn_size: 1,
+            expert_count: 256,
+            top_k: 6,
+            routed_scale: 1.5,
+        };
+        let scratch = DeepSeekV4MoeScratch::new(&ctx, config).unwrap();
+        let logits = (0..256)
+            .map(|index| ((index * 37 + 11) % 257) as f32 * 0.03125 - 4.0)
+            .collect::<Vec<_>>();
+        host_write_f32(&scratch.logits, &logits, "profile route logits").unwrap();
+        let bias = offset_f32(
+            &ctx,
+            &(0..256)
+                .map(|index| ((index * 19 + 3) % 127) as f32 * 0.0005 - 0.03)
+                .collect::<Vec<_>>(),
+            vec![256],
+        );
+        let hash_map = offset_i32(&ctx, &[3, 17, 42, 91, 173, 255], vec![6, 1]);
+
+        let measure = |encode: &dyn Fn(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>| {
+            let warm = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&warm);
+            encode(&encoder).unwrap();
+            encoder.end();
+            warm.commit();
+            warm.waitUntilCompleted();
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            for _ in 0..REPEATS {
+                encode(&encoder).unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            (command.GPUEndTime() - command.GPUStartTime()) * 1e3 / REPEATS as f64
+        };
+
+        let learned = measure(&|encoder| scratch.encode_route_learned_gpu(&ctx, encoder, &bias));
+        let hash = measure(&|encoder| scratch.encode_route_hash_gpu(&ctx, encoder, 0, &hash_map));
+        eprintln!(
+            "deepseek_v4 gpu_route_dispatch learned_ms={learned:.6} hash_ms={hash:.6} repeats={REPEATS}"
+        );
+    }
+
+    #[test]
+    fn gpu_learned_routes_preserve_cpu_ids_across_cutoff_shapes() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const E: usize = 256;
+        const K: usize = 6;
+        let config = DeepSeekV4MoeConfig {
+            hidden_size: 1,
+            ffn_size: 1,
+            expert_count: E,
+            top_k: K,
+            routed_scale: 1.5,
+        };
+        let scratch = DeepSeekV4MoeScratch::new(&ctx, config).unwrap();
+        let write_logits = |values: &[f32]| {
+            assert_eq!(values.len(), E);
+            let destination = unsafe {
+                scratch
+                    .logits
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .add(usize::try_from(scratch.logits.offset).unwrap())
+                    as *mut f32
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(values.as_ptr(), destination, values.len());
+            }
+        };
+        let run = |bias: &MetalTensor| {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            scratch
+                .encode_route_learned_gpu(&ctx, &encoder, bias)
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            scratch.capture_gpu_route_record().unwrap()
+        };
+
+        let mut cases = Vec::new();
+        cases.push((vec![0.0; E], vec![0.0; E], "all tied"));
+        let mut cutoff_bias = vec![-1.0; E];
+        cutoff_bias[..7].fill(0.25);
+        cutoff_bias[6] = f32::from_bits(0.25f32.to_bits() - 1);
+        cases.push((vec![0.0; E], cutoff_bias, "one-ULP cutoff"));
+        let branch_values = [
+            f32::from_bits((-20.0f32).to_bits() + 1),
+            -20.0,
+            f32::from_bits((-20.0f32).to_bits() - 1),
+            f32::from_bits(20.0f32.to_bits() - 1),
+            20.0,
+            f32::from_bits(20.0f32.to_bits() + 1),
+            -f32::MAX,
+            f32::MAX,
+        ];
+        cases.push((
+            (0..E)
+                .map(|expert| branch_values[expert % branch_values.len()])
+                .collect(),
+            (0..E)
+                .map(|expert| (expert % 11) as f32 * 0.0001 - 0.0005)
+                .collect(),
+            "finite extremes and softplus branches",
+        ));
+        for case in 0..24usize {
+            let logits = (0..E)
+                .map(|expert| {
+                    let mixed = expert * 1_103 + case * 7_919 + (expert ^ case) * 53;
+                    (mixed % 8_191) as f32 * 0.0025 - 10.0
+                })
+                .collect::<Vec<_>>();
+            let bias = (0..E)
+                .map(|expert| {
+                    let mixed = expert * 193 + case * 389 + expert / 7;
+                    (mixed % 257) as f32 * 0.0002 - 0.0256
+                })
+                .collect::<Vec<_>>();
+            cases.push((logits, bias, "mixed deterministic"));
+        }
+
+        for (case, (logits, bias_values, label)) in cases.into_iter().enumerate() {
+            write_logits(&logits);
+            let bias = offset_f32(&ctx, &bias_values, vec![E as u64]);
+            let actual = run(&bias);
+            let scores = crate::deepseek_v4_oracle::sqrt_softplus_scores(&logits).unwrap();
+            let expected =
+                crate::deepseek_v4_oracle::learned_route(&scores, &bias_values, K, 1.5).unwrap();
+            assert_eq!(
+                actual.status, DEEPSEEK_V4_ROUTE_STATUS_READY,
+                "{label} {case}"
+            );
+            assert_eq!(
+                actual.expert_ids,
+                expected
+                    .expert_ids
+                    .iter()
+                    .map(|&expert| expert as i32)
+                    .collect::<Vec<_>>(),
+                "{label} {case}"
+            );
+            assert_close(
+                &format!("{label} {case} weights"),
+                &actual.weights,
+                &expected.weights,
+                1e-4,
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_ds4_expert_projections_match_static_views_and_zero_failures() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const N_IN: usize = 256;
+        const N_OUT: usize = 8;
+        const EXPERTS: usize = 3;
+
+        let make_bank = |dtype: GgmlType| {
+            let (block_elements, block_bytes) = ggml_type_layout(dtype).unwrap();
+            let block_elements = block_elements as usize;
+            let block_bytes = block_bytes as usize;
+            let blocks = N_IN * N_OUT * EXPERTS / block_elements;
+            let mut payload = vec![0u8; blocks * block_bytes];
+            for block in 0..blocks {
+                let start = block * block_bytes;
+                if dtype == GgmlType::MXFP4 {
+                    payload[start] = 127 + (block % 3) as u8;
+                    for byte in 1..block_bytes {
+                        payload[start + byte] = (block * 29 + byte * 17 + 11) as u8;
+                    }
+                } else {
+                    payload[start..start + 2].copy_from_slice(
+                        &half::f16::from_f32(0.015625 * (1 + block % 5) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                    for byte in 2..block_bytes {
+                        payload[start + byte] = (block * 31 + byte * 13 + 7) as u8;
+                    }
+                }
+            }
+            let prefix = 32usize;
+            let mut bytes = vec![0xA5; prefix];
+            bytes.extend_from_slice(&payload);
+            bytes.extend_from_slice(&[0x5A; 32]);
+            MetalTensor {
+                buffer: ctx.buffer_from(&bytes).unwrap(),
+                offset: prefix as u64,
+                shape: vec![N_IN as u64, N_OUT as u64, EXPERTS as u64],
+                dtype,
+                provenance: MetalTensorProvenance::OwnedWritable,
+            }
+        };
+        let input_values = (0..N_IN)
+            .map(|index| ((index * 37 + 5) % 127) as f32 * 0.001 - 0.063)
+            .collect::<Vec<_>>();
+        let input = offset_f32(&ctx, &input_values, vec![N_IN as u64]);
+        let expert_ids = offset_i32(&ctx, &[2, 0], vec![2]);
+        let ready = offset_i32(&ctx, &[DEEPSEEK_V4_ROUTE_STATUS_READY], vec![1]);
+
+        for dtype in [
+            GgmlType::IQ2_S,
+            GgmlType::IQ3_XXS,
+            GgmlType::IQ3_S,
+            GgmlType::MXFP4,
+        ] {
+            let bank = make_bank(dtype);
+            let static_weight =
+                expert_weight_view(&bank, N_IN, N_OUT, 2, "static indexed-projection oracle")
+                    .unwrap();
+            let expected = offset_f32(&ctx, &[0.0; N_OUT], vec![N_OUT as u64]);
+            let actual = offset_f32(&ctx, &[0.0; N_OUT], vec![N_OUT as u64]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_projection(
+                &ctx,
+                &encoder,
+                &static_weight,
+                &input,
+                &expected,
+                N_IN,
+                N_OUT,
+                "static indexed-projection oracle",
+            )
+            .unwrap();
+            encode_ds4_indexed_expert_projection(
+                &ctx,
+                &encoder,
+                &bank,
+                &input,
+                &expert_ids,
+                &ready,
+                &actual,
+                N_IN,
+                N_OUT,
+                EXPERTS,
+                0,
+                "indexed expert projection",
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "{dtype:?} indexed command failed: {:?}",
+                command.error()
+            );
+            assert_eq!(
+                read_f32(&actual)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                read_f32(&expected)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{dtype:?} indexed projection changed reduction lineage"
+            );
+
+            for (label, ids, status) in [
+                ("failed status", vec![2, 0], -1),
+                ("negative ID", vec![-1, 0], DEEPSEEK_V4_ROUTE_STATUS_READY),
+                (
+                    "oversized ID",
+                    vec![EXPERTS as i32, 0],
+                    DEEPSEEK_V4_ROUTE_STATUS_READY,
+                ),
+            ] {
+                let invalid_ids = offset_i32(&ctx, &ids, vec![2]);
+                let invalid_status = offset_i32(&ctx, &[status], vec![1]);
+                let output = offset_f32(&ctx, &[7.0; N_OUT], vec![N_OUT as u64]);
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                encode_ds4_indexed_expert_projection(
+                    &ctx,
+                    &encoder,
+                    &bank,
+                    &input,
+                    &invalid_ids,
+                    &invalid_status,
+                    &output,
+                    N_IN,
+                    N_OUT,
+                    EXPERTS,
+                    0,
+                    "invalid indexed expert projection",
+                )
+                .unwrap();
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(command.error().is_none(), "{dtype:?} {label}");
+                assert_eq!(read_f32(&output), vec![0.0; N_OUT], "{dtype:?} {label}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "focused production-shape indexed expert profiler; run explicitly"]
+    fn profile_indexed_ds4_expert_projections_against_static_views() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const EXPERTS: usize = 4;
+        const REPEATS: usize = 40;
+        let expert_ids = offset_i32(&ctx, &[3], vec![1]);
+        let ready = offset_i32(&ctx, &[DEEPSEEK_V4_ROUTE_STATUS_READY], vec![1]);
+
+        let measure = |encode: &dyn Fn(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>| {
+            let warm = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&warm);
+            encode(&encoder).unwrap();
+            encoder.end();
+            warm.commit();
+            warm.waitUntilCompleted();
+            assert!(warm.error().is_none());
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            for _ in 0..REPEATS {
+                encode(&encoder).unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            (command.GPUEndTime() - command.GPUStartTime()) * 1e3 / REPEATS as f64
+        };
+
+        for (dtype, n_in, n_out, label) in [
+            (GgmlType::IQ2_S, 4_096, 2_048, "gate_up_iq2_s"),
+            (GgmlType::IQ3_S, 4_096, 2_048, "gate_up_iq3_s"),
+            (GgmlType::IQ3_XXS, 2_048, 4_096, "down_iq3_xxs"),
+            (GgmlType::MXFP4, 2_048, 4_096, "down_mxfp4"),
+        ] {
+            let (block_elements, block_bytes) = ggml_type_layout(dtype).unwrap();
+            let bank_bytes =
+                n_in * n_out * EXPERTS / block_elements as usize * block_bytes as usize;
+            let bank = MetalTensor::from_bytes(
+                &ctx,
+                &vec![0u8; bank_bytes],
+                vec![n_in as u64, n_out as u64, EXPERTS as u64],
+                dtype,
+            )
+            .unwrap();
+            let static_weight =
+                expert_weight_view(&bank, n_in, n_out, 3, label).expect("static expert view");
+            let input = offset_f32(
+                &ctx,
+                &(0..n_in)
+                    .map(|index| ((index * 17 + 3) % 127) as f32 * 0.0005 - 0.031)
+                    .collect::<Vec<_>>(),
+                vec![n_in as u64],
+            );
+            let static_output = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+            let indexed_output = MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).unwrap();
+            let static_ms = measure(&|encoder| {
+                encode_projection(
+                    &ctx,
+                    encoder,
+                    &static_weight,
+                    &input,
+                    &static_output,
+                    n_in,
+                    n_out,
+                    label,
+                )
+            });
+            let indexed_ms = measure(&|encoder| {
+                encode_ds4_indexed_expert_projection(
+                    &ctx,
+                    encoder,
+                    &bank,
+                    &input,
+                    &expert_ids,
+                    &ready,
+                    &indexed_output,
+                    n_in,
+                    n_out,
+                    EXPERTS,
+                    0,
+                    label,
+                )
+            });
+            assert_eq!(
+                read_f32(&indexed_output)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                read_f32(&static_output)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            eprintln!(
+                "deepseek_v4 indexed_expert {label} static_ms={static_ms:.6} indexed_ms={indexed_ms:.6} ratio={:.3} repeats={REPEATS}",
+                indexed_ms / static_ms
+            );
+        }
     }
 
     #[test]

@@ -3,8 +3,8 @@ use qwen_llm::deepseek_v4::DeepSeekV4Model;
 #[cfg(feature = "dsv4-diagnostics")]
 use qwen_llm::deepseek_v4_metal::DeepSeekV4DecisionTranscript;
 use qwen_llm::deepseek_v4_metal::{
-    DeepSeekV4CausalSnapshot, DeepSeekV4MetalResidency, DeepSeekV4ModelContentId,
-    DeepSeekV4PositionZeroForward, DeepSeekV4RoutingKind, DeepSeekV4RoutingProfile,
+    DeepSeekV4CausalSnapshot, DeepSeekV4CommandProfile, DeepSeekV4MetalResidency,
+    DeepSeekV4ModelContentId, DeepSeekV4PositionZeroForward, DeepSeekV4RoutingKind,
     DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotObservation, decode_causal_snapshot,
     encode_causal_snapshot, load_causal_snapshot_file, publish_causal_snapshot_file,
 };
@@ -506,14 +506,14 @@ fn native_deepseek_v4_full_context_session_plan_is_exact_and_admitted() {
     assert_eq!(plan.session_capacity().hca_physical_rows(), 8_192);
     let memory = plan.memory_plan().clone();
     eprintln!("deepseek_v4 full-context planned memory={memory}");
-    assert_eq!(memory.session_allocations().len(), 537);
-    assert_eq!(memory.session_logical_bytes(), 7_631_890_976);
-    assert_eq!(memory.session_priced_upper_bytes(), 7_636_353_024);
-    assert_eq!(memory.total_priced_upper_bytes(), 110_630_977_536);
+    assert_eq!(memory.session_allocations().len(), 538);
+    assert_eq!(memory.session_logical_bytes(), 7_631_890_980);
+    assert_eq!(memory.session_priced_upper_bytes(), 7_636_369_408);
+    assert_eq!(memory.total_priced_upper_bytes(), 110_630_993_920);
     let required = memory
         .required_with_reserve_bytes()
         .expect("price full-context plan with reserve");
-    assert_eq!(required, 111_167_848_448);
+    assert_eq!(required, 111_167_864_832);
     let admission = memory.admission(ctx.memory_signals());
     assert!(
         admission.admitted,
@@ -1189,16 +1189,16 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         "memory planning must not realize Metal buffers"
     );
     let memory_plan = load_plan.memory_plan().clone();
-    assert_eq!(memory_plan.session_allocations().len(), 537);
-    assert_eq!(memory_plan.session_logical_bytes(), 179_077_664);
-    assert_eq!(memory_plan.session_priced_upper_bytes(), 183_566_336);
+    assert_eq!(memory_plan.session_allocations().len(), 538);
+    assert_eq!(memory_plan.session_logical_bytes(), 179_077_668);
+    assert_eq!(memory_plan.session_priced_upper_bytes(), 183_582_720);
     assert_eq!(memory_plan.residency_buffer_count(), 7);
     assert_eq!(memory_plan.residency_logical_bytes(), 102_994_608_640);
     assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_624_512);
-    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_190_848);
+    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_207_232);
     assert_eq!(
         memory_plan.required_with_reserve_bytes().unwrap(),
-        103_715_061_760
+        103_715_078_144
     );
     assert_eq!(load_plan.residency_report().window_count, 3);
     assert_eq!(load_plan.residency_report().fallback_count, 4);
@@ -1821,14 +1821,14 @@ fn profile_native_deepseek_v4_singleton_decode_at_128_and_512() {
 
 #[test]
 #[ignore = "focused release profiler requires the local 95.93 GiB DS4 fixture"]
-fn profile_native_deepseek_v4_routing_seam_at_128_and_512() {
+fn profile_native_deepseek_v4_single_command_at_128_and_512() {
     const FORWARD_LIMIT: usize = 520;
     const SAMPLES: usize = 5;
 
     #[derive(Debug)]
     struct EndpointProfile {
         control_before_ms: Vec<f64>,
-        profiled: Vec<DeepSeekV4RoutingProfile>,
+        profiled: Vec<DeepSeekV4CommandProfile>,
         control_after_ms: Vec<f64>,
         logits_sha256: String,
     }
@@ -1886,20 +1886,14 @@ fn profile_native_deepseek_v4_routing_seam_at_128_and_512() {
             for (layer, record) in profile.layers.iter().enumerate() {
                 assert_eq!(record.layer, layer);
                 assert_eq!(
-                    record.kind,
+                    record.routing_kind,
                     if layer < 3 {
                         DeepSeekV4RoutingKind::Hash
                     } else {
                         DeepSeekV4RoutingKind::Learned
                     }
                 );
-                for value in [
-                    record.router_command_gpu_ms,
-                    record.route_cpu_ms,
-                    record.expert_encode_cpu_ms,
-                    record.inter_command_idle_ms,
-                    record.expert_command_gpu_ms,
-                ] {
+                for value in [record.encode_cpu_ms, record.command_gpu_ms] {
                     assert!(value.is_finite() && value >= 0.0);
                 }
             }
@@ -1922,67 +1916,27 @@ fn profile_native_deepseek_v4_routing_seam_at_128_and_512() {
         }
     }
 
-    fn report(label: &str, endpoint: &EndpointProfile) -> f64 {
+    fn report(label: &str, endpoint: &EndpointProfile) {
         let profiled_wall = endpoint
             .profiled
             .iter()
             .map(|profile| profile.forward_wall_ms)
             .collect::<Vec<_>>();
-        let idle = endpoint
+        let encode_cpu = endpoint
             .profiled
             .iter()
-            .map(DeepSeekV4RoutingProfile::inter_command_idle_ms)
+            .map(DeepSeekV4CommandProfile::encode_cpu_ms)
             .collect::<Vec<_>>();
-        let route_cpu = endpoint
+        let command_gpu = endpoint
             .profiled
             .iter()
-            .map(DeepSeekV4RoutingProfile::route_cpu_ms)
+            .map(DeepSeekV4CommandProfile::command_gpu_ms)
             .collect::<Vec<_>>();
-        let expert_encode_cpu = endpoint
-            .profiled
-            .iter()
-            .map(DeepSeekV4RoutingProfile::expert_encode_cpu_ms)
-            .collect::<Vec<_>>();
-        let router_gpu = endpoint
-            .profiled
-            .iter()
-            .map(DeepSeekV4RoutingProfile::router_command_gpu_ms)
-            .collect::<Vec<_>>();
-        let expert_gpu = endpoint
-            .profiled
-            .iter()
-            .map(DeepSeekV4RoutingProfile::expert_command_gpu_ms)
-            .collect::<Vec<_>>();
-        let hash_idle = endpoint
-            .profiled
-            .iter()
-            .map(|profile| {
-                profile
-                    .layers
-                    .iter()
-                    .filter(|layer| layer.kind == DeepSeekV4RoutingKind::Hash)
-                    .map(|layer| layer.inter_command_idle_ms)
-                    .sum::<f64>()
-            })
-            .collect::<Vec<_>>();
-        let learned_idle = endpoint
-            .profiled
-            .iter()
-            .map(|profile| {
-                profile
-                    .layers
-                    .iter()
-                    .filter(|layer| layer.kind == DeepSeekV4RoutingKind::Learned)
-                    .map(|layer| layer.inter_command_idle_ms)
-                    .sum::<f64>()
-            })
-            .collect::<Vec<_>>();
-        let idle_median = median(idle.clone());
         let control_before_median = median(endpoint.control_before_ms.clone());
         let profiled_wall_median = median(profiled_wall.clone());
         let control_after_median = median(endpoint.control_after_ms.clone());
         eprintln!(
-            "deepseek_v4 routing_seam {label} control_before_ms={:?} control_before_median_ms={:.3} profiled_wall_ms={profiled_wall:?} profiled_wall_median_ms={:.3} control_after_ms={:?} control_after_median_ms={:.3} idle_ms={idle:?} idle_median_ms={idle_median:.3} hash_idle_ms={hash_idle:?} learned_idle_ms={learned_idle:?} route_cpu_ms={route_cpu:?} expert_encode_cpu_ms={expert_encode_cpu:?} router_gpu_ms={router_gpu:?} expert_gpu_ms={expert_gpu:?} logits_sha256={}",
+            "deepseek_v4 single_command {label} control_before_ms={:?} control_before_median_ms={:.3} profiled_wall_ms={profiled_wall:?} profiled_wall_median_ms={:.3} control_after_ms={:?} control_after_median_ms={:.3} encode_cpu_ms={encode_cpu:?} command_gpu_ms={command_gpu:?} command_buffers_per_token=43 logits_sha256={}",
             endpoint.control_before_ms,
             control_before_median,
             profiled_wall_median,
@@ -1990,7 +1944,6 @@ fn profile_native_deepseek_v4_routing_seam_at_128_and_512() {
             control_after_median,
             endpoint.logits_sha256,
         );
-        idle_median
     }
 
     let model_path = std::env::var_os("DSV4_MODEL")
@@ -2029,18 +1982,8 @@ fn profile_native_deepseek_v4_routing_seam_at_128_and_512() {
         .expect("capture context-512 routing state");
     let endpoint_512 = measure_endpoint(&ctx, &mut session, &context_512, &prompt, 512);
 
-    let idle_128 = report("context128", &endpoint_128);
-    let idle_512 = report("context512", &endpoint_512);
-    eprintln!(
-        "deepseek_v4 routing_seam stop_rule_threshold_ms=5.000 context128_pass={} context512_pass={} decision={}",
-        idle_128 >= 5.0,
-        idle_512 >= 5.0,
-        if idle_128 >= 5.0 && idle_512 >= 5.0 {
-            "gpu_route_record_abi"
-        } else {
-            "alternate_bottleneck"
-        }
-    );
+    report("context128", &endpoint_128);
+    report("context512", &endpoint_512);
 }
 
 #[test]
@@ -3386,7 +3329,7 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
     assert_eq!(continuation_argmax, 201);
     assert_eq!(
         continuation_hash,
-        "7ec53d29a78a4d6ee932f292d67dc67c1d15bdd31c050ef2aa625f57fd257764"
+        "2ecde5de747a8637d38c2cd38538670b3e15932cee15b243b6e25f1b3dfe4c43"
     );
     let continuation = compare_logits(
         "position_3072",
@@ -3569,15 +3512,15 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
     );
     assert_eq!(
         control_hash,
-        "32511523dad01070a3c00f22e4725cabe58fcfc450d04b56646c793ff3327ae5"
+        "63ef2382f467566f87e6def5738659ae591b45000d3eb3b8018aecd02a271aec"
     );
     assert_eq!(
         split_boundary_hash,
-        "95a7e1218b39a51c112fa822cd219b815696ff160b5e6a32216187f4323c31d7"
+        "6d02fb35f001c060d9c69f2b61ddc7392611a670f84426aa102193b78091544b"
     );
     assert_eq!(
         split_continuation_hash,
-        "09700f7707107f5efa1c50ec6dda1734bae89c7fc2a56be7153bcac62fd274f4"
+        "c0de193afebc2440488e13d2d95dd0f7c4a6972455205624fa519a18ae4efae6"
     );
 
     assert_schedule_expanded_envelope(
@@ -3714,7 +3657,7 @@ fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope()
     }
     assert_eq!(
         format!("{:x}", native_hasher.finalize()),
-        "7ec53d29a78a4d6ee932f292d67dc67c1d15bdd31c050ef2aa625f57fd257764"
+        "2ecde5de747a8637d38c2cd38538670b3e15932cee15b243b6e25f1b3dfe4c43"
     );
 
     let error = session
@@ -3807,7 +3750,7 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
                 .copy_logits_f32()
                 .expect("copy larger-capacity position-3072 logits")
         ),
-        "7ec53d29a78a4d6ee932f292d67dc67c1d15bdd31c050ef2aa625f57fd257764"
+        "2ecde5de747a8637d38c2cd38538670b3e15932cee15b243b6e25f1b3dfe4c43"
     );
     session
         .restore_causal_snapshot(&schedule_fork)
@@ -3905,11 +3848,11 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
     );
     assert_eq!(
         continuation_hash,
-        "6bb59676ce30832cb0cc8273c44d26b0daf1b8e136b5a279a502682ca35b658a"
+        "bfc09a03b698b6e4842bada487bf738b2d724202ed3eab54ecac45af3451233f"
     );
     assert_eq!(
         terminal_digest,
-        "f95010dec44698e956328325d7372454042353186d5415f508b838985b4d3deb"
+        "73d2c01d1db99d5a84e3da691fd8bdb7a7ea720ee6fc49c9926ade6f55a838a3"
     );
     let error = session
         .forward_token(&ctx, 201)

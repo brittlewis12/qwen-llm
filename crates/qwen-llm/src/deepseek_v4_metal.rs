@@ -1226,6 +1226,79 @@ impl DeepSeekV4StageRecorder {
     }
 }
 
+struct DeepSeekV4LayerEncoder<'command, 'recorder> {
+    command: &'command Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    layer: usize,
+    sampled: bool,
+    recorder: Option<&'recorder mut DeepSeekV4StageRecorder>,
+    encoder: Option<KernelEncoder>,
+}
+
+impl<'command, 'recorder> DeepSeekV4LayerEncoder<'command, 'recorder> {
+    fn begin(
+        command: &'command Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        layer: usize,
+        mut recorder: Option<&'recorder mut DeepSeekV4StageRecorder>,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        let sampled = recorder
+            .as_deref()
+            .is_some_and(|recorder| recorder.samples_layer(layer));
+        let encoder = if sampled {
+            recorder
+                .as_deref_mut()
+                .expect("sampled layer requires a stage recorder")
+                .begin(
+                    command,
+                    layer,
+                    DeepSeekV4StageKind::AttentionHyperConnection,
+                )?
+        } else {
+            KernelEncoder::begin(command)
+        };
+        Ok(Self {
+            command,
+            layer,
+            sampled,
+            recorder,
+            encoder: Some(encoder),
+        })
+    }
+
+    fn current(&self) -> &KernelEncoder {
+        self.encoder
+            .as_ref()
+            .expect("DeepSeek V4 layer encoder ended before layer completion")
+    }
+
+    fn boundary(&mut self, next: DeepSeekV4StageKind) -> Result<(), DeepSeekV4MetalError> {
+        if !self.sampled {
+            return Ok(());
+        }
+        self.encoder
+            .take()
+            .expect("sampled DeepSeek V4 layer encoder missing at stage boundary")
+            .end();
+        self.encoder = Some(
+            self.recorder
+                .as_deref_mut()
+                .expect("sampled layer requires a stage recorder")
+                .begin(self.command, self.layer, next)?,
+        );
+        Ok(())
+    }
+
+    fn end(mut self) {
+        self.encoder
+            .take()
+            .expect("DeepSeek V4 layer encoder missing at completion")
+            .end();
+    }
+}
+
+struct DeepSeekV4EncodedLayer {
+    sparse_visible_count: Option<usize>,
+}
+
 impl DeepSeekV4CommandProfile {
     pub fn encode_cpu_ms(&self) -> f64 {
         self.layers.iter().map(|layer| layer.encode_cpu_ms).sum()
@@ -1247,9 +1320,11 @@ pub struct DeepSeekV4Session {
     hyper_connection: DeepSeekV4HyperConnectionScratch,
     attention: DeepSeekV4PositionZeroAttentionScratch,
     sparse_csa: DeepSeekV4SparseCsaScratch,
+    layer_selections: DeepSeekV4LayerSelectionRecords,
     raw_cache: MetalTensor,
     compressor_frontiers: DeepSeekV4CompressorFrontiers,
     moe: DeepSeekV4MoeScratch,
+    layer_routes: DeepSeekV4LayerRouteRecords,
     final_hidden: MetalTensor,
     final_normalized_hidden: MetalTensor,
     logits: MetalTensor,
@@ -1332,6 +1407,7 @@ impl DeepSeekV4Session {
             hyper_connection: DeepSeekV4HyperConnectionScratch::new(ctx, DEEPSEEK_V4_HIDDEN_SIZE)?,
             attention: DeepSeekV4PositionZeroAttentionScratch::new(ctx, attention_config)?,
             sparse_csa: DeepSeekV4SparseCsaScratch::new(ctx, capacity.csa_physical_rows())?,
+            layer_selections: DeepSeekV4LayerSelectionRecords::new(ctx)?,
             raw_cache: MetalTensor::zeros_f16(
                 ctx,
                 vec![
@@ -1342,6 +1418,7 @@ impl DeepSeekV4Session {
             )?,
             compressor_frontiers,
             moe: DeepSeekV4MoeScratch::new(ctx, moe_config)?,
+            layer_routes: DeepSeekV4LayerRouteRecords::new(ctx, moe_config)?,
             final_hidden: MetalTensor::zeros_f32(ctx, vec![DEEPSEEK_V4_HIDDEN_SIZE as u64])?,
             final_normalized_hidden: MetalTensor::zeros_f32(
                 ctx,
@@ -1457,8 +1534,9 @@ impl DeepSeekV4Session {
     }
 
     /// Execute one complete token and retain the raw cache and every compressor
-    /// frontier needed by the next position. Each layer publishes its route and
-    /// consumes dynamically indexed experts in one ordered Metal command.
+    /// frontier needed by the next position. Ordinary decode encodes every
+    /// layer into one ordered serial Metal pass, then validates immutable
+    /// per-layer route and sparse-selection records before publishing progress.
     pub fn forward_token_with_progress(
         &mut self,
         ctx: &MetalContext,
@@ -1468,8 +1546,9 @@ impl DeepSeekV4Session {
         self.forward_token_with_progress_and_profile(ctx, token_id, layer_completed, None, None)
     }
 
-    /// Execute one singleton token while timing the one-command-per-layer path.
-    /// The ordinary forward path does not allocate or sample clocks.
+    /// Execute one singleton token while timing the retained, separately
+    /// encoded one-command-per-layer comparator. The ordinary whole-token path
+    /// does not allocate or sample clocks.
     #[doc(hidden)]
     pub fn forward_token_profiled(
         &mut self,
@@ -1495,8 +1574,8 @@ impl DeepSeekV4Session {
     }
 
     /// Execute one singleton token while sampling ten encoder-delimited stages
-    /// in only the requested layers. Unsampled layers retain the production
-    /// one-encoder command shape.
+    /// in only the requested layers. This intentionally retains the historical
+    /// per-layer command schedule as an attribution comparator.
     #[doc(hidden)]
     pub fn forward_token_stage_profiled(
         &mut self,
@@ -1617,6 +1696,258 @@ impl DeepSeekV4Session {
         self.committed_tokens.extend_from_slice(tokens);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn encode_token_layer(
+        &mut self,
+        ctx: &MetalContext,
+        layer_encoder: &mut DeepSeekV4LayerEncoder<'_, '_>,
+        token_id: u32,
+        position: u32,
+        layer: usize,
+        route_record: &DeepSeekV4RouteRecord,
+        selection_record: &DeepSeekV4SelectionRecord,
+    ) -> Result<DeepSeekV4EncodedLayer, DeepSeekV4MetalError> {
+        let rms_eps = self.residency.config().attention_rms_epsilon;
+        let hc_eps = self.residency.config().hyper_connection_epsilon;
+        let raw_cache = self.raw_cache_layer(layer)?;
+        let rope = deepseek_v4_layer_rope(self.residency.config(), layer)?;
+
+        if layer == 0 {
+            encode_get_rows_f32(
+                ctx,
+                layer_encoder.current(),
+                self.residency.require_tensor("token_embd.weight")?,
+                &self.token_id,
+                &self.embedding,
+                1,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+            )?;
+            self.hyper_connection.encode_initial_repeat(
+                ctx,
+                layer_encoder.current(),
+                &self.embedding,
+                &self.residual_primary,
+            )?;
+        }
+
+        self.hyper_connection.encode_pre(
+            ctx,
+            layer_encoder.current(),
+            &self.residual_primary,
+            self.layer_tensor(layer, "hc_attn_fn.weight")?,
+            self.layer_tensor(layer, "hc_attn_scale.weight")?,
+            self.layer_tensor(layer, "hc_attn_base.weight")?,
+            rms_eps,
+            hc_eps,
+        )?;
+        layer_encoder.boundary(DeepSeekV4StageKind::AttentionPrepare)?;
+
+        self.attention.encode_prepare_local_f16(
+            ctx,
+            layer_encoder.current(),
+            self.hyper_connection.collapsed_input(),
+            self.layer_tensor(layer, "attn_norm.weight")?,
+            self.layer_tensor(layer, "attn_q_a.weight")?,
+            self.layer_tensor(layer, "attn_q_a_norm.weight")?,
+            self.layer_tensor(layer, "attn_q_b.weight")?,
+            self.layer_tensor(layer, "attn_kv.weight")?,
+            self.layer_tensor(layer, "attn_kv_a_norm.weight")?,
+            &raw_cache,
+            position,
+            rope,
+            rms_eps,
+        )?;
+        self.compressor_frontiers.encode_layer(
+            ctx,
+            layer_encoder.current(),
+            &self.residency,
+            layer,
+            position,
+            self.attention.normalized_input(),
+            rope,
+            rms_eps,
+        )?;
+        layer_encoder.boundary(DeepSeekV4StageKind::AttentionCore)?;
+
+        let csa_rows = self.compressor_frontiers.csa_rows(layer, position)?;
+        let sparse_visible_count =
+            if let Some(rows) = csa_rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
+                self.sparse_csa.encode(
+                    ctx,
+                    layer_encoder.current(),
+                    self.attention.q_lora(),
+                    self.attention.normalized_input(),
+                    self.layer_tensor(layer, "indexer.attn_q_b.weight")?,
+                    self.layer_tensor(layer, "indexer.proj.weight")?,
+                    rows,
+                    position,
+                    rope,
+                    selection_record,
+                )?;
+                self.attention.encode_selected_attention_f16(
+                    ctx,
+                    layer_encoder.current(),
+                    &raw_cache,
+                    rows,
+                    &self.sparse_csa,
+                    selection_record,
+                    self.layer_tensor(layer, "attn_sinks.weight")?,
+                    position,
+                    rope,
+                )?;
+                Some(rows.count)
+            } else {
+                let compressed = self.compressor_frontiers.attention_rows(layer, position)?;
+                self.attention.encode_dense_attention_f16(
+                    ctx,
+                    layer_encoder.current(),
+                    &raw_cache,
+                    compressed,
+                    self.residency.config().attention_kinds[layer],
+                    self.layer_tensor(layer, "attn_sinks.weight")?,
+                    position,
+                    rope,
+                )?;
+                None
+            };
+        layer_encoder.boundary(DeepSeekV4StageKind::AttentionOutput)?;
+
+        let attention_output = self.attention.encode_attention_output(
+            ctx,
+            layer_encoder.current(),
+            self.layer_tensor(layer, "attn_output_a.weight")?,
+            self.layer_tensor(layer, "attn_output_b.weight")?,
+            position,
+            rope,
+        )?;
+        layer_encoder.boundary(DeepSeekV4StageKind::HyperConnectionBridge)?;
+
+        self.hyper_connection.encode_post(
+            ctx,
+            layer_encoder.current(),
+            attention_output,
+            &self.residual_primary,
+            &self.residual_secondary,
+        )?;
+        self.hyper_connection.encode_pre(
+            ctx,
+            layer_encoder.current(),
+            &self.residual_secondary,
+            self.layer_tensor(layer, "hc_ffn_fn.weight")?,
+            self.layer_tensor(layer, "hc_ffn_scale.weight")?,
+            self.layer_tensor(layer, "hc_ffn_base.weight")?,
+            rms_eps,
+            hc_eps,
+        )?;
+        layer_encoder.boundary(DeepSeekV4StageKind::MoeRouter)?;
+
+        self.moe.encode_router(
+            ctx,
+            layer_encoder.current(),
+            self.hyper_connection.collapsed_input(),
+            self.layer_tensor(layer, "ffn_norm.weight")?,
+            self.layer_tensor(layer, "ffn_gate_inp.weight")?,
+            rms_eps,
+        )?;
+        if layer < self.residency.config().hash_layer_count as usize {
+            self.moe.encode_route_hash_gpu_into(
+                ctx,
+                layer_encoder.current(),
+                token_id as usize,
+                self.layer_tensor(layer, "ffn_gate_tid2eid.weight")?,
+                route_record,
+            )?;
+        } else {
+            self.moe.encode_route_learned_gpu_into(
+                ctx,
+                layer_encoder.current(),
+                self.layer_tensor(layer, "exp_probs_b.bias")?,
+                route_record,
+            )?;
+        }
+        self.moe.validate_indexed_experts(
+            self.layer_tensor(layer, "ffn_gate_exps.weight")?,
+            self.layer_tensor(layer, "ffn_up_exps.weight")?,
+            self.layer_tensor(layer, "ffn_down_exps.weight")?,
+            self.layer_tensor(layer, "ffn_gate_shexp.weight")?,
+            self.layer_tensor(layer, "ffn_up_shexp.weight")?,
+            self.layer_tensor(layer, "ffn_down_shexp.weight")?,
+            self.residency.config().swiglu_clamp_experts[layer],
+            self.residency.config().swiglu_clamp_shared[layer],
+        )?;
+        layer_encoder.boundary(DeepSeekV4StageKind::MoeRoutedExperts)?;
+
+        self.moe.encode_routed_experts_all_slots_from_record(
+            ctx,
+            layer_encoder.current(),
+            self.layer_tensor(layer, "ffn_gate_exps.weight")?,
+            self.layer_tensor(layer, "ffn_up_exps.weight")?,
+            self.layer_tensor(layer, "ffn_down_exps.weight")?,
+            self.residency.config().swiglu_clamp_experts[layer],
+            route_record,
+        )?;
+        layer_encoder.boundary(DeepSeekV4StageKind::MoeSharedExpert)?;
+
+        self.moe.encode_shared_expert(
+            ctx,
+            layer_encoder.current(),
+            self.layer_tensor(layer, "ffn_gate_shexp.weight")?,
+            self.layer_tensor(layer, "ffn_up_shexp.weight")?,
+            self.layer_tensor(layer, "ffn_down_shexp.weight")?,
+            self.residency.config().swiglu_clamp_shared[layer],
+        )?;
+        layer_encoder.boundary(DeepSeekV4StageKind::MoeCombine)?;
+
+        let moe_output = self.moe.encode_expert_combine_from_record(
+            ctx,
+            layer_encoder.current(),
+            route_record,
+        )?;
+        layer_encoder.boundary(DeepSeekV4StageKind::LayerTail)?;
+
+        self.hyper_connection.encode_post(
+            ctx,
+            layer_encoder.current(),
+            moe_output,
+            &self.residual_secondary,
+            &self.residual_primary,
+        )?;
+        if layer + 1 == DEEPSEEK_V4_LAYER_COUNT {
+            self.hyper_connection.encode_head(
+                ctx,
+                layer_encoder.current(),
+                &self.residual_primary,
+                self.residency.require_tensor("output_hc_fn.weight")?,
+                self.residency.require_tensor("output_hc_scale.weight")?,
+                self.residency.require_tensor("output_hc_base.weight")?,
+                &self.final_hidden,
+                rms_eps,
+                hc_eps,
+            )?;
+            encode_rms_norm_mul_f32(
+                ctx,
+                layer_encoder.current(),
+                &self.final_hidden,
+                self.residency.require_tensor("output_norm.weight")?,
+                &self.final_normalized_hidden,
+                rms_eps,
+            )?;
+            encode_projection(
+                ctx,
+                layer_encoder.current(),
+                self.residency.require_tensor("output.weight")?,
+                &self.final_normalized_hidden,
+                &self.logits,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                DEEPSEEK_V4_VOCAB_SIZE,
+                "output logits",
+            )?;
+        }
+        Ok(DeepSeekV4EncodedLayer {
+            sparse_visible_count,
+        })
+    }
+
     fn forward_token_inner(
         &mut self,
         ctx: &MetalContext,
@@ -1626,10 +1957,20 @@ impl DeepSeekV4Session {
         mut routing_profile: Option<&mut Vec<DeepSeekV4LayerCommandProfile>>,
         mut stage_recorder: Option<&mut DeepSeekV4StageRecorder>,
     ) -> Result<(), DeepSeekV4MetalError> {
+        #[cfg(feature = "dsv4-diagnostics")]
+        let decision_capture_active = self.decision_diagnostics.is_capturing();
+        #[cfg(not(feature = "dsv4-diagnostics"))]
+        let decision_capture_active = false;
+        if routing_profile.is_none() && stage_recorder.is_none() && !decision_capture_active {
+            return self.forward_token_inner_collapsed(ctx, token_id, position, layer_completed);
+        }
+
         let rms_eps = self.residency.config().attention_rms_epsilon;
         let hc_eps = self.residency.config().hyper_connection_epsilon;
 
         for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
+            let selection_record = self.sparse_csa.default_record();
+            let route_record = self.moe.default_route_record();
             let raw_cache = self.raw_cache_layer(layer)?;
             let rope = deepseek_v4_layer_rope(self.residency.config(), layer)?;
             let encode_started = routing_profile.as_ref().map(|_| std::time::Instant::now());
@@ -1732,6 +2073,7 @@ impl DeepSeekV4Session {
                     rows,
                     position,
                     rope,
+                    &selection_record,
                 )?;
                 self.attention.encode_selected_attention_f16(
                     ctx,
@@ -1739,6 +2081,7 @@ impl DeepSeekV4Session {
                     &raw_cache,
                     rows,
                     &self.sparse_csa,
+                    &selection_record,
                     self.layer_tensor(layer, "attn_sinks.weight")?,
                     position,
                     rope,
@@ -1927,11 +2270,12 @@ impl DeepSeekV4Session {
             if let Some(error) = command.error() {
                 return invalid(format!("layer {layer} command failed: {error:?}"));
             }
-            self.moe.validate_gpu_route_completed()?;
+            self.moe
+                .validate_gpu_route_record_completed(&route_record)?;
             if self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
                 && (position as usize + 1) / 4 > DEEPSEEK_V4_CSA_TOP_K
             {
-                self.sparse_csa.validate_completed()?;
+                self.sparse_csa.validate_completed(&selection_record)?;
             }
 
             #[cfg(feature = "dsv4-diagnostics")]
@@ -1940,7 +2284,10 @@ impl DeepSeekV4Session {
             {
                 let rows = self.compressor_frontiers.csa_rows(layer, position)?;
                 match rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
-                    Some(rows) => Some(self.sparse_csa.capture_decision(rows.count)?),
+                    Some(rows) => Some(
+                        self.sparse_csa
+                            .capture_decision(rows.count, &selection_record)?,
+                    ),
                     None => None,
                 }
             } else {
@@ -1949,7 +2296,7 @@ impl DeepSeekV4Session {
 
             #[cfg(feature = "dsv4-diagnostics")]
             if self.decision_diagnostics.is_capturing() {
-                let route = self.moe.capture_route_decision()?;
+                let route = self.moe.capture_route_decision(&route_record)?;
                 self.decision_diagnostics
                     .capture_layer(layer, csa_decision, route)?;
             }
@@ -1995,6 +2342,61 @@ impl DeepSeekV4Session {
 
         if let Some(recorder) = stage_recorder.as_deref_mut() {
             recorder.resolve(ctx)?;
+        }
+
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.decision_diagnostics.finish()?;
+
+        Ok(())
+    }
+
+    fn forward_token_inner_collapsed(
+        &mut self,
+        ctx: &MetalContext,
+        token_id: u32,
+        position: u32,
+        layer_completed: &mut impl FnMut(usize),
+    ) -> Result<(), DeepSeekV4MetalError> {
+        self.layer_routes.reset_for_token()?;
+        self.layer_selections.reset_for_token()?;
+        let command = ctx.queue.commandBuffer().ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "failed to allocate DeepSeek V4 whole-token command buffer".into(),
+            )
+        })?;
+        let mut sparse_visible_counts = [None; DEEPSEEK_V4_LAYER_COUNT];
+        let mut token_encoder = DeepSeekV4LayerEncoder::begin(&command, 0, None)?;
+
+        for (layer, sparse_visible_count) in sparse_visible_counts.iter_mut().enumerate() {
+            let route_record = self.layer_routes.layer(layer)?;
+            let selection_record = self.layer_selections.layer(layer)?;
+            let encoded = self.encode_token_layer(
+                ctx,
+                &mut token_encoder,
+                token_id,
+                position,
+                layer,
+                &route_record,
+                &selection_record,
+            )?;
+            *sparse_visible_count = encoded.sparse_visible_count;
+        }
+        token_encoder.end();
+
+        command.commit();
+        command.waitUntilCompleted();
+        if let Some(error) = command.error() {
+            return invalid(format!("whole-token Metal command failed: {error:?}"));
+        }
+
+        let completed_routes = self.layer_routes.read_completed()?;
+        let completed_selections = self.layer_selections.read_completed()?;
+        for (layer, sparse_visible_count) in sparse_visible_counts.into_iter().enumerate() {
+            completed_routes.validate_layer(layer)?;
+            if let Some(visible_count) = sparse_visible_count {
+                completed_selections.validate_layer(layer, visible_count)?;
+            }
+            layer_completed(layer);
         }
 
         #[cfg(feature = "dsv4-diagnostics")]
@@ -2764,6 +3166,135 @@ struct DeepSeekV4CsaRows<'a> {
     capacity_rows: usize,
 }
 
+const DEEPSEEK_V4_SELECTION_RECORD_I32_WIDTH: usize = 3;
+
+#[derive(Clone)]
+struct DeepSeekV4SelectionRecord {
+    visible_count: MetalTensor,
+    selected_count: MetalTensor,
+    status: MetalTensor,
+}
+
+impl DeepSeekV4SelectionRecord {
+    fn validate(&self) -> Result<(), DeepSeekV4MetalError> {
+        validate_i32(&self.visible_count, &[1], true, "CSA visible-count record")?;
+        validate_i32(
+            &self.selected_count,
+            &[1],
+            true,
+            "CSA selected-count record",
+        )?;
+        validate_i32(&self.status, &[1], true, "CSA status record")
+    }
+}
+
+struct DeepSeekV4LayerSelectionRecords {
+    integers: MetalTensor,
+}
+
+struct DeepSeekV4CompletedLayerSelectionRecords {
+    integers: Vec<i32>,
+}
+
+impl DeepSeekV4LayerSelectionRecords {
+    fn new(ctx: &MetalContext) -> Result<Self, DeepSeekV4MetalError> {
+        Ok(Self {
+            integers: MetalTensor::zeros_i32(
+                ctx,
+                vec![
+                    DEEPSEEK_V4_SELECTION_RECORD_I32_WIDTH as u64,
+                    DEEPSEEK_V4_LAYER_COUNT as u64,
+                ],
+            )?,
+        })
+    }
+
+    fn layer(&self, layer: usize) -> Result<DeepSeekV4SelectionRecord, DeepSeekV4MetalError> {
+        if layer >= DEEPSEEK_V4_LAYER_COUNT {
+            return invalid(format!(
+                "CSA selection-record layer {layer} is out of range"
+            ));
+        }
+        validate_i32(
+            &self.integers,
+            &[
+                DEEPSEEK_V4_SELECTION_RECORD_I32_WIDTH as u64,
+                DEEPSEEK_V4_LAYER_COUNT as u64,
+            ],
+            true,
+            "CSA layer-selection records",
+        )?;
+        let base = checked_mul(
+            layer,
+            DEEPSEEK_V4_SELECTION_RECORD_I32_WIDTH,
+            "CSA selection-record layer offset",
+        )? as u64;
+        let record = DeepSeekV4SelectionRecord {
+            visible_count: self.integers.view_subrange(base, vec![1]),
+            selected_count: self.integers.view_subrange(base + 1, vec![1]),
+            status: self.integers.view_subrange(base + 2, vec![1]),
+        };
+        record.validate()?;
+        Ok(record)
+    }
+
+    fn reset_for_token(&self) -> Result<(), DeepSeekV4MetalError> {
+        host_write_i32(
+            &self.integers,
+            &[-1; DEEPSEEK_V4_SELECTION_RECORD_I32_WIDTH * DEEPSEEK_V4_LAYER_COUNT],
+            "reset CSA layer-selection records",
+        )
+    }
+
+    fn read_completed(
+        &self,
+    ) -> Result<DeepSeekV4CompletedLayerSelectionRecords, DeepSeekV4MetalError> {
+        validate_i32(
+            &self.integers,
+            &[
+                DEEPSEEK_V4_SELECTION_RECORD_I32_WIDTH as u64,
+                DEEPSEEK_V4_LAYER_COUNT as u64,
+            ],
+            false,
+            "completed CSA layer-selection records",
+        )?;
+        Ok(DeepSeekV4CompletedLayerSelectionRecords {
+            integers: host_read_i32(&self.integers, "completed CSA layer-selection records")?,
+        })
+    }
+}
+
+impl DeepSeekV4CompletedLayerSelectionRecords {
+    fn validate_layer(
+        &self,
+        layer: usize,
+        expected_visible_count: usize,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if layer >= DEEPSEEK_V4_LAYER_COUNT {
+            return invalid(format!(
+                "completed CSA selection layer {layer} is out of range"
+            ));
+        }
+        let base = checked_mul(
+            layer,
+            DEEPSEEK_V4_SELECTION_RECORD_I32_WIDTH,
+            "completed CSA selection-record layer offset",
+        )?;
+        let visible_count = self.integers[base];
+        let selected_count = self.integers[base + 1];
+        let status = self.integers[base + 2];
+        if visible_count != expected_visible_count as i32
+            || selected_count != DEEPSEEK_V4_CSA_TOP_K as i32
+            || status != 0
+        {
+            return invalid(format!(
+                "layer {layer} sparse CSA selection failed with visible={visible_count} expected={expected_visible_count} selected={selected_count} status={status}"
+            ));
+        }
+        Ok(())
+    }
+}
+
 struct DeepSeekV4SparseCsaScratch {
     capacity_rows: usize,
     index_queries: MetalTensor,
@@ -2810,6 +3341,7 @@ impl DeepSeekV4SparseCsaScratch {
         rows: DeepSeekV4CsaRows<'_>,
         position: u32,
         rope: DeepSeekV4RopeParameters,
+        record: &DeepSeekV4SelectionRecord,
     ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_sparse_csa_indexer")?;
         if rows.count <= DEEPSEEK_V4_CSA_TOP_K
@@ -2841,8 +3373,9 @@ impl DeepSeekV4SparseCsaScratch {
             false,
             "sparse CSA indexer cache",
         )?;
+        record.validate()?;
         host_write_i32(
-            &self.visible_counts,
+            &record.visible_count,
             &[rows.count as i32],
             "sparse CSA visible count",
         )?;
@@ -2888,7 +3421,7 @@ impl DeepSeekV4SparseCsaScratch {
             &self.index_queries,
             &self.head_weights,
             rows.indexer_cache,
-            &self.visible_counts,
+            &record.visible_count,
             &self.scores,
             64,
             128,
@@ -2899,12 +3432,12 @@ impl DeepSeekV4SparseCsaScratch {
             ctx,
             enc,
             &self.scores,
-            &self.visible_counts,
+            &record.visible_count,
             &self.selected_mask,
             None,
             &self.cache_order_ids,
-            &self.selected_counts,
-            &self.status,
+            &record.selected_count,
+            &record.status,
             rows.capacity_rows,
             rows.count,
             DEEPSEEK_V4_CSA_TOP_K,
@@ -2912,9 +3445,21 @@ impl DeepSeekV4SparseCsaScratch {
         )
     }
 
-    fn validate_completed(&self) -> Result<(), DeepSeekV4MetalError> {
-        let status = host_read_i32(&self.status, "sparse CSA selection status")?;
-        let count = host_read_i32(&self.selected_counts, "sparse CSA selected count")?;
+    fn default_record(&self) -> DeepSeekV4SelectionRecord {
+        DeepSeekV4SelectionRecord {
+            visible_count: self.visible_counts.clone(),
+            selected_count: self.selected_counts.clone(),
+            status: self.status.clone(),
+        }
+    }
+
+    fn validate_completed(
+        &self,
+        record: &DeepSeekV4SelectionRecord,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        record.validate()?;
+        let status = host_read_i32(&record.status, "sparse CSA selection status")?;
+        let count = host_read_i32(&record.selected_count, "sparse CSA selected count")?;
         if status.as_slice() != [0] || count.as_slice() != [DEEPSEEK_V4_CSA_TOP_K as i32] {
             return invalid(format!(
                 "sparse CSA selection failed with status={status:?} count={count:?}"
@@ -2927,17 +3472,19 @@ impl DeepSeekV4SparseCsaScratch {
     fn capture_decision(
         &self,
         visible_count: usize,
+        record: &DeepSeekV4SelectionRecord,
     ) -> Result<DeepSeekV4CsaDecision, DeepSeekV4MetalError> {
+        record.validate()?;
         let scores = host_read_f32(&self.scores, "diagnostic sparse CSA scores")?;
         let selected_ids = host_read_i32(
             &self.cache_order_ids,
             "diagnostic sparse CSA cache-order IDs",
         )?;
         let selected_count = host_read_i32(
-            &self.selected_counts,
+            &record.selected_count,
             "diagnostic sparse CSA selected count",
         )?;
-        let status = host_read_i32(&self.status, "diagnostic sparse CSA status")?;
+        let status = host_read_i32(&record.status, "diagnostic sparse CSA status")?;
         Ok(diagnostics::build_csa_decision(
             scores,
             visible_count,
@@ -3445,6 +3992,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         raw_cache: &MetalTensor,
         rows: DeepSeekV4CsaRows<'_>,
         selection: &DeepSeekV4SparseCsaScratch,
+        record: &DeepSeekV4SelectionRecord,
         sinks: &MetalTensor,
         position: u32,
         rope: DeepSeekV4RopeParameters,
@@ -3460,6 +4008,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                 selection.capacity_rows, rows.capacity_rows
             ));
         }
+        record.validate()?;
         let queries = self
             .queries
             .view_subrange(0, vec![dims.query_width as u64, 1]);
@@ -3475,8 +4024,8 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             rows.attention_cache,
             rows.capacity_rows,
             &selection.cache_order_ids,
-            &selection.selected_counts,
-            &selection.visible_counts,
+            &record.selected_count,
+            &record.visible_count,
             sinks,
             &output,
             position,
@@ -4048,6 +4597,198 @@ pub struct DeepSeekV4MoeScratch {
     final_output: MetalTensor,
 }
 
+const DEEPSEEK_V4_ROUTE_RECORD_I32_WIDTH: usize = DEEPSEEK_V4_ROUTE_MAX_TOP_K + 1;
+
+#[derive(Clone)]
+struct DeepSeekV4RouteRecord {
+    expert_ids: MetalTensor,
+    weights: MetalTensor,
+    status: MetalTensor,
+}
+
+impl DeepSeekV4RouteRecord {
+    fn validate(&self, config: DeepSeekV4MoeConfig) -> Result<(), DeepSeekV4MetalError> {
+        validate_i32(
+            &self.expert_ids,
+            &[config.top_k as u64],
+            true,
+            "MoE route-record expert IDs",
+        )?;
+        validate_f32(
+            &self.weights,
+            &[config.top_k as u64],
+            true,
+            "MoE route-record weights",
+        )?;
+        validate_i32(&self.status, &[1], true, "MoE route-record status")
+    }
+}
+
+struct DeepSeekV4LayerRouteRecords {
+    integers: MetalTensor,
+    weights: MetalTensor,
+    config: DeepSeekV4MoeConfig,
+}
+
+struct DeepSeekV4CompletedLayerRouteRecords {
+    integers: Vec<i32>,
+    weights: Vec<f32>,
+    config: DeepSeekV4MoeConfig,
+}
+
+impl DeepSeekV4LayerRouteRecords {
+    fn new(ctx: &MetalContext, config: DeepSeekV4MoeConfig) -> Result<Self, DeepSeekV4MetalError> {
+        config.checked()?;
+        if config.top_k != DEEPSEEK_V4_ROUTE_MAX_TOP_K {
+            return invalid(format!(
+                "layer route records require top-k {DEEPSEEK_V4_ROUTE_MAX_TOP_K}, got {}",
+                config.top_k
+            ));
+        }
+        Ok(Self {
+            integers: MetalTensor::zeros_i32(
+                ctx,
+                vec![
+                    DEEPSEEK_V4_ROUTE_RECORD_I32_WIDTH as u64,
+                    DEEPSEEK_V4_LAYER_COUNT as u64,
+                ],
+            )?,
+            weights: MetalTensor::zeros_f32(
+                ctx,
+                vec![config.top_k as u64, DEEPSEEK_V4_LAYER_COUNT as u64],
+            )?,
+            config,
+        })
+    }
+
+    fn layer(&self, layer: usize) -> Result<DeepSeekV4RouteRecord, DeepSeekV4MetalError> {
+        if layer >= DEEPSEEK_V4_LAYER_COUNT {
+            return invalid(format!("MoE route-record layer {layer} is out of range"));
+        }
+        validate_i32(
+            &self.integers,
+            &[
+                DEEPSEEK_V4_ROUTE_RECORD_I32_WIDTH as u64,
+                DEEPSEEK_V4_LAYER_COUNT as u64,
+            ],
+            true,
+            "MoE layer-route integer records",
+        )?;
+        validate_f32(
+            &self.weights,
+            &[self.config.top_k as u64, DEEPSEEK_V4_LAYER_COUNT as u64],
+            true,
+            "MoE layer-route weight records",
+        )?;
+        let integer_base = checked_mul(
+            layer,
+            DEEPSEEK_V4_ROUTE_RECORD_I32_WIDTH,
+            "MoE route-record integer layer offset",
+        )? as u64;
+        let weight_base = checked_mul(
+            layer,
+            self.config.top_k,
+            "MoE route-record weight layer offset",
+        )? as u64;
+        let record = DeepSeekV4RouteRecord {
+            expert_ids: self
+                .integers
+                .view_subrange(integer_base, vec![self.config.top_k as u64]),
+            weights: self
+                .weights
+                .view_subrange(weight_base, vec![self.config.top_k as u64]),
+            status: self
+                .integers
+                .view_subrange(integer_base + self.config.top_k as u64, vec![1]),
+        };
+        record.validate(self.config)?;
+        Ok(record)
+    }
+
+    fn reset_for_token(&self) -> Result<(), DeepSeekV4MetalError> {
+        host_write_i32(
+            &self.integers,
+            &[0; DEEPSEEK_V4_ROUTE_RECORD_I32_WIDTH * DEEPSEEK_V4_LAYER_COUNT],
+            "reset MoE layer-route records",
+        )
+    }
+
+    fn read_completed(&self) -> Result<DeepSeekV4CompletedLayerRouteRecords, DeepSeekV4MetalError> {
+        validate_i32(
+            &self.integers,
+            &[
+                DEEPSEEK_V4_ROUTE_RECORD_I32_WIDTH as u64,
+                DEEPSEEK_V4_LAYER_COUNT as u64,
+            ],
+            false,
+            "completed MoE layer-route integer records",
+        )?;
+        validate_f32(
+            &self.weights,
+            &[self.config.top_k as u64, DEEPSEEK_V4_LAYER_COUNT as u64],
+            false,
+            "completed MoE layer-route weight records",
+        )?;
+        Ok(DeepSeekV4CompletedLayerRouteRecords {
+            integers: host_read_i32(&self.integers, "completed MoE layer-route integers")?,
+            weights: host_read_f32(&self.weights, "completed MoE layer-route weights")?,
+            config: self.config,
+        })
+    }
+}
+
+impl DeepSeekV4CompletedLayerRouteRecords {
+    fn validate_layer(&self, layer: usize) -> Result<(), DeepSeekV4MetalError> {
+        if layer >= DEEPSEEK_V4_LAYER_COUNT {
+            return invalid(format!("completed MoE route layer {layer} is out of range"));
+        }
+        let integer_base = checked_mul(
+            layer,
+            DEEPSEEK_V4_ROUTE_RECORD_I32_WIDTH,
+            "completed MoE route integer layer offset",
+        )?;
+        let weight_base = checked_mul(
+            layer,
+            self.config.top_k,
+            "completed MoE route weight layer offset",
+        )?;
+        let status = self.integers[integer_base + self.config.top_k];
+        if status != DEEPSEEK_V4_ROUTE_STATUS_READY {
+            return invalid(format!(
+                "layer {layer} GPU route failed with status {status} ({})",
+                deepseek_v4_route_status_name(status)
+            ));
+        }
+        let mut seen = [false; DEEPSEEK_V4_ROUTE_MAX_EXPERTS];
+        for slot in 0..self.config.top_k {
+            let expert = self.integers[integer_base + slot];
+            let Ok(expert_index) = usize::try_from(expert) else {
+                return invalid(format!(
+                    "layer {layer} GPU route slot {slot} returned negative expert {expert}"
+                ));
+            };
+            if expert_index >= self.config.expert_count {
+                return invalid(format!(
+                    "layer {layer} GPU route slot {slot} returned expert {expert_index} outside {}",
+                    self.config.expert_count
+                ));
+            }
+            if std::mem::replace(&mut seen[expert_index], true) {
+                return invalid(format!(
+                    "layer {layer} GPU route returned duplicate expert {expert_index}"
+                ));
+            }
+            let weight = self.weights[weight_base + slot];
+            if !weight.is_finite() || weight < 0.0 {
+                return invalid(format!(
+                    "layer {layer} GPU route slot {slot} returned invalid weight {weight}"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl DeepSeekV4MoeScratch {
     pub fn new(
         ctx: &MetalContext,
@@ -4161,6 +4902,17 @@ impl DeepSeekV4MoeScratch {
         enc: &KernelEncoder,
         correction_bias: &MetalTensor,
     ) -> Result<(), DeepSeekV4MetalError> {
+        let record = self.default_route_record();
+        self.encode_route_learned_gpu_into(ctx, enc, correction_bias, &record)
+    }
+
+    fn encode_route_learned_gpu_into(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        correction_bias: &MetalTensor,
+        record: &DeepSeekV4RouteRecord,
+    ) -> Result<(), DeepSeekV4MetalError> {
         let c = self.config;
         validate_f32(
             correction_bias,
@@ -4176,6 +4928,7 @@ impl DeepSeekV4MoeScratch {
             c.expert_count,
             "kernel_deepseek_v4_route_learned",
             DEEPSEEK_V4_ROUTE_MAX_EXPERTS,
+            record,
         )
     }
 
@@ -4185,6 +4938,18 @@ impl DeepSeekV4MoeScratch {
         enc: &KernelEncoder,
         token_id: usize,
         token_to_expert: &MetalTensor,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        let record = self.default_route_record();
+        self.encode_route_hash_gpu_into(ctx, enc, token_id, token_to_expert, &record)
+    }
+
+    fn encode_route_hash_gpu_into(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        token_id: usize,
+        token_to_expert: &MetalTensor,
+        record: &DeepSeekV4RouteRecord,
     ) -> Result<(), DeepSeekV4MetalError> {
         let c = self.config;
         validate_i32_bank(token_to_expert, c.top_k, "GPU token-to-expert map")?;
@@ -4199,6 +4964,7 @@ impl DeepSeekV4MoeScratch {
             vocab_size,
             "kernel_deepseek_v4_route_hash",
             1,
+            record,
         )
     }
 
@@ -4211,10 +4977,12 @@ impl DeepSeekV4MoeScratch {
         vocab_size: usize,
         kernel: &'static str,
         threads_per_group: usize,
+        record: &DeepSeekV4RouteRecord,
     ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, kernel)?;
         self.validate_scratch()?;
         let c = self.config;
+        record.validate(c)?;
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
         struct Args {
@@ -4249,9 +5017,9 @@ impl DeepSeekV4MoeScratch {
         enc.set_bytes(0, &args);
         enc.set_tensor(1, &self.logits);
         enc.set_tensor(2, auxiliary);
-        enc.set_tensor(3, &self.expert_ids);
-        enc.set_tensor(4, &self.weights);
-        enc.set_tensor(5, &self.route_status);
+        enc.set_tensor(3, &record.expert_ids);
+        enc.set_tensor(4, &record.weights);
+        enc.set_tensor(5, &record.status);
         enc.dispatch(
             MTLSize {
                 width: 1,
@@ -4267,8 +5035,18 @@ impl DeepSeekV4MoeScratch {
         Ok(())
     }
 
+    #[cfg(test)]
     fn validate_gpu_route_completed(&self) -> Result<(), DeepSeekV4MetalError> {
-        let status = host_read_i32(&self.route_status, "GPU route status")?;
+        let record = self.default_route_record();
+        self.validate_gpu_route_record_completed(&record)
+    }
+
+    fn validate_gpu_route_record_completed(
+        &self,
+        record: &DeepSeekV4RouteRecord,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        record.validate(self.config)?;
+        let status = host_read_i32(&record.status, "GPU route status")?;
         if status.as_slice() != [DEEPSEEK_V4_ROUTE_STATUS_READY] {
             return invalid(format!(
                 "GPU route failed with status {} ({})",
@@ -4277,6 +5055,14 @@ impl DeepSeekV4MoeScratch {
             ));
         }
         Ok(())
+    }
+
+    fn default_route_record(&self) -> DeepSeekV4RouteRecord {
+        DeepSeekV4RouteRecord {
+            expert_ids: self.expert_ids.clone(),
+            weights: self.weights.clone(),
+            status: self.route_status.clone(),
+        }
     }
 
     #[cfg(test)]
@@ -4635,6 +5421,29 @@ impl DeepSeekV4MoeScratch {
         down_bank: &MetalTensor,
         expert_clamp: f32,
     ) -> Result<(), DeepSeekV4MetalError> {
+        let record = self.default_route_record();
+        self.encode_routed_experts_all_slots_from_record(
+            ctx,
+            enc,
+            gate_bank,
+            up_bank,
+            down_bank,
+            expert_clamp,
+            &record,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_routed_experts_all_slots_from_record(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        gate_bank: &MetalTensor,
+        up_bank: &MetalTensor,
+        down_bank: &MetalTensor,
+        expert_clamp: f32,
+        record: &DeepSeekV4RouteRecord,
+    ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_moe_routed_experts_all_slots")?;
         let c = self.config;
         if c.top_k != DEEPSEEK_V4_ROUTE_MAX_TOP_K {
@@ -4647,6 +5456,7 @@ impl DeepSeekV4MoeScratch {
             return invalid("all-slot routed expert clamp must be finite and positive");
         }
         self.validate_scratch()?;
+        record.validate(c)?;
         validate_expert_bank(
             gate_bank,
             c.hidden_size,
@@ -4700,8 +5510,8 @@ impl DeepSeekV4MoeScratch {
             gate_bank,
             up_bank,
             &self.normalized_input,
-            &self.expert_ids,
-            &self.route_status,
+            &record.expert_ids,
+            &record.status,
             &self.routed_inner,
             c.hidden_size,
             c.ffn_size,
@@ -4713,8 +5523,8 @@ impl DeepSeekV4MoeScratch {
             enc,
             down_bank,
             &self.routed_inner,
-            &self.expert_ids,
-            &self.route_status,
+            &record.expert_ids,
+            &record.status,
             &self.expert_outputs,
             c.ffn_size,
             c.hidden_size,
@@ -4772,13 +5582,24 @@ impl DeepSeekV4MoeScratch {
         ctx: &MetalContext,
         enc: &KernelEncoder,
     ) -> Result<&'a MetalTensor, DeepSeekV4MetalError> {
+        let record = self.default_route_record();
+        self.encode_expert_combine_from_record(ctx, enc, &record)
+    }
+
+    fn encode_expert_combine_from_record<'a>(
+        &'a self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        record: &DeepSeekV4RouteRecord,
+    ) -> Result<&'a MetalTensor, DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_moe_expert_combine")?;
         let c = self.config;
+        record.validate(c)?;
         crate::metal::encode_moe_weighted_sum_f32(
             ctx,
             enc,
             &self.expert_outputs,
-            &self.weights,
+            &record.weights,
             &self.routed_output,
             c.hidden_size,
             c.top_k,
@@ -4844,10 +5665,14 @@ impl DeepSeekV4MoeScratch {
     }
 
     #[cfg(feature = "dsv4-diagnostics")]
-    fn capture_route_decision(&self) -> Result<DeepSeekV4RouteDecision, DeepSeekV4MetalError> {
+    fn capture_route_decision(
+        &self,
+        record: &DeepSeekV4RouteRecord,
+    ) -> Result<DeepSeekV4RouteDecision, DeepSeekV4MetalError> {
+        record.validate(self.config)?;
         Ok(diagnostics::build_route_decision(
-            host_read_i32(&self.expert_ids, "diagnostic routed expert IDs")?,
-            host_read_f32(&self.weights, "diagnostic routed expert weights")?,
+            host_read_i32(&record.expert_ids, "diagnostic routed expert IDs")?,
+            host_read_f32(&record.weights, "diagnostic routed expert weights")?,
             self.config.expert_count,
             self.config.routed_scale,
         )?)
@@ -8038,6 +8863,16 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
     }
     push_session_allocation(
         &mut requests,
+        "layer_selections.integers",
+        checked_mul(
+            DEEPSEEK_V4_SELECTION_RECORD_I32_WIDTH,
+            DEEPSEEK_V4_LAYER_COUNT,
+            "layer-selection record elements",
+        )?,
+        i32_bytes,
+    )?;
+    push_session_allocation(
+        &mut requests,
         "raw_cache",
         checked_mul(
             checked_mul(
@@ -8095,6 +8930,26 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
     push_session_allocation(&mut requests, "moe.expert_ids", moe.top_k, i32_bytes)?;
     push_session_allocation(&mut requests, "moe.weights", moe.top_k, f32_bytes)?;
     push_session_allocation(&mut requests, "moe.route_status", 1, i32_bytes)?;
+    push_session_allocation(
+        &mut requests,
+        "layer_routes.integers",
+        checked_mul(
+            DEEPSEEK_V4_ROUTE_RECORD_I32_WIDTH,
+            DEEPSEEK_V4_LAYER_COUNT,
+            "layer-route integer record elements",
+        )?,
+        i32_bytes,
+    )?;
+    push_session_allocation(
+        &mut requests,
+        "layer_routes.weights",
+        checked_mul(
+            moe.top_k,
+            DEEPSEEK_V4_LAYER_COUNT,
+            "layer-route weight record elements",
+        )?,
+        f32_bytes,
+    )?;
     for name in ["moe.gate", "moe.up", "moe.inner"] {
         push_session_allocation(&mut requests, name, moe.ffn_size, f32_bytes)?;
     }
@@ -8579,13 +9434,13 @@ mod tests {
         let capacity =
             DeepSeekV4SessionCapacity::for_forward_limit(3_073, config.context_length).unwrap();
         let requests = deepseek_v4_session_allocation_requests_for_kinds(&kinds, capacity).unwrap();
-        assert_eq!(requests.len(), 539);
+        assert_eq!(requests.len(), 542);
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            179_126_820
+            179_129_572
         );
         let names = requests
             .iter()
@@ -8622,7 +9477,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            7_631_940_132
+            7_631_942_884
         );
         assert_eq!(
             promoted
@@ -15348,6 +16203,98 @@ mod tests {
                 .unwrap_err();
         assert!(capacity_error.to_string().contains("only 128 threads"));
         validate_deepseek_v4_route_pipeline_geometry("hash route", 16, 1, 1).unwrap();
+    }
+
+    #[test]
+    fn layer_records_preserve_earlier_failures_across_later_success() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const E: usize = 8;
+        let config = DeepSeekV4MoeConfig {
+            hidden_size: 1,
+            ffn_size: 1,
+            expert_count: E,
+            top_k: DEEPSEEK_V4_ROUTE_MAX_TOP_K,
+            routed_scale: 1.5,
+        };
+        let scratch = DeepSeekV4MoeScratch::new(&ctx, config).unwrap();
+        let routes = DeepSeekV4LayerRouteRecords::new(&ctx, config).unwrap();
+        routes.reset_for_token().unwrap();
+        assert!(
+            routes
+                .read_completed()
+                .unwrap()
+                .validate_layer(6)
+                .unwrap_err()
+                .to_string()
+                .contains("pending")
+        );
+        host_write_f32(
+            &scratch.logits,
+            &[-3.0, 0.5, 1.25, -0.75, 2.0, 0.125, -1.5, 0.875],
+            "layer-record route logits",
+        )
+        .unwrap();
+        let hash_map = offset_i32(&ctx, &[0, 2, 4, 1, 7, 3], vec![6, 1]);
+        let failed = routes.layer(7).unwrap();
+        let ready = routes.layer(8).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let failed_encoder = KernelEncoder::begin(&command);
+        scratch
+            .encode_route_hash_gpu_into(&ctx, &failed_encoder, 1, &hash_map, &failed)
+            .unwrap();
+        failed_encoder.end();
+        let ready_encoder = KernelEncoder::begin(&command);
+        scratch
+            .encode_route_hash_gpu_into(&ctx, &ready_encoder, 0, &hash_map, &ready)
+            .unwrap();
+        ready_encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none(), "{:?}", command.error());
+
+        let completed = routes.read_completed().unwrap();
+        let error = completed.validate_layer(7).unwrap_err();
+        assert!(error.to_string().contains("invalid hash token"));
+        completed.validate_layer(8).unwrap();
+        assert_eq!(
+            read_i32(&failed.status),
+            vec![DEEPSEEK_V4_ROUTE_STATUS_INVALID_TOKEN]
+        );
+        assert_eq!(
+            read_i32(&ready.status),
+            vec![DEEPSEEK_V4_ROUTE_STATUS_READY]
+        );
+
+        let selections = DeepSeekV4LayerSelectionRecords::new(&ctx).unwrap();
+        selections.reset_for_token().unwrap();
+        assert!(
+            selections
+                .read_completed()
+                .unwrap()
+                .validate_layer(19, 513)
+                .unwrap_err()
+                .to_string()
+                .contains("visible=-1")
+        );
+        let failed = selections.layer(19).unwrap();
+        let ready = selections.layer(21).unwrap();
+        host_write_i32(&failed.visible_count, &[513], "failed visible count").unwrap();
+        host_write_i32(&failed.selected_count, &[511], "failed selected count").unwrap();
+        host_write_i32(&failed.status, &[3], "failed selector status").unwrap();
+        host_write_i32(&ready.visible_count, &[513], "ready visible count").unwrap();
+        host_write_i32(&ready.selected_count, &[512], "ready selected count").unwrap();
+        host_write_i32(&ready.status, &[0], "ready selector status").unwrap();
+        let completed = selections.read_completed().unwrap();
+        assert!(
+            completed
+                .validate_layer(19, 513)
+                .unwrap_err()
+                .to_string()
+                .contains("selected=511 status=3")
+        );
+        completed.validate_layer(21, 513).unwrap();
     }
 
     #[test]

@@ -10,7 +10,7 @@ use qwen_llm::deepseek_v4_metal::{
     load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::metal::MetalContext;
+use qwen_llm::metal::{MetalContext, kernel_trace_begin, kernel_trace_snapshot};
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -507,14 +507,14 @@ fn native_deepseek_v4_full_context_session_plan_is_exact_and_admitted() {
     assert_eq!(plan.session_capacity().hca_physical_rows(), 8_192);
     let memory = plan.memory_plan().clone();
     eprintln!("deepseek_v4 full-context planned memory={memory}");
-    assert_eq!(memory.session_allocations().len(), 539);
-    assert_eq!(memory.session_logical_bytes(), 7_631_940_132);
-    assert_eq!(memory.session_priced_upper_bytes(), 7_636_418_560);
-    assert_eq!(memory.total_priced_upper_bytes(), 110_631_043_072);
+    assert_eq!(memory.session_allocations().len(), 542);
+    assert_eq!(memory.session_logical_bytes(), 7_631_942_884);
+    assert_eq!(memory.session_priced_upper_bytes(), 7_636_467_712);
+    assert_eq!(memory.total_priced_upper_bytes(), 110_631_092_224);
     let required = memory
         .required_with_reserve_bytes()
         .expect("price full-context plan with reserve");
-    assert_eq!(required, 111_167_913_984);
+    assert_eq!(required, 111_167_963_136);
     let admission = memory.admission(ctx.memory_signals());
     assert!(
         admission.admitted,
@@ -1190,16 +1190,16 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         "memory planning must not realize Metal buffers"
     );
     let memory_plan = load_plan.memory_plan().clone();
-    assert_eq!(memory_plan.session_allocations().len(), 539);
-    assert_eq!(memory_plan.session_logical_bytes(), 179_126_820);
-    assert_eq!(memory_plan.session_priced_upper_bytes(), 183_631_872);
+    assert_eq!(memory_plan.session_allocations().len(), 542);
+    assert_eq!(memory_plan.session_logical_bytes(), 179_129_572);
+    assert_eq!(memory_plan.session_priced_upper_bytes(), 183_681_024);
     assert_eq!(memory_plan.residency_buffer_count(), 7);
     assert_eq!(memory_plan.residency_logical_bytes(), 102_994_608_640);
     assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_624_512);
-    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_256_384);
+    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_305_536);
     assert_eq!(
         memory_plan.required_with_reserve_bytes().unwrap(),
-        103_715_127_296
+        103_715_176_448
     );
     assert_eq!(load_plan.residency_report().window_count, 3);
     assert_eq!(load_plan.residency_report().fallback_count, 4);
@@ -1628,6 +1628,41 @@ fn native_deepseek_v4_packed_callback_unwind_poison_is_fail_stop() {
 
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+fn native_deepseek_v4_whole_command_callback_reports_only_verified_prefix() {
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency_for(&ctx, &gguf, 1);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build singleton session");
+    let mut completed = Vec::new();
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = session.forward_token_zero_with_progress(&ctx, 35, |layer| {
+            completed.push(layer);
+            if layer == 7 {
+                panic!("intentional whole-command callback interruption");
+            }
+        });
+    }));
+    assert!(
+        unwind.is_err(),
+        "progress callback must interrupt publication"
+    );
+    assert_eq!(completed, (0..=7).collect::<Vec<_>>());
+    assert_eq!(session.next_position(), 0);
+    assert!(session.committed_tokens().is_empty());
+    assert!(session.copy_logits_f32().is_err());
+    let error = match session.forward_token(&ctx, 35) {
+        Err(error) => error,
+        Ok(_) => panic!("poisoned singleton session unexpectedly accepted a token"),
+    };
+    assert!(error.to_string().contains("poisoned"));
+}
+
+#[test]
+#[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_packed_n128_preserves_hca_and_wrapped_decode() {
     let model_path = std::env::var_os("DSV4_MODEL")
         .map(PathBuf::from)
@@ -1997,7 +2032,7 @@ fn profile_native_deepseek_v4_single_command_at_128_and_512() {
         let profiled_wall_median = median(&profiled_wall);
         let control_after_median = median(&endpoint.control_after_ms);
         eprintln!(
-            "deepseek_v4 single_command {label} control_before_ms={:?} control_before_median_ms={:.3} profiled_wall_ms={profiled_wall:?} profiled_wall_median_ms={:.3} control_after_ms={:?} control_after_median_ms={:.3} encode_cpu_ms={encode_cpu:?} command_gpu_ms={command_gpu:?} swa_gpu_ms={swa_gpu:?} swa_gpu_median_ms={:.3} csa_gpu_ms={csa_gpu:?} csa_gpu_median_ms={:.3} hca_gpu_ms={hca_gpu:?} hca_gpu_median_ms={:.3} hash_gpu_ms={hash_gpu:?} hash_gpu_median_ms={:.3} learned_gpu_ms={learned_gpu:?} learned_gpu_median_ms={:.3} layer42_gpu_ms={layer_42_gpu:?} layer42_gpu_median_ms={:.3} command_buffers_per_token=43 logits_sha256={}",
+            "deepseek_v4 single_command {label} control_before_ms={:?} control_before_median_ms={:.3} profiled_wall_ms={profiled_wall:?} profiled_wall_median_ms={:.3} control_after_ms={:?} control_after_median_ms={:.3} encode_cpu_ms={encode_cpu:?} command_gpu_ms={command_gpu:?} swa_gpu_ms={swa_gpu:?} swa_gpu_median_ms={:.3} csa_gpu_ms={csa_gpu:?} csa_gpu_median_ms={:.3} hca_gpu_ms={hca_gpu:?} hca_gpu_median_ms={:.3} hash_gpu_ms={hash_gpu:?} hash_gpu_median_ms={:.3} learned_gpu_ms={learned_gpu:?} learned_gpu_median_ms={:.3} layer42_gpu_ms={layer_42_gpu:?} layer42_gpu_median_ms={:.3} control_command_buffers=1 control_encoders=1 profiled_command_buffers=43 profiled_encoders=43 logits_sha256={}",
             endpoint.control_before_ms,
             control_before_median,
             profiled_wall_median,
@@ -2481,6 +2516,68 @@ fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
         .capture_causal_snapshot()
         .expect("capture exact position-129 state");
 
+    let collapsed_trace = {
+        let _trace = kernel_trace_begin();
+        session
+            .forward_token(&ctx, 201)
+            .expect("execute collapsed position-129 comparison token");
+        kernel_trace_snapshot()
+    };
+    let collapsed = session
+        .copy_logits_f32()
+        .expect("copy collapsed position-129 comparison logits");
+    session
+        .restore_causal_snapshot(&position_129)
+        .expect("restore position-129 layer-command comparison state");
+    let layer_command_trace = {
+        let _trace = kernel_trace_begin();
+        session
+            .forward_token_profiled(&ctx, 201)
+            .expect("execute layer-command position-129 comparison token");
+        kernel_trace_snapshot()
+    };
+    let layer_commands = session
+        .copy_logits_f32()
+        .expect("copy layer-command position-129 comparison logits");
+    let mut dot = 0.0f64;
+    let mut collapsed_norm = 0.0f64;
+    let mut layer_norm = 0.0f64;
+    let mut squared_error = 0.0f64;
+    let mut max_abs = 0.0f32;
+    for (&left, &right) in collapsed.iter().zip(&layer_commands) {
+        dot += f64::from(left) * f64::from(right);
+        collapsed_norm += f64::from(left) * f64::from(left);
+        layer_norm += f64::from(right) * f64::from(right);
+        squared_error += f64::from(left - right).powi(2);
+        max_abs = max_abs.max((left - right).abs());
+    }
+    let schedule_cosine = dot / (collapsed_norm.sqrt() * layer_norm.sqrt());
+    let schedule_relative_rms = (squared_error / layer_norm).sqrt();
+    eprintln!(
+        "deepseek_v4 whole_command_equivalence position=129 collapsed_encoders={} layer_command_encoders={} dispatches={} collapsed_sha256={} layer_commands_sha256={} cosine={schedule_cosine:.12} relative_rms={schedule_relative_rms:.12} max_abs={max_abs}",
+        collapsed_trace.encoders,
+        layer_command_trace.encoders,
+        collapsed_trace.dispatches,
+        f32_sha256(&collapsed),
+        f32_sha256(&layer_commands),
+    );
+    assert_eq!(collapsed_trace.encoders, 1);
+    assert_eq!(collapsed_trace.concurrent_encoders, 0);
+    assert_eq!(collapsed_trace.dispatches, 1_999);
+    assert_eq!(layer_command_trace.encoders, 43);
+    assert_eq!(layer_command_trace.concurrent_encoders, 0);
+    assert_eq!(collapsed_trace.dispatches, layer_command_trace.dispatches);
+    assert!(
+        collapsed
+            .iter()
+            .zip(&layer_commands)
+            .all(|(collapsed, layered)| collapsed.to_bits() == layered.to_bits()),
+        "whole-token and layer-command logits must be bit-identical"
+    );
+    session
+        .restore_causal_snapshot(&position_129)
+        .expect("restore exact position-129 state after command comparison");
+
     let continuation_started = Instant::now();
     for chunk in prompt[129..513].chunks(128) {
         session
@@ -2496,13 +2593,14 @@ fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
         measure(&mut session, &position_129);
     let (position_513_cold, position_513_warm, position_513_median, position_513_hash) =
         measure(&mut session, &position_513);
+    // Detached 43463fc reproduces these pins; they predate this command shape.
     assert_eq!(
         position_129_hash,
-        "4490618b733ff6e4841b3beba176220f939f43366584f58c513bf3b8c38ec2fc"
+        "3be7c94d6693bcb4e098ac3cf08d253a4f45868e3427da19aacce9f5a591484b"
     );
     assert_eq!(
         position_513_hash,
-        "7f358590cd7d483f6dbe30a9cf7f8acb747845fefd44a84c0c940f7458e2d179"
+        "809bc8184f3ca905af37a567237b7f0b4325ca8effdb7428bc10d030709e55b3"
     );
 
     eprintln!(

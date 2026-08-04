@@ -1078,15 +1078,16 @@ Gate:
   by Qwen benchmarks.
 - Allocation-free full-context planning inventories 7 resident buffers (3
   retained no-copy windows and 4 final-page copies) at 102,994,608,640 logical /
-  102,994,624,512 priced-upper bytes and 539 unique session buffers at
-  7,631,940,132 logical / 7,636,418,560 priced-upper bytes. Of the logical
+  102,994,624,512 priced-upper bytes and 542 unique session buffers at
+  7,631,942,884 logical / 7,636,467,712 priced-upper bytes. Of the logical
   session total, 7,214,202,880 bytes are published-history storage. The
   remainder includes the complete physical 128-token packed scratch,
   sparse-index score/selection matrices, and 131,072-byte pre-chunk raw-ring
   snapshot rather than charging them to reserve. The complete priced upper
-  bound is 110,631,043,072 bytes; a 536,870,912-byte dynamic reserve makes the
-  admission requirement 111,167,913,984 bytes. The final 49,152 logical bytes
-  are the six slot-private routed FFN rows used by all-slot expert execution.
+  bound is 110,631,092,224 bytes; a 536,870,912-byte dynamic reserve makes the
+  admission requirement 111,167,963,136 bytes. The final additions are the
+  49,152-byte six-slot routed FFN row and 2,752 logical bytes of transient
+  per-layer route and sparse-selection records.
 - The load plan freezes configuration plus every descriptor's name, shape,
   dtype, shard, offset, and byte length. Realization revalidates those values,
   fallback policy, all view/alias/window geometry, and a deterministic planner
@@ -1095,10 +1096,13 @@ Gate:
   475,136-byte baseline, giving 126,701,060,096 bytes of working-set headroom.
   The process signal was `Some(0)`, the established omitted-limit convention,
   so the explicit reason was `admitted_process_budget_omitted`.
-- Live full-context reconciliation observed 7,631,945,728 session bytes and
-  110,626,553,856 cumulative residency-plus-session bytes, both below their
-  priced inventories. Residency and session must fit those inventories without
-  the reserve; only the first-forward endpoint gate may use the reserve.
+- A post-collapse live full-context reconciliation still observed
+  7,631,945,728 session bytes and 110,626,553,856 cumulative
+  residency-plus-session bytes: the three small record buffers did not move
+  Metal's endpoint allocation counter, while both observations remain below
+  their newly increased priced inventories. Residency and session must fit
+  those inventories without the reserve; only the first-forward endpoint gate
+  may use the reserve.
   Residency is reconciled inside realization, before an unaccounted resident
   handle can be returned.
 - A release `qwen -p A -n 1` run generated oracle ID 201 in 0.716 seconds of
@@ -1418,15 +1422,46 @@ the exact control/profile vectors remain `4a76e443...` and `e0c53614...`.
 Position zero remains `dc2fd6f1...`; the position-3075/3076 continuation and
 terminal causal digest remain `068c670b...`, `bfc09a03...`, and `73d2c01d...`.
 
-The next measured seam is now host synchronization rather than another weight
-kernel. Ordinary CPU encoding is about 1.7-1.8 ms/token, while
-`wall - aggregate_command_GPU - encode_CPU` remains 6.3-7.7 ms at context 128
+The next measured seam was host synchronization rather than another weight
+kernel. Ordinary CPU encoding was about 1.7-1.8 ms/token, while
+`wall - aggregate_command_GPU - encode_CPU` remained 6.3-7.7 ms at context 128
 and 6.5-6.9 ms at context 512, clearing the 5 ms whole-token submission gate.
-The first collapse must retain 43 ordered serial encoders in one command and
-replace reusable route and sparse-selector statuses with snapshot-excluded
-per-layer records; after completion the host scans them in layer order and
-poisons on the first failure. A later successful layer must not overwrite an
-earlier failure, and progress callbacks may report only the verified prefix.
+
+The preregistered first collapse retained 43 ordered serial encoders inside one
+command. It falsified command-buffer submission alone: product-warm medians
+were 45.698/48.026 ms at contexts about 128/512 versus 45.370/47.771 ms from a
+detached `43463fc` baseline. Keeping that command ownership but removing the 42
+intra-command layer encoder boundaries exposes the actual seam. One serial
+encoder now carries every layer and all 1,999 position-129 dispatches; product-
+warm candidate repeats span 38.235-38.359/38.189-39.131 ms at contexts about
+128/512 (25.56-26.19 token/s). Even the slower repeat removes 7.011/8.640 ms,
+or 15.5%/18.1%, from the detached baseline. The remaining latency gap to the
+pinned llama.cpp 36.137/36.255 ms baseline is about 6-8%, not the prior 26-32%.
+
+The collapse does not trade away layer attribution or fail-stop ownership.
+Forty-three immutable route records retain six IDs, six weights, and status;
+sparse layers retain visible count, selected count, and status. Payload is
+written before ready status, later layers use disjoint views, and the host
+pre-poisons every record before encoding so a missing producer cannot inherit a
+prior token's success. It bulk-reads and validates records in layer order only
+after the command completes. A
+failed Metal command reports no prefix; a semantic failure or callback unwind
+leaves the session poisoned and publishes only the already verified callback
+prefix. These three snapshot-excluded buffers add 2,752 logical bytes.
+
+At position 129 the whole-token and retained 43-command comparator use one and
+43 serial encoders respectively, execute the same 1,999 dispatches, and produce
+bit-identical logits at SHA-256 `3be7c94d...`. Position zero remains
+`dc2fd6f1...`; positions 3075/3076 and terminal causal state remain
+`068c670b...`, `bfc09a03...`, and `73d2c01d...`. The exact-prefix pins
+`3be7c94d...` and `809bc818...` were also reproduced in the detached `43463fc`
+baseline, proving their correction from stale assertions is not attributed to
+the command collapse.
+
+The next attribution packet must sample stage boundaries inside this one
+encoder rather than reintroducing encoder boundaries as the observer. The
+remaining short-context target is only about 2 ms/token to llama.cpp parity;
+far-context Lightning Indexer scoring remains an independent measured lane.
 
 The stage-attribution command is:
 
@@ -1560,10 +1595,11 @@ Broader S6 work remains:
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention. All-slot routed experts have closed the first measured MoE
   boundary without changing reduction lineage.
-- Collapse the measured 43-command host seam into one whole-token command with
-  per-layer route/selector failure records and verified-prefix callbacks. An
-  asynchronously immutable SSD-streaming ticket remains a separate product
-  contract.
+- Re-attribute the remaining one-encoder GPU span with in-encoder counter
+  samples, then fuse only the measured stage boundary. Whole-token submission,
+  per-layer route/selector failure records, and verified-prefix callbacks are
+  promoted. An asynchronously immutable SSD-streaming ticket remains a separate
+  product contract.
 - Parallelize or tile the measured 8.232 ms terminal Lightning Indexer scoring
   kernel while preserving scalar head/dimension accumulation semantics and the
   exact selected-ID transcript. It is now the primary measured CSA target.

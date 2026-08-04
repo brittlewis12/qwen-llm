@@ -901,6 +901,50 @@ pub struct DeepSeekV4CommandProfile {
     pub layers: Vec<DeepSeekV4LayerCommandProfile>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+#[doc(hidden)]
+pub struct DeepSeekV4WholeTokenProfile {
+    pub position: u32,
+    pub forward_wall_ms: f64,
+    pub guards_phase_cpu_ms: f64,
+    pub record_reset_cpu_ms: f64,
+    pub command_encoder_create_cpu_ms: f64,
+    pub encode_cpu_ms: f64,
+    pub commit_cpu_ms: f64,
+    pub commit_wait_wall_ms: f64,
+    pub command_gpu_ms: f64,
+    pub command_status_cpu_ms: f64,
+    pub record_read_cpu_ms: f64,
+    pub record_validate_callback_cpu_ms: f64,
+    pub causal_commit_cpu_ms: f64,
+}
+
+impl DeepSeekV4WholeTokenProfile {
+    pub fn wait_residual_ms(self) -> f64 {
+        self.commit_wait_wall_ms - self.command_gpu_ms
+    }
+
+    pub fn outside_gpu_ms(self) -> f64 {
+        self.forward_wall_ms - self.command_gpu_ms
+    }
+
+    pub fn accounted_outside_gpu_ms(self) -> f64 {
+        self.guards_phase_cpu_ms
+            + self.record_reset_cpu_ms
+            + self.command_encoder_create_cpu_ms
+            + self.encode_cpu_ms
+            + self.wait_residual_ms()
+            + self.command_status_cpu_ms
+            + self.record_read_cpu_ms
+            + self.record_validate_callback_cpu_ms
+            + self.causal_commit_cpu_ms
+    }
+
+    pub fn reconstruction_residual_ms(self) -> f64 {
+        self.outside_gpu_ms() - self.accounted_outside_gpu_ms()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[doc(hidden)]
 pub enum DeepSeekV4StageKind {
@@ -1543,7 +1587,14 @@ impl DeepSeekV4Session {
         token_id: u32,
         layer_completed: impl FnMut(usize),
     ) -> Result<&MetalTensor, DeepSeekV4MetalError> {
-        self.forward_token_with_progress_and_profile(ctx, token_id, layer_completed, None, None)
+        self.forward_token_with_progress_and_profile(
+            ctx,
+            token_id,
+            layer_completed,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Execute one singleton token while timing the retained, separately
@@ -1564,6 +1615,7 @@ impl DeepSeekV4Session {
             |_| {},
             Some(&mut layers),
             None,
+            None,
         )?;
         debug_assert_eq!(layers.len(), DEEPSEEK_V4_LAYER_COUNT);
         Ok(DeepSeekV4CommandProfile {
@@ -1571,6 +1623,29 @@ impl DeepSeekV4Session {
             forward_wall_ms: started.elapsed().as_secs_f64() * 1e3,
             layers,
         })
+    }
+
+    /// Time the ordinary one-command, one-encoder path without adding GPU
+    /// samples, command buffers, encoders, or dispatches.
+    #[doc(hidden)]
+    pub fn forward_token_whole_profiled(
+        &mut self,
+        ctx: &MetalContext,
+        token_id: u32,
+    ) -> Result<DeepSeekV4WholeTokenProfile, DeepSeekV4MetalError> {
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.decision_diagnostics
+            .ensure_no_active_capture("profile a whole token")?;
+        let mut profile = DeepSeekV4WholeTokenProfile::default();
+        self.forward_token_with_progress_and_profile(
+            ctx,
+            token_id,
+            |_| {},
+            None,
+            None,
+            Some(&mut profile),
+        )?;
+        Ok(profile)
     }
 
     /// Execute one singleton token while sampling ten encoder-delimited stages
@@ -1593,6 +1668,7 @@ impl DeepSeekV4Session {
             |_| {},
             Some(&mut layers),
             Some(&mut recorder),
+            None,
         )?;
         debug_assert_eq!(layers.len(), DEEPSEEK_V4_LAYER_COUNT);
         Ok(DeepSeekV4StageProfile {
@@ -1610,7 +1686,10 @@ impl DeepSeekV4Session {
         mut layer_completed: impl FnMut(usize),
         routing_profile: Option<&mut Vec<DeepSeekV4LayerCommandProfile>>,
         stage_recorder: Option<&mut DeepSeekV4StageRecorder>,
+        mut whole_profile: Option<&mut DeepSeekV4WholeTokenProfile>,
     ) -> Result<&MetalTensor, DeepSeekV4MetalError> {
+        let forward_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
+        let guards_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         if ctx.device.registryID() != self.device_registry_id {
             return invalid(format!(
                 "DeepSeek V4 session belongs to Metal device registry {}, got {}",
@@ -1635,6 +1714,14 @@ impl DeepSeekV4Session {
         host_write_i32(&self.token_id, &[token_id as i32], "DeepSeek V4 token ID")?;
         let begun_position = self.phase.begin_mutation()?;
         debug_assert_eq!(begun_position, position);
+        if let Some(profile) = whole_profile.as_deref_mut() {
+            profile.position = position;
+            profile.guards_phase_cpu_ms = guards_started
+                .expect("whole-token profile requires a guards timer")
+                .elapsed()
+                .as_secs_f64()
+                * 1e3;
+        }
         let result = self.forward_token_inner(
             ctx,
             token_id,
@@ -1642,12 +1729,27 @@ impl DeepSeekV4Session {
             &mut layer_completed,
             routing_profile,
             stage_recorder,
+            whole_profile.as_deref_mut(),
         );
         match result {
             Ok(()) => {
+                let causal_commit_started =
+                    whole_profile.as_ref().map(|_| std::time::Instant::now());
                 self.commit_tokens(&[token_id]);
                 self.phase
                     .complete_mutation(position, next_position, true)?;
+                if let Some(profile) = whole_profile.as_deref_mut() {
+                    profile.causal_commit_cpu_ms = causal_commit_started
+                        .expect("whole-token profile requires a causal-commit timer")
+                        .elapsed()
+                        .as_secs_f64()
+                        * 1e3;
+                    profile.forward_wall_ms = forward_started
+                        .expect("whole-token profile requires a forward timer")
+                        .elapsed()
+                        .as_secs_f64()
+                        * 1e3;
+                }
                 Ok(&self.logits)
             }
             Err(error) => Err(error),
@@ -1956,13 +2058,25 @@ impl DeepSeekV4Session {
         layer_completed: &mut impl FnMut(usize),
         mut routing_profile: Option<&mut Vec<DeepSeekV4LayerCommandProfile>>,
         mut stage_recorder: Option<&mut DeepSeekV4StageRecorder>,
+        whole_profile: Option<&mut DeepSeekV4WholeTokenProfile>,
     ) -> Result<(), DeepSeekV4MetalError> {
         #[cfg(feature = "dsv4-diagnostics")]
         let decision_capture_active = self.decision_diagnostics.is_capturing();
         #[cfg(not(feature = "dsv4-diagnostics"))]
         let decision_capture_active = false;
         if routing_profile.is_none() && stage_recorder.is_none() && !decision_capture_active {
-            return self.forward_token_inner_collapsed(ctx, token_id, position, layer_completed);
+            return self.forward_token_inner_collapsed(
+                ctx,
+                token_id,
+                position,
+                layer_completed,
+                whole_profile,
+            );
+        }
+        if whole_profile.is_some() {
+            return invalid(
+                "whole-token profiling is incompatible with layer, stage, or decision profiling",
+            );
         }
 
         let rms_eps = self.residency.config().attention_rms_epsilon;
@@ -2356,9 +2470,20 @@ impl DeepSeekV4Session {
         token_id: u32,
         position: u32,
         layer_completed: &mut impl FnMut(usize),
+        mut whole_profile: Option<&mut DeepSeekV4WholeTokenProfile>,
     ) -> Result<(), DeepSeekV4MetalError> {
+        let reset_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         self.layer_routes.reset_for_token()?;
         self.layer_selections.reset_for_token()?;
+        if let Some(profile) = whole_profile.as_deref_mut() {
+            profile.record_reset_cpu_ms = reset_started
+                .expect("whole-token profile requires a reset timer")
+                .elapsed()
+                .as_secs_f64()
+                * 1e3;
+        }
+
+        let create_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         let command = ctx.queue.commandBuffer().ok_or_else(|| {
             DeepSeekV4MetalError::Invalid(
                 "failed to allocate DeepSeek V4 whole-token command buffer".into(),
@@ -2366,7 +2491,15 @@ impl DeepSeekV4Session {
         })?;
         let mut sparse_visible_counts = [None; DEEPSEEK_V4_LAYER_COUNT];
         let mut token_encoder = DeepSeekV4LayerEncoder::begin(&command, 0, None)?;
+        if let Some(profile) = whole_profile.as_deref_mut() {
+            profile.command_encoder_create_cpu_ms = create_started
+                .expect("whole-token profile requires a command-creation timer")
+                .elapsed()
+                .as_secs_f64()
+                * 1e3;
+        }
 
+        let encode_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         for (layer, sparse_visible_count) in sparse_visible_counts.iter_mut().enumerate() {
             let route_record = self.layer_routes.layer(layer)?;
             let selection_record = self.layer_selections.layer(layer)?;
@@ -2382,15 +2515,72 @@ impl DeepSeekV4Session {
             *sparse_visible_count = encoded.sparse_visible_count;
         }
         token_encoder.end();
+        if let Some(profile) = whole_profile.as_deref_mut() {
+            profile.encode_cpu_ms = encode_started
+                .expect("whole-token profile requires an encode timer")
+                .elapsed()
+                .as_secs_f64()
+                * 1e3;
+        }
 
+        let commit_wait_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
+        let commit_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         command.commit();
+        if let Some(profile) = whole_profile.as_deref_mut() {
+            profile.commit_cpu_ms = commit_started
+                .expect("whole-token profile requires a commit timer")
+                .elapsed()
+                .as_secs_f64()
+                * 1e3;
+        }
         command.waitUntilCompleted();
+        if let Some(profile) = whole_profile.as_deref_mut() {
+            profile.commit_wait_wall_ms = commit_wait_started
+                .expect("whole-token profile requires a commit/wait timer")
+                .elapsed()
+                .as_secs_f64()
+                * 1e3;
+        }
+
+        let status_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         if let Some(error) = command.error() {
             return invalid(format!("whole-token Metal command failed: {error:?}"));
         }
+        if let Some(profile) = whole_profile.as_deref_mut() {
+            let gpu_seconds = command.GPUEndTime() - command.GPUStartTime();
+            if !gpu_seconds.is_finite() || gpu_seconds <= 0.0 {
+                return invalid(format!(
+                    "whole-token command returned invalid Metal timestamps: ({}, {})",
+                    command.GPUStartTime(),
+                    command.GPUEndTime()
+                ));
+            }
+            profile.command_gpu_ms = gpu_seconds * 1e3;
+            if profile.wait_residual_ms() < -0.25 {
+                return invalid(format!(
+                    "whole-token commit/wait envelope {:.6} ms is shorter than GPU duration {:.6} ms",
+                    profile.commit_wait_wall_ms, profile.command_gpu_ms
+                ));
+            }
+            profile.command_status_cpu_ms = status_started
+                .expect("whole-token profile requires a command-status timer")
+                .elapsed()
+                .as_secs_f64()
+                * 1e3;
+        }
 
+        let record_read_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         let completed_routes = self.layer_routes.read_completed()?;
         let completed_selections = self.layer_selections.read_completed()?;
+        if let Some(profile) = whole_profile.as_deref_mut() {
+            profile.record_read_cpu_ms = record_read_started
+                .expect("whole-token profile requires a record-read timer")
+                .elapsed()
+                .as_secs_f64()
+                * 1e3;
+        }
+
+        let validate_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         for (layer, sparse_visible_count) in sparse_visible_counts.into_iter().enumerate() {
             completed_routes.validate_layer(layer)?;
             if let Some(visible_count) = sparse_visible_count {
@@ -2401,6 +2591,13 @@ impl DeepSeekV4Session {
 
         #[cfg(feature = "dsv4-diagnostics")]
         self.decision_diagnostics.finish()?;
+        if let Some(profile) = whole_profile.as_deref_mut() {
+            profile.record_validate_callback_cpu_ms = validate_started
+                .expect("whole-token profile requires a validation timer")
+                .elapsed()
+                .as_secs_f64()
+                * 1e3;
+        }
 
         Ok(())
     }
@@ -16189,6 +16386,29 @@ mod tests {
                 .to_string()
                 .contains("invalid command GPU duration")
         );
+    }
+
+    #[test]
+    fn whole_token_profile_accounts_for_wait_without_double_counting_commit() {
+        let profile = DeepSeekV4WholeTokenProfile {
+            forward_wall_ms: 100.0,
+            guards_phase_cpu_ms: 0.5,
+            record_reset_cpu_ms: 0.1,
+            command_encoder_create_cpu_ms: 0.2,
+            encode_cpu_ms: 5.0,
+            commit_cpu_ms: 0.75,
+            commit_wait_wall_ms: 92.0,
+            command_gpu_ms: 90.0,
+            command_status_cpu_ms: 0.1,
+            record_read_cpu_ms: 0.2,
+            record_validate_callback_cpu_ms: 1.0,
+            causal_commit_cpu_ms: 0.9,
+            ..DeepSeekV4WholeTokenProfile::default()
+        };
+        assert_eq!(profile.wait_residual_ms(), 2.0);
+        assert_eq!(profile.outside_gpu_ms(), 10.0);
+        assert_eq!(profile.accounted_outside_gpu_ms(), 10.0);
+        assert_eq!(profile.reconstruction_residual_ms(), 0.0);
     }
 
     #[test]

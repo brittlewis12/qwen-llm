@@ -1458,14 +1458,68 @@ bit-identical logits at SHA-256 `3be7c94d...`. Position zero remains
 baseline, proving their correction from stale assertions is not attributed to
 the command collapse.
 
-The next attribution packet must sample stage boundaries inside this one
-encoder rather than reintroducing encoder boundaries as the observer. The
-remaining short-context target is only about 2 ms/token to llama.cpp parity;
-far-context Lightning Indexer scoring remains an independent measured lane.
+The next attribution packet must preserve this one encoder rather than
+reintroducing encoder boundaries as the observer. The remaining short-context
+target is only about 2 ms/token to llama.cpp parity; far-context Lightning
+Indexer scoring remains an independent measured lane.
 
-The stage-attribution command is:
+The target M4 Max reports `stage-boundary=true` but
+`dispatch-boundary=false`, so an in-encoder `MTLCounterSampleBuffer` profiler
+would be unsupported rather than non-perturbative. The promoted fallback times
+only host boundaries and the completed command's independent GPU duration; it
+adds no command, encoder, dispatch, or GPU sample. It separates guards/phase,
+record reset, command+encoder creation, CPU encoding, commit, the
+commit-through-wait envelope, command status, bulk record reads, ordered
+validation/callbacks, and causal publication. Host segments plus
+`commit_wait_wall - command_gpu` reconstruct `forward_wall - command_gpu`
+within 0.005 ms at the medians.
+
+Ten-token product-warm packets settle the host/GPU split:
+
+| Whole-token median, ms | ctx~128 | ctx~512 |
+|---|---:|---:|
+| profiled wall | 38.089 | 38.637 |
+| command GPU | **37.125** | **37.627** |
+| total outside GPU | **0.960** | **1.032** |
+| CPU command encoding | 0.727 | 0.772 |
+| commit/wait minus GPU | 0.215 | 0.247 |
+| command+encoder creation | 0.006 | 0.013 |
+| record read + validation/callback | 0.003 | 0.005 |
+| all remaining named host phases | <0.001 each | <0.001 each |
+
+The before/after ordinary-control medians are 38.126/36.843 ms at context 128
+and 37.975/39.028 ms at context 512, bracketing the profiled arms under normal
+run variance. Profiled and ordinary schedules retain exact final hashes; a
+position-129 gate additionally preserves one encoder, 1,999 dispatches, every
+logit bit, and the causal-state digest. No host component owns 0.75 ms at both
+depths, and total outside-GPU time is only about 1 ms, so host lookup, record
+scanning, and completion synchronization are closed as the next short-context
+optimization target.
+
+Two headless Metal captures independently bracket the command interval. The
+standard timeline sees singleton compute spans around 34-38 ms. A pinned
+`metal-counters` template joins five context-128 and six context-512 whole-token
+windows to 234.7/232.2 GB/s GPU read bandwidth, 21.9%/22.6% occupancy,
+40.8%/40.9% instruction-throughput limiting, 31.1%/30.8% integer/complex
+limiting, and only 11.4%/11.4% compute-launch limiting. These percentages are
+not additive time shares, and shader-list metadata is sampling-biased; they do
+not authorize a kernel by themselves. They do falsify a global launch-only
+story and support a targeted quantized-expert instruction-path falsifier.
+
+The next narrow prototype removes the redundant cross-simdgroup rendezvous in
+the all-slot gate/up kernels: each simdgroup already owns complete rows after
+`simd_sum`, so its lane zero can apply the unchanged clamp/SwiGLU directly
+without storing local totals, waiting at a threadgroup barrier, and reloading
+the same values. Promotion requires bit identity for all routed storage
+families, at least 0.75 ms/token paired improvement at both depths, and no
+regression in the one-command profile. If the gate fails, do not continue
+shaving host timers or infer a broader kernel rewrite from limiter percentages.
+
+The nonperturbative whole-command and historical stage-attribution commands
+are:
 
 ```bash
+cargo test --release -p qwen-llm --test deepseek_v4_position_zero_live profile_native_deepseek_v4_whole_token_breakdown_at_128_and_512 -- --ignored --exact --nocapture
 cargo test --release -p qwen-llm --test deepseek_v4_position_zero_live profile_native_deepseek_v4_stage_families_at_128_and_512 -- --ignored --exact --nocapture
 ```
 

@@ -6,8 +6,8 @@ use qwen_llm::deepseek_v4_metal::{
     DeepSeekV4CausalSnapshot, DeepSeekV4CommandProfile, DeepSeekV4MetalResidency,
     DeepSeekV4ModelContentId, DeepSeekV4PositionZeroForward, DeepSeekV4RoutingKind,
     DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotObservation, DeepSeekV4StageKind,
-    DeepSeekV4StageProfile, decode_causal_snapshot, encode_causal_snapshot,
-    load_causal_snapshot_file, publish_causal_snapshot_file,
+    DeepSeekV4StageProfile, DeepSeekV4WholeTokenProfile, decode_causal_snapshot,
+    encode_causal_snapshot, load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{MetalContext, kernel_trace_begin, kernel_trace_snapshot};
@@ -1857,6 +1857,196 @@ fn profile_native_deepseek_v4_singleton_decode_at_128_and_512() {
 
 #[test]
 #[ignore = "focused release profiler requires the local 95.93 GiB DS4 fixture"]
+fn profile_native_deepseek_v4_whole_token_breakdown_at_128_and_512() {
+    const FORWARD_LIMIT: usize = 532;
+    const SAMPLES: usize = 10;
+
+    struct Endpoint {
+        control_before_ms: Vec<f64>,
+        profiles: Vec<DeepSeekV4WholeTokenProfile>,
+        control_after_ms: Vec<f64>,
+        logits_sha256: String,
+    }
+
+    fn median(values: &[f64]) -> f64 {
+        let mut values = values.to_vec();
+        values.sort_by(f64::total_cmp);
+        (values[values.len() / 2 - 1] + values[values.len() / 2]) * 0.5
+    }
+
+    fn mad(values: &[f64]) -> f64 {
+        let center = median(values);
+        median(
+            &values
+                .iter()
+                .map(|value| (value - center).abs())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn measure_endpoint(
+        ctx: &MetalContext,
+        session: &mut DeepSeekV4PositionZeroForward,
+        snapshot: &DeepSeekV4CausalSnapshot,
+        prompt: &[u32],
+        start_position: usize,
+    ) -> Endpoint {
+        let run_control = |session: &mut DeepSeekV4PositionZeroForward| {
+            session
+                .restore_causal_snapshot(snapshot)
+                .expect("restore whole-token control state");
+            let mut wall_ms = Vec::with_capacity(SAMPLES);
+            for position in start_position..start_position + SAMPLES {
+                let started = Instant::now();
+                session
+                    .forward_token(ctx, prompt[position])
+                    .expect("execute whole-token control");
+                wall_ms.push(started.elapsed().as_secs_f64() * 1e3);
+            }
+            let hash = f32_sha256(
+                &session
+                    .copy_logits_f32()
+                    .expect("copy whole-token control logits"),
+            );
+            (wall_ms, hash)
+        };
+
+        session
+            .restore_causal_snapshot(snapshot)
+            .expect("restore whole-token warm state");
+        session
+            .forward_token(ctx, prompt[start_position])
+            .expect("warm whole-token endpoint");
+        let (control_before_ms, expected_hash) = run_control(session);
+
+        session
+            .restore_causal_snapshot(snapshot)
+            .expect("restore whole-token profiled state");
+        let mut profiles = Vec::with_capacity(SAMPLES);
+        for position in start_position..start_position + SAMPLES {
+            let profile = session
+                .forward_token_whole_profiled(ctx, prompt[position])
+                .expect("execute whole-token profiled token");
+            assert_eq!(profile.position as usize, position);
+            assert!(profile.command_gpu_ms.is_finite() && profile.command_gpu_ms > 0.0);
+            assert!(profile.wait_residual_ms() >= -0.25);
+            assert!(profile.reconstruction_residual_ms().abs() <= 0.25);
+            profiles.push(profile);
+        }
+        let profiled_hash = f32_sha256(
+            &session
+                .copy_logits_f32()
+                .expect("copy whole-token profiled logits"),
+        );
+        let (control_after_ms, control_after_hash) = run_control(session);
+        assert_eq!(profiled_hash, expected_hash);
+        assert_eq!(control_after_hash, expected_hash);
+        Endpoint {
+            control_before_ms,
+            profiles,
+            control_after_ms,
+            logits_sha256: expected_hash,
+        }
+    }
+
+    fn report(label: &str, endpoint: &Endpoint) {
+        let field = |read: fn(&DeepSeekV4WholeTokenProfile) -> f64| {
+            endpoint.profiles.iter().map(read).collect::<Vec<_>>()
+        };
+        let wall = field(|profile| profile.forward_wall_ms);
+        let gpu = field(|profile| profile.command_gpu_ms);
+        let outside = field(|profile| profile.outside_gpu_ms());
+        let guards = field(|profile| profile.guards_phase_cpu_ms);
+        let reset = field(|profile| profile.record_reset_cpu_ms);
+        let create = field(|profile| profile.command_encoder_create_cpu_ms);
+        let encode = field(|profile| profile.encode_cpu_ms);
+        let commit = field(|profile| profile.commit_cpu_ms);
+        let commit_wait = field(|profile| profile.commit_wait_wall_ms);
+        let wait_residual = field(|profile| profile.wait_residual_ms());
+        let status = field(|profile| profile.command_status_cpu_ms);
+        let record_read = field(|profile| profile.record_read_cpu_ms);
+        let validate = field(|profile| profile.record_validate_callback_cpu_ms);
+        let causal = field(|profile| profile.causal_commit_cpu_ms);
+        let residual = field(|profile| profile.reconstruction_residual_ms());
+        let control_before_median = median(&endpoint.control_before_ms);
+        let control_after_median = median(&endpoint.control_after_ms);
+        let profiled_median = median(&wall);
+        let control_distance = (profiled_median - control_before_median)
+            .abs()
+            .min((profiled_median - control_after_median).abs());
+        let pooled_mad = mad(&wall)
+            .max(mad(&endpoint.control_before_ms))
+            .max(mad(&endpoint.control_after_ms));
+        assert!(
+            control_distance <= 0.2f64.max(2.0 * pooled_mad),
+            "{label} whole-token profiler perturbs wall by {control_distance:.3} ms with pooled MAD {pooled_mad:.3}"
+        );
+        eprintln!(
+            "deepseek_v4 whole_token_profile {label} control_before_ms={:?} control_before_median_ms={control_before_median:.3} control_after_ms={:?} control_after_median_ms={control_after_median:.3} wall_ms={wall:?} wall_median_ms={:.3} wall_mad_ms={:.3} gpu_ms={gpu:?} gpu_median_ms={:.3} outside_gpu_ms={outside:?} outside_gpu_median_ms={:.3} guards_ms={guards:?} guards_median_ms={:.3} reset_ms={reset:?} reset_median_ms={:.3} create_ms={create:?} create_median_ms={:.3} encode_ms={encode:?} encode_median_ms={:.3} commit_ms={commit:?} commit_median_ms={:.3} commit_wait_ms={commit_wait:?} commit_wait_median_ms={:.3} wait_residual_ms={wait_residual:?} wait_residual_median_ms={:.3} status_ms={status:?} status_median_ms={:.3} record_read_ms={record_read:?} record_read_median_ms={:.3} validate_callback_ms={validate:?} validate_callback_median_ms={:.3} causal_commit_ms={causal:?} causal_commit_median_ms={:.3} reconstruction_residual_ms={residual:?} reconstruction_residual_median_ms={:.6} logits_sha256={}",
+            endpoint.control_before_ms,
+            endpoint.control_after_ms,
+            median(&wall),
+            mad(&wall),
+            median(&gpu),
+            median(&outside),
+            median(&guards),
+            median(&reset),
+            median(&create),
+            median(&encode),
+            median(&commit),
+            median(&commit_wait),
+            median(&wait_residual),
+            median(&status),
+            median(&record_read),
+            median(&validate),
+            median(&causal),
+            median(&residual),
+            endpoint.logits_sha256,
+        );
+    }
+
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(model_path.exists(), "missing DS4 model");
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
+    let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
+        &ctx,
+        residency,
+        frozen_model_content_id(),
+    )
+    .expect("build whole-token profile session");
+    let prompt = [35, 201, 200, 34].repeat(FORWARD_LIMIT.div_ceil(4));
+
+    session
+        .advance_tokens(&ctx, &prompt[..128])
+        .expect("advance whole-token profile to context 128");
+    let context_128 = session
+        .capture_causal_snapshot()
+        .expect("capture context-128 whole-token state");
+    let endpoint_128 = measure_endpoint(&ctx, &mut session, &context_128, &prompt, 128);
+
+    session
+        .restore_causal_snapshot(&context_128)
+        .expect("restore context-128 whole-token state");
+    for chunk in prompt[128..512].chunks(128) {
+        session
+            .advance_tokens(&ctx, chunk)
+            .expect("advance whole-token profile to context 512");
+    }
+    let context_512 = session
+        .capture_causal_snapshot()
+        .expect("capture context-512 whole-token state");
+    let endpoint_512 = measure_endpoint(&ctx, &mut session, &context_512, &prompt, 512);
+
+    report("context128", &endpoint_128);
+    report("context512", &endpoint_512);
+}
+
+#[test]
+#[ignore = "focused release profiler requires the local 95.93 GiB DS4 fixture"]
 fn profile_native_deepseek_v4_single_command_at_128_and_512() {
     const FORWARD_LIMIT: usize = 520;
     const SAMPLES: usize = 5;
@@ -2516,16 +2706,19 @@ fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
         .capture_causal_snapshot()
         .expect("capture exact position-129 state");
 
-    let collapsed_trace = {
+    let (collapsed_trace, whole_profile) = {
         let _trace = kernel_trace_begin();
-        session
-            .forward_token(&ctx, 201)
-            .expect("execute collapsed position-129 comparison token");
-        kernel_trace_snapshot()
+        let profile = session
+            .forward_token_whole_profiled(&ctx, 201)
+            .expect("execute profiled collapsed position-129 comparison token");
+        (kernel_trace_snapshot(), profile)
     };
     let collapsed = session
         .copy_logits_f32()
         .expect("copy collapsed position-129 comparison logits");
+    let collapsed_state = session
+        .capture_causal_snapshot()
+        .expect("capture collapsed position-130 comparison state");
     session
         .restore_causal_snapshot(&position_129)
         .expect("restore position-129 layer-command comparison state");
@@ -2539,6 +2732,9 @@ fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
     let layer_commands = session
         .copy_logits_f32()
         .expect("copy layer-command position-129 comparison logits");
+    let layer_command_state = session
+        .capture_causal_snapshot()
+        .expect("capture layer-command position-130 comparison state");
     let mut dot = 0.0f64;
     let mut collapsed_norm = 0.0f64;
     let mut layer_norm = 0.0f64;
@@ -2554,10 +2750,14 @@ fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
     let schedule_cosine = dot / (collapsed_norm.sqrt() * layer_norm.sqrt());
     let schedule_relative_rms = (squared_error / layer_norm).sqrt();
     eprintln!(
-        "deepseek_v4 whole_command_equivalence position=129 collapsed_encoders={} layer_command_encoders={} dispatches={} collapsed_sha256={} layer_commands_sha256={} cosine={schedule_cosine:.12} relative_rms={schedule_relative_rms:.12} max_abs={max_abs}",
+        "deepseek_v4 whole_command_equivalence position=129 collapsed_encoders={} layer_command_encoders={} dispatches={} profile_wall_ms={:.3} profile_gpu_ms={:.3} profile_outside_gpu_ms={:.3} profile_reconstruction_residual_ms={:.6} collapsed_sha256={} layer_commands_sha256={} cosine={schedule_cosine:.12} relative_rms={schedule_relative_rms:.12} max_abs={max_abs}",
         collapsed_trace.encoders,
         layer_command_trace.encoders,
         collapsed_trace.dispatches,
+        whole_profile.forward_wall_ms,
+        whole_profile.command_gpu_ms,
+        whole_profile.outside_gpu_ms(),
+        whole_profile.reconstruction_residual_ms(),
         f32_sha256(&collapsed),
         f32_sha256(&layer_commands),
     );
@@ -2567,12 +2767,21 @@ fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
     assert_eq!(layer_command_trace.encoders, 43);
     assert_eq!(layer_command_trace.concurrent_encoders, 0);
     assert_eq!(collapsed_trace.dispatches, layer_command_trace.dispatches);
+    assert_eq!(whole_profile.position, 129);
+    assert!(whole_profile.command_gpu_ms > 0.0);
+    assert!(whole_profile.wait_residual_ms() >= -0.25);
+    assert!(whole_profile.reconstruction_residual_ms().abs() <= 0.25);
     assert!(
         collapsed
             .iter()
             .zip(&layer_commands)
             .all(|(collapsed, layered)| collapsed.to_bits() == layered.to_bits()),
         "whole-token and layer-command logits must be bit-identical"
+    );
+    assert_eq!(
+        collapsed_state.causal_digest(),
+        layer_command_state.causal_digest(),
+        "whole-token profiling changed causal state"
     );
     session
         .restore_causal_snapshot(&position_129)
@@ -3931,6 +4140,14 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
             restore_error
                 .to_string()
                 .contains("decision capture is active and cannot restore a causal snapshot")
+        );
+        let profile_error = session
+            .forward_token_whole_profiled(&ctx, 200)
+            .expect_err("armed capture must reject whole-token profiling");
+        assert!(
+            profile_error
+                .to_string()
+                .contains("decision capture is active and cannot profile a whole token")
         );
         assert_eq!(session.next_position(), 3_070);
     }

@@ -866,6 +866,73 @@ impl DeepSeekV4SessionPhase {
 /// Physical retained state is derived from the admitted request. The separate
 /// evidence ceiling prevents successful allocation from authorizing positions
 /// beyond the promoted 1,048,576-forward model-context contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum DeepSeekV4RoutingKind {
+    Hash,
+    Learned,
+}
+
+/// One layer's command-boundary attribution from a profiled singleton forward.
+///
+/// `inter_command_idle_ms` is measured in Metal's command-buffer clock as the
+/// expert command's GPU start minus the router command's GPU end. It includes
+/// host routing, command construction and submission, rather than claiming to
+/// be pure CPU routing time.
+#[derive(Clone, Copy, Debug)]
+#[doc(hidden)]
+pub struct DeepSeekV4RoutingLayerProfile {
+    pub layer: usize,
+    pub kind: DeepSeekV4RoutingKind,
+    pub router_command_gpu_ms: f64,
+    pub route_cpu_ms: f64,
+    pub expert_encode_cpu_ms: f64,
+    pub inter_command_idle_ms: f64,
+    pub expert_command_gpu_ms: f64,
+}
+
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub struct DeepSeekV4RoutingProfile {
+    pub position: u32,
+    pub forward_wall_ms: f64,
+    pub layers: Vec<DeepSeekV4RoutingLayerProfile>,
+}
+
+impl DeepSeekV4RoutingProfile {
+    pub fn route_cpu_ms(&self) -> f64 {
+        self.layers.iter().map(|layer| layer.route_cpu_ms).sum()
+    }
+
+    pub fn expert_encode_cpu_ms(&self) -> f64 {
+        self.layers
+            .iter()
+            .map(|layer| layer.expert_encode_cpu_ms)
+            .sum()
+    }
+
+    pub fn inter_command_idle_ms(&self) -> f64 {
+        self.layers
+            .iter()
+            .map(|layer| layer.inter_command_idle_ms)
+            .sum()
+    }
+
+    pub fn router_command_gpu_ms(&self) -> f64 {
+        self.layers
+            .iter()
+            .map(|layer| layer.router_command_gpu_ms)
+            .sum()
+    }
+
+    pub fn expert_command_gpu_ms(&self) -> f64 {
+        self.layers
+            .iter()
+            .map(|layer| layer.expert_command_gpu_ms)
+            .sum()
+    }
+}
+
 pub struct DeepSeekV4Session {
     residency: DeepSeekV4MetalResidency,
     capacity: DeepSeekV4SessionCapacity,
@@ -1093,7 +1160,38 @@ impl DeepSeekV4Session {
         &mut self,
         ctx: &MetalContext,
         token_id: u32,
+        layer_completed: impl FnMut(usize),
+    ) -> Result<&MetalTensor, DeepSeekV4MetalError> {
+        self.forward_token_with_progress_and_profile(ctx, token_id, layer_completed, None)
+    }
+
+    /// Execute one singleton token while attributing the existing two-command
+    /// routing seam. The ordinary forward path does not allocate or sample
+    /// clocks; this entry point is intended for focused release profiling.
+    #[doc(hidden)]
+    pub fn forward_token_profiled(
+        &mut self,
+        ctx: &MetalContext,
+        token_id: u32,
+    ) -> Result<DeepSeekV4RoutingProfile, DeepSeekV4MetalError> {
+        let position = self.phase.next_position();
+        let started = std::time::Instant::now();
+        let mut layers = Vec::with_capacity(DEEPSEEK_V4_LAYER_COUNT);
+        self.forward_token_with_progress_and_profile(ctx, token_id, |_| {}, Some(&mut layers))?;
+        debug_assert_eq!(layers.len(), DEEPSEEK_V4_LAYER_COUNT);
+        Ok(DeepSeekV4RoutingProfile {
+            position,
+            forward_wall_ms: started.elapsed().as_secs_f64() * 1e3,
+            layers,
+        })
+    }
+
+    fn forward_token_with_progress_and_profile(
+        &mut self,
+        ctx: &MetalContext,
+        token_id: u32,
         mut layer_completed: impl FnMut(usize),
+        routing_profile: Option<&mut Vec<DeepSeekV4RoutingLayerProfile>>,
     ) -> Result<&MetalTensor, DeepSeekV4MetalError> {
         if ctx.device.registryID() != self.device_registry_id {
             return invalid(format!(
@@ -1119,7 +1217,13 @@ impl DeepSeekV4Session {
         host_write_i32(&self.token_id, &[token_id as i32], "DeepSeek V4 token ID")?;
         let begun_position = self.phase.begin_mutation()?;
         debug_assert_eq!(begun_position, position);
-        let result = self.forward_token_inner(ctx, token_id, position, &mut layer_completed);
+        let result = self.forward_token_inner(
+            ctx,
+            token_id,
+            position,
+            &mut layer_completed,
+            routing_profile,
+        );
         match result {
             Ok(()) => {
                 self.commit_tokens(&[token_id]);
@@ -1179,6 +1283,7 @@ impl DeepSeekV4Session {
         token_id: u32,
         position: u32,
         layer_completed: &mut impl FnMut(usize),
+        mut routing_profile: Option<&mut Vec<DeepSeekV4RoutingLayerProfile>>,
     ) -> Result<(), DeepSeekV4MetalError> {
         let rms_eps = self.residency.config().attention_rms_epsilon;
         let hc_eps = self.residency.config().hyper_connection_epsilon;
@@ -1186,12 +1291,12 @@ impl DeepSeekV4Session {
         for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
             let raw_cache = self.raw_cache_layer(layer)?;
             let rope = deepseek_v4_layer_rope(self.residency.config(), layer)?;
-            let command = ctx.queue.commandBuffer().ok_or_else(|| {
+            let router_command = ctx.queue.commandBuffer().ok_or_else(|| {
                 DeepSeekV4MetalError::Invalid(format!(
                     "failed to allocate layer {layer} router command buffer"
                 ))
             })?;
-            let encoder = KernelEncoder::begin(&command);
+            let encoder = KernelEncoder::begin(&router_command);
             let encode_result = (|| {
                 if layer == 0 {
                     encode_get_rows_f32(
@@ -1317,9 +1422,9 @@ impl DeepSeekV4Session {
             })();
             encoder.end();
             encode_result?;
-            command.commit();
-            command.waitUntilCompleted();
-            if let Some(error) = command.error() {
+            router_command.commit();
+            router_command.waitUntilCompleted();
+            if let Some(error) = router_command.error() {
                 return invalid(format!("layer {layer} router command failed: {error:?}"));
             }
             if self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
@@ -1341,7 +1446,13 @@ impl DeepSeekV4Session {
                 None
             };
 
-            if layer < self.residency.config().hash_layer_count as usize {
+            let routing_kind = if layer < self.residency.config().hash_layer_count as usize {
+                DeepSeekV4RoutingKind::Hash
+            } else {
+                DeepSeekV4RoutingKind::Learned
+            };
+            let route_started = routing_profile.as_ref().map(|_| std::time::Instant::now());
+            if routing_kind == DeepSeekV4RoutingKind::Hash {
                 self.moe.route_hash(
                     token_id as usize,
                     self.layer_tensor(layer, "ffn_gate_tid2eid.weight")?,
@@ -1350,6 +1461,9 @@ impl DeepSeekV4Session {
                 self.moe
                     .route_learned(self.layer_tensor(layer, "exp_probs_b.bias")?)?;
             }
+            let route_cpu_ms = route_started
+                .map(|started| started.elapsed().as_secs_f64() * 1e3)
+                .unwrap_or_default();
 
             #[cfg(feature = "dsv4-diagnostics")]
             if self.decision_diagnostics.is_capturing() {
@@ -1358,12 +1472,13 @@ impl DeepSeekV4Session {
                     .capture_layer(layer, csa_decision, route)?;
             }
 
-            let command = ctx.queue.commandBuffer().ok_or_else(|| {
+            let expert_encode_started = routing_profile.as_ref().map(|_| std::time::Instant::now());
+            let expert_command = ctx.queue.commandBuffer().ok_or_else(|| {
                 DeepSeekV4MetalError::Invalid(format!(
                     "failed to allocate layer {layer} expert command buffer"
                 ))
             })?;
-            let encoder = KernelEncoder::begin(&command);
+            let encoder = KernelEncoder::begin(&expert_command);
             let encode_result = (|| {
                 let moe_output = self.moe.encode_experts(
                     ctx,
@@ -1419,11 +1534,42 @@ impl DeepSeekV4Session {
                 Ok::<(), DeepSeekV4MetalError>(())
             })();
             encoder.end();
+            let expert_encode_cpu_ms = expert_encode_started
+                .map(|started| started.elapsed().as_secs_f64() * 1e3)
+                .unwrap_or_default();
             encode_result?;
-            command.commit();
-            command.waitUntilCompleted();
-            if let Some(error) = command.error() {
+            expert_command.commit();
+            expert_command.waitUntilCompleted();
+            if let Some(error) = expert_command.error() {
                 return invalid(format!("layer {layer} expert command failed: {error:?}"));
+            }
+            if let Some(profile) = routing_profile.as_deref_mut() {
+                let router_start = router_command.GPUStartTime();
+                let router_end = router_command.GPUEndTime();
+                let expert_start = expert_command.GPUStartTime();
+                let expert_end = expert_command.GPUEndTime();
+                let timings = [
+                    router_end - router_start,
+                    expert_start - router_end,
+                    expert_end - expert_start,
+                ];
+                if timings
+                    .iter()
+                    .any(|seconds| !seconds.is_finite() || *seconds < 0.0)
+                {
+                    return invalid(format!(
+                        "layer {layer} returned invalid Metal command timestamps: router=({router_start}, {router_end}) expert=({expert_start}, {expert_end})"
+                    ));
+                }
+                profile.push(DeepSeekV4RoutingLayerProfile {
+                    layer,
+                    kind: routing_kind,
+                    router_command_gpu_ms: timings[0] * 1e3,
+                    route_cpu_ms,
+                    expert_encode_cpu_ms,
+                    inter_command_idle_ms: timings[1] * 1e3,
+                    expert_command_gpu_ms: timings[2] * 1e3,
+                });
             }
             layer_completed(layer);
         }

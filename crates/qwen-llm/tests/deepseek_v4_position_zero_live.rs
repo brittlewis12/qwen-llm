@@ -4,9 +4,9 @@ use qwen_llm::deepseek_v4::DeepSeekV4Model;
 use qwen_llm::deepseek_v4_metal::DeepSeekV4DecisionTranscript;
 use qwen_llm::deepseek_v4_metal::{
     DeepSeekV4CausalSnapshot, DeepSeekV4MetalResidency, DeepSeekV4ModelContentId,
-    DeepSeekV4PositionZeroForward, DeepSeekV4SnapshotCodecConstraints,
-    DeepSeekV4SnapshotObservation, decode_causal_snapshot, encode_causal_snapshot,
-    load_causal_snapshot_file, publish_causal_snapshot_file,
+    DeepSeekV4PositionZeroForward, DeepSeekV4RoutingKind, DeepSeekV4RoutingProfile,
+    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotObservation, decode_causal_snapshot,
+    encode_causal_snapshot, load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
@@ -1816,6 +1816,230 @@ fn profile_native_deepseek_v4_singleton_decode_at_128_and_512() {
         "deepseek_v4 singleton_decode context128_ms={context_128_samples:?} context128_median_ms={context_128_median:.3} context128_tps={:.3} context512_ms={context_512_samples:?} context512_median_ms={context_512_median:.3} context512_tps={:.3}",
         1e3 / context_128_median,
         1e3 / context_512_median,
+    );
+}
+
+#[test]
+#[ignore = "focused release profiler requires the local 95.93 GiB DS4 fixture"]
+fn profile_native_deepseek_v4_routing_seam_at_128_and_512() {
+    const FORWARD_LIMIT: usize = 520;
+    const SAMPLES: usize = 5;
+
+    #[derive(Debug)]
+    struct EndpointProfile {
+        control_before_ms: Vec<f64>,
+        profiled: Vec<DeepSeekV4RoutingProfile>,
+        control_after_ms: Vec<f64>,
+        logits_sha256: String,
+    }
+
+    fn median(mut values: Vec<f64>) -> f64 {
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    }
+
+    fn measure_endpoint(
+        ctx: &MetalContext,
+        session: &mut DeepSeekV4PositionZeroForward,
+        snapshot: &DeepSeekV4CausalSnapshot,
+        prompt: &[u32],
+        start_position: usize,
+    ) -> EndpointProfile {
+        let run_control = |session: &mut DeepSeekV4PositionZeroForward| {
+            session
+                .restore_causal_snapshot(snapshot)
+                .expect("restore routing-profile endpoint");
+            let mut milliseconds = Vec::with_capacity(SAMPLES);
+            for position in start_position..start_position + SAMPLES {
+                let started = Instant::now();
+                session
+                    .forward_token(ctx, prompt[position])
+                    .expect("execute routing-profile control token");
+                milliseconds.push(started.elapsed().as_secs_f64() * 1e3);
+            }
+            let hash = f32_sha256(
+                &session
+                    .copy_logits_f32()
+                    .expect("copy routing-profile control logits"),
+            );
+            (milliseconds, hash)
+        };
+
+        session
+            .restore_causal_snapshot(snapshot)
+            .expect("restore routing-profile warm state");
+        session
+            .forward_token(ctx, prompt[start_position])
+            .expect("warm routing-profile endpoint");
+
+        let (control_before_ms, control_before_hash) = run_control(session);
+        session
+            .restore_causal_snapshot(snapshot)
+            .expect("restore routing-profile measured state");
+        let mut profiled = Vec::with_capacity(SAMPLES);
+        for position in start_position..start_position + SAMPLES {
+            let profile = session
+                .forward_token_profiled(ctx, prompt[position])
+                .expect("execute routing-profile token");
+            assert_eq!(profile.position as usize, position);
+            assert_eq!(profile.layers.len(), 43);
+            for (layer, record) in profile.layers.iter().enumerate() {
+                assert_eq!(record.layer, layer);
+                assert_eq!(
+                    record.kind,
+                    if layer < 3 {
+                        DeepSeekV4RoutingKind::Hash
+                    } else {
+                        DeepSeekV4RoutingKind::Learned
+                    }
+                );
+                for value in [
+                    record.router_command_gpu_ms,
+                    record.route_cpu_ms,
+                    record.expert_encode_cpu_ms,
+                    record.inter_command_idle_ms,
+                    record.expert_command_gpu_ms,
+                ] {
+                    assert!(value.is_finite() && value >= 0.0);
+                }
+            }
+            profiled.push(profile);
+        }
+        let profiled_hash = f32_sha256(
+            &session
+                .copy_logits_f32()
+                .expect("copy routing-profile measured logits"),
+        );
+        let (control_after_ms, control_after_hash) = run_control(session);
+        assert_eq!(profiled_hash, control_before_hash);
+        assert_eq!(profiled_hash, control_after_hash);
+
+        EndpointProfile {
+            control_before_ms,
+            profiled,
+            control_after_ms,
+            logits_sha256: profiled_hash,
+        }
+    }
+
+    fn report(label: &str, endpoint: &EndpointProfile) -> f64 {
+        let profiled_wall = endpoint
+            .profiled
+            .iter()
+            .map(|profile| profile.forward_wall_ms)
+            .collect::<Vec<_>>();
+        let idle = endpoint
+            .profiled
+            .iter()
+            .map(DeepSeekV4RoutingProfile::inter_command_idle_ms)
+            .collect::<Vec<_>>();
+        let route_cpu = endpoint
+            .profiled
+            .iter()
+            .map(DeepSeekV4RoutingProfile::route_cpu_ms)
+            .collect::<Vec<_>>();
+        let expert_encode_cpu = endpoint
+            .profiled
+            .iter()
+            .map(DeepSeekV4RoutingProfile::expert_encode_cpu_ms)
+            .collect::<Vec<_>>();
+        let router_gpu = endpoint
+            .profiled
+            .iter()
+            .map(DeepSeekV4RoutingProfile::router_command_gpu_ms)
+            .collect::<Vec<_>>();
+        let expert_gpu = endpoint
+            .profiled
+            .iter()
+            .map(DeepSeekV4RoutingProfile::expert_command_gpu_ms)
+            .collect::<Vec<_>>();
+        let hash_idle = endpoint
+            .profiled
+            .iter()
+            .map(|profile| {
+                profile
+                    .layers
+                    .iter()
+                    .filter(|layer| layer.kind == DeepSeekV4RoutingKind::Hash)
+                    .map(|layer| layer.inter_command_idle_ms)
+                    .sum::<f64>()
+            })
+            .collect::<Vec<_>>();
+        let learned_idle = endpoint
+            .profiled
+            .iter()
+            .map(|profile| {
+                profile
+                    .layers
+                    .iter()
+                    .filter(|layer| layer.kind == DeepSeekV4RoutingKind::Learned)
+                    .map(|layer| layer.inter_command_idle_ms)
+                    .sum::<f64>()
+            })
+            .collect::<Vec<_>>();
+        let idle_median = median(idle.clone());
+        let control_before_median = median(endpoint.control_before_ms.clone());
+        let profiled_wall_median = median(profiled_wall.clone());
+        let control_after_median = median(endpoint.control_after_ms.clone());
+        eprintln!(
+            "deepseek_v4 routing_seam {label} control_before_ms={:?} control_before_median_ms={:.3} profiled_wall_ms={profiled_wall:?} profiled_wall_median_ms={:.3} control_after_ms={:?} control_after_median_ms={:.3} idle_ms={idle:?} idle_median_ms={idle_median:.3} hash_idle_ms={hash_idle:?} learned_idle_ms={learned_idle:?} route_cpu_ms={route_cpu:?} expert_encode_cpu_ms={expert_encode_cpu:?} router_gpu_ms={router_gpu:?} expert_gpu_ms={expert_gpu:?} logits_sha256={}",
+            endpoint.control_before_ms,
+            control_before_median,
+            profiled_wall_median,
+            endpoint.control_after_ms,
+            control_after_median,
+            endpoint.logits_sha256,
+        );
+        idle_median
+    }
+
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(model_path.exists(), "missing DS4 model");
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
+    let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
+        &ctx,
+        residency,
+        frozen_model_content_id(),
+    )
+    .expect("build routing-profile session");
+    let prompt = [35, 201, 200, 34].repeat(FORWARD_LIMIT.div_ceil(4));
+
+    session
+        .advance_tokens(&ctx, &prompt[..128])
+        .expect("advance routing profile to context 128");
+    let context_128 = session
+        .capture_causal_snapshot()
+        .expect("capture context-128 routing state");
+    let endpoint_128 = measure_endpoint(&ctx, &mut session, &context_128, &prompt, 128);
+
+    session
+        .restore_causal_snapshot(&context_128)
+        .expect("restore context-128 routing state");
+    for chunk in prompt[128..512].chunks(128) {
+        session
+            .advance_tokens(&ctx, chunk)
+            .expect("advance routing profile to context 512");
+    }
+    let context_512 = session
+        .capture_causal_snapshot()
+        .expect("capture context-512 routing state");
+    let endpoint_512 = measure_endpoint(&ctx, &mut session, &context_512, &prompt, 512);
+
+    let idle_128 = report("context128", &endpoint_128);
+    let idle_512 = report("context512", &endpoint_512);
+    eprintln!(
+        "deepseek_v4 routing_seam stop_rule_threshold_ms=5.000 context128_pass={} context512_pass={} decision={}",
+        idle_128 >= 5.0,
+        idle_512 >= 5.0,
+        if idle_128 >= 5.0 && idle_512 >= 5.0 {
+            "gpu_route_record_abi"
+        } else {
+            "alternate_bottleneck"
+        }
     );
 }
 

@@ -1260,6 +1260,31 @@ llama_core medians, but no prefill ratio is promoted until warm treatment is
 matched. Complete commands, revisions, decode samples, hashes, and comparison caveats are retained in
 `docs/bench/2026-08-03-dsv4-metal-llama-baseline.md`.
 
+A focused routing-seam packet replays identical context-128 and context-512
+snapshots through five ordinary forwards, five instrumented forwards, and five
+ordinary forwards. All three schedules produce the same final-logit hash at
+each depth. Instrumentation is therefore observational: it adds no dispatches
+to the ordinary path and does not change the profiled compute graph. Median
+ordinary/instrumented/ordinary wall times are 58.849/58.748/58.957 ms at depth
+128 and 59.344/59.636/59.873 ms at depth 512.
+
+The same-queue Metal-clock interval from each router command's GPU end to its
+expert command's GPU start totals a median 9.827 and 9.563 ms/token. CPU route
+and copy work, measured inside rather than in addition to that interval, totals
+1.124 and 1.116 ms; expert-command construction totals 1.423 and 1.406 ms.
+Hash layers account for about 1.108/1.094 ms of the gap and the 40 learned
+layers for 8.719/8.436 ms. Both depths decisively cross the preregistered 5 ms
+gate. The next optimization is therefore a private GPU route record consumed
+by dynamically indexed experts in one command per layer. Parallel expert-slot
+execution, packed GPU bucketization, whole-token submission, and an externally
+observable SSD-streaming ticket remain separate, measured follow-ons.
+
+The release command is:
+
+```bash
+cargo test --release -p qwen-llm --test deepseek_v4_position_zero_live profile_native_deepseek_v4_routing_seam_at_128_and_512 -- --ignored --exact --nocapture
+```
+
 Gate:
 
 - Packed N=1 preserves position-zero argmax 201 at cosine 0.999999548 and
@@ -1380,11 +1405,11 @@ Broader S6 work remains:
 - Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, shared-KV
   sparse attention, and high-value MoE boundaries.
-- Attribute the 43 per-layer CPU routing completions, CPU route/copy work, and
-  expert GPU work. Proceed to a GPU route-record ABI only if the aggregate
-  router-GPU-end-to-expert-GPU-start idle interval exposes at least 5 ms/token;
-  CPU route/copy explains that interval and is not added to it. Keep selected
-  IDs asynchronously observable for future SSD expert streaming.
+- Replace the measured 9.563-9.827 ms singleton routing seam with a private GPU
+  route record and dynamically indexed experts, preserving the current
+  six-slot projection and reduction order. The first production switch keeps
+  one command and one completion boundary per layer; it does not yet promise an
+  asynchronously immutable SSD-streaming record.
 - Parallelize or tile the measured 8.232 ms terminal Lightning Indexer scoring
   kernel while preserving scalar head/dimension accumulation semantics and the
   exact selected-ID transcript. It is now the primary measured CSA target.

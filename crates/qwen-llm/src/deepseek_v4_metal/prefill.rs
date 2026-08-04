@@ -857,6 +857,51 @@ fn sparse_csa_query_offset(start_position: u32, n_tokens: usize) -> Option<usize
     })
 }
 
+fn packed_sparse_visible_counts(
+    start_position: u32,
+    query_offset: usize,
+    n_tokens: usize,
+    final_rows: usize,
+) -> Result<Vec<i32>, DeepSeekV4MetalError> {
+    if query_offset >= n_tokens || final_rows <= DEEPSEEK_V4_CSA_TOP_K {
+        return invalid(format!(
+            "packed sparse visibility geometry is invalid: offset={query_offset} tokens={n_tokens} final_rows={final_rows}"
+        ));
+    }
+    let final_rows_i32 = i32::try_from(final_rows).map_err(|_| {
+        DeepSeekV4MetalError::Invalid("packed sparse final row count exceeds i32".into())
+    })?;
+    let visible = (query_offset..n_tokens)
+        .map(|token| {
+            let position = start_position
+                .checked_add(u32::try_from(token).map_err(|_| {
+                    DeepSeekV4MetalError::Invalid(
+                        "packed sparse token offset exceeds u32".into(),
+                    )
+                })?)
+                .ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid("packed sparse position overflow".into())
+                })?;
+            let count = csa_visible_rows(position);
+            if count <= DEEPSEEK_V4_CSA_TOP_K || count > final_rows {
+                return invalid(format!(
+                    "packed sparse token {token} sees {count} rows outside 513..={final_rows} final rows"
+                ));
+            }
+            i32::try_from(count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed sparse visible count exceeds i32".into())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if visible.last().copied() != Some(final_rows_i32) {
+        return invalid(format!(
+            "packed sparse final visibility {:?} differs from published row count {final_rows}",
+            visible.last()
+        ));
+    }
+    Ok(visible)
+}
+
 fn tiled_hca_query_offset(start_position: u32, n_tokens: usize) -> Option<usize> {
     (0..n_tokens).find(|&token| {
         let position = u64::from(start_position) + token as u64;
@@ -981,37 +1026,8 @@ impl PrefillSparseCsaScratch {
             "packed sparse selection status",
         )?;
 
-        let visible = (0..query_count)
-            .map(|local| {
-                let token = query_offset + local;
-                let position = start_position
-                    .checked_add(u32::try_from(token).map_err(|_| {
-                        DeepSeekV4MetalError::Invalid(
-                            "packed sparse token offset exceeds u32".into(),
-                        )
-                    })?)
-                    .ok_or_else(|| {
-                        DeepSeekV4MetalError::Invalid("packed sparse position overflow".into())
-                    })?;
-                let count = csa_visible_rows(position);
-                if count <= DEEPSEEK_V4_CSA_TOP_K || count > rows.count {
-                    return invalid(format!(
-                        "packed sparse token {token} sees {count} rows outside 513..={} final rows",
-                        rows.count
-                    ));
-                }
-                i32::try_from(count).map_err(|_| {
-                    DeepSeekV4MetalError::Invalid("packed sparse visible count exceeds i32".into())
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if visible.last().copied() != Some(rows.count as i32) {
-            return invalid(format!(
-                "packed sparse final visibility {:?} differs from published row count {}",
-                visible.last(),
-                rows.count
-            ));
-        }
+        let visible =
+            packed_sparse_visible_counts(start_position, query_offset, n_tokens, rows.count)?;
         host_write_i32(
             &visible_counts,
             &visible,
@@ -3187,6 +3203,30 @@ impl DeepSeekV4Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_sparse_visibility_tracks_publication_cadence() {
+        assert_eq!(
+            packed_sparse_visible_counts(2_051, 0, 5, 514).unwrap(),
+            [513, 513, 513, 513, 514]
+        );
+        assert_eq!(
+            packed_sparse_visible_counts(2_047, 4, 9, 514).unwrap(),
+            [513, 513, 513, 513, 514]
+        );
+        assert!(
+            packed_sparse_visible_counts(2_051, 0, 5, 515)
+                .unwrap_err()
+                .to_string()
+                .contains("differs from published row count 515")
+        );
+        assert!(
+            packed_sparse_visible_counts(2_051, 5, 5, 514)
+                .unwrap_err()
+                .to_string()
+                .contains("visibility geometry is invalid")
+        );
+    }
 
     #[test]
     fn tiled_hca_offset_starts_at_the_513th_visible_row() {

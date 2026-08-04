@@ -3708,6 +3708,7 @@ impl DeepSeekV4SparseCsaScratch {
             rows.count,
             DEEPSEEK_V4_CSA_TOP_K,
             1,
+            DeepSeekV4SelectorDispatchPolicy::Production,
             self.use_radix4_selector(),
         )
     }
@@ -8278,8 +8279,34 @@ fn encode_select_top_k_f32(
         max_visible_rows,
         top_k,
         query_count,
+        DeepSeekV4SelectorDispatchPolicy::Production,
         true,
     )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeepSeekV4SelectorDispatchPolicy {
+    Production,
+    #[cfg(test)]
+    ScalarOracle,
+    #[cfg(test)]
+    Parallel,
+}
+
+fn use_parallel_selector(
+    dispatch_policy: DeepSeekV4SelectorDispatchPolicy,
+    max_visible_rows: usize,
+    top_k: usize,
+) -> bool {
+    match dispatch_policy {
+        // Once one row must be pruned, the scalar oracle's repeated worst-row
+        // scans grow as (visible - top_k) * visible through the shallow band.
+        DeepSeekV4SelectorDispatchPolicy::Production => max_visible_rows > top_k,
+        #[cfg(test)]
+        DeepSeekV4SelectorDispatchPolicy::ScalarOracle => false,
+        #[cfg(test)]
+        DeepSeekV4SelectorDispatchPolicy::Parallel => true,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8297,6 +8324,7 @@ fn encode_select_top_k_f32_with_policy(
     max_visible_rows: usize,
     top_k: usize,
     query_count: usize,
+    dispatch_policy: DeepSeekV4SelectorDispatchPolicy,
     radix4: bool,
 ) -> Result<(), DeepSeekV4MetalError> {
     if row_capacity == 0
@@ -8374,7 +8402,7 @@ fn encode_select_top_k_f32_with_policy(
     }
     let emit_ranked = ranked_ids.is_some();
     let ranked_ids = ranked_ids.unwrap_or(cache_order_ids);
-    let parallel = max_visible_rows > 1_024;
+    let parallel = use_parallel_selector(dispatch_policy, max_visible_rows, top_k);
     let radix4 = radix4 && parallel;
     let pso = ctx.pipeline(if radix4 {
         "kernel_deepseek_v4_select_top_k_radix4_f32"
@@ -15652,6 +15680,7 @@ mod tests {
                 CAPACITY,
                 TOP_K,
                 QUERIES,
+                DeepSeekV4SelectorDispatchPolicy::Production,
                 radix4,
             )
             .unwrap();
@@ -15741,7 +15770,242 @@ mod tests {
     }
 
     #[test]
-    fn scalar_and_radix_top512_agree_at_dispatch_boundary() {
+    fn shallow_scalar_parallel_and_radix_selectors_match_cpu_contracts() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 1_024;
+        const TOP_K: usize = 512;
+        const QUERIES: usize = 12;
+        let visible_values = [
+            513i32, 520, 544, 576, 640, 768, 896, 1_024, 513, 640, 896, 1_024,
+        ];
+        let mut score_values = vec![-3.0f32; CAPACITY * QUERIES];
+        fn query_scores(scores: &mut [f32], query: usize) -> &mut [f32] {
+            &mut scores[query * CAPACITY..(query + 1) * CAPACITY]
+        }
+
+        query_scores(&mut score_values, 0).fill(1.0);
+        for row in 0..CAPACITY {
+            query_scores(&mut score_values, 1)[row] = row as f32;
+            query_scores(&mut score_values, 2)[row] = -(row as f32);
+            let bucket = (row * 193 + row / 7 + row / 503) % 509;
+            query_scores(&mut score_values, 3)[row] = bucket as f32 * 0.003 - 0.7;
+        }
+        query_scores(&mut score_values, 4)[..511].fill(2.0);
+        query_scores(&mut score_values, 4)[511..].fill(1.0);
+        query_scores(&mut score_values, 5)[..507].fill(2.0);
+        for (row, bits) in [
+            (507, 0x0080_0000),
+            (508, 0x0000_0000),
+            (509, 0x8000_0000),
+            (510, 0x007f_ffff),
+            (511, 0x807f_ffff),
+            (512, 0x0000_0001),
+            (513, 0x8000_0001),
+        ] {
+            query_scores(&mut score_values, 5)[row] = f32::from_bits(bits);
+        }
+        query_scores(&mut score_values, 6).fill(0.5);
+        query_scores(&mut score_values, 6)[700] = f32::NAN;
+        query_scores(&mut score_values, 7).fill(0.5);
+        query_scores(&mut score_values, 7)[900] = f32::INFINITY;
+        for row in 0..CAPACITY {
+            query_scores(&mut score_values, 8)[row] = ((row * 17) % 257) as f32 - 128.0;
+        }
+        query_scores(&mut score_values, 8)[700] = f32::NAN;
+        query_scores(&mut score_values, 9).fill(0.5);
+        query_scores(&mut score_values, 9)[100] = f32::NEG_INFINITY;
+        query_scores(&mut score_values, 10)[..600].fill(1.0);
+        query_scores(&mut score_values, 10)[600..].fill(0.0);
+        for row in 0..CAPACITY {
+            let bucket = (row * 73 + row / 11) % 503;
+            query_scores(&mut score_values, 11)[row] = bucket as f32 * 0.005 - 1.1;
+        }
+
+        let scores = offset_f32(&ctx, &score_values, vec![CAPACITY as u64, QUERIES as u64]);
+        let visible_counts = offset_i32(&ctx, &visible_values, vec![QUERIES as u64]);
+        let allocate_outputs = || {
+            (
+                MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap(),
+            )
+        };
+        let scalar = allocate_outputs();
+        let bitwise = allocate_outputs();
+        let radix4 = allocate_outputs();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for (policy, use_radix4, outputs) in [
+            (
+                DeepSeekV4SelectorDispatchPolicy::ScalarOracle,
+                false,
+                &scalar,
+            ),
+            (DeepSeekV4SelectorDispatchPolicy::Parallel, false, &bitwise),
+            (DeepSeekV4SelectorDispatchPolicy::Parallel, true, &radix4),
+        ] {
+            encode_select_top_k_f32_with_policy(
+                &ctx,
+                &encoder,
+                &scores,
+                &visible_counts,
+                &outputs.0,
+                Some(&outputs.1),
+                &outputs.2,
+                &outputs.3,
+                &outputs.4,
+                CAPACITY,
+                CAPACITY,
+                TOP_K,
+                QUERIES,
+                policy,
+                use_radix4,
+            )
+            .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+
+        let read_outputs = |outputs: &(
+            MetalTensor,
+            MetalTensor,
+            MetalTensor,
+            MetalTensor,
+            MetalTensor,
+        )| {
+            (
+                read_i32(&outputs.0),
+                read_i32(&outputs.1),
+                read_i32(&outputs.2),
+                read_i32(&outputs.3),
+                read_i32(&outputs.4),
+            )
+        };
+        let scalar = read_outputs(&scalar);
+        let bitwise = read_outputs(&bitwise);
+        let radix4 = read_outputs(&radix4);
+        assert_eq!(bitwise, scalar, "parallel bitwise selector");
+        assert_eq!(radix4, scalar, "parallel radix-4 selector");
+
+        for (query, &visible) in visible_values.iter().enumerate() {
+            let visible = visible as usize;
+            let scores = &score_values[query * CAPACITY..query * CAPACITY + visible];
+            let non_finite = scores.iter().any(|score| !score.is_finite());
+            let expected_ranked = if non_finite {
+                (0..TOP_K).collect::<Vec<_>>()
+            } else {
+                deployed_selector_top_k_indices(scores, TOP_K)
+            };
+            let mut expected_cache_order = expected_ranked.clone();
+            expected_cache_order.sort_unstable();
+            assert_eq!(scalar.3[query], TOP_K as i32, "query {query} count");
+            assert_eq!(
+                scalar.4[query],
+                i32::from(non_finite) * 2,
+                "query {query} status"
+            );
+            assert_eq!(
+                &scalar.1[query * TOP_K..(query + 1) * TOP_K],
+                expected_ranked
+                    .iter()
+                    .map(|&row| row as i32)
+                    .collect::<Vec<_>>(),
+                "query {query} ranked IDs"
+            );
+            assert_eq!(
+                &scalar.2[query * TOP_K..(query + 1) * TOP_K],
+                expected_cache_order
+                    .iter()
+                    .map(|&row| row as i32)
+                    .collect::<Vec<_>>(),
+                "query {query} cache-order IDs"
+            );
+            let mask = &scalar.0[query * CAPACITY..(query + 1) * CAPACITY];
+            for (row, &selected) in mask.iter().enumerate() {
+                assert_eq!(
+                    selected,
+                    i32::from(expected_cache_order.binary_search(&row).is_ok()),
+                    "query {query} row {row} mask"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_publication_cadence_uses_the_same_scalar_and_production_selection() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 514;
+        const TOP_K: usize = 512;
+        const QUERIES: usize = 5;
+        let visible_values = [513i32, 513, 513, 513, 514];
+        let score_values = (0..CAPACITY * QUERIES)
+            .map(|index| {
+                let query = index / CAPACITY;
+                let row = index % CAPACITY;
+                ((row * 37 + query * 101 + row / 13) % 257) as f32 * 0.007 - 0.8
+            })
+            .collect::<Vec<_>>();
+        let scores = offset_f32(&ctx, &score_values, vec![CAPACITY as u64, QUERIES as u64]);
+        let visible_counts = offset_i32(&ctx, &visible_values, vec![QUERIES as u64]);
+        let allocate_outputs = || {
+            (
+                MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap(),
+            )
+        };
+        let scalar = allocate_outputs();
+        let production = allocate_outputs();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for (policy, outputs) in [
+            (DeepSeekV4SelectorDispatchPolicy::ScalarOracle, &scalar),
+            (DeepSeekV4SelectorDispatchPolicy::Production, &production),
+        ] {
+            encode_select_top_k_f32_with_policy(
+                &ctx,
+                &encoder,
+                &scores,
+                &visible_counts,
+                &outputs.0,
+                None,
+                &outputs.1,
+                &outputs.2,
+                &outputs.3,
+                CAPACITY,
+                CAPACITY,
+                TOP_K,
+                QUERIES,
+                policy,
+                true,
+            )
+            .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        for (label, scalar, production) in [
+            ("mask", &scalar.0, &production.0),
+            ("cache order", &scalar.1, &production.1),
+            ("count", &scalar.2, &production.2),
+            ("status", &scalar.3, &production.3),
+        ] {
+            assert_eq!(read_i32(production), read_i32(scalar), "{label}");
+        }
+    }
+
+    #[test]
+    fn scalar_parallel_and_radix_top512_are_bit_identical_at_1024() {
         let Some(ctx) = metal_context() else {
             return;
         };
@@ -15779,10 +16043,14 @@ mod tests {
         let radix4 = allocate_outputs();
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
-        for (max_visible, use_radix4, outputs) in [
-            (VISIBLE, false, &scalar),
-            (CAPACITY, false, &radix),
-            (CAPACITY, true, &radix4),
+        for (dispatch_policy, use_radix4, outputs) in [
+            (
+                DeepSeekV4SelectorDispatchPolicy::ScalarOracle,
+                false,
+                &scalar,
+            ),
+            (DeepSeekV4SelectorDispatchPolicy::Parallel, false, &radix),
+            (DeepSeekV4SelectorDispatchPolicy::Parallel, true, &radix4),
         ] {
             encode_select_top_k_f32_with_policy(
                 &ctx,
@@ -15795,9 +16063,10 @@ mod tests {
                 &outputs.3,
                 &outputs.4,
                 CAPACITY,
-                max_visible,
+                VISIBLE,
                 TOP_K,
                 1,
+                dispatch_policy,
                 use_radix4,
             )
             .unwrap();
@@ -15834,6 +16103,154 @@ mod tests {
                 .map(|&row| row as i32)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    #[ignore = "focused shallow sparse-selector crossover profiler; run explicitly with --nocapture"]
+    fn profile_shallow_sparse_selector_crossover() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 2_304;
+        const TOP_K: usize = 512;
+        const SAMPLES: usize = 12;
+
+        fn timed_gpu<F>(ctx: &MetalContext, encode: F) -> f64
+        where
+            F: FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        {
+            let command = ctx
+                .queue
+                .commandBuffer()
+                .expect("selector profile command buffer");
+            let encoder = KernelEncoder::begin(&command);
+            encode(&encoder).expect("encode selector profile phase");
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "selector profile command failed: {:?}",
+                command.error()
+            );
+            let elapsed_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            assert!(elapsed_ms.is_finite() && elapsed_ms > 0.0);
+            elapsed_ms
+        }
+
+        fn median_and_p95(mut samples: Vec<f64>) -> (f64, f64) {
+            samples.sort_by(f64::total_cmp);
+            let median = samples[samples.len() / 2];
+            let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+            (median, p95)
+        }
+
+        let score_values = (0..CAPACITY)
+            .map(|row| {
+                let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
+                bucket as f32 * 0.0003 - 1.1
+            })
+            .collect::<Vec<_>>();
+        let scores = offset_f32(&ctx, &score_values, vec![CAPACITY as u64, 1]);
+        let scalar_mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+        let scalar_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let scalar_count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let scalar_status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let radix_mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+        let radix_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let radix_count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let radix_status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+
+        for visible in [513usize, 520, 528, 544, 576, 640, 768, 896, 1_024] {
+            let visible_counts = offset_i32(&ctx, &[visible as i32], vec![1]);
+            let scalar = |encoder: &KernelEncoder| {
+                encode_select_top_k_f32_with_policy(
+                    &ctx,
+                    encoder,
+                    &scores,
+                    &visible_counts,
+                    &scalar_mask,
+                    None,
+                    &scalar_ids,
+                    &scalar_count,
+                    &scalar_status,
+                    CAPACITY,
+                    visible,
+                    TOP_K,
+                    1,
+                    DeepSeekV4SelectorDispatchPolicy::ScalarOracle,
+                    true,
+                )
+            };
+            let radix4 = |encoder: &KernelEncoder| {
+                encode_select_top_k_f32_with_policy(
+                    &ctx,
+                    encoder,
+                    &scores,
+                    &visible_counts,
+                    &radix_mask,
+                    None,
+                    &radix_ids,
+                    &radix_count,
+                    &radix_status,
+                    CAPACITY,
+                    visible,
+                    TOP_K,
+                    1,
+                    DeepSeekV4SelectorDispatchPolicy::Parallel,
+                    true,
+                )
+            };
+            for _ in 0..3 {
+                timed_gpu(&ctx, scalar);
+                timed_gpu(&ctx, radix4);
+            }
+            let scalar_before_samples = (0..SAMPLES)
+                .map(|_| timed_gpu(&ctx, scalar))
+                .collect::<Vec<_>>();
+            let radix_samples = (0..SAMPLES)
+                .map(|_| timed_gpu(&ctx, radix4))
+                .collect::<Vec<_>>();
+            let scalar_after_samples = (0..SAMPLES)
+                .map(|_| timed_gpu(&ctx, scalar))
+                .collect::<Vec<_>>();
+            let (scalar_before_ms, scalar_before_p95_ms) =
+                median_and_p95(scalar_before_samples.clone());
+            let (radix_ms, radix_p95_ms) = median_and_p95(radix_samples.clone());
+            let (scalar_after_ms, scalar_after_p95_ms) =
+                median_and_p95(scalar_after_samples.clone());
+            let scalar_midpoint_ms = (scalar_before_ms + scalar_after_ms) * 0.5;
+
+            timed_gpu(&ctx, scalar);
+            let scalar_result = (
+                read_i32(&scalar_mask),
+                read_i32(&scalar_ids),
+                read_i32(&scalar_count),
+                read_i32(&scalar_status),
+            );
+            timed_gpu(&ctx, radix4);
+            let radix_result = (
+                read_i32(&radix_mask),
+                read_i32(&radix_ids),
+                read_i32(&radix_count),
+                read_i32(&radix_status),
+            );
+            assert_eq!(
+                radix_result, scalar_result,
+                "selector drift at {visible} rows"
+            );
+            assert_eq!(radix_result.2, [TOP_K as i32]);
+            assert_eq!(radix_result.3, [0]);
+
+            eprintln!(
+                "deepseek_v4 shallow_selector visible={visible} capacity={CAPACITY} scalar_before_ms={scalar_before_ms:.6} scalar_before_p95_ms={scalar_before_p95_ms:.6} radix4_ms={radix_ms:.6} radix4_p95_ms={radix_p95_ms:.6} scalar_after_ms={scalar_after_ms:.6} scalar_after_p95_ms={scalar_after_p95_ms:.6} midpoint_saving_ms={:.6} projected_21_layer_saving_ms={:.3}",
+                scalar_midpoint_ms - radix_ms,
+                (scalar_midpoint_ms - radix_ms) * 21.0,
+            );
+            eprintln!(
+                "deepseek_v4 shallow_selector visible={visible} scalar_before_samples_ms={scalar_before_samples:?} radix4_samples_ms={radix_samples:?} scalar_after_samples_ms={scalar_after_samples:?}"
+            );
+        }
     }
 
     #[test]
@@ -15975,6 +16392,7 @@ mod tests {
                 CAPACITY,
                 TOP_K,
                 QUERIES,
+                DeepSeekV4SelectorDispatchPolicy::Production,
                 radix4,
             )
             .unwrap();
@@ -18073,6 +18491,7 @@ mod tests {
                         row_count,
                         TOP_K,
                         1,
+                        DeepSeekV4SelectorDispatchPolicy::Production,
                         radix4,
                     )
                 })
@@ -19326,6 +19745,30 @@ mod tests {
                 .unwrap_err();
         assert!(capacity_error.to_string().contains("only 128 threads"));
         validate_deepseek_v4_route_pipeline_geometry("hash route", 16, 1, 1).unwrap();
+    }
+
+    #[test]
+    fn sparse_selector_parallelizes_at_the_first_pruned_row() {
+        assert!(!use_parallel_selector(
+            DeepSeekV4SelectorDispatchPolicy::Production,
+            DEEPSEEK_V4_CSA_TOP_K,
+            DEEPSEEK_V4_CSA_TOP_K,
+        ));
+        assert!(use_parallel_selector(
+            DeepSeekV4SelectorDispatchPolicy::Production,
+            DEEPSEEK_V4_CSA_TOP_K + 1,
+            DEEPSEEK_V4_CSA_TOP_K,
+        ));
+        assert!(!use_parallel_selector(
+            DeepSeekV4SelectorDispatchPolicy::ScalarOracle,
+            DEEPSEEK_V4_CSA_TOP_K + 1,
+            DEEPSEEK_V4_CSA_TOP_K,
+        ));
+        assert!(use_parallel_selector(
+            DeepSeekV4SelectorDispatchPolicy::Parallel,
+            DEEPSEEK_V4_CSA_TOP_K,
+            DEEPSEEK_V4_CSA_TOP_K,
+        ));
     }
 
     #[test]

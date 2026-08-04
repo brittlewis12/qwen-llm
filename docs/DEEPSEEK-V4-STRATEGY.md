@@ -1700,6 +1700,20 @@ singleton HCA reduces that to 3.410 ms/layer and about 68.2 ms/token, below the
 complete 93.4 ms CSA subtotal. Packed/FP4 Lightning scoring therefore becomes
 the primary far-context optimization lane.
 
+One later refreshed-asset workload found a bounded hole between those regimes,
+not a reason to reopen local kernel tuning. Sparse CSA starts at compressed row
+513 / token position 2,051, while production retained the scalar
+remove-one-worst-row selector until row 1,024. Its work grows as
+`(visible - 512) * visible` across that band. Moving the existing exact radix4
+selector to the first pruned row takes an identical 2,385-token warmed product
+bracket from scalar 6.69/6.68 to 22.62 decode token/s and cuts generation from
+4,780.3/4,789.8 to 1,414.7 ms. Prefill remains bracketed, and every generated ID
+and logged first-token logit bit remains exact. The scalar, one-bit parallel,
+and radix4 schedules also agree from rows 513 through 1,024, including packed
+publication cadence. This is a complexity-policy repair at positions
+2,051-4,095; the contexts-128/512 bounded KILL and far-context FP4 priority both
+remain intact.
+
 The first bounded packed-lane experiment separates schedule ceiling from cache
 semantics. An eight-simdgroup matrix scorer over already-decoded F16 K and one
 F16-rounded query reduces 262,144-row scoring from a 2.102 ms bracket midpoint
@@ -1944,7 +1958,10 @@ noise without reducing technical risk. Revisit after S5.
 4. Treat short-context execution as bounded near-parity rather than the primary
    optimization lane. The one-command path is about 37-38 ms of GPU work versus
    llama.cpp's 36.1 ms total at depths 128/512; barrier, row-shape, geometry,
-   and vector-decode probes all miss the 0.75 ms/token two-depth gate.
+   and vector-decode probes all miss the 0.75 ms/token two-depth gate. Preserve
+   the separate first-pruned-row complexity firewall: sparse CSA dispatches the
+   exact radix4 selector from row 513 rather than entering the retired scalar
+   positions-2,051-through-4,095 cliff.
 5. Preserve the promoted cooperative Lightning scorer and four-bit radix
    selector, including their scalar and bitwise differentials. The idealized
    matrix-score ceiling is now established but remains test-only. The official

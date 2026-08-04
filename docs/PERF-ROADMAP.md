@@ -126,6 +126,15 @@ the legacy recipe, but it is not a promotion-grade throughput packet. Capture a
 paired current-asset baseline before attributing further whole-token gains or
 comparing against llama.cpp.
 
+The refreshed-asset bracket also exposed and closed one bounded policy cliff.
+Sparse CSA begins at row 513 / token position 2,051, but production retained the
+scalar remove-one-worst-row selector through row 1,024. Dispatching the existing
+radix4 selector at the first pruned row raises warmed decode on the identical
+2,385-token request from a 6.685 token/s scalar midpoint to 22.62 token/s, cuts
+generation time 70.4%, and preserves every generated ID and logged first-token
+logit bit. Candidate prefill remains between both controls. This resolves token
+positions 2,051-4,095 without changing the deep selector or attention contract.
+
 Cooperative Lightning scoring is promoted. It preserves every production score
 bit and cuts the operation from 0.701/2.0-2.2/8.3-8.4 ms to
 0.141/0.533/2.102 ms per CSA layer at 16,384/65,536/262,144 rows. A real-weight
@@ -191,11 +200,14 @@ Force-ranked queue:
 
 Short-context local tuning is bounded-KILL under the current 0.75 ms/token
 two-depth gate: all-slot barrier removal, larger IQ2 row groups, fixed-geometry
-metadata specialization, and four-lane IQ2 decode all miss or regress. Reopen
-only for a new structural work reduction with a credible >=2 ms/token ceiling,
-or a measured candidate that clears 0.75 ms at both contexts 128 and 512. The
-retained nonzero expert profiler reports gate/up and down separately so a future
-reopen starts from attribution rather than another shape sweep.
+metadata specialization, and four-lane IQ2 decode all miss or regress. The
+row-513 repair is a separate structural complexity guard outside the original
+contexts 128/512; it does not reopen those sub-threshold kernel sweeps. Reopen
+local tuning only for a new structural work reduction with a credible
+>=2 ms/token ceiling, or a measured candidate that clears 0.75 ms at both
+contexts. The retained nonzero expert profiler reports gate/up and down
+separately so a future reopen starts from attribution rather than another shape
+sweep.
 
 `llama-bench --n-depth` is not a free decode-only long-context comparator: its
 first repetition executes the complete depth prompt and serializes the state.

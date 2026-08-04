@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 Shallow Sparse-Selector Cliff GO
+
+Status: promoted `GO` for dispatching the existing parallel radix selector at
+the first pruned compressed row. No kernel, score, selected-attention, cache,
+memory-plan, snapshot, or numerical contract changes.
+
+- Sparse CSA starts at compressed row 513 / token position 2,051. Production
+  previously retained the scalar remove-one-worst-row selector through row
+  1,024, making work grow as `(visible - 512) * visible` until token position
+  4,095. Production now treats `max_visible_rows > top_k` as the complexity
+  firewall; scalar and one-bit parallel schedules remain test differentials.
+- An uncontended operation bracket measures scalar/radix midpoint medians of
+  0.833/0.199 ms at row 513, 7.999/0.044 at row 640, 18.522/0.045 at row 768,
+  and 47.527/0.045 at row 1,024. Every output is exact. This demonstrates the
+  old complexity shape rather than claiming radix is optimal at every row.
+- A warmed scalar/candidate/scalar product bracket on the refreshed asset and
+  identical 2,385-token request measures generation 4,780.3/1,414.7/4,789.8 ms
+  and decode 6.69/22.62/6.68 token/s. Candidate prefill 90,239.4 ms lies between
+  the 90,694.4/89,861.8 ms controls. The 70.4% generation saving and 3.38x
+  throughput recovery therefore isolate decode rather than file-cache warmth.
+- All 32 generated IDs are exact at signed-i32-LE SHA-256
+  `f87ca5a5d4e7787951cb02b979b54987a39d9968ca03ee577116e86f3e5e67ae`;
+  all eight first-token logit records are exact at
+  `b5499d064f8efb2b7115d1235b8398b4ccdec6a96903a4940819a0fb56050eb0`.
+  Scalar/bitwise/radix gates cover 513-1,024 rows, ties, signed zero,
+  subnormals, nonfinite fallback, and packed cadence
+  `[513,513,513,513,514]`.
+
+Decision: retain the bounded short-context kernel-tuning KILL. This is a
+structural complexity repair outside its context-128/512 gate, not a new
+quant-kernel sweep. Resume the official FP4 indexer Metal shadow. Exact identity,
+protocol, operation samples, product manifest, and CX review are retained in
+`docs/bench/2026-08-04-dsv4-shallow-selector-cliff.md`.
+
 ## 2026-08-04 - DeepSeek V4 Packed Indexer Scalar Contract GO
 
 Status: `GO` for the source-pinned scalar format and decoded-score contract, not

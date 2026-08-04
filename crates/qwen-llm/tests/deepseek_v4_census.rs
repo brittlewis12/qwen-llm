@@ -1,15 +1,26 @@
+use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::deepseek_v4_census::{PinnedDeepSeekV4AssetV1, RoleCensus, StorageCensus};
 use qwen_llm::gguf::GgufFile;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-const FIXTURE_JSON: &str =
+const LEGACY_FIXTURE_JSON: &str =
     include_str!("fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_census_v1.json");
-const DEFAULT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+const CURRENT_FIXTURE_JSON: &str =
+    include_str!("fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_current_2026_08_04_census_v1.json");
+const LEGACY_PROVISIONING_JSON: &str = include_str!(
+    "fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_legacy_2026_07_31_provisioning_v1.json"
+);
+const DEFAULT_CURRENT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+const DEFAULT_LEGACY_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 
-fn fixture() -> PinnedDeepSeekV4AssetV1 {
-    PinnedDeepSeekV4AssetV1::parse(FIXTURE_JSON).expect("valid pinned DS4 census")
+fn legacy_fixture() -> PinnedDeepSeekV4AssetV1 {
+    PinnedDeepSeekV4AssetV1::parse(LEGACY_FIXTURE_JSON).expect("valid legacy pinned DS4 census")
+}
+
+fn current_fixture() -> PinnedDeepSeekV4AssetV1 {
+    PinnedDeepSeekV4AssetV1::parse(CURRENT_FIXTURE_JSON).expect("valid current pinned DS4 census")
 }
 
 fn recompute_census_digest(fixture: &mut PinnedDeepSeekV4AssetV1) {
@@ -37,10 +48,13 @@ fn storage<'a>(role: &'a RoleCensus, dtype: &str) -> &'a StorageCensus {
 }
 
 #[test]
-fn pinned_fixture_is_canonical_and_self_consistent() {
-    let fixture = fixture();
+fn legacy_fixture_remains_canonical_and_self_consistent() {
+    let fixture = legacy_fixture();
     assert_eq!(fixture.manifest_schema_version, 1);
-    assert_eq!(fixture.asset_id, "deepseek-v4-flash-0731-ud-iq3_xxs");
+    assert_eq!(
+        fixture.asset_id,
+        "deepseek-v4-flash-0731-ud-iq3_xxs-legacy-2026-07-31"
+    );
     assert_eq!(
         fixture.census_sha256,
         "f4397fae14a6df04786324006ce41ea0489d4b246f68e742207446098684e4fc"
@@ -66,8 +80,93 @@ fn pinned_fixture_is_canonical_and_self_consistent() {
 }
 
 #[test]
+fn current_fixture_is_canonical_and_self_consistent() {
+    let fixture = current_fixture();
+    assert_eq!(fixture.manifest_schema_version, 1);
+    assert_eq!(
+        fixture.asset_id,
+        "deepseek-v4-flash-0731-ud-iq3_xxs-current-2026-08-04"
+    );
+    assert_eq!(
+        fixture.census_sha256,
+        "cbfddbea4260cbaffb02429f0d9593d6e00ec08eb9a5b8d56ea83e8d22860889"
+    );
+    assert_eq!(fixture.census.totals.shard_count, 4);
+    assert_eq!(fixture.census.totals.file_bytes, 104_207_848_032);
+    assert_eq!(fixture.census.totals.tensor_count, 1_328);
+    assert_eq!(fixture.census.totals.element_count, 284_334_567_511);
+    assert_eq!(fixture.census.totals.tensor_bytes, 104_202_502_492);
+    assert_eq!(
+        fixture
+            .shards
+            .iter()
+            .map(|shard| shard.sha256.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "dec1cee704800267d9d836d5a61aefc33705be939bbb3058fa9006d98191576d",
+            "3064d3c4c1d6363e9f9ad88e90a3e2c5fb2d6f7ae16ca72135c3ce6a5c984da5",
+            "2e9b2732eca7da8324f731653624a4f5c9846258926fd9f468cc703afb51a019",
+            "4ca79d8e5107dd1b9bb57b176a7c09948837425dee49f0f1dfd6547a3769fea7",
+        ]
+    );
+    assert_eq!(
+        storage(role(&fixture, "routed_gate"), "IQ2_XS").tensor_count,
+        25
+    );
+    assert_eq!(
+        storage(role(&fixture, "routed_gate"), "IQ3_XXS").tensor_count,
+        17
+    );
+    assert_eq!(
+        storage(role(&fixture, "routed_gate"), "IQ3_S").tensor_count,
+        1
+    );
+    assert_eq!(
+        storage(role(&fixture, "routed_up"), "IQ2_XS").tensor_count,
+        25
+    );
+    assert_eq!(
+        storage(role(&fixture, "routed_down"), "IQ3_XXS").tensor_count,
+        41
+    );
+    assert_eq!(
+        storage(role(&fixture, "routed_down"), "MXFP4").tensor_count,
+        2
+    );
+}
+
+#[test]
+fn legacy_provisioning_coordinates_match_manifest() {
+    let fixture = legacy_fixture();
+    let provisioning: serde_json::Value = serde_json::from_str(LEGACY_PROVISIONING_JSON).unwrap();
+    assert_eq!(provisioning["schema_version"], 1);
+    assert_eq!(provisioning["asset_id"], fixture.asset_id);
+    assert_eq!(
+        provisioning["checkpoint_content_id_blake3"],
+        "af65c31459d1d25ef9f3c7766af1f74157cb330d9bdee5432e320fa1d8e49e2a"
+    );
+    let shards = provisioning["shards"].as_array().unwrap();
+    assert_eq!(shards.len(), fixture.shards.len());
+    for (provisioned, pinned) in shards.iter().zip(&fixture.shards) {
+        assert_eq!(provisioned["index"], pinned.index);
+        assert_eq!(provisioned["file_bytes"], pinned.file_bytes);
+        assert_eq!(provisioned["sha256"], pinned.sha256);
+        assert_eq!(
+            provisioned["path"].as_str().unwrap(),
+            format!("UD-IQ3_XXS/{}", pinned.basename)
+        );
+        assert!(
+            provisioned["url"]
+                .as_str()
+                .unwrap()
+                .ends_with(provisioned["path"].as_str().unwrap())
+        );
+    }
+}
+
+#[test]
 fn global_dtype_census_is_pinned() {
-    let fixture = fixture();
+    let fixture = legacy_fixture();
     let observed = fixture
         .census
         .dtypes
@@ -100,7 +199,7 @@ fn global_dtype_census_is_pinned() {
 
 #[test]
 fn routed_moe_outliers_and_baselines_are_pinned() {
-    let fixture = fixture();
+    let fixture = legacy_fixture();
     assert_eq!(
         storage(role(&fixture, "routed_gate"), "IQ2_S").tensor_count,
         42
@@ -143,14 +242,14 @@ fn routed_moe_outliers_and_baselines_are_pinned() {
 
 #[test]
 fn fixture_rejects_unknown_fields_and_digest_drift() {
-    let mut unknown: serde_json::Value = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let mut unknown: serde_json::Value = serde_json::from_str(LEGACY_FIXTURE_JSON).unwrap();
     unknown
         .as_object_mut()
         .unwrap()
         .insert("undeclared".into(), true.into());
     assert!(serde_json::from_value::<PinnedDeepSeekV4AssetV1>(unknown).is_err());
 
-    let mut drifted: PinnedDeepSeekV4AssetV1 = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let mut drifted: PinnedDeepSeekV4AssetV1 = serde_json::from_str(LEGACY_FIXTURE_JSON).unwrap();
     let basename = format!("{}.drift", drifted.shards[0].basename);
     drifted.shards[0].basename.clone_from(&basename);
     drifted.census.shards[0].basename = basename;
@@ -161,13 +260,15 @@ fn fixture_rejects_unknown_fields_and_digest_drift() {
 
 #[test]
 fn fixture_rejects_rehashed_dtype_identity_and_cross_table_drift() {
-    let mut dtype_drift: PinnedDeepSeekV4AssetV1 = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let mut dtype_drift: PinnedDeepSeekV4AssetV1 =
+        serde_json::from_str(LEGACY_FIXTURE_JSON).unwrap();
     dtype_drift.census.dtypes[0].dtype = "BF16".into();
     recompute_census_digest(&mut dtype_drift);
     let error = dtype_drift.validate().unwrap_err().to_string();
     assert!(error.contains("does not match wire name"), "{error}");
 
-    let mut layer_drift: PinnedDeepSeekV4AssetV1 = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let mut layer_drift: PinnedDeepSeekV4AssetV1 =
+        serde_json::from_str(LEGACY_FIXTURE_JSON).unwrap();
     layer_drift.census.layers[0].routed_gate.element_count += 256;
     layer_drift.census.layers[0].routed_gate.storage_bytes += 82;
     layer_drift.census.layers[0].routed_up.element_count += 256;
@@ -179,7 +280,8 @@ fn fixture_rejects_rehashed_dtype_identity_and_cross_table_drift() {
         "{error}"
     );
 
-    let mut balanced_drift: PinnedDeepSeekV4AssetV1 = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let mut balanced_drift: PinnedDeepSeekV4AssetV1 =
+        serde_json::from_str(LEGACY_FIXTURE_JSON).unwrap();
     balanced_drift.census.roles[1].storage[0].element_count += 1;
     balanced_drift.census.roles[1].storage[0].storage_bytes += 4;
     balanced_drift.census.roles[5].storage[0].element_count -= 1;
@@ -192,7 +294,8 @@ fn fixture_rejects_rehashed_dtype_identity_and_cross_table_drift() {
         "{error}"
     );
 
-    let mut shard_drift: PinnedDeepSeekV4AssetV1 = serde_json::from_str(FIXTURE_JSON).unwrap();
+    let mut shard_drift: PinnedDeepSeekV4AssetV1 =
+        serde_json::from_str(LEGACY_FIXTURE_JSON).unwrap();
     for shard in &mut shard_drift.shards {
         shard.sha256 = "0".repeat(64);
     }
@@ -201,18 +304,48 @@ fn fixture_rejects_rehashed_dtype_identity_and_cross_table_drift() {
 }
 
 #[test]
-#[ignore = "mmaps the local DS4 asset and validates its 9 MiB hash-router tables"]
-fn live_asset_matches_pinned_schema_and_quant_census() {
+#[ignore = "mmaps the current local DS4 asset and validates its 9 MiB hash-router tables"]
+fn live_current_asset_matches_pinned_schema_and_quant_census() {
     let model_path = std::env::var_os("DSV4_MODEL")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CURRENT_MODEL));
     assert!(
         model_path.exists(),
         "missing DS4 fixture at {}",
         model_path.display()
     );
     let gguf = GgufFile::open(&model_path).expect("open DS4 fixture");
-    fixture()
+    current_fixture()
         .validate_observed(&gguf)
         .expect("live census matches pinned fixture");
+}
+
+#[test]
+#[ignore = "hashes the optional legacy DS4 asset and validates its exact ordered contents"]
+fn live_legacy_asset_matches_pinned_schema_and_content_identity() {
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_LEGACY_MODEL));
+    assert!(
+        model_path.exists(),
+        "missing legacy DS4 fixture at {}",
+        model_path.display()
+    );
+    let gguf = GgufFile::open(&model_path).expect("open legacy DS4 fixture");
+    legacy_fixture()
+        .validate_observed(&gguf)
+        .expect("live census matches legacy fixture");
+    let cache_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("target/.qwen-dsv4-model-identity-v2");
+    let content = checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(cache_path))
+        .expect("resolve legacy ordered-content identity");
+    let mut observed = String::with_capacity(64);
+    for byte in content.content_id {
+        write!(&mut observed, "{byte:02x}").unwrap();
+    }
+    assert_eq!(
+        observed,
+        "af65c31459d1d25ef9f3c7766af1f74157cb330d9bdee5432e320fa1d8e49e2a"
+    );
 }

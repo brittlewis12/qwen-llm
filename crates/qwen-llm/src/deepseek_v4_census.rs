@@ -1,4 +1,4 @@
-//! Deterministic storage census for the frozen DeepSeek V4 Flash-0731 asset.
+//! Deterministic storage census for pinned DeepSeek V4 Flash-0731 assets.
 
 use crate::deepseek_v4::{
     AttentionKind, AttentionLane, CompressorWeights, DeepSeekV4Model, HyperConnectionWeights,
@@ -11,10 +11,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub const FLASH_0731_PROFILE: &str = "deepseek-v4-flash-0731";
-const FLASH_0731_ASSET_ID: &str = "deepseek-v4-flash-0731-ud-iq3_xxs";
-const FLASH_0731_CENSUS_SHA256: &str =
+const FLASH_0731_LEGACY_ASSET_ID: &str = "deepseek-v4-flash-0731-ud-iq3_xxs-legacy-2026-07-31";
+const FLASH_0731_LEGACY_CENSUS_SHA256: &str =
     "f4397fae14a6df04786324006ce41ea0489d4b246f68e742207446098684e4fc";
-const FLASH_0731_SHARDS: [(&str, u64, &str); 4] = [
+const FLASH_0731_LEGACY_SHARDS: [(&str, u64, &str); 4] = [
     (
         "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
         5_257_664,
@@ -34,6 +34,31 @@ const FLASH_0731_SHARDS: [(&str, u64, &str); 4] = [
         "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf",
         4_071_015_712,
         "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2",
+    ),
+];
+const FLASH_0731_CURRENT_ASSET_ID: &str = "deepseek-v4-flash-0731-ud-iq3_xxs-current-2026-08-04";
+const FLASH_0731_CURRENT_CENSUS_SHA256: &str =
+    "cbfddbea4260cbaffb02429f0d9593d6e00ec08eb9a5b8d56ea83e8d22860889";
+const FLASH_0731_CURRENT_SHARDS: [(&str, u64, &str); 4] = [
+    (
+        "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+        5_257_696,
+        "dec1cee704800267d9d836d5a61aefc33705be939bbb3058fa9006d98191576d",
+    ),
+    (
+        "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00002-of-00004.gguf",
+        49_910_532_416,
+        "3064d3c4c1d6363e9f9ad88e90a3e2c5fb2d6f7ae16ca72135c3ce6a5c984da5",
+    ),
+    (
+        "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00003-of-00004.gguf",
+        49_257_859_456,
+        "2e9b2732eca7da8324f731653624a4f5c9846258926fd9f468cc703afb51a019",
+    ),
+    (
+        "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf",
+        5_034_198_464,
+        "4ca79d8e5107dd1b9bb57b176a7c09948837425dee49f0f1dfd6547a3769fea7",
     ),
 ];
 
@@ -713,13 +738,26 @@ impl PinnedDeepSeekV4AssetV1 {
     }
 
     pub fn validate(&self) -> Result<(), DeepSeekV4CensusError> {
-        if self.manifest_schema_version != 1 || self.asset_id != FLASH_0731_ASSET_ID {
+        if self.manifest_schema_version != 1 {
             return Err(DeepSeekV4CensusError::Invalid(
                 "unsupported asset manifest or asset ID".into(),
             ));
         }
+        let (expected_census_sha256, expected_shards) = match self.asset_id.as_str() {
+            FLASH_0731_LEGACY_ASSET_ID => {
+                (FLASH_0731_LEGACY_CENSUS_SHA256, &FLASH_0731_LEGACY_SHARDS)
+            }
+            FLASH_0731_CURRENT_ASSET_ID => {
+                (FLASH_0731_CURRENT_CENSUS_SHA256, &FLASH_0731_CURRENT_SHARDS)
+            }
+            _ => {
+                return Err(DeepSeekV4CensusError::Invalid(
+                    "unsupported asset manifest or asset ID".into(),
+                ));
+            }
+        };
         self.census.validate()?;
-        if self.census_sha256 != FLASH_0731_CENSUS_SHA256 {
+        if self.census_sha256 != expected_census_sha256 {
             return Err(DeepSeekV4CensusError::Invalid(
                 "unsupported pinned census digest".into(),
             ));
@@ -735,7 +773,7 @@ impl PinnedDeepSeekV4AssetV1 {
             .shards
             .iter()
             .zip(&self.census.shards)
-            .zip(FLASH_0731_SHARDS)
+            .zip(expected_shards.iter().copied())
             .enumerate()
         {
             let (basename, file_bytes, sha256) = expected;

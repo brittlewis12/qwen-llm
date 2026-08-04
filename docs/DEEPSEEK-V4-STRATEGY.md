@@ -59,23 +59,52 @@ Primary sources:
 - Official encoding reference: the model repository's `encoding/` directory
 - Standard GGUF execution reference: llama.cpp PR 24162 and descendants
 
-## Frozen reference asset
+## Pinned assets and local policy
 
-The current local target is:
+The current product, quality, and optimization target is the 2026-08-04
+converter refresh at:
 
 `/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf`
 
-Observed facts from the complete four-shard mapping:
+Observed facts from its complete four-shard mapping:
 
 - Source repository: `unsloth/DeepSeek-V4-Flash-0731-GGUF`
-- Quant: `UD-IQ3_XXS`, `general.file_type = 23`
-- Size: 102,999,888,416 bytes (95.93 GiB)
-- Shards: 4
-- Tensors: 1,328
-- Architecture: `deepseek4`
-- No converted `mtp.*` / DSpark tensors
+- Pinned asset ID: `deepseek-v4-flash-0731-ud-iq3_xxs-current-2026-08-04`
+- Quant label: `UD-IQ3_XXS`, `general.file_type = 23`
+- Size: 104,207,848,032 bytes (97.05 GiB)
+- Shards / tensors: 4 / 1,328
+- Architecture: `deepseek4`; no converted `mtp.*` / DSpark tensors
+- Census manifest:
+  `crates/qwen-llm/tests/fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_current_2026_08_04_census_v1.json`
 
-Pinned shard hashes:
+Pinned current shard hashes:
+
+| Shard | Bytes | SHA-256 |
+|---|---:|---|
+| 1 | 5,257,696 | `dec1cee704800267d9d836d5a61aefc33705be939bbb3058fa9006d98191576d` |
+| 2 | 49,910,532,416 | `3064d3c4c1d6363e9f9ad88e90a3e2c5fb2d6f7ae16ca72135c3ce6a5c984da5` |
+| 3 | 49,257,859,456 | `2e9b2732eca7da8324f731653624a4f5c9846258926fd9f468cc703afb51a019` |
+| 4 | 5,034,198,464 | `4ca79d8e5107dd1b9bb57b176a7c09948837425dee49f0f1dfd6547a3769fea7` |
+
+The directory label does not describe this recipe completely. Routed gate/up
+storage is IQ2_XS in 25 layers, IQ3_XXS in 17, and IQ3_S in one; routed down is
+IQ3_XXS in 41 layers and MXFP4 in two. Admission therefore validates role-level
+dtype coverage from the artifact rather than inferring it from `UD-IQ3_XXS`.
+The refresh is also the first accepted qualitative target: the fixed boundary
+probe changed from a low-margin Croatian token on the legacy asset to a sharp
+`Hi` / `Hi!` response, while measured decode increased from 30.90 to 43.08
+tokens/s. Those observations choose the product asset; they are not a general
+quality benchmark.
+
+The 2026-07-31 four-shard asset used for bring-up is historical lineage, not a
+required local dependency. Its b10222 logits, decision transcripts, census,
+and shard hashes remain immutable in the repository. Historical live tests use
+`DSV4_LEGACY_MODEL` and may be reprovisioned under
+`/Users/tito/models/deepseek-v4-flash-0731-old/`; ordinary development does not
+keep its 95.93 GiB GGUF resident. The exact mixed-revision URLs, commits, Xet
+objects, hashes, and engine ordered-content root are retained in
+`crates/qwen-llm/tests/fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_legacy_2026_07_31_provisioning_v1.json`.
+Its pinned hashes are:
 
 | Shard | Bytes | SHA-256 |
 |---|---:|---|
@@ -84,20 +113,11 @@ Pinned shard hashes:
 | 3 | 49,437,886,752 | `64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca` |
 | 4 | 4,071,015,712 | `5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2` |
 
-The download records resolve shard 2 at a different repository commit from
-the other shards. The GGUF split metadata and complete tensor schema validate,
-but reproducible benchmark packets must pin the four content hashes rather
-than claim one repository revision.
-
-A separately downloaded converter refresh at
-`/Users/tito/models/deepseek-v4-flash-0731-fresh/UD-IQ3_XXS/` is a compatibility
-asset, not a replacement for that frozen benchmark identity. Its four-shard
-census still has 1,328 tensors and the same architecture geometry, but totals
-104,207,848,032 file bytes and changes routed gate/up storage materially: 25
-layers use IQ2_XS, 17 use IQ3_XXS, and one uses IQ3_S. Routed down remains 41
-IQ3_XXS layers plus two MXFP4 layers. Model loading must therefore validate
-role-level dtype coverage from each artifact rather than infer a quant recipe
-from the directory name.
+The legacy download records resolve shard 2 at a different repository commit
+from the other shards. Historical packets therefore pin ordered content hashes
+rather than claim one repository revision. They remain valid evidence for the
+implementation state they measured, but current performance claims need a new
+packet on the current asset rather than a silent repin.
 
 ## Corrected architecture facts
 
@@ -222,8 +242,8 @@ Not directly reusable:
 - Qwen's gated-attention and GDN scratch layouts.
 - Qwen's tokenizer pre-split and chat renderer.
 
-The frozen IQ3 asset stores routed gate/up banks as IQ2_S in 42 layers and
-IQ3_S in one. The converter refresh instead mixes IQ2_XS, IQ3_XXS, and IQ3_S.
+The legacy IQ3 asset stores routed gate/up banks as IQ2_S in 42 layers and
+IQ3_S in one. The current product asset instead mixes IQ2_XS, IQ3_XXS, and IQ3_S.
 Production singleton execution now has matching all-slot kernels for all four
 gate/up dtypes, while packed IQ2_XS uses the generic block-256 matrix path.
 Generic matrix coverage is a correctness contract, not a grouped-kernel
@@ -521,7 +541,8 @@ Gate:
   continuation logits and the post-continuation state bit-for-bit, while the
   independent b10222 gate remains argmax 63,325 at cosine 0.999999958 / relative
   RMS 0.000290112. The complete live packet takes 1.534-1.539 seconds.
-- A fresh CLI process hashes 102,999,888,416 ordered shard bytes in 4,840.5 ms,
+- A fresh CLI process hashes the legacy asset's 102,999,888,416 ordered shard
+  bytes in 4,840.5 ms,
   advances the first 1,024 tokens of the certified 1,025-token prompt, and
   publishes a 24,907,808-byte record. Prompt execution takes 21,746.0 ms and
   generates oracle ID 201.
@@ -932,8 +953,8 @@ Gate:
   byte-identical full-logit SHA-256
   `915be9ad610710c4bcb3cfb661ef1fcdd35e2ccebca82c20e15b05336528997a`;
   the next position rejects without changing logits. This proves mechanical
-  integration on the 95.93 GiB asset, not semantic correctness of the synthetic
-  prefix.
+  integration on the legacy 95.93 GiB asset, not semantic correctness of the
+  synthetic prefix.
 - Serial publication-to-attention gates at positions 639, 1023, 2047, 2175,
   and 3071 materially distinguish the newest row from a prior-count ablation.
   Tagged

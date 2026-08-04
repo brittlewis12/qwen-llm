@@ -1598,7 +1598,7 @@ mod tests {
     use fancy_regex::Regex;
     use proptest::prelude::*;
 
-    const DS4_0731_IQ3: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+    const DS4_0731_CURRENT: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 
     #[test]
     fn raw_i32le_token_digest_matches_frozen_vectors() {
@@ -2277,8 +2277,8 @@ mod tests {
     #[test]
     #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
     fn deepseek_v4_0731_native_tokenizer_smoke() {
-        assert!(Path::new(DS4_0731_IQ3).exists(), "missing DS4 fixture");
-        let tokenizer = NativeTokenizer::open(DS4_0731_IQ3).expect("open DS4 tokenizer");
+        assert!(Path::new(DS4_0731_CURRENT).exists(), "missing DS4 fixture");
+        let tokenizer = NativeTokenizer::open(DS4_0731_CURRENT).expect("open DS4 tokenizer");
         assert_eq!(tokenizer.pretokenizer, PretokenizerKind::JoyAi);
         assert_eq!(tokenizer.n_vocab(), 129_280);
         assert_eq!(tokenizer.bos(), Some(0));
@@ -2408,12 +2408,12 @@ mod tests {
     #[ignore = "requires local DeepSeek V4 fixture and current llama.cpp tokenizer binary"]
     fn deepseek_v4_native_matches_current_llama_cpp_cli() {
         const LLAMA_TOKENIZE: &str = "/Users/tito/code/llama.cpp/build/bin/llama-tokenize";
-        assert!(Path::new(DS4_0731_IQ3).exists(), "missing DS4 fixture");
+        assert!(Path::new(DS4_0731_CURRENT).exists(), "missing DS4 fixture");
         assert!(
             Path::new(LLAMA_TOKENIZE).exists(),
             "missing llama-tokenize oracle"
         );
-        let tokenizer = NativeTokenizer::open(DS4_0731_IQ3).expect("open DS4 tokenizer");
+        let tokenizer = NativeTokenizer::open(DS4_0731_CURRENT).expect("open DS4 tokenizer");
         let prompts = [
             "Hello, world!",
             "digits 1 12 123 1234 １２３４ ①Ⅻ",
@@ -2427,7 +2427,7 @@ mod tests {
             let output = std::process::Command::new(LLAMA_TOKENIZE)
                 .args([
                     "-m",
-                    DS4_0731_IQ3,
+                    DS4_0731_CURRENT,
                     "--ids",
                     "--no-bos",
                     "--no-escape",

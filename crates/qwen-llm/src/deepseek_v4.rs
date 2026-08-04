@@ -1489,7 +1489,7 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    const DS4_0731_IQ3: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+    const DS4_0731_CURRENT: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 
     #[test]
     fn compression_ratios_are_closed() {
@@ -1577,10 +1577,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
+    #[ignore = "requires the current local DeepSeek V4 Flash-0731 fixture"]
     fn live_0731_iq3_schema_binds_every_tensor() {
-        assert!(Path::new(DS4_0731_IQ3).exists(), "missing DS4 fixture");
-        let gguf = GgufFile::open(DS4_0731_IQ3).expect("open DS4 fixture");
+        assert!(Path::new(DS4_0731_CURRENT).exists(), "missing DS4 fixture");
+        let gguf = GgufFile::open(DS4_0731_CURRENT).expect("open DS4 fixture");
         let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind DS4 fixture");
         assert_eq!(model.config.layer_count, 43);
         assert_eq!(model.config.hidden_size, 4096);

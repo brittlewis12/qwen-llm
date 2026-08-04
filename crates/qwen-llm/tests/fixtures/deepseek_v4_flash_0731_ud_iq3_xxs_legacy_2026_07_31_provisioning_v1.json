@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs-legacy-2026-07-31",
+  "repository": "unsloth/DeepSeek-V4-Flash-0731-GGUF",
+  "checkpoint_content_id_blake3": "af65c31459d1d25ef9f3c7766af1f74157cb330d9bdee5432e320fa1d8e49e2a",
+  "shards": [
+    {
+      "index": 0,
+      "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+      "resolved_commit": "f7fe2a4546ac55932500db5c2e77ade2cb976ab0",
+      "url": "https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF/resolve/f7fe2a4546ac55932500db5c2e77ade2cb976ab0/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+      "file_bytes": 5257664,
+      "sha256": "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a",
+      "xet_hash": "7a5e3e2bd43e329e19730c987868fbe75d93751eb8d47d2c71c80fe13b554484"
+    },
+    {
+      "index": 1,
+      "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00002-of-00004.gguf",
+      "resolved_commit": "232e2805f1874c6a01e40de761aa58521be3065f",
+      "url": "https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF/resolve/232e2805f1874c6a01e40de761aa58521be3065f/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00002-of-00004.gguf",
+      "file_bytes": 49485728288,
+      "sha256": "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd",
+      "xet_hash": "264cf4a514b1433dd0020b216d0ef23250a059796be42a260a347dd37f87e305"
+    },
+    {
+      "index": 2,
+      "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00003-of-00004.gguf",
+      "resolved_commit": "f7fe2a4546ac55932500db5c2e77ade2cb976ab0",
+      "url": "https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF/resolve/f7fe2a4546ac55932500db5c2e77ade2cb976ab0/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00003-of-00004.gguf",
+      "file_bytes": 49437886752,
+      "sha256": "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
+      "xet_hash": "c6ce5483507f10eef40e991c4b537629af21bb9a141a70a461818d8e19d305bf"
+    },
+    {
+      "index": 3,
+      "path": "UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf",
+      "resolved_commit": "f7fe2a4546ac55932500db5c2e77ade2cb976ab0",
+      "url": "https://huggingface.co/unsloth/DeepSeek-V4-Flash-0731-GGUF/resolve/f7fe2a4546ac55932500db5c2e77ade2cb976ab0/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf",
+      "file_bytes": 4071015712,
+      "sha256": "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2",
+      "xet_hash": "8b7730dac7f2c9d26ad48ba9e306e1be577065ca606b5f50c8b9cb150f8f7d5a"
+    }
+  ]
+}

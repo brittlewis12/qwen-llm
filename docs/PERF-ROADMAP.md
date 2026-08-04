@@ -115,9 +115,16 @@ Decision rules:
 DS4 Flash-0731 has crossed from architecture bring-up into optimization. Full
 structural execution reaches 1,048,576 context positions; ordinary short
 decode uses one Metal command/encoder and runs at about 37-38 ms command-GPU /
-38-39 ms wall on the 95.93 GiB IQ3_XXS asset, near the pinned llama.cpp b10254
-36.1 ms wall floor. Practical long context is the leading measured optimization
-opportunity, not yet a demonstrated product-speed differentiator.
+38-39 ms wall on the legacy 95.93 GiB IQ3_XXS asset, near the pinned llama.cpp
+b10254 36.1 ms wall floor. Practical long context is the leading measured
+optimization opportunity, not yet a demonstrated product-speed differentiator.
+
+That baseline remains historical rather than being silently transferred across
+weights. The 2026-08-04 97.05 GiB refresh is now the sole resident product asset;
+an initial fixed boundary probe measured 43.08 decode tokens/s versus 30.90 on
+the legacy recipe, but it is not a promotion-grade throughput packet. Capture a
+paired current-asset baseline before attributing further whole-token gains or
+comparing against llama.cpp.
 
 Cooperative Lightning scoring is promoted. It preserves every production score
 bit and cuts the operation from 0.701/2.0-2.2/8.3-8.4 ms to

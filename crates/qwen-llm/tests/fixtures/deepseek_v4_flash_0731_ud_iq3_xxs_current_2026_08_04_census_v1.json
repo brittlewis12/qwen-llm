@@ -1,33 +1,33 @@
 {
   "manifest_schema_version": 1,
-  "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs-legacy-2026-07-31",
+  "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs-current-2026-08-04",
   "shards": [
     {
       "index": 0,
       "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
-      "file_bytes": 5257664,
-      "sha256": "9758eb3d78e1afe8852543931703f4f1cd6fbb07f492d4ed853f5d2f6e43be5a"
+      "file_bytes": 5257696,
+      "sha256": "dec1cee704800267d9d836d5a61aefc33705be939bbb3058fa9006d98191576d"
     },
     {
       "index": 1,
       "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00002-of-00004.gguf",
-      "file_bytes": 49485728288,
-      "sha256": "afcfd59721d4da86bc3301e16ca624af202d8af3fa3f9fbbfbb04b3b47666cfd"
+      "file_bytes": 49910532416,
+      "sha256": "3064d3c4c1d6363e9f9ad88e90a3e2c5fb2d6f7ae16ca72135c3ce6a5c984da5"
     },
     {
       "index": 2,
       "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00003-of-00004.gguf",
-      "file_bytes": 49437886752,
-      "sha256": "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca"
+      "file_bytes": 49257859456,
+      "sha256": "2e9b2732eca7da8324f731653624a4f5c9846258926fd9f468cc703afb51a019"
     },
     {
       "index": 3,
       "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf",
-      "file_bytes": 4071015712,
-      "sha256": "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2"
+      "file_bytes": 5034198464,
+      "sha256": "4ca79d8e5107dd1b9bb57b176a7c09948837425dee49f0f1dfd6547a3769fea7"
     }
   ],
-  "census_sha256": "f4397fae14a6df04786324006ce41ea0489d4b246f68e742207446098684e4fc",
+  "census_sha256": "cbfddbea4260cbaffb02429f0d9593d6e00ec08eb9a5b8d56ea83e8d22860889",
   "census": {
     "schema_version": 1,
     "profile": "deepseek-v4-flash-0731",
@@ -35,38 +35,38 @@
       {
         "index": 0,
         "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
-        "file_bytes": 5257664,
+        "file_bytes": 5257696,
         "tensor_count": 0,
         "tensor_bytes": 0
       },
       {
         "index": 1,
         "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00002-of-00004.gguf",
-        "file_bytes": 49485728288,
-        "tensor_count": 632,
-        "tensor_bytes": 49485686772
+        "file_bytes": 49910532416,
+        "tensor_count": 660,
+        "tensor_bytes": 49910489036
       },
       {
         "index": 2,
         "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00003-of-00004.gguf",
-        "file_bytes": 49437886752,
-        "tensor_count": 650,
-        "tensor_bytes": 49437843640
+        "file_bytes": 49257859456,
+        "tensor_count": 620,
+        "tensor_bytes": 49257818336
       },
       {
         "index": 3,
         "basename": "DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00004-of-00004.gguf",
-        "file_bytes": 4071015712,
-        "tensor_count": 46,
-        "tensor_bytes": 4071012528
+        "file_bytes": 5034198464,
+        "tensor_count": 48,
+        "tensor_bytes": 5034195120
       }
     ],
     "totals": {
       "shard_count": 4,
-      "file_bytes": 102999888416,
+      "file_bytes": 104207848032,
       "tensor_count": 1328,
       "element_count": 284334567511,
-      "tensor_bytes": 102994542940
+      "tensor_bytes": 104202502492
     },
     "dtypes": [
       {
@@ -91,11 +91,18 @@
         "storage_bytes": 1880309760
       },
       {
+        "dtype": "IQ2_XS",
+        "dtype_tag": 17,
+        "tensor_count": 50,
+        "element_count": 107374182400,
+        "storage_bytes": 31037849600
+      },
+      {
         "dtype": "IQ3_XXS",
         "dtype_tag": 18,
-        "tensor_count": 41,
-        "element_count": 88046829568,
-        "storage_bytes": 33705426944
+        "tensor_count": 75,
+        "element_count": 161061273600,
+        "storage_bytes": 61656268800
       },
       {
         "dtype": "IQ3_S",
@@ -103,13 +110,6 @@
         "tensor_count": 2,
         "element_count": 4294967296,
         "storage_bytes": 1845493760
-      },
-      {
-        "dtype": "IQ2_S",
-        "dtype_tag": 22,
-        "tensor_count": 84,
-        "element_count": 180388626432,
-        "storage_bytes": 57780731904
       },
       {
         "dtype": "I32",
@@ -536,18 +536,25 @@
         "role_id": 30,
         "storage": [
           {
+            "dtype": "IQ2_XS",
+            "dtype_tag": 17,
+            "tensor_count": 25,
+            "element_count": 53687091200,
+            "storage_bytes": 15518924800
+          },
+          {
+            "dtype": "IQ3_XXS",
+            "dtype_tag": 18,
+            "tensor_count": 17,
+            "element_count": 36507222016,
+            "storage_bytes": 13975420928
+          },
+          {
             "dtype": "IQ3_S",
             "dtype_tag": 21,
             "tensor_count": 1,
             "element_count": 2147483648,
             "storage_bytes": 922746880
-          },
-          {
-            "dtype": "IQ2_S",
-            "dtype_tag": 22,
-            "tensor_count": 42,
-            "element_count": 90194313216,
-            "storage_bytes": 28890365952
           }
         ]
       },
@@ -556,18 +563,25 @@
         "role_id": 31,
         "storage": [
           {
+            "dtype": "IQ2_XS",
+            "dtype_tag": 17,
+            "tensor_count": 25,
+            "element_count": 53687091200,
+            "storage_bytes": 15518924800
+          },
+          {
+            "dtype": "IQ3_XXS",
+            "dtype_tag": 18,
+            "tensor_count": 17,
+            "element_count": 36507222016,
+            "storage_bytes": 13975420928
+          },
+          {
             "dtype": "IQ3_S",
             "dtype_tag": 21,
             "tensor_count": 1,
             "element_count": 2147483648,
             "storage_bytes": 922746880
-          },
-          {
-            "dtype": "IQ2_S",
-            "dtype_tag": 22,
-            "tensor_count": 42,
-            "element_count": 90194313216,
-            "storage_bytes": 28890365952
           }
         ]
       },
@@ -723,16 +737,16 @@
         "attention": "local",
         "router": "hash",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -746,16 +760,16 @@
         "attention": "local",
         "router": "hash",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -769,16 +783,16 @@
         "attention": "csa",
         "router": "hash",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -792,16 +806,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -815,16 +829,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -838,16 +852,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -861,16 +875,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -884,16 +898,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -907,16 +921,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -930,16 +944,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -953,16 +967,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -976,16 +990,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -999,16 +1013,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1022,16 +1036,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1045,16 +1059,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1068,16 +1082,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1091,16 +1105,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1114,16 +1128,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1137,16 +1151,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1160,16 +1174,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1183,16 +1197,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1206,16 +1220,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1229,16 +1243,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1252,16 +1266,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1275,16 +1289,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1298,16 +1312,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1344,16 +1358,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1367,16 +1381,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1390,16 +1404,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1413,16 +1427,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1436,16 +1450,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1459,16 +1473,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1482,16 +1496,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1505,16 +1519,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1528,16 +1542,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1551,16 +1565,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1574,16 +1588,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1597,16 +1611,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1620,16 +1634,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1643,16 +1657,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1666,16 +1680,16 @@
         "attention": "hca",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ2_XS",
+          "dtype_tag": 17,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 620756992
         },
         "routed_down": {
           "dtype": "IQ3_XXS",
@@ -1689,16 +1703,16 @@
         "attention": "csa",
         "router": "learned",
         "routed_gate": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_up": {
-          "dtype": "IQ2_S",
-          "dtype_tag": 22,
+          "dtype": "IQ3_XXS",
+          "dtype_tag": 18,
           "element_count": 2147483648,
-          "storage_bytes": 687865856
+          "storage_bytes": 822083584
         },
         "routed_down": {
           "dtype": "MXFP4",

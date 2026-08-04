@@ -1,5 +1,6 @@
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::deepseek_v4::{AttentionKind, DeepSeekV4Model};
+use qwen_llm::deepseek_v4_census::PinnedDeepSeekV4AssetV1;
 #[cfg(feature = "dsv4-diagnostics")]
 use qwen_llm::deepseek_v4_metal::DeepSeekV4DecisionTranscript;
 use qwen_llm::deepseek_v4_metal::{
@@ -13,10 +14,10 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{MetalContext, kernel_trace_begin, kernel_trace_snapshot};
 use sha2::{Digest, Sha256};
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const DEFAULT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+const DEFAULT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 const DEFAULT_DURABLE_SNAPSHOT: &str = "target/dsv4-position1024.ds4c";
 const DEFAULT_DURABLE_POSITION_2048_SNAPSHOT: &str = "target/dsv4-position2048.ds4c";
 const DEFAULT_DURABLE_POSITION_2052_SNAPSHOT: &str = "target/dsv4-position2052.ds4c";
@@ -27,6 +28,8 @@ const DEFAULT_DURABLE_POSITION_3072_SNAPSHOT: &str = "target/dsv4-position3072.d
 const DEFAULT_DURABLE_IDENTITY_CACHE: &str = "target/.qwen-dsv4-model-identity-v2";
 const ORACLE_BYTES: &[u8] = include_bytes!("fixtures/deepseek_v4_token35_position0_b10222.f32");
 const ORACLE_MANIFEST: &str = include_str!("fixtures/deepseek_v4_token35_position0_b10222.json");
+const LEGACY_CENSUS_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_census_v1.json");
 const POSITION_ONE_ORACLE_BYTES: &[u8] =
     include_bytes!("fixtures/deepseek_v4_tokens35_201_position1_b10222.f32");
 const POSITION_ONE_ORACLE_MANIFEST: &str =
@@ -196,6 +199,10 @@ const MODEL_SHARDS_SHA256: [&str; 4] = [
     "64eaf514a763597ba7bb50866583d8db5eabbbbce3cb2f616d749af3890155ca",
     "5df52988c56348a22d15da809e9ac4f0cc59cc1c412347f1481dda4685ce89b2",
 ];
+const LEGACY_CHECKPOINT_CONTENT_ID: [u8; 32] = [
+    0xaf, 0x65, 0xc3, 0x14, 0x59, 0xd1, 0xd2, 0x5e, 0xf9, 0xf3, 0xc7, 0x76, 0x6a, 0xf1, 0xf7, 0x41,
+    0x57, 0xcb, 0x33, 0x0d, 0x9b, 0xde, 0xe5, 0x43, 0x2e, 0x32, 0x0f, 0xa1, 0xd8, 0xe4, 0x9e, 0x2a,
+];
 
 struct LogitComparison {
     argmax: usize,
@@ -215,6 +222,29 @@ fn frozen_model_content_id() -> DeepSeekV4ModelContentId {
         hasher.update(digest.as_bytes());
     }
     DeepSeekV4ModelContentId::new(hasher.finalize().into())
+}
+
+fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
+    let gguf = GgufFile::open(model_path).expect("open legacy DS4 GGUF shards");
+    PinnedDeepSeekV4AssetV1::parse(LEGACY_CENSUS_MANIFEST)
+        .expect("parse legacy DS4 census")
+        .validate_observed(&gguf)
+        .expect("legacy DS4 schema and quant census match");
+    let identity_cache_path = std::env::var_os("DSV4_IDENTITY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(DEFAULT_DURABLE_IDENTITY_CACHE)
+        });
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+            .expect("resolve legacy DS4 ordered-content identity");
+    assert_eq!(
+        content.content_id, LEGACY_CHECKPOINT_CONTENT_ID,
+        "DSV4_LEGACY_MODEL does not match the pinned 2026-07-31 asset"
+    );
+    gguf
 }
 
 fn assert_hca_long_prefix_gate(label: &str, comparison: &LogitComparison) {
@@ -494,12 +524,12 @@ fn pinned_position_zero_oracle_has_exact_identity() {
 #[test]
 #[ignore = "requires the local DS4 model and target Metal device"]
 fn native_deepseek_v4_full_context_session_plan_is_exact_and_admitted() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 1_048_576)
         .expect("plan full-context DS4 session");
     assert_eq!(plan.session_capacity().forward_limit(), 1_048_576);
@@ -1171,7 +1201,7 @@ fn pinned_hca_boundary_oracles_have_exact_identity() {
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -1179,7 +1209,7 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         "missing DS4 model at {}",
         model_path.display()
     );
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let ctx = MetalContext::new().expect("create Metal context");
     let before_plan = ctx.current_allocated_size();
     let load_plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 3_073)
@@ -1262,7 +1292,7 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
 #[test]
 #[ignore = "manual native DS4 full forward maps the 95.93 GiB checkpoint"]
 fn native_deepseek_v4_token_35_position_zero() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -1273,7 +1303,7 @@ fn native_deepseek_v4_token_35_position_zero() {
 
     eprintln!("opening {}", model_path.display());
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     eprintln!("residency={}", residency.report());
     let mut forward =
@@ -1367,7 +1397,7 @@ fn native_deepseek_v4_token_35_position_zero() {
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_packed_n1_matches_position_zero_oracle() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -1376,7 +1406,7 @@ fn native_deepseek_v4_packed_n1_matches_position_zero_oracle() {
         model_path.display()
     );
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
@@ -1391,11 +1421,11 @@ fn native_deepseek_v4_packed_n1_matches_position_zero_oracle() {
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_packed_n2_matches_local_continuation() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
@@ -1421,7 +1451,7 @@ fn native_deepseek_v4_packed_n2_matches_local_continuation() {
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_packed_n4_preserves_csa_and_decode_continuation() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -1430,7 +1460,7 @@ fn native_deepseek_v4_packed_n4_preserves_csa_and_decode_continuation() {
         model_path.display()
     );
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
@@ -1466,7 +1496,7 @@ fn native_deepseek_v4_packed_n4_preserves_csa_and_decode_continuation() {
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -1475,7 +1505,7 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
         model_path.display()
     );
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     let model_content_id = frozen_model_content_id();
     let mut session =
@@ -1590,11 +1620,11 @@ fn native_deepseek_v4_snapshot_restores_exact_csa_continuation() {
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_packed_callback_unwind_poison_is_fail_stop() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
@@ -1637,11 +1667,11 @@ fn native_deepseek_v4_packed_callback_unwind_poison_is_fail_stop() {
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_whole_command_callback_reports_only_verified_prefix() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency_for(&ctx, &gguf, 1);
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build singleton session");
@@ -1672,7 +1702,7 @@ fn native_deepseek_v4_whole_command_callback_reports_only_verified_prefix() {
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_packed_n128_preserves_hca_and_wrapped_decode() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -1681,7 +1711,7 @@ fn native_deepseek_v4_packed_n128_preserves_hca_and_wrapped_decode() {
         model_path.display()
     );
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
@@ -1753,11 +1783,11 @@ fn native_deepseek_v4_packed_n128_preserves_hca_and_wrapped_decode() {
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_two_packed_chunks_match_second_hca_and_decode() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build packed session");
@@ -1810,12 +1840,12 @@ fn native_deepseek_v4_two_packed_chunks_match_second_hca_and_decode() {
 fn profile_native_deepseek_v4_singleton_decode_at_128_and_512() {
     const FORWARD_LIMIT: usize = 520;
     const SAMPLES: usize = 5;
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build profiled session");
@@ -2013,12 +2043,12 @@ fn profile_native_deepseek_v4_whole_token_breakdown_at_128_and_512() {
         );
     }
 
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
     let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
         &ctx,
@@ -2246,12 +2276,12 @@ fn profile_native_deepseek_v4_single_command_at_128_and_512() {
         );
     }
 
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
     let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
         &ctx,
@@ -2620,12 +2650,12 @@ fn profile_native_deepseek_v4_stage_families_at_128_and_512() {
         );
     }
 
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
     let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
         &ctx,
@@ -2665,12 +2695,12 @@ fn profile_native_deepseek_v4_stage_families_at_128_and_512() {
 fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
     const FORWARD_LIMIT: usize = 520;
     const WARM_SAMPLES: usize = 5;
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(model_path.exists(), "missing DS4 model");
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
     let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
         &ctx,
@@ -2835,7 +2865,7 @@ fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
 #[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_retained_chunks_reach_position_1024() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -2844,7 +2874,7 @@ fn native_deepseek_v4_retained_chunks_reach_position_1024() {
         model_path.display()
     );
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     let mut session =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build native session");
@@ -2889,7 +2919,7 @@ fn native_deepseek_v4_retained_chunks_reach_position_1024() {
 #[test]
 #[ignore = "requires the local DS4 model and a published position-1024 snapshot"]
 fn native_deepseek_v4_durable_position_1024_snapshot_matches_oracle() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let snapshot_path = std::env::var_os("DSV4_SNAPSHOT")
@@ -2910,7 +2940,7 @@ fn native_deepseek_v4_durable_position_1024_snapshot_matches_oracle() {
     assert!(snapshot_path.exists(), "missing durable DS4 snapshot");
 
     let started = Instant::now();
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
             .expect("resolve durable snapshot model identity");
@@ -2973,7 +3003,7 @@ fn native_deepseek_v4_durable_position_1024_snapshot_matches_oracle() {
 #[test]
 #[ignore = "requires the local DS4 model and a published position-1024 snapshot"]
 fn native_deepseek_v4_position_1024_snapshot_reaches_position_2048() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let source_snapshot_path = std::env::var_os("DSV4_SNAPSHOT")
@@ -3004,7 +3034,7 @@ fn native_deepseek_v4_position_1024_snapshot_reaches_position_2048() {
     );
 
     let started = Instant::now();
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
             .expect("resolve durable snapshot model identity");
@@ -3126,7 +3156,7 @@ fn native_deepseek_v4_position_1024_snapshot_reaches_position_2048() {
 #[test]
 #[ignore = "requires the local DS4 model and a published position-2048 snapshot"]
 fn native_deepseek_v4_durable_position_2048_snapshot_matches_oracle() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let snapshot_path = std::env::var_os("DSV4_POSITION_2048_SNAPSHOT")
@@ -3150,7 +3180,7 @@ fn native_deepseek_v4_durable_position_2048_snapshot_matches_oracle() {
     );
 
     let started = Instant::now();
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
             .expect("resolve durable snapshot model identity");
@@ -3222,7 +3252,7 @@ fn native_deepseek_v4_durable_position_2048_snapshot_matches_oracle() {
 #[test]
 #[ignore = "requires the local DS4 model and a published position-2048 snapshot"]
 fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let source_snapshot_path = std::env::var_os("DSV4_POSITION_2048_SNAPSHOT")
@@ -3253,7 +3283,7 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
     );
 
     let started = Instant::now();
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
             .expect("resolve durable snapshot model identity");
@@ -3475,7 +3505,7 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
 #[test]
 #[ignore = "requires the local DS4 model and a published position-2052 snapshot"]
 fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let snapshot_path = std::env::var_os("DSV4_POSITION_2052_SNAPSHOT")
@@ -3499,7 +3529,7 @@ fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
     );
 
     let started = Instant::now();
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
             .expect("resolve durable sparse snapshot model identity");
@@ -3572,7 +3602,7 @@ fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
 #[ignore = "requires the local DS4 model and a published position-2052 snapshot"]
 fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
     const FORWARD_LIMIT: usize = 2_177;
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let source_snapshot_path = std::env::var_os("DSV4_POSITION_2052_SNAPSHOT")
@@ -3603,7 +3633,7 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
     );
 
     let started = Instant::now();
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
             .expect("resolve HCA row-16 snapshot model identity");
@@ -3844,7 +3874,7 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
 #[test]
 #[ignore = "requires the local DS4 model and a published position-2176 snapshot"]
 fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let snapshot_path = std::env::var_os("DSV4_POSITION_2176_SNAPSHOT")
@@ -3868,7 +3898,7 @@ fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
     );
 
     let started = Instant::now();
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
             .expect("resolve durable HCA row-16 snapshot model identity");
@@ -3943,7 +3973,7 @@ fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
 #[test]
 #[ignore = "requires the local DS4 model and a published position-2176 snapshot"]
 fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let source_snapshot_path = std::env::var_os("DSV4_POSITION_2176_SNAPSHOT")
@@ -3974,7 +4004,7 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
     );
 
     let started = Instant::now();
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
             .expect("resolve full-third-slab snapshot model identity");
@@ -4333,7 +4363,7 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
 #[test]
 #[ignore = "requires the local DS4 model and a published position-3072 snapshot"]
 fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let snapshot_path = std::env::var_os("DSV4_POSITION_3072_SNAPSHOT")
@@ -4354,7 +4384,7 @@ fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope()
     assert!(snapshot_path.exists(), "missing position-3072 snapshot");
 
     let started = Instant::now();
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
             .expect("resolve full-third-slab snapshot model identity");
@@ -4450,7 +4480,7 @@ fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope()
 #[ignore = "requires the local DS4 model and a published position-3072 snapshot"]
 fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
     const FORWARD_LIMIT: usize = 3_077;
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     let snapshot_path = std::env::var_os("DSV4_POSITION_3072_SNAPSHOT")
@@ -4471,7 +4501,7 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
     assert!(snapshot_path.exists(), "missing position-3072 snapshot");
 
     let started = Instant::now();
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let content =
         checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
             .expect("resolve dynamic-capacity snapshot model identity");
@@ -4637,7 +4667,7 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
 #[test]
 #[ignore = "manual native DS4 four-token forward maps the 95.93 GiB checkpoint"]
 fn native_deepseek_v4_tokens_35_201_200_local_prefix() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -4648,7 +4678,7 @@ fn native_deepseek_v4_tokens_35_201_200_local_prefix() {
 
     eprintln!("opening {}", model_path.display());
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     eprintln!("residency={}", residency.report());
     let mut session =
@@ -4803,7 +4833,7 @@ fn native_deepseek_v4_tokens_35_201_200_local_prefix() {
 #[test]
 #[ignore = "manual native DS4 five-token branch maps the 95.93 GiB checkpoint"]
 fn native_deepseek_v4_csa_boundary_and_continuation_branch() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -4814,7 +4844,7 @@ fn native_deepseek_v4_csa_boundary_and_continuation_branch() {
 
     eprintln!("opening {}", model_path.display());
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     eprintln!("residency={}", residency.report());
     let mut session =
@@ -4875,7 +4905,7 @@ fn native_deepseek_v4_csa_boundary_and_continuation_branch() {
 #[test]
 #[ignore = "manual native DS4 nine-token branch maps the 95.93 GiB checkpoint"]
 fn native_deepseek_v4_second_csa_boundary_and_continuation() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -4886,7 +4916,7 @@ fn native_deepseek_v4_second_csa_boundary_and_continuation() {
 
     eprintln!("opening {}", model_path.display());
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     eprintln!("residency={}", residency.report());
     let mut session =
@@ -4947,7 +4977,7 @@ fn native_deepseek_v4_second_csa_boundary_and_continuation() {
 #[test]
 #[ignore = "manual native DS4 513-token HCA branch maps the 95.93 GiB checkpoint"]
 fn native_deepseek_v4_through_fourth_hca_continuation() {
-    let model_path = std::env::var_os("DSV4_MODEL")
+    let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
     assert!(
@@ -4958,7 +4988,7 @@ fn native_deepseek_v4_through_fourth_hca_continuation() {
 
     eprintln!("opening {}", model_path.display());
     let ctx = MetalContext::new().expect("create Metal context");
-    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let gguf = open_pinned_legacy_gguf(&model_path);
     let residency = load_admitted_residency(&ctx, &gguf);
     eprintln!("residency={}", residency.report());
     let mut session =

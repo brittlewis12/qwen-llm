@@ -9897,6 +9897,8 @@ fn invalid<T>(detail: impl Into<String>) -> Result<T, DeepSeekV4MetalError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
+    use crate::deepseek_v4_census::PinnedDeepSeekV4AssetV1;
     use crate::deepseek_v4_oracle::{
         CompressorState, RopeDirection, RopeParameters,
         attention_fp8_nope_bf16_rope_roundtrip_in_place, grouped_low_rank_projection,
@@ -9907,6 +9909,15 @@ mod tests {
     use crate::tensor::{GgmlType, TensorDesc};
     use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
     use sha2::{Digest, Sha256};
+    use std::path::{Path, PathBuf};
+
+    const LEGACY_CENSUS_MANIFEST: &str =
+        include_str!("../tests/fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_census_v1.json");
+    const LEGACY_CHECKPOINT_CONTENT_ID: [u8; 32] = [
+        0xaf, 0x65, 0xc3, 0x14, 0x59, 0xd1, 0xd2, 0x5e, 0xf9, 0xf3, 0xc7, 0x76, 0x6a, 0xf1, 0xf7,
+        0x41, 0x57, 0xcb, 0x33, 0x0d, 0x9b, 0xde, 0xe5, 0x43, 0x2e, 0x32, 0x0f, 0xa1, 0xd8, 0xe4,
+        0x9e, 0x2a,
+    ];
 
     fn metal_context() -> Option<MetalContext> {
         match MetalContext::new() {
@@ -9914,6 +9925,25 @@ mod tests {
             Err(MetalError::NoDevice) => None,
             Err(error) => panic!("Metal context: {error}"),
         }
+    }
+
+    fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
+        let gguf = GgufFile::open(model_path).expect("open legacy DS4 GGUF shards");
+        PinnedDeepSeekV4AssetV1::parse(LEGACY_CENSUS_MANIFEST)
+            .expect("parse legacy DS4 census")
+            .validate_observed(&gguf)
+            .expect("legacy DS4 schema and quant census match");
+        let identity_cache_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("target/.qwen-dsv4-model-identity-v2");
+        let content =
+            checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+                .expect("resolve legacy DS4 ordered-content identity");
+        assert_eq!(
+            content.content_id, LEGACY_CHECKPOINT_CONTENT_ID,
+            "DSV4_LEGACY_MODEL does not match the pinned 2026-07-31 asset"
+        );
+        gguf
     }
 
     fn offset_f32(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
@@ -10291,20 +10321,20 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires the local 95.93 GiB DS4 fixture and executes a synthetic deep-context token"]
+    #[ignore = "requires the archived 95.93 GiB DS4 fixture and executes a synthetic deep-context token"]
     fn native_synthetic_state_crosses_the_first_tiled_hca_boundary_repeatably() {
         const POSITION: u32 = 65_663;
         const FORWARD_LIMIT: usize = POSITION as usize + 1;
-        let model_path = std::env::var_os("DSV4_MODEL")
+        let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::PathBuf::from(
-                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                    "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
                 )
             });
         assert!(model_path.exists(), "missing DS4 model");
         let ctx = MetalContext::new().expect("create Metal context");
-        let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+        let gguf = open_pinned_legacy_gguf(&model_path);
         let run = || {
             let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
                 .expect("plan first tiled-HCA boundary session");
@@ -10457,16 +10487,16 @@ mod tests {
             (session.residency, evidence)
         }
 
-        let model_path = std::env::var_os("DSV4_MODEL")
+        let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::PathBuf::from(
-                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                    "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
                 )
             });
         assert!(model_path.exists(), "missing DS4 model");
         let ctx = MetalContext::new().expect("create Metal context");
-        let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+        let gguf = open_pinned_legacy_gguf(&model_path);
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
             .expect("plan terminal synthetic session");
         assert_eq!(plan.session_capacity().csa_physical_rows(), 262_144);
@@ -10711,16 +10741,16 @@ mod tests {
             (session.residency, evidence)
         }
 
-        let model_path = std::env::var_os("DSV4_MODEL")
+        let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::PathBuf::from(
-                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                    "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
                 )
             });
         assert!(model_path.exists(), "missing DS4 model");
         let ctx = MetalContext::new().expect("create Metal context");
-        let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+        let gguf = open_pinned_legacy_gguf(&model_path);
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(
             &ctx,
             &gguf,
@@ -10891,16 +10921,16 @@ mod tests {
             (session.residency, evidence)
         }
 
-        let model_path = std::env::var_os("DSV4_MODEL")
+        let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::PathBuf::from(
-                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                    "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
                 )
             });
         assert!(model_path.exists(), "missing DS4 model");
         let ctx = MetalContext::new().expect("create Metal context");
-        let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+        let gguf = open_pinned_legacy_gguf(&model_path);
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
             .expect("plan far-context differential session");
         let admitted = plan
@@ -11240,16 +11270,16 @@ mod tests {
             (session.residency, evidence)
         }
 
-        let model_path = std::env::var_os("DSV4_MODEL")
+        let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::PathBuf::from(
-                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                    "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
                 )
             });
         assert!(model_path.exists(), "missing DS4 model");
         let ctx = MetalContext::new().expect("create Metal context");
-        let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+        let gguf = open_pinned_legacy_gguf(&model_path);
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
             .expect("plan online HCA boundary session");
         let admitted = plan

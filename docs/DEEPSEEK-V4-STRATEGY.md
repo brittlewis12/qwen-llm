@@ -17,6 +17,25 @@ The initial shipping target is non-speculative generation from a standard
 llama.cpp-schema GGUF. DSpark, custom quant recipes, SSD expert streaming, and
 a project rename are independent follow-on decisions.
 
+## Working records
+
+This document owns architecture contracts, milestone gates, and the current
+integrated interpretation. It is not the chronological experiment ledger.
+
+- `docs/PERF-ROADMAP.md` owns the force-ranked optimization queue and
+  optimization reopen conditions across model families. DS4 work enters that
+  queue once a structural milestone becomes an optimization problem.
+- `docs/PERF-LOG.md` owns append-only measured outcomes, including bounded
+  KILLs and removed prototypes. Add one entry at each decision-changing
+  checkpoint rather than rewriting history here.
+- `docs/bench/` owns durable packet details when a result needs raw samples,
+  artifact inventories, or an independently reusable protocol. Small
+  model-free falsifiers may cite their exact command and retained test instead
+  of manufacturing a packet directory.
+
+The strategy may summarize promoted conclusions, but the performance log is
+authoritative for what was tried, what gate fired, and why a branch closed.
+
 ## Why this target
 
 DeepSeek-V4-Flash-0731 is the official post-training release of V4 Flash. The
@@ -1506,14 +1525,32 @@ not additive time shares, and shader-list metadata is sampling-biased; they do
 not authorize a kernel by themselves. They do falsify a global launch-only
 story and support a targeted quantized-expert instruction-path falsifier.
 
-The next narrow prototype removes the redundant cross-simdgroup rendezvous in
-the all-slot gate/up kernels: each simdgroup already owns complete rows after
-`simd_sum`, so its lane zero can apply the unchanged clamp/SwiGLU directly
-without storing local totals, waiting at a threadgroup barrier, and reloading
-the same values. Promotion requires bit identity for all routed storage
-families, at least 0.75 ms/token paired improvement at both depths, and no
-regression in the one-command profile. If the gate fails, do not continue
-shaving host timers or infer a broader kernel rewrite from limiter percentages.
+The bounded all-slot follow-up rejects four short-context kernel hypotheses.
+Removing the cross-simdgroup totals rendezvous remains bit-identical, but the
+product command moves to 37.185/36.923 ms at contexts 128/512 versus the
+37.125/37.627 ms attribution checkpoint: it does not improve both depths or
+clear 0.75 ms/token. Doubling IQ2_S rows per simdgroup worsens isolated gate/up
+from about 0.112 to 0.123 ms/layer. A Flash-0731 geometry specialization with
+two-byte packed metadata loads saves only 0.008-0.013 ms/layer, below the
+0.018-0.020 ms model-free kill gate. Four-lane grid conversion and exact sign
+bit application regresses to about 0.157 ms/layer. All prototypes were removed
+without a production switch.
+
+The retained profiler now uses deterministic nonzero quant blocks and times
+gate/up and down independently. At production geometry, IQ2_S gate/up owns
+about 0.112 ms/layer, IQ3_XXS down about 0.062 ms/layer, and MXFP4 down about
+0.088 ms/layer. The split is attribution evidence rather than an additive
+product trace because each operation is warmed and timed independently. These
+results close sub-threshold short-context kernel tuning under the current gate;
+the next primary lane is cooperative Lightning Indexer scoring, where the
+measured 262,144-row operation alone costs 8.232 ms per CSA layer.
+
+The pinned llama.cpp depth command is not a free decode-only bracket. Its
+`--n-depth` implementation executes `test_prompt(n_depth)` and serializes the
+resulting state before timed generation on the first repetition at every new
+depth. A 32K row would therefore reintroduce the long cold-prefill loop this
+strategy deliberately retired. Defer that external bracket until a reusable
+prepared state exists or the comparison itself becomes the gating uncertainty.
 
 The nonperturbative whole-command and historical stage-attribution commands
 are:
@@ -1733,19 +1770,19 @@ noise without reducing technical risk. Revisit after S5.
    thereafter; CSA uses it through position 2050 before sparse selection starts
    at 2051; and HCA uses it through position 65,662 before tiled attention starts
    at 65,663 without a numerical seam.
-4. Treat the pinned b10254 Metal baseline as the short-context target: 27.67 and
-   27.58 tokens/s at depths 128 and 512 versus qwen-llm's 16.81 and 16.70. The
-   exact b10235 token packet and prefill comparison independently bracket request
-   identity and preserve full-vector repeat hashes.
-5. Attribute per-layer routing next, with a preregistered 5 ms/token stop rule
-   on the aggregate router-GPU-end-to-expert-GPU-start idle interval. If it
-   passes, move learned/hash expert selection toward an immutable GPU
-   route-record ABI while keeping selected IDs asynchronously observable and the
-   current CPU route as the differential reference. If it fails, target command
-   submission or expert projections instead.
-6. Keep far-context index scoring and packed-prompt dispatch reduction as
-   independent measured lanes. Exact radix selection is bounded at 4.582 ms
-   median / 4.589 ms p95 over all 262,144 rows, while scoring leads at 8.232 ms;
-   packed prefill needs a warm-matched comparator before promoting a ratio.
+4. Treat short-context execution as bounded near-parity rather than the primary
+   optimization lane. The one-command path is about 37-38 ms of GPU work versus
+   llama.cpp's 36.1 ms total at depths 128/512; barrier, row-shape, geometry,
+   and vector-decode probes all miss the 0.75 ms/token two-depth gate.
+5. Replace scalar Lightning Indexer scoring with one simdgroup per row at the
+   production 64-head by 128-dimension geometry. Stage each F16 key row once,
+   compute two complete heads per lane in original dimension order, and let
+   lane zero sum 64 published head terms in original head order. Require exact
+   scalar/cooperative score bits and selected IDs before product promotion.
+6. Keep the external depth bracket and packed-prompt dispatch reduction as
+   independent lanes. `llama-bench --n-depth` performs the full cold prefix at
+   each new depth, so do not pay that loop until a reusable state or a gating
+   cross-engine question justifies it. Packed prefill still needs a warm-matched
+   comparator before promoting a ratio.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 Short-Context Kernel Lane Bounded KILL
+
+Status: bounded `KILL` for the measured all-slot IQ2/short-command hypotheses.
+No experimental production kernel remains. This closes those local shapes, not
+all possible DS4 short-context work; reopening requires the explicit roadmap
+ceiling or two-depth gate.
+
+- Base is clean checkpoint `7979a2e` after whole-token attribution commit
+  `78323f3`. Ordinary DS4 decode is one command and one encoder; host time
+  outside the GPU is about 1 ms, while the command itself is about 37-38 ms.
+- The retained production-shape profiler now uses deterministic nonzero quant
+  blocks and attributes IQ2_S gate/up at 0.1120-0.1126 ms/layer, IQ3_XXS down at
+  0.0606-0.0611, and MXFP4 down at 0.0873-0.0878. The independently warmed
+  split is attribution evidence, not an additive product trace.
+- Removing the all-slot totals/barrier remains bit-identical but fails product
+  promotion: context-128 GPU is 37.185 ms versus the 37.125 ms checkpoint;
+  context-512 reaches 36.923 versus 37.627 ms, so the candidate does not clear
+  0.75 ms at both depths. It was removed.
+- IQ2 rows-per-simdgroup 4 -> 8 remains exact and regresses gate/up to about
+  0.123 ms/layer. A production-geometry/two-byte-metadata specialization saves
+  only 0.008-0.013 ms/layer, below the 0.018-0.020 model-free kill line.
+  Four-lane grid conversion with exact sign-bit application regresses to about
+  0.157 ms/layer. Both were removed before live inference.
+- Source inspection rejects a supposedly free llama.cpp 8K/32K bracket:
+  `llama-bench --n-depth` calls `test_prompt(n_depth)` and serializes the state
+  before timed generation for each new depth. No long cold-prefix run was spent
+  on this checkpoint.
+
+Decision: preserve the gate/up-versus-down profiler and move the primary DS4
+lane to cooperative Lightning Indexer scoring. The existing scalar score costs
+1.961/8.232 ms per CSA layer at 65,536/262,144 rows, materially larger than the
+entire remaining short-context parity gap.
+
+Validation: exact all-slot/serial outputs and invalid-route zeroing pass; the
+final release profiler passes on all four storage combinations; strict
+all-target/all-feature qwen-llm Clippy is warning-free. Design and stop-rule
+reviews: CX session `019fc50a-a944-7c60-9ac8-8083aad4b983`.
+
 ## 2026-08-01 - v0.663 Lm-Head Prompt-Digest Invalid
 
 Status: authenticated `INVALID` with `authority=[]`. The identity-key repair and

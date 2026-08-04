@@ -17463,12 +17463,33 @@ mod tests {
         )
         .unwrap();
 
-        let make_bank = |dtype: GgmlType, n_in: usize, n_out: usize| {
+        let make_bank = |dtype: GgmlType, n_in: usize, n_out: usize, seed: usize| {
             let (block_elements, block_bytes) = ggml_type_layout(dtype).unwrap();
-            let bytes = n_in * n_out * E / block_elements as usize * block_bytes as usize;
+            let block_elements = block_elements as usize;
+            let block_bytes = block_bytes as usize;
+            let blocks = n_in * n_out * E / block_elements;
+            let mut payload = vec![0u8; blocks * block_bytes];
+            for block in 0..blocks {
+                let start = block * block_bytes;
+                if dtype == GgmlType::MXFP4 {
+                    payload[start] = 126 + ((block + seed) % 4) as u8;
+                    for byte in 1..block_bytes {
+                        payload[start + byte] = (block * 29 + byte * 17 + seed * 11 + 7) as u8;
+                    }
+                } else {
+                    payload[start..start + 2].copy_from_slice(
+                        &half::f16::from_f32(0.0078125 * (1 + (block + seed) % 7) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                    for byte in 2..block_bytes {
+                        payload[start + byte] = (block * 31 + byte * 13 + seed * 19 + 5) as u8;
+                    }
+                }
+            }
             MetalTensor::from_bytes(
                 &ctx,
-                &vec![0u8; bytes],
+                &payload,
                 vec![n_in as u64, n_out as u64, E as u64],
                 dtype,
             )
@@ -17507,9 +17528,9 @@ mod tests {
             (GgmlType::IQ3_S, GgmlType::IQ3_XXS, "iq3s_iq3xxs"),
             (GgmlType::IQ3_S, GgmlType::MXFP4, "iq3s_mxfp4"),
         ] {
-            let gate_bank = make_bank(gate_dtype, H, F);
-            let up_bank = make_bank(gate_dtype, H, F);
-            let down_bank = make_bank(down_dtype, F, H);
+            let gate_bank = make_bank(gate_dtype, H, F, 1);
+            let up_bank = make_bank(gate_dtype, H, F, 3);
+            let down_bank = make_bank(down_dtype, F, H, 5);
             let serial = || {
                 measure(&|encoder| {
                     scratch.encode_routed_experts_indexed(
@@ -17524,11 +17545,48 @@ mod tests {
                     )
                 })
             };
+            let gate_up = || {
+                measure(&|encoder| {
+                    encode_ds4_all_slots_gate_up_swiglu(
+                        &ctx,
+                        encoder,
+                        &gate_bank,
+                        &up_bank,
+                        &scratch.normalized_input,
+                        &scratch.expert_ids,
+                        &scratch.route_status,
+                        &scratch.routed_inner,
+                        H,
+                        F,
+                        E,
+                        10.0,
+                    )
+                })
+            };
+            let down = || {
+                measure(&|encoder| {
+                    encode_ds4_all_slots_down(
+                        &ctx,
+                        encoder,
+                        &down_bank,
+                        &scratch.routed_inner,
+                        &scratch.expert_ids,
+                        &scratch.route_status,
+                        &scratch.expert_outputs,
+                        F,
+                        H,
+                        E,
+                    )
+                })
+            };
             let serial_before_ms = serial();
             let serial_bits = bits(scratch.expert_outputs());
             let all_slot_ms = all_slot();
             assert_eq!(bits(scratch.expert_outputs()), serial_bits, "{label}");
             let all_slot_repeat_ms = all_slot();
+            let gate_up_ms = gate_up();
+            let gate_up_repeat_ms = gate_up();
+            let down_ms = down();
             let serial_after_ms = serial();
             assert_eq!(
                 bits(scratch.expert_outputs()),
@@ -17536,7 +17594,9 @@ mod tests {
                 "{label} repeat"
             );
             eprintln!(
-                "deepseek_v4 all_slot_experts {label} serial_before_ms={serial_before_ms:.6} all_slot_ms={all_slot_ms:.6} all_slot_repeat_ms={all_slot_repeat_ms:.6} serial_after_ms={serial_after_ms:.6} serial_median_ms={:.6} all_slot_median_ms={:.6} speedup={:.3} repeats={REPEATS}",
+                "deepseek_v4 all_slot_experts {label} serial_before_ms={serial_before_ms:.6} all_slot_ms={all_slot_ms:.6} all_slot_repeat_ms={all_slot_repeat_ms:.6} gate_up_ms={gate_up_ms:.6} gate_up_repeat_ms={gate_up_repeat_ms:.6} gate_up_median_ms={:.6} down_ms={down_ms:.6} isolated_warmed_sum_ms={:.6} serial_after_ms={serial_after_ms:.6} serial_median_ms={:.6} all_slot_median_ms={:.6} speedup={:.3} repeats={REPEATS}",
+                (gate_up_ms + gate_up_repeat_ms) * 0.5,
+                (gate_up_ms + gate_up_repeat_ms) * 0.5 + down_ms,
                 (serial_before_ms + serial_after_ms) * 0.5,
                 (all_slot_ms + all_slot_repeat_ms) * 0.5,
                 (serial_before_ms + serial_after_ms) / (all_slot_ms + all_slot_repeat_ms),

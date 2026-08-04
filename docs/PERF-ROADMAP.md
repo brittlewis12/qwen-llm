@@ -110,6 +110,47 @@ Decision rules:
 - Until an enforceable GPU lease exists, only the coordinating session may run
   timed GPU work; research subagents must remain read-only.
 
+## DeepSeek V4 Optimization Lane — 2026-08-04
+
+DS4 Flash-0731 has crossed from architecture bring-up into optimization. Full
+structural execution reaches 1,048,576 context positions; ordinary short
+decode uses one Metal command/encoder and runs at about 37-38 ms command-GPU /
+38-39 ms wall on the 95.93 GiB IQ3_XXS asset, near the pinned llama.cpp b10254
+36.1 ms wall floor. Practical long context is the leading measured optimization
+opportunity, not yet a demonstrated product-speed differentiator.
+
+Force-ranked queue:
+
+1. **Cooperative Lightning Indexer scoring.** The scalar production kernel
+   costs 1.961 ms at 65,536 rows and 8.232 ms at 262,144 rows per CSA layer.
+   Give one simdgroup each row, stage its 128 F16 key values once, compute two
+   complete heads per lane in original dimension order, and have lane zero sum
+   64 published head terms in original head order. Require bit-identical scores,
+   selected IDs, and failure semantics before measuring speed.
+2. **Reprice exact radix selection after scoring.** Selection is already exact
+   and bounded at 1.172/4.582 ms for 65,536/262,144 rows. Optimize it only after
+   cooperative scoring lands and it becomes the measured leading CSA phase.
+3. **Tiled HCA and million-row latency.** The tiled kernel is structurally exact
+   beyond 512 compressed rows, but practical latency above 65,536 context is a
+   separate measured phase. Do not conflate it with CSA scoring.
+4. **Packed prefill dispatch reduction.** Retain as an independent TTFT lane;
+   require a warm-matched comparator and named prompt archetype before a ratio
+   gets product authority.
+
+Short-context local tuning is bounded-KILL under the current 0.75 ms/token
+two-depth gate: all-slot barrier removal, larger IQ2 row groups, fixed-geometry
+metadata specialization, and four-lane IQ2 decode all miss or regress. Reopen
+only for a new structural work reduction with a credible >=2 ms/token ceiling,
+or a measured candidate that clears 0.75 ms at both contexts 128 and 512. The
+retained nonzero expert profiler reports gate/up and down separately so a future
+reopen starts from attribution rather than another shape sweep.
+
+`llama-bench --n-depth` is not a free decode-only long-context comparator: its
+first repetition executes the complete depth prompt and serializes the state.
+Do not pay a 32K cold prefix merely to populate a scoreboard; first establish a
+reusable prepared state or make the cross-engine depth curve the actual gating
+uncertainty.
+
 ## Latest Baseline Snapshot
 
 M4 Max, release `qwen-bench`, clean narrow family spot after `v0.344` against

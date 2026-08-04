@@ -329,7 +329,7 @@ fn assert_cutoff_bifurcation(
 fn pinned_position_3070_decisions_explain_long_sparse_schedule_drift() {
     assert_eq!(
         format!("{:x}", Sha256::digest(NATIVE_SOURCE.as_bytes())),
-        "539c0cfac45ff2ead361a5f3c0d9e2730347810c41fac5b3fdf006a4360a7c46"
+        "7ce0ab84f262d5e9ce8cd3098452872156f180a53d5282d71c68d4b97ce9e393"
     );
     assert_eq!(
         format!("{:x}", Sha256::digest(BATCHED_SOURCE.as_bytes())),
@@ -435,7 +435,7 @@ fn pinned_position_3070_decisions_explain_long_sparse_schedule_drift() {
 fn schedule_envelope_manifest_pins_producer_vectors_and_repeats() {
     assert_eq!(
         format!("{:x}", Sha256::digest(MANIFEST_SOURCE.as_bytes())),
-        "ba26fa36e8ba6c0f776c3c2783cf23c305c60f9b1d06298bab41c8347d80c067"
+        "2dcba3755196c101f2bfe4375c1f82a8039039047a830fcc7e6ae4e08e56482a"
     );
     let manifest: Value = serde_json::from_str(MANIFEST_SOURCE).unwrap();
     assert_eq!(manifest["schema_version"], 1);
@@ -628,11 +628,31 @@ fn schedule_envelope_manifest_pins_producer_vectors_and_repeats() {
         manifest["mechanism_gate"]["b10222_first_schedule_csa_set_difference_layer"],
         6
     );
+    assert_eq!(
+        manifest["dense_cooperative_change_gate"],
+        serde_json::json!({
+            "baseline_commit": "cfb4d3a",
+            "comparison_order": "descending_score_then_ascending_row_id",
+            "selected_cache_order_lists_unchanged": 21,
+            "ordered_route_id_lists_unchanged": 43,
+            "layers_with_internal_rank_jitter": 15,
+            "internally_moved_rows": 152,
+            "maximum_rank_displacement": 2,
+            "rank_512_513_row_ids_unchanged": 21,
+            "minimum_cutoff_margin_before": 0.00011134148,
+            "minimum_cutoff_margin_after": 0.00015997887,
+            "maximum_score_absolute_delta": 0.0002625,
+            "maximum_score_relative_rms": 0.0000744290247,
+            "maximum_route_weight_absolute_delta": 0.00002378,
+            "maximum_route_weight_relative_rms": 0.0000487064126,
+            "consumed_discrete_decisions_changed": 0,
+        })
+    );
     let native_hashes = &manifest["native_repeat_hashes"];
     for (field, expected) in [
         (
             "position3070_singleton_target",
-            "2479973378fe4befe8304dc89b4a836274ad7ccb3fbda4b3e4f0c8c63ad0defc",
+            "32511523dad01070a3c00f22e4725cabe58fcfc450d04b56646c793ff3327ae5",
         ),
         (
             "position3071_packed",
@@ -640,15 +660,15 @@ fn schedule_envelope_manifest_pins_producer_vectors_and_repeats() {
         ),
         (
             "position3071_split",
-            "f3be04a3823f7008e6735c81c35ae1ad8c6d68dd72698f77082f1c2843c41b25",
+            "95a7e1218b39a51c112fa822cd219b815696ff160b5e6a32216187f4323c31d7",
         ),
         (
             "position3072_packed",
-            "e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da",
+            "7ec53d29a78a4d6ee932f292d67dc67c1d15bdd31c050ef2aa625f57fd257764",
         ),
         (
             "position3072_split",
-            "d85c2d5698ebc537ae39d2ced5d34892c4340250fe4811d031a55013118d4db1",
+            "09700f7707107f5efa1c50ec6dda1734bae89c7fc2a56be7153bcac62fd274f4",
         ),
     ] {
         assert_eq!(native_hashes[field], expected);

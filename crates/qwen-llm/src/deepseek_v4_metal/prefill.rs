@@ -1,5 +1,4 @@
 use super::*;
-use objc2_metal::MTLComputePipelineState;
 
 pub const DEEPSEEK_V4_PREFILL_MAX_TOKENS: usize = 128;
 
@@ -2404,7 +2403,7 @@ fn encode_packed_dense_sink_attention_f16(
         .then(|| tiled_hca_query_offset(start_position, n_tokens))
         .flatten()
     else {
-        return encode_packed_legacy_dense_sink_attention_f16(
+        return encode_packed_cooperative_dense_sink_attention_f16(
             ctx,
             enc,
             queries,
@@ -2429,19 +2428,19 @@ fn encode_packed_dense_sink_attention_f16(
         let prefix_queries = f32_prefix(
             queries,
             vec![query_width as u64, query_offset as u64],
-            "packed legacy-HCA prefix queries",
+            "packed cooperative-HCA prefix queries",
         )?;
         let prefix_output = f32_prefix(
             output,
             vec![query_width as u64, query_offset as u64],
-            "packed legacy-HCA prefix output",
+            "packed cooperative-HCA prefix output",
         )?;
         let prefix_end = start_position
             .checked_add(u32::try_from(query_offset).map_err(|_| {
                 DeepSeekV4MetalError::Invalid("packed HCA prefix exceeds u32".into())
             })?)
             .ok_or_else(|| DeepSeekV4MetalError::Invalid("packed HCA prefix overflow".into()))?;
-        encode_packed_legacy_dense_sink_attention_f16(
+        encode_packed_cooperative_dense_sink_attention_f16(
             ctx,
             enc,
             &prefix_queries,
@@ -2477,7 +2476,7 @@ fn encode_packed_dense_sink_attention_f16(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode_packed_legacy_dense_sink_attention_f16(
+fn encode_packed_cooperative_dense_sink_attention_f16(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     queries: &MetalTensor,
@@ -2490,131 +2489,20 @@ fn encode_packed_legacy_dense_sink_attention_f16(
     start_position: u32,
     n_tokens: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
-    let config = deepseek_v4_session_attention_config();
-    let dims = config.checked()?;
-    checked_token_count(n_tokens)?;
-    validate_f32(
+    encode_cooperative_dense_sink_attention_f16(
+        ctx,
+        enc,
         queries,
-        &[dims.query_width as u64, n_tokens as u64],
-        false,
-        "packed attention queries",
-    )?;
-    validate_f16(
         raw_cache,
-        &[config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
-        false,
-        "packed raw cache",
-    )?;
-    validate_f16(
         raw_cache_before_chunk,
-        &[config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
-        false,
-        "packed preserved raw cache",
-    )?;
-    validate_f32(
+        compressed,
         sinks,
-        &[config.head_count as u64],
-        false,
-        "packed attention sinks",
-    )?;
-    validate_f32(
         output,
-        &[dims.query_width as u64, n_tokens as u64],
-        true,
-        "packed attention output",
-    )?;
-    let ratio = match kind {
-        AttentionKind::SlidingWindow => 0,
-        AttentionKind::CompressedSparse => 4,
-        AttentionKind::HeavilyCompressed => 128,
-    };
-    let end_position = start_position
-        .checked_add(checked_token_count(n_tokens)?)
-        .ok_or_else(|| DeepSeekV4MetalError::Invalid("packed position overflow".into()))?;
-    let expected_rows = if ratio == 0 {
-        0
-    } else {
-        end_position as usize / ratio
-    };
-    let compressed_cache = match (expected_rows, compressed) {
-        (0, None) => raw_cache,
-        (0, Some(rows)) if rows.count == 0 => rows.cache,
-        (expected, Some(rows)) if rows.count == expected => {
-            validate_f16(
-                rows.cache,
-                &[config.head_dim as u64, rows.capacity_rows as u64],
-                false,
-                "packed compressed cache",
-            )?;
-            if expected > DEEPSEEK_V4_CSA_TOP_K || expected > rows.capacity_rows {
-                return invalid(format!(
-                    "packed dense attention cannot consume {expected} rows from capacity {}",
-                    rows.capacity_rows
-                ));
-            }
-            rows.cache
-        }
-        (expected, rows) => {
-            return invalid(format!(
-                "packed attention expected {expected} compressed rows, got {}",
-                rows.map_or(0, |rows| rows.count)
-            ));
-        }
-    };
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Args {
-        head_count: u32,
-        head_dim: u32,
-        n_tokens: u32,
-        compression_ratio: u32,
-        start_position: u32,
-        window: u32,
-        scale: f32,
-    }
-    let pso = ctx.pipeline("kernel_deepseek_v4_packed_dense_sink_attention_f16")?;
-    let maximum_rows = DEEPSEEK_V4_LOCAL_WINDOW + DEEPSEEK_V4_CSA_TOP_K;
-    let threadgroup_width = config.head_dim.max(maximum_rows);
-    if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
-        return invalid(format!(
-            "packed attention pipeline supports {} threads, requires {}",
-            pso.maxTotalThreadsPerThreadgroup(),
-            threadgroup_width
-        ));
-    }
-    enc.set_pipeline(&pso);
-    enc.set_bytes(
-        0,
-        &Args {
-            head_count: config.head_count as u32,
-            head_dim: config.head_dim as u32,
-            n_tokens: n_tokens as u32,
-            compression_ratio: ratio as u32,
-            start_position,
-            window: DEEPSEEK_V4_LOCAL_WINDOW as u32,
-            scale: 1.0 / (config.head_dim as f32).sqrt(),
-        },
-    );
-    enc.set_tensor(1, queries);
-    enc.set_tensor(2, raw_cache);
-    enc.set_tensor(3, raw_cache_before_chunk);
-    enc.set_tensor(4, compressed_cache);
-    enc.set_tensor(5, sinks);
-    enc.set_tensor(6, output);
-    enc.set_threadgroup_memory(0, (maximum_rows + 1) * std::mem::size_of::<f32>());
-    enc.dispatch(
-        MTLSize {
-            width: n_tokens,
-            height: config.head_count,
-            depth: 1,
-        },
-        MTLSize {
-            width: threadgroup_width,
-            height: 1,
-            depth: 1,
-        },
-    );
-    Ok(())
+        kind,
+        start_position,
+        n_tokens,
+        deepseek_v4_session_attention_config(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3378,8 +3266,108 @@ mod tests {
             MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, n_tokens as u64]).unwrap();
         let ordered =
             MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, n_tokens as u64]).unwrap();
+        let overlapping_raw_storage = MetalTensor::zeros_f16(
+            &ctx,
+            vec![
+                config.head_dim as u64,
+                (DEEPSEEK_V4_LOCAL_WINDOW + 1) as u64,
+            ],
+        )
+        .unwrap();
+        let overlapping_raw = overlapping_raw_storage.view_subrange(
+            0,
+            vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+        );
+        let overlapping_raw_before = overlapping_raw_storage.view_subrange(
+            config.head_dim as u64,
+            vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+        );
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
+        let empty = encode_cooperative_dense_sink_attention_f16(
+            &ctx,
+            &encoder,
+            &queries,
+            &raw,
+            &raw_before,
+            None,
+            &sinks,
+            &packed,
+            AttentionKind::SlidingWindow,
+            0,
+            0,
+            config,
+        )
+        .unwrap_err();
+        assert!(empty.to_string().contains("requires at least one token"));
+        let oversized = encode_cooperative_dense_sink_attention_f16(
+            &ctx,
+            &encoder,
+            &queries,
+            &raw,
+            &raw_before,
+            None,
+            &sinks,
+            &packed,
+            AttentionKind::SlidingWindow,
+            0,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1,
+            config,
+        )
+        .unwrap_err();
+        assert!(
+            oversized
+                .to_string()
+                .contains("exceeds retained chunk limit")
+        );
+        let aliased = encode_cooperative_dense_sink_attention_f16(
+            &ctx,
+            &encoder,
+            &queries,
+            &raw,
+            &raw,
+            Some(DeepSeekV4PublishedRows {
+                cache: &compressed,
+                count: n_tokens / 4,
+                capacity_rows: DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+            }),
+            &sinks,
+            &packed,
+            AttentionKind::CompressedSparse,
+            0,
+            n_tokens,
+            config,
+        )
+        .unwrap_err();
+        assert!(
+            aliased
+                .to_string()
+                .contains("requires disjoint current and preserved raw caches")
+        );
+        let partially_aliased = encode_cooperative_dense_sink_attention_f16(
+            &ctx,
+            &encoder,
+            &queries,
+            &overlapping_raw,
+            &overlapping_raw_before,
+            Some(DeepSeekV4PublishedRows {
+                cache: &compressed,
+                count: n_tokens / 4,
+                capacity_rows: DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+            }),
+            &sinks,
+            &packed,
+            AttentionKind::CompressedSparse,
+            0,
+            n_tokens,
+            config,
+        )
+        .unwrap_err();
+        assert!(
+            partially_aliased
+                .to_string()
+                .contains("requires disjoint current and preserved raw caches")
+        );
         encode_packed_dense_sink_attention_f16(
             &ctx,
             &encoder,

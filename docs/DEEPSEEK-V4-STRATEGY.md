@@ -520,7 +520,7 @@ Gate:
   `8ba373e16e2b9bde526d7b00326ae26331b2bedd68fee2fbfaf6055a2e4f8d25`.
   Fresh restore under the cooperative singleton schedule reproduces
   position-3072 logit SHA-256
-  `e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da`
+  `7ec53d29a78a4d6ee932f292d67dc67c1d15bdd31c050ef2aa625f57fd257764`
   without changing the snapshot ABI or causal digest.
 
 ### S2: local-only Metal backbone
@@ -679,17 +679,17 @@ Gate:
   two independent position-2052 captures are byte-identical at
   `819a833db015eb57c553d3e77e9514141d5094fc0b07df9e9977553bfa51abaf`.
   Native singleton execution preserves argmaxes 35 and 201 at cosine / relative
-  RMS 0.998268912 / 0.059766996 and 0.997480789 / 0.070976469.
+  RMS 0.998268661 / 0.059772205 and 0.997481235 / 0.070970007.
 - A packed four-token chunk crosses the 513-row boundary and an immediate packed
   continuation preserves argmax 201. Against the singleton continuation it has
-  relative RMS 0.000273143; a model-free packed test also
+  relative RMS 0.000265079; a model-free packed test also
   matches the CPU oracle while forcing the original-chunk raw-ring branch.
 - The durable next-position-2052 checkpoint has a 31,967,504-byte payload,
   31,983,920-byte record, and causal digest
   `8b7906e362419dfe077eb5dd7d4909e154a5729cd100463dcfd9c2a86c172920`.
   Fresh restore remains ABI-compatible and reproduces cooperative-schedule
   position-2052 logit SHA-256
-  `db5cf5daddd63eb265cec1a7d693a35ac8adb4ca1632f5dad653732a3df32bce`.
+  `c4858badebd29be9ae861ff96161050f0f2165ab757245df4ae70e01c7e1663f`.
   Packed and singleton prefixes intentionally retain their own deterministic
   reduction histories; their snapshots need not be bit-identical.
 - At positions 3070/3071/3072, b10222's legal singleton and batched prompt
@@ -699,9 +699,9 @@ Gate:
   angular chord and common-singleton-norm L2 diameter: the expanded native
   diameter must fit inside the independently measured b10222 schedule diameter
   plus the already-established historical allowance. Measured expanded versus
-  allowed angular/L2 diameters are 0.202828/0.215391 versus
+  allowed angular/L2 diameters are 0.202833/0.215389 versus
   0.289972/0.298147 at position 3070, 0.261382/0.271941 versus
-  0.402803/0.421941 at position 3071, and 0.102983/0.105346 versus
+  0.402803/0.421941 at position 3071, and 0.102987/0.105349 versus
   0.161559/0.168516 at position 3072.
 - Complete position-3070 decision transcripts pin 21 CSA selectors and all 43
   MoE routes for native, batched b10222, and singleton b10222. All three agree
@@ -712,18 +712,23 @@ Gate:
   reference/reference comparisons. The first disagreement is therefore a
   cutoff-sensitive numerical bifurcation, not a publication, ordering, or
   large-margin semantic mismatch. Canonical vectors and transcripts are
-  byte-identical across two fresh processes and validated model-free. Moving
-  singleton attention onto the cooperative reduction changes low-order score
-  values but preserves all 21 selected sets and all 43 routed-expert sets from
-  the prior native transcript. The only selector rank change is a layer-22
-  rank-513 row, outside the consumed top 512.
+  byte-identical across two fresh processes and validated model-free. The later
+  dense-attention promotion changes low-order score and route-weight values but
+  preserves every one of the 21 cache-order selected-ID lists and 43 ordered
+  routed-expert lists from the exact-radix checkpoint. Fifteen selector layers
+  have 152 internal ordinal changes, all by at most two ranks; rank-512/513 row
+  IDs remain unchanged, as do all consumed sets and orders. The smallest cutoff
+  margin is 0.000160 after the change, maximum score delta is 0.000263, and
+  maximum route-weight delta is 0.00002378. The regenerated transcript is
+  byte-identical across fresh runs at SHA-256
+  `7ce0ab84f262d5e9ce8cd3098452872156f180a53d5282d71c68d4b97ce9e393`.
 - The certified position-3072 v1 snapshot restores into a 1,024-row CSA session
   and reproduces its existing full-logit hash before crossing the old fixed
   allocation. Packed and singleton schedules then publish row 768 at position
   3075 and continue through 3076 at cosine / relative-RMS pairs
-  0.999999988 / 0.000158082 and 0.999999998 / 0.000070236. Fresh restore of the
+  0.999998275 / 0.001868266 and 0.999999752 / 0.000723981. Fresh restore of the
   row-768 state reproduces continuation bits exactly; the terminal causal digest
-  is `5b65f082d06c94f98604bdaf5b3d0ff45e875e3371d7dd9e215d2132fb3fdc11`,
+  is `f95010dec44698e956328325d7372454042353186d5415f508b838985b4d3deb`,
   and position 3077 rejects before mutation in that deliberately bounded test
   session.
 
@@ -744,13 +749,15 @@ publish and consume terminal row 8,191 at position 1,048,575 without replaying
 the prefix. All 20 HCA layers use the retained ratio-128 frontier to pool,
 RMS-normalize, apply block-start adjacent-pair RoPE, publish F16 compressed rows,
 and include every published row in the same-token softmax over the 128-row local
-window plus dense compressed history. Counts through 512 retain the established
+window plus dense compressed history. Counts through 512 use the cooperative
 single-threadgroup reduction. Larger histories use a correctness-first tiled
 two-pass kernel: each 512-row tile recomputes scalar 512-wide dot products,
 finds the global maximum, and then accumulates masses and values in the same
 raw-then-compressed order as the legacy path. It uses no global scratch and
-makes no throughput claim. The first four rows retain their named full-model
-boundary evidence. Later rows use generalized production-width operation
+makes no throughput claim. At production 64x512 geometry the cooperative and
+tiled kernels are bit-identical at exactly 512 compressed rows, so the handoff
+does not add a reduction discontinuity. The first four rows retain their named
+full-model boundary evidence. Later rows use generalized production-width operation
 properties and strategic full-model endpoints rather than a mechanical fixture
 campaign at every boundary. Position 2047
 publishes HCA row 15 and CSA row 511; position 2048 proves immediate wrapped
@@ -856,12 +863,15 @@ Gate:
   CPU attention while a prior-511-row ablation is materially different. This
   proves far row addressing and terminal same-token visibility without a 65K
   replay.
-- The tiled kernel is bit-identical to the legacy reduction at compressed counts
-  1, 511, and 512. Above the switch it matches the independent CPU equation at
-  counts 513, 527, 528, 895, 896, 897, 8,191, and 8,192, including late rising
-  maxima and a material final-row ablation. Counts 895/896/897 straddle a true
-  512-row tile boundary rather than only the legacy-to-tiled dispatch boundary.
-- A packed two-query gate at positions 65,662/65,663 executes a legacy prefix
+- The one-head tiled differential is bit-identical to the legacy reduction at
+  compressed counts 1, 511, and 512. At production 64-head geometry the
+  cooperative and tiled kernels are bit-identical to each other at count 512;
+  both differ from legacy in the same 66 of 32,768 output words. Above the
+  switch tiled attention matches the independent CPU equation at counts 513,
+  527, 528, 895, 896, 897, 8,191, and 8,192, including late rising maxima and a
+  material final-row ablation. Counts 895/896/897 straddle a true 512-row tile
+  boundary rather than only the cooperative-to-tiled dispatch boundary.
+- A packed two-query gate at positions 65,662/65,663 executes a cooperative prefix
   and tiled suffix in one retained chunk. It preserves the original pre-chunk
   raw ring for the older query and consumes the newly published row 512 only for
   the later query. A separate terminal pair at positions
@@ -924,8 +934,8 @@ Gate:
   and `2c4a75eaa53d206ee996ec01480dff2f5d41c3dae02185c9737de34b6dbeb8f7`.
 - The singleton-schedule native control/boundary/continuation preserves
   argmaxes 34/35/201 at cosine / relative-RMS pairs
-  0.996295811 / 0.092469395, 0.997194787 / 0.075041071, and
-  0.997642849 / 0.069782687. Publication and continuation each improve both
+  0.996295665 / 0.092472428, 0.997194466 / 0.075045587, and
+  0.997641601 / 0.069803888. Publication and continuation each improve both
   measures, so inherited sparse-interval drift is not misattributed to row 16.
 - The product packed schedule reaches the boundary in one 124-token chunk at
   0.995150607 / 0.098514095, then recovers on the immediate singleton
@@ -934,13 +944,13 @@ Gate:
   RMS from the pre-boundary control, strict two-measure recovery, and an
   absolute continuation floor/ceiling of 0.997 / 0.08. Packed-versus-singleton
   schedule comparisons are separately bounded at 0.998 / 0.06; measured pairs
-  are 0.998269056 / 0.058813970 and 0.999267213 / 0.038684935.
+  are 0.998268217 / 0.058828178 and 0.999267484 / 0.038675588.
 - The next-position-2176 checkpoint has a 32,821,760-byte payload,
   32,838,176-byte record, and causal digest
   `279a2f4ba1a7a6541144b5af6f2cbff745b498cca1fd24e414ec1cb7f86ffa68`.
   Fresh restore under the cooperative singleton schedule reproduces full-logit
   SHA-256
-  `f11d5f383999f85be6a606672dc6529cdd1d370d4b42c5b14460f7392c1f7870`;
+  `5218c60672d51e48f2dbd832584aac39c895e5b34b39724e96ca7705642293c8`;
   position 2177 rejects before mutation and preserves every completed
   position-2176 logit bit.
 
@@ -1145,16 +1155,17 @@ Packed attention derives each query's absolute raw window and compressed count,
 then selects pre-chunk or current storage before modulo addressing. This keeps
 future chunk rows from destroying historical keys needed by earlier queries;
 append-only compressed rows remain hidden solely by per-query absolute counts.
-CSA chunks that straddle row 512 run an unchanged dense prefix followed by a
-sparse suffix with per-query visible counts and cache-ordered selected IDs. Its
-dynamic mass slab covers exactly 128 raw rows, 512 dense-or-selected compressed
-rows, and one denominator slot; the host dispatch uses 640 threads so every
-possible score has one producer while the first 512 lanes also write output.
-HCA queries through 512 compressed rows retain that established reduction.
-Above 512, the packed scheduler keeps any legacy prefix and dispatches only the
-suffix from the first 513-row query to a 512-thread tiled two-pass kernel. The
-suffix retains the original chunk start so future raw-ring writes cannot leak
-into an earlier query.
+CSA chunks that straddle row 512 run a cooperative dense prefix followed by a
+sparse suffix with per-query visible counts and cache-ordered selected IDs. The
+dense helper allocates masses for the final query's exact raw-plus-compressed row
+count and dispatches the greater of that count and 512 threads, up to 640. The
+sparse suffix always has 128 raw plus 512 selected rows and uses the full
+640-thread / 641-float shape so every score has one producer while the first 512
+lanes also write output. HCA queries through 512 compressed rows retain the
+cooperative reduction. Above 512, the packed scheduler keeps any cooperative
+prefix and dispatches only the suffix from the first 513-row query to a
+512-thread tiled two-pass kernel. The suffix retains the original chunk start so
+future raw-ring writes cannot leak into an earlier query.
 
 Intermediate teacher-forced chunks use the typed `advance_tokens` transition.
 It executes every causal layer state but omits final HC collapse, output norm,
@@ -1188,8 +1199,9 @@ product independently for every output lane and took 41.49-41.63 ms per CSA
 layer regardless of history length. Singleton decode now uses the packed
 cooperative kernel: each score is computed once per query/head and shared through
 threadgroup memory. It takes 0.303-0.304 ms, a 136.4-137.2x kernel speedup. The
-legacy host path remains test-only; its compiled kernel is retained solely for
-the numerical differential.
+legacy selected-attention host path remains test-only. Legacy dense attention
+remains production only at singleton position zero and otherwise serves the
+numerical differential.
 
 The first profile measured deterministic top-512 selection at 3.490, 25.876,
 and 114.212 ms over 16,384, 65,536, and 262,144 compressed rows. Replacing its
@@ -1206,11 +1218,37 @@ synchronization, and host work. They establish that full-history index scoring,
 not exact selection or selected attention, is now the dominant CSA target.
 
 The retained legacy selected-attention differential still measures 43.36 ms at
-the 128-raw-plus-512-compressed shape, and singleton dense attention has the same
-output-lane score-recomputation structure. It remains live for every SWA layer,
-HCA through 512 rows, and CSA through its first 512 rows. Reusing the already
-promoted cooperative dense kernel for N=1 is therefore the next product-level
-optimization before specializing the now-dominant far-context score phase.
+the 128-raw-plus-512-compressed shape. Singleton dense attention had the same
+output-lane score-recomputation structure in every SWA layer, HCA through 512
+rows, and CSA through its first 512 rows. Positions at least one now share the
+packed cooperative dense kernel; singleton position zero deliberately retains
+the legacy kernel and its strongest exact fixture lineage. A paired five-sample release
+packet reduces median singleton decode from 487.743 to 59.498 ms at context
+about 128 and from 624.192 to 59.865 ms at context about 512: 2.050 to 16.807
+tokens/s and 1.602 to 16.704 tokens/s. Context-dependent growth over that range
+falls from 136.449 to 0.367 ms.
+
+The baseline is clean commit `cfb4d3a` with only the profiler harness applied;
+both sides use:
+
+```bash
+cargo test --release -p qwen-llm --test deepseek_v4_position_zero_live profile_native_deepseek_v4_singleton_decode_at_128_and_512 -- --ignored --exact --nocapture --test-threads=1
+```
+
+Baseline context-128/context-512 samples in milliseconds are
+`[485.663, 485.194, 487.743, 487.997, 489.423]` and
+`[621.798, 621.767, 627.592, 626.768, 624.192]`; candidate samples are
+`[59.973708, 59.498083, 60.165667, 59.021916, 58.860167]` and
+`[60.106792, 59.865125, 60.702625, 59.439334, 59.369167]`. This is an observed
+near-flat five-sample curve, not a context-independent throughput claim.
+
+At production 64x512 geometry, cooperative dense attention is bit-identical to
+legacy for 128-row SWA and 129-row HCA. Its worst named CSA/HCA difference is 137
+of 32,768 F32 words, maximum absolute error 2.33e-10, and relative RMS 1.1e-8.
+At the 512-compressed-row HCA handoff, cooperative and tiled kernels are
+bit-identical to each other; both differ from legacy in the same 66 words at
+maximum absolute error 5.83e-11. This gives the <=512 and >512 paths one exact
+production-shape reduction lineage rather than merely adjacent tolerances.
 
 Gate:
 
@@ -1219,11 +1257,11 @@ Gate:
 - Packed `[35, 201, 200, 34]` publishes the first CSA row and preserves argmax
   262 at cosine 0.999999903 / relative RMS 0.000448886. Ordinary singleton
   decode from that retained state preserves position-4 argmax 63,325 at
-  0.999999958 / 0.000290112.
+  0.999999961 / 0.000278771.
 - Packed `[35, 201, 200, 34] * 32` publishes the first HCA row and preserves
   position-127 argmax 35 at 0.998357518 / 0.057293913. Ordinary position-128
   decode wraps raw slot zero, preserves argmax 201, and recovers to
-  0.998725888 / 0.050464456.
+  0.998725996 / 0.050462295.
 - The optimized N=128 path takes 2.909-3.060 seconds versus the prior 35.0-35.2
   second singleton prompt, an 11.4-12.0x improvement. The release CLI
   independently reports 2,934.8 ms, `prefill_mode=layer_major_128`, and
@@ -1257,7 +1295,7 @@ Gate:
 - Starting from the durable position-2048 state, a packed four-token chunk
   crosses the first sparse boundary and a packed one-token continuation reaches
   position 2052. The continuation preserves argmax 201 and differs from the
-  cooperative singleton path by only 0.000273143 relative RMS. The
+  cooperative singleton path by only 0.000265079 relative RMS. The
   packed causal-state digest
   `03cea8187af6782fa374bf8ce441057d74924880eb6be46439b25982098476db`
   is pinned separately from the singleton reduction history.
@@ -1265,7 +1303,7 @@ Gate:
   keeps sparse CSA active from 513 through 544 visible rows and publishes HCA
   row 16 on its final token. The packed boundary/continuation preserves
   argmaxes 35/201 at 0.995150607 / 0.098514095 and
-  0.997213076 / 0.076756856; the immediate continuation recovers both measures.
+  0.997212245 / 0.076768115; the immediate continuation recovers both measures.
   The complete checkpoint-producing live packet takes 23.324 seconds cold.
 - Starting from the durable position-2176 state, seven 128-token chunks fill
   the third CSA slab and publish HCA row 23 in 26.7 seconds. Position 3071 and
@@ -1287,11 +1325,29 @@ Gate:
   the pinned b10222 schedule envelope, preserves every consumed CSA selection
   and MoE expert set, and restores the existing causal snapshots without an ABI
   change.
+- The dense cooperative swap starts exactly at singleton position one.
+  Singleton position zero keeps argmax 201, cosine 0.999999999, relative RMS
+  0.000049306, and full-vector
+  SHA-256 `33ec463aee992d3b557a58bd5710080d6a42f85ba14c9ceb07d5f772ab1cfd37`.
+  The position-4 singleton continuation and named SWA production shape exercise
+  the new path; newest-row, local-only, wrapped-CSA, and invalid-count ablations
+  re-pin visibility rather than assuming it from the packed implementation.
+- Existing packed causal states remain bit-identical because packed attention
+  already used this reduction. A newly captured singleton position-2052 state
+  is published separately as `target/dsv4-position2052-dense-cooperative.ds4c`
+  and changes digest to
+  `4caf4cada32e320cabd86c6399e135abe8961c811a856d500443755c26d68fd6`:
+  its prefix is unchanged, raw-cache changes are confined to newly executed
+  positions 2049-2051 in layers 1-42, and published changes are confined to the
+  newly emitted CSA row 512 with no older or HCA publication drift. Historical
+  snapshots still restore under ABI v1, and packed row-16/position-3072 digests
+  remain exact.
 - Restoring that certified position-3072 state into a request-sized session,
   then crossing row 768 with one four-token packed chunk, preserves the existing
-  endpoint hash, agrees with singleton execution within 0.000153 relative RMS,
-  and restores the immediate continuation bit-for-bit. This makes the former
-  ceiling a tested allocator property rather than a new fixture ladder.
+  endpoint hash, agrees with singleton execution within 0.001869 relative RMS at
+  the boundary and 0.000724 on continuation, and restores that continuation
+  bit-for-bit. This makes the former ceiling a tested allocator property rather
+  than a new fixture ladder.
 - At exact full-context capacities, far-index compressor publication,
   score/mask generation across 262,144 CSA rows, deterministic top-512
   selection, selected CSA attention, dense HCA across 8,192 rows, snapshot
@@ -1320,7 +1376,9 @@ Broader S6 work remains:
 - Attribute tiled HCA score recomputation and retained-chunk routing before
   choosing their next fusion or scheduling target.
 - Move CPU routing and grouped expert schedules onto the GPU only after named
-  retained-chunk phase attribution identifies them as the next bottleneck.
+  retained-chunk phase attribution identifies them as the next bottleneck. Keep
+  selected expert IDs observable without forcing a per-layer host wait so this
+  optimization does not preclude later SSD expert streaming.
 
 Gates:
 
@@ -1390,18 +1448,21 @@ noise without reducing technical risk. Revisit after S5.
    attribution. Use durable or constructed deep states to measure the mechanism
    under study directly; optimization, not another position unlock, is now the
    critical path to useful long-context inference.
-3. Route singleton dense SWA/HCA/CSA attention through the promoted cooperative
-   packed kernel. Preserve the legacy reduction as the operation differential
-   and remeasure the context-128/512 decode curve before deeper kernel work.
-4. Then choose between CSA index scoring and routing synchronization from the
-   product profile. Exact radix selection is bounded at 4.582 ms median /
-   4.589 ms p95 over all 262,144 rows, while scoring leads at 8.232 ms; the
+3. Preserve the promoted dense-attention checkpoint: singleton position zero
+   remains on its exact legacy lineage; SWA uses cooperative attention thereafter; CSA uses
+   it through position 2050 before sparse selection starts at 2051; and HCA uses
+   it through position 65,662 before tiled attention starts at 65,663 without a
+   numerical seam. The observed five-sample context-128/512 curve is near 16.7
+   tokens/s at both depths.
+4. Establish a same-hash, same-request llama.cpp Metal throughput baseline before
+   changing synchronization. Then choose between CSA index scoring and routing
+   from the product profile. Exact radix selection is bounded at 4.582 ms median
+   / 4.589 ms p95 over all 262,144 rows, while scoring leads at 8.232 ms; the
    current per-layer routing completion instead governs short-context decode.
 5. Reduce whichever remaining synchronization cost dominates: tiled HCA's
    deliberate two-pass score recomputation, 43-layer host routing completion,
    or the roughly 1,000 chronological compressor/cache dispatches per packed
-   chunk. Keep the current correctness path as the differential reference.
-6. Establish a same-hash, same-request llama.cpp Metal throughput baseline once
-   its DS4 path is runnable on this host. Pursue streaming snapshots and the
-   remaining DSML tool/developer encoder as independent product lanes, not
-   blockers for inference optimization.
+   chunk. Keep the current correctness path as the differential reference and
+   preserve asynchronous expert-ID visibility for future streaming.
+6. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
+   independent product lanes, not blockers for inference optimization.

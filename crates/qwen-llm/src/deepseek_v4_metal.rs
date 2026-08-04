@@ -33,6 +33,7 @@ use crate::metal::{
     host_page_size_bytes, plan_retained_storage,
 };
 use crate::tensor::{GgmlType, ggml_type_layout};
+use objc2::rc::Retained;
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLSize,
 };
@@ -1279,6 +1280,7 @@ impl DeepSeekV4Session {
                         &encoder,
                         &raw_cache,
                         compressed,
+                        self.residency.config().attention_kinds[layer],
                         self.layer_tensor(layer, "attn_sinks.weight")?,
                         self.layer_tensor(layer, "attn_output_a.weight")?,
                         self.layer_tensor(layer, "attn_output_b.weight")?,
@@ -2790,6 +2792,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         enc: &KernelEncoder,
         raw_cache: &MetalTensor,
         compressed: Option<DeepSeekV4PublishedRows<'_>>,
+        kind: AttentionKind,
         sinks: &MetalTensor,
         output_a: &MetalTensor,
         output_b: &MetalTensor,
@@ -2836,6 +2839,9 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         }
 
         if let Some(rows) = compressed.filter(|rows| rows.count > DEEPSEEK_V4_HCA_TILE_ROWS) {
+            if kind != AttentionKind::HeavilyCompressed {
+                return invalid("tiled dense attention is only valid for HCA layers");
+            }
             let queries = self
                 .queries
                 .view_subrange(0, vec![dims.query_width as u64, 1]);
@@ -2846,17 +2852,31 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                 ctx, enc, &queries, raw_cache, raw_cache, rows, sinks, &output, position, 0, 1,
                 128, c,
             )?;
-        } else {
+        } else if position == 0 {
+            if compressed.is_some() {
+                return invalid("position-zero dense attention cannot have compressed rows");
+            }
             encode_dense_sink_attention_f16(
                 ctx,
                 enc,
                 &self.queries,
                 raw_cache,
-                compressed,
+                None,
                 sinks,
                 &self.attention,
                 position,
                 c,
+            )?;
+        } else {
+            let queries = self
+                .queries
+                .view_subrange(0, vec![dims.query_width as u64, 1]);
+            let output = self
+                .attention
+                .view_subrange(0, vec![dims.query_width as u64, 1]);
+            encode_cooperative_dense_sink_attention_f16(
+                ctx, enc, &queries, raw_cache, raw_cache, compressed, sinks, &output, kind,
+                position, 1, c,
             )?;
         }
         self.encode_attention_output(ctx, enc, output_a, output_b, position, rope)
@@ -4586,6 +4606,187 @@ fn encode_dense_sink_attention_f16(
         },
         MTLSize {
             width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_cooperative_dense_sink_attention_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    raw_cache: &MetalTensor,
+    raw_cache_before_chunk: &MetalTensor,
+    compressed: Option<DeepSeekV4PublishedRows<'_>>,
+    sinks: &MetalTensor,
+    output: &MetalTensor,
+    kind: AttentionKind,
+    start_position: u32,
+    token_count: usize,
+    config: DeepSeekV4PositionZeroAttentionConfig,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, "deepseek_v4_cooperative_dense_attention")?;
+    let dims = config.checked()?;
+    if token_count == 0 {
+        return invalid("cooperative dense attention requires at least one token");
+    }
+    if token_count > DEEPSEEK_V4_PREFILL_MAX_TOKENS {
+        return invalid(format!(
+            "cooperative dense attention token count {token_count} exceeds retained chunk limit {DEEPSEEK_V4_PREFILL_MAX_TOKENS}"
+        ));
+    }
+    let token_count_u32 = u32::try_from(token_count).map_err(|_| {
+        DeepSeekV4MetalError::Invalid("cooperative dense token count exceeds u32".into())
+    })?;
+    validate_f32(
+        queries,
+        &[dims.query_width as u64, token_count as u64],
+        false,
+        "cooperative dense attention queries",
+    )?;
+    for (tensor, name) in [
+        (raw_cache, "cooperative dense current raw cache"),
+        (
+            raw_cache_before_chunk,
+            "cooperative dense preserved raw cache",
+        ),
+    ] {
+        validate_f16(
+            tensor,
+            &[config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+            false,
+            name,
+        )?;
+    }
+    if token_count > 1
+        && Retained::as_ptr(&raw_cache.buffer) == Retained::as_ptr(&raw_cache_before_chunk.buffer)
+    {
+        let raw_end = raw_cache
+            .offset
+            .checked_add(raw_cache.n_bytes())
+            .ok_or_else(|| DeepSeekV4MetalError::Invalid("raw cache range overflow".into()))?;
+        let preserved_end = raw_cache_before_chunk
+            .offset
+            .checked_add(raw_cache_before_chunk.n_bytes())
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid("preserved raw cache range overflow".into())
+            })?;
+        if raw_cache.offset < preserved_end && raw_cache_before_chunk.offset < raw_end {
+            return invalid(
+                "cooperative dense multi-token attention requires disjoint current and preserved raw caches",
+            );
+        }
+    }
+    validate_f32(
+        sinks,
+        &[config.head_count as u64],
+        false,
+        "cooperative dense attention sinks",
+    )?;
+    validate_f32(
+        output,
+        &[dims.query_width as u64, token_count as u64],
+        true,
+        "cooperative dense attention output",
+    )?;
+
+    let ratio = match kind {
+        AttentionKind::SlidingWindow => 0,
+        AttentionKind::CompressedSparse => 4,
+        AttentionKind::HeavilyCompressed => 128,
+    };
+    let end_position = start_position.checked_add(token_count_u32).ok_or_else(|| {
+        DeepSeekV4MetalError::Invalid("cooperative dense position overflow".into())
+    })?;
+    let expected_rows = if ratio == 0 {
+        0
+    } else {
+        end_position as usize / ratio
+    };
+    let compressed_cache = match compressed {
+        None if expected_rows == 0 => raw_cache,
+        Some(rows) if rows.count == expected_rows => {
+            validate_f16(
+                rows.cache,
+                &[config.head_dim as u64, rows.capacity_rows as u64],
+                false,
+                "cooperative dense compressed cache",
+            )?;
+            if expected_rows > DEEPSEEK_V4_CSA_TOP_K || expected_rows > rows.capacity_rows {
+                return invalid(format!(
+                    "cooperative dense attention cannot consume {expected_rows} rows from capacity {}",
+                    rows.capacity_rows
+                ));
+            }
+            rows.cache
+        }
+        rows => {
+            return invalid(format!(
+                "cooperative dense attention expected {expected_rows} compressed rows, got {}",
+                rows.map_or(0, |rows| rows.count)
+            ));
+        }
+    };
+    let final_raw_rows = (end_position as usize).min(DEEPSEEK_V4_LOCAL_WINDOW);
+    let maximum_rows = final_raw_rows
+        .checked_add(expected_rows)
+        .ok_or_else(|| DeepSeekV4MetalError::Invalid("cooperative dense row overflow".into()))?;
+    if maximum_rows == 0 || maximum_rows > DEEPSEEK_V4_LOCAL_WINDOW + DEEPSEEK_V4_CSA_TOP_K {
+        return invalid(format!(
+            "cooperative dense attention row count {maximum_rows} is out of range"
+        ));
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        head_count: u32,
+        head_dim: u32,
+        token_count: u32,
+        compression_ratio: u32,
+        start_position: u32,
+        window: u32,
+        scale: f32,
+    }
+    let pso = ctx.pipeline("kernel_deepseek_v4_packed_dense_sink_attention_f16")?;
+    let threadgroup_width = config.head_dim.max(maximum_rows);
+    if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
+        return invalid(format!(
+            "cooperative dense attention pipeline supports {} threads, requires {threadgroup_width}",
+            pso.maxTotalThreadsPerThreadgroup()
+        ));
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            head_count: config.head_count as u32,
+            head_dim: config.head_dim as u32,
+            token_count: token_count_u32,
+            compression_ratio: ratio as u32,
+            start_position,
+            window: DEEPSEEK_V4_LOCAL_WINDOW as u32,
+            scale: 1.0 / (config.head_dim as f32).sqrt(),
+        },
+    );
+    enc.set_tensor(1, queries);
+    enc.set_tensor(2, raw_cache);
+    enc.set_tensor(3, raw_cache_before_chunk);
+    enc.set_tensor(4, compressed_cache);
+    enc.set_tensor(5, sinks);
+    enc.set_tensor(6, output);
+    enc.set_threadgroup_memory(0, (maximum_rows + 1) * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: token_count,
+            height: config.head_count,
+            depth: 1,
+        },
+        MTLSize {
+            width: threadgroup_width,
             height: 1,
             depth: 1,
         },
@@ -12024,6 +12225,208 @@ mod tests {
     }
 
     #[test]
+    fn cooperative_dense_attention_matches_legacy_singleton_within_roundoff() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 512;
+        let config = deepseek_v4_session_attention_config();
+        let dims = config.checked().unwrap();
+        let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
+        let query_values = (0..dims.query_width)
+            .map(|index| ((index * 17 + 3) % 131) as f32 * 0.0007 - 0.043)
+            .collect::<Vec<_>>();
+        let queries = offset_f32(
+            &ctx,
+            &query_values,
+            vec![config.head_dim as u64, config.head_count as u64],
+        );
+        let cooperative_queries = queries.view_subrange(0, vec![dims.query_width as u64, 1]);
+        let raw_values = (0..DEEPSEEK_V4_LOCAL_WINDOW * config.head_dim)
+            .map(|index| {
+                let slot = index / config.head_dim;
+                let dimension = index % config.head_dim;
+                let tag = (slot * 23 + dimension * 7 + slot / 5) % 137;
+                round_f16((tag as f32 - 68.0) * 0.0009)
+            })
+            .collect::<Vec<_>>();
+        let raw_bits = raw_values
+            .iter()
+            .map(|value| half::f16::from_f32(*value).to_bits())
+            .collect::<Vec<_>>();
+        let raw_cache = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&raw_bits),
+            vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let compressed_values = (0..CAPACITY * config.head_dim)
+            .map(|index| {
+                let row = index / config.head_dim;
+                let dimension = index % config.head_dim;
+                let tag = (row * 31 + dimension * 11 + row / 5) % 149;
+                round_f16((tag as f32 - 74.0) * 0.0008)
+            })
+            .collect::<Vec<_>>();
+        let compressed_bits = compressed_values
+            .iter()
+            .map(|value| half::f16::from_f32(*value).to_bits())
+            .collect::<Vec<_>>();
+        let compressed_cache = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&compressed_bits),
+            vec![config.head_dim as u64, CAPACITY as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let sinks = offset_f32(
+            &ctx,
+            &(0..config.head_count)
+                .map(|head| -0.37 + head as f32 * 0.003)
+                .collect::<Vec<_>>(),
+            vec![config.head_count as u64],
+        );
+
+        for (label, kind, position, compressed_count) in [
+            ("swa-127", AttentionKind::SlidingWindow, 127u32, 0usize),
+            ("csa-127", AttentionKind::CompressedSparse, 127, 32),
+            ("csa-2047", AttentionKind::CompressedSparse, 2_047, 512),
+            ("hca-127", AttentionKind::HeavilyCompressed, 127, 1),
+            ("hca-65535", AttentionKind::HeavilyCompressed, 65_535, 512),
+        ] {
+            let compressed = (compressed_count > 0).then_some(DeepSeekV4PublishedRows {
+                cache: &compressed_cache,
+                count: compressed_count,
+                capacity_rows: CAPACITY,
+            });
+            let legacy = MetalTensor::zeros_f32(
+                &ctx,
+                vec![config.head_dim as u64, config.head_count as u64],
+            )
+            .unwrap();
+            let cooperative =
+                MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
+            let tiled = (kind == AttentionKind::HeavilyCompressed
+                && compressed_count == DEEPSEEK_V4_HCA_TILE_ROWS)
+                .then(|| MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap());
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_dense_sink_attention_f16(
+                &ctx, &encoder, &queries, &raw_cache, compressed, &sinks, &legacy, position, config,
+            )
+            .unwrap();
+            encode_cooperative_dense_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &cooperative_queries,
+                &raw_cache,
+                &raw_cache,
+                compressed,
+                &sinks,
+                &cooperative,
+                kind,
+                position,
+                1,
+                config,
+            )
+            .unwrap();
+            if let Some(tiled) = &tiled {
+                encode_tiled_dense_sink_attention_f16(
+                    &ctx,
+                    &encoder,
+                    &cooperative_queries,
+                    &raw_cache,
+                    &raw_cache,
+                    compressed.expect("HCA handoff has compressed rows"),
+                    &sinks,
+                    tiled,
+                    position,
+                    0,
+                    1,
+                    128,
+                    config,
+                )
+                .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            let legacy = read_f32(&legacy);
+            let cooperative = read_f32(&cooperative);
+            let differing = legacy
+                .iter()
+                .zip(&cooperative)
+                .filter(|(legacy, cooperative)| legacy.to_bits() != cooperative.to_bits())
+                .count();
+            let max_abs = legacy
+                .iter()
+                .zip(&cooperative)
+                .map(|(legacy, cooperative)| (legacy - cooperative).abs())
+                .fold(0.0f32, f32::max);
+            let squared_error = legacy
+                .iter()
+                .zip(&cooperative)
+                .map(|(legacy, cooperative)| f64::from(legacy - cooperative).powi(2))
+                .sum::<f64>();
+            let reference_norm = legacy
+                .iter()
+                .map(|value| f64::from(*value).powi(2))
+                .sum::<f64>();
+            let relative_rms = (squared_error / reference_norm).sqrt();
+            eprintln!(
+                "cooperative dense {label} rows={} differing={differing}/{} max_abs={max_abs} rel_rms={relative_rms:.9}",
+                DEEPSEEK_V4_LOCAL_WINDOW.min(position as usize + 1) + compressed_count,
+                legacy.len(),
+            );
+            assert!(max_abs <= 5e-7, "{label} max abs {max_abs}");
+            assert!(relative_rms <= 1e-6, "{label} relative RMS {relative_rms}");
+            if let Some(tiled) = tiled {
+                let tiled = read_f32(&tiled);
+                let tiled_differing = legacy
+                    .iter()
+                    .zip(&tiled)
+                    .filter(|(legacy, tiled)| legacy.to_bits() != tiled.to_bits())
+                    .count();
+                let tiled_max_abs = legacy
+                    .iter()
+                    .zip(&tiled)
+                    .map(|(legacy, tiled)| (legacy - tiled).abs())
+                    .fold(0.0f32, f32::max);
+                let tiled_squared_error = legacy
+                    .iter()
+                    .zip(&tiled)
+                    .map(|(legacy, tiled)| f64::from(legacy - tiled).powi(2))
+                    .sum::<f64>();
+                let tiled_relative_rms = (tiled_squared_error / reference_norm).sqrt();
+                eprintln!(
+                    "tiled dense {label} rows={} differing={tiled_differing}/{} max_abs={tiled_max_abs} rel_rms={tiled_relative_rms:.9}",
+                    DEEPSEEK_V4_LOCAL_WINDOW + compressed_count,
+                    legacy.len(),
+                );
+                assert!(
+                    tiled_max_abs <= 5e-7,
+                    "tiled {label} max abs {tiled_max_abs}"
+                );
+                assert!(
+                    tiled_relative_rms <= 1e-6,
+                    "tiled {label} relative RMS {tiled_relative_rms}"
+                );
+                let cooperative_tiled_differing = cooperative
+                    .iter()
+                    .zip(&tiled)
+                    .filter(|(cooperative, tiled)| cooperative.to_bits() != tiled.to_bits())
+                    .count();
+                assert_eq!(
+                    cooperative_tiled_differing, 0,
+                    "cooperative and tiled HCA differ at the 512-row handoff"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn cooperative_selected_attention_matches_legacy_singleton_within_roundoff() {
         let Some(ctx) = metal_context() else {
             return;
@@ -12699,7 +13102,7 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let raw_rows = (0..4)
+        let raw_rows = (0..16)
             .flat_map(|row| {
                 (0..HEAD_DIM).map(move |dimension| {
                     -0.24 + row as f32 * 0.071 + (dimension % 9) as f32 * 0.006
@@ -12761,6 +13164,7 @@ mod tests {
         );
 
         let query_tensor = offset_f32(&ctx, &queries, vec![HEAD_DIM as u64, HEADS as u64]);
+        let cooperative_query = query_tensor.view_subrange(0, vec![(HEADS * HEAD_DIM) as u64, 1]);
         let sink_tensor = offset_f32(&ctx, &sinks, vec![HEADS as u64]);
         let raw_cache =
             MetalTensor::zeros_f16(&ctx, vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64])
@@ -12783,6 +13187,7 @@ mod tests {
             &vec![0.0; HEADS * HEAD_DIM],
             vec![HEAD_DIM as u64, HEADS as u64],
         );
+        let cooperative_output = output.view_subrange(0, vec![(HEADS * HEAD_DIM) as u64, 1]);
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
         for (row, source) in raw_sources.iter().enumerate() {
@@ -12805,10 +13210,11 @@ mod tests {
             4 * HEAD_DIM,
         )
         .unwrap();
-        encode_dense_sink_attention_f16(
+        encode_cooperative_dense_sink_attention_f16(
             &ctx,
             &encoder,
-            &query_tensor,
+            &cooperative_query,
+            &raw_cache,
             &raw_cache,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed_cache,
@@ -12816,8 +13222,10 @@ mod tests {
                 capacity_rows: DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
             }),
             &sink_tensor,
-            &output,
-            3,
+            &cooperative_output,
+            AttentionKind::CompressedSparse,
+            15,
+            1,
             config,
         )
         .unwrap();
@@ -12993,6 +13401,8 @@ mod tests {
             }
 
             let query_tensor = offset_f32(&ctx, &queries, vec![HEAD_DIM as u64, HEADS as u64]);
+            let cooperative_query =
+                query_tensor.view_subrange(0, vec![(HEADS * HEAD_DIM) as u64, 1]);
             let sink_tensor = offset_f32(&ctx, &sinks, vec![HEADS as u64]);
             let raw_source = offset_f32(
                 &ctx,
@@ -13027,6 +13437,10 @@ mod tests {
                 &vec![0.0; HEADS * HEAD_DIM],
                 vec![HEAD_DIM as u64, HEADS as u64],
             );
+            let cooperative_hca_output =
+                hca_output.view_subrange(0, vec![(HEADS * HEAD_DIM) as u64, 1]);
+            let cooperative_csa_output =
+                csa_output.view_subrange(0, vec![(HEADS * HEAD_DIM) as u64, 1]);
             let command = ctx.queue.commandBuffer().unwrap();
             let encoder = KernelEncoder::begin(&command);
             encode_scatter_offset_f32_to_f16(
@@ -13047,10 +13461,11 @@ mod tests {
                 compressed_rows.len(),
             )
             .unwrap();
-            encode_dense_sink_attention_f16(
+            encode_cooperative_dense_sink_attention_f16(
                 &ctx,
                 &encoder,
-                &query_tensor,
+                &cooperative_query,
+                &raw_cache,
                 &raw_cache,
                 Some(DeepSeekV4PublishedRows {
                     cache: &compressed_cache,
@@ -13058,15 +13473,18 @@ mod tests {
                     capacity_rows: DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
                 }),
                 &sink_tensor,
-                &hca_output,
+                &cooperative_hca_output,
+                AttentionKind::HeavilyCompressed,
                 position as u32,
+                1,
                 config,
             )
             .unwrap();
-            encode_dense_sink_attention_f16(
+            encode_cooperative_dense_sink_attention_f16(
                 &ctx,
                 &encoder,
-                &query_tensor,
+                &cooperative_query,
+                &raw_cache,
                 &raw_cache,
                 Some(DeepSeekV4PublishedRows {
                     cache: &compressed_cache,
@@ -13074,8 +13492,10 @@ mod tests {
                     capacity_rows: DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
                 }),
                 &sink_tensor,
-                &csa_output,
+                &cooperative_csa_output,
+                AttentionKind::CompressedSparse,
                 position as u32,
+                1,
                 config,
             )
             .unwrap();
@@ -13123,12 +13543,15 @@ mod tests {
             &vec![0.0; HEADS * HEAD_DIM],
             vec![HEAD_DIM as u64, HEADS as u64],
         );
+        let cooperative_queries = queries.view_subrange(0, vec![(HEADS * HEAD_DIM) as u64, 1]);
+        let cooperative_output = output.view_subrange(0, vec![(HEADS * HEAD_DIM) as u64, 1]);
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
-        let error = encode_dense_sink_attention_f16(
+        let error = encode_cooperative_dense_sink_attention_f16(
             &ctx,
             &encoder,
-            &queries,
+            &cooperative_queries,
+            &raw_cache,
             &raw_cache,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed_cache,
@@ -13136,13 +13559,15 @@ mod tests {
                 capacity_rows: DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
             }),
             &sink_tensor,
-            &output,
-            1_024,
+            &cooperative_output,
+            AttentionKind::CompressedSparse,
+            2_051,
+            1,
             config,
         )
         .unwrap_err();
         encoder.end();
-        assert!(error.to_string().contains("count 513 is out of range"));
+        assert!(error.to_string().contains("cannot consume 513 rows"));
     }
 
     fn oracle_expert(

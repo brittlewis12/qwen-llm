@@ -18,6 +18,8 @@ const DEFAULT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XX
 const DEFAULT_DURABLE_SNAPSHOT: &str = "target/dsv4-position1024.ds4c";
 const DEFAULT_DURABLE_POSITION_2048_SNAPSHOT: &str = "target/dsv4-position2048.ds4c";
 const DEFAULT_DURABLE_POSITION_2052_SNAPSHOT: &str = "target/dsv4-position2052.ds4c";
+const DEFAULT_DENSE_COOPERATIVE_POSITION_2052_SNAPSHOT: &str =
+    "target/dsv4-position2052-dense-cooperative.ds4c";
 const DEFAULT_DURABLE_POSITION_2176_SNAPSHOT: &str = "target/dsv4-position2176.ds4c";
 const DEFAULT_DURABLE_POSITION_3072_SNAPSHOT: &str = "target/dsv4-position3072.ds4c";
 const DEFAULT_DURABLE_IDENTITY_CACHE: &str = "target/.qwen-dsv4-model-identity-v2";
@@ -1759,6 +1761,64 @@ fn native_deepseek_v4_two_packed_chunks_match_second_hca_and_decode() {
 }
 
 #[test]
+#[ignore = "focused release profiler requires the local 95.93 GiB DS4 fixture"]
+fn profile_native_deepseek_v4_singleton_decode_at_128_and_512() {
+    const FORWARD_LIMIT: usize = 520;
+    const SAMPLES: usize = 5;
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(model_path.exists(), "missing DS4 model");
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
+    let mut session =
+        DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("build profiled session");
+    let prompt = [35, 201, 200, 34].repeat(FORWARD_LIMIT.div_ceil(4));
+
+    let measure = |session: &mut DeepSeekV4PositionZeroForward| {
+        let mut milliseconds = Vec::with_capacity(SAMPLES);
+        for _ in 0..SAMPLES {
+            let position = session.next_position();
+            let started = Instant::now();
+            session
+                .forward_token(&ctx, prompt[position as usize % prompt.len()])
+                .expect("execute profiled singleton token");
+            milliseconds.push(started.elapsed().as_secs_f64() * 1e3);
+        }
+        let mut ordered = milliseconds.clone();
+        ordered.sort_by(f64::total_cmp);
+        (milliseconds, ordered[SAMPLES / 2])
+    };
+
+    session
+        .advance_tokens(&ctx, &prompt[..128])
+        .expect("advance packed context to 128");
+    session
+        .forward_token(&ctx, prompt[128])
+        .expect("warm singleton context 128");
+    let (context_128_samples, context_128_median) = measure(&mut session);
+
+    while session.next_position() < 512 {
+        let start = session.next_position();
+        let end = (start + 128).min(512);
+        session
+            .advance_tokens(&ctx, &prompt[start as usize..end as usize])
+            .expect("advance packed context to 512");
+    }
+    session
+        .forward_token(&ctx, prompt[512])
+        .expect("warm singleton context 512");
+    let (context_512_samples, context_512_median) = measure(&mut session);
+
+    eprintln!(
+        "deepseek_v4 singleton_decode context128_ms={context_128_samples:?} context128_median_ms={context_128_median:.3} context128_tps={:.3} context512_ms={context_512_samples:?} context512_median_ms={context_512_median:.3} context512_tps={:.3}",
+        1e3 / context_128_median,
+        1e3 / context_512_median,
+    );
+}
+
+#[test]
 #[ignore = "requires the local 95.93 GiB DeepSeek V4 Flash-0731 IQ3 fixture"]
 fn native_deepseek_v4_retained_chunks_reach_position_1024() {
     let model_path = std::env::var_os("DSV4_MODEL")
@@ -2158,12 +2218,12 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
                 .join("../..")
                 .join(DEFAULT_DURABLE_POSITION_2048_SNAPSHOT)
         });
-    let destination_snapshot_path = std::env::var_os("DSV4_POSITION_2052_SNAPSHOT")
+    let destination_snapshot_path = std::env::var_os("DSV4_DENSE_POSITION_2052_SNAPSHOT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
-                .join(DEFAULT_DURABLE_POSITION_2052_SNAPSHOT)
+                .join(DEFAULT_DENSE_COOPERATIVE_POSITION_2052_SNAPSHOT)
         });
     let identity_cache_path = std::env::var_os("DSV4_IDENTITY_CACHE")
         .map(PathBuf::from)
@@ -2233,26 +2293,8 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
             hasher.update(value.to_le_bytes());
         }
         let hash = format!("{:x}", hasher.finalize());
-        let (expected_argmax, expected_hash) = [
-            (
-                201,
-                "13cb8a323341f3f23bcb98ddfb8c257b5125411065d14e1b40c5a75fa19ed53c",
-            ),
-            (
-                200,
-                "84e8d26310d87438423f3ce27c7b05f9a6567d6e72fc9d7bb0e17e589a603c25",
-            ),
-            (
-                34,
-                "e94c259038cf1272cf8ed190b1d3eeaeed2b9ae9cd93f5094cb6cd6ab080cf8d",
-            ),
-            (
-                35,
-                "c7b544041ff440e0ba96b2609a4f3d88ff9e48e3d263d6f2e8a4c8b459ca13e5",
-            ),
-        ][offset];
+        let expected_argmax = [201, 200, 34, 35][offset];
         assert_eq!(argmax, expected_argmax);
-        assert_eq!(hash, expected_hash);
         if position == 2_051 {
             let boundary = compare_logits("position_2051", &logits, POSITION_2051_ORACLE_BYTES);
             assert_eq!(boundary.argmax, boundary.oracle_argmax);
@@ -2271,18 +2313,6 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
         .expect("capture first sparse-CSA snapshot");
     assert_eq!(sparse_snapshot.next_position(), 2_052);
     assert_eq!(sparse_snapshot.payload_bytes(), 31_967_504);
-    let report = publish_causal_snapshot_file(
-        &destination_snapshot_path,
-        &sparse_snapshot,
-        DeepSeekV4SnapshotCodecConstraints {
-            config: session.residency().config(),
-            session_capacity: session.capacity(),
-            expected_model_content_id: model_content_id,
-            max_record_bytes: 64 * 1024 * 1024,
-        },
-    )
-    .expect("publish position-2052 snapshot");
-    assert_eq!(report.record_bytes, 31_983_920);
 
     session
         .forward_token(&ctx, 35)
@@ -2303,10 +2333,6 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
     }
     let continuation_hash = format!("{:x}", hasher.finalize());
     assert_eq!(continuation_argmax, 201);
-    assert_eq!(
-        continuation_hash,
-        "ada663984481867281e57ee39b6f46fd9a486ff850df1fc81c52686e4b59e1f2"
-    );
     let continuation = compare_logits(
         "position_2052",
         &continuation_logits,
@@ -2314,22 +2340,15 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
     );
     assert_eq!(continuation.argmax, continuation.oracle_argmax);
     assert_hca_long_prefix_gate("position 2052", &continuation);
-    assert_eq!(
-        sparse_snapshot
-            .causal_digest()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-        "96211118bcae44e4664680b8e787cfffb5c739e84a4c6a9256508430594ec55c"
-    );
+    let sparse_digest = sparse_snapshot
+        .causal_digest()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     eprintln!(
         "sparse_position=2052 token=35 argmax={continuation_argmax} sha256={continuation_hash} elapsed={:.3}s snapshot_digest={}",
         started.elapsed().as_secs_f64(),
-        sparse_snapshot
-            .causal_digest()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
+        sparse_digest
     );
 
     session
@@ -2369,36 +2388,74 @@ fn native_deepseek_v4_position_2048_snapshot_crosses_first_sparse_csa() {
         packed_hasher.update(value.to_le_bytes());
     }
     let packed_hash = format!("{:x}", packed_hasher.finalize());
+    let packed_sparse_digest = packed_sparse_snapshot
+        .causal_digest()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    eprintln!(
+        "packed_sparse_position=2052 sha256={} snapshot_digest={} singleton_snapshot_digest={} elapsed={:.3}s",
+        packed_hash,
+        packed_sparse_digest,
+        sparse_digest,
+        started.elapsed().as_secs_f64()
+    );
+
+    assert_eq!(session.next_position(), 2_053);
+    assert_eq!(
+        endpoint_hashes,
+        [
+            (
+                2_048,
+                201,
+                "13cb8a323341f3f23bcb98ddfb8c257b5125411065d14e1b40c5a75fa19ed53c",
+            ),
+            (
+                2_049,
+                200,
+                "d985952cab58971437a602b0e7d63e043368e2379208ffd7f2c372636c89bf33",
+            ),
+            (
+                2_050,
+                34,
+                "0957bb7e8563fa143954eab90470544948dd062ec116321dc8f34a219050bfe3",
+            ),
+            (
+                2_051,
+                35,
+                "672e29f6f154f63d1edb22bbf7102efc814976c78c700d6eb8e904207062d99b",
+            ),
+        ]
+        .map(|(position, argmax, hash)| (position, argmax, hash.to_owned()))
+    );
+    assert_eq!(
+        continuation_hash,
+        "c84cd7149cc2082d6691fc946c0cea063a6c01e1dc68401bba45e36c1ae3896d"
+    );
+    assert_eq!(
+        sparse_digest,
+        "4caf4cada32e320cabd86c6399e135abe8961c811a856d500443755c26d68fd6"
+    );
     assert_eq!(
         packed_hash,
         "d78f88e7acd4746477c25bc899eefa78af97a42cba266141ec7c76ab27e96b9f"
     );
     assert_eq!(
-        packed_sparse_snapshot
-            .causal_digest()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
+        packed_sparse_digest,
         "03cea8187af6782fa374bf8ce441057d74924880eb6be46439b25982098476db"
     );
-    eprintln!(
-        "packed_sparse_position=2052 sha256={} snapshot_digest={} singleton_snapshot_digest={} elapsed={:.3}s",
-        packed_hash,
-        packed_sparse_snapshot
-            .causal_digest()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-        sparse_snapshot
-            .causal_digest()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-        started.elapsed().as_secs_f64()
-    );
-
-    assert_eq!(session.next_position(), 2_053);
-    assert_eq!(endpoint_hashes.len(), 4);
+    let report = publish_causal_snapshot_file(
+        &destination_snapshot_path,
+        &sparse_snapshot,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: session.residency().config(),
+            session_capacity: session.capacity(),
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("publish position-2052 snapshot after all gates");
+    assert_eq!(report.record_bytes, 31_983_920);
 }
 
 #[test]
@@ -2488,7 +2545,7 @@ fn native_deepseek_v4_durable_position_2052_snapshot_matches_oracle() {
     }
     assert_eq!(
         format!("{:x}", native_hasher.finalize()),
-        "db5cf5daddd63eb265cec1a7d693a35ac8adb4ca1632f5dad653732a3df32bce"
+        "c4858badebd29be9ae861ff96161050f0f2165ab757245df4ae70e01c7e1663f"
     );
     eprintln!(
         "durable_position_2052_elapsed={:.3}s identity_cache={:?}",
@@ -2604,29 +2661,12 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
         singleton_continuation.oracle_argmax
     );
     assert_hca_interval_drift_containment("singleton position 2176", &singleton_continuation);
-    for (label, logits, expected) in [
-        (
-            "position 2174",
-            control_logits.as_slice(),
-            "652e7d0135a2542ba6d602f810c79ccdd3674cb52f46a18b284c6d81e112f3ed",
-        ),
-        (
-            "singleton position 2175",
-            singleton_boundary_logits.as_slice(),
-            "33d415f78832e8df15ffa3c29fcf6566790d2a513e31d947c1441093aea99692",
-        ),
-        (
-            "singleton position 2176",
-            singleton_continuation_logits.as_slice(),
-            "8402ce15d4dbd31ec05219b65734a09d8cc23d7a891be81ef5e6abbaa011b882",
-        ),
-    ] {
-        let mut hasher = Sha256::new();
-        for value in logits {
-            hasher.update(value.to_le_bytes());
-        }
-        assert_eq!(format!("{:x}", hasher.finalize()), expected, "{label}");
-    }
+    let control_hash = f32_sha256(&control_logits);
+    let singleton_boundary_hash = f32_sha256(&singleton_boundary_logits);
+    let singleton_continuation_hash = f32_sha256(&singleton_continuation_logits);
+    eprintln!(
+        "hca_row16_singleton control_sha256={control_hash} boundary_sha256={singleton_boundary_hash} continuation_sha256={singleton_continuation_hash}"
+    );
     assert!(singleton_boundary.cosine >= control.cosine);
     assert!(singleton_boundary.relative_rms <= control.relative_rms);
     assert!(singleton_continuation.cosine >= singleton_boundary.cosine);
@@ -2651,16 +2691,8 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
         .max_by(|left, right| left.1.total_cmp(right.1))
         .unwrap()
         .0;
-    let mut boundary_hasher = Sha256::new();
-    for value in &boundary_logits {
-        boundary_hasher.update(value.to_le_bytes());
-    }
-    let boundary_hash = format!("{:x}", boundary_hasher.finalize());
+    let boundary_hash = f32_sha256(&boundary_logits);
     assert_eq!(boundary_argmax, 35);
-    assert_eq!(
-        boundary_hash,
-        "b9a17795021d99e2c94445f5afd8144a97ee06c2df7fb514ff24cebe11ad788b"
-    );
     let boundary = compare_logits(
         "position_2175",
         &boundary_logits,
@@ -2683,18 +2715,6 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
         .expect("capture HCA row-16 snapshot");
     assert_eq!(boundary_snapshot.next_position(), 2_176);
     assert_eq!(boundary_snapshot.payload_bytes(), 32_821_760);
-    let report = publish_causal_snapshot_file(
-        &destination_snapshot_path,
-        &boundary_snapshot,
-        DeepSeekV4SnapshotCodecConstraints {
-            config: session.residency().config(),
-            session_capacity: session.capacity(),
-            expected_model_content_id: model_content_id,
-            max_record_bytes: 64 * 1024 * 1024,
-        },
-    )
-    .expect("publish position-2176 snapshot");
-    assert_eq!(report.record_bytes, 32_838_176);
 
     session
         .forward_token(&ctx, 35)
@@ -2709,21 +2729,13 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
         .max_by(|left, right| left.1.total_cmp(right.1))
         .unwrap()
         .0;
-    let mut continuation_hasher = Sha256::new();
-    for value in &continuation_logits {
-        continuation_hasher.update(value.to_le_bytes());
-    }
-    let continuation_hash = format!("{:x}", continuation_hasher.finalize());
+    let continuation_hash = f32_sha256(&continuation_logits);
     let causal_digest = boundary_snapshot
         .causal_digest()
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     assert_eq!(continuation_argmax, 201);
-    assert_eq!(
-        continuation_hash,
-        "f11d5f383999f85be6a606672dc6529cdd1d370d4b42c5b14460f7392c1f7870"
-    );
     let continuation = compare_logits(
         "position_2176",
         &continuation_logits,
@@ -2747,14 +2759,56 @@ fn native_deepseek_v4_position_2052_snapshot_reaches_hca_row_16() {
         packed_continuation.oracle_argmax
     );
     assert_packed_singleton_schedule_containment("position 2176", &packed_continuation);
-    assert_eq!(
-        causal_digest,
-        "279a2f4ba1a7a6541144b5af6f2cbff745b498cca1fd24e414ec1cb7f86ffa68"
-    );
     eprintln!(
         "hca_row16 boundary_position=2175 argmax={boundary_argmax} sha256={boundary_hash} continuation_position=2176 argmax={continuation_argmax} sha256={continuation_hash} snapshot_digest={causal_digest} elapsed={:.3}s",
         started.elapsed().as_secs_f64()
     );
+    for (label, actual, expected) in [
+        (
+            "position 2174",
+            control_hash.as_str(),
+            "c773c603434891dd6acc9c4b02b51927ea928127c8d39fc68cd7d06cf5c1c188",
+        ),
+        (
+            "singleton position 2175",
+            singleton_boundary_hash.as_str(),
+            "41bdc9c936b00454d6191b51442e883fc22cfdf65fd2a4a650b60a65c9d5f8cd",
+        ),
+        (
+            "singleton position 2176",
+            singleton_continuation_hash.as_str(),
+            "b7258313b71e8262bb0aea7b821f762424b9b31e20efdf8ea03f5fb846a3677e",
+        ),
+        (
+            "packed position 2175",
+            boundary_hash.as_str(),
+            "b9a17795021d99e2c94445f5afd8144a97ee06c2df7fb514ff24cebe11ad788b",
+        ),
+        (
+            "packed position 2176",
+            continuation_hash.as_str(),
+            "5218c60672d51e48f2dbd832584aac39c895e5b34b39724e96ca7705642293c8",
+        ),
+        (
+            "packed position-2176 causal state",
+            causal_digest.as_str(),
+            "279a2f4ba1a7a6541144b5af6f2cbff745b498cca1fd24e414ec1cb7f86ffa68",
+        ),
+    ] {
+        assert_eq!(actual, expected, "{label}");
+    }
+    let report = publish_causal_snapshot_file(
+        &destination_snapshot_path,
+        &boundary_snapshot,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: session.residency().config(),
+            session_capacity: session.capacity(),
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 64 * 1024 * 1024,
+        },
+    )
+    .expect("publish position-2176 snapshot after all gates");
+    assert_eq!(report.record_bytes, 32_838_176);
 
     let error = session
         .forward_token(&ctx, continuation_argmax as u32)
@@ -2862,7 +2916,7 @@ fn native_deepseek_v4_durable_position_2176_snapshot_matches_oracle() {
     }
     assert_eq!(
         format!("{:x}", native_hasher.finalize()),
-        "f11d5f383999f85be6a606672dc6529cdd1d370d4b42c5b14460f7392c1f7870"
+        "5218c60672d51e48f2dbd832584aac39c895e5b34b39724e96ca7705642293c8"
     );
     eprintln!(
         "durable_position_2176_elapsed={:.3}s identity_cache={:?}",
@@ -3017,7 +3071,7 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
     assert_eq!(continuation_argmax, 201);
     assert_eq!(
         continuation_hash,
-        "e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da"
+        "7ec53d29a78a4d6ee932f292d67dc67c1d15bdd31c050ef2aa625f57fd257764"
     );
     let continuation = compare_logits(
         "position_3072",
@@ -3127,10 +3181,6 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
         .copy_logits_f32()
         .expect("copy position-3070 control logits");
     let control_hash = f32_sha256(&control_logits);
-    assert_eq!(
-        control_hash,
-        "2479973378fe4befe8304dc89b4a836274ad7ccb3fbda4b3e4f0c8c63ad0defc"
-    );
     let control = compare_logits(
         "split_position_3070",
         &control_logits,
@@ -3151,10 +3201,6 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
         .copy_logits_f32()
         .expect("copy split position-3071 logits");
     let split_boundary_hash = f32_sha256(&split_boundary_logits);
-    assert_eq!(
-        split_boundary_hash,
-        "f3be04a3823f7008e6735c81c35ae1ad8c6d68dd72698f77082f1c2843c41b25"
-    );
     let split_boundary = compare_logits(
         "split_position_3071",
         &split_boundary_logits,
@@ -3178,10 +3224,6 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
         .copy_logits_f32()
         .expect("copy split position-3072 logits");
     let split_continuation_hash = f32_sha256(&split_continuation_logits);
-    assert_eq!(
-        split_continuation_hash,
-        "d85c2d5698ebc537ae39d2ced5d34892c4340250fe4811d031a55013118d4db1"
-    );
     let split_continuation = compare_logits(
         "split_position_3072",
         &split_continuation_logits,
@@ -3209,6 +3251,18 @@ fn native_deepseek_v4_position_2176_snapshot_fills_third_csa_slab() {
         split_continuation.cosine,
         split_continuation.relative_rms,
         started.elapsed().as_secs_f64()
+    );
+    assert_eq!(
+        control_hash,
+        "32511523dad01070a3c00f22e4725cabe58fcfc450d04b56646c793ff3327ae5"
+    );
+    assert_eq!(
+        split_boundary_hash,
+        "95a7e1218b39a51c112fa822cd219b815696ff160b5e6a32216187f4323c31d7"
+    );
+    assert_eq!(
+        split_continuation_hash,
+        "09700f7707107f5efa1c50ec6dda1734bae89c7fc2a56be7153bcac62fd274f4"
     );
 
     assert_schedule_expanded_envelope(
@@ -3345,7 +3399,7 @@ fn native_deepseek_v4_durable_position_3072_snapshot_matches_schedule_envelope()
     }
     assert_eq!(
         format!("{:x}", native_hasher.finalize()),
-        "e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da"
+        "7ec53d29a78a4d6ee932f292d67dc67c1d15bdd31c050ef2aa625f57fd257764"
     );
 
     let error = session
@@ -3438,7 +3492,7 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
                 .copy_logits_f32()
                 .expect("copy larger-capacity position-3072 logits")
         ),
-        "e28ab0a9dd3d8bcd3eab8007334f1dfe5d63a73cabb0701db8159ba3a8e156da"
+        "7ec53d29a78a4d6ee932f292d67dc67c1d15bdd31c050ef2aa625f57fd257764"
     );
     session
         .restore_causal_snapshot(&schedule_fork)
@@ -3536,11 +3590,11 @@ fn native_deepseek_v4_position_3072_snapshot_crosses_dynamic_csa_capacity() {
     );
     assert_eq!(
         continuation_hash,
-        "ae1680c39a2f82b236618160ca3431040cff04af02c1c8640a449c600de3e982"
+        "6bb59676ce30832cb0cc8273c44d26b0daf1b8e136b5a279a502682ca35b658a"
     );
     assert_eq!(
         terminal_digest,
-        "5b65f082d06c94f98604bdaf5b3d0ff45e875e3371d7dd9e215d2132fb3fdc11"
+        "f95010dec44698e956328325d7372454042353186d5415f508b838985b4d3deb"
     );
     let error = session
         .forward_token(&ctx, 201)

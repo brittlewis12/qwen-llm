@@ -2484,6 +2484,7 @@ fn run_deepseek_v4_single_turn(
         .encode(&prompt, false)
         .context("tokenize raw DeepSeek V4 prompt")?;
     let required_forwards = deepseek_v4_required_forwards(prompt_ids.len(), args.tokens)?;
+    deepseek_v4_debug_dump_prompt_ids("single_turn", &prompt_ids);
     let vocab_size = tokenizer.n_vocab();
     let prompt_token_ids = prompt_ids
         .iter()
@@ -2753,6 +2754,7 @@ fn run_deepseek_v4_single_turn(
         .context("reconcile admitted DeepSeek V4 Metal memory")?;
     eprintln!("deepseek_v4: memory reconciliation; {reconciliation}");
     let logits = copy_deepseek_v4_logits(&session, vocab_size, "prompt")?;
+    deepseek_v4_debug_dump_top_logits("single_turn", &logits, &tokenizer);
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
     let mut sampler = Sampler::new(sampling).context("initialize DeepSeek V4 sampler")?;
@@ -2863,6 +2865,7 @@ fn prepare_deepseek_v4_jsonl_request_line(
         !prompt_ids.is_empty(),
         "request {id} tokenized to zero tokens"
     );
+    deepseek_v4_debug_dump_prompt_ids(&id, &prompt_ids);
     let prompt_token_ids = prompt_ids
         .iter()
         .enumerate()
@@ -3077,6 +3080,7 @@ fn run_deepseek_v4_requests_jsonl(
             }
             let logits = copy_deepseek_v4_logits(&session, vocab_size, "prompt")
                 .with_context(|| format!("copy request {} prompt logits", request.id))?;
+            deepseek_v4_debug_dump_top_logits(&request.id, &logits, &tokenizer);
             let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
             let mut sampler = Sampler::new(request.sampling)
@@ -3203,6 +3207,43 @@ fn run_deepseek_v4_requests_jsonl(
     }
     eprintln!("deepseek_v4: requests complete; executed={executed}");
     Ok(())
+}
+
+/// Debug observability: `QWEN_DSV4_PROMPT_IDS=1` dumps the exact input token
+/// stream fed to the model, for cross-engine tokenization diffs.
+fn deepseek_v4_debug_dump_prompt_ids(scope: &str, prompt_ids: &[i32]) {
+    if std::env::var_os("QWEN_DSV4_PROMPT_IDS").is_some() {
+        eprintln!(
+            "deepseek_v4 prompt_ids: scope={scope:?} count={} ids={:?}",
+            prompt_ids.len(),
+            prompt_ids
+        );
+    }
+}
+
+/// Debug observability: `QWEN_DSV4_TOP_LOGITS=N` dumps the top-N first-token
+/// logits with decoded pieces, for greedy near-tie margin analysis.
+fn deepseek_v4_debug_dump_top_logits(scope: &str, logits: &[f32], tokenizer: &Tokenizer) {
+    let Some(value) = std::env::var_os("QWEN_DSV4_TOP_LOGITS") else {
+        return;
+    };
+    let count = value
+        .to_string_lossy()
+        .parse::<usize>()
+        .unwrap_or(5)
+        .clamp(1, 50);
+    let mut ranked: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    for (rank, &(token, logit)) in ranked.iter().take(count).enumerate() {
+        let piece = tokenizer
+            .try_decode_piece_bytes_exact(token as i32)
+            .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
+            .unwrap_or_else(|_| "<undecodable>".into());
+        let margin = ranked[0].1 - logit;
+        eprintln!(
+            "deepseek_v4 first_token_logit: scope={scope:?} rank={rank} id={token} logit={logit:.6} margin_to_top={margin:.6} piece={piece:?}"
+        );
+    }
 }
 
 fn cli_sampling_config(args: &Args) -> Result<SamplingConfig> {

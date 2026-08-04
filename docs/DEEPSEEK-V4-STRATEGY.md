@@ -1222,8 +1222,8 @@ the 128-raw-plus-512-compressed shape. Singleton dense attention had the same
 output-lane score-recomputation structure in every SWA layer, HCA through 512
 rows, and CSA through its first 512 rows. Positions at least one now share the
 packed cooperative dense kernel; singleton position zero deliberately retains
-the legacy kernel and its strongest exact fixture lineage. A paired five-sample release
-packet reduces median singleton decode from 487.743 to 59.498 ms at context
+the legacy kernel and its strongest exact fixture lineage. A paired five-sample
+release packet reduces median singleton decode from 487.743 to 59.498 ms at context
 about 128 and from 624.192 to 59.865 ms at context about 512: 2.050 to 16.807
 tokens/s and 1.602 to 16.704 tokens/s. Context-dependent growth over that range
 falls from 136.449 to 0.367 ms.
@@ -1249,6 +1249,16 @@ At the 512-compressed-row HCA handoff, cooperative and tiled kernels are
 bit-identical to each other; both differ from legacy in the same 66 words at
 maximum absolute error 5.83e-11. This gives the <=512 and >512 paths one exact
 production-shape reduction lineage rather than merely adjacent tolerances.
+
+A clean current-upstream llama.cpp Metal packet at b10254 measures 36.137 and
+36.255 ms/token at cached depths 128 and 512, or 27.673 and 27.582 tokens/s.
+qwen-llm takes 1.646x/1.651x as long per token and delivers 60.7%/60.6% of
+upstream throughput despite matching its near-flat context curve. A separately pinned b10235 exact
+token-injection packet remains near 27 tokens/s and repeats its full vectors
+byte-for-byte. A cold-first qwen prefix observation is materially behind warmed
+llama_core medians, but no prefill ratio is promoted until warm treatment is
+matched. Complete commands, revisions, decode samples, hashes, and comparison caveats are retained in
+`docs/bench/2026-08-03-dsv4-metal-llama-baseline.md`.
 
 Gate:
 
@@ -1370,15 +1380,16 @@ Broader S6 work remains:
 - Pack intended mixed FP8/BF16 KV and FP4 indexer caches.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, shared-KV
   sparse attention, and high-value MoE boundaries.
+- Attribute the 43 per-layer CPU routing completions, CPU route/copy work, and
+  expert GPU work. Proceed to a GPU route-record ABI only if the aggregate
+  router-GPU-end-to-expert-GPU-start idle interval exposes at least 5 ms/token;
+  CPU route/copy explains that interval and is not added to it. Keep selected
+  IDs asynchronously observable for future SSD expert streaming.
 - Parallelize or tile the measured 8.232 ms terminal Lightning Indexer scoring
   kernel while preserving scalar head/dimension accumulation semantics and the
   exact selected-ID transcript. It is now the primary measured CSA target.
 - Attribute tiled HCA score recomputation and retained-chunk routing before
   choosing their next fusion or scheduling target.
-- Move CPU routing and grouped expert schedules onto the GPU only after named
-  retained-chunk phase attribution identifies them as the next bottleneck. Keep
-  selected expert IDs observable without forcing a per-layer host wait so this
-  optimization does not preclude later SSD expert streaming.
 
 Gates:
 
@@ -1449,20 +1460,23 @@ noise without reducing technical risk. Revisit after S5.
    under study directly; optimization, not another position unlock, is now the
    critical path to useful long-context inference.
 3. Preserve the promoted dense-attention checkpoint: singleton position zero
-   remains on its exact legacy lineage; SWA uses cooperative attention thereafter; CSA uses
-   it through position 2050 before sparse selection starts at 2051; and HCA uses
-   it through position 65,662 before tiled attention starts at 65,663 without a
-   numerical seam. The observed five-sample context-128/512 curve is near 16.7
-   tokens/s at both depths.
-4. Establish a same-hash, same-request llama.cpp Metal throughput baseline before
-   changing synchronization. Then choose between CSA index scoring and routing
-   from the product profile. Exact radix selection is bounded at 4.582 ms median
-   / 4.589 ms p95 over all 262,144 rows, while scoring leads at 8.232 ms; the
-   current per-layer routing completion instead governs short-context decode.
-5. Reduce whichever remaining synchronization cost dominates: tiled HCA's
-   deliberate two-pass score recomputation, 43-layer host routing completion,
-   or the roughly 1,000 chronological compressor/cache dispatches per packed
-   chunk. Keep the current correctness path as the differential reference and
-   preserve asynchronous expert-ID visibility for future streaming.
-6. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
+   remains on its exact legacy lineage; SWA uses cooperative attention
+   thereafter; CSA uses it through position 2050 before sparse selection starts
+   at 2051; and HCA uses it through position 65,662 before tiled attention starts
+   at 65,663 without a numerical seam.
+4. Treat the pinned b10254 Metal baseline as the short-context target: 27.67 and
+   27.58 tokens/s at depths 128 and 512 versus qwen-llm's 16.81 and 16.70. The
+   exact b10235 token packet and prefill comparison independently bracket request
+   identity and preserve full-vector repeat hashes.
+5. Attribute per-layer routing next, with a preregistered 5 ms/token stop rule
+   on the aggregate router-GPU-end-to-expert-GPU-start idle interval. If it
+   passes, move learned/hash expert selection toward an immutable GPU
+   route-record ABI while keeping selected IDs asynchronously observable and the
+   current CPU route as the differential reference. If it fails, target command
+   submission or expert projections instead.
+6. Keep far-context index scoring and packed-prompt dispatch reduction as
+   independent measured lanes. Exact radix selection is bounded at 4.582 ms
+   median / 4.589 ms p95 over all 262,144 rows, while scoring leads at 8.232 ms;
+   packed prefill needs a warm-matched comparator before promoting a ratio.
+7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

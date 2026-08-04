@@ -29,9 +29,12 @@ For priorities: `docs/PERF-ROADMAP.md`.
 
 ## Opinionated choices
 
-- **No bandwidth row for MoE models.** Naive `model_size × t/s`
-  overstates by ~10x for A3B / A10B; honest accounting needs active-param
-  tracking in the JSON schema first.
+- **No model-size bandwidth row for MoE models.** Naive `model_size x t/s`
+  overstates by ~10x for A3B / A10B. A MoE packet may instead report
+  census-derived `active_bytes_per_token`, effective active-byte bandwidth, and
+  percent of the maintained stream anchor when it pins the dense/shared/routed
+  role decomposition and quant byte widths. These fields belong in the JSON
+  schema before becoming scoreboard authority.
 - **One JSON file per (engine, model, shape).** Lets you re-run a single
   cell of the matrix without disturbing the rest.
 - **Sanity flags inline in the digest.** `pp1024 < pp512` and friends
@@ -43,3 +46,4 @@ For priorities: `docs/PERF-ROADMAP.md`.
   lcpp and qwen in the same sweep so drift cancels in the ratio.
 - No auto-diff against the previous baseline.
 - No first-token / TTFT measurement.
+- No census-to-active-bytes exporter in the bench tooling yet.

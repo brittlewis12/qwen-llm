@@ -3,9 +3,10 @@ use qwen_llm::deepseek_v4::DeepSeekV4Model;
 #[cfg(feature = "dsv4-diagnostics")]
 use qwen_llm::deepseek_v4_metal::DeepSeekV4DecisionTranscript;
 use qwen_llm::deepseek_v4_metal::{
-    DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4PositionZeroForward,
-    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotObservation, decode_causal_snapshot,
-    encode_causal_snapshot, load_causal_snapshot_file, publish_causal_snapshot_file,
+    DeepSeekV4CausalSnapshot, DeepSeekV4MetalResidency, DeepSeekV4ModelContentId,
+    DeepSeekV4PositionZeroForward, DeepSeekV4SnapshotCodecConstraints,
+    DeepSeekV4SnapshotObservation, decode_causal_snapshot, encode_causal_snapshot,
+    load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
@@ -1815,6 +1816,96 @@ fn profile_native_deepseek_v4_singleton_decode_at_128_and_512() {
         "deepseek_v4 singleton_decode context128_ms={context_128_samples:?} context128_median_ms={context_128_median:.3} context128_tps={:.3} context512_ms={context_512_samples:?} context512_median_ms={context_512_median:.3} context512_tps={:.3}",
         1e3 / context_128_median,
         1e3 / context_512_median,
+    );
+}
+
+#[test]
+#[ignore = "focused release profiler requires the local 95.93 GiB DS4 fixture"]
+fn profile_native_deepseek_v4_exact_packed_prefix_decode_at_129_and_513() {
+    const FORWARD_LIMIT: usize = 520;
+    const WARM_SAMPLES: usize = 5;
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MODEL));
+    assert!(model_path.exists(), "missing DS4 model");
+    let ctx = MetalContext::new().expect("create Metal context");
+    let gguf = GgufFile::open(&model_path).expect("open DS4 GGUF shards");
+    let residency = load_admitted_residency_for(&ctx, &gguf, FORWARD_LIMIT);
+    let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
+        &ctx,
+        residency,
+        frozen_model_content_id(),
+    )
+    .expect("build exact-prefix profiled session");
+    let prompt = [35, 201, 200, 34].repeat(129);
+
+    let measure = |session: &mut DeepSeekV4PositionZeroForward,
+                   snapshot: &DeepSeekV4CausalSnapshot| {
+        let mut milliseconds = Vec::with_capacity(WARM_SAMPLES + 1);
+        let mut hashes = Vec::with_capacity(WARM_SAMPLES + 1);
+        for _ in 0..=WARM_SAMPLES {
+            session
+                .restore_causal_snapshot(snapshot)
+                .expect("restore exact-prefix benchmark state");
+            let started = Instant::now();
+            session
+                .forward_token(&ctx, 201)
+                .expect("execute exact-prefix profiled token");
+            milliseconds.push(started.elapsed().as_secs_f64() * 1e3);
+            hashes.push(f32_sha256(
+                &session
+                    .copy_logits_f32()
+                    .expect("copy exact-prefix profiled logits"),
+            ));
+        }
+        assert!(hashes.iter().all(|hash| hash == &hashes[0]));
+        let cold = milliseconds[0];
+        let warm = milliseconds[1..].to_vec();
+        let mut ordered = warm.clone();
+        ordered.sort_by(f64::total_cmp);
+        (cold, warm, ordered[WARM_SAMPLES / 2], hashes.remove(0))
+    };
+
+    let prefill_started = Instant::now();
+    session
+        .advance_tokens(&ctx, &prompt[..128])
+        .expect("advance exact packed prefix to position 128");
+    session
+        .advance_tokens(&ctx, &prompt[128..129])
+        .expect("advance exact packed prefix to position 129");
+    let position_129_prefill_ms = prefill_started.elapsed().as_secs_f64() * 1e3;
+    let position_129 = session
+        .capture_causal_snapshot()
+        .expect("capture exact position-129 state");
+
+    let continuation_started = Instant::now();
+    for chunk in prompt[129..513].chunks(128) {
+        session
+            .advance_tokens(&ctx, chunk)
+            .expect("advance exact packed prefix to position 513");
+    }
+    let position_513_prefill_ms =
+        position_129_prefill_ms + continuation_started.elapsed().as_secs_f64() * 1e3;
+    let position_513 = session
+        .capture_causal_snapshot()
+        .expect("capture exact position-513 state");
+    let (position_129_cold, position_129_warm, position_129_median, position_129_hash) =
+        measure(&mut session, &position_129);
+    let (position_513_cold, position_513_warm, position_513_median, position_513_hash) =
+        measure(&mut session, &position_513);
+    assert_eq!(
+        position_129_hash,
+        "4490618b733ff6e4841b3beba176220f939f43366584f58c513bf3b8c38ec2fc"
+    );
+    assert_eq!(
+        position_513_hash,
+        "7f358590cd7d483f6dbe30a9cf7f8acb747845fefd44a84c0c940f7458e2d179"
+    );
+
+    eprintln!(
+        "deepseek_v4 exact_packed_prefix_decode position129_prefill_ms={position_129_prefill_ms:.3} position129_cold_restore_ms={position_129_cold:.3} position129_warm_restore_ms={position_129_warm:?} position129_warm_restore_median_ms={position_129_median:.3} position129_warm_restore_tps={:.3} position129_sha256={position_129_hash} position513_prefill_ms={position_513_prefill_ms:.3} position513_cold_restore_ms={position_513_cold:.3} position513_warm_restore_ms={position_513_warm:?} position513_warm_restore_median_ms={position_513_median:.3} position513_warm_restore_tps={:.3} position513_sha256={position_513_hash}",
+        1e3 / position_129_median,
+        1e3 / position_513_median,
     );
 }
 

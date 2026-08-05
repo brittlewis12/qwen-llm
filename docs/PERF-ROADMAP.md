@@ -320,14 +320,25 @@ and exact outputs plus matching causal identities. Ordinary controls total
 That misses the 150 ms/15% authorization floor. Keep it as a CSA-weighted
 piggyback opportunity, not a standalone optimization target.
 
+The same supported instrument now closes the next branch. Attention body plus
+output occupies 46.897%/47.238% of pre-expert GPU and has a 500.011 ms/46.420%
+uncertainty-adjusted lower estimate. A direct four-pass split reproduces that
+combined envelope within 1.449/0.019 points. Attention body alone misses at
+113.488 ms/10.641%; `encode_output` clears decisively at
+377.528 ms/35.397%. Controls drift 2.019% and sampled runs drift 2.447%.
+Packed logits, normalized hidden, and restored continuation bits remain exact;
+recorded state digests and all 47,990 dispatch geometries match. This authorizes
+output work, not a generic attention rewrite.
+
 Force-ranked queue:
 
-1. **Attribute packed attention body plus output.** Reuse the accepted narrow
-   instrument across all 43 layers. Begin after chronological publication,
-   include dense/sparse attention, inverse RoPE, and both output projections,
-   then end before attention mHC post. Keep ordinary execution at one encoder;
-   treat diagnostic pass envelopes as attribution only. Split body from output
-   only if the combined target clears its authorization gate.
+1. **Collapse packed Q8_0 attention output.** The current output-A path executes
+   eight pack/projection/scatter triplets before output B and rereads weights per
+   token. Test one exact mapped, token-tiled output-A dispatch plus one tiled
+   output-B dispatch at T=4/8. Preserve each token's Q8_0 block traversal and
+   reduction lineage, write disjoint low-rank slices directly, add no session
+   allocation, and retain the current 25-dispatch path as fallback. Require
+   intermediate and final bit identity before a current-asset timing gate.
 2. **Attribute unchanged packed post-route work.** The 27 layers outside the
    all-IQ3 candidate remain at roughly 688 ms in both traced arms. Separate
    dtype mix, expert compute, and fixed dispatch overhead before attempting

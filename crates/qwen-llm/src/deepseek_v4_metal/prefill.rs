@@ -2906,16 +2906,18 @@ struct PackedLayerTrace {
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum PackedPrefillStageKind {
-    BeforeChronological,
-    ChronologicalRows,
-    AfterChronological,
+    BeforeAttentionBody,
+    AttentionBody,
+    AttentionOutputProjections,
+    AfterAttentionOutput,
 }
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
-pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 3] = [
-    PackedPrefillStageKind::BeforeChronological,
-    PackedPrefillStageKind::ChronologicalRows,
-    PackedPrefillStageKind::AfterChronological,
+pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 4] = [
+    PackedPrefillStageKind::BeforeAttentionBody,
+    PackedPrefillStageKind::AttentionBody,
+    PackedPrefillStageKind::AttentionOutputProjections,
+    PackedPrefillStageKind::AfterAttentionOutput,
 ];
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -3314,7 +3316,7 @@ impl<'command, 'recorder> PackedPrefillLayerEncoder<'command, 'recorder> {
             recorder.as_deref_mut().unwrap().begin_encoder(
                 command,
                 layer,
-                PackedPrefillStageKind::BeforeChronological,
+                PackedPrefillStageKind::BeforeAttentionBody,
             )?
         } else {
             KernelEncoder::begin(command)
@@ -5227,9 +5229,6 @@ impl DeepSeekV4Session {
                     n_tokens,
                 )?;
 
-                #[cfg(all(test, feature = "dsv4-diagnostics"))]
-                encoder.boundary(PackedPrefillStageKind::ChronologicalRows)?;
-
                 for row in 0..n_tokens {
                     let position = start_position
                         .checked_add(u32::try_from(row).map_err(|_| {
@@ -5283,7 +5282,7 @@ impl DeepSeekV4Session {
                 }
 
                 #[cfg(all(test, feature = "dsv4-diagnostics"))]
-                encoder.boundary(PackedPrefillStageKind::AfterChronological)?;
+                encoder.boundary(PackedPrefillStageKind::AttentionBody)?;
 
                 let compressed = self
                     .compressor_frontiers
@@ -5467,6 +5466,10 @@ impl DeepSeekV4Session {
                         true,
                     )?;
                 }
+
+                #[cfg(all(test, feature = "dsv4-diagnostics"))]
+                encoder.boundary(PackedPrefillStageKind::AttentionOutputProjections)?;
+
                 let attention_output = self.prefill.attention.encode_output(
                     ctx,
                     &encoder,
@@ -5475,6 +5478,9 @@ impl DeepSeekV4Session {
                     self.layer_tensor(layer, "attn_output_b.weight")?,
                     n_tokens,
                 )?;
+
+                #[cfg(all(test, feature = "dsv4-diagnostics"))]
+                encoder.boundary(PackedPrefillStageKind::AfterAttentionOutput)?;
 
                 self.prefill.hyper.encode_post(
                     ctx,
@@ -5992,40 +5998,45 @@ mod tests {
         let records = [
             PackedPrefillPendingStageSample {
                 layer: 0,
-                kind: PackedPrefillStageKind::BeforeChronological,
+                kind: PackedPrefillStageKind::BeforeAttentionBody,
                 samples: Some((0, 1)),
             },
             PackedPrefillPendingStageSample {
                 layer: 0,
-                kind: PackedPrefillStageKind::ChronologicalRows,
+                kind: PackedPrefillStageKind::AttentionBody,
                 samples: None,
             },
             PackedPrefillPendingStageSample {
                 layer: 0,
-                kind: PackedPrefillStageKind::AfterChronological,
+                kind: PackedPrefillStageKind::AttentionOutputProjections,
                 samples: Some((2, 3)),
+            },
+            PackedPrefillPendingStageSample {
+                layer: 0,
+                kind: PackedPrefillStageKind::AfterAttentionOutput,
+                samples: Some((4, 5)),
             },
         ];
         let profile = resolve_packed_prefill_layer_stage_samples(
             0,
             &records,
-            &[100, 110, 113, 130],
+            &[100, 110, 113, 130, 133, 145],
             1.0,
-            Some(PackedPrefillStageKind::ChronologicalRows),
+            Some(PackedPrefillStageKind::AttentionBody),
         )
         .unwrap();
         assert_eq!(profile.stages[1].start_timestamp, None);
         assert_eq!(profile.stages[1].end_timestamp, None);
         assert_eq!(profile.stages[1].duration_ticks, 0);
         assert_eq!(profile.stages[1].duration_ms_scaled, 0.0);
-        assert_eq!(profile.transitions.len(), 1);
+        assert_eq!(profile.transitions.len(), 2);
         assert_eq!(
             profile.transitions[0].from,
-            PackedPrefillStageKind::BeforeChronological
+            PackedPrefillStageKind::BeforeAttentionBody
         );
         assert_eq!(
             profile.transitions[0].to,
-            PackedPrefillStageKind::AfterChronological
+            PackedPrefillStageKind::AttentionOutputProjections
         );
     }
 

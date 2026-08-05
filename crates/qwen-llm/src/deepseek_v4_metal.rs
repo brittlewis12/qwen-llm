@@ -14281,9 +14281,13 @@ mod tests {
     #[cfg(feature = "dsv4-diagnostics")]
     #[test]
     #[ignore = "requires the current 97.05 GiB DS4 asset"]
-    fn current_asset_packed_pre_expert_stage_attribution_packet() {
+    fn current_asset_packed_attention_split_attribution_packet() {
         const PREFIX_TOKENS: usize = 128;
         const CONTINUATION_TOKEN: u32 = 35;
+        const ACCEPTED_COMBINED_LOG_SHA256: &str =
+            "e735c536b742bb4f24c7dc89eaa7ceb40cbfa5ffdf65cf3e852130bf8be87cc0";
+        const ACCEPTED_COMBINED_SHARES: [f64; 2] =
+            [0.468_973_667_511_767_6, 0.472_380_181_289_259_2];
         const ORDINARY_ENCODERS: u64 = (DEEPSEEK_V4_LAYER_COUNT * 2) as u64;
         const SAMPLED_ENCODERS: u64 =
             (DEEPSEEK_V4_LAYER_COUNT * (prefill::PACKED_PREFILL_STAGE_KINDS.len() + 1)) as u64;
@@ -14306,8 +14310,8 @@ mod tests {
 
         #[derive(Clone, Debug)]
         struct Summary {
-            stage_ms: [f64; 3],
-            cohort_stage_ms: [[f64; 3]; 3],
+            stage_ms: [f64; 4],
+            cohort_stage_ms: [[f64; 4]; 3],
             cohort_command_ms: [f64; 3],
             cohort_gap_ms: [f64; 3],
             cohort_overlap_ms: [f64; 3],
@@ -14334,9 +14338,10 @@ mod tests {
 
         fn stage_index(kind: prefill::PackedPrefillStageKind) -> usize {
             match kind {
-                prefill::PackedPrefillStageKind::BeforeChronological => 0,
-                prefill::PackedPrefillStageKind::ChronologicalRows => 1,
-                prefill::PackedPrefillStageKind::AfterChronological => 2,
+                prefill::PackedPrefillStageKind::BeforeAttentionBody => 0,
+                prefill::PackedPrefillStageKind::AttentionBody => 1,
+                prefill::PackedPrefillStageKind::AttentionOutputProjections => 2,
+                prefill::PackedPrefillStageKind::AfterAttentionOutput => 3,
             }
         }
 
@@ -14502,8 +14507,8 @@ mod tests {
         fn summarize(profile: &prefill::PackedPrefillStageProfile) -> Summary {
             assert!(profile.sampled);
             let config = crate::deepseek_v4::flash_0731_config_fixture();
-            let mut stage_ms = [0.0; 3];
-            let mut cohort_stage_ms = [[0.0; 3]; 3];
+            let mut stage_ms = [0.0; 4];
+            let mut cohort_stage_ms = [[0.0; 4]; 3];
             let mut cohort_command_ms = [0.0; 3];
             let mut cohort_gap_ms = [0.0; 3];
             let mut cohort_overlap_ms = [0.0; 3];
@@ -14515,8 +14520,8 @@ mod tests {
             let mut max_single_transition_ambiguity = 0.0f64;
             for (layer, sampled_layer) in profile.sampled_layers.iter().enumerate() {
                 assert_eq!(sampled_layer.layer, layer);
-                assert_eq!(sampled_layer.stages.len(), 3);
-                assert_eq!(sampled_layer.transitions.len(), 2);
+                assert_eq!(sampled_layer.stages.len(), 4);
+                assert_eq!(sampled_layer.transitions.len(), 3);
                 assert!(
                     (sampled_layer.command_gpu_ms - profile.command_gpu_ms[layer]).abs() < 1e-9
                 );
@@ -14607,13 +14612,13 @@ mod tests {
             }
         }
 
-        fn chronological_share(summary: &Summary) -> f64 {
-            summary.stage_ms[1] / summary.command_gpu_ms
+        fn stage_share(summary: &Summary, stage: usize) -> f64 {
+            summary.stage_ms[stage] / summary.command_gpu_ms
         }
 
-        fn cohort_chronological_shares(summary: &Summary) -> [f64; 3] {
+        fn cohort_stage_shares(summary: &Summary, stage: usize) -> [f64; 3] {
             std::array::from_fn(|cohort| {
-                summary.cohort_stage_ms[cohort][1] / summary.cohort_command_ms[cohort]
+                summary.cohort_stage_ms[cohort][stage] / summary.cohort_command_ms[cohort]
             })
         }
 
@@ -14695,17 +14700,29 @@ mod tests {
             .iter()
             .map(|evidence| summarize(&evidence.profile))
             .collect::<Vec<_>>();
-        let target_shares = [
-            chronological_share(&summaries[0]),
-            chronological_share(&summaries[1]),
+        let body_shares = [stage_share(&summaries[0], 1), stage_share(&summaries[1], 1)];
+        let output_shares = [stage_share(&summaries[0], 2), stage_share(&summaries[1], 2)];
+        let combined_shares: [f64; 2] =
+            std::array::from_fn(|index| body_shares[index] + output_shares[index]);
+        let body_repeat_delta = (body_shares[0] - body_shares[1]).abs();
+        let output_repeat_delta = (output_shares[0] - output_shares[1]).abs();
+        let combined_repeat_delta = (combined_shares[0] - combined_shares[1]).abs();
+        let combined_reproduction_delta: [f64; 2] = std::array::from_fn(|index| {
+            (combined_shares[index] - ACCEPTED_COMBINED_SHARES[index]).abs()
+        });
+        let cohort_body_shares = [
+            cohort_stage_shares(&summaries[0], 1),
+            cohort_stage_shares(&summaries[1], 1),
         ];
-        let target_repeat_delta = (target_shares[0] - target_shares[1]).abs();
-        let cohort_shares = [
-            cohort_chronological_shares(&summaries[0]),
-            cohort_chronological_shares(&summaries[1]),
+        let cohort_output_shares = [
+            cohort_stage_shares(&summaries[0], 2),
+            cohort_stage_shares(&summaries[1], 2),
         ];
-        let cohort_share_delta: [f64; 3] = std::array::from_fn(|cohort| {
-            (cohort_shares[0][cohort] - cohort_shares[1][cohort]).abs()
+        let cohort_body_share_delta: [f64; 3] = std::array::from_fn(|cohort| {
+            (cohort_body_shares[0][cohort] - cohort_body_shares[1][cohort]).abs()
+        });
+        let cohort_output_share_delta: [f64; 3] = std::array::from_fn(|cohort| {
+            (cohort_output_shares[0][cohort] - cohort_output_shares[1][cohort]).abs()
         });
         let transition_uncertainty = summaries
             .iter()
@@ -14722,29 +14739,46 @@ mod tests {
             .map(|summary| (summary.raw_span_ms / summary.command_gpu_ms - 1.0).abs())
             .reduce(f64::max)
             .unwrap();
-        let observer_uncertainty = transition_uncertainty
-            .max(topology_uncertainty)
-            .max(target_repeat_delta);
-        let mean_target_share = (target_shares[0] + target_shares[1]) * 0.5;
-        let lower_target_share = (mean_target_share - observer_uncertainty).max(0.0);
-        let normalized_target_ms = [
-            target_shares[0] * interpolated_control_gpu_ms[0],
-            target_shares[1] * interpolated_control_gpu_ms[1],
+        let common_uncertainty = transition_uncertainty.max(topology_uncertainty);
+        let body_observer_uncertainty = common_uncertainty.max(body_repeat_delta);
+        let output_observer_uncertainty = common_uncertainty.max(output_repeat_delta);
+        let mean_body_share = (body_shares[0] + body_shares[1]) * 0.5;
+        let mean_output_share = (output_shares[0] + output_shares[1]) * 0.5;
+        let lower_body_share = (mean_body_share - body_observer_uncertainty).max(0.0);
+        let lower_output_share = (mean_output_share - output_observer_uncertainty).max(0.0);
+        let normalized_body_ms = [
+            body_shares[0] * interpolated_control_gpu_ms[0],
+            body_shares[1] * interpolated_control_gpu_ms[1],
+        ];
+        let normalized_output_ms = [
+            output_shares[0] * interpolated_control_gpu_ms[0],
+            output_shares[1] * interpolated_control_gpu_ms[1],
         ];
         let ordinary_gpu_median = median(&control_gpu_ms);
-        let normalized_target_median_ms = median(&normalized_target_ms);
-        let lower_target_ms =
-            (normalized_target_median_ms - observer_uncertainty * ordinary_gpu_median).max(0.0);
-        let mean_cohort_share: [f64; 3] = std::array::from_fn(|cohort| {
-            (cohort_shares[0][cohort] + cohort_shares[1][cohort]) * 0.5
+        let normalized_body_median_ms = median(&normalized_body_ms);
+        let normalized_output_median_ms = median(&normalized_output_ms);
+        let lower_body_ms =
+            (normalized_body_median_ms - body_observer_uncertainty * ordinary_gpu_median).max(0.0);
+        let lower_output_ms = (normalized_output_median_ms
+            - output_observer_uncertainty * ordinary_gpu_median)
+            .max(0.0);
+        let mean_cohort_body_share: [f64; 3] = std::array::from_fn(|cohort| {
+            (cohort_body_shares[0][cohort] + cohort_body_shares[1][cohort]) * 0.5
         });
-        let chronological_authorized = lower_target_share >= 0.15
-            && lower_target_ms >= 150.0
-            && mean_cohort_share[1] >= 0.10
-            && mean_cohort_share[2] >= 0.10;
+        let mean_cohort_output_share: [f64; 3] = std::array::from_fn(|cohort| {
+            (cohort_output_shares[0][cohort] + cohort_output_shares[1][cohort]) * 0.5
+        });
+        let body_authorized = lower_body_share >= 0.15
+            && lower_body_ms >= 150.0
+            && mean_cohort_body_share[1] >= 0.10
+            && mean_cohort_body_share[2] >= 0.10;
+        let output_authorized = lower_output_share >= 0.15
+            && lower_output_ms >= 150.0
+            && mean_cohort_output_share[1] >= 0.10
+            && mean_cohort_output_share[2] >= 0.10;
 
         eprintln!(
-            "deepseek_v4 packed_chronological_profile n={PREFIX_TOKENS} grouped_default={grouped_default} control_gpu_ms={control_gpu_ms:?} interpolated_control_gpu_ms={interpolated_control_gpu_ms:?} sampled_gpu_ms={sampled_gpu_ms:?} audit_inclusive_control_wall_ms={control_wall_ms:?} audit_inclusive_sampled_wall_ms={sampled_wall_ms:?} control_drift={control_drift:.6} sampled_drift={sampled_drift:.6} sampled_perturbation={perturbation:?} target_shares={target_shares:?} target_repeat_delta={target_repeat_delta:.6} cohort_shares={cohort_shares:?} cohort_share_delta={cohort_share_delta:?} normalized_target_ms={normalized_target_ms:?} normalized_target_median_ms={normalized_target_median_ms:.3} lower_target_share={lower_target_share:.6} lower_target_ms={lower_target_ms:.3} transition_uncertainty={transition_uncertainty:.6} topology_uncertainty={topology_uncertainty:.6} coverage_uncertainty={coverage_uncertainty:.6} observer_uncertainty={observer_uncertainty:.6} chronological_authorized={chronological_authorized} dispatches={} ordinary_encoders={ORDINARY_ENCODERS} sampled_encoders={SAMPLED_ENCODERS} dispatch_sha256={} model_content_id={} logits_sha256={} hidden_sha256={} causal_digest={} prefix_digest={} compatibility_digest={} continuation_logits_sha256={} continuation_causal_digest={} committed_tokens_sha256={}",
+            "deepseek_v4 packed_attention_split_profile n={PREFIX_TOKENS} grouped_default={grouped_default} control_gpu_ms={control_gpu_ms:?} interpolated_control_gpu_ms={interpolated_control_gpu_ms:?} sampled_gpu_ms={sampled_gpu_ms:?} audit_inclusive_control_wall_ms={control_wall_ms:?} audit_inclusive_sampled_wall_ms={sampled_wall_ms:?} control_drift={control_drift:.6} sampled_drift={sampled_drift:.6} sampled_perturbation={perturbation:?} body_shares={body_shares:?} output_shares={output_shares:?} combined_shares={combined_shares:?} accepted_combined_log_sha256={ACCEPTED_COMBINED_LOG_SHA256} accepted_combined_shares={ACCEPTED_COMBINED_SHARES:?} combined_reproduction_delta={combined_reproduction_delta:?} body_repeat_delta={body_repeat_delta:.6} output_repeat_delta={output_repeat_delta:.6} combined_repeat_delta={combined_repeat_delta:.6} cohort_body_shares={cohort_body_shares:?} cohort_output_shares={cohort_output_shares:?} cohort_body_share_delta={cohort_body_share_delta:?} cohort_output_share_delta={cohort_output_share_delta:?} normalized_body_ms={normalized_body_ms:?} normalized_output_ms={normalized_output_ms:?} normalized_body_median_ms={normalized_body_median_ms:.3} normalized_output_median_ms={normalized_output_median_ms:.3} lower_body_share={lower_body_share:.6} lower_output_share={lower_output_share:.6} lower_body_ms={lower_body_ms:.3} lower_output_ms={lower_output_ms:.3} transition_uncertainty={transition_uncertainty:.6} topology_uncertainty={topology_uncertainty:.6} coverage_uncertainty={coverage_uncertainty:.6} body_observer_uncertainty={body_observer_uncertainty:.6} output_observer_uncertainty={output_observer_uncertainty:.6} body_authorized={body_authorized} output_authorized={output_authorized} dispatches={} ordinary_encoders={ORDINARY_ENCODERS} sampled_encoders={SAMPLED_ENCODERS} dispatch_sha256={} model_content_id={} logits_sha256={} hidden_sha256={} causal_digest={} prefix_digest={} compatibility_digest={} continuation_logits_sha256={} continuation_causal_digest={} committed_tokens_sha256={}",
             warm_control.dispatch_count,
             profile_digest_hex(warm_control.dispatch_digest),
             profile_digest_hex(model_content_id.as_bytes()),
@@ -14763,13 +14797,13 @@ mod tests {
         );
         for (index, control) in controls.iter().enumerate() {
             eprintln!(
-                "deepseek_v4 packed_chronological_profile_control index={index} layer_command_gpu_ms={:?}",
+                "deepseek_v4 packed_attention_split_profile_control index={index} layer_command_gpu_ms={:?}",
                 control.profile.command_gpu_ms
             );
         }
         for (index, summary) in summaries.iter().enumerate() {
             eprintln!(
-                "deepseek_v4 packed_chronological_profile_sample index={index} command_gpu_ms={:.3} raw_span_ms={:.3} raw_coverage={:.6} gap_ms={:.3} overlap_ms={:.3} transition_ambiguity={:.6} max_layer_coverage_error={:.6} max_layer_transition_ambiguity={:.6} max_single_transition_ambiguity={:.6} stage_ms={:?} target_share={:.6} cohort_stage_ms={:?} cohort_command_ms={:?} cohort_target_share={:?} cohort_gap_ms={:?} cohort_overlap_ms={:?}",
+                "deepseek_v4 packed_attention_split_profile_sample index={index} command_gpu_ms={:.3} raw_span_ms={:.3} raw_coverage={:.6} gap_ms={:.3} overlap_ms={:.3} transition_ambiguity={:.6} max_layer_coverage_error={:.6} max_layer_transition_ambiguity={:.6} max_single_transition_ambiguity={:.6} stage_ms={:?} body_share={:.6} output_share={:.6} combined_share={:.6} cohort_stage_ms={:?} cohort_command_ms={:?} cohort_body_share={:?} cohort_output_share={:?} cohort_gap_ms={:?} cohort_overlap_ms={:?}",
                 summary.command_gpu_ms,
                 summary.raw_span_ms,
                 summary.raw_span_ms / summary.command_gpu_ms,
@@ -14780,21 +14814,24 @@ mod tests {
                 summary.max_layer_transition_ambiguity,
                 summary.max_single_transition_ambiguity,
                 summary.stage_ms,
-                target_shares[index],
+                body_shares[index],
+                output_shares[index],
+                combined_shares[index],
                 summary.cohort_stage_ms,
                 summary.cohort_command_ms,
-                cohort_shares[index],
+                cohort_body_shares[index],
+                cohort_output_shares[index],
                 summary.cohort_gap_ms,
                 summary.cohort_overlap_ms,
             );
             let config = crate::deepseek_v4::flash_0731_config_fixture();
             for layer in &sampled_runs[index].profile.sampled_layers {
-                let stage_ticks: [u64; 3] =
+                let stage_ticks: [u64; 4] =
                     std::array::from_fn(|stage| layer.stages[stage].duration_ticks);
-                let stage_ms: [f64; 3] =
+                let stage_ms: [f64; 4] =
                     std::array::from_fn(|stage| layer.stages[stage].duration_ms_scaled);
                 eprintln!(
-                    "deepseek_v4 packed_chronological_profile_layer sample={index} layer={} attention_kind={:?} command_gpu_ms={:.6} raw_span_ticks={} raw_span_ms={:.6} raw_coverage={:.9} gap_ms={:.6} overlap_ms={:.6} transition_ambiguity={:.9} target_share={:.9} stage_ticks={stage_ticks:?} stage_ms={stage_ms:?} transitions={:?}",
+                    "deepseek_v4 packed_attention_split_profile_layer sample={index} layer={} attention_kind={:?} command_gpu_ms={:.6} raw_span_ticks={} raw_span_ms={:.6} raw_coverage={:.9} gap_ms={:.6} overlap_ms={:.6} transition_ambiguity={:.9} body_share={:.9} output_share={:.9} combined_share={:.9} stage_ticks={stage_ticks:?} stage_ms={stage_ms:?} transitions={:?}",
                     layer.layer,
                     config.attention_kinds[layer.layer],
                     layer.command_gpu_ms,
@@ -14806,6 +14843,9 @@ mod tests {
                     (layer.encoder_gap_ms_scaled + layer.encoder_overlap_ms_scaled)
                         / layer.command_gpu_ms,
                     layer.stages[1].duration_ms_scaled / layer.command_gpu_ms,
+                    layer.stages[2].duration_ms_scaled / layer.command_gpu_ms,
+                    (layer.stages[1].duration_ms_scaled + layer.stages[2].duration_ms_scaled)
+                        / layer.command_gpu_ms,
                     layer.transitions,
                 );
             }
@@ -14836,20 +14876,33 @@ mod tests {
         assert!(
             summaries
                 .iter()
-                .all(|summary| summary.max_layer_transition_ambiguity <= 0.075),
-            "per-layer combined transition ambiguity exceeded 7.5%"
+                .all(|summary| summary.max_layer_transition_ambiguity <= 0.10),
+            "per-layer combined transition ambiguity exceeded 10%"
         );
         assert!(
             transition_uncertainty <= 0.025,
             "aggregate transition ambiguity exceeded 2.5%"
         );
         assert!(
-            target_repeat_delta <= 0.02,
-            "chronological share changed by more than two points"
+            body_repeat_delta <= 0.02 && output_repeat_delta <= 0.02,
+            "body or output share changed by more than two points"
         );
         assert!(
-            cohort_share_delta[1] <= 0.03 && cohort_share_delta[2] <= 0.03,
-            "CSA/HCA chronological shares changed by more than three points"
+            combined_repeat_delta <= 0.02,
+            "combined attention share changed by more than two points"
+        );
+        assert!(
+            combined_reproduction_delta
+                .iter()
+                .all(|&delta| delta <= 0.02),
+            "split attention share did not reproduce the accepted combined envelope"
+        );
+        assert!(
+            cohort_body_share_delta[1] <= 0.03
+                && cohort_body_share_delta[2] <= 0.03
+                && cohort_output_share_delta[1] <= 0.03
+                && cohort_output_share_delta[2] <= 0.03,
+            "CSA/HCA body or output shares changed by more than three points"
         );
     }
 

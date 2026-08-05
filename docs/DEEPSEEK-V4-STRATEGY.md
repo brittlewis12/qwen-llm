@@ -1980,13 +1980,17 @@ Broader S6 work remains:
   sparse attention only after packed attribution identifies one of those seams.
   The first narrow packet kills chronological publication as a standalone
   N=128 target: its normalized 73.273 ms envelope has a 54.163 ms/5.099%
-  uncertainty-adjusted lower bound, below the frozen 150 ms/15% floor. Next
-  isolate attention body plus output from the post-row boundary through
-  `encode_output`; split them only if the combined target clears. Then split the
-  unchanged roughly 688 ms post-route span before widening another grouped
-  format. Whole-token submission, per-layer route/selector failure records, and
-  verified-prefix callbacks are promoted. An asynchronously immutable
-  SSD-streaming ticket remains a separate product contract.
+  uncertainty-adjusted lower bound, below the frozen 150 ms/15% floor. The next
+  packet authorizes attention body plus output at a 500.011 ms/46.420% lower
+  estimate. Its four-pass split then kills attention body alone at
+  113.488 ms/10.641% and authorizes `encode_output` at
+  377.528 ms/35.397%. First test an exact mapped, token-tiled Q8_0 output-A and
+  output-B pair; preserve per-token reduction lineage and keep the current
+  pack/project/scatter chain as fallback. Then split the unchanged roughly
+  688 ms post-route span before widening another grouped format. Whole-token
+  submission, per-layer route/selector failure records, and verified-prefix
+  callbacks are promoted. An asynchronously immutable SSD-streaming ticket
+  remains a separate product contract.
 - Preserve promoted online singleton HCA and the exact packed/legacy tiled
   differential. Defer heads8/rows16 split-K while HCA remains below CSA; reopen
   HCA only if attribution returns it to the lead. The scalar scorer and bitwise
@@ -2125,9 +2129,16 @@ noise without reducing technical risk. Revisit after S5.
    occupies 6.992%/6.818% and normalizes to 74.620/71.925 ms; its frozen lower
    bound is only 54.163 ms/5.099%. The earlier broad profiler is retained only
    as negative evidence because adjacent Metal pass envelopes overlap and its
-   layer-41 ambiguity gate fails. No eight-stage live lane remains. Next measure
-   attention body plus output together, then attribute the unchanged roughly
-   688 ms post-route span. Keep MXFP4 down and GPU route arithmetic unchanged
-   and do not revive a monolithic FFN kernel.
+   layer-41 ambiguity gate fails. No eight-stage live lane remains. The same
+   narrow instrument next authorizes the combined attention-body/output family
+   at a 500.011 ms/46.420% lower estimate. A four-pass direct split reproduces
+   that envelope within 1.449/0.019 points: body alone misses at
+   113.488 ms/10.641%, while the output pipeline clears at
+   377.528 ms/35.397%. All arms retain exact outputs, matching
+   causal/prefix/compatibility digests, tokens, and the same 47,990 dispatch
+   geometries. Next test an exact mapped,
+   token-tiled Q8_0 output pair, then attribute the unchanged roughly 688 ms
+   post-route span. Keep MXFP4 down and GPU route arithmetic unchanged and do
+   not revive a monolithic FFN kernel.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

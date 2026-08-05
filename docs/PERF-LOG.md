@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Packed Attention Attribution
+
+Status: combined attention family `GO`; attention body is `KILL` as the
+standalone next N=128 target; the output pipeline is `GO`. Ordinary execution
+is unchanged.
+
+- The three-pass family packet isolates post-publication attention, inverse
+  RoPE, and both output projections. Its 46.897%/47.238% shares normalize to
+  505.813/508.012 ms; the 500.011 ms/46.420% lower estimate decisively clears
+  the frozen 150 ms/15% decomposition gate.
+- A four-pass packet directly separates attention body from `encode_output` in
+  one A/B/A/B/A campaign. Its body-plus-output share reproduces the accepted
+  combined envelope within 1.449/0.019 percentage points.
+- Attention body measures 122.332/123.056 ms raw. Its normalized 122.900 ms
+  median and 113.488 ms/10.641% lower estimate miss both authorization floors.
+- The output pipeline measures 386.217/386.352 ms raw. Its normalized
+  386.940 ms median and 377.528 ms/35.397% lower estimate clear decisively;
+  CSA/HCA output shares repeat around 34.8%/38.4%.
+- Four-pass controls drift 2.019%, sampled runs drift 2.447%, topology
+  perturbation is -0.882%/+0.553%, and transition ambiguity is 0.0059%.
+- Every arm preserves packed logits, normalized hidden, restored continuation,
+  state digests, tokens, and the same 47,990 complete dispatch geometries.
+
+Decision: do not open a standalone initial-prefix attention-body campaign.
+Next test an exact mapped, token-tiled Q8_0 output-A/output-B path that removes
+the eight pack/project/scatter chains without changing per-token arithmetic.
+Evidence:
+`docs/bench/2026-08-05-dsv4-packed-attention-attribution/README.md`. CX:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Packed Chronological Attribution KILL
 
 Status: chronological row publication is `KILL` as the standalone next N=128

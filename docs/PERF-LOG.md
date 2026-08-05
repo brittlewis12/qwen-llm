@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Packed GPU Route Integration KILL
+
+Status: current GPU route arithmetic is `KILL` for packed production. The exact
+topology remains diagnostics-only; ordinary packed routing and memory are
+unchanged.
+
+- Integrate the qualified GPU route/schedule into a 140-token current-asset
+  prefix, canonical snapshot restore, and one-token continuation under a
+  current/candidate/hybrid/current bracket.
+- Both Rust controls have bit-identical outputs and matching recorded state
+  digests. The GPU candidate preserves packed and continuation argmaxes but
+  reaches 0.043026507 packed and 0.030833979 continuation relative RMS,
+  changing both causal digests.
+- Same-input audits find zero route-ID mismatches or symmetric differences in
+  all 86 layer/chunk records. Tiny GPU/Rust route-weight deltas reach 1.7762e-5
+  and amplify through the routed residual stack.
+- A controlled GPU-ID/schedule plus Rust-weight hybrid restores bit-identical
+  packed logits, hidden state, and restored continuation logits plus matching
+  causal/prefix/compatibility and continuation-causal digests. This isolates
+  route-weight lineage rather than schedule topology.
+- The uninstrumented candidate/trailing-control comparison is
+  4,367.370/4,275.460 ms, a single warm regression of 91.910 ms or 2.15%. The
+  final 77.057 ms difference includes the same-input Rust audit and is not an
+  isolated seam measurement.
+- Remove the ordinary environment switch and its seven allocations. The exact
+  topology, generation authority, validator/signature, and negative harness
+  remain under `dsv4-diagnostics`.
+
+Decision: do not weaken packed numerical/state semantics for a slower seam.
+Proceed directly to the grouped IQ2_XS gate/up plus IQ3_XXS down falsifier using
+the exact Rust schedule. Reopen GPU route ownership only with exact Rust weights
+or a separately justified all-GPU consumer contract. Evidence:
+`docs/bench/2026-08-05-dsv4-packed-route-integration-kill/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Exact Packed Route/Schedule GO
 
 Status: test-only exact topology `GO`; off-by-default production integration is

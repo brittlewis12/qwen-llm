@@ -13492,6 +13492,335 @@ mod tests {
 
     #[cfg(feature = "dsv4-diagnostics")]
     #[test]
+    #[ignore = "requires the current 97.05 GiB DS4 asset"]
+    fn current_asset_packed_gpu_route_kill_packet() {
+        const PREFIX_TOKENS: usize = 140;
+        const CONTINUATION_TOKEN: u32 = 35;
+        const FORWARD_LIMIT: usize = PREFIX_TOKENS + 1;
+
+        struct Evidence {
+            packed_logits: Vec<f32>,
+            packed_hidden: Vec<f32>,
+            packed_causal_digest: [u8; 32],
+            packed_prefix_digest: [u8; 32],
+            compatibility_digest: [u8; 32],
+            continuation_logits: Vec<f32>,
+            continuation_causal_digest: [u8; 32],
+            committed_tokens: Vec<u32>,
+            route_generations: u32,
+            packed_wall_ms: f64,
+        }
+
+        fn metrics(actual: &[f32], reference: &[f32]) -> (f64, f64) {
+            assert_eq!(actual.len(), reference.len());
+            let mut dot = 0.0_f64;
+            let mut actual_norm = 0.0_f64;
+            let mut reference_norm = 0.0_f64;
+            let mut squared_error = 0.0_f64;
+            for (&actual, &reference) in actual.iter().zip(reference) {
+                let actual = actual as f64;
+                let reference = reference as f64;
+                dot += actual * reference;
+                actual_norm += actual * actual;
+                reference_norm += reference * reference;
+                let error = actual - reference;
+                squared_error += error * error;
+            }
+            (
+                dot / (actual_norm * reference_norm).sqrt(),
+                (squared_error / reference_norm).sqrt(),
+            )
+        }
+
+        fn argmax(values: &[f32]) -> usize {
+            values
+                .iter()
+                .enumerate()
+                .max_by(|(left_index, left), (right_index, right)| {
+                    left.total_cmp(right)
+                        .then_with(|| right_index.cmp(left_index))
+                })
+                .map(|(index, _)| index)
+                .unwrap()
+        }
+
+        fn bits(values: &[f32]) -> Vec<u32> {
+            values.iter().map(|value| value.to_bits()).collect()
+        }
+
+        fn digest_f32(values: &[f32]) -> [u8; 32] {
+            Sha256::digest(bytemuck::cast_slice(values)).into()
+        }
+
+        fn digest_hex(digest: &[u8; 32]) -> String {
+            digest.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            residency: DeepSeekV4MetalResidency,
+            model_content_id: DeepSeekV4ModelContentId,
+            prefix: &[u32],
+            gpu_route: bool,
+            preserve_cpu_weights: bool,
+        ) -> (DeepSeekV4MetalResidency, Evidence) {
+            let mut session =
+                DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
+                    .expect("construct packed GPU route session");
+            let generation_before = session.packed_route_generation_for_test();
+            let started = std::time::Instant::now();
+            session
+                .execute_packed_tokens_with_route_policy_for_test(
+                    ctx,
+                    &prefix[..DEEPSEEK_V4_PREFILL_MAX_TOKENS],
+                    false,
+                    gpu_route,
+                    preserve_cpu_weights,
+                )
+                .expect("execute 128-token packed route chunk");
+            session
+                .execute_packed_tokens_with_route_policy_for_test(
+                    ctx,
+                    &prefix[DEEPSEEK_V4_PREFILL_MAX_TOKENS..],
+                    true,
+                    gpu_route,
+                    preserve_cpu_weights,
+                )
+                .expect("execute 12-token packed route tail");
+            let packed_wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            let route_generations = session
+                .packed_route_generation_for_test()
+                .checked_sub(generation_before)
+                .expect("packed route generation is monotonic");
+            let packed_logits = session.copy_logits_f32().expect("copy packed route logits");
+            let packed_hidden = host_read_f32(
+                session
+                    .final_normalized_hidden()
+                    .expect("packed final hidden is visible"),
+                "packed GPU route final hidden",
+            )
+            .expect("copy packed route hidden");
+            let packed = session
+                .capture_causal_snapshot()
+                .expect("capture packed GPU route state");
+            let packed_causal_digest = *packed.causal_digest();
+            let packed_prefix_digest = *packed.prefix_digest();
+            let compatibility_digest = *packed.compatibility_digest().as_bytes();
+            session
+                .restore_causal_snapshot(&packed)
+                .expect("restore packed GPU route state");
+            session
+                .forward_token(ctx, CONTINUATION_TOKEN)
+                .expect("consume packed GPU route state");
+            let continuation_logits = session
+                .copy_logits_f32()
+                .expect("copy packed route continuation logits");
+            let continuation = session
+                .capture_causal_snapshot()
+                .expect("capture packed route continuation state");
+            let evidence = Evidence {
+                packed_logits,
+                packed_hidden,
+                packed_causal_digest,
+                packed_prefix_digest,
+                compatibility_digest,
+                continuation_logits,
+                continuation_causal_digest: *continuation.causal_digest(),
+                committed_tokens: session.committed_tokens().to_vec(),
+                route_generations,
+                packed_wall_ms,
+            };
+            (session.into_residency(), evidence)
+        }
+
+        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+            });
+        assert!(model_path.exists(), "missing current DS4 model");
+        let ctx = MetalContext::new().expect("create Metal context");
+        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
+        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
+            .expect("plan packed GPU route session");
+        assert_eq!(plan.session_capacity().csa_physical_rows(), 768);
+        assert_eq!(plan.session_capacity().hca_physical_rows(), 512);
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit packed GPU route session");
+        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+            .expect("realize current DS4 residency");
+        let residency = realized.into_residency();
+        let prefix = (0..PREFIX_TOKENS)
+            .map(|index| [35, 201, 200, 34][index % 4])
+            .collect::<Vec<_>>();
+
+        let (residency, current_before) =
+            execute(&ctx, residency, model_content_id, &prefix, false, false);
+        let (residency, candidate) =
+            execute(&ctx, residency, model_content_id, &prefix, true, false);
+        let (residency, cpu_weight_hybrid) =
+            execute(&ctx, residency, model_content_id, &prefix, true, true);
+        let (_residency, current_after) =
+            execute(&ctx, residency, model_content_id, &prefix, false, false);
+
+        assert_eq!(
+            bits(&current_before.packed_logits),
+            bits(&current_after.packed_logits)
+        );
+        assert_eq!(
+            bits(&current_before.packed_hidden),
+            bits(&current_after.packed_hidden)
+        );
+        assert_eq!(
+            bits(&current_before.continuation_logits),
+            bits(&current_after.continuation_logits)
+        );
+        assert_eq!(
+            current_before.packed_causal_digest,
+            current_after.packed_causal_digest
+        );
+        assert_eq!(
+            current_before.continuation_causal_digest,
+            current_after.continuation_causal_digest
+        );
+        assert_eq!(
+            current_before.committed_tokens,
+            current_after.committed_tokens
+        );
+        assert_eq!(candidate.committed_tokens, current_before.committed_tokens);
+        assert_eq!(
+            cpu_weight_hybrid.committed_tokens,
+            current_before.committed_tokens
+        );
+        assert_eq!(
+            candidate.packed_prefix_digest,
+            current_before.packed_prefix_digest
+        );
+        assert_eq!(
+            candidate.compatibility_digest,
+            current_before.compatibility_digest
+        );
+        assert_eq!(current_before.route_generations, 0);
+        assert_eq!(current_after.route_generations, 0);
+        assert_eq!(
+            candidate.route_generations,
+            2 * DEEPSEEK_V4_LAYER_COUNT as u32
+        );
+        assert_eq!(
+            cpu_weight_hybrid.route_generations,
+            2 * DEEPSEEK_V4_LAYER_COUNT as u32
+        );
+
+        let packed_argmax = argmax(&current_before.packed_logits);
+        let candidate_packed_argmax = argmax(&candidate.packed_logits);
+        let continuation_argmax = argmax(&current_before.continuation_logits);
+        let candidate_continuation_argmax = argmax(&candidate.continuation_logits);
+        let (packed_cosine, packed_relative_rms) =
+            metrics(&candidate.packed_logits, &current_before.packed_logits);
+        let (hidden_cosine, hidden_relative_rms) =
+            metrics(&candidate.packed_hidden, &current_before.packed_hidden);
+        let (continuation_cosine, continuation_relative_rms) = metrics(
+            &candidate.continuation_logits,
+            &current_before.continuation_logits,
+        );
+        assert_eq!(candidate_packed_argmax, packed_argmax);
+        assert_eq!(candidate_continuation_argmax, continuation_argmax);
+        assert_ne!(
+            bits(&candidate.packed_logits),
+            bits(&current_before.packed_logits)
+        );
+        assert_ne!(
+            bits(&candidate.packed_hidden),
+            bits(&current_before.packed_hidden)
+        );
+        assert_ne!(
+            bits(&candidate.continuation_logits),
+            bits(&current_before.continuation_logits)
+        );
+        assert_ne!(
+            candidate.packed_causal_digest,
+            current_before.packed_causal_digest
+        );
+        assert_ne!(
+            candidate.continuation_causal_digest,
+            current_before.continuation_causal_digest
+        );
+        assert_eq!(
+            digest_hex(&digest_f32(&current_before.packed_logits)),
+            "688aecb312c9bff3469b4947e37086d9230efaa835c8afef529e7e7618ff886e"
+        );
+        assert_eq!(
+            digest_hex(&digest_f32(&candidate.packed_logits)),
+            "81cb6874e6ada8d905c9744105ee01622e01f4df8ddca575f5b4281fa2bfd94f"
+        );
+        assert_eq!(
+            digest_hex(&current_before.packed_causal_digest),
+            "0bc001b6045aa52f636db496628cad69b9bab8d7f1727e9e4f41b21075cf41bb"
+        );
+        assert_eq!(
+            digest_hex(&candidate.packed_causal_digest),
+            "067c8e5c191cbef2e599b7637e55cde545b32236a771499448c16fe102ffdb47"
+        );
+        assert_eq!(
+            digest_hex(&candidate.continuation_causal_digest),
+            "a7526bfb5c733cd311c30536fe10e7ef4b62e6a2866c22d661d42b1e0c0891ae"
+        );
+
+        assert_eq!(
+            bits(&cpu_weight_hybrid.packed_logits),
+            bits(&current_before.packed_logits)
+        );
+        assert_eq!(
+            bits(&cpu_weight_hybrid.packed_hidden),
+            bits(&current_before.packed_hidden)
+        );
+        assert_eq!(
+            bits(&cpu_weight_hybrid.continuation_logits),
+            bits(&current_before.continuation_logits)
+        );
+        assert_eq!(
+            cpu_weight_hybrid.packed_causal_digest,
+            current_before.packed_causal_digest
+        );
+        assert_eq!(
+            cpu_weight_hybrid.packed_prefix_digest,
+            current_before.packed_prefix_digest
+        );
+        assert_eq!(
+            cpu_weight_hybrid.compatibility_digest,
+            current_before.compatibility_digest
+        );
+        assert_eq!(
+            cpu_weight_hybrid.continuation_causal_digest,
+            current_before.continuation_causal_digest
+        );
+
+        eprintln!(
+            "deepseek_v4 packed_gpu_route_kill prompt_tokens={PREFIX_TOKENS} chunks=128+12 packed_argmax={packed_argmax} continuation_argmax={continuation_argmax} packed_cosine={packed_cosine:.9} packed_rel_rms={packed_relative_rms:.9} hidden_cosine={hidden_cosine:.9} hidden_rel_rms={hidden_relative_rms:.9} continuation_cosine={continuation_cosine:.9} continuation_rel_rms={continuation_relative_rms:.9} current_before_wall_ms={:.3} candidate_wall_ms={:.3} cpu_weight_hybrid_wall_ms={:.3} current_after_wall_ms={:.3} candidate_generations={} cpu_weight_hybrid_generations={} current_before_logits_sha256={} candidate_logits_sha256={} cpu_weight_hybrid_logits_sha256={} current_after_logits_sha256={} current_before_causal={} candidate_causal={} cpu_weight_hybrid_causal={} current_after_causal={} candidate_continuation_causal={} cpu_weight_hybrid_continuation_causal={}",
+            current_before.packed_wall_ms,
+            candidate.packed_wall_ms,
+            cpu_weight_hybrid.packed_wall_ms,
+            current_after.packed_wall_ms,
+            candidate.route_generations,
+            cpu_weight_hybrid.route_generations,
+            digest_hex(&digest_f32(&current_before.packed_logits)),
+            digest_hex(&digest_f32(&candidate.packed_logits)),
+            digest_hex(&digest_f32(&cpu_weight_hybrid.packed_logits)),
+            digest_hex(&digest_f32(&current_after.packed_logits)),
+            digest_hex(&current_before.packed_causal_digest),
+            digest_hex(&candidate.packed_causal_digest),
+            digest_hex(&cpu_weight_hybrid.packed_causal_digest),
+            digest_hex(&current_after.packed_causal_digest),
+            digest_hex(&candidate.continuation_causal_digest),
+            digest_hex(&cpu_weight_hybrid.continuation_causal_digest),
+        );
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
     fn fp4_score_plans_are_exhaustive_and_dispatch_ledgers_fail_closed() {
         let cases = [
             (
@@ -13596,13 +13925,26 @@ mod tests {
         } else {
             0
         };
-        assert_eq!(requests.len(), 542 + diagnostics_allocations);
+        let packed_route_allocations = if cfg!(feature = "dsv4-diagnostics") {
+            7
+        } else {
+            0
+        };
+        let packed_route_logical = if cfg!(feature = "dsv4-diagnostics") {
+            134_176
+        } else {
+            0
+        };
+        assert_eq!(
+            requests.len(),
+            542 + diagnostics_allocations + packed_route_allocations
+        );
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            179_129_572 + diagnostics_logical
+            179_129_572 + diagnostics_logical + packed_route_logical
         );
         let names = requests
             .iter()
@@ -13625,6 +13967,18 @@ mod tests {
                 .logical_bytes,
             5_636_096
         );
+        let packed_gpu_route = requests
+            .iter()
+            .filter(|request| request.name.starts_with("prefill.moe.gpu_route."))
+            .collect::<Vec<_>>();
+        assert_eq!(packed_gpu_route.len(), packed_route_allocations);
+        assert_eq!(
+            packed_gpu_route
+                .iter()
+                .map(|request| request.logical_bytes)
+                .sum::<u64>(),
+            packed_route_logical
+        );
 
         let promoted_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
             DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
@@ -13646,7 +14000,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            7_632_210_316 + promoted_diagnostics_logical
+            7_632_210_316 + promoted_diagnostics_logical + packed_route_logical
         );
         assert_eq!(
             promoted

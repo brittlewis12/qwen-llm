@@ -2089,8 +2089,15 @@ noise without reducing technical risk. Revisit after S5.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine
-   question justifies it. For native TTFT, replace the packed router CPU seam
-   with deterministic expert/token/slot GPU scheduling and grouped MXFP4 down;
-   do not revive a monolithic Metal FFN kernel.
+   question justifies it. The deterministic packed GPU route/schedule topology
+   clears its microproof but fails integrated promotion: all 86 same-input route
+   ID records are exact, while small GPU weight deltas amplify to 4.3% packed
+   relative RMS and a controlled Rust-weight hybrid restores output bits plus
+   every recorded state digest. The uninstrumented candidate also regresses one
+   warm comparison by 2.15%; the later audit-inclusive timing is not an isolated
+   seam measurement. Keep the topology under diagnostics and preserve ordinary
+   Rust routing. Next falsify grouped IQ2_XS gate/up plus IQ3_XXS down at
+   N=12/32/128 using the exact Rust schedule; do not revive a monolithic Metal
+   FFN kernel.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

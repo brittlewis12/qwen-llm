@@ -275,20 +275,26 @@ transcript. Whole-token GPU/wall saving is 13.867/17.573 ms against the faster
 control. This is not real-prompt continuation evidence and qualifies only the
 bounded hidden opt-in, not default-on or wider-device routing.
 
+The packed GPU route/schedule integration does not clear. Across all 86
+layer/chunk records, same-input GPU and Rust route IDs are exact, but small route
+weight differences reach 1.7762e-5 and amplify to 0.043026507 packed-logit and
+0.030833979 restored-continuation relative RMS. Replacing only GPU weights with
+same-input Rust weights restores output bits and all recorded state digests,
+isolating the arithmetic lineage. The uninstrumented candidate also regresses
+one warm comparison by 91.910 ms, or 2.15%; the final instrumented bracket is
+not an isolated seam timing. Remove its ordinary switch and seven allocations;
+retain the exact topology and fault harness under diagnostics.
+
 Force-ranked queue:
 
-1. **Integrate exact GPU scheduling, then falsify grouped experts.** The
-   route/schedule microproof is GO: deployed singleton route bits, deterministic
-   expert/token/original-slot order, generation authority, malformed terminal
-   bounds, and all N=1..128 pass. The complete 43-layer packet is 1.314/1.600 ms
-   GPU/wall p95 at N=12 and 7.064/7.273 ms at N=128. Add admitted scratch and
-   generation ownership behind an off-by-default packed seam while retaining
-   current CPU grouped experts; require integrated current/candidate/current
-   output/state before promotion. Then falsify only IQ2_XS gate/up plus IQ3_XXS
-   down at N=12/32/128, requiring at least 15% aggregate GPU and wall saving at
-   N=128 before widening formats. Do not replace expert-major reuse with direct
-   token-slot all-slot execution. Mixture-of-Kittens informs scheduling, not a
-   monolithic Metal kernel.
+1. **Falsify grouped packed experts.** Use the current exact Rust route schedule
+   and target only IQ2_XS gate/up plus IQ3_XXS down at N=12/32/128. Require at
+   least 15% aggregate GPU and wall saving at N=128 before widening formats. Do
+   not replace expert-major bank reuse with direct token-slot all-slot execution.
+   The current GPU route integration is KILL on both packed state and wall;
+   retain its exact topology as a future consumer dependency, not a prerequisite
+   for measuring grouped compute. Mixture-of-Kittens informs deterministic
+   expert/token/slot scheduling, not a monolithic Metal kernel.
 2. **Decide bounded selector product promotion.** Keep the qualified current
    policy hidden and off by default while its device/asset scope is explicit.
    A future default or user-facing switch needs a separately reviewed product

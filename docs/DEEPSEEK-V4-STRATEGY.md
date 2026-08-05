@@ -1963,11 +1963,14 @@ Gate:
 
 Broader S6 work remains:
 
-- Replace the retained 1.875 ms terminal radix4 selector with an exact
-  multi-group schedule only after a cheap production-shape ceiling clears.
-  Preserve the current F16 scorer, threshold, lower-row tie order, cache-order
-  compaction, visibility, and failure status. The diagnostics-only collapsed FP4
-  implementation remains negative evidence, not an active production lane.
+- The exact multi-group selector's threshold-only ceiling clears at 32 producer
+  groups. Eight producer/reducer pairs take 0.351/0.351 ms median/p95 for mixed
+  terminal scores and 0.600/0.600 ms for all ties, leaving 1.507/1.410 ms against
+  the faster radix4 controls. Complete the frozen 18-dispatch full-output
+  falsifier before production: deterministic per-partition tie quotas and
+  offsets, exact cache-order IDs/mask, then separate completion validation and
+  first-K fallback. Preserve the F16 scorer, visibility, and failure status. The
+  diagnostics-only collapsed FP4 implementation remains negative evidence.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention. All-slot routed experts have closed the first measured MoE
   boundary without changing reduction lineage.
@@ -2062,20 +2065,14 @@ noise without reducing technical risk. Revisit after S5.
    the separate first-pruned-row complexity firewall: sparse CSA dispatches the
    exact radix4 selector from row 513 rather than entering the retired scalar
    positions-2,051-through-4,095 cliff.
-5. Preserve the promoted cooperative Lightning scorer and four-bit radix
-   selector, including their scalar and bitwise differentials. The official
-   scalar Q/K FP4 contract remains frozen at fixture SHA-256
-   `0e5e2b251a960d417e7977608a363b83e072e2d90bc286cc52820b0ea7dc2b1f`;
-   preserve the packed matrix shadow at 0.841 ms terminal, including its exact
-   pack, unit-unpack, score, status, and query-reuse gates. The real-weight
-   status-carrying sidecar and shallow whole-token counterfactual are promoted
-   under diagnostics: all status gates pass, every selector delta is one cutoff
-   exchange, and downstream logits remain far inside their frozen bands. Build
-   the now-qualified no-double-score plan into collapsed execution next, then
-   require a deep/current-product packet. Do not migrate paged K or snapshots
-   from shallow quality evidence or microprofiles alone. The bounded instrumented
-   arm omits F16 scoring exactly and saves 1.447 ms against the faster paired
-   control; promote that plan before paying the deeper prefix.
+5. Preserve the cooperative Lightning scorer and four-bit radix selector as
+   executable differentials. Direct FP4-Q/K replacement is closed by the
+   position-3,070 quality and speed KILL; keep its diagnostics and packed matrix
+   shadow as negative evidence without migrating paged K or snapshot v2. The
+   exact multi-group threshold ceiling now clears at 32 groups and fails at the
+   frozen 64/80 alternatives. Complete its 18-dispatch full-output falsifier
+   next, requiring exact masks, cache-order IDs, failure fallback, and at least
+   0.50 ms all-in saving before changing production dispatch.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine

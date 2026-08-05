@@ -238,14 +238,23 @@ FP4-Q/K replacement, paged FP4 K, snapshot v2, and more same-design tuning are
 closed. Reopen only for a materially new guarded or mixed scorer that first
 clears the frozen deep quality gates and has a positive all-in timing ceiling.
 
+The exact multi-group selector's threshold-only ceiling now clears. Eight
+producer/reducer pairs preserve the deployed F16 finite-key and tie contract.
+At 262,144 visible rows, the frozen 32-group geometry measures 0.351/0.351 ms
+median/p95 on mixed scores and 0.600/0.600 ms on all ties, saving 1.507/1.410
+ms against the faster current controls. The 64- and 80-group alternatives fail
+the tied-case gate and are closed. This is Phase-A feasibility only: it emits
+validated threshold state and per-partition counts, not masks or IDs.
+
 Force-ranked queue:
 
-1. **Multi-group exact selection.** The retained radix4 selector costs about
-   1.875 ms per CSA layer at terminal history. First prove a cheap exact
-   production-shape ceiling, then reopen global histograms, query-scaled
-   scratch, and producer/reducer dispatches while preserving exact threshold,
-   lower-row tie order, cache-order compaction, visibility, and failure status.
-   Keep the current F16 scorer authoritative.
+1. **Complete multi-group exact selection.** Freeze 32 producer groups and the
+   18-dispatch Phase-B topology. Add deterministic per-partition tie quotas and
+   output offsets, exact cache-order IDs and mask, then a separate completion
+   validator that alone publishes status/count or deterministic first-K
+   fallback. Require bit-exact full outputs and at most 1.35/1.40 ms median/p95
+   with at least 0.50 ms GPU and wall saving before production routing. Keep the
+   current F16 scorer authoritative.
 2. **GPU-resident deterministic packed routing.** Remove prefill's router
    commit/wait and CPU schedule construction with integer counts, deterministic
    expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,

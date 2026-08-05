@@ -10315,6 +10315,183 @@ fn use_parallel_selector(
     }
 }
 
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS: usize = 20;
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS: usize = 10;
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_DIGITS: usize = 8;
+
+#[cfg(test)]
+fn deepseek_v4_multigroup_selector_record_completion(
+    generation: u32,
+    digit: usize,
+    group: usize,
+) -> u32 {
+    0xd541_0000 ^ generation ^ ((digit as u32) << 12) ^ group as u32
+}
+
+#[cfg(test)]
+fn deepseek_v4_multigroup_selector_state_completion(generation: u32, digit: usize) -> u32 {
+    0xd542_0000 ^ generation ^ ((digit as u32) << 12)
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_select_top_k_multigroup_threshold_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    visible_counts: &MetalTensor,
+    records: &MetalTensor,
+    partition_counts: &MetalTensor,
+    state: &MetalTensor,
+    row_capacity: usize,
+    top_k: usize,
+    group_count: usize,
+    generation: u32,
+    fault_digit: Option<usize>,
+) -> Result<(), DeepSeekV4MetalError> {
+    const THREADGROUP_WIDTH: usize = 256;
+    const SIMD_GROUPS: usize = THREADGROUP_WIDTH / 32;
+    const HISTOGRAM_WORDS: usize = SIMD_GROUPS * 16;
+    const ERROR_WORDS: usize = SIMD_GROUPS;
+    require_serial(enc, "deepseek_v4_multigroup_selector_threshold")?;
+    if row_capacity == 0
+        || top_k == 0
+        || top_k > row_capacity
+        || !(2..=THREADGROUP_WIDTH).contains(&group_count)
+        || generation == 0
+        || fault_digit.is_some_and(|digit| digit >= DEEPSEEK_V4_MULTIGROUP_SELECTOR_DIGITS)
+        || [row_capacity, top_k, group_count]
+            .into_iter()
+            .any(|value| u32::try_from(value).is_err())
+    {
+        return invalid("multi-group selector threshold geometry is invalid");
+    }
+    let score_elements = checked_mul(row_capacity, 1, "multi-group selector score elements")?;
+    let record_elements = checked_mul(
+        DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS,
+        group_count,
+        "multi-group selector record elements",
+    )?;
+    let partition_elements = checked_mul(2, group_count, "multi-group selector partitions")?;
+    if [score_elements, record_elements, partition_elements]
+        .into_iter()
+        .any(|value| u32::try_from(value).is_err())
+    {
+        return invalid("multi-group selector threshold offsets exceed u32");
+    }
+    validate_f32(
+        scores,
+        &[row_capacity as u64, 1],
+        false,
+        "multi-group selector scores",
+    )?;
+    validate_i32(
+        visible_counts,
+        &[1],
+        false,
+        "multi-group selector visibility",
+    )?;
+    validate_i32(
+        records,
+        &[
+            DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+            group_count as u64,
+        ],
+        true,
+        "multi-group selector records",
+    )?;
+    validate_i32(
+        partition_counts,
+        &[2, group_count as u64],
+        true,
+        "multi-group selector partition counts",
+    )?;
+    validate_i32(
+        state,
+        &[DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+        true,
+        "multi-group selector state",
+    )?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        row_capacity: u32,
+        top_k: u32,
+        group_count: u32,
+        generation: u32,
+        digit: u32,
+        shift: u32,
+    }
+
+    let producer = ctx.pipeline("kernel_deepseek_v4_select_top_k_multigroup_histogram_f32")?;
+    validate_parallel_selector_pipeline(
+        producer.threadExecutionWidth(),
+        producer.maxTotalThreadsPerThreadgroup(),
+    )?;
+    let reducer = ctx.pipeline("kernel_deepseek_v4_select_top_k_multigroup_reduce_f32")?;
+    for digit in 0..DEEPSEEK_V4_MULTIGROUP_SELECTOR_DIGITS {
+        let args = Args {
+            row_capacity: row_capacity as u32,
+            top_k: top_k as u32,
+            group_count: group_count as u32,
+            generation,
+            digit: digit as u32,
+            shift: 28 - digit as u32 * 4,
+        };
+        enc.set_pipeline(&producer);
+        enc.set_bytes(0, &args);
+        enc.set_tensor(1, scores);
+        enc.set_tensor(2, visible_counts);
+        enc.set_tensor(3, state);
+        enc.set_tensor(4, records);
+        enc.set_threadgroup_memory(
+            0,
+            (HISTOGRAM_WORDS + ERROR_WORDS) * std::mem::size_of::<u32>(),
+        );
+        let producer_groups = if fault_digit == Some(digit) {
+            group_count - 1
+        } else {
+            group_count
+        };
+        enc.dispatch(
+            MTLSize {
+                width: producer_groups,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: THREADGROUP_WIDTH,
+                height: 1,
+                depth: 1,
+            },
+        );
+
+        enc.set_pipeline(&reducer);
+        enc.set_bytes(0, &args);
+        enc.set_tensor(1, visible_counts);
+        enc.set_tensor(2, records);
+        enc.set_tensor(3, partition_counts);
+        enc.set_tensor(4, state);
+        enc.dispatch(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+        );
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_select_top_k_f32_with_policy(
     ctx: &MetalContext,
@@ -12423,6 +12600,74 @@ mod tests {
         });
         indices.truncate(top_k.min(indices.len()));
         indices
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct MultigroupSelectorThresholdOracle {
+        status: u32,
+        selected_count: u32,
+        threshold_key: u32,
+        threshold_take: u32,
+        partition_counts: Vec<u32>,
+    }
+
+    fn multigroup_selector_threshold_oracle(
+        scores: &[f32],
+        row_capacity: usize,
+        visible_count: i32,
+        top_k: usize,
+        group_count: usize,
+    ) -> MultigroupSelectorThresholdOracle {
+        let geometry_valid = visible_count > 0
+            && visible_count as usize <= row_capacity
+            && top_k > 0
+            && top_k <= row_capacity
+            && scores.len() == row_capacity;
+        let visible = if geometry_valid {
+            visible_count as usize
+        } else {
+            0
+        };
+        let selected_count = visible.min(top_k);
+        let mut result = MultigroupSelectorThresholdOracle {
+            status: u32::from(!geometry_valid),
+            selected_count: selected_count as u32,
+            threshold_key: 0,
+            threshold_take: 0,
+            partition_counts: vec![0; group_count * 2],
+        };
+        if !geometry_valid {
+            return result;
+        }
+        if scores[..visible].iter().any(|score| !score.is_finite()) {
+            result.status = 2;
+            return result;
+        }
+        let mut keys = scores[..visible]
+            .iter()
+            .map(|&score| deployed_selector_order_key(score))
+            .collect::<Vec<_>>();
+        keys.sort_unstable_by(|left, right| right.cmp(left));
+        result.threshold_key = keys[selected_count - 1];
+        let greater_total = keys
+            .iter()
+            .take_while(|&&key| key > result.threshold_key)
+            .count();
+        result.threshold_take = (selected_count - greater_total) as u32;
+        let chunk = row_capacity.div_ceil(group_count);
+        for group in 0..group_count {
+            let start = (group * chunk).min(row_capacity);
+            let end = (start + chunk).min(row_capacity).min(visible);
+            for &score in &scores[start..end] {
+                let key = deployed_selector_order_key(score);
+                if key > result.threshold_key {
+                    result.partition_counts[group * 2] += 1;
+                } else if key == result.threshold_key {
+                    result.partition_counts[group * 2 + 1] += 1;
+                }
+            }
+        }
+        result
     }
 
     fn assert_close(label: &str, actual: &[f32], expected: &[f32], tolerance: f32) {
@@ -17818,6 +18063,619 @@ mod tests {
             command.error()
         );
         assert_close("Hadamard-128", &read_f32(&tensor), &expected, 2e-6);
+    }
+
+    #[test]
+    fn multigroup_selector_threshold_matches_current_and_fails_closed() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 4_096;
+        const TOP_K: usize = 512;
+        const GROUPS: usize = 8;
+        const GENERATION: u32 = 0x1357_2468;
+
+        let run_case = |label: &str, values: &[f32], visible: i32| {
+            let scores = offset_f32(&ctx, values, vec![CAPACITY as u64, 1]);
+            let visible_counts = offset_i32(&ctx, &[visible], vec![1]);
+            let records = offset_i32(
+                &ctx,
+                &vec![i32::MIN; DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS * GROUPS],
+                vec![
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+                    GROUPS as u64,
+                ],
+            );
+            let partition_counts =
+                offset_i32(&ctx, &[i32::MIN; 2 * GROUPS], vec![2, GROUPS as u64]);
+            let state = offset_i32(
+                &ctx,
+                &[i32::MIN; DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS],
+                vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+            );
+            let execute = || {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                encode_select_top_k_multigroup_threshold_f32(
+                    &ctx,
+                    &encoder,
+                    &scores,
+                    &visible_counts,
+                    &records,
+                    &partition_counts,
+                    &state,
+                    CAPACITY,
+                    TOP_K,
+                    GROUPS,
+                    GENERATION,
+                    None,
+                )
+                .unwrap();
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(command.error().is_none(), "{label}: {:?}", command.error());
+                (
+                    read_i32(&records),
+                    read_i32(&partition_counts),
+                    read_i32(&state),
+                )
+            };
+            let first = execute();
+            let repeat = execute();
+            assert_eq!(repeat, first, "{label}: repeat drift");
+
+            let expected =
+                multigroup_selector_threshold_oracle(values, CAPACITY, visible, TOP_K, GROUPS);
+            let state_words = first.2.iter().map(|&word| word as u32).collect::<Vec<_>>();
+            assert_eq!(state_words[0], GENERATION, "{label}: generation");
+            assert_eq!(state_words[1], 7, "{label}: digit");
+            assert_eq!(state_words[5], expected.status, "{label}: status");
+            assert_eq!(
+                state_words[6], expected.threshold_key,
+                "{label}: threshold key"
+            );
+            assert_eq!(
+                state_words[7], expected.threshold_take,
+                "{label}: threshold take"
+            );
+            assert_eq!(
+                state_words[8], expected.selected_count,
+                "{label}: selected count"
+            );
+            assert_eq!(
+                state_words[9],
+                deepseek_v4_multigroup_selector_state_completion(GENERATION, 7),
+                "{label}: state completion"
+            );
+            assert_eq!(
+                first.1.iter().map(|&word| word as u32).collect::<Vec<_>>(),
+                expected.partition_counts,
+                "{label}: partition counts"
+            );
+            let expected_record_error = expected.status.min(2);
+            for group in 0..GROUPS {
+                let base = group * DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS;
+                assert_eq!(
+                    first.0[base] as u32, GENERATION,
+                    "{label}: record generation"
+                );
+                assert_eq!(first.0[base + 1], 7, "{label}: record digit");
+                assert_eq!(
+                    first.0[base + 2] as u32,
+                    expected_record_error,
+                    "{label}: record error"
+                );
+                assert_eq!(
+                    first.0[base + 3] as u32,
+                    deepseek_v4_multigroup_selector_record_completion(GENERATION, 7, group),
+                    "{label}: record completion"
+                );
+            }
+
+            let mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+            let ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+            let count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+            let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_select_top_k_f32(
+                &ctx,
+                &encoder,
+                &scores,
+                &visible_counts,
+                &mask,
+                None,
+                &ids,
+                &count,
+                &status,
+                CAPACITY,
+                CAPACITY,
+                TOP_K,
+                1,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            assert_eq!(
+                read_i32(&status),
+                [expected.status as i32],
+                "{label}: current status"
+            );
+            assert_eq!(
+                read_i32(&count),
+                [expected.selected_count as i32],
+                "{label}: current count"
+            );
+            if expected.status == 0 {
+                let selected_ids = read_i32(&ids);
+                let selected_keys = selected_ids
+                    .iter()
+                    .map(|&id| deployed_selector_order_key(values[id as usize]))
+                    .collect::<Vec<_>>();
+                let threshold = *selected_keys.iter().min().unwrap();
+                let take = selected_keys
+                    .iter()
+                    .filter(|&&key| key == threshold)
+                    .count();
+                assert_eq!(
+                    threshold, expected.threshold_key,
+                    "{label}: current threshold"
+                );
+                assert_eq!(
+                    take, expected.threshold_take as usize,
+                    "{label}: current take"
+                );
+            }
+        };
+
+        let mixed = (0..CAPACITY)
+            .map(|row| {
+                let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
+                bucket as f32 * 0.0003 - 1.1
+            })
+            .collect::<Vec<_>>();
+        run_case("mixed", &mixed, CAPACITY as i32);
+        run_case("all tied", &vec![0.0; CAPACITY], CAPACITY as i32);
+
+        let mut threshold_take_one = vec![-1.0; CAPACITY];
+        for (row, value) in threshold_take_one.iter_mut().take(TOP_K - 1).enumerate() {
+            *value = 2.0 + row as f32 * 0.001;
+        }
+        threshold_take_one[CAPACITY - 1] = f32::from_bits(1);
+        run_case(
+            "last eligible subnormal tie",
+            &threshold_take_one,
+            CAPACITY as i32,
+        );
+
+        let mut partition_boundary = vec![-1.0; CAPACITY];
+        for (offset, value) in partition_boundary[256..768].iter_mut().enumerate() {
+            *value = match offset % 4 {
+                0 => 0.0,
+                1 => -0.0,
+                2 => f32::from_bits(1),
+                _ => f32::from_bits(0x8000_0001),
+            };
+        }
+        run_case(
+            "partition boundary zero and subnormal tie",
+            &partition_boundary,
+            CAPACITY as i32,
+        );
+
+        let mut outside_nonfinite = mixed.clone();
+        outside_nonfinite[CAPACITY - 1] = f32::INFINITY;
+        run_case(
+            "nonfinite outside visibility",
+            &outside_nonfinite,
+            CAPACITY as i32 - 1,
+        );
+        let mut visible_nonfinite = mixed.clone();
+        visible_nonfinite[CAPACITY / 2] = f32::NAN;
+        run_case("visible nonfinite", &visible_nonfinite, CAPACITY as i32);
+        run_case("invalid visibility", &mixed, 0);
+
+        let scores = offset_f32(&ctx, &mixed, vec![CAPACITY as u64, 1]);
+        let visible = offset_i32(&ctx, &[CAPACITY as i32], vec![1]);
+        let records = MetalTensor::zeros_i32(
+            &ctx,
+            vec![
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+                GROUPS as u64,
+            ],
+        )
+        .unwrap();
+        let partition_counts = MetalTensor::zeros_i32(&ctx, vec![2, GROUPS as u64]).unwrap();
+        let state = MetalTensor::zeros_i32(
+            &ctx,
+            vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+        )
+        .unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_select_top_k_multigroup_threshold_f32(
+            &ctx,
+            &encoder,
+            &scores,
+            &visible,
+            &records,
+            &partition_counts,
+            &state,
+            CAPACITY,
+            TOP_K,
+            GROUPS,
+            GENERATION,
+            Some(3),
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        let stale_state = read_i32(&state)
+            .into_iter()
+            .map(|word| word as u32)
+            .collect::<Vec<_>>();
+        assert_eq!(stale_state[0], GENERATION, "stale state generation");
+        assert_eq!(stale_state[1], 7, "stale state digit");
+        assert_eq!(stale_state[5], 3, "stale record must produce status 3");
+        assert_eq!(stale_state[6], 0, "stale state threshold key");
+        assert_eq!(stale_state[7], 0, "stale state threshold take");
+        assert_eq!(
+            stale_state[9],
+            deepseek_v4_multigroup_selector_state_completion(GENERATION, 7),
+            "stale state completion"
+        );
+        let stale_records = read_i32(&records);
+        for group in 0..GROUPS {
+            let base = group * DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS;
+            assert_eq!(
+                stale_records[base] as u32, GENERATION,
+                "stale record generation group={group}"
+            );
+            assert_eq!(
+                stale_records[base + 1],
+                7,
+                "stale record digit group={group}"
+            );
+            assert_eq!(
+                stale_records[base + 2],
+                3,
+                "stale record error group={group}"
+            );
+            assert_eq!(
+                stale_records[base + 3] as u32,
+                deepseek_v4_multigroup_selector_record_completion(GENERATION, 7, group),
+                "stale record completion group={group}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "focused terminal multi-group threshold ceiling; run explicitly with --nocapture"]
+    fn profile_multigroup_selector_threshold_ceiling() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 262_144;
+        const TOP_K: usize = 512;
+        const SAMPLES: usize = 24;
+        const MAX_MEDIAN_MS: f64 = 1.00;
+        const MAX_P95_MS: f64 = 1.05;
+        const MIN_SAVING_MS: f64 = 0.70;
+
+        fn timed_gpu<F>(ctx: &MetalContext, encode: F) -> f64
+        where
+            F: FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode(&encoder).unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{:?}", command.error());
+            let elapsed = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            assert!(elapsed.is_finite() && elapsed > 0.0);
+            elapsed
+        }
+
+        fn median_and_p95(mut samples: Vec<f64>) -> (f64, f64, Vec<f64>) {
+            let raw = samples.clone();
+            samples.sort_by(f64::total_cmp);
+            let median = if samples.len().is_multiple_of(2) {
+                (samples[samples.len() / 2 - 1] + samples[samples.len() / 2]) * 0.5
+            } else {
+                samples[samples.len() / 2]
+            };
+            let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+            (median, p95, raw)
+        }
+
+        let mixed_values = (0..CAPACITY)
+            .map(|row| {
+                let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
+                bucket as f32 * 0.0003 - 1.1
+            })
+            .collect::<Vec<_>>();
+        let tied_values = vec![0.0f32; CAPACITY];
+        let mixed_scores = offset_f32(&ctx, &mixed_values, vec![CAPACITY as u64, 1]);
+        let tied_scores = offset_f32(&ctx, &tied_values, vec![CAPACITY as u64, 1]);
+        let visible = offset_i32(&ctx, &[CAPACITY as i32], vec![1]);
+        let mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+        let ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+
+        let time_current = |scores: &MetalTensor| {
+            timed_gpu(&ctx, |encoder| {
+                encode_select_top_k_f32(
+                    &ctx, encoder, scores, &visible, &mask, None, &ids, &count, &status, CAPACITY,
+                    CAPACITY, TOP_K, 1,
+                )
+            })
+        };
+
+        let mut any_geometry_passed = false;
+        for groups in [32usize, 64, 80] {
+            let generation = 0x2468_0000 | groups as u32;
+            let records = MetalTensor::zeros_i32(
+                &ctx,
+                vec![
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+                    groups as u64,
+                ],
+            )
+            .unwrap();
+            let partition_counts = MetalTensor::zeros_i32(&ctx, vec![2, groups as u64]).unwrap();
+            let state = MetalTensor::zeros_i32(
+                &ctx,
+                vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+            )
+            .unwrap();
+            let time_candidate = |scores: &MetalTensor| {
+                timed_gpu(&ctx, |encoder| {
+                    encode_select_top_k_multigroup_threshold_f32(
+                        &ctx,
+                        encoder,
+                        scores,
+                        &visible,
+                        &records,
+                        &partition_counts,
+                        &state,
+                        CAPACITY,
+                        TOP_K,
+                        groups,
+                        generation,
+                        None,
+                    )
+                })
+            };
+
+            let assert_candidate = |label: &str, values: &[f32], scores: &MetalTensor| {
+                time_candidate(scores);
+                let expected = multigroup_selector_threshold_oracle(
+                    values,
+                    CAPACITY,
+                    CAPACITY as i32,
+                    TOP_K,
+                    groups,
+                );
+                let state_words = read_i32(&state)
+                    .into_iter()
+                    .map(|word| word as u32)
+                    .collect::<Vec<_>>();
+                assert_eq!(state_words[5], 0, "{label} status groups={groups}");
+                assert_eq!(
+                    state_words[6], expected.threshold_key,
+                    "{label} key groups={groups}"
+                );
+                assert_eq!(
+                    state_words[7], expected.threshold_take,
+                    "{label} take groups={groups}"
+                );
+                assert_eq!(
+                    state_words[8], TOP_K as u32,
+                    "{label} count groups={groups}"
+                );
+                assert_eq!(
+                    read_i32(&partition_counts)
+                        .into_iter()
+                        .map(|word| word as u32)
+                        .collect::<Vec<_>>(),
+                    expected.partition_counts,
+                    "{label} partitions groups={groups}"
+                );
+            };
+            assert_candidate("mixed", &mixed_values, &mixed_scores);
+            assert_candidate("tied", &tied_values, &tied_scores);
+
+            let mut geometry_passed = true;
+            for (label, values, scores) in [
+                ("mixed", mixed_values.as_slice(), &mixed_scores),
+                ("tied", tied_values.as_slice(), &tied_scores),
+            ] {
+                let expected = multigroup_selector_threshold_oracle(
+                    values,
+                    CAPACITY,
+                    CAPACITY as i32,
+                    TOP_K,
+                    groups,
+                );
+                assert_eq!(expected.status, 0, "{label} oracle status groups={groups}");
+                let assert_candidate_snapshot =
+                    |arm: &str, snapshot: &(Vec<i32>, Vec<i32>, Vec<i32>)| {
+                        let state_words = snapshot
+                            .2
+                            .iter()
+                            .map(|&word| word as u32)
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            state_words[0], generation,
+                            "{label} {arm} state generation groups={groups}"
+                        );
+                        assert_eq!(
+                            state_words[1], 7,
+                            "{label} {arm} state digit groups={groups}"
+                        );
+                        assert_eq!(
+                            state_words[2], expected.threshold_key,
+                            "{label} {arm} state prefix groups={groups}"
+                        );
+                        assert_eq!(
+                            state_words[3],
+                            u32::MAX,
+                            "{label} {arm} state prefix mask groups={groups}"
+                        );
+                        assert_eq!(
+                            state_words[4], expected.threshold_take,
+                            "{label} {arm} state rank groups={groups}"
+                        );
+                        assert_eq!(
+                            state_words[5], expected.status,
+                            "{label} {arm} state status groups={groups}"
+                        );
+                        assert_eq!(
+                            state_words[6], expected.threshold_key,
+                            "{label} {arm} state threshold groups={groups}"
+                        );
+                        assert_eq!(
+                            state_words[7], expected.threshold_take,
+                            "{label} {arm} state take groups={groups}"
+                        );
+                        assert_eq!(
+                            state_words[8], expected.selected_count,
+                            "{label} {arm} state count groups={groups}"
+                        );
+                        assert_eq!(
+                            state_words[9],
+                            deepseek_v4_multigroup_selector_state_completion(generation, 7),
+                            "{label} {arm} state completion groups={groups}"
+                        );
+                        assert_eq!(
+                            snapshot
+                                .1
+                                .iter()
+                                .map(|&word| word as u32)
+                                .collect::<Vec<_>>(),
+                            expected.partition_counts,
+                            "{label} {arm} partition counts groups={groups}"
+                        );
+                        for group in 0..groups {
+                            let base = group * DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS;
+                            assert_eq!(
+                                snapshot.0[base] as u32, generation,
+                                "{label} {arm} record generation group={group} groups={groups}"
+                            );
+                            assert_eq!(
+                                snapshot.0[base + 1],
+                                7,
+                                "{label} {arm} record digit group={group} groups={groups}"
+                            );
+                            assert_eq!(
+                                snapshot.0[base + 2],
+                                0,
+                                "{label} {arm} record error group={group} groups={groups}"
+                            );
+                            assert_eq!(
+                                snapshot.0[base + 3] as u32,
+                                deepseek_v4_multigroup_selector_record_completion(
+                                    generation, 7, group,
+                                ),
+                                "{label} {arm} record completion group={group} groups={groups}"
+                            );
+                        }
+                    };
+                let assert_current_output = |arm: &str| {
+                    assert_eq!(
+                        read_i32(&status),
+                        [expected.status as i32],
+                        "{label} {arm} current status groups={groups}"
+                    );
+                    assert_eq!(
+                        read_i32(&count),
+                        [expected.selected_count as i32],
+                        "{label} {arm} current count groups={groups}"
+                    );
+                    let selected_ids = read_i32(&ids);
+                    let selected_keys = selected_ids
+                        .iter()
+                        .take(expected.selected_count as usize)
+                        .map(|&id| {
+                            assert!(
+                                (0..CAPACITY as i32).contains(&id),
+                                "{label} {arm} current id {id} groups={groups}"
+                            );
+                            deployed_selector_order_key(values[id as usize])
+                        })
+                        .collect::<Vec<_>>();
+                    let threshold = *selected_keys.iter().min().unwrap();
+                    let take = selected_keys
+                        .iter()
+                        .filter(|&&key| key == threshold)
+                        .count();
+                    assert_eq!(
+                        threshold, expected.threshold_key,
+                        "{label} {arm} current threshold groups={groups}"
+                    );
+                    assert_eq!(
+                        take, expected.threshold_take as usize,
+                        "{label} {arm} current take groups={groups}"
+                    );
+                };
+                for _ in 0..5 {
+                    time_current(scores);
+                    time_candidate(scores);
+                }
+                let (before_median, _, before_samples) =
+                    median_and_p95((0..SAMPLES).map(|_| time_current(scores)).collect());
+                assert_current_output("before");
+                let exact_before = (
+                    read_i32(&records),
+                    read_i32(&partition_counts),
+                    read_i32(&state),
+                );
+                assert_candidate_snapshot("before", &exact_before);
+                let (candidate_median, candidate_p95, candidate_samples) =
+                    median_and_p95((0..SAMPLES).map(|_| time_candidate(scores)).collect());
+                let exact_after = (
+                    read_i32(&records),
+                    read_i32(&partition_counts),
+                    read_i32(&state),
+                );
+                assert_candidate_snapshot("after", &exact_after);
+                assert_eq!(
+                    exact_after, exact_before,
+                    "{label} record drift groups={groups}"
+                );
+                let (after_median, _, after_samples) =
+                    median_and_p95((0..SAMPLES).map(|_| time_current(scores)).collect());
+                assert_current_output("after");
+                let control_drift =
+                    2.0 * (before_median - after_median).abs() / (before_median + after_median);
+                let faster_control = before_median.min(after_median);
+                let saving = faster_control - candidate_median;
+                let passed = control_drift <= 0.05
+                    && candidate_median <= MAX_MEDIAN_MS
+                    && candidate_p95 <= MAX_P95_MS
+                    && saving >= MIN_SAVING_MS;
+                geometry_passed &= passed;
+                eprintln!(
+                    "deepseek_v4 multigroup_threshold groups={groups} case={label} current_before_median_ms={before_median:.6} candidate_median_ms={candidate_median:.6} candidate_p95_ms={candidate_p95:.6} current_after_median_ms={after_median:.6} control_drift={control_drift:.6} faster_control_saving_ms={saving:.6} pass={passed}"
+                );
+                eprintln!(
+                    "deepseek_v4 multigroup_threshold groups={groups} case={label} current_before_samples_ms={before_samples:?} candidate_samples_ms={candidate_samples:?} current_after_samples_ms={after_samples:?}"
+                );
+            }
+            any_geometry_passed |= geometry_passed;
+        }
+        assert!(
+            any_geometry_passed,
+            "no frozen multi-group threshold geometry cleared both mixed and tied gates"
+        );
     }
 
     #[test]

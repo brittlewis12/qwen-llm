@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Multi-Group Threshold Ceiling GO
+
+Status: threshold-only diagnostics `GO`; freeze 32 producer groups and proceed
+to the full-output Phase B falsifier. Production selection remains `HOLD`.
+
+- Add an eight-digit exact global histogram schedule with generation-tagged
+  producer records and reducer state. Geometry, stale records, visible
+  nonfinite scores, deployed finite-key ordering, rank, threshold ties, and
+  per-partition greater/equal counts fail closed under the current contract.
+- Active Metal/CPU/current-selector differentials cover mixed scores, all ties,
+  partition-boundary signed zeros and positive/negative subnormals, visibility,
+  nonfinite precedence, a deliberately missing producer, and repeat identity.
+- At 262,144 visible rows, 32 groups measure 0.351/0.351 ms median/p95 on mixed
+  scores and 0.600/0.600 ms on all ties. Faster current controls measure
+  1.858/2.010 ms, leaving 1.507/1.410 ms of saving before output compaction.
+- The frozen 64- and 80-group alternatives fail their tied-case latency gates
+  at 1.044/1.045 and 1.273/1.274 ms median/p95. They are negative evidence, not
+  tuning candidates.
+
+Decision: retain the 32-group threshold schedule as diagnostics and implement
+only the frozen 18-dispatch Phase B: 16 threshold dispatches, one exact
+mask/cache-order compaction dispatch, and one validate-and-publish/fallback
+dispatch. Mask, IDs, fallback, packed/multiquery use, and production routing are
+not promoted by this checkpoint. Evidence:
+`docs/bench/2026-08-05-dsv4-multigroup-threshold-ceiling/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Collapsed FP4 Selector KILL
 
 Status: diagnostics-only collapsed execution is structurally qualified, but

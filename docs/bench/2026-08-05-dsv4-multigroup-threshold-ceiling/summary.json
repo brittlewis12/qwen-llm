@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "result": "go",
+  "scope": "threshold_only_diagnostics",
+  "source_base_git_commit": "158b1cac4d305f3a4e52075af8507f4d21542169",
+  "environment": {
+    "device_name": "Apple M4 Max",
+    "target_arch": "aarch64",
+    "target_os": "macos",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "llvm_version": "22.1.6",
+    "metal": "Apple metal version 32023.864 (metalfe-32023.864)",
+    "metal_target": "air64-apple-darwin24.6.0"
+  },
+  "shape": {
+    "query_count": 1,
+    "row_capacity": 262144,
+    "visible_rows": 262144,
+    "top_k": 512,
+    "threads_per_group": 256,
+    "producer_reducer_pairs": 8,
+    "samples_per_arm": 24,
+    "warmups": 5
+  },
+  "gates_ms": {
+    "maximum_candidate_median": 1.0,
+    "maximum_candidate_p95": 1.05,
+    "minimum_faster_control_saving": 0.7,
+    "maximum_control_drift_fraction": 0.05
+  },
+  "run_log": {
+    "path": "run.log",
+    "bytes": 11257,
+    "sha256": "898d384306b33c882dd1342f059bd0eae38f00cd24a062041aa21408cc50edd1"
+  },
+  "results": [
+    {"groups": 32, "case": "mixed", "current_before_median": 1.858688, "candidate_median": 0.350542, "candidate_p95": 0.350750, "current_after_median": 1.857833, "control_drift": 0.000460, "saving": 1.507292, "pass": true},
+    {"groups": 32, "case": "tied", "current_before_median": 2.010125, "candidate_median": 0.599625, "candidate_p95": 0.600333, "current_after_median": 2.010083, "control_drift": 0.000021, "saving": 1.410458, "pass": true},
+    {"groups": 64, "case": "mixed", "current_before_median": 1.859375, "candidate_median": 0.546500, "candidate_p95": 0.551333, "current_after_median": 1.857354, "control_drift": 0.001087, "saving": 1.310854, "pass": true},
+    {"groups": 64, "case": "tied", "current_before_median": 2.010875, "candidate_median": 1.043771, "candidate_p95": 1.044625, "current_after_median": 2.008625, "control_drift": 0.001120, "saving": 0.964854, "pass": false},
+    {"groups": 80, "case": "mixed", "current_before_median": 1.859271, "candidate_median": 0.649563, "candidate_p95": 0.654625, "current_after_median": 1.860313, "control_drift": 0.000560, "saving": 1.209708, "pass": true},
+    {"groups": 80, "case": "tied", "current_before_median": 2.011438, "candidate_median": 1.273417, "candidate_p95": 1.274250, "current_after_median": 2.011146, "control_drift": 0.000145, "saving": 0.737729, "pass": false}
+  ],
+  "decision": {
+    "frozen_group_count": 32,
+    "phase_a_threshold": "go",
+    "phase_b_full_output": "authorized",
+    "production_selection": "hold",
+    "packed_multiquery_ranked": "hold"
+  },
+  "cx_review": "019fcf7d-e9d4-7150-b496-e70a31958e80"
+}

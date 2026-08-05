@@ -263,21 +263,30 @@ capacity clears the 0.50 ms bound: tied savings are 0.691/0.677 ms at capacity
 capacity 262,144. A 262,144-row session at only 131,072 visible rows has just
 0.122/0.103 ms tied headroom, so visibility alone is insufficient.
 
+The off-by-default production seam now clears. Five session-owned buffers add
+267,432 logical bytes at terminal capacity and are included in admission; a
+nonzero invocation owner fails before generation reuse. Integrated model-free
+current/candidate/current gates preserve every output and save at least
+0.624/0.627 ms GPU/wall per layer in the frozen band. On the current asset at
+position 786,431, all 21 candidate layers execute from a real-weight synthetic
+zero-causal-state fixture restored through snapshot-v1, with exact logits,
+hidden state, causal state, committed tokens, and a separate untimed decision
+transcript. Whole-token GPU/wall saving is 13.867/17.573 ms against the faster
+control. This is not real-prompt continuation evidence and qualifies only the
+bounded hidden opt-in, not default-on or wider-device routing.
+
 Force-ranked queue:
 
-1. **Integrate exact multi-group selection experimentally.** First measure a
-   session-owned scratch plan, memory accounting, and a wrap-safe generation
-   owner behind explicit opt-in. Eligibility is Q=1/K=512,
-   `visible <= capacity <= 262144`, `visible >= 196608`, and
-   `visible >= capacity - capacity / 4`; packed, shallow, and ranked-output paths
-   remain current. Require exact per-layer outputs and final product state plus
-   at least 0.50 ms times eligible layers of GPU and wall saving before default.
-   Keep the current F16 scorer authoritative.
-2. **GPU-resident deterministic packed routing.** Remove prefill's router
+1. **GPU-resident deterministic packed routing.** Remove prefill's router
    commit/wait and CPU schedule construction with integer counts, deterministic
    expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,
    and slot-order reduction. Follow with grouped MXFP4 down. Mixture-of-Kittens
    informs scheduling and determinism, not a CUDA-style monolithic Metal kernel.
+2. **Decide bounded selector product promotion.** Keep the qualified current
+   policy hidden and off by default while its device/asset scope is explicit.
+   A future default or user-facing switch needs a separately reviewed product
+   contract; do not repeat the 5.43 GB restore campaign absent code, device, or
+   asset drift.
 3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.

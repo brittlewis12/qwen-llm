@@ -1,0 +1,30 @@
+command: /usr/bin/time -l cargo test --release -p qwen-llm --lib --features dsv4-diagnostics deepseek_v4_metal::tests::current_asset_multigroup_selector_whole_token_gate -- --ignored --exact --nocapture --test-threads=1
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::tests::current_asset_multigroup_selector_whole_token_gate ... deepseek_v4 multigroup_live position=786431 visible_rows=196608 eligible_layers=21 current_before_gpu_median_ms=181.055938 candidate_gpu_median_ms=167.188771 current_after_gpu_median_ms=183.630667 gpu_saving_ms=13.867167 gpu_drift=0.014120 current_before_wall_median_ms=1352.151583 candidate_wall_median_ms=1321.882958 current_after_wall_median_ms=1339.456000 wall_saving_ms=17.573042 wall_drift=0.009433 pass=true
+deepseek_v4 multigroup_live current_before_gpu_ms=[179.56637497991323, 185.6817500665784, 180.26220821775496, 180.5412918329239, 181.8903749808669, 181.57058325596154, 179.9858333542943, 182.16587509959936] current_before_wall_ms=[1340.0056249999998, 1419.385291, 1364.297541, 1423.9758339999998, 1179.151333, 1209.574292, 1185.8595, 1580.6893340000001] candidate_gpu_ms=[167.58329165168107, 166.46041651256382, 169.3111250642687, 166.79425002075732, 167.5892083439976, 164.7413750179112, 167.61737503111362, 166.32895823568106] candidate_wall_ms=[1383.781708, 1316.6281660000002, 1316.674125, 1315.754625, 1326.236417, 1322.539583, 1321.226333, 1343.3735410000002] current_after_gpu_ms=[187.60995822958648, 182.6730000320822, 180.58912479318678, 184.62187494151294, 188.55237495154142, 183.04799986071885, 180.4243333172053, 184.21333329752088] current_after_wall_ms=[1338.404875, 1386.283958, 1490.5501669999999, 1187.82075, 1195.212875, 1202.6094999999998, 1354.739916, 1340.507125]
+deepseek_v4 multigroup_live model_path=/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf model_content_id=ae11d1ea13ccfd98509d248705a589384412cd67c502450158f84a8bd143b5e2 current_census_sha256=cbfddbea4260cbaffb02429f0d9593d6e00ec08eb9a5b8d56ea83e8d22860889 metallib_sha256=89f8862d54aa5f2a3aad594f2b791221f2288765f4aa84f6781961296e2d50f0 device_name=Apple M4 Max device_registry_id=4294968482 input_snapshot_payload_bytes=5431592700 input_snapshot_causal_digest=d07671952860a611666e520c9e51b9d419c2b98c56b9cd1f0a830a25feb15093 input_snapshot_prefix_digest=8710cb4e9bbdf32511fbae7c882e4ea643a02b4ef355d6001867fcc937e3de89 completed_causal_digest=a87d1f6623bab8e137b43ab2103923347b8de9577ce43e1e95e18f0873a57a7c completed_prefix_digest=a3f8526f9831df3d376b7fd9a0707667bd40a5327a0be344c95a44c1c09c8605 compatibility_digest=e7fb64be2f9fd96c52c9d5aa9384e09652e899650558dd50c4ba998e834bf076 committed_sha256=52c3382230a9d0ec6f7a56402d643596ae5718ca5d575306ade06d6de15084ef logits_sha256=959a5e7bee641cce3eed319a5ebf7d4b73dd7ed6563991daae15597ddde003e5 hidden_sha256=26d90c291675cf3b1593a7ab563266e372187fd09fb7e6220656ff729da81dda decision_sha256=c81842c7a895254defac7473ca0ff70657a134ee647786d5b8a0b61618dbe0bb candidate_generation_deltas=[21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21] memory_plan=(residency_buffers=11 residency_logical=104202570752 residency_priced=104202649600 session_buffers=623 session_logical=8030781356 session_priced=8035516416 total_priced=112238166016 reserve=536870912 required=112775036928) memory_reconciliation=(before=475136 after_residency=104203042816 after_session=112233824256 after_first_forward=112234086400 residency_delta=104202567680 session_delta=112233349120 first_forward_delta=112233611264 sampled_peak_delta=112233611264 planned_limit=112775036928)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 648 filtered out; finished in 883.72s
+
+      884.07 real       851.73 user        69.52 sys
+        120742952960  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             6561224  page reclaims
+             6360828  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                 357  messages sent
+                   0  messages received
+                   1  signals received
+                 789  voluntary context switches
+             2075134  involuntary context switches
+          1115384340  instructions retired
+           325465015  cycles elapsed
+            47792728  peak memory footprint

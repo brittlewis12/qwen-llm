@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Multi-Group Integration GO
+
+Status: bounded off-by-default singleton route `GO`; production default and
+wider capacity/device routing remain `HOLD`.
+
+- Add five capacity-bounded session buffers, exact admission accounting, and a
+  nonzero generation owner that fails before reuse. Radix4 remains default;
+  packed, shallow, ranked, and ineligible singleton paths are unchanged.
+- The integrated 24-sample model-free gate clears all mixed/tied cases at
+  capacity/visible 196,608/196,608, 250,112/196,608, and
+  262,144/196,608. Minimum GPU/wall saving is 0.624/0.627 ms per layer;
+  maximum control drift is 1.874%, and every candidate p95 remains below
+  1.18 ms.
+- A current-asset, real-weight synthetic zero-causal-state fixture at position
+  786,431 executes 21 eligible CSA layers through canonical snapshot-v1 under
+  current/candidate/current. Logits, final hidden bits, causal/prefix state,
+  committed tokens, and a separate untimed selected-ID/route transcript are
+  exact for this fixture. Every candidate invocation advances 21 generations;
+  controls advance zero. This is not real-prompt continuation evidence.
+- Whole-token GPU median falls from the faster 181.056 ms control to
+  167.189 ms, saving 13.867 ms. Wall median saves 17.573 ms; GPU/wall control
+  drift is 1.412%/0.943%. Memory reconciles at 112.234 GB observed versus
+  112.775 GB planned with reserve.
+- Two rejected five-warm-pair model-free brackets are retained: immediately
+  after the 120.7 GB live process, radix4 clocks walked down through the control
+  arm and correctly failed the 5% drift gate. Forty untimed pairs stabilize the
+  instrument without changing production code or thresholds.
+
+Decision: retain the qualified policy behind its hidden explicit opt-in. Do not
+generalize this packet into default-on, packed, larger-capacity, or other-device
+claims. The 884-second live test is an offline code/device/asset promotion gate,
+not a routine loop. Evidence:
+`docs/bench/2026-08-05-dsv4-multigroup-integration/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Multi-Group Crossover GO
 
 Status: model-free crossover map `GO`; freeze a narrow experimental eligibility

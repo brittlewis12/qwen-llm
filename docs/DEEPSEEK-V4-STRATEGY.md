@@ -2074,13 +2074,18 @@ noise without reducing technical risk. Revisit after S5.
    executable differentials. Direct FP4-Q/K replacement is closed by the
    position-3,070 quality and speed KILL; keep its diagnostics and packed matrix
    shadow as negative evidence without migrating paged K or snapshot v2. The
-   exact multi-group full selector now clears at 32 groups with exact masks,
-   cache-order IDs, status fallback, and more than 1.11 ms/layer terminal GPU
-   and wall saving. Its crossover freezes an experimental boundary at 196,608
-   visible rows, at least three-quarters of no more than 262,144 physical rows.
-   Integrate only that singleton policy with session-owned scratch and generation
-   state. Require exact final model state and 0.50 ms times eligible layers of
-   whole-token saving before changing default dispatch.
+    exact multi-group full selector now clears at 32 groups with exact masks,
+    cache-order IDs, status fallback, and more than 1.11 ms/layer terminal GPU
+    and wall saving. Its crossover freezes an experimental boundary at 196,608
+    visible rows, at least three-quarters of no more than 262,144 physical rows.
+    The bounded singleton integration now owns admitted session scratch and
+    non-reusing generation state behind a hidden opt-in. A current-asset,
+    real-weight synthetic zero-causal-state fixture at position 786,431 restores
+    through snapshot-v1 and preserves exact fixture output/state plus a separate
+    untimed 21-layer decision trace while saving 13.867/17.573 ms GPU/wall
+    against the faster control. This is not real-prompt continuation evidence.
+    Keep default, packed, and wider-device routing unchanged; do not repeat the
+    5.43 GB restore campaign without implementation, asset, or device drift.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine

@@ -41,8 +41,10 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLSize,
 };
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::num::NonZeroU32;
 
 pub const DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT: usize = 1_328;
 const GGUF_BINDING_ALIGNMENT: usize = 32;
@@ -1640,6 +1642,21 @@ impl DeepSeekV4Session {
 
     pub fn capacity(&self) -> DeepSeekV4SessionCapacity {
         self.capacity
+    }
+
+    /// Enables the exact multi-group sparse selector for its measured
+    /// far-context crossover band. The experiment is off by default, must be
+    /// sealed before the first token, and never changes packed prefill or
+    /// ineligible singleton positions.
+    #[doc(hidden)]
+    pub fn enable_multigroup_selector_experiment(&mut self) -> Result<(), DeepSeekV4MetalError> {
+        let position = self.phase.ready_position()?;
+        if position != 0 {
+            return invalid(format!(
+                "DeepSeek V4 multi-group selector must be enabled at position zero, got {position}"
+            ));
+        }
+        self.sparse_csa.enable_multigroup_selector_experiment()
     }
 
     /// Enables exact post-Hadamard FP4 lineage capture for a diagnostics-only
@@ -4824,6 +4841,142 @@ impl DeepSeekV4Fp4ShadowScratch {
     }
 }
 
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS: usize = 20;
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS: usize = 10;
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_DIGITS: usize = 8;
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS: usize = 5;
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS: usize = 32;
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS: usize = 196_608;
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS: usize = 262_144;
+
+fn deepseek_v4_multigroup_selector_capacity_supported(capacity_rows: usize) -> bool {
+    (DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS
+        ..=DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS)
+        .contains(&capacity_rows)
+}
+
+fn deepseek_v4_multigroup_selector_eligible(capacity_rows: usize, visible_rows: usize) -> bool {
+    deepseek_v4_multigroup_selector_capacity_supported(capacity_rows)
+        && visible_rows <= capacity_rows
+        && visible_rows >= DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS
+        && visible_rows >= capacity_rows - capacity_rows / 4
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeepSeekV4SparseSelectorMode {
+    Radix4,
+    MultigroupExperimental,
+}
+
+#[derive(Debug)]
+struct DeepSeekV4MultigroupSelectorGeneration {
+    next: Cell<Option<NonZeroU32>>,
+}
+
+impl DeepSeekV4MultigroupSelectorGeneration {
+    fn new() -> Self {
+        Self::from_next(NonZeroU32::MIN)
+    }
+
+    fn from_next(next: NonZeroU32) -> Self {
+        Self {
+            next: Cell::new(Some(next)),
+        }
+    }
+
+    fn take(&self) -> Result<u32, DeepSeekV4MetalError> {
+        let generation = self.next.get().ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "DeepSeek V4 multi-group selector generation space is exhausted".into(),
+            )
+        })?;
+        self.next
+            .set(generation.get().checked_add(1).and_then(NonZeroU32::new));
+        Ok(generation.get())
+    }
+}
+
+struct DeepSeekV4MultigroupSelectorScratch {
+    records: MetalTensor,
+    partition_plan: MetalTensor,
+    state: MetalTensor,
+    private_mask: MetalTensor,
+    private_ids: MetalTensor,
+    generation: DeepSeekV4MultigroupSelectorGeneration,
+}
+
+impl DeepSeekV4MultigroupSelectorScratch {
+    fn new(ctx: &MetalContext, capacity_rows: usize) -> Result<Self, DeepSeekV4MetalError> {
+        if !deepseek_v4_multigroup_selector_capacity_supported(capacity_rows) {
+            return invalid(format!(
+                "multi-group selector scratch does not support capacity {capacity_rows}"
+            ));
+        }
+        Ok(Self {
+            records: MetalTensor::zeros_i32(
+                ctx,
+                vec![
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS as u64,
+                ],
+            )?,
+            partition_plan: MetalTensor::zeros_i32(
+                ctx,
+                vec![
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS as u64,
+                ],
+            )?,
+            state: MetalTensor::zeros_i32(
+                ctx,
+                vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+            )?,
+            private_mask: MetalTensor::zeros_dtype(
+                ctx,
+                vec![capacity_rows as u64, 1],
+                GgmlType::I8,
+            )?,
+            private_ids: MetalTensor::zeros_i32(ctx, vec![DEEPSEEK_V4_CSA_TOP_K as u64, 1])?,
+            generation: DeepSeekV4MultigroupSelectorGeneration::new(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        scores: &MetalTensor,
+        visible_counts: &MetalTensor,
+        selected_mask: &MetalTensor,
+        cache_order_ids: &MetalTensor,
+        selected_counts: &MetalTensor,
+        status: &MetalTensor,
+        capacity_rows: usize,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        encode_select_top_k_multigroup_full_f32(
+            ctx,
+            enc,
+            scores,
+            visible_counts,
+            &self.records,
+            &self.partition_plan,
+            &self.state,
+            &self.private_mask,
+            &self.private_ids,
+            selected_mask,
+            cache_order_ids,
+            selected_counts,
+            status,
+            capacity_rows,
+            DEEPSEEK_V4_CSA_TOP_K,
+            self.generation.take()?,
+            None,
+            false,
+        )
+    }
+}
+
 struct DeepSeekV4SparseCsaScratch {
     capacity_rows: usize,
     index_queries: MetalTensor,
@@ -4834,6 +4987,8 @@ struct DeepSeekV4SparseCsaScratch {
     cache_order_ids: MetalTensor,
     selected_counts: MetalTensor,
     status: MetalTensor,
+    selector_mode: DeepSeekV4SparseSelectorMode,
+    multigroup: Option<DeepSeekV4MultigroupSelectorScratch>,
     #[cfg(test)]
     score_test_policy: DeepSeekV4IndexerScoreTestPolicy,
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -4873,11 +5028,29 @@ impl DeepSeekV4SparseCsaScratch {
             cache_order_ids: MetalTensor::zeros_i32(ctx, vec![DEEPSEEK_V4_CSA_TOP_K as u64, 1])?,
             selected_counts: MetalTensor::zeros_i32(ctx, vec![1])?,
             status: MetalTensor::zeros_i32(ctx, vec![1])?,
+            selector_mode: DeepSeekV4SparseSelectorMode::Radix4,
+            multigroup: deepseek_v4_multigroup_selector_capacity_supported(capacity_rows)
+                .then(|| DeepSeekV4MultigroupSelectorScratch::new(ctx, capacity_rows))
+                .transpose()?,
             #[cfg(test)]
             score_test_policy: DeepSeekV4IndexerScoreTestPolicy::Production,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
             selector_test_policy: DeepSeekV4SelectorTestPolicy::Production,
         })
+    }
+
+    fn enable_multigroup_selector_experiment(&mut self) -> Result<(), DeepSeekV4MetalError> {
+        if self.selector_mode != DeepSeekV4SparseSelectorMode::Radix4 {
+            return invalid("DeepSeek V4 sparse selector experiment is already sealed");
+        }
+        if self.multigroup.is_none() {
+            return invalid(format!(
+                "DeepSeek V4 session CSA capacity {} cannot enter the measured multi-group selector band",
+                self.capacity_rows
+            ));
+        }
+        self.selector_mode = DeepSeekV4SparseSelectorMode::MultigroupExperimental;
+        Ok(())
     }
 
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -5050,6 +5223,40 @@ impl DeepSeekV4SparseCsaScratch {
             1,
             self.force_scalar_score_kernel(),
         )?;
+        self.encode_scored_rows(ctx, enc, rows.capacity_rows, rows.count, record)
+    }
+
+    fn encode_scored_rows(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        capacity_rows: usize,
+        visible_rows: usize,
+        record: &DeepSeekV4SelectionRecord,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if self.selector_mode == DeepSeekV4SparseSelectorMode::MultigroupExperimental
+            && deepseek_v4_multigroup_selector_eligible(capacity_rows, visible_rows)
+        {
+            return self
+                .multigroup
+                .as_ref()
+                .ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(
+                        "eligible multi-group selector has no session-owned scratch".into(),
+                    )
+                })?
+                .encode(
+                    ctx,
+                    enc,
+                    &self.scores,
+                    &record.visible_count,
+                    &self.selected_mask,
+                    &self.cache_order_ids,
+                    &record.selected_count,
+                    &record.status,
+                    capacity_rows,
+                );
+        }
         encode_select_top_k_f32_with_policy(
             ctx,
             enc,
@@ -5060,8 +5267,8 @@ impl DeepSeekV4SparseCsaScratch {
             &self.cache_order_ids,
             &record.selected_count,
             &record.status,
-            rows.capacity_rows,
-            rows.count,
+            capacity_rows,
+            visible_rows,
             DEEPSEEK_V4_CSA_TOP_K,
             1,
             DeepSeekV4SelectorDispatchPolicy::Production,
@@ -10316,16 +10523,6 @@ fn use_parallel_selector(
 }
 
 #[cfg(test)]
-const DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS: usize = 20;
-#[cfg(test)]
-const DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS: usize = 10;
-#[cfg(test)]
-const DEEPSEEK_V4_MULTIGROUP_SELECTOR_DIGITS: usize = 8;
-#[cfg(test)]
-const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS: usize = 5;
-#[cfg(test)]
-const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS: usize = 32;
-#[cfg(test)]
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_GREATER: usize = 0;
 #[cfg(test)]
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_EQUAL: usize = 1;
@@ -10357,7 +10554,6 @@ fn deepseek_v4_multigroup_selector_compact_completion(generation: u32, group: us
     0xd543_0000 ^ generation ^ group as u32
 }
 
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn encode_select_top_k_multigroup_threshold_f32(
     ctx: &MetalContext,
@@ -10520,7 +10716,6 @@ fn encode_select_top_k_multigroup_threshold_f32(
     Ok(())
 }
 
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn encode_select_top_k_multigroup_full_f32(
     ctx: &MetalContext,
@@ -10545,7 +10740,7 @@ fn encode_select_top_k_multigroup_full_f32(
     const THREADGROUP_WIDTH: usize = 256;
     const COMPACT_SCRATCH_WORDS: usize = 3 * THREADGROUP_WIDTH + 20;
     const PUBLISH_SCRATCH_WORDS: usize = 20;
-    let group_count = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+    let group_count = DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS;
     require_serial(enc, "deepseek_v4_multigroup_selector_full")?;
     validate_i8(
         private_mask,
@@ -10694,7 +10889,7 @@ fn encode_select_top_k_multigroup_publish_only_f32(
 ) -> Result<(), DeepSeekV4MetalError> {
     const THREADGROUP_WIDTH: usize = 256;
     const PUBLISH_SCRATCH_WORDS: usize = 20;
-    let group_count = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+    let group_count = DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS;
     require_serial(enc, "deepseek_v4_multigroup_selector_publish_only")?;
     if row_capacity == 0
         || top_k == 0
@@ -11428,7 +11623,6 @@ fn raw_i8_subview(
     Ok(view)
 }
 
-#[cfg(any(test, feature = "dsv4-diagnostics"))]
 fn validate_i8(
     tensor: &MetalTensor,
     shape: &[u64],
@@ -12233,6 +12427,46 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
     for name in ["sparse_csa.selected_counts", "sparse_csa.status"] {
         push_session_allocation(&mut requests, name, 1, i32_bytes)?;
     }
+    if deepseek_v4_multigroup_selector_capacity_supported(capacity.csa_physical_rows()) {
+        push_session_allocation(
+            &mut requests,
+            "sparse_csa.multigroup.records",
+            checked_mul(
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS,
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS,
+                "multi-group selector record elements",
+            )?,
+            i32_bytes,
+        )?;
+        push_session_allocation(
+            &mut requests,
+            "sparse_csa.multigroup.partition_plan",
+            checked_mul(
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS,
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS,
+                "multi-group selector plan elements",
+            )?,
+            i32_bytes,
+        )?;
+        push_session_allocation(
+            &mut requests,
+            "sparse_csa.multigroup.state",
+            DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS,
+            i32_bytes,
+        )?;
+        push_session_allocation(
+            &mut requests,
+            "sparse_csa.multigroup.private_mask",
+            capacity.csa_physical_rows(),
+            std::mem::size_of::<u8>(),
+        )?;
+        push_session_allocation(
+            &mut requests,
+            "sparse_csa.multigroup.private_ids",
+            DEEPSEEK_V4_CSA_TOP_K,
+            i32_bytes,
+        )?;
+    }
     #[cfg(feature = "dsv4-diagnostics")]
     {
         push_session_allocation(
@@ -12625,6 +12859,10 @@ mod tests {
 
     const LEGACY_CENSUS_MANIFEST: &str =
         include_str!("../tests/fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_census_v1.json");
+    #[cfg(feature = "dsv4-diagnostics")]
+    const CURRENT_CENSUS_MANIFEST: &str = include_str!(
+        "../tests/fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_current_2026_08_04_census_v1.json"
+    );
     const INDEXER_FP4_CONTRACT_FIXTURE: &str =
         include_str!("../tests/fixtures/deepseek_v4_indexer_fp4_contract_v1.json");
     const LEGACY_CHECKPOINT_CONTENT_ID: [u8; 32] = [
@@ -12743,6 +12981,22 @@ mod tests {
             "DSV4_LEGACY_MODEL does not match the pinned 2026-07-31 asset"
         );
         gguf
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    fn open_pinned_current_gguf(model_path: &Path) -> (GgufFile, DeepSeekV4ModelContentId) {
+        let gguf = GgufFile::open(model_path).expect("open current DS4 GGUF shards");
+        PinnedDeepSeekV4AssetV1::parse(CURRENT_CENSUS_MANIFEST)
+            .expect("parse current DS4 census")
+            .validate_observed(&gguf)
+            .expect("current DS4 schema and quant census match");
+        let identity_cache_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("target/.qwen-dsv4-model-identity-v2");
+        let content =
+            checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+                .expect("resolve current DS4 ordered-content identity");
+        (gguf, DeepSeekV4ModelContentId::new(content.content_id))
     }
 
     fn offset_f32(ctx: &MetalContext, values: &[f32], shape: Vec<u64>) -> MetalTensor {
@@ -13124,6 +13378,66 @@ mod tests {
     }
 
     #[test]
+    fn multigroup_selector_crossover_predicate_is_frozen() {
+        for (capacity, visible, expected) in [
+            (196_352, 196_352, false),
+            (196_608, 196_607, false),
+            (196_608, 196_608, true),
+            (250_112, 196_607, false),
+            (250_112, 196_608, true),
+            (250_112, 250_112, true),
+            (262_144, 196_607, false),
+            (262_144, 196_608, true),
+            (262_144, 262_144, true),
+            (262_145, 262_145, false),
+            (262_144, 262_145, false),
+        ] {
+            assert_eq!(
+                deepseek_v4_multigroup_selector_eligible(capacity, visible),
+                expected,
+                "capacity={capacity} visible={visible}"
+            );
+        }
+    }
+
+    #[test]
+    fn multigroup_selector_generation_fails_before_reuse() {
+        let generation = DeepSeekV4MultigroupSelectorGeneration::from_next(
+            NonZeroU32::new(u32::MAX - 1).unwrap(),
+        );
+        assert_eq!(generation.take().unwrap(), u32::MAX - 1);
+        assert_eq!(generation.take().unwrap(), u32::MAX);
+        assert!(
+            generation
+                .take()
+                .unwrap_err()
+                .to_string()
+                .contains("exhausted")
+        );
+    }
+
+    #[test]
+    fn sparse_csa_multigroup_scratch_is_explicit_and_capacity_bounded() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let mut shallow = DeepSeekV4SparseCsaScratch::new(&ctx, 768).unwrap();
+        assert_eq!(shallow.selector_mode, DeepSeekV4SparseSelectorMode::Radix4);
+        assert!(shallow.multigroup.is_none());
+        assert!(shallow.enable_multigroup_selector_experiment().is_err());
+
+        let mut terminal = DeepSeekV4SparseCsaScratch::new(&ctx, 262_144).unwrap();
+        assert_eq!(terminal.selector_mode, DeepSeekV4SparseSelectorMode::Radix4);
+        assert!(terminal.multigroup.is_some());
+        terminal.enable_multigroup_selector_experiment().unwrap();
+        assert_eq!(
+            terminal.selector_mode,
+            DeepSeekV4SparseSelectorMode::MultigroupExperimental
+        );
+        assert!(terminal.enable_multigroup_selector_experiment().is_err());
+    }
+
+    #[test]
     fn session_phase_encodes_observation_and_poison_transitions() {
         let mut phase = DeepSeekV4SessionPhase::fresh();
         assert_eq!(phase.next_position(), 0);
@@ -13319,7 +13633,7 @@ mod tests {
         .unwrap();
         let promoted =
             deepseek_v4_session_allocation_requests_for_kinds(&kinds, promoted_capacity).unwrap();
-        assert_eq!(promoted.len(), requests.len());
+        assert_eq!(promoted.len(), requests.len() + 5);
         let promoted_diagnostics_logical = if cfg!(feature = "dsv4-diagnostics") {
             csa_layer_count as u64 * promoted_capacity.csa_physical_rows() as u64 * 72
                 + 112_160
@@ -13332,7 +13646,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            7_631_942_884 + promoted_diagnostics_logical
+            7_632_210_316 + promoted_diagnostics_logical
         );
         assert_eq!(
             promoted
@@ -13342,12 +13656,25 @@ mod tests {
                 .sum::<u64>(),
             7_214_202_880
         );
+        let promoted_names = promoted
+            .iter()
+            .map(|request| request.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(names.is_subset(&promoted_names));
         assert_eq!(
-            promoted
-                .iter()
-                .map(|request| request.name.as_str())
+            promoted_names
+                .difference(&names)
+                .copied()
                 .collect::<std::collections::BTreeSet<_>>(),
-            names
+            [
+                "sparse_csa.multigroup.partition_plan",
+                "sparse_csa.multigroup.private_ids",
+                "sparse_csa.multigroup.private_mask",
+                "sparse_csa.multigroup.records",
+                "sparse_csa.multigroup.state",
+            ]
+            .into_iter()
+            .collect()
         );
     }
 
@@ -18736,7 +19063,7 @@ mod tests {
         };
         const CAPACITY: usize = 4_096;
         const TOP_K: usize = 512;
-        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS;
 
         #[derive(Debug, Eq, PartialEq)]
         struct PublishedSelection {
@@ -19096,7 +19423,7 @@ mod tests {
         };
         const CAPACITY: usize = 4_096;
         const TOP_K: usize = 512;
-        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS;
         const GENERATION: u32 = 0x3200_0001;
 
         let values = (0..CAPACITY)
@@ -19249,6 +19576,79 @@ mod tests {
     }
 
     #[test]
+    fn sparse_csa_multigroup_route_is_exact_and_opt_in() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 262_144;
+
+        #[derive(Debug, Eq, PartialEq)]
+        struct PublishedSelection {
+            mask: Vec<i32>,
+            ids: Vec<i32>,
+            count: Vec<i32>,
+            status: Vec<i32>,
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            scratch: &DeepSeekV4SparseCsaScratch,
+            values: &[f32],
+            visible_rows: usize,
+        ) -> PublishedSelection {
+            host_write_f32(&scratch.scores, values, "integrated selector scores").unwrap();
+            let record = scratch.default_record();
+            host_write_i32(
+                &record.visible_count,
+                &[visible_rows as i32],
+                "integrated selector visibility",
+            )
+            .unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            scratch
+                .encode_scored_rows(ctx, &encoder, CAPACITY, visible_rows, &record)
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{:?}", command.error());
+            scratch.validate_completed(&record).unwrap();
+            PublishedSelection {
+                mask: read_i32(&scratch.selected_mask),
+                ids: read_i32(&scratch.cache_order_ids),
+                count: read_i32(&record.selected_count),
+                status: read_i32(&record.status),
+            }
+        }
+
+        let mixed = (0..CAPACITY)
+            .map(|row| {
+                let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
+                bucket as f32 * 0.0003 - 1.1
+            })
+            .collect::<Vec<_>>();
+        let tied = vec![0.0f32; CAPACITY];
+        let current = DeepSeekV4SparseCsaScratch::new(&ctx, CAPACITY).unwrap();
+        let mut candidate = DeepSeekV4SparseCsaScratch::new(&ctx, CAPACITY).unwrap();
+        candidate.enable_multigroup_selector_experiment().unwrap();
+        let generation = &candidate.multigroup.as_ref().unwrap().generation;
+
+        let ineligible = execute(&ctx, &current, &mixed, 131_072);
+        assert_eq!(execute(&ctx, &candidate, &mixed, 131_072), ineligible);
+        assert_eq!(generation.next.get(), Some(NonZeroU32::MIN));
+
+        for (label, values) in [("mixed", mixed.as_slice()), ("tied", tied.as_slice())] {
+            let before = execute(&ctx, &current, values, 196_608);
+            let selected = execute(&ctx, &candidate, values, 196_608);
+            let after = execute(&ctx, &current, values, 196_608);
+            assert_eq!(selected, before, "{label}: candidate output");
+            assert_eq!(after, before, "{label}: repeated radix4 output");
+        }
+        assert_eq!(generation.next.get().unwrap().get(), 3);
+    }
+
+    #[test]
     #[ignore = "focused terminal full multi-group selector ceiling; run explicitly with --nocapture"]
     fn profile_multigroup_selector_full_ceiling() {
         let Some(ctx) = metal_context() else {
@@ -19256,7 +19656,7 @@ mod tests {
         };
         const CAPACITY: usize = 262_144;
         const TOP_K: usize = 512;
-        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS;
         const SAMPLES: usize = 24;
         const MAX_MEDIAN_MS: f64 = 1.35;
         const MAX_P95_MS: f64 = 1.40;
@@ -19526,13 +19926,596 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "focused integrated multi-group selector gate; run explicitly with --nocapture"]
+    fn profile_sparse_csa_multigroup_integrated_gate() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const SAMPLES: usize = 24;
+        const WARM_PAIRS: usize = 40;
+        const MAX_MEDIAN_MS: f64 = 1.35;
+        const MAX_P95_MS: f64 = 1.40;
+        const MIN_SAVING_MS: f64 = 0.50;
+        const CELLS: &[(usize, usize)] =
+            &[(196_608, 196_608), (250_112, 196_608), (262_144, 196_608)];
+
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        struct PublishedSelection {
+            mask: Vec<i32>,
+            ids: Vec<i32>,
+            count: Vec<i32>,
+            status: Vec<i32>,
+        }
+
+        fn timed_gpu_wall<F>(ctx: &MetalContext, encode: F) -> (f64, f64)
+        where
+            F: FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        {
+            let started = std::time::Instant::now();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode(&encoder).unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            assert!(command.error().is_none(), "{:?}", command.error());
+            let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            assert!(gpu_ms.is_finite() && gpu_ms > 0.0);
+            assert!(wall_ms.is_finite() && wall_ms > 0.0);
+            (gpu_ms, wall_ms)
+        }
+
+        fn median_and_p95(samples: &[f64]) -> (f64, f64) {
+            let mut sorted = samples.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            let median = if sorted.len().is_multiple_of(2) {
+                (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) * 0.5
+            } else {
+                sorted[sorted.len() / 2]
+            };
+            let p95 = sorted[(sorted.len() * 95).div_ceil(100) - 1];
+            (median, p95)
+        }
+
+        fn output(
+            scratch: &DeepSeekV4SparseCsaScratch,
+            record: &DeepSeekV4SelectionRecord,
+        ) -> PublishedSelection {
+            PublishedSelection {
+                mask: read_i32(&scratch.selected_mask),
+                ids: read_i32(&scratch.cache_order_ids),
+                count: read_i32(&record.selected_count),
+                status: read_i32(&record.status),
+            }
+        }
+
+        for &(capacity, visible_rows) in CELLS {
+            assert!(deepseek_v4_multigroup_selector_eligible(
+                capacity,
+                visible_rows
+            ));
+            for tied in [false, true] {
+                let case = if tied { "tied" } else { "mixed" };
+                let values = if tied {
+                    vec![0.0f32; capacity]
+                } else {
+                    (0..capacity)
+                        .map(|row| {
+                            let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
+                            bucket as f32 * 0.0003 - 1.1
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let current = DeepSeekV4SparseCsaScratch::new(&ctx, capacity).unwrap();
+                let mut candidate = DeepSeekV4SparseCsaScratch::new(&ctx, capacity).unwrap();
+                candidate.enable_multigroup_selector_experiment().unwrap();
+                host_write_f32(&current.scores, &values, "integrated control scores").unwrap();
+                host_write_f32(&candidate.scores, &values, "integrated candidate scores").unwrap();
+                let current_record = current.default_record();
+                let candidate_record = candidate.default_record();
+                host_write_i32(
+                    &current_record.visible_count,
+                    &[visible_rows as i32],
+                    "integrated control visibility",
+                )
+                .unwrap();
+                host_write_i32(
+                    &candidate_record.visible_count,
+                    &[visible_rows as i32],
+                    "integrated candidate visibility",
+                )
+                .unwrap();
+                let time_current = || {
+                    timed_gpu_wall(&ctx, |encoder| {
+                        current.encode_scored_rows(
+                            &ctx,
+                            encoder,
+                            capacity,
+                            visible_rows,
+                            &current_record,
+                        )
+                    })
+                };
+                let time_candidate = || {
+                    timed_gpu_wall(&ctx, |encoder| {
+                        candidate.encode_scored_rows(
+                            &ctx,
+                            encoder,
+                            capacity,
+                            visible_rows,
+                            &candidate_record,
+                        )
+                    })
+                };
+
+                time_current();
+                let exact = output(&current, &current_record);
+                time_candidate();
+                assert_eq!(
+                    output(&candidate, &candidate_record),
+                    exact,
+                    "capacity={capacity} visible={visible_rows} case={case}: untimed output"
+                );
+                for _ in 0..WARM_PAIRS {
+                    time_current();
+                    time_candidate();
+                }
+                let before = (0..SAMPLES).map(|_| time_current()).collect::<Vec<_>>();
+                let candidate_samples = (0..SAMPLES).map(|_| time_candidate()).collect::<Vec<_>>();
+                let after = (0..SAMPLES).map(|_| time_current()).collect::<Vec<_>>();
+                assert_eq!(output(&current, &current_record), exact);
+                assert_eq!(output(&candidate, &candidate_record), exact);
+                candidate.validate_completed(&candidate_record).unwrap();
+                let multigroup = candidate.multigroup.as_ref().unwrap();
+                let candidate_invocations = 1 + WARM_PAIRS + SAMPLES;
+                assert_eq!(
+                    multigroup.generation.next.get().unwrap().get(),
+                    candidate_invocations as u32 + 1
+                );
+                let state = read_i32(&multigroup.state);
+                assert_eq!(
+                    state[0], candidate_invocations as i32,
+                    "last invocation generation"
+                );
+                assert_eq!(state[5], 0, "last invocation status");
+
+                let before_gpu = before.iter().map(|sample| sample.0).collect::<Vec<_>>();
+                let before_wall = before.iter().map(|sample| sample.1).collect::<Vec<_>>();
+                let candidate_gpu = candidate_samples
+                    .iter()
+                    .map(|sample| sample.0)
+                    .collect::<Vec<_>>();
+                let candidate_wall = candidate_samples
+                    .iter()
+                    .map(|sample| sample.1)
+                    .collect::<Vec<_>>();
+                let after_gpu = after.iter().map(|sample| sample.0).collect::<Vec<_>>();
+                let after_wall = after.iter().map(|sample| sample.1).collect::<Vec<_>>();
+                let (before_gpu_median, _) = median_and_p95(&before_gpu);
+                let (before_wall_median, _) = median_and_p95(&before_wall);
+                let (candidate_gpu_median, candidate_gpu_p95) = median_and_p95(&candidate_gpu);
+                let (candidate_wall_median, candidate_wall_p95) = median_and_p95(&candidate_wall);
+                let (after_gpu_median, _) = median_and_p95(&after_gpu);
+                let (after_wall_median, _) = median_and_p95(&after_wall);
+                let gpu_drift = 2.0 * (before_gpu_median - after_gpu_median).abs()
+                    / (before_gpu_median + after_gpu_median);
+                let wall_drift = 2.0 * (before_wall_median - after_wall_median).abs()
+                    / (before_wall_median + after_wall_median);
+                let gpu_saving = before_gpu_median.min(after_gpu_median) - candidate_gpu_median;
+                let wall_saving = before_wall_median.min(after_wall_median) - candidate_wall_median;
+                let passed = gpu_drift <= 0.05
+                    && wall_drift <= 0.05
+                    && candidate_gpu_median <= MAX_MEDIAN_MS
+                    && candidate_gpu_p95 <= MAX_P95_MS
+                    && candidate_wall_median <= MAX_MEDIAN_MS
+                    && candidate_wall_p95 <= MAX_P95_MS
+                    && gpu_saving >= MIN_SAVING_MS
+                    && wall_saving >= MIN_SAVING_MS;
+                eprintln!(
+                    "deepseek_v4 multigroup_integrated capacity={capacity} visible={visible_rows} case={case} current_before_gpu_median_ms={before_gpu_median:.6} current_before_wall_median_ms={before_wall_median:.6} candidate_gpu_median_ms={candidate_gpu_median:.6} candidate_gpu_p95_ms={candidate_gpu_p95:.6} candidate_wall_median_ms={candidate_wall_median:.6} candidate_wall_p95_ms={candidate_wall_p95:.6} current_after_gpu_median_ms={after_gpu_median:.6} current_after_wall_median_ms={after_wall_median:.6} gpu_drift={gpu_drift:.6} wall_drift={wall_drift:.6} faster_control_gpu_saving_ms={gpu_saving:.6} faster_control_wall_saving_ms={wall_saving:.6} pass={passed}"
+                );
+                eprintln!(
+                    "deepseek_v4 multigroup_integrated capacity={capacity} visible={visible_rows} case={case} current_before_gpu_ms={before_gpu:?} current_before_wall_ms={before_wall:?} candidate_gpu_ms={candidate_gpu:?} candidate_wall_ms={candidate_wall:?} current_after_gpu_ms={after_gpu:?} current_after_wall_ms={after_wall:?}"
+                );
+                assert!(
+                    passed,
+                    "capacity={capacity} visible={visible_rows} case={case}: integrated gate failed"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    #[ignore = "requires the current 97.05 GiB DS4 asset and a full-context session"]
+    fn current_asset_multigroup_selector_whole_token_gate() {
+        const POSITION: u32 = 786_431;
+        const FORWARD_LIMIT: usize = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY;
+        const TOKEN_ID: u32 = 35;
+        const WARM_SAMPLES: usize = 2;
+        const TIMED_SAMPLES: usize = 8;
+        const EXPECTED_ELIGIBLE_LAYERS: u32 = 21;
+        const MIN_WHOLE_TOKEN_SAVING_MS: f64 = 10.5;
+
+        struct Evidence {
+            profiles: Vec<DeepSeekV4WholeTokenProfile>,
+            logits_bits: Vec<u32>,
+            hidden_bits: Vec<u32>,
+            causal_digest: [u8; 32],
+            prefix_digest: [u8; 32],
+            compatibility_digest: [u8; 32],
+            committed_digest: [u8; 32],
+            committed_len: usize,
+            decision: DeepSeekV4DecisionTranscript,
+            generation_deltas: Vec<u32>,
+            after_session_bytes: u64,
+            after_first_forward_bytes: u64,
+        }
+
+        fn digest_u32(values: &[u32]) -> [u8; 32] {
+            let mut hasher = Sha256::new();
+            for value in values {
+                hasher.update(value.to_le_bytes());
+            }
+            hasher.finalize().into()
+        }
+
+        fn digest_hex(digest: &[u8; 32]) -> String {
+            digest.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+
+        fn median(samples: &[f64]) -> f64 {
+            let mut sorted = samples.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            if sorted.len().is_multiple_of(2) {
+                (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) * 0.5
+            } else {
+                sorted[sorted.len() / 2]
+            }
+        }
+
+        fn selector_generation(session: &DeepSeekV4Session) -> u32 {
+            session
+                .sparse_csa
+                .multigroup
+                .as_ref()
+                .expect("full-context session owns multi-group scratch")
+                .generation
+                .next
+                .get()
+                .expect("live gate does not exhaust selector generations")
+                .get()
+        }
+
+        fn record_generation_delta(
+            deltas: &mut Vec<u32>,
+            before: u32,
+            after: u32,
+            experimental: bool,
+        ) {
+            let delta = after.checked_sub(before).expect("generation is monotonic");
+            assert_eq!(
+                delta,
+                if experimental {
+                    EXPECTED_ELIGIBLE_LAYERS
+                } else {
+                    0
+                }
+            );
+            deltas.push(delta);
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            residency: DeepSeekV4MetalResidency,
+            model_content_id: DeepSeekV4ModelContentId,
+            snapshot: &DeepSeekV4CausalSnapshot,
+            experimental: bool,
+        ) -> (DeepSeekV4MetalResidency, Evidence) {
+            let mut session =
+                DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
+                    .expect("construct live selector session");
+            if experimental {
+                session
+                    .enable_multigroup_selector_experiment()
+                    .expect("seal live selector experiment before restore");
+            }
+            session
+                .restore_causal_snapshot(snapshot)
+                .expect("restore live selector prefix");
+            assert_eq!(session.next_position(), POSITION);
+            let after_session_bytes = ctx.current_allocated_size();
+            let mut after_first_forward_bytes = after_session_bytes;
+            let mut generation_deltas = Vec::with_capacity(
+                WARM_SAMPLES
+                    .checked_add(TIMED_SAMPLES)
+                    .and_then(|count| count.checked_add(1))
+                    .unwrap(),
+            );
+
+            for warm in 0..WARM_SAMPLES {
+                session
+                    .restore_causal_snapshot(snapshot)
+                    .expect("restore warm live selector prefix");
+                let before = selector_generation(&session);
+                session
+                    .forward_token(ctx, TOKEN_ID)
+                    .expect("execute warm live selector token");
+                let after = selector_generation(&session);
+                record_generation_delta(&mut generation_deltas, before, after, experimental);
+                if warm == 0 {
+                    after_first_forward_bytes = ctx.current_allocated_size();
+                }
+            }
+
+            let mut profiles = Vec::with_capacity(TIMED_SAMPLES);
+            let mut logits_bits = None;
+            let mut hidden_bits = None;
+            for _ in 0..TIMED_SAMPLES {
+                session
+                    .restore_causal_snapshot(snapshot)
+                    .expect("restore timed live selector prefix");
+                let before = selector_generation(&session);
+                let profile = session
+                    .forward_token_whole_profiled(ctx, TOKEN_ID)
+                    .expect("profile live selector token");
+                let after = selector_generation(&session);
+                record_generation_delta(&mut generation_deltas, before, after, experimental);
+                assert_eq!(profile.position, POSITION);
+                let observed_logits = session
+                    .copy_logits_f32()
+                    .expect("copy live selector logits")
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>();
+                let observed_hidden = host_read_f32(
+                    session
+                        .final_normalized_hidden()
+                        .expect("live selector final hidden is visible"),
+                    "live selector final normalized hidden",
+                )
+                .expect("copy live selector final hidden")
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+                match &logits_bits {
+                    Some(expected) => assert_eq!(&observed_logits, expected),
+                    None => logits_bits = Some(observed_logits),
+                }
+                match &hidden_bits {
+                    Some(expected) => assert_eq!(&observed_hidden, expected),
+                    None => hidden_bits = Some(observed_hidden),
+                }
+                profiles.push(profile);
+            }
+
+            let committed_digest = digest_u32(session.committed_tokens());
+            let committed_len = session.committed_tokens().len();
+            let completed = session
+                .capture_causal_snapshot()
+                .expect("capture completed live selector state");
+            assert_eq!(completed.next_position(), POSITION + 1);
+            assert_eq!(
+                completed.source_observation(),
+                DeepSeekV4SnapshotObservation::Available
+            );
+            let causal_digest = *completed.causal_digest();
+            let prefix_digest = *completed.prefix_digest();
+            let compatibility_digest = *completed.compatibility_digest().as_bytes();
+            drop(completed);
+
+            session
+                .restore_causal_snapshot(snapshot)
+                .expect("restore decision-trace live selector prefix");
+            session
+                .arm_decision_transcript(POSITION)
+                .expect("arm live selector decision trace");
+            let before = selector_generation(&session);
+            session
+                .forward_token(ctx, TOKEN_ID)
+                .expect("execute live selector decision trace");
+            let after = selector_generation(&session);
+            record_generation_delta(&mut generation_deltas, before, after, experimental);
+            let decision = session
+                .take_decision_transcript()
+                .expect("take live selector decision trace");
+            assert_eq!(decision.position, POSITION);
+            assert_eq!(decision.csa_layer_count, EXPECTED_ELIGIBLE_LAYERS);
+
+            let evidence = Evidence {
+                profiles,
+                logits_bits: logits_bits.unwrap(),
+                hidden_bits: hidden_bits.unwrap(),
+                causal_digest,
+                prefix_digest,
+                compatibility_digest,
+                committed_digest,
+                committed_len,
+                decision,
+                generation_deltas,
+                after_session_bytes,
+                after_first_forward_bytes,
+            };
+            (session.into_residency(), evidence)
+        }
+
+        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+            });
+        assert!(model_path.exists(), "missing current DS4 model");
+        let ctx = MetalContext::new().expect("create Metal context");
+        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
+        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
+            .expect("plan full-context current-asset session");
+        assert_eq!(plan.session_capacity().csa_physical_rows(), 262_144);
+        assert_eq!(plan.session_capacity().hca_physical_rows(), 8_192);
+        let memory_plan = plan.memory_plan().clone();
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit full-context current-asset session");
+        let before_residency_bytes = admitted.admission().signals.current_allocated_bytes;
+        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+            .expect("realize current DS4 residency");
+        let after_residency_bytes = realized.after_residency_bytes();
+        let residency = realized.into_residency();
+
+        let mut seed =
+            DeepSeekV4Session::new_with_model_content_id(&ctx, residency, model_content_id)
+                .expect("construct live selector snapshot seed");
+        initialize_zero_synthetic_causal_state(&seed);
+        seed.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
+            next_position: POSITION,
+        };
+        seed.committed_tokens
+            .extend(std::iter::repeat_n(TOKEN_ID, POSITION as usize));
+        let snapshot = seed
+            .capture_causal_snapshot()
+            .expect("capture live selector input snapshot");
+        assert_eq!(snapshot.next_position(), POSITION);
+        assert_eq!(snapshot.prefix_tokens().len(), POSITION as usize);
+        let input_snapshot_payload_bytes = snapshot.payload_bytes();
+        let input_snapshot_causal_digest = *snapshot.causal_digest();
+        let input_snapshot_prefix_digest = *snapshot.prefix_digest();
+        let residency = seed.into_residency();
+
+        let (residency, current_before) =
+            execute(&ctx, residency, model_content_id, &snapshot, false);
+        let (residency, candidate) = execute(&ctx, residency, model_content_id, &snapshot, true);
+        let (_residency, current_after) =
+            execute(&ctx, residency, model_content_id, &snapshot, false);
+
+        for control in [&current_before, &current_after] {
+            assert_eq!(candidate.logits_bits, control.logits_bits);
+            assert_eq!(candidate.hidden_bits, control.hidden_bits);
+            assert_eq!(candidate.causal_digest, control.causal_digest);
+            assert_eq!(candidate.prefix_digest, control.prefix_digest);
+            assert_eq!(candidate.compatibility_digest, control.compatibility_digest);
+            assert_eq!(candidate.committed_digest, control.committed_digest);
+            assert_eq!(candidate.committed_len, control.committed_len);
+            assert_eq!(candidate.decision, control.decision);
+        }
+        assert_eq!(current_before.logits_bits, current_after.logits_bits);
+        assert_eq!(current_before.hidden_bits, current_after.hidden_bits);
+        assert_eq!(current_before.causal_digest, current_after.causal_digest);
+        assert_eq!(current_before.decision, current_after.decision);
+        assert_eq!(candidate.committed_len, POSITION as usize + 1);
+        assert!(
+            candidate
+                .generation_deltas
+                .iter()
+                .all(|&delta| delta == EXPECTED_ELIGIBLE_LAYERS)
+        );
+        for control in [&current_before, &current_after] {
+            assert!(control.generation_deltas.iter().all(|&delta| delta == 0));
+        }
+
+        let current_before_gpu = current_before
+            .profiles
+            .iter()
+            .map(|profile| profile.command_gpu_ms)
+            .collect::<Vec<_>>();
+        let current_before_wall = current_before
+            .profiles
+            .iter()
+            .map(|profile| profile.forward_wall_ms)
+            .collect::<Vec<_>>();
+        let candidate_gpu = candidate
+            .profiles
+            .iter()
+            .map(|profile| profile.command_gpu_ms)
+            .collect::<Vec<_>>();
+        let candidate_wall = candidate
+            .profiles
+            .iter()
+            .map(|profile| profile.forward_wall_ms)
+            .collect::<Vec<_>>();
+        let current_after_gpu = current_after
+            .profiles
+            .iter()
+            .map(|profile| profile.command_gpu_ms)
+            .collect::<Vec<_>>();
+        let current_after_wall = current_after
+            .profiles
+            .iter()
+            .map(|profile| profile.forward_wall_ms)
+            .collect::<Vec<_>>();
+        let current_before_gpu_median = median(&current_before_gpu);
+        let current_before_wall_median = median(&current_before_wall);
+        let candidate_gpu_median = median(&candidate_gpu);
+        let candidate_wall_median = median(&candidate_wall);
+        let current_after_gpu_median = median(&current_after_gpu);
+        let current_after_wall_median = median(&current_after_wall);
+        let gpu_drift = 2.0 * (current_before_gpu_median - current_after_gpu_median).abs()
+            / (current_before_gpu_median + current_after_gpu_median);
+        let wall_drift = 2.0 * (current_before_wall_median - current_after_wall_median).abs()
+            / (current_before_wall_median + current_after_wall_median);
+        let gpu_saving =
+            current_before_gpu_median.min(current_after_gpu_median) - candidate_gpu_median;
+        let wall_saving =
+            current_before_wall_median.min(current_after_wall_median) - candidate_wall_median;
+        assert!(gpu_drift <= 0.05, "control GPU drift {gpu_drift:.6}");
+        assert!(wall_drift <= 0.05, "control wall drift {wall_drift:.6}");
+        assert!(
+            gpu_saving >= MIN_WHOLE_TOKEN_SAVING_MS,
+            "whole-token GPU saving {gpu_saving:.3} ms"
+        );
+        assert!(
+            wall_saving >= MIN_WHOLE_TOKEN_SAVING_MS,
+            "whole-token wall saving {wall_saving:.3} ms"
+        );
+
+        let memory = memory_plan
+            .reconcile(DeepSeekV4MemorySamples {
+                before_residency_bytes,
+                after_residency_bytes,
+                after_session_bytes: current_before.after_session_bytes,
+                after_first_forward_bytes: current_before.after_first_forward_bytes,
+            })
+            .expect("reconcile live selector memory");
+        let logits_sha256 = digest_u32(&candidate.logits_bits);
+        let hidden_sha256 = digest_u32(&candidate.hidden_bits);
+        let decision_sha256: [u8; 32] =
+            Sha256::digest(serde_json::to_vec(&candidate.decision).unwrap()).into();
+        let metallib_sha256 = deepseek_v4_diagnostics_metallib_sha256();
+        eprintln!(
+            "deepseek_v4 multigroup_live position={POSITION} visible_rows=196608 eligible_layers={EXPECTED_ELIGIBLE_LAYERS} current_before_gpu_median_ms={current_before_gpu_median:.6} candidate_gpu_median_ms={candidate_gpu_median:.6} current_after_gpu_median_ms={current_after_gpu_median:.6} gpu_saving_ms={gpu_saving:.6} gpu_drift={gpu_drift:.6} current_before_wall_median_ms={current_before_wall_median:.6} candidate_wall_median_ms={candidate_wall_median:.6} current_after_wall_median_ms={current_after_wall_median:.6} wall_saving_ms={wall_saving:.6} wall_drift={wall_drift:.6} pass=true"
+        );
+        eprintln!(
+            "deepseek_v4 multigroup_live current_before_gpu_ms={current_before_gpu:?} current_before_wall_ms={current_before_wall:?} candidate_gpu_ms={candidate_gpu:?} candidate_wall_ms={candidate_wall:?} current_after_gpu_ms={current_after_gpu:?} current_after_wall_ms={current_after_wall:?}"
+        );
+        eprintln!(
+            "deepseek_v4 multigroup_live model_path={} model_content_id={} current_census_sha256=cbfddbea4260cbaffb02429f0d9593d6e00ec08eb9a5b8d56ea83e8d22860889 metallib_sha256={} device_name={} device_registry_id={} input_snapshot_payload_bytes={input_snapshot_payload_bytes} input_snapshot_causal_digest={} input_snapshot_prefix_digest={} completed_causal_digest={} completed_prefix_digest={} compatibility_digest={} committed_sha256={} logits_sha256={} hidden_sha256={} decision_sha256={} candidate_generation_deltas={:?} memory_plan=({memory_plan}) memory_reconciliation=({memory})",
+            model_path.display(),
+            digest_hex(model_content_id.as_bytes()),
+            digest_hex(&metallib_sha256),
+            ctx.device.name(),
+            ctx.device.registryID(),
+            digest_hex(&input_snapshot_causal_digest),
+            digest_hex(&input_snapshot_prefix_digest),
+            digest_hex(&candidate.causal_digest),
+            digest_hex(&candidate.prefix_digest),
+            digest_hex(&candidate.compatibility_digest),
+            digest_hex(&candidate.committed_digest),
+            digest_hex(&logits_sha256),
+            digest_hex(&hidden_sha256),
+            digest_hex(&decision_sha256),
+            candidate.generation_deltas,
+        );
+    }
+
+    #[test]
     #[ignore = "focused multi-group selector crossover map; run explicitly with --nocapture"]
     fn profile_multigroup_selector_crossover() {
         let Some(ctx) = metal_context() else {
             return;
         };
         const TOP_K: usize = 512;
-        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS;
         const SAMPLES: usize = 16;
         const CELLS: &[(usize, usize)] = &[
             (16_384, 16_384),

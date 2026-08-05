@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "result": "go",
+  "scope": "off_by_default_singleton_multigroup_selector_integration",
+  "source_base_git_commit": "a4885a9ac0f5e711701e857cc56e7499c8ffdcb8",
+  "source_provenance": {
+    "live_executable": {
+      "path": "target/evidence/dsv4-multigroup-integration/live-test",
+      "bytes": 17130712,
+      "sha256": "54902cc9f0c2224254dd55c432b02a43e9a8f4098366fe909f9884fc78a39ee8",
+      "features": ["dsv4-diagnostics"]
+    },
+    "final_model_free_executable": {
+      "path": "target/evidence/dsv4-multigroup-integration/model-free-test",
+      "bytes": 16672600,
+      "sha256": "27d1a3cd8de7af5ef40bb8af117bfd570bce20acacdf5925a63fb7749681e887",
+      "features": []
+    },
+    "reviewed_final_rust_source": {
+      "path": "crates/qwen-llm/src/deepseek_v4_metal.rs",
+      "bytes": 1075998,
+      "sha256": "2afd55c9de26bb2482d6ff3d50ed7d3bad3b3cb835faedf94997ddb9677bf6d7"
+    },
+    "post_live_source_delta": [
+      "doc_hidden_attribute_on_experiment_method",
+      "diagnostics_cfg_on_live_test_fixture_helpers",
+      "model_free_profiler_warm_pairs_5_to_40_and_generation_assertion_update"
+    ],
+    "production_or_live_harness_changed_after_live": false
+  },
+  "environment": {
+    "package": "qwen-llm 0.0.1",
+    "device_name": "Apple M4 Max",
+    "target_arch": "aarch64",
+    "target_os": "macos",
+    "macos_version": "15.6.1",
+    "macos_build": "24G90",
+    "sdk_version": "26.2",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "llvm_version": "22.1.6",
+    "metal": "Apple metal version 32023.864 (metalfe-32023.864)",
+    "metal_target": "air64-apple-darwin24.6.0"
+  },
+  "policy": {
+    "explicit_opt_in": true,
+    "query_count": 1,
+    "top_k": 512,
+    "group_count": 32,
+    "maximum_capacity_rows": 262144,
+    "minimum_visible_rows": 196608,
+    "minimum_visible_fraction": "capacity - capacity / 4",
+    "packed_prefill_unchanged": true,
+    "production_default": false
+  },
+  "scratch": {
+    "allocation_count": 5,
+    "terminal_logical_bytes": 267432,
+    "capacity_bounded": true,
+    "admission_accounted": true,
+    "generation_zero_forbidden": true,
+    "generation_reuse": "fails_before_wrap"
+  },
+  "model_free_gate": {
+    "samples_per_arm": 24,
+    "warm_pairs": 40,
+    "maximum_control_drift": 0.018738,
+    "candidate_gpu_median_ceiling_ms": 1.35,
+    "candidate_gpu_p95_ceiling_ms": 1.40,
+    "candidate_wall_median_ceiling_ms": 1.35,
+    "candidate_wall_p95_ceiling_ms": 1.40,
+    "minimum_gpu_saving_ms": 0.623813,
+    "minimum_wall_saving_ms": 0.626521,
+    "results": [
+      {"capacity": 196608, "visible": 196608, "case": "mixed", "candidate_gpu_median_ms": 0.573417, "candidate_gpu_p95_ms": 0.578375, "candidate_wall_median_ms": 0.714875, "candidate_wall_p95_ms": 0.746375, "gpu_saving_ms": 0.857833, "wall_saving_ms": 0.869312},
+      {"capacity": 196608, "visible": 196608, "case": "tied", "candidate_gpu_median_ms": 0.829167, "candidate_gpu_p95_ms": 0.840500, "candidate_wall_median_ms": 0.985521, "candidate_wall_p95_ms": 1.067875, "gpu_saving_ms": 0.719500, "wall_saving_ms": 0.728938},
+      {"capacity": 250112, "visible": 196608, "case": "mixed", "candidate_gpu_median_ms": 0.652625, "candidate_gpu_p95_ms": 0.653250, "candidate_wall_median_ms": 0.848042, "candidate_wall_p95_ms": 0.902250, "gpu_saving_ms": 0.779229, "wall_saving_ms": 0.759687},
+      {"capacity": 250112, "visible": 196608, "case": "tied", "candidate_gpu_median_ms": 0.912896, "candidate_gpu_p95_ms": 0.917000, "candidate_wall_median_ms": 1.097980, "candidate_wall_p95_ms": 1.166583, "gpu_saving_ms": 0.634979, "wall_saving_ms": 0.633625},
+      {"capacity": 262144, "visible": 196608, "case": "mixed", "candidate_gpu_median_ms": 0.662771, "candidate_gpu_p95_ms": 0.663375, "candidate_wall_median_ms": 0.829958, "candidate_wall_p95_ms": 0.914625, "gpu_saving_ms": 0.772104, "wall_saving_ms": 0.788063},
+      {"capacity": 262144, "visible": 196608, "case": "tied", "candidate_gpu_median_ms": 0.927187, "candidate_gpu_p95_ms": 0.928125, "candidate_wall_median_ms": 1.104187, "candidate_wall_p95_ms": 1.178375, "gpu_saving_ms": 0.623813, "wall_saving_ms": 0.626521}
+    ]
+  },
+  "live_gate": {
+    "asset": "deepseek-v4-flash-0731-ud-iq3_xxs-current-2026-08-04",
+    "model_content_id": "ae11d1ea13ccfd98509d248705a589384412cd67c502450158f84a8bd143b5e2",
+    "current_census_sha256": "cbfddbea4260cbaffb02429f0d9593d6e00ec08eb9a5b8d56ea83e8d22860889",
+    "metallib_sha256": "89f8862d54aa5f2a3aad594f2b791221f2288765f4aa84f6781961296e2d50f0",
+    "device": "Apple M4 Max",
+    "device_registry_id": 4294968482,
+    "position": 786431,
+    "fixture_kind": "real_weight_synthetic_zero_causal_state_deep_position",
+    "fixture_construction": "zero causal arenas, phase advanced to position, repeated token transcript, canonical snapshot-v1 capture and restore",
+    "prefix_token_id": 35,
+    "prefix_token_count": 786431,
+    "timed_schedule": "collapsed_one_command_singleton",
+    "decision_transcript_schedule": "separate_untimed_instrumented_singleton",
+    "visible_rows": 196608,
+    "eligible_csa_layers": 21,
+    "warm_samples_per_arm": 2,
+    "timed_samples_per_arm": 8,
+    "input_snapshot_payload_bytes": 5431592700,
+    "input_snapshot_causal_digest": "d07671952860a611666e520c9e51b9d419c2b98c56b9cd1f0a830a25feb15093",
+    "input_snapshot_prefix_digest": "8710cb4e9bbdf32511fbae7c882e4ea643a02b4ef355d6001867fcc937e3de89",
+    "input_snapshot_compatibility_digest": "e7fb64be2f9fd96c52c9d5aa9384e09652e899650558dd50c4ba998e834bf076",
+    "current_before_gpu_median_ms": 181.055938,
+    "candidate_gpu_median_ms": 167.188771,
+    "current_after_gpu_median_ms": 183.630667,
+    "gpu_saving_ms": 13.867167,
+    "gpu_control_drift": 0.014120,
+    "current_before_wall_median_ms": 1352.151583,
+    "candidate_wall_median_ms": 1321.882958,
+    "current_after_wall_median_ms": 1339.456000,
+    "wall_saving_ms": 17.573042,
+    "wall_control_drift": 0.009433,
+    "candidate_generation_deltas": [21, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21],
+    "current_before_generation_deltas": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "current_after_generation_deltas": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    "exact": {
+      "logits_sha256": "959a5e7bee641cce3eed319a5ebf7d4b73dd7ed6563991daae15597ddde003e5",
+      "hidden_sha256": "26d90c291675cf3b1593a7ab563266e372187fd09fb7e6220656ff729da81dda",
+      "decision_sha256": "c81842c7a895254defac7473ca0ff70657a134ee647786d5b8a0b61618dbe0bb",
+      "causal_digest": "a87d1f6623bab8e137b43ab2103923347b8de9577ce43e1e95e18f0873a57a7c",
+      "prefix_digest": "a3f8526f9831df3d376b7fd9a0707667bd40a5327a0be344c95a44c1c09c8605",
+      "committed_sha256": "52c3382230a9d0ec6f7a56402d643596ae5718ca5d575306ade06d6de15084ef"
+    },
+    "memory": {
+      "planned_required_with_reserve_bytes": 112775036928,
+      "observed_first_forward_delta_bytes": 112233611264,
+      "maximum_resident_set_size_bytes": 120742952960,
+      "swaps": 0
+    },
+    "elapsed_seconds": 884.07
+  },
+  "logs": [
+    {"path": "model-free.log", "bytes": 18305, "sha256": "c1ad2cb9ae4996825ad0c65181c0d98df4dbfdc0f8975946aea0c9af0e85a4f3", "role": "promoted"},
+    {"path": "live.log", "bytes": 4606, "sha256": "a986bb9fc91a8ca3f1a689eb9284a835e40c0f5f29088819c938232a8b02e475", "role": "promoted"},
+    {"path": "model-free-control-drift.log", "bytes": 4488, "sha256": "8c8613411c2eeeed642f7598bffb5e7f55acf7031573a7cc5ef7fc1a8d4c6eb3", "role": "retained_negative"},
+    {"path": "model-free-control-drift-after-live.log", "bytes": 4432, "sha256": "e88a872108afc995fee61d47850406a3adf9847f11151648dabe720952176bcf", "role": "retained_negative"}
+  ],
+  "decision": {
+    "bounded_experimental_route": "go",
+    "production_default": "hold",
+    "wider_capacity_or_device": "not_authorized"
+  },
+  "cx_review": "019fcf7d-e9d4-7150-b496-e70a31958e80"
+}

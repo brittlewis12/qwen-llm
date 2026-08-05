@@ -1697,8 +1697,9 @@ operation from 8.3-8.4 to 2.102 ms per CSA layer, while four-bit radix reduces
 mixed selection from about 4.58 to 1.875 ms. Complete terminal attribution now
 puts exact tiled HCA at 5.26 ms/layer and about 105.2 ms/token. Promoted online
 singleton HCA reduces that to 3.410 ms/layer and about 68.2 ms/token, below the
-complete 93.4 ms CSA subtotal. Packed/FP4 Lightning scoring therefore becomes
-the primary far-context optimization lane.
+complete 93.4 ms CSA subtotal. Exact CSA scoring and selection therefore become
+the primary far-context optimization lane. The direct FP4 scoring premise that
+first motivated that lane is tested and killed by the deeper packet below.
 
 One later refreshed-asset workload found a bounded hole between those regimes,
 not a reason to reopen local kernel tuning. Sparse CSA starts at compressed row
@@ -1711,7 +1712,7 @@ bracket from scalar 6.69/6.68 to 22.62 decode token/s and cuts generation from
 and logged first-token logit bit remains exact. The scalar, one-bit parallel,
 and radix4 schedules also agree from rows 513 through 1,024, including packed
 publication cadence. This is a complexity-policy repair at positions
-2,051-4,095; the contexts-128/512 bounded KILL and far-context FP4 priority both
+2,051-4,095; the contexts-128/512 bounded KILL and far-context CSA priority both
 remain intact.
 
 The first bounded packed-lane experiment separates schedule ceiling from cache
@@ -1760,6 +1761,10 @@ FP4-ID/F16-cache counterfactual preserves packed argmax 35 at cosine
 0.999999967 / relative RMS 0.000260574 and singleton argmax 201 at
 0.999999996 / 0.000091580. Maximum absolute errors are 0.003527/0.001985.
 
+That evidence is explicitly shallow. Selecting 512 rows from only 513 candidates
+can differ by at most one reciprocal exchange, so it qualifies the sidecar and
+counterfactual plumbing but cannot establish ranking stability as history grows.
+
 Controls repeat bit-for-bit in logits, reports, and transcripts, and their
 causal-state digests are exact. The candidate trace binds packed/singleton kind,
 position, layer, visibility, and every consumed ID across exactly 21 packed and
@@ -1801,6 +1806,24 @@ against the midpoint and 1.447 ms against the faster control. This clears the
 frozen 1.0 ms gate and authorizes collapsed-command engineering, not a speed or
 production claim: the schedule remains one command per layer and sees only
 513-515 rows.
+
+The collapsed one-command experiment closes that authorization with a decisive
+`KILL`. It retains one 512-ID slice and compact completion record per layer,
+validates active and inactive slices before trace or commit, and distinguishes
+instrumented and collapsed execution while preserving an execution-independent
+selection payload digest. A two-layer one-encoder Metal differential proves the
+shared scratch and retained outputs exact.
+
+The current-asset product gate pays one lineage prefix to position 3,070, runs
+one paired audit and eight unaudited collapsed tokens, then restores two exact
+F16 controls from the pre-seal snapshot. All structural gates pass and exactly
+189 CSA-layer selections are traced. Quality and speed do not: every audit mask
+differs by 24-102 IDs; minimum cosine is 0.983313, maximum relative RMS 0.182029,
+and maximum absolute error 3.19737. Candidate GPU/wall medians are
+45.768/47.137 ms versus faster controls at 44.312/45.366 ms. Direct FP4-Q/K
+selection, paged FP4 K, snapshot v2, and further same-design tuning are closed.
+Reopen only for a materially new guarded/mixed premise that clears deep quality
+before a product timing campaign.
 
 The pinned llama.cpp depth command is not a free decode-only bracket. Its
 `--n-depth` implementation executes `test_prompt(n_depth)` and serializes the
@@ -1940,12 +1963,11 @@ Gate:
 
 Broader S6 work remains:
 
-- Carry the promoted no-double-score plan into collapsed one-command execution.
-  Retain layer-addressed FP4 IDs and compact completion records, validate and
-  trace them after the command, and keep paired audits instrumented. Then require
-  a useful deep decision/quality packet and terminal whole-token timing before
-  production, paged K, or snapshot v2. Pack the remaining intended mixed
-  FP8/BF16 attention cache independently.
+- Replace the retained 1.875 ms terminal radix4 selector with an exact
+  multi-group schedule only after a cheap production-shape ceiling clears.
+  Preserve the current F16 scorer, threshold, lower-row tie order, cache-order
+  compaction, visibility, and failure status. The diagnostics-only collapsed FP4
+  implementation remains negative evidence, not an active production lane.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention. All-slot routed experts have closed the first measured MoE
   boundary without changing reduction lineage.
@@ -1956,9 +1978,8 @@ Broader S6 work remains:
   product contract.
 - Preserve promoted online singleton HCA and the exact packed/legacy tiled
   differential. Defer heads8/rows16 split-K while HCA remains below CSA; reopen
-  multi-group exact selection alongside the collapsed FP4 arm, because the
-  admitted 0.841 ms scorer now sits below the retained 1.875 ms selector. The
-  scalar scorer and bitwise selector remain executable differentials.
+  HCA only if attribution returns it to the lead. The scalar scorer and bitwise
+  selector remain executable differentials for the multi-group selection lane.
 
 Gates:
 

@@ -2784,6 +2784,689 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
     eprintln!("deepseek_v4 current FP4 packet={}", packet_path.display());
 }
 
+#[cfg(feature = "dsv4-diagnostics")]
+#[test]
+#[ignore = "requires the current 97.05 GiB DS4 asset and one 3,070-token lineage prefix"]
+fn current_deepseek_v4_fp4_collapsed_position_3070_packet() {
+    const SOURCE_BASE_GIT_COMMIT: &str = "2bfa848f37d29df3a36496aa03e1c8ae3c630f21";
+    const AUDIT_POSITION: u32 = 3_070;
+    const TIMED_TOKENS: usize = 8;
+    const FORWARD_LIMIT: usize = AUDIT_POSITION as usize + 1 + TIMED_TOKENS;
+    const MAX_CONTROL_DRIFT: f64 = 0.05;
+    const MIN_SAVING_MS: f64 = 0.75;
+    const MIN_LOGIT_COSINE: f64 = 0.999_999;
+    const MAX_LOGIT_RELATIVE_RMS: f64 = 0.001;
+    const MAX_LOGIT_ABSOLUTE_ERROR: f32 = 0.01;
+
+    struct ControlRun {
+        logits: Vec<Vec<f32>>,
+        decisions: DeepSeekV4DecisionTranscript,
+        audit_prefix_digest: [u8; 32],
+        audit_state_digest: [u8; 32],
+        final_prefix_digest: [u8; 32],
+        final_state_digest: [u8; 32],
+        audit_ledger: DeepSeekV4Fp4ScoreDispatchLedger,
+        audit_wall_ms: f64,
+        audit_gpu_ms: f64,
+        timed_wall_ms: Vec<f64>,
+        timed_gpu_ms: Vec<f64>,
+        committed_tokens: Vec<u32>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct LogitDelta {
+        reference_argmax: usize,
+        candidate_argmax: usize,
+        cosine: f64,
+        relative_rms: f64,
+        max_abs: f32,
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn median(values: &[f64]) -> f64 {
+        assert!(!values.is_empty());
+        let mut values = values.to_vec();
+        values.sort_by(f64::total_cmp);
+        let middle = values.len() / 2;
+        if values.len().is_multiple_of(2) {
+            (values[middle - 1] + values[middle]) * 0.5
+        } else {
+            values[middle]
+        }
+    }
+
+    fn assert_exact(label: &str, left: &[f32], right: &[f32]) {
+        assert_eq!(left.len(), right.len(), "{label} length");
+        if let Some((index, (left, right))) = left
+            .iter()
+            .zip(right)
+            .enumerate()
+            .find(|(_, (left, right))| left.to_bits() != right.to_bits())
+        {
+            panic!(
+                "{label} first differs at {index}: {left} ({:08x}) vs {right} ({:08x})",
+                left.to_bits(),
+                right.to_bits()
+            );
+        }
+    }
+
+    fn logit_delta(reference: &[f32], candidate: &[f32]) -> LogitDelta {
+        assert_eq!(reference.len(), candidate.len());
+        assert!(
+            reference
+                .iter()
+                .chain(candidate)
+                .all(|value| value.is_finite())
+        );
+        let reference_argmax = reference
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .unwrap()
+            .0;
+        let candidate_argmax = candidate
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .unwrap()
+            .0;
+        let mut dot = 0.0_f64;
+        let mut reference_norm = 0.0_f64;
+        let mut candidate_norm = 0.0_f64;
+        let mut squared_error = 0.0_f64;
+        let mut max_abs = 0.0_f32;
+        for (&reference, &candidate) in reference.iter().zip(candidate) {
+            let error = candidate - reference;
+            let reference = f64::from(reference);
+            let candidate = f64::from(candidate);
+            dot += reference * candidate;
+            reference_norm += reference * reference;
+            candidate_norm += candidate * candidate;
+            squared_error += f64::from(error).powi(2);
+            max_abs = max_abs.max(error.abs());
+        }
+        LogitDelta {
+            reference_argmax,
+            candidate_argmax,
+            cosine: dot / (reference_norm.sqrt() * candidate_norm.sqrt()),
+            relative_rms: (squared_error / reference_norm).sqrt(),
+            max_abs,
+        }
+    }
+
+    fn assert_ledger(
+        ledger: &DeepSeekV4Fp4ScoreDispatchLedger,
+        execution: DeepSeekV4Fp4ShadowExecution,
+        position: u32,
+        plan: DeepSeekV4Fp4ScorePlanKind,
+        f16_invocations: u32,
+    ) {
+        assert_eq!(ledger.execution, execution);
+        assert_eq!(ledger.position, position);
+        assert_eq!(ledger.plan, plan);
+        assert_eq!(ledger.consumed_source, DeepSeekV4Fp4SelectionSource::Fp4);
+        assert_eq!(ledger.sparse_layer_count, 21);
+        assert_eq!(ledger.common_prepare_invocations, 21);
+        assert_eq!(
+            ledger.f16_score_selector_pipeline_invocations,
+            f16_invocations
+        );
+        assert_eq!(ledger.fp4_pipeline_invocations, 21);
+    }
+
+    fn source_sha256() -> String {
+        const SOURCES: &[(&str, &[u8])] = &[
+            (
+                "crates/qwen-llm/src/deepseek_v4_metal.rs",
+                include_bytes!("../src/deepseek_v4_metal.rs"),
+            ),
+            (
+                "crates/qwen-llm/src/deepseek_v4_metal/diagnostics.rs",
+                include_bytes!("../src/deepseek_v4_metal/diagnostics.rs"),
+            ),
+            (
+                "crates/qwen-llm/src/deepseek_v4_metal/snapshot.rs",
+                include_bytes!("../src/deepseek_v4_metal/snapshot.rs"),
+            ),
+            (
+                "crates/qwen-llm/tests/deepseek_v4_position_zero_live.rs",
+                include_bytes!("deepseek_v4_position_zero_live.rs"),
+            ),
+            (
+                "kernels/deepseek_v4.metal",
+                include_bytes!("../../../kernels/deepseek_v4.metal"),
+            ),
+        ];
+        let mut hasher = Sha256::new();
+        hasher.update(b"qwen-dsv4-fp4-collapsed-campaign-source-v1\0");
+        for (path, bytes) in SOURCES {
+            hasher.update((path.len() as u64).to_le_bytes());
+            hasher.update(path.as_bytes());
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn file_sha256(path: &Path) -> (String, u64) {
+        let mut file = std::fs::File::open(path).expect("open collapsed campaign executable");
+        let length = file.metadata().expect("stat collapsed executable").len();
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            let read = file.read(&mut buffer).expect("hash collapsed executable");
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        (format!("{:x}", hasher.finalize()), length)
+    }
+
+    fn command_identity(program: &str, args: &[&str]) -> String {
+        let output = Command::new(program)
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("run {program} {args:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "{program} {args:?} failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut bytes = output.stdout;
+        bytes.extend_from_slice(&output.stderr);
+        String::from_utf8(bytes)
+            .unwrap_or_else(|error| panic!("{program} identity is not UTF-8: {error}"))
+            .trim()
+            .to_owned()
+    }
+
+    let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CURRENT_MODEL));
+    assert!(model_path.exists(), "missing current DS4 model");
+    let ctx = MetalContext::new().expect("create collapsed FP4 Metal context");
+    let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
+    let load_plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
+        .expect("plan collapsed FP4 residency");
+    let memory_plan = load_plan.memory_plan().clone();
+    let admitted = load_plan
+        .admit(ctx.memory_signals())
+        .expect("admit collapsed FP4 residency");
+    let residency = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+        .expect("realize collapsed FP4 residency")
+        .into_residency();
+
+    let pattern = [35_u32, 201, 200, 34];
+    let token_stream = pattern.repeat(FORWARD_LIMIT.div_ceil(pattern.len()));
+    let prefix = &token_stream[..AUDIT_POSITION as usize];
+    let continuation = &token_stream[AUDIT_POSITION as usize..FORWARD_LIMIT];
+    assert_eq!(continuation.len(), TIMED_TOKENS + 1);
+    let prefix_started = Instant::now();
+    let mut candidate =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("construct collapsed FP4 candidate");
+    candidate
+        .enable_fp4_shadow_lineage()
+        .expect("enable collapsed candidate lineage");
+    for chunk in prefix.chunks(128) {
+        candidate
+            .prefill_tokens(&ctx, chunk)
+            .expect("advance one collapsed candidate prefix");
+    }
+    let prefix_ms = prefix_started.elapsed().as_secs_f64() * 1e3;
+    assert_eq!(candidate.next_position(), AUDIT_POSITION);
+    let control_fork = candidate
+        .capture_causal_snapshot()
+        .expect("capture pre-seal position-3070 control fork");
+    candidate
+        .seal_fp4_no_double_score_experiment()
+        .expect("seal collapsed FP4 candidate");
+    candidate
+        .arm_fp4_paired_singleton_audit(AUDIT_POSITION)
+        .expect("arm position-3070 paired audit");
+    let audit_profile = candidate
+        .forward_token_profiled(&ctx, continuation[0])
+        .expect("execute position-3070 paired audit");
+    let audit_logits = candidate
+        .copy_logits_f32()
+        .expect("copy collapsed candidate audit logits");
+    let audit_report = candidate
+        .take_fp4_shadow_report()
+        .expect("take collapsed candidate audit report");
+    let audit_decisions = candidate
+        .take_decision_transcript()
+        .expect("take collapsed candidate audit decisions");
+    let audit_ledger = candidate
+        .take_fp4_score_dispatch_ledger()
+        .expect("take collapsed candidate audit ledger");
+    assert_ledger(
+        &audit_ledger,
+        DeepSeekV4Fp4ShadowExecution::Singleton,
+        AUDIT_POSITION,
+        DeepSeekV4Fp4ScorePlanKind::Paired,
+        21,
+    );
+    assert_eq!(audit_report.position, AUDIT_POSITION);
+    assert_eq!(audit_report.layers.len(), 21);
+    let mut audit_exact_layers = 0_usize;
+    let mut audit_symmetric_differences = Vec::with_capacity(audit_report.layers.len());
+    for layer in &audit_report.layers {
+        assert_eq!(layer.eligibility, DeepSeekV4Fp4ShadowEligibility::Ready);
+        let shadow = layer.shadow.as_ref().expect("eligible audit shadow");
+        assert_eq!(layer.shadow_selected_count, 512);
+        assert_eq!(layer.shadow_selection_status, 0);
+        audit_exact_layers += usize::from(layer.selected_mask_exact);
+        let symmetric_difference = layer
+            .authoritative
+            .cache_order_selected_ids
+            .iter()
+            .filter(|id| !shadow.cache_order_selected_ids.contains(id))
+            .count()
+            + shadow
+                .cache_order_selected_ids
+                .iter()
+                .filter(|id| !layer.authoritative.cache_order_selected_ids.contains(id))
+                .count();
+        audit_symmetric_differences.push(symmetric_difference);
+    }
+    let audit_csa = audit_decisions
+        .layers
+        .iter()
+        .filter_map(|layer| layer.csa.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(audit_csa.len(), audit_report.layers.len());
+    for (decision, layer) in audit_csa.iter().zip(&audit_report.layers) {
+        assert_eq!(**decision, layer.authoritative);
+    }
+    let audit_digest = candidate
+        .fp4_counterfactual_state_digest()
+        .expect("digest collapsed candidate audit state");
+    assert_eq!(audit_digest.consumed_layer_count, 21);
+
+    let mut candidate_logits = vec![audit_logits];
+    let mut candidate_ledgers = Vec::with_capacity(TIMED_TOKENS);
+    let mut candidate_wall_ms = Vec::with_capacity(TIMED_TOKENS);
+    let mut candidate_gpu_ms = Vec::with_capacity(TIMED_TOKENS);
+    for (offset, &token) in continuation[1..].iter().enumerate() {
+        let position = AUDIT_POSITION + 1 + offset as u32;
+        let profile = candidate
+            .forward_token_whole_profiled(&ctx, token)
+            .expect("execute collapsed FP4 timing token");
+        let ledger = candidate
+            .take_fp4_score_dispatch_ledger()
+            .expect("take collapsed FP4 timing ledger");
+        assert_ledger(
+            &ledger,
+            DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+            position,
+            DeepSeekV4Fp4ScorePlanKind::Fp4Only,
+            0,
+        );
+        candidate_logits.push(
+            candidate
+                .copy_logits_f32()
+                .expect("copy collapsed FP4 timing logits"),
+        );
+        candidate_wall_ms.push(profile.forward_wall_ms);
+        candidate_gpu_ms.push(profile.command_gpu_ms);
+        candidate_ledgers.push(ledger);
+    }
+    let final_digest = candidate
+        .fp4_counterfactual_state_digest()
+        .expect("digest final collapsed candidate state");
+    assert_eq!(
+        final_digest.consumed_layer_count,
+        21 * continuation.len() as u64
+    );
+    assert_ne!(
+        audit_digest.selection_trace_digest,
+        final_digest.selection_trace_digest
+    );
+    assert_ne!(
+        audit_digest.selection_payload_digest,
+        final_digest.selection_payload_digest
+    );
+    let expected_tokens = token_stream[..FORWARD_LIMIT].to_vec();
+    assert_eq!(candidate.committed_tokens(), expected_tokens);
+    let candidate_committed_tokens = candidate.committed_tokens().to_vec();
+    let residency = candidate.into_residency();
+
+    let run_control = |residency: DeepSeekV4MetalResidency| {
+        let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
+            &ctx,
+            residency,
+            model_content_id,
+        )
+        .expect("construct collapsed FP4 control");
+        session
+            .restore_causal_snapshot(&control_fork)
+            .expect("restore position-3070 F16 control");
+        session
+            .arm_decision_transcript(AUDIT_POSITION)
+            .expect("arm F16 audit decisions");
+        let audit_profile = session
+            .forward_token_profiled(&ctx, continuation[0])
+            .expect("execute restored F16 audit");
+        let audit_ledger = session
+            .take_fp4_score_dispatch_ledger()
+            .expect("take restored F16 audit ledger");
+        assert_eq!(
+            audit_ledger.execution,
+            DeepSeekV4Fp4ShadowExecution::Singleton
+        );
+        assert_eq!(audit_ledger.position, AUDIT_POSITION);
+        assert_eq!(audit_ledger.plan, DeepSeekV4Fp4ScorePlanKind::F16Only);
+        assert_eq!(
+            audit_ledger.consumed_source,
+            DeepSeekV4Fp4SelectionSource::F16
+        );
+        assert_eq!(audit_ledger.sparse_layer_count, 21);
+        assert_eq!(audit_ledger.common_prepare_invocations, 21);
+        assert_eq!(audit_ledger.f16_score_selector_pipeline_invocations, 21);
+        assert_eq!(audit_ledger.fp4_pipeline_invocations, 0);
+        let decisions = session
+            .take_decision_transcript()
+            .expect("take restored F16 decisions");
+        let mut logits = vec![
+            session
+                .copy_logits_f32()
+                .expect("copy restored F16 audit logits"),
+        ];
+        let audit_snapshot = session
+            .capture_causal_snapshot()
+            .expect("capture restored F16 audit state");
+        let mut timed_wall_ms = Vec::with_capacity(TIMED_TOKENS);
+        let mut timed_gpu_ms = Vec::with_capacity(TIMED_TOKENS);
+        for &token in &continuation[1..] {
+            let profile = session
+                .forward_token_whole_profiled(&ctx, token)
+                .expect("execute restored F16 timing token");
+            logits.push(
+                session
+                    .copy_logits_f32()
+                    .expect("copy restored F16 timing logits"),
+            );
+            timed_wall_ms.push(profile.forward_wall_ms);
+            timed_gpu_ms.push(profile.command_gpu_ms);
+        }
+        let final_snapshot = session
+            .capture_causal_snapshot()
+            .expect("capture final restored F16 state");
+        let committed_tokens = session.committed_tokens().to_vec();
+        let residency = session.into_residency();
+        (
+            residency,
+            ControlRun {
+                logits,
+                decisions,
+                audit_prefix_digest: *audit_snapshot.prefix_digest(),
+                audit_state_digest: *audit_snapshot.causal_digest(),
+                final_prefix_digest: *final_snapshot.prefix_digest(),
+                final_state_digest: *final_snapshot.causal_digest(),
+                audit_ledger,
+                audit_wall_ms: audit_profile.forward_wall_ms,
+                audit_gpu_ms: audit_profile.command_gpu_ms(),
+                timed_wall_ms,
+                timed_gpu_ms,
+                committed_tokens,
+            },
+        )
+    };
+
+    let (residency, control_a) = run_control(residency);
+    let (_residency, control_b) = run_control(residency);
+    assert_eq!(candidate_committed_tokens, expected_tokens);
+    assert_eq!(control_a.committed_tokens, expected_tokens);
+    assert_eq!(control_b.committed_tokens, expected_tokens);
+    assert_eq!(control_a.decisions, control_b.decisions);
+    assert_eq!(candidate_logits.len(), continuation.len());
+    let mut deltas = Vec::with_capacity(candidate_logits.len());
+    for (index, candidate_endpoint) in candidate_logits.iter().enumerate() {
+        assert_exact(
+            &format!("control repetition endpoint {index}"),
+            &control_a.logits[index],
+            &control_b.logits[index],
+        );
+        deltas.push(logit_delta(&control_a.logits[index], candidate_endpoint));
+    }
+    assert_eq!(audit_digest.prefix_digest, control_a.audit_prefix_digest);
+    assert_eq!(control_a.audit_prefix_digest, control_b.audit_prefix_digest);
+    assert_eq!(control_a.audit_state_digest, control_b.audit_state_digest);
+    assert_eq!(final_digest.prefix_digest, control_a.final_prefix_digest);
+    assert_eq!(control_a.final_prefix_digest, control_b.final_prefix_digest);
+    assert_eq!(control_a.final_state_digest, control_b.final_state_digest);
+    let argmax_pass = deltas
+        .iter()
+        .all(|delta| delta.reference_argmax == delta.candidate_argmax);
+    let quality_pass = argmax_pass
+        && deltas.iter().all(|delta| {
+            delta.cosine >= MIN_LOGIT_COSINE
+                && delta.relative_rms <= MAX_LOGIT_RELATIVE_RMS
+                && delta.max_abs <= MAX_LOGIT_ABSOLUTE_ERROR
+        });
+
+    let candidate_gpu_median = median(&candidate_gpu_ms);
+    let control_a_gpu_median = median(&control_a.timed_gpu_ms);
+    let control_b_gpu_median = median(&control_b.timed_gpu_ms);
+    let candidate_wall_median = median(&candidate_wall_ms);
+    let control_a_wall_median = median(&control_a.timed_wall_ms);
+    let control_b_wall_median = median(&control_b.timed_wall_ms);
+    let gpu_control_midpoint = (control_a_gpu_median + control_b_gpu_median) * 0.5;
+    let wall_control_midpoint = (control_a_wall_median + control_b_wall_median) * 0.5;
+    let gpu_control_drift =
+        (control_a_gpu_median - control_b_gpu_median).abs() / gpu_control_midpoint;
+    let wall_control_drift =
+        (control_a_wall_median - control_b_wall_median).abs() / wall_control_midpoint;
+    let gpu_worst_saving = control_a_gpu_median.min(control_b_gpu_median) - candidate_gpu_median;
+    let wall_worst_saving =
+        control_a_wall_median.min(control_b_wall_median) - candidate_wall_median;
+    let timing_pass = gpu_control_drift <= MAX_CONTROL_DRIFT
+        && wall_control_drift <= MAX_CONTROL_DRIFT
+        && gpu_worst_saving >= MIN_SAVING_MS
+        && wall_worst_saving >= MIN_SAVING_MS;
+
+    let token_sha256 = {
+        let mut hasher = Sha256::new();
+        for token in &expected_tokens {
+            hasher.update(token.to_le_bytes());
+        }
+        format!("{:x}", hasher.finalize())
+    };
+    let executable_path = std::env::current_exe().expect("resolve collapsed FP4 executable");
+    let (executable_sha256, executable_bytes) = file_sha256(&executable_path);
+    let rustc_identity = command_identity("rustc", &["--version", "--verbose"]);
+    let metal_compiler_identity =
+        command_identity("xcrun", &["-sdk", "macosx", "metal", "--version"]);
+    let macos_sdk_version = command_identity("xcrun", &["--sdk", "macosx", "--show-sdk-version"]);
+    let decision_sha256 = |transcript: &DeepSeekV4DecisionTranscript| {
+        format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(transcript).expect("serialize audit decision transcript")
+            )
+        )
+    };
+    let packet = serde_json::json!({
+        "schema_version": 1,
+        "result": if quality_pass && timing_pass { "pass" } else { "fail" },
+        "mode": "fp4_collapsed_one_command_position_3070",
+        "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs-current-2026-08-04",
+        "model_content_id_blake3": hex(model_content_id.as_bytes()),
+        "implementation": {
+            "source_base_git_commit": SOURCE_BASE_GIT_COMMIT,
+            "campaign_source_sha256": source_sha256(),
+            "kernel_source_sha256": format!("{:x}", Sha256::digest(include_bytes!("../../../kernels/deepseek_v4.metal"))),
+            "embedded_metallib_sha256": hex(&deepseek_v4_diagnostics_metallib_sha256()),
+            "test_executable_sha256": executable_sha256,
+            "test_executable_bytes": executable_bytes,
+            "cargo_package_version": env!("CARGO_PKG_VERSION"),
+            "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+            "features": ["dsv4-diagnostics"],
+        },
+        "environment": {
+            "device_name": ctx.device.name().to_string(),
+            "device_registry_id": ctx.device.registryID(),
+            "target_arch": std::env::consts::ARCH,
+            "target_os": std::env::consts::OS,
+            "rustc": rustc_identity,
+            "metal_compiler": metal_compiler_identity,
+            "macos_sdk_version": macos_sdk_version,
+        },
+        "request": {
+            "forward_limit": FORWARD_LIMIT,
+            "audit_position": AUDIT_POSITION,
+            "timed_positions": (AUDIT_POSITION + 1..FORWARD_LIMIT as u32).collect::<Vec<_>>(),
+            "token_sha256_u32_le": token_sha256,
+            "prefix_packed_once": true,
+            "control_restore_count": 2,
+        },
+        "acceptance_gates": {
+            "argmax_preserved_all_endpoints": argmax_pass,
+            "quality_gate_pass": quality_pass,
+            "minimum_logit_cosine": MIN_LOGIT_COSINE,
+            "maximum_logit_relative_rms": MAX_LOGIT_RELATIVE_RMS,
+            "maximum_logit_absolute_error": MAX_LOGIT_ABSOLUTE_ERROR,
+            "exact_control_repetition": true,
+            "exact_control_a_b_audit_decisions": true,
+            "maximum_control_drift": MAX_CONTROL_DRIFT,
+            "minimum_worst_control_gpu_saving_ms": MIN_SAVING_MS,
+            "minimum_worst_control_wall_saving_ms": MIN_SAVING_MS,
+        },
+        "memory": {
+            "residency_logical_bytes": memory_plan.residency_logical_bytes(),
+            "residency_priced_upper_bytes": memory_plan.residency_priced_upper_bytes(),
+            "session_logical_bytes": memory_plan.session_logical_bytes(),
+            "session_priced_upper_bytes": memory_plan.session_priced_upper_bytes(),
+            "required_with_reserve_bytes": memory_plan.required_with_reserve_bytes().unwrap(),
+            "control_fork_payload_bytes": control_fork.payload_bytes(),
+        },
+        "state": {
+            "audit_prefix_digest": hex(&audit_digest.prefix_digest),
+            "audit_causal_digest": hex(&audit_digest.state_digest),
+            "audit_selection_trace_digest": hex(&audit_digest.selection_trace_digest),
+            "audit_selection_payload_digest": hex(&audit_digest.selection_payload_digest),
+            "audit_counterfactual_domain_digest": hex(&audit_digest.counterfactual_domain_digest),
+            "audit_consumed_layers": audit_digest.consumed_layer_count,
+            "final_prefix_digest": hex(&final_digest.prefix_digest),
+            "final_causal_digest": hex(&final_digest.state_digest),
+            "final_selection_trace_digest": hex(&final_digest.selection_trace_digest),
+            "final_selection_payload_digest": hex(&final_digest.selection_payload_digest),
+            "final_counterfactual_domain_digest": hex(&final_digest.counterfactual_domain_digest),
+            "final_consumed_layers": final_digest.consumed_layer_count,
+            "control_audit_causal_digest": hex(&control_a.audit_state_digest),
+            "control_final_causal_digest": hex(&control_a.final_state_digest),
+            "control_a_audit_prefix_digest": hex(&control_a.audit_prefix_digest),
+            "control_a_final_prefix_digest": hex(&control_a.final_prefix_digest),
+            "control_b_audit_prefix_digest": hex(&control_b.audit_prefix_digest),
+            "control_b_audit_causal_digest": hex(&control_b.audit_state_digest),
+            "control_b_final_prefix_digest": hex(&control_b.final_prefix_digest),
+            "control_b_final_causal_digest": hex(&control_b.final_state_digest),
+        },
+        "logit_sha256_f32_le": {
+            "candidate": candidate_logits.iter().map(|logits| f32_sha256(logits)).collect::<Vec<_>>(),
+            "control_a": control_a.logits.iter().map(|logits| f32_sha256(logits)).collect::<Vec<_>>(),
+            "control_b": control_b.logits.iter().map(|logits| f32_sha256(logits)).collect::<Vec<_>>(),
+        },
+        "logit_delta": deltas.iter().enumerate().map(|(offset, delta)| serde_json::json!({
+            "position": AUDIT_POSITION + offset as u32,
+            "reference_argmax": delta.reference_argmax,
+            "candidate_argmax": delta.candidate_argmax,
+            "cosine": delta.cosine,
+            "relative_rms": delta.relative_rms,
+            "max_abs": delta.max_abs,
+        })).collect::<Vec<_>>(),
+        "dispatch_ledgers": {
+            "candidate_audit": &audit_ledger,
+            "candidate_collapsed": &candidate_ledgers,
+            "control_a_audit": &control_a.audit_ledger,
+            "control_b_audit": &control_b.audit_ledger,
+        },
+        "timings_ms": {
+            "prefix_once": prefix_ms,
+            "audit": {
+                "candidate_wall": audit_profile.forward_wall_ms,
+                "candidate_gpu": audit_profile.command_gpu_ms(),
+                "control_a_wall": control_a.audit_wall_ms,
+                "control_a_gpu": control_a.audit_gpu_ms,
+                "control_b_wall": control_b.audit_wall_ms,
+                "control_b_gpu": control_b.audit_gpu_ms,
+            },
+            "candidate_wall": &candidate_wall_ms,
+            "candidate_wall_median": candidate_wall_median,
+            "candidate_gpu": &candidate_gpu_ms,
+            "candidate_gpu_median": candidate_gpu_median,
+            "control_a_wall": &control_a.timed_wall_ms,
+            "control_a_wall_median": control_a_wall_median,
+            "control_a_gpu": &control_a.timed_gpu_ms,
+            "control_a_gpu_median": control_a_gpu_median,
+            "control_b_wall": &control_b.timed_wall_ms,
+            "control_b_wall_median": control_b_wall_median,
+            "control_b_gpu": &control_b.timed_gpu_ms,
+            "control_b_gpu_median": control_b_gpu_median,
+            "gpu_control_drift": gpu_control_drift,
+            "wall_control_drift": wall_control_drift,
+            "gpu_worst_control_saving": gpu_worst_saving,
+            "wall_worst_control_saving": wall_worst_saving,
+        },
+        "paired_audit_selection": {
+            "exact_layers": audit_exact_layers,
+            "nonexact_layers": audit_report.layers.len() - audit_exact_layers,
+            "symmetric_differences": audit_symmetric_differences,
+        },
+        "audit_decision_transcript_sha256": {
+            "candidate": decision_sha256(&audit_decisions),
+            "control_a": decision_sha256(&control_a.decisions),
+            "control_b": decision_sha256(&control_b.decisions),
+            "control_a_b_exact_scope": "audit_position_only",
+        },
+        "paired_audit_report": &audit_report,
+    });
+    let packet_path = std::env::var_os("DSV4_FP4_COLLAPSED_PACKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("target/dsv4-current-fp4-collapsed-position3070.json")
+        });
+    if let Some(parent) = packet_path.parent() {
+        std::fs::create_dir_all(parent).expect("create collapsed FP4 packet directory");
+    }
+    std::fs::write(
+        &packet_path,
+        serde_json::to_vec_pretty(&packet).expect("serialize collapsed FP4 packet"),
+    )
+    .expect("write collapsed FP4 packet");
+    eprintln!(
+        "deepseek_v4 collapsed FP4 GPU={candidate_gpu_median:.3}ms controls={control_a_gpu_median:.3}/{control_b_gpu_median:.3}ms wall={candidate_wall_median:.3}ms controls={control_a_wall_median:.3}/{control_b_wall_median:.3}ms packet={}",
+        packet_path.display()
+    );
+    assert!(quality_pass, "collapsed FP4 deep logit-quality gate failed");
+    assert!(
+        gpu_control_drift <= MAX_CONTROL_DRIFT,
+        "collapsed FP4 GPU control drift is {:.3}%",
+        gpu_control_drift * 100.0
+    );
+    assert!(
+        wall_control_drift <= MAX_CONTROL_DRIFT,
+        "collapsed FP4 wall control drift is {:.3}%",
+        wall_control_drift * 100.0
+    );
+    assert!(
+        gpu_worst_saving >= MIN_SAVING_MS,
+        "collapsed FP4 GPU saving {gpu_worst_saving:.3} ms misses {MIN_SAVING_MS:.3} ms"
+    );
+    assert!(
+        wall_worst_saving >= MIN_SAVING_MS,
+        "collapsed FP4 wall saving {wall_worst_saving:.3} ms misses {MIN_SAVING_MS:.3} ms"
+    );
+}
+
 /// Manual only: maps the 95.93 GiB model and executes all 43 native layers.
 /// This test must never be included in routine or CI test runs.
 #[test]

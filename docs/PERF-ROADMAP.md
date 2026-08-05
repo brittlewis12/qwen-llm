@@ -223,25 +223,35 @@ With no report work in any timed arm, repeated GPU medians are
 engineering only: the campaign uses one command per layer at 513-515 visible
 rows and cannot establish ordinary-token or terminal savings.
 
+The authorized collapsed experiment is now complete and KILLs the direct FP4
+selector premise. Layer-addressed outputs, inactive poison records, ledgers, and
+189 consumed-layer traces all validate, but the first useful deeper packet at
+position 3,070 changes every audit mask by 24-102 IDs. Candidate logits fall to
+0.983313 minimum cosine, 0.182029 maximum relative RMS, and 3.19737 maximum
+absolute error. GPU/wall medians regress by 1.456/1.772 ms against the faster
+F16 control. The shallow result was not contradictory: selecting 512 of only
+513-515 rows structurally bounded the visible set difference and could not
+establish deeper ranking stability.
+
+Retain the diagnostics implementation and packet as negative evidence. Direct
+FP4-Q/K replacement, paged FP4 K, snapshot v2, and more same-design tuning are
+closed. Reopen only for a materially new guarded or mixed scorer that first
+clears the frozen deep quality gates and has a positive all-in timing ceiling.
+
 Force-ranked queue:
 
-1. **Collapsed one-command FP4 experiment.** Retain 43 layer-addressed slices of
-   512 IDs plus source/visibility/count/status/preflight records. Let attention
-   consume each slice in-command, then bulk-read, validate, and trace records in
-   layer order before token commit. Reuse query, score, and mask scratch; keep
-   paired audits instrumented. Require exact agreement with paired FP4
-   consumption before timing ordinary tokens, then use one lineage-preserving
-   prefix to position 3,070 for the first deeper product packet.
-2. **Multi-group selection.** The terminal FP4 shadow moves scoring below the
-   retained 1.875 ms radix4 selector. Reopen global histograms,
-   query-scaled scratch, and producer/reducer dispatches after or alongside the
-   collapsed FP4 lane, preserving exact threshold and tie order.
-3. **GPU-resident deterministic packed routing.** Remove prefill's router
+1. **Multi-group exact selection.** The retained radix4 selector costs about
+   1.875 ms per CSA layer at terminal history. First prove a cheap exact
+   production-shape ceiling, then reopen global histograms, query-scaled
+   scratch, and producer/reducer dispatches while preserving exact threshold,
+   lower-row tie order, cache-order compaction, visibility, and failure status.
+   Keep the current F16 scorer authoritative.
+2. **GPU-resident deterministic packed routing.** Remove prefill's router
    commit/wait and CPU schedule construction with integer counts, deterministic
    expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,
    and slot-order reduction. Follow with grouped MXFP4 down. Mixture-of-Kittens
    informs scheduling and determinism, not a CUDA-style monolithic Metal kernel.
-4. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

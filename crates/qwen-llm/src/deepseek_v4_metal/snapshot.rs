@@ -246,16 +246,19 @@ impl DeepSeekV4Session {
             &self.compressor_frontiers,
         )?;
         let state_digest = *state.causal_digest();
-        let (selection_trace_digest, consumed_layer_count) = self.fp4_counterfactual_trace.digest();
+        let (selection_trace_digest, selection_payload_digest, consumed_layer_count) =
+            self.fp4_counterfactual_trace.digest();
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"qwen-dsv4-fp4-selection-counterfactual-v1\0");
+        hasher.update(b"qwen-dsv4-fp4-selection-counterfactual-v2\0");
         hasher.update(&state_digest);
         hasher.update(&selection_trace_digest);
+        hasher.update(&selection_payload_digest);
         hasher.update(&consumed_layer_count.to_le_bytes());
         Ok(DeepSeekV4Fp4CounterfactualStateDigest {
             prefix_digest: *state.prefix_digest(),
             state_digest,
             selection_trace_digest,
+            selection_payload_digest,
             consumed_layer_count,
             counterfactual_domain_digest: *hasher.finalize().as_bytes(),
         })

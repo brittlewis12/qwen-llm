@@ -1,0 +1,29 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal.rs b/crates/qwen-llm/src/deepseek_v4_metal.rs
+--- a/crates/qwen-llm/src/deepseek_v4_metal.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@ -10871,5 +10871,5 @@ fn require_serial(enc: &KernelEncoder, kernel: &str) -> Result<(), DeepSeekV4Me
+     Ok(())
+ }
+ 
+-#[cfg(feature = "dsv4-diagnostics")]
++#[cfg(any(test, feature = "dsv4-diagnostics"))]
+ fn raw_i8_subview(
+diff --git a/crates/qwen-llm/tests/deepseek_v4_position_zero_live.rs b/crates/qwen-llm/tests/deepseek_v4_position_zero_live.rs
+--- a/crates/qwen-llm/tests/deepseek_v4_position_zero_live.rs
++++ b/crates/qwen-llm/tests/deepseek_v4_position_zero_live.rs
+@@ -3228,10 +3228,13 @@ fn current_deepseek_v4_fp4_collapsed_position_3070_packet() {
+     assert_eq!(candidate_logits.len(), continuation.len());
+     let mut deltas = Vec::with_capacity(candidate_logits.len());
+-    for (index, candidate_endpoint) in candidate_logits.iter().enumerate() {
++    for index in 0..candidate_logits.len() {
+         assert_exact(
+             &format!("control repetition endpoint {index}"),
+             &control_a.logits[index],
+             &control_b.logits[index],
+         );
+-        deltas.push(logit_delta(&control_a.logits[index], candidate_endpoint));
++        deltas.push(logit_delta(
++            &control_a.logits[index],
++            &candidate_logits[index],
++        ));
+     }

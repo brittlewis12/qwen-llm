@@ -60,6 +60,17 @@ pub struct DeepSeekV4DecisionTranscript {
 pub enum DeepSeekV4Fp4ShadowExecution {
     Packed,
     Singleton,
+    SingletonCollapsed,
+}
+
+impl DeepSeekV4Fp4ShadowExecution {
+    pub(crate) fn domain_code(self) -> u8 {
+        match self {
+            Self::Packed => 0,
+            Self::Singleton => 1,
+            Self::SingletonCollapsed => 2,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -67,6 +78,15 @@ pub enum DeepSeekV4Fp4ShadowExecution {
 pub enum DeepSeekV4Fp4SelectionSource {
     F16,
     Fp4,
+}
+
+impl DeepSeekV4Fp4SelectionSource {
+    pub(crate) fn domain_code(self) -> u8 {
+        match self {
+            Self::F16 => 0,
+            Self::Fp4 => 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -219,21 +239,26 @@ pub struct DeepSeekV4Fp4CounterfactualStateDigest {
     pub prefix_digest: [u8; 32],
     pub state_digest: [u8; 32],
     pub selection_trace_digest: [u8; 32],
+    pub selection_payload_digest: [u8; 32],
     pub consumed_layer_count: u64,
     pub counterfactual_domain_digest: [u8; 32],
 }
 
 pub(crate) struct DeepSeekV4Fp4CounterfactualTrace {
     hasher: blake3::Hasher,
+    payload_hasher: blake3::Hasher,
     consumed_layer_count: u64,
 }
 
 impl Default for DeepSeekV4Fp4CounterfactualTrace {
     fn default() -> Self {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"qwen-dsv4-fp4-selection-trace-v3\0");
+        hasher.update(b"qwen-dsv4-fp4-selection-trace-v4\0");
+        let mut payload_hasher = blake3::Hasher::new();
+        payload_hasher.update(b"qwen-dsv4-fp4-selection-payload-v1\0");
         Self {
             hasher,
+            payload_hasher,
             consumed_layer_count: 0,
         }
     }
@@ -259,20 +284,26 @@ impl DeepSeekV4Fp4CounterfactualTrace {
                 "invalid consumed FP4 selection at position {position} layer {layer}"
             )));
         }
-        self.hasher.update(&[match execution {
-            DeepSeekV4Fp4ShadowExecution::Packed => 0,
-            DeepSeekV4Fp4ShadowExecution::Singleton => 1,
-        }]);
-        self.hasher.update(&[match source {
-            DeepSeekV4Fp4SelectionSource::F16 => 0,
-            DeepSeekV4Fp4SelectionSource::Fp4 => 1,
-        }]);
-        self.hasher.update(&position.to_le_bytes());
-        self.hasher.update(&(layer as u32).to_le_bytes());
-        self.hasher.update(&visible_count.to_le_bytes());
-        self.hasher.update(&(ids.len() as u32).to_le_bytes());
+        self.hasher.update(&[execution.domain_code()]);
+        let source = [source.domain_code()];
+        self.hasher.update(&source);
+        self.payload_hasher.update(&source);
+        let position = position.to_le_bytes();
+        self.hasher.update(&position);
+        self.payload_hasher.update(&position);
+        let layer = (layer as u32).to_le_bytes();
+        self.hasher.update(&layer);
+        self.payload_hasher.update(&layer);
+        let visible_count = visible_count.to_le_bytes();
+        self.hasher.update(&visible_count);
+        self.payload_hasher.update(&visible_count);
+        let id_count = (ids.len() as u32).to_le_bytes();
+        self.hasher.update(&id_count);
+        self.payload_hasher.update(&id_count);
         for id in ids {
-            self.hasher.update(&id.to_le_bytes());
+            let id = id.to_le_bytes();
+            self.hasher.update(&id);
+            self.payload_hasher.update(&id);
         }
         self.consumed_layer_count = self.consumed_layer_count.checked_add(1).ok_or_else(|| {
             DeepSeekV4DiagnosticsError::Shape(
@@ -282,9 +313,10 @@ impl DeepSeekV4Fp4CounterfactualTrace {
         Ok(())
     }
 
-    pub(crate) fn digest(&self) -> ([u8; 32], u64) {
+    pub(crate) fn digest(&self) -> ([u8; 32], [u8; 32], u64) {
         (
             *self.hasher.clone().finalize().as_bytes(),
+            *self.payload_hasher.clone().finalize().as_bytes(),
             self.consumed_layer_count,
         )
     }
@@ -1411,7 +1443,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(first.digest(), repeat.digest());
-        assert_eq!(first.digest().1, 2);
+        assert_eq!(first.digest().2, 2);
 
         let mut changed = DeepSeekV4Fp4CounterfactualTrace::default();
         changed
@@ -1458,6 +1490,7 @@ mod tests {
             )
             .unwrap();
         assert_ne!(first.digest().0, changed_execution.digest().0);
+        assert_eq!(first.digest().1, changed_execution.digest().1);
 
         let mut changed_source = DeepSeekV4Fp4CounterfactualTrace::default();
         changed_source
@@ -1481,6 +1514,31 @@ mod tests {
             )
             .unwrap();
         assert_ne!(first.digest().0, changed_source.digest().0);
+        assert_ne!(first.digest().1, changed_source.digest().1);
+
+        let mut collapsed = DeepSeekV4Fp4CounterfactualTrace::default();
+        collapsed
+            .record(
+                DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                2,
+                513,
+                &ids,
+            )
+            .unwrap();
+        collapsed
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                4,
+                513,
+                &ids,
+            )
+            .unwrap();
+        assert_ne!(first.digest().0, collapsed.digest().0);
+        assert_eq!(first.digest().1, collapsed.digest().1);
 
         let mut invalid = DeepSeekV4Fp4CounterfactualTrace::default();
         let mut duplicate = ids;

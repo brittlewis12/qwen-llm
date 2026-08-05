@@ -1478,6 +1478,8 @@ pub struct DeepSeekV4Session {
     #[cfg(feature = "dsv4-diagnostics")]
     fp4_shadow: DeepSeekV4Fp4ShadowScratch,
     #[cfg(feature = "dsv4-diagnostics")]
+    fp4_collapsed_selections: DeepSeekV4LayerFp4SelectionRecords,
+    #[cfg(feature = "dsv4-diagnostics")]
     fp4_shadow_diagnostics: diagnostics::DeepSeekV4Fp4ShadowCapture,
     #[cfg(feature = "dsv4-diagnostics")]
     fp4_selection_mode: DeepSeekV4Fp4SessionMode,
@@ -1584,6 +1586,8 @@ impl DeepSeekV4Session {
             decision_diagnostics: diagnostics::DeepSeekV4DecisionCapture::default(),
             #[cfg(feature = "dsv4-diagnostics")]
             fp4_shadow: DeepSeekV4Fp4ShadowScratch::new(ctx, capacity.csa_physical_rows())?,
+            #[cfg(feature = "dsv4-diagnostics")]
+            fp4_collapsed_selections: DeepSeekV4LayerFp4SelectionRecords::new(ctx)?,
             #[cfg(feature = "dsv4-diagnostics")]
             fp4_shadow_diagnostics: diagnostics::DeepSeekV4Fp4ShadowCapture::default(),
             #[cfg(feature = "dsv4-diagnostics")]
@@ -2136,6 +2140,7 @@ impl DeepSeekV4Session {
         let csa_rows = self.compressor_frontiers.csa_rows(layer, position)?;
         let sparse_visible_count =
             if let Some(rows) = csa_rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
+                #[cfg(not(feature = "dsv4-diagnostics"))]
                 self.sparse_csa.encode(
                     ctx,
                     layer_encoder.current(),
@@ -2148,6 +2153,68 @@ impl DeepSeekV4Session {
                     rope,
                     selection_record,
                 )?;
+                #[cfg(feature = "dsv4-diagnostics")]
+                let collapsed_fp4 =
+                    self.fp4_selection_mode == DeepSeekV4Fp4SessionMode::Fp4OnlyExperimental;
+                #[cfg(feature = "dsv4-diagnostics")]
+                if collapsed_fp4 {
+                    self.sparse_csa.encode_prepare(
+                        ctx,
+                        layer_encoder.current(),
+                        self.attention.q_lora(),
+                        self.attention.normalized_input(),
+                        self.layer_tensor(layer, "indexer.attn_q_b.weight")?,
+                        self.layer_tensor(layer, "indexer.proj.weight")?,
+                        rows,
+                        position,
+                        rope,
+                        selection_record,
+                    )?;
+                    let fp4_record = self.fp4_collapsed_selections.layer(layer)?;
+                    self.fp4_shadow.encode_into(
+                        ctx,
+                        layer_encoder.current(),
+                        &self.sparse_csa.index_queries,
+                        &self.sparse_csa.head_weights,
+                        rows,
+                        &selection_record.visible_count,
+                        fp4_record.output(selection_record),
+                    )?;
+                    self.attention.encode_selected_attention_f16(
+                        ctx,
+                        layer_encoder.current(),
+                        &raw_cache,
+                        rows,
+                        fp4_record.selection_view(selection_record),
+                        self.layer_tensor(layer, "attn_sinks.weight")?,
+                        position,
+                        rope,
+                    )?;
+                } else {
+                    self.sparse_csa.encode(
+                        ctx,
+                        layer_encoder.current(),
+                        self.attention.q_lora(),
+                        self.attention.normalized_input(),
+                        self.layer_tensor(layer, "indexer.attn_q_b.weight")?,
+                        self.layer_tensor(layer, "indexer.proj.weight")?,
+                        rows,
+                        position,
+                        rope,
+                        selection_record,
+                    )?;
+                    self.attention.encode_selected_attention_f16(
+                        ctx,
+                        layer_encoder.current(),
+                        &raw_cache,
+                        rows,
+                        self.sparse_csa.selection_view(selection_record),
+                        self.layer_tensor(layer, "attn_sinks.weight")?,
+                        position,
+                        rope,
+                    )?;
+                }
+                #[cfg(not(feature = "dsv4-diagnostics"))]
                 self.attention.encode_selected_attention_f16(
                     ctx,
                     layer_encoder.current(),
@@ -2336,7 +2403,8 @@ impl DeepSeekV4Session {
             return invalid("decision capture requires an F16 or paired CSA score plan");
         }
         #[cfg(feature = "dsv4-diagnostics")]
-        let fp4_shadow_active = fp4_score_plan.runs_fp4();
+        let fp4_requires_instrumented_schedule =
+            matches!(fp4_score_plan, DeepSeekV4Fp4ScorePlan::Paired { .. });
         #[cfg(feature = "dsv4-diagnostics")]
         let mut fp4_score_dispatch_ledger = DeepSeekV4Fp4ScoreDispatchLedger::new(
             DeepSeekV4Fp4ShadowExecution::Singleton,
@@ -2349,11 +2417,11 @@ impl DeepSeekV4Session {
             self.fp4_score_dispatch_ledger = None;
         }
         #[cfg(not(feature = "dsv4-diagnostics"))]
-        let fp4_shadow_active = false;
+        let fp4_requires_instrumented_schedule = false;
         if routing_profile.is_none()
             && stage_recorder.is_none()
             && !decision_capture_active
-            && !fp4_shadow_active
+            && !fp4_requires_instrumented_schedule
         {
             return self.forward_token_inner_collapsed(
                 ctx,
@@ -2863,9 +2931,39 @@ impl DeepSeekV4Session {
         layer_completed: &mut impl FnMut(usize),
         mut whole_profile: Option<&mut DeepSeekV4WholeTokenProfile>,
     ) -> Result<(), DeepSeekV4MetalError> {
+        #[cfg(feature = "dsv4-diagnostics")]
+        let fp4_score_plan = self.fp4_selection_mode.score_plan(false);
+        #[cfg(feature = "dsv4-diagnostics")]
+        if matches!(fp4_score_plan, DeepSeekV4Fp4ScorePlan::Paired { .. }) {
+            return invalid("paired FP4 scoring requires the instrumented singleton schedule");
+        }
+        #[cfg(feature = "dsv4-diagnostics")]
+        let fp4_collapsed_active = fp4_score_plan == DeepSeekV4Fp4ScorePlan::Fp4Only;
+        #[cfg(feature = "dsv4-diagnostics")]
+        let fp4_execution = DeepSeekV4Fp4ShadowExecution::SingletonCollapsed;
+        #[cfg(feature = "dsv4-diagnostics")]
+        let fp4_source = fp4_score_plan.consumed_source();
+        #[cfg(feature = "dsv4-diagnostics")]
+        let mut fp4_score_dispatch_ledger = fp4_collapsed_active.then(|| {
+            DeepSeekV4Fp4ScoreDispatchLedger::new(
+                fp4_execution,
+                position,
+                fp4_score_plan.kind(),
+                fp4_source,
+            )
+        });
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            self.fp4_score_dispatch_ledger = None;
+        }
         let reset_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         self.layer_routes.reset_for_token()?;
         self.layer_selections.reset_for_token()?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        if fp4_collapsed_active {
+            self.fp4_collapsed_selections
+                .reset_for_token(fp4_execution, fp4_source)?;
+        }
         if let Some(profile) = whole_profile.as_deref_mut() {
             profile.record_reset_cpu_ms = reset_started
                 .expect("whole-token profile requires a reset timer")
@@ -2904,6 +3002,14 @@ impl DeepSeekV4Session {
                 &selection_record,
             )?;
             *sparse_visible_count = encoded.sparse_visible_count;
+            #[cfg(feature = "dsv4-diagnostics")]
+            if encoded.sparse_visible_count.is_some() && fp4_collapsed_active {
+                let ledger = fp4_score_dispatch_ledger
+                    .as_mut()
+                    .expect("collapsed FP4 score plan requires a dispatch ledger");
+                ledger.record_common_prepare()?;
+                ledger.record_fp4_pipeline()?;
+            }
         }
         token_encoder.end();
         if let Some(profile) = whole_profile.as_deref_mut() {
@@ -2963,6 +3069,10 @@ impl DeepSeekV4Session {
         let record_read_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         let completed_routes = self.layer_routes.read_completed()?;
         let completed_selections = self.layer_selections.read_completed()?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        let completed_fp4_selections = fp4_collapsed_active
+            .then(|| self.fp4_collapsed_selections.read_completed())
+            .transpose()?;
         if let Some(profile) = whole_profile.as_deref_mut() {
             profile.record_read_cpu_ms = record_read_started
                 .expect("whole-token profile requires a record-read timer")
@@ -2972,16 +3082,58 @@ impl DeepSeekV4Session {
         }
 
         let validate_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
-        for (layer, sparse_visible_count) in sparse_visible_counts.into_iter().enumerate() {
+        #[cfg(feature = "dsv4-diagnostics")]
+        let mut fp4_ids = [None; DEEPSEEK_V4_LAYER_COUNT];
+        for (layer, sparse_visible_count) in sparse_visible_counts.iter().copied().enumerate() {
             completed_routes.validate_layer(layer)?;
             if let Some(visible_count) = sparse_visible_count {
                 completed_selections.validate_layer(layer, visible_count)?;
+                #[cfg(feature = "dsv4-diagnostics")]
+                if let Some(completed_fp4) = completed_fp4_selections.as_ref() {
+                    fp4_ids[layer] = Some(completed_fp4.validate_layer(
+                        layer,
+                        visible_count,
+                        fp4_execution,
+                        fp4_source,
+                    )?);
+                }
+            } else {
+                #[cfg(feature = "dsv4-diagnostics")]
+                if let Some(completed_fp4) = completed_fp4_selections.as_ref() {
+                    completed_fp4.validate_inactive_layer(layer, fp4_execution, fp4_source)?;
+                }
             }
+        }
+        #[cfg(feature = "dsv4-diagnostics")]
+        if let Some(ledger) = fp4_score_dispatch_ledger.as_ref() {
+            ledger.validate_completed()?;
+        }
+        #[cfg(feature = "dsv4-diagnostics")]
+        if fp4_collapsed_active {
+            for (layer, sparse_visible_count) in sparse_visible_counts.iter().copied().enumerate() {
+                if let Some(visible_count) = sparse_visible_count {
+                    self.fp4_counterfactual_trace.record(
+                        fp4_execution,
+                        fp4_source,
+                        position,
+                        layer,
+                        visible_count as i32,
+                        fp4_ids[layer]
+                            .expect("validated collapsed FP4 layer requires retained IDs"),
+                    )?;
+                }
+            }
+        }
+        for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
             layer_completed(layer);
         }
 
         #[cfg(feature = "dsv4-diagnostics")]
         self.decision_diagnostics.finish()?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            self.fp4_score_dispatch_ledger = fp4_score_dispatch_ledger;
+        }
         if let Some(profile) = whole_profile {
             profile.record_validate_callback_cpu_ms = validate_started
                 .expect("whole-token profile requires a validation timer")
@@ -3939,6 +4091,8 @@ struct DeepSeekV4CsaRows<'a> {
 }
 
 const DEEPSEEK_V4_SELECTION_RECORD_I32_WIDTH: usize = 3;
+#[cfg(feature = "dsv4-diagnostics")]
+const DEEPSEEK_V4_FP4_COMPLETION_RECORD_I32_WIDTH: usize = 6;
 
 #[derive(Clone)]
 struct DeepSeekV4SelectionRecord {
@@ -4093,6 +4247,294 @@ impl DeepSeekV4CompletedLayerSelectionRecords {
 }
 
 #[cfg(feature = "dsv4-diagnostics")]
+#[derive(Clone)]
+struct DeepSeekV4LayerFp4SelectionRecord {
+    cache_order_ids: MetalTensor,
+    eligible_visible: MetalTensor,
+    eligibility_record: MetalTensor,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+impl DeepSeekV4LayerFp4SelectionRecord {
+    fn output<'a>(
+        &'a self,
+        selection_record: &'a DeepSeekV4SelectionRecord,
+    ) -> DeepSeekV4Fp4SelectionOutput<'a> {
+        DeepSeekV4Fp4SelectionOutput {
+            eligible_visible: &self.eligible_visible,
+            eligibility_record: &self.eligibility_record,
+            cache_order_ids: &self.cache_order_ids,
+            selected_count: &selection_record.selected_count,
+            status: &selection_record.status,
+        }
+    }
+
+    fn selection_view<'a>(
+        &'a self,
+        selection_record: &'a DeepSeekV4SelectionRecord,
+    ) -> DeepSeekV4CsaSelectionView<'a> {
+        DeepSeekV4CsaSelectionView {
+            cache_order_ids: &self.cache_order_ids,
+            selected_count: &selection_record.selected_count,
+            visible_count: &self.eligible_visible,
+        }
+    }
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+#[derive(Clone, Copy)]
+struct DeepSeekV4Fp4SelectionOutput<'a> {
+    eligible_visible: &'a MetalTensor,
+    eligibility_record: &'a MetalTensor,
+    cache_order_ids: &'a MetalTensor,
+    selected_count: &'a MetalTensor,
+    status: &'a MetalTensor,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+impl DeepSeekV4Fp4SelectionOutput<'_> {
+    fn validate(&self) -> Result<(), DeepSeekV4MetalError> {
+        validate_i32(
+            self.eligible_visible,
+            &[1],
+            true,
+            "FP4 selection eligible visibility",
+        )?;
+        validate_i32(
+            self.eligibility_record,
+            &[3],
+            true,
+            "FP4 selection eligibility record",
+        )?;
+        validate_i32(
+            self.cache_order_ids,
+            &[DEEPSEEK_V4_CSA_TOP_K as u64, 1],
+            true,
+            "FP4 selection cache-order IDs",
+        )?;
+        validate_i32(self.selected_count, &[1], true, "FP4 selection count")?;
+        validate_i32(self.status, &[1], true, "FP4 selection status")
+    }
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+struct DeepSeekV4LayerFp4SelectionRecords {
+    cache_order_ids: MetalTensor,
+    integers: MetalTensor,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+struct DeepSeekV4CompletedLayerFp4SelectionRecords {
+    cache_order_ids: Vec<i32>,
+    integers: Vec<i32>,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+impl DeepSeekV4LayerFp4SelectionRecords {
+    fn new(ctx: &MetalContext) -> Result<Self, DeepSeekV4MetalError> {
+        Ok(Self {
+            cache_order_ids: MetalTensor::zeros_i32(
+                ctx,
+                vec![DEEPSEEK_V4_CSA_TOP_K as u64, DEEPSEEK_V4_LAYER_COUNT as u64],
+            )?,
+            integers: MetalTensor::zeros_i32(
+                ctx,
+                vec![
+                    DEEPSEEK_V4_FP4_COMPLETION_RECORD_I32_WIDTH as u64,
+                    DEEPSEEK_V4_LAYER_COUNT as u64,
+                ],
+            )?,
+        })
+    }
+
+    fn layer(
+        &self,
+        layer: usize,
+    ) -> Result<DeepSeekV4LayerFp4SelectionRecord, DeepSeekV4MetalError> {
+        if layer >= DEEPSEEK_V4_LAYER_COUNT {
+            return invalid(format!(
+                "collapsed FP4 selection-record layer {layer} is out of range"
+            ));
+        }
+        validate_i32(
+            &self.cache_order_ids,
+            &[DEEPSEEK_V4_CSA_TOP_K as u64, DEEPSEEK_V4_LAYER_COUNT as u64],
+            true,
+            "collapsed FP4 layer-selection IDs",
+        )?;
+        validate_i32(
+            &self.integers,
+            &[
+                DEEPSEEK_V4_FP4_COMPLETION_RECORD_I32_WIDTH as u64,
+                DEEPSEEK_V4_LAYER_COUNT as u64,
+            ],
+            true,
+            "collapsed FP4 layer-selection records",
+        )?;
+        let ids_base = checked_mul(
+            layer,
+            DEEPSEEK_V4_CSA_TOP_K,
+            "collapsed FP4 selection-ID layer offset",
+        )? as u64;
+        let record_base = checked_mul(
+            layer,
+            DEEPSEEK_V4_FP4_COMPLETION_RECORD_I32_WIDTH,
+            "collapsed FP4 completion-record layer offset",
+        )? as u64;
+        Ok(DeepSeekV4LayerFp4SelectionRecord {
+            cache_order_ids: self
+                .cache_order_ids
+                .view_subrange(ids_base, vec![DEEPSEEK_V4_CSA_TOP_K as u64, 1]),
+            eligible_visible: self.integers.view_subrange(record_base, vec![1]),
+            eligibility_record: self.integers.view_subrange(record_base + 1, vec![3]),
+        })
+    }
+
+    fn reset_for_token(
+        &self,
+        execution: DeepSeekV4Fp4ShadowExecution,
+        source: DeepSeekV4Fp4SelectionSource,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        let mut integers =
+            vec![-1; DEEPSEEK_V4_FP4_COMPLETION_RECORD_I32_WIDTH * DEEPSEEK_V4_LAYER_COUNT];
+        for record in integers.chunks_exact_mut(DEEPSEEK_V4_FP4_COMPLETION_RECORD_I32_WIDTH) {
+            record[4] = i32::from(source.domain_code());
+            record[5] = i32::from(execution.domain_code());
+        }
+        host_write_i32(
+            &self.cache_order_ids,
+            &vec![-1; DEEPSEEK_V4_CSA_TOP_K * DEEPSEEK_V4_LAYER_COUNT],
+            "reset collapsed FP4 layer-selection IDs",
+        )?;
+        host_write_i32(
+            &self.integers,
+            &integers,
+            "reset collapsed FP4 layer-selection records",
+        )
+    }
+
+    fn read_completed(
+        &self,
+    ) -> Result<DeepSeekV4CompletedLayerFp4SelectionRecords, DeepSeekV4MetalError> {
+        validate_i32(
+            &self.cache_order_ids,
+            &[DEEPSEEK_V4_CSA_TOP_K as u64, DEEPSEEK_V4_LAYER_COUNT as u64],
+            false,
+            "completed collapsed FP4 layer-selection IDs",
+        )?;
+        validate_i32(
+            &self.integers,
+            &[
+                DEEPSEEK_V4_FP4_COMPLETION_RECORD_I32_WIDTH as u64,
+                DEEPSEEK_V4_LAYER_COUNT as u64,
+            ],
+            false,
+            "completed collapsed FP4 layer-selection records",
+        )?;
+        Ok(DeepSeekV4CompletedLayerFp4SelectionRecords {
+            cache_order_ids: host_read_i32(
+                &self.cache_order_ids,
+                "completed collapsed FP4 layer-selection IDs",
+            )?,
+            integers: host_read_i32(
+                &self.integers,
+                "completed collapsed FP4 layer-selection records",
+            )?,
+        })
+    }
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+impl DeepSeekV4CompletedLayerFp4SelectionRecords {
+    fn record_and_ids(&self, layer: usize) -> Result<(&[i32], &[i32]), DeepSeekV4MetalError> {
+        if layer >= DEEPSEEK_V4_LAYER_COUNT {
+            return invalid(format!(
+                "completed collapsed FP4 selection layer {layer} is out of range"
+            ));
+        }
+        let record_base = checked_mul(
+            layer,
+            DEEPSEEK_V4_FP4_COMPLETION_RECORD_I32_WIDTH,
+            "completed collapsed FP4 record layer offset",
+        )?;
+        let record_end = record_base + DEEPSEEK_V4_FP4_COMPLETION_RECORD_I32_WIDTH;
+        let record = self.integers.get(record_base..record_end).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "completed collapsed FP4 record layer {layer} is truncated"
+            ))
+        })?;
+        let ids_base = checked_mul(
+            layer,
+            DEEPSEEK_V4_CSA_TOP_K,
+            "completed collapsed FP4 ID layer offset",
+        )?;
+        let ids_end = ids_base + DEEPSEEK_V4_CSA_TOP_K;
+        let ids = self.cache_order_ids.get(ids_base..ids_end).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "completed collapsed FP4 IDs for layer {layer} are truncated"
+            ))
+        })?;
+        Ok((record, ids))
+    }
+
+    fn validate_layer(
+        &self,
+        layer: usize,
+        expected_visible_count: usize,
+        expected_execution: DeepSeekV4Fp4ShadowExecution,
+        expected_source: DeepSeekV4Fp4SelectionSource,
+    ) -> Result<&[i32], DeepSeekV4MetalError> {
+        let (record, ids) = self.record_and_ids(layer)?;
+        let expected_record = [
+            expected_visible_count as i32,
+            0,
+            -1,
+            0,
+            i32::from(expected_source.domain_code()),
+            i32::from(expected_execution.domain_code()),
+        ];
+        if record != expected_record {
+            return invalid(format!(
+                "layer {layer} collapsed FP4 completion record {record:?} differs from {expected_record:?}"
+            ));
+        }
+        if ids.windows(2).any(|pair| pair[0] >= pair[1])
+            || ids
+                .iter()
+                .any(|&id| id < 0 || id >= expected_visible_count as i32)
+        {
+            return invalid(format!(
+                "layer {layer} collapsed FP4 IDs are not sorted, unique, and in range"
+            ));
+        }
+        Ok(ids)
+    }
+
+    fn validate_inactive_layer(
+        &self,
+        layer: usize,
+        expected_execution: DeepSeekV4Fp4ShadowExecution,
+        expected_source: DeepSeekV4Fp4SelectionSource,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        let (record, ids) = self.record_and_ids(layer)?;
+        let expected_record = [
+            -1,
+            -1,
+            -1,
+            -1,
+            i32::from(expected_source.domain_code()),
+            i32::from(expected_execution.domain_code()),
+        ];
+        if record != expected_record || ids.iter().any(|&id| id != -1) {
+            return invalid(format!(
+                "inactive layer {layer} collapsed FP4 slice was modified: record={record:?}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
 struct DeepSeekV4Fp4ShadowScratch {
     capacity_rows: usize,
     query_values: MetalTensor,
@@ -4164,6 +4606,35 @@ impl DeepSeekV4Fp4ShadowScratch {
         rows: DeepSeekV4CsaRows<'_>,
         requested_visible: &MetalTensor,
     ) -> Result<(), DeepSeekV4MetalError> {
+        let output = DeepSeekV4Fp4SelectionOutput {
+            eligible_visible: &self.eligible_visible,
+            eligibility_record: &self.eligibility_record,
+            cache_order_ids: &self.cache_order_ids,
+            selected_count: &self.selected_count,
+            status: &self.status,
+        };
+        self.encode_into(
+            ctx,
+            enc,
+            index_queries,
+            head_weights,
+            rows,
+            requested_visible,
+            output,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_into(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        index_queries: &MetalTensor,
+        head_weights: &MetalTensor,
+        rows: DeepSeekV4CsaRows<'_>,
+        requested_visible: &MetalTensor,
+        output: DeepSeekV4Fp4SelectionOutput<'_>,
+    ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_fp4_shadow")?;
         if rows.count <= DEEPSEEK_V4_CSA_TOP_K
             || rows.count > rows.capacity_rows
@@ -4193,6 +4664,7 @@ impl DeepSeekV4Fp4ShadowScratch {
             false,
             "FP4 shadow requested visibility",
         )?;
+        output.validate()?;
         encode_pack_indexer_fp4_rows_shadow(
             ctx,
             enc,
@@ -4216,8 +4688,8 @@ impl DeepSeekV4Fp4ShadowScratch {
             &self.query_status,
             &sidecar.status,
             requested_visible,
-            &self.eligible_visible,
-            &self.eligibility_record,
+            output.eligible_visible,
+            output.eligibility_record,
             rows.capacity_rows,
             rows.count,
         )?;
@@ -4229,7 +4701,7 @@ impl DeepSeekV4Fp4ShadowScratch {
             head_weights,
             &sidecar.values,
             &sidecar.scales,
-            &self.eligible_visible,
+            output.eligible_visible,
             &self.scores,
             rows.capacity_rows,
             1,
@@ -4238,12 +4710,12 @@ impl DeepSeekV4Fp4ShadowScratch {
             ctx,
             enc,
             &self.scores,
-            &self.eligible_visible,
+            output.eligible_visible,
             &self.selected_mask,
             None,
-            &self.cache_order_ids,
-            &self.selected_count,
-            &self.status,
+            output.cache_order_ids,
+            output.selected_count,
+            output.status,
             rows.capacity_rows,
             rows.count,
             DEEPSEEK_V4_CSA_TOP_K,
@@ -10399,7 +10871,7 @@ fn require_serial(enc: &KernelEncoder, kernel: &str) -> Result<(), DeepSeekV4Met
     Ok(())
 }
 
-#[cfg(any(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 fn raw_i8_subview(
     tensor: &MetalTensor,
     element_offset: usize,
@@ -11285,6 +11757,26 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
         for name in ["fp4_shadow.selected_count", "fp4_shadow.status"] {
             push_session_allocation(&mut requests, name, 1, i32_bytes)?;
         }
+        push_session_allocation(
+            &mut requests,
+            "fp4_collapsed_selections.cache_order_ids",
+            checked_mul(
+                DEEPSEEK_V4_CSA_TOP_K,
+                DEEPSEEK_V4_LAYER_COUNT,
+                "collapsed FP4 layer-selection ID elements",
+            )?,
+            i32_bytes,
+        )?;
+        push_session_allocation(
+            &mut requests,
+            "fp4_collapsed_selections.integers",
+            checked_mul(
+                DEEPSEEK_V4_FP4_COMPLETION_RECORD_I32_WIDTH,
+                DEEPSEEK_V4_LAYER_COUNT,
+                "collapsed FP4 completion-record elements",
+            )?,
+            i32_bytes,
+        )?;
     }
     push_session_allocation(
         &mut requests,
@@ -12172,13 +12664,13 @@ mod tests {
             .filter(|&&kind| kind == AttentionKind::CompressedSparse)
             .count();
         let diagnostics_allocations = if cfg!(feature = "dsv4-diagnostics") {
-            csa_layer_count * 3 + 11
+            csa_layer_count * 3 + 13
         } else {
             0
         };
         let diagnostics_logical = if cfg!(feature = "dsv4-diagnostics") {
             csa_layer_count as u64 * capacity.csa_physical_rows() as u64 * 72
-                + 23_064
+                + 112_160
                 + capacity.csa_physical_rows() as u64 * 8
         } else {
             0
@@ -12223,7 +12715,7 @@ mod tests {
         assert_eq!(promoted.len(), requests.len());
         let promoted_diagnostics_logical = if cfg!(feature = "dsv4-diagnostics") {
             csa_layer_count as u64 * promoted_capacity.csa_physical_rows() as u64 * 72
-                + 23_064
+                + 112_160
                 + promoted_capacity.csa_physical_rows() as u64 * 8
         } else {
             0
@@ -20378,6 +20870,222 @@ mod tests {
         assert!(relative_rms <= 2.0e-5, "relative RMS {relative_rms}");
     }
 
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn fp4_shadow_layer_addressed_output_matches_instrumented_output_exactly() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 768;
+        const FIRST_VISIBLE: usize = 513;
+        const SECOND_VISIBLE: usize = 517;
+        const FIRST_LAYER: usize = 2;
+        const SECOND_LAYER: usize = 4;
+        let first_queries = offset_f32(
+            &ctx,
+            &(0..64 * INDEXER_FP4_VALUES_PER_ROW)
+                .map(|index| 0.01 + (index % 17) as f32 * 0.0001)
+                .collect::<Vec<_>>(),
+            vec![INDEXER_FP4_VALUES_PER_ROW as u64, 64, 1],
+        );
+        let second_queries = offset_f32(
+            &ctx,
+            &(0..64 * INDEXER_FP4_VALUES_PER_ROW)
+                .map(|index| 0.02 + (index % 23) as f32 * 0.0002)
+                .collect::<Vec<_>>(),
+            vec![INDEXER_FP4_VALUES_PER_ROW as u64, 64, 1],
+        );
+        let head_weights = offset_f32(
+            &ctx,
+            &(0..64)
+                .map(|head| 0.001 + (head % 13) as f32 * 0.0002)
+                .collect::<Vec<_>>(),
+            vec![64, 1],
+        );
+        let attention_cache = offset_f16(&ctx, &vec![0.0; 512 * CAPACITY], vec![512, 768]);
+        let indexer_cache = offset_f16(&ctx, &vec![0.0; 128 * CAPACITY], vec![128, 768]);
+        let key_rows = (0..CAPACITY)
+            .map(|row| {
+                let magnitude = if row >= FIRST_VISIBLE {
+                    0.25 + (row - FIRST_VISIBLE) as f32 * 0.01
+                } else {
+                    0.001 + row as f32 * 0.0001
+                };
+                pack_indexer_fp4_row(&vec![magnitude; INDEXER_FP4_VALUES_PER_ROW])
+                    .unwrap()
+                    .as_bytes()
+                    .to_vec()
+            })
+            .collect::<Vec<_>>();
+        let (key_values, key_scales) = split_fp4_rows(&key_rows);
+        let sidecar = DeepSeekV4IndexerFp4Sidecar {
+            enabled: true,
+            capacity_rows: CAPACITY,
+            values: offset_i8(
+                &ctx,
+                &key_values,
+                vec![INDEXER_FP4_VALUE_BYTES as u64, CAPACITY as u64],
+            ),
+            scales: offset_i8(
+                &ctx,
+                &key_scales,
+                vec![INDEXER_FP4_SCALE_BYTES as u64, CAPACITY as u64],
+            ),
+            status: offset_i32(&ctx, &vec![0; CAPACITY], vec![CAPACITY as u64]),
+        };
+        let first_rows = DeepSeekV4CsaRows {
+            attention_cache: &attention_cache,
+            indexer_cache: &indexer_cache,
+            indexer_fp4_sidecar: Some(&sidecar),
+            count: FIRST_VISIBLE,
+            capacity_rows: CAPACITY,
+        };
+        let second_rows = DeepSeekV4CsaRows {
+            count: SECOND_VISIBLE,
+            ..first_rows
+        };
+        let scratch = DeepSeekV4Fp4ShadowScratch::new(&ctx, CAPACITY).unwrap();
+        let first_requested = offset_i32(&ctx, &[FIRST_VISIBLE as i32], vec![1]);
+        let second_requested = offset_i32(&ctx, &[SECOND_VISIBLE as i32], vec![1]);
+        let run_instrumented =
+            |queries: &MetalTensor, rows: DeepSeekV4CsaRows<'_>, requested: &MetalTensor| {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                scratch
+                    .encode(&ctx, &encoder, queries, &head_weights, rows, requested)
+                    .unwrap();
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(command.error().is_none());
+                scratch.validate_completed().unwrap();
+                read_i32(&scratch.cache_order_ids)
+            };
+        let first_instrumented = run_instrumented(&first_queries, first_rows, &first_requested);
+        let second_instrumented = run_instrumented(&second_queries, second_rows, &second_requested);
+        assert_ne!(first_instrumented, second_instrumented);
+
+        let selection_records = DeepSeekV4LayerSelectionRecords::new(&ctx).unwrap();
+        selection_records.reset_for_token().unwrap();
+        let first_selection = selection_records.layer(FIRST_LAYER).unwrap();
+        let second_selection = selection_records.layer(SECOND_LAYER).unwrap();
+        host_write_i32(
+            &first_selection.visible_count,
+            &[FIRST_VISIBLE as i32],
+            "first layer-addressed FP4 requested visibility",
+        )
+        .unwrap();
+        host_write_i32(
+            &second_selection.visible_count,
+            &[SECOND_VISIBLE as i32],
+            "second layer-addressed FP4 requested visibility",
+        )
+        .unwrap();
+        let fp4_records = DeepSeekV4LayerFp4SelectionRecords::new(&ctx).unwrap();
+        fp4_records
+            .reset_for_token(
+                DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            )
+            .unwrap();
+        let first_fp4 = fp4_records.layer(FIRST_LAYER).unwrap();
+        let second_fp4 = fp4_records.layer(SECOND_LAYER).unwrap();
+        let collapsed_command = ctx.queue.commandBuffer().unwrap();
+        let collapsed_encoder = KernelEncoder::begin(&collapsed_command);
+        scratch
+            .encode_into(
+                &ctx,
+                &collapsed_encoder,
+                &first_queries,
+                &head_weights,
+                first_rows,
+                &first_selection.visible_count,
+                first_fp4.output(&first_selection),
+            )
+            .unwrap();
+        scratch
+            .encode_into(
+                &ctx,
+                &collapsed_encoder,
+                &second_queries,
+                &head_weights,
+                second_rows,
+                &second_selection.visible_count,
+                second_fp4.output(&second_selection),
+            )
+            .unwrap();
+        collapsed_encoder.end();
+        collapsed_command.commit();
+        collapsed_command.waitUntilCompleted();
+        assert!(collapsed_command.error().is_none());
+
+        selection_records
+            .read_completed()
+            .unwrap()
+            .validate_layer(FIRST_LAYER, FIRST_VISIBLE)
+            .unwrap();
+        selection_records
+            .read_completed()
+            .unwrap()
+            .validate_layer(SECOND_LAYER, SECOND_VISIBLE)
+            .unwrap();
+        let completed = fp4_records.read_completed().unwrap();
+        let first_collapsed = completed
+            .validate_layer(
+                FIRST_LAYER,
+                FIRST_VISIBLE,
+                DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            )
+            .unwrap();
+        let second_collapsed = completed
+            .validate_layer(
+                SECOND_LAYER,
+                SECOND_VISIBLE,
+                DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            )
+            .unwrap();
+        assert_eq!(first_collapsed, first_instrumented);
+        assert_eq!(second_collapsed, second_instrumented);
+        for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
+            if layer != FIRST_LAYER && layer != SECOND_LAYER {
+                completed
+                    .validate_inactive_layer(
+                        layer,
+                        DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                        DeepSeekV4Fp4SelectionSource::Fp4,
+                    )
+                    .unwrap();
+            }
+        }
+
+        let mut instrumented_trace = diagnostics::DeepSeekV4Fp4CounterfactualTrace::default();
+        instrumented_trace
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Singleton,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                FIRST_LAYER,
+                FIRST_VISIBLE as i32,
+                &first_instrumented,
+            )
+            .unwrap();
+        let mut collapsed_trace = diagnostics::DeepSeekV4Fp4CounterfactualTrace::default();
+        collapsed_trace
+            .record(
+                DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                FIRST_LAYER,
+                FIRST_VISIBLE as i32,
+                first_collapsed,
+            )
+            .unwrap();
+        assert_ne!(instrumented_trace.digest().0, collapsed_trace.digest().0);
+        assert_eq!(instrumented_trace.digest().1, collapsed_trace.digest().1);
+    }
+
     #[test]
     fn fp4_matrix_shadow_covers_batched_queries_tails_offsets_and_envelope() {
         let Some(ctx) = metal_context() else {
@@ -23252,6 +23960,148 @@ mod tests {
                 .contains("selected=511 status=3")
         );
         completed.validate_layer(21, 513).unwrap();
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn collapsed_fp4_layer_records_bind_status_ids_source_and_schedule() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const LAYER: usize = 2;
+        const VISIBLE: usize = 513;
+        let records = DeepSeekV4LayerFp4SelectionRecords::new(&ctx).unwrap();
+        records
+            .reset_for_token(
+                DeepSeekV4Fp4ShadowExecution::Singleton,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            )
+            .unwrap();
+        assert!(
+            records
+                .read_completed()
+                .unwrap()
+                .validate_layer(
+                    LAYER,
+                    VISIBLE,
+                    DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                    DeepSeekV4Fp4SelectionSource::Fp4,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("completion record")
+        );
+
+        records
+            .reset_for_token(
+                DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            )
+            .unwrap();
+        records
+            .read_completed()
+            .unwrap()
+            .validate_inactive_layer(
+                4,
+                DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            )
+            .unwrap();
+        let layer = records.layer(LAYER).unwrap();
+        let ids = (0..DEEPSEEK_V4_CSA_TOP_K as i32).collect::<Vec<_>>();
+        host_write_i32(&layer.cache_order_ids, &ids, "ready collapsed FP4 IDs").unwrap();
+        host_write_i32(
+            &layer.eligible_visible,
+            &[VISIBLE as i32],
+            "ready collapsed FP4 visibility",
+        )
+        .unwrap();
+        host_write_i32(
+            &layer.eligibility_record,
+            &[0, -1, 0],
+            "ready collapsed FP4 eligibility",
+        )
+        .unwrap();
+        let completed = records.read_completed().unwrap();
+        assert_eq!(
+            completed
+                .validate_layer(
+                    LAYER,
+                    VISIBLE,
+                    DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                    DeepSeekV4Fp4SelectionSource::Fp4,
+                )
+                .unwrap(),
+            ids
+        );
+
+        let mut duplicate = ids.clone();
+        duplicate[511] = duplicate[510];
+        host_write_i32(
+            &layer.cache_order_ids,
+            &duplicate,
+            "duplicate collapsed FP4 IDs",
+        )
+        .unwrap();
+        assert!(
+            records
+                .read_completed()
+                .unwrap()
+                .validate_layer(
+                    LAYER,
+                    VISIBLE,
+                    DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                    DeepSeekV4Fp4SelectionSource::Fp4,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("not sorted, unique, and in range")
+        );
+
+        host_write_i32(&layer.cache_order_ids, &ids, "restore collapsed FP4 IDs").unwrap();
+        host_write_i32(
+            &layer.eligibility_record,
+            &[3, 512, 2],
+            "failed collapsed FP4 eligibility",
+        )
+        .unwrap();
+        assert!(
+            records
+                .read_completed()
+                .unwrap()
+                .validate_layer(
+                    LAYER,
+                    VISIBLE,
+                    DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                    DeepSeekV4Fp4SelectionSource::Fp4,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("completion record")
+        );
+
+        let inactive = records.layer(4).unwrap();
+        let mut overwritten = vec![-1; DEEPSEEK_V4_CSA_TOP_K];
+        overwritten[0] = 0;
+        host_write_i32(
+            &inactive.cache_order_ids,
+            &overwritten,
+            "overwritten inactive collapsed FP4 IDs",
+        )
+        .unwrap();
+        assert!(
+            records
+                .read_completed()
+                .unwrap()
+                .validate_inactive_layer(
+                    4,
+                    DeepSeekV4Fp4ShadowExecution::SingletonCollapsed,
+                    DeepSeekV4Fp4SelectionSource::Fp4,
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("was modified")
+        );
     }
 
     #[test]

@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Collapsed FP4 Selector KILL
+
+Status: diagnostics-only collapsed execution is structurally qualified, but
+direct FP4-Q/K selection is `KILL` on quality and speed. Production FP4
+selection, paged FP4 K, snapshot v2, and further same-design tuning remain
+`HOLD`.
+
+- Add 43 layer-addressed 512-ID slices and compact completion records binding
+  visibility, preflight status, consumed source, and execution schedule. Every
+  inactive slice must retain poisoned sentinels. Records validate before trace,
+  callbacks, or token commit.
+- Distinguish instrumented singleton from collapsed singleton traces while a
+  second execution-independent payload digest binds source, position, layer,
+  visibility, and every consumed ID. A two-layer one-encoder Metal differential
+  proves shared-scratch outputs exact and all 41 inactive slices untouched.
+- One current-asset lineage prefix reaches position 3,070 once. A paired audit
+  then precedes eight unaudited collapsed tokens; two F16 controls restore from
+  the pre-seal snapshot. Controls are bit-exact in all nine logits, audit
+  decisions, and audit/final causal state. All candidate ledgers and 189
+  consumed-layer traces complete.
+- The deep premise fails decisively. All 21 audit masks differ by 24-102 IDs.
+  Candidate cosine falls as low as 0.983313, relative RMS reaches 0.182029, and
+  max absolute error reaches 3.19737. The synthetic pattern preserves argmax,
+  but misses every frozen vector-quality threshold by orders of magnitude.
+- Candidate GPU/wall medians are 45.768/47.137 ms versus faster F16 controls at
+  44.312/45.366 ms: regressions of 1.456/1.772 ms. The earlier 513-row audit was
+  structurally limited to one reciprocal exchange; its 513-515-row continuation
+  did not establish deeper ranking stability.
+
+Decision: retain the feature-gated sidecar, audit, ledgers, collapsed harness,
+and negative evidence. Kill direct FP4 selector replacement under the current
+F16-cache contract. Reopen only for a materially new guarded/mixed scorer that
+first clears deep quality and demonstrates a positive all-in ceiling. Promote
+an exact multi-group selector falsifier to the head of the queue. Evidence:
+`docs/bench/2026-08-05-dsv4-fp4-collapsed-kill/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-04 - DeepSeek V4 FP4 No-Double-Score Falsifier GO
 
 Status: bounded instrumented no-double-score `GO`; collapsed one-command

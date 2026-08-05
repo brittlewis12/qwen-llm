@@ -1,0 +1,17 @@
+command=cargo test --release -p qwen-llm --test deepseek_v4_position_zero_live --features dsv4-diagnostics current_deepseek_v4_fp4_collapsed_position_3070_packet -- --ignored --exact --nocapture
+profile=release
+device=Apple M4 Max
+test=current_deepseek_v4_fp4_collapsed_position_3070_packet
+test_harness_result=FAILED_AS_EXPECTED_BY_KILL_GATE
+test_harness_elapsed_seconds=102.70
+prefix_once_ms=98360.21654200001
+candidate_gpu_median_ms=45.76799995265901
+control_a_gpu_median_ms=45.452999882400036
+control_b_gpu_median_ms=44.3117500981316
+candidate_wall_median_ms=47.1374585
+control_a_wall_median_ms=46.5175415
+control_b_wall_median_ms=45.365687
+panic=collapsed FP4 deep logit-quality gate failed
+source_packet=target/dsv4-current-fp4-collapsed-position3070.json
+source_packet_bytes=1404624
+source_packet_sha256=39a4e95b8e94b913e3806ac12b5c204ebd0e4b053ce65e6c432e931586062541

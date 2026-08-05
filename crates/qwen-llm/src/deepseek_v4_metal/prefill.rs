@@ -4081,11 +4081,8 @@ mod tests {
             cache_order_ids: selected_ids,
             selected_counts,
             visible_counts,
-            #[cfg(feature = "dsv4-diagnostics")]
             index_queries: MetalTensor::zeros_f32(&ctx, vec![128, 64, query_count as u64]).unwrap(),
-            #[cfg(feature = "dsv4-diagnostics")]
             head_weights: MetalTensor::zeros_f32(&ctx, vec![64, query_count as u64]).unwrap(),
-            #[cfg(feature = "dsv4-diagnostics")]
             scores: MetalTensor::zeros_f32(
                 &ctx,
                 vec![
@@ -4094,7 +4091,6 @@ mod tests {
                 ],
             )
             .unwrap(),
-            #[cfg(feature = "dsv4-diagnostics")]
             selected_mask: MetalTensor::zeros_i32(
                 &ctx,
                 vec![
@@ -4103,7 +4099,6 @@ mod tests {
                 ],
             )
             .unwrap(),
-            #[cfg(feature = "dsv4-diagnostics")]
             status: MetalTensor::zeros_i32(&ctx, vec![query_count as u64]).unwrap(),
         };
 

@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 Packed FP4 Matrix Shadow GO
+
+Status: packed-semantic schedule `GO` as a test-only shadow; production cache,
+snapshot, and dispatch remain `HOLD`. The existing F32-query/F16-key scorer and
+snapshot v1 are unchanged.
+
+- Four simdgroups pack one post-Hadamard row into separate raw-byte value and
+  scale planes under the frozen BF16-before-amax contract. All 42 E2M1 cases,
+  13 scale cases, five valid rows, one upper-domain rejection, and 20 malformed
+  packed rows are exact. Rejected rows leave sentinel planes untouched.
+- The first matrix schedule decoded packed Q inside every eight-row K tile and
+  KILLed at terminal current/FP4/current `2.127/1.634/2.125` ms: only 0.492
+  ms/layer saving, below the 0.80 gate, with candidate above the 1.30 ms limit.
+  No gate was weakened.
+- The admitted schedule expands authoritative packed Q once into a transient
+  16 KiB/query F16 unit-value slab; Q scales remain packed and are applied once
+  per block. K stays packed in the row scan. Combined exponent rescaling uses
+  `ldexp(dot, q_code + k_code - 254)`, then preserves block order,
+  ReLU-before-weight, and head order under safe Metal math.
+- Two valid final-source campaigns measure terminal current/FP4/current
+  `2.127/0.841/2.126` and `2.127/0.841/2.124` ms. Candidate p95 is
+  0.842/0.842 ms and midpoint saving is 1.285/1.284 ms/layer. Control drift is
+  0.04%/0.15%. One-row K pack is 0.013375/0.013667 ms median with
+  0.013542/0.013958 p95, inside the frozen 0.020/0.030 gate.
+- Fixture scores and top-2 IDs are bit-exact. Pack-to-unpack-to-score runs
+  without host reconstruction; all 16 query codes, signed zero, both nibbles,
+  tails, offsets, 128 queries, repeats, visibility, selector ties, and
+  nonfinite fallback pass. The general 128-query packed differential observes
+  zero error against the scalar oracle.
+
+Decision: proceed to a real-weight status-carrying sidecar and whole-token
+decision/quality packet before designing paged K or snapshot v2. Synthetic K is
+prepacked here, and the scorer trusts validated status-0 planes; neither the
+split planes nor transient Q slab defines a production ABI. The full protocol,
+KILL history, caveats, and raw samples are retained in
+`docs/bench/2026-08-04-dsv4-fp4-matrix-shadow/README.md`. Review session:
+`019fcf01-f2d0-7043-bc7c-a139ab850de3`.
+
 ## 2026-08-04 - DeepSeek V4 Shallow Sparse-Selector Cliff GO
 
 Status: promoted `GO` for dispatching the existing parallel radix selector at

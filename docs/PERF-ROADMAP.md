@@ -177,23 +177,36 @@ score vectors are explicitly deterministic scalar transcriptions over decoded
 packed operands with already-normalized head weights. Scoreable rows reject any
 physical encoding that would overflow finite F32 dequantization.
 
+The official packed-semantic Metal shadow now clears its frozen schedule gate.
+The first implementation decoded all Q heads in every eight-row K tile and was
+KILLed at 1.634 ms terminal, only 0.492 ms/layer faster than current. The
+admitted schedule expands authoritative packed Q once into a transient 16 KiB
+unit-value slab while K remains packed in the matrix scan. Two valid campaigns
+measure terminal current/FP4/current `2.127/0.841/2.126` and
+`2.127/0.841/2.124` ms, saving 1.285/1.284 ms/layer with 0.842/0.842 p95. Q
+pack and unpack are included; one-row K pack is 0.0134-0.0137 ms. Every frozen
+pack byte, score vector, decision, tail, offset, and status gate passes. This is
+test-only schedule evidence: synthetic K is prepacked, status-0 planes are
+trusted, and no cache or snapshot ABI changes.
+
 Force-ranked queue:
 
-1. **Official FP4 indexer Metal shadow and matrix scoring.** Quantize Q/K from
-   post-Hadamard pre-F16 values under the frozen scalar contract, decode packed
-   operands inside the matrix schedule, and include query packing in timing.
-   Preserve the F16 scorer as the differential and defer snapshot-v2 migration
-   until packed-semantic decisions and a new whole-token packet clear their
-   gates. The idealized matrix ceiling has already passed; do not spend a
-   separate experiment on packed bytes under the scalar scorer.
-2. **GPU-resident deterministic packed routing.** Remove prefill's router
+1. **Real-weight FP4 sidecar and whole-token packet.** Populate a status-carrying
+   packed K sidecar from post-Hadamard pre-F16 publication while retaining the
+   F16 cache as the differential. Carry validated Q/K status into the shadow
+   dispatch, compare every selector decision and downstream logit against the
+   current path, and measure whole-token saving on the refreshed asset. Do not
+   define paged K or snapshot v2 until this packet clears quality and product
+   gates.
+2. **Multi-group selection.** The terminal FP4 shadow moves scoring below the
+   retained 1.875 ms radix4 selector. Reopen global histograms,
+   query-scaled scratch, and producer/reducer dispatches after or alongside the
+   real-weight sidecar, preserving exact threshold and tie order.
+3. **GPU-resident deterministic packed routing.** Remove prefill's router
    commit/wait and CPU schedule construction with integer counts, deterministic
    expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,
    and slot-order reduction. Follow with grouped MXFP4 down. Mixture-of-Kittens
    informs scheduling and determinism, not a CUDA-style monolithic Metal kernel.
-3. **Multi-group selection.** Radix4 remains one threadgroup per query. Defer
-   global histograms, query-scaled scratch, and producer/reducer dispatches until
-   scoring moves enough for the retained 1.875 ms selector to lead again.
 4. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.

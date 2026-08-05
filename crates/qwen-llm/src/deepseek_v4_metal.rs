@@ -8192,6 +8192,560 @@ fn encode_lightning_indexer_scores_f16_matrix_ceiling(
     Ok(())
 }
 
+#[cfg(test)]
+fn encode_indexer_fp4_contract_primitives(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    e2m1_values: &MetalTensor,
+    scale_maxima: &MetalTensor,
+    e2m1_codes: &MetalTensor,
+    scale_codes: &MetalTensor,
+    scale_status: &MetalTensor,
+    e2m1_count: usize,
+    scale_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    if e2m1_count == 0
+        || scale_count == 0
+        || u32::try_from(e2m1_count).is_err()
+        || u32::try_from(scale_count).is_err()
+    {
+        return invalid("indexer FP4 primitive counts must be nonzero and fit u32");
+    }
+    validate_f32(
+        e2m1_values,
+        &[e2m1_count as u64],
+        false,
+        "indexer FP4 E2M1 primitive inputs",
+    )?;
+    validate_f32(
+        scale_maxima,
+        &[scale_count as u64],
+        false,
+        "indexer FP4 scale primitive inputs",
+    )?;
+    validate_i8(
+        e2m1_codes,
+        &[e2m1_count as u64],
+        true,
+        "indexer FP4 E2M1 primitive codes",
+    )?;
+    validate_i8(
+        scale_codes,
+        &[scale_count as u64],
+        true,
+        "indexer FP4 scale primitive codes",
+    )?;
+    validate_i32(
+        scale_status,
+        &[scale_count as u64],
+        true,
+        "indexer FP4 scale primitive status",
+    )?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        e2m1_count: u32,
+        scale_count: u32,
+    }
+
+    let pso = ctx.pipeline("kernel_deepseek_v4_indexer_fp4_contract_primitives")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            e2m1_count: e2m1_count as u32,
+            scale_count: scale_count as u32,
+        },
+    );
+    enc.set_tensor(1, e2m1_values);
+    enc.set_tensor(2, scale_maxima);
+    enc.set_tensor(3, e2m1_codes);
+    enc.set_tensor(4, scale_codes);
+    enc.set_tensor(5, scale_status);
+    enc.dispatch(
+        MTLSize {
+            width: e2m1_count.max(scale_count).div_ceil(256),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+fn encode_pack_indexer_fp4_rows_shadow(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    input: &MetalTensor,
+    packed_values: &MetalTensor,
+    packed_scales: &MetalTensor,
+    status: &MetalTensor,
+    row_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const VALUES_PER_ROW: usize = crate::deepseek_v4_oracle::INDEXER_FP4_VALUES_PER_ROW;
+    const VALUE_BYTES: usize = crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES;
+    const SCALE_BYTES: usize = crate::deepseek_v4_oracle::INDEXER_FP4_SCALE_BYTES;
+    if row_count == 0 || u32::try_from(row_count).is_err() {
+        return invalid("indexer FP4 row count must be nonzero and fit u32");
+    }
+    for (name, elements) in [
+        (
+            "indexer FP4 input elements",
+            checked_mul(row_count, VALUES_PER_ROW, "indexer FP4 input elements")?,
+        ),
+        (
+            "indexer FP4 value bytes",
+            checked_mul(row_count, VALUE_BYTES, "indexer FP4 value bytes")?,
+        ),
+        (
+            "indexer FP4 scale bytes",
+            checked_mul(row_count, SCALE_BYTES, "indexer FP4 scale bytes")?,
+        ),
+    ] {
+        if u32::try_from(elements).is_err() {
+            return invalid(format!("{name} exceed u32 shader offsets"));
+        }
+    }
+    let trailing_rows = input
+        .shape
+        .get(1..)
+        .and_then(crate::tensor::checked_shape_elements)
+        .and_then(|rows| usize::try_from(rows).ok());
+    if input.dtype != GgmlType::F32
+        || input.shape.first().copied() != Some(VALUES_PER_ROW as u64)
+        || trailing_rows != Some(row_count)
+    {
+        return invalid(format!(
+            "indexer FP4 pack input must be F32 with width {VALUES_PER_ROW} and {row_count} rows, got {:?} {:?}",
+            input.dtype, input.shape
+        ));
+    }
+    let mut value_shape = input.shape.clone();
+    value_shape[0] = VALUE_BYTES as u64;
+    let mut scale_shape = input.shape.clone();
+    scale_shape[0] = SCALE_BYTES as u64;
+    validate_f32(input, &input.shape, false, "indexer FP4 pack input")?;
+    validate_i8(
+        packed_values,
+        &value_shape,
+        true,
+        "indexer FP4 packed values",
+    )?;
+    validate_i8(
+        packed_scales,
+        &scale_shape,
+        true,
+        "indexer FP4 packed scales",
+    )?;
+    validate_i32(status, &[row_count as u64], true, "indexer FP4 pack status")?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        row_count: u32,
+    }
+
+    let pso = ctx.pipeline("kernel_deepseek_v4_pack_indexer_fp4_rows_shadow")?;
+    validate_fp4_pack_geometry(
+        pso.threadExecutionWidth(),
+        pso.maxTotalThreadsPerThreadgroup(),
+        ctx.device.maxThreadgroupMemoryLength(),
+    )?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            row_count: row_count as u32,
+        },
+    );
+    enc.set_tensor(1, input);
+    enc.set_tensor(2, packed_values);
+    enc.set_tensor(3, packed_scales);
+    enc.set_tensor(4, status);
+    enc.dispatch(
+        MTLSize {
+            width: row_count,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+fn encode_unpack_indexer_fp4_units_shadow(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    packed_values: &MetalTensor,
+    status: &MetalTensor,
+    units: &MetalTensor,
+    row_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const VALUE_BYTES: usize = crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES;
+    const VALUES_PER_ROW: usize = crate::deepseek_v4_oracle::INDEXER_FP4_VALUES_PER_ROW;
+    if row_count == 0 || u32::try_from(row_count).is_err() {
+        return invalid("indexer FP4 unpack row count must be nonzero and fit u32");
+    }
+    let trailing_rows = packed_values
+        .shape
+        .get(1..)
+        .and_then(crate::tensor::checked_shape_elements)
+        .and_then(|rows| usize::try_from(rows).ok());
+    if packed_values.dtype != GgmlType::I8
+        || packed_values.shape.first().copied() != Some(VALUE_BYTES as u64)
+        || trailing_rows != Some(row_count)
+    {
+        return invalid(format!(
+            "indexer FP4 unpack values must be raw I8 width {VALUE_BYTES} with {row_count} rows, got {:?} {:?}",
+            packed_values.dtype, packed_values.shape
+        ));
+    }
+    let mut unit_shape = packed_values.shape.clone();
+    unit_shape[0] = VALUES_PER_ROW as u64;
+    validate_i8(
+        packed_values,
+        &packed_values.shape,
+        false,
+        "indexer FP4 unpack values",
+    )?;
+    validate_i32(
+        status,
+        &[row_count as u64],
+        false,
+        "indexer FP4 unpack status",
+    )?;
+    validate_f16(units, &unit_shape, true, "indexer FP4 unpacked units")?;
+    let element_count = checked_mul(row_count, VALUES_PER_ROW, "indexer FP4 unpack elements")?;
+    if u32::try_from(element_count).is_err() {
+        return invalid("indexer FP4 unpack elements exceed u32 shader offsets");
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        row_count: u32,
+    }
+
+    let pso = ctx.pipeline("kernel_deepseek_v4_unpack_indexer_fp4_units_shadow")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            row_count: row_count as u32,
+        },
+    );
+    enc.set_tensor(1, packed_values);
+    enc.set_tensor(2, status);
+    enc.set_tensor(3, units);
+    enc.dispatch(
+        MTLSize {
+            width: element_count.div_ceil(256),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+fn encode_validate_indexer_fp4_rows_shadow(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    packed_values: &MetalTensor,
+    packed_scales: &MetalTensor,
+    status: &MetalTensor,
+    row_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const VALUE_BYTES: usize = crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES;
+    const SCALE_BYTES: usize = crate::deepseek_v4_oracle::INDEXER_FP4_SCALE_BYTES;
+    if row_count == 0 || u32::try_from(row_count).is_err() {
+        return invalid("indexer FP4 validation row count must be nonzero and fit u32");
+    }
+    validate_i8(
+        packed_values,
+        &[VALUE_BYTES as u64, row_count as u64],
+        false,
+        "indexer FP4 validation values",
+    )?;
+    validate_i8(
+        packed_scales,
+        &[SCALE_BYTES as u64, row_count as u64],
+        false,
+        "indexer FP4 validation scales",
+    )?;
+    validate_i32(
+        status,
+        &[row_count as u64],
+        true,
+        "indexer FP4 validation status",
+    )?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        row_count: u32,
+    }
+
+    let pso = ctx.pipeline("kernel_deepseek_v4_validate_indexer_fp4_rows_shadow")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            row_count: row_count as u32,
+        },
+    );
+    enc.set_tensor(1, packed_values);
+    enc.set_tensor(2, packed_scales);
+    enc.set_tensor(3, status);
+    enc.dispatch(
+        MTLSize {
+            width: row_count.div_ceil(256),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_lightning_indexer_scores_fp4_matrix_shadow(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query_units: &MetalTensor,
+    query_scales: &MetalTensor,
+    head_weights: &MetalTensor,
+    key_values: &MetalTensor,
+    key_scales: &MetalTensor,
+    visible_counts: &MetalTensor,
+    scores: &MetalTensor,
+    row_capacity: usize,
+    query_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const KERNEL: &str = "kernel_deepseek_v4_lightning_indexer_scores_fp4_matrix_shadow";
+    const HEAD_COUNT: usize = 64;
+    const HEAD_DIM: usize = 128;
+    const VALUE_BYTES: usize = crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES;
+    const SCALE_BYTES: usize = crate::deepseek_v4_oracle::INDEXER_FP4_SCALE_BYTES;
+    if row_capacity == 0
+        || query_count == 0
+        || u32::try_from(row_capacity).is_err()
+        || u32::try_from(query_count).is_err()
+    {
+        return invalid("FP4 matrix score row and query counts must be nonzero and fit u32");
+    }
+    validate_fp4_lightning_score_offsets(row_capacity, query_count)?;
+    validate_f16(
+        query_units,
+        &[HEAD_DIM as u64, HEAD_COUNT as u64, query_count as u64],
+        false,
+        "FP4 matrix indexer query units",
+    )?;
+    validate_i8(
+        query_scales,
+        &[SCALE_BYTES as u64, HEAD_COUNT as u64, query_count as u64],
+        false,
+        "FP4 matrix indexer query scales",
+    )?;
+    validate_f32(
+        head_weights,
+        &[HEAD_COUNT as u64, query_count as u64],
+        false,
+        "FP4 matrix indexer head weights",
+    )?;
+    validate_i8(
+        key_values,
+        &[VALUE_BYTES as u64, row_capacity as u64],
+        false,
+        "FP4 matrix indexer key values",
+    )?;
+    validate_i8(
+        key_scales,
+        &[SCALE_BYTES as u64, row_capacity as u64],
+        false,
+        "FP4 matrix indexer key scales",
+    )?;
+    validate_i32(
+        visible_counts,
+        &[query_count as u64],
+        false,
+        "FP4 matrix indexer visible counts",
+    )?;
+    validate_f32(
+        scores,
+        &[row_capacity as u64, query_count as u64],
+        true,
+        "FP4 matrix indexer scores",
+    )?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        head_count: u32,
+        head_dim: u32,
+        row_capacity: u32,
+        query_count: u32,
+    }
+
+    let pso = ctx.pipeline(KERNEL)?;
+    validate_fp4_matrix_score_geometry(
+        KERNEL,
+        pso.threadExecutionWidth(),
+        pso.maxTotalThreadsPerThreadgroup(),
+        ctx.device.maxThreadgroupMemoryLength(),
+    )?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            head_count: HEAD_COUNT as u32,
+            head_dim: HEAD_DIM as u32,
+            row_capacity: row_capacity as u32,
+            query_count: query_count as u32,
+        },
+    );
+    enc.set_tensor(1, query_units);
+    enc.set_tensor(2, query_scales);
+    enc.set_tensor(3, head_weights);
+    enc.set_tensor(4, key_values);
+    enc.set_tensor(5, key_scales);
+    enc.set_tensor(6, visible_counts);
+    enc.set_tensor(7, scores);
+    enc.set_threadgroup_memory(0, 8 * 32 * std::mem::size_of::<u16>());
+    enc.set_threadgroup_memory(1, 64 * 8 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: row_capacity.div_ceil(8),
+            height: query_count,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_fp4_lightning_score_offsets(
+    row_capacity: usize,
+    query_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const HEAD_COUNT: usize = 64;
+    const VALUE_BYTES: usize = crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES;
+    const SCALE_BYTES: usize = crate::deepseek_v4_oracle::INDEXER_FP4_SCALE_BYTES;
+    for (name, elements) in [
+        (
+            "FP4 indexer score elements",
+            checked_mul(row_capacity, query_count, "FP4 indexer score elements")?,
+        ),
+        (
+            "FP4 indexer weight elements",
+            checked_mul(HEAD_COUNT, query_count, "FP4 indexer weight elements")?,
+        ),
+        (
+            "FP4 indexer query unit elements",
+            checked_mul(
+                checked_mul(HEAD_COUNT, query_count, "FP4 indexer query rows")?,
+                crate::deepseek_v4_oracle::INDEXER_FP4_VALUES_PER_ROW,
+                "FP4 indexer query unit elements",
+            )?,
+        ),
+        (
+            "FP4 indexer query scale bytes",
+            checked_mul(
+                checked_mul(HEAD_COUNT, query_count, "FP4 indexer query rows")?,
+                SCALE_BYTES,
+                "FP4 indexer query scale bytes",
+            )?,
+        ),
+        (
+            "FP4 indexer key value bytes",
+            checked_mul(row_capacity, VALUE_BYTES, "FP4 indexer key value bytes")?,
+        ),
+        (
+            "FP4 indexer key scale bytes",
+            checked_mul(row_capacity, SCALE_BYTES, "FP4 indexer key scale bytes")?,
+        ),
+    ] {
+        if u32::try_from(elements).is_err() {
+            return invalid(format!("{name} exceed u32 shader offsets"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_fp4_matrix_score_geometry(
+    kernel: &str,
+    thread_execution_width: usize,
+    max_threads_per_group: usize,
+    max_threadgroup_bytes: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const THREADS: usize = 256;
+    const KEY_BYTES: usize = 8 * 32 * std::mem::size_of::<u16>();
+    const DOT_BYTES: usize = 64 * 8 * std::mem::size_of::<f32>();
+    const THREADGROUP_BYTES: usize = KEY_BYTES + DOT_BYTES;
+    if thread_execution_width != 32 || max_threads_per_group < THREADS {
+        return invalid(format!(
+            "{kernel} requires SIMD width 32 and {THREADS} threads, got width {thread_execution_width} max {max_threads_per_group}"
+        ));
+    }
+    if max_threadgroup_bytes < THREADGROUP_BYTES {
+        return invalid(format!(
+            "{kernel} requires {THREADGROUP_BYTES} threadgroup bytes, device allows {max_threadgroup_bytes}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_fp4_pack_geometry(
+    thread_execution_width: usize,
+    max_threads_per_group: usize,
+    max_threadgroup_bytes: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const THREADS: usize = 128;
+    const THREADGROUP_BYTES: usize = 128 * std::mem::size_of::<f32>()
+        + 64 * std::mem::size_of::<u8>()
+        + 4 * std::mem::size_of::<u8>()
+        + 4 * std::mem::size_of::<u32>();
+    if thread_execution_width != 32 || max_threads_per_group < THREADS {
+        return invalid(format!(
+            "FP4 row pack requires SIMD width 32 and {THREADS} threads, got width {thread_execution_width} max {max_threads_per_group}"
+        ));
+    }
+    if max_threadgroup_bytes < THREADGROUP_BYTES {
+        return invalid(format!(
+            "FP4 row pack requires {THREADGROUP_BYTES} threadgroup bytes, device allows {max_threadgroup_bytes}"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_lightning_indexer_score_offsets(
     head_count: usize,
     head_dim: usize,
@@ -8861,6 +9415,36 @@ fn validate_ds4_rope(
 fn require_serial(enc: &KernelEncoder, kernel: &str) -> Result<(), DeepSeekV4MetalError> {
     if enc.concurrent {
         return invalid(format!("{kernel} requires ordered serial dispatches"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_i8(
+    tensor: &MetalTensor,
+    shape: &[u64],
+    writable: bool,
+    name: &str,
+) -> Result<(), DeepSeekV4MetalError> {
+    if tensor.dtype != GgmlType::I8 || tensor.shape != shape {
+        return invalid(format!(
+            "{name} must be raw I8 bytes with shape {shape:?}, got {:?} {:?}",
+            tensor.dtype, tensor.shape
+        ));
+    }
+    if writable && !tensor.is_writable() {
+        return invalid(format!("{name} must be writable"));
+    }
+    let end = tensor
+        .offset
+        .checked_add(tensor.n_bytes())
+        .ok_or_else(|| DeepSeekV4MetalError::Invalid(format!("{name} range overflow")))?;
+    if end > tensor.buffer.length() as u64 {
+        return invalid(format!(
+            "{name} range [{}, {end}) exceeds buffer length {}",
+            tensor.offset,
+            tensor.buffer.length()
+        ));
     }
     Ok(())
 }
@@ -9928,11 +10512,12 @@ mod tests {
     use crate::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
     use crate::deepseek_v4_census::PinnedDeepSeekV4AssetV1;
     use crate::deepseek_v4_oracle::{
-        CompressorState, RopeDirection, RopeParameters,
+        CompressorState, DeepSeekV4IndexerFp4Row, INDEXER_FP4_ROW_BYTES, INDEXER_FP4_SCALE_BYTES,
+        INDEXER_FP4_VALUE_BYTES, INDEXER_FP4_VALUES_PER_ROW, RopeDirection, RopeParameters,
         attention_fp8_nope_bf16_rope_roundtrip_in_place, grouped_low_rank_projection,
         hadamard_128_in_place, hyper_connection_head, hyper_connection_post, hyper_connection_pre,
-        indexer_scores, mat_vec, rms_norm, rope_tail_in_place, shared_kv_attention,
-        shared_kv_projection, top_k_indices,
+        indexer_scores, mat_vec, pack_indexer_fp4_row, packed_indexer_scores, rms_norm,
+        rope_tail_in_place, shared_kv_attention, shared_kv_projection, top_k_indices,
     };
     use crate::tensor::{GgmlType, TensorDesc};
     use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
@@ -9941,11 +10526,98 @@ mod tests {
 
     const LEGACY_CENSUS_MANIFEST: &str =
         include_str!("../tests/fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_census_v1.json");
+    const INDEXER_FP4_CONTRACT_FIXTURE: &str =
+        include_str!("../tests/fixtures/deepseek_v4_indexer_fp4_contract_v1.json");
     const LEGACY_CHECKPOINT_CONTENT_ID: [u8; 32] = [
         0xaf, 0x65, 0xc3, 0x14, 0x59, 0xd1, 0xd2, 0x5e, 0xf9, 0xf3, 0xc7, 0x76, 0x6a, 0xf1, 0xf7,
         0x41, 0x57, 0xcb, 0x33, 0x0d, 0x9b, 0xde, 0xe5, 0x43, 0x2e, 0x32, 0x0f, 0xa1, 0xd8, 0xe4,
         0x9e, 0x2a,
     ];
+
+    #[derive(serde::Deserialize)]
+    struct MetalFp4Fixture {
+        invalid_rows: Vec<MetalFp4InvalidRowCase>,
+        pack_rejections: Vec<MetalFp4PackRejectionCase>,
+        rounding_cases: Vec<MetalFp4RoundingCase>,
+        rows: Vec<MetalFp4RowCase>,
+        scale_cases: Vec<MetalFp4ScaleCase>,
+        score_cases: Vec<MetalFp4ScoreCase>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct MetalFp4RoundingCase {
+        code: u8,
+        input_bits: u32,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct MetalFp4ScaleCase {
+        code: u8,
+        maximum_bits: u32,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct MetalFp4RowCase {
+        input_bits: Vec<u32>,
+        name: String,
+        packed_bytes: Vec<u8>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct MetalFp4InvalidRowCase {
+        error_category: String,
+        mutations: Vec<MetalFp4ByteMutation>,
+        name: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct MetalFp4ByteMutation {
+        byte_index: usize,
+        byte_value: u8,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct MetalFp4PackRejectionCase {
+        dimension: usize,
+        error_category: String,
+        input_bits: u32,
+        name: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct MetalFp4ScoreCase {
+        key_rows: Vec<Vec<u8>>,
+        name: String,
+        query_rows: Vec<Vec<u8>>,
+        scaled_head_weight_bits: Vec<u32>,
+        score_bits: Vec<u32>,
+        top2: Vec<usize>,
+    }
+
+    fn metal_fp4_fixture() -> MetalFp4Fixture {
+        serde_json::from_str(INDEXER_FP4_CONTRACT_FIXTURE)
+            .expect("valid strict indexer FP4 fixture")
+    }
+
+    fn fp4_row_from_bytes(bytes: &[u8]) -> DeepSeekV4IndexerFp4Row {
+        DeepSeekV4IndexerFp4Row::from_bytes(
+            bytes
+                .try_into()
+                .expect("indexer FP4 fixture row is 68 bytes"),
+        )
+        .expect("indexer FP4 fixture row is canonical")
+    }
+
+    fn split_fp4_rows(rows: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+        let mut values = Vec::with_capacity(rows.len() * INDEXER_FP4_VALUE_BYTES);
+        let mut scales = Vec::with_capacity(rows.len() * INDEXER_FP4_SCALE_BYTES);
+        for row in rows {
+            assert_eq!(row.len(), INDEXER_FP4_ROW_BYTES);
+            values.extend_from_slice(&row[..INDEXER_FP4_VALUE_BYTES]);
+            scales.extend_from_slice(&row[INDEXER_FP4_VALUE_BYTES..]);
+        }
+        (values, scales)
+    }
 
     fn metal_context() -> Option<MetalContext> {
         match MetalContext::new() {
@@ -10006,6 +10678,20 @@ mod tests {
         }
     }
 
+    fn offset_i8(ctx: &MetalContext, values: &[u8], shape: Vec<u64>) -> MetalTensor {
+        let prefix = 13usize;
+        let mut bytes = vec![0x5Au8; prefix];
+        bytes.extend_from_slice(values);
+        bytes.extend_from_slice(&[0xA5u8; 19]);
+        MetalTensor {
+            buffer: ctx.buffer_from(&bytes).expect("offset raw-byte buffer"),
+            offset: prefix as u64,
+            shape,
+            dtype: GgmlType::I8,
+            provenance: MetalTensorProvenance::OwnedWritable,
+        }
+    }
+
     fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
         unsafe {
             let pointer = tensor
@@ -10016,6 +10702,46 @@ mod tests {
                 .add(tensor.offset as usize)
                 .cast::<f32>();
             std::slice::from_raw_parts(pointer, tensor.n_elements() as usize).to_vec()
+        }
+    }
+
+    fn read_u8(tensor: &MetalTensor) -> Vec<u8> {
+        assert_eq!(tensor.dtype, GgmlType::I8);
+        unsafe {
+            let pointer = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize);
+            std::slice::from_raw_parts(pointer, tensor.n_elements() as usize).to_vec()
+        }
+    }
+
+    fn read_f16_bits(tensor: &MetalTensor) -> Vec<u16> {
+        assert_eq!(tensor.dtype, GgmlType::F16);
+        unsafe {
+            let pointer = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<u16>();
+            std::slice::from_raw_parts(pointer, tensor.n_elements() as usize).to_vec()
+        }
+    }
+
+    fn i8_prefix(tensor: &MetalTensor, shape: Vec<u64>) -> MetalTensor {
+        assert_eq!(tensor.dtype, GgmlType::I8);
+        let elements = crate::tensor::checked_shape_elements(&shape).expect("I8 prefix shape");
+        assert!(elements <= tensor.n_elements());
+        MetalTensor {
+            buffer: tensor.buffer.clone(),
+            offset: tensor.offset,
+            shape,
+            dtype: GgmlType::I8,
+            provenance: tensor.provenance,
         }
     }
 
@@ -17648,6 +18374,966 @@ mod tests {
     }
 
     #[test]
+    fn fp4_metal_primitives_and_packer_match_the_frozen_contract() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let fixture = metal_fp4_fixture();
+        assert_eq!(fixture.rounding_cases.len(), 42);
+        assert_eq!(fixture.scale_cases.len(), 13);
+        assert_eq!(fixture.rows.len(), 5);
+        assert_eq!(fixture.pack_rejections.len(), 1);
+
+        let e2m1_values = fixture
+            .rounding_cases
+            .iter()
+            .map(|case| f32::from_bits(case.input_bits))
+            .collect::<Vec<_>>();
+        let scale_maxima = fixture
+            .scale_cases
+            .iter()
+            .map(|case| f32::from_bits(case.maximum_bits))
+            .collect::<Vec<_>>();
+        let e2m1_inputs = offset_f32(&ctx, &e2m1_values, vec![e2m1_values.len() as u64]);
+        let scale_inputs = offset_f32(&ctx, &scale_maxima, vec![scale_maxima.len() as u64]);
+        let e2m1_codes = offset_i8(&ctx, &vec![0xA5; e2m1_values.len()], vec![42]);
+        let scale_codes = offset_i8(&ctx, &vec![0xA5; scale_maxima.len()], vec![13]);
+        let scale_status = offset_i32(&ctx, &[-1; 13], vec![13]);
+
+        let valid_rows = fixture.rows.len();
+        let rejection_rows = fixture.pack_rejections.len();
+        let total_rows = valid_rows + rejection_rows + 2;
+        let mut pack_inputs = Vec::with_capacity(total_rows * INDEXER_FP4_VALUES_PER_ROW);
+        for case in &fixture.rows {
+            assert_eq!(case.input_bits.len(), INDEXER_FP4_VALUES_PER_ROW);
+            pack_inputs.extend(case.input_bits.iter().map(|&bits| f32::from_bits(bits)));
+        }
+        for case in &fixture.pack_rejections {
+            assert_eq!(case.error_category, "decoded_f32_overflow");
+            assert_eq!(case.name, "bf16_max_decodes_beyond_f32");
+            let mut row = [0.0f32; INDEXER_FP4_VALUES_PER_ROW];
+            row[case.dimension] = f32::from_bits(case.input_bits);
+            pack_inputs.extend_from_slice(&row);
+        }
+        let mut source_nonfinite = [0.0f32; INDEXER_FP4_VALUES_PER_ROW];
+        source_nonfinite[17] = f32::INFINITY;
+        pack_inputs.extend_from_slice(&source_nonfinite);
+        let mut bf16_nonfinite = [0.0f32; INDEXER_FP4_VALUES_PER_ROW];
+        bf16_nonfinite[23] = f32::MAX;
+        pack_inputs.extend_from_slice(&bf16_nonfinite);
+
+        let pack_inputs = offset_f32(
+            &ctx,
+            &pack_inputs,
+            vec![INDEXER_FP4_VALUES_PER_ROW as u64, total_rows as u64],
+        );
+        let packed_values = offset_i8(
+            &ctx,
+            &vec![0xA5; total_rows * INDEXER_FP4_VALUE_BYTES],
+            vec![INDEXER_FP4_VALUE_BYTES as u64, total_rows as u64],
+        );
+        let packed_scales = offset_i8(
+            &ctx,
+            &vec![0xA5; total_rows * INDEXER_FP4_SCALE_BYTES],
+            vec![INDEXER_FP4_SCALE_BYTES as u64, total_rows as u64],
+        );
+        let pack_status = offset_i32(&ctx, &vec![-1; total_rows], vec![total_rows as u64]);
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_indexer_fp4_contract_primitives(
+            &ctx,
+            &encoder,
+            &e2m1_inputs,
+            &scale_inputs,
+            &e2m1_codes,
+            &scale_codes,
+            &scale_status,
+            e2m1_values.len(),
+            scale_maxima.len(),
+        )
+        .unwrap();
+        encode_pack_indexer_fp4_rows_shadow(
+            &ctx,
+            &encoder,
+            &pack_inputs,
+            &packed_values,
+            &packed_scales,
+            &pack_status,
+            total_rows,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "FP4 pack command failed: {:?}",
+            command.error()
+        );
+
+        assert_eq!(
+            read_u8(&e2m1_codes),
+            fixture
+                .rounding_cases
+                .iter()
+                .map(|case| case.code)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            read_u8(&scale_codes),
+            fixture
+                .scale_cases
+                .iter()
+                .map(|case| case.code)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(read_i32(&scale_status), vec![0; fixture.scale_cases.len()]);
+
+        let actual_values = read_u8(&packed_values);
+        let actual_scales = read_u8(&packed_scales);
+        let actual_status = read_i32(&pack_status);
+        for (row, case) in fixture.rows.iter().enumerate() {
+            assert_eq!(actual_status[row], 0, "{} status", case.name);
+            assert_eq!(
+                &actual_values[row * INDEXER_FP4_VALUE_BYTES..(row + 1) * INDEXER_FP4_VALUE_BYTES],
+                &case.packed_bytes[..INDEXER_FP4_VALUE_BYTES],
+                "{} values",
+                case.name
+            );
+            assert_eq!(
+                &actual_scales[row * INDEXER_FP4_SCALE_BYTES..(row + 1) * INDEXER_FP4_SCALE_BYTES],
+                &case.packed_bytes[INDEXER_FP4_VALUE_BYTES..],
+                "{} scales",
+                case.name
+            );
+        }
+        assert_eq!(
+            &actual_status[valid_rows..],
+            &[3, 1, 1],
+            "overflow, source nonfinite, and BF16 nonfinite statuses"
+        );
+        for row in valid_rows..total_rows {
+            assert!(
+                actual_values[row * INDEXER_FP4_VALUE_BYTES..(row + 1) * INDEXER_FP4_VALUE_BYTES]
+                    .iter()
+                    .all(|&byte| byte == 0xA5),
+                "rejected row {row} partially published values"
+            );
+            assert!(
+                actual_scales[row * INDEXER_FP4_SCALE_BYTES..(row + 1) * INDEXER_FP4_SCALE_BYTES]
+                    .iter()
+                    .all(|&byte| byte == 0xA5),
+                "rejected row {row} partially published scales"
+            );
+        }
+    }
+
+    #[test]
+    fn fp4_metal_raw_row_validation_classifies_the_frozen_invalid_domain() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let fixture = metal_fp4_fixture();
+        assert_eq!(fixture.invalid_rows.len(), 20);
+        let mut rows = vec![fixture.rows[0].packed_bytes.clone()];
+        for case in &fixture.invalid_rows {
+            let mut row = vec![0u8; INDEXER_FP4_ROW_BYTES];
+            row[INDEXER_FP4_VALUE_BYTES..].fill(127);
+            for mutation in &case.mutations {
+                row[mutation.byte_index] = mutation.byte_value;
+            }
+            rows.push(row);
+        }
+        let (values, scales) = split_fp4_rows(&rows);
+        let values = offset_i8(
+            &ctx,
+            &values,
+            vec![INDEXER_FP4_VALUE_BYTES as u64, rows.len() as u64],
+        );
+        let scales = offset_i8(
+            &ctx,
+            &scales,
+            vec![INDEXER_FP4_SCALE_BYTES as u64, rows.len() as u64],
+        );
+        let status = offset_i32(&ctx, &vec![-1; rows.len()], vec![rows.len() as u64]);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_validate_indexer_fp4_rows_shadow(
+            &ctx,
+            &encoder,
+            &values,
+            &scales,
+            &status,
+            rows.len(),
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        let actual = read_i32(&status);
+        assert_eq!(actual[0], 0);
+        for (index, case) in fixture.invalid_rows.iter().enumerate() {
+            let expected = match case.error_category.as_str() {
+                "noncanonical_scale_code" => 2,
+                "decoded_f32_overflow" => 3,
+                category => panic!("unexpected invalid-row category {category}"),
+            };
+            assert_eq!(actual[index + 1], expected, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn fp4_query_unpack_is_exact_for_codes_offsets_tails_and_128_queries() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const QUERIES: usize = 128;
+
+        fn expected_unit_bits(code: u8) -> u16 {
+            const MAGNITUDES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+            let magnitude = MAGNITUDES[usize::from(code & 0x07)];
+            let value = if code & 0x08 == 0 {
+                magnitude
+            } else {
+                -magnitude
+            };
+            half::f16::from_f32(value).to_bits()
+        }
+
+        fn packed_pattern(rows: usize) -> Vec<u8> {
+            (0..rows * INDEXER_FP4_VALUE_BYTES)
+                .map(|index| {
+                    let row = index / INDEXER_FP4_VALUE_BYTES;
+                    let byte = index % INDEXER_FP4_VALUE_BYTES;
+                    let low = ((row * 5 + byte * 3) % 16) as u8;
+                    let high = ((row * 11 + byte * 7 + 8) % 16) as u8;
+                    low | (high << 4)
+                })
+                .collect()
+        }
+
+        fn expected_units(packed: &[u8]) -> Vec<u16> {
+            packed
+                .iter()
+                .flat_map(|&byte| {
+                    [
+                        expected_unit_bits(byte & 0x0f),
+                        expected_unit_bits(byte >> 4),
+                    ]
+                })
+                .collect()
+        }
+
+        let tail_rows = 3;
+        let tail_packed = packed_pattern(tail_rows);
+        let tail_expected = expected_units(&tail_packed);
+        assert!(tail_expected.contains(&0x8000));
+        let tail_values = offset_i8(
+            &ctx,
+            &tail_packed,
+            vec![INDEXER_FP4_VALUE_BYTES as u64, tail_rows as u64],
+        );
+        let tail_status = offset_i32(&ctx, &[0; 3], vec![tail_rows as u64]);
+        let tail_units = offset_f16(
+            &ctx,
+            &vec![1.0; tail_rows * INDEXER_FP4_VALUES_PER_ROW],
+            vec![INDEXER_FP4_VALUES_PER_ROW as u64, tail_rows as u64],
+        );
+
+        let batched_rows = HEADS * QUERIES;
+        let batched_packed = packed_pattern(batched_rows);
+        let batched_expected = expected_units(&batched_packed);
+        let batched_values = offset_i8(
+            &ctx,
+            &batched_packed,
+            vec![INDEXER_FP4_VALUE_BYTES as u64, HEADS as u64, QUERIES as u64],
+        );
+        let batched_status = offset_i32(&ctx, &vec![0; batched_rows], vec![batched_rows as u64]);
+        let batched_first = offset_f16(
+            &ctx,
+            &vec![1.0; batched_rows * INDEXER_FP4_VALUES_PER_ROW],
+            vec![
+                INDEXER_FP4_VALUES_PER_ROW as u64,
+                HEADS as u64,
+                QUERIES as u64,
+            ],
+        );
+        let batched_second = offset_f16(
+            &ctx,
+            &vec![1.0; batched_rows * INDEXER_FP4_VALUES_PER_ROW],
+            vec![
+                INDEXER_FP4_VALUES_PER_ROW as u64,
+                HEADS as u64,
+                QUERIES as u64,
+            ],
+        );
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_unpack_indexer_fp4_units_shadow(
+            &ctx,
+            &encoder,
+            &tail_values,
+            &tail_status,
+            &tail_units,
+            tail_rows,
+        )
+        .unwrap();
+        for output in [&batched_first, &batched_second] {
+            encode_unpack_indexer_fp4_units_shadow(
+                &ctx,
+                &encoder,
+                &batched_values,
+                &batched_status,
+                output,
+                batched_rows,
+            )
+            .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        assert_eq!(read_f16_bits(&tail_units), tail_expected);
+        assert_eq!(read_f16_bits(&batched_first), batched_expected);
+        assert_eq!(
+            read_f16_bits(&batched_second),
+            read_f16_bits(&batched_first)
+        );
+    }
+
+    #[test]
+    fn fp4_matrix_shadow_matches_frozen_score_vectors_and_top2() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        let fixture = metal_fp4_fixture();
+        assert_eq!(fixture.score_cases.len(), 3);
+        for case in &fixture.score_cases {
+            assert_eq!(case.query_rows.len(), 2);
+            assert_eq!(case.key_rows.len(), 3);
+            let mut query_values = vec![0u8; HEADS * INDEXER_FP4_VALUE_BYTES];
+            let mut query_scales = vec![127u8; HEADS * INDEXER_FP4_SCALE_BYTES];
+            for (head, row) in case.query_rows.iter().enumerate() {
+                query_values[head * INDEXER_FP4_VALUE_BYTES..(head + 1) * INDEXER_FP4_VALUE_BYTES]
+                    .copy_from_slice(&row[..INDEXER_FP4_VALUE_BYTES]);
+                query_scales[head * INDEXER_FP4_SCALE_BYTES..(head + 1) * INDEXER_FP4_SCALE_BYTES]
+                    .copy_from_slice(&row[INDEXER_FP4_VALUE_BYTES..]);
+            }
+            let (key_values, key_scales) = split_fp4_rows(&case.key_rows);
+            let mut weights = vec![0.0f32; HEADS];
+            for (weight, &bits) in weights.iter_mut().zip(&case.scaled_head_weight_bits) {
+                *weight = f32::from_bits(bits);
+            }
+            let query_values = offset_i8(
+                &ctx,
+                &query_values,
+                vec![INDEXER_FP4_VALUE_BYTES as u64, HEADS as u64, 1],
+            );
+            let query_scales = offset_i8(
+                &ctx,
+                &query_scales,
+                vec![INDEXER_FP4_SCALE_BYTES as u64, HEADS as u64, 1],
+            );
+            let query_status = offset_i32(&ctx, &vec![0; HEADS], vec![HEADS as u64]);
+            let query_units = offset_f16(
+                &ctx,
+                &vec![0.0; HEADS * INDEXER_FP4_VALUES_PER_ROW],
+                vec![INDEXER_FP4_VALUES_PER_ROW as u64, HEADS as u64, 1],
+            );
+            let head_weights = offset_f32(&ctx, &weights, vec![HEADS as u64, 1]);
+            let key_values = offset_i8(
+                &ctx,
+                &key_values,
+                vec![INDEXER_FP4_VALUE_BYTES as u64, case.key_rows.len() as u64],
+            );
+            let key_scales = offset_i8(
+                &ctx,
+                &key_scales,
+                vec![INDEXER_FP4_SCALE_BYTES as u64, case.key_rows.len() as u64],
+            );
+            let visible_counts = offset_i32(&ctx, &[case.key_rows.len() as i32], vec![1]);
+            let first = offset_f32(&ctx, &[0.0; 3], vec![3, 1]);
+            let second = offset_f32(&ctx, &[0.0; 3], vec![3, 1]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_unpack_indexer_fp4_units_shadow(
+                &ctx,
+                &encoder,
+                &query_values,
+                &query_status,
+                &query_units,
+                HEADS,
+            )
+            .unwrap();
+            for output in [&first, &second] {
+                encode_lightning_indexer_scores_fp4_matrix_shadow(
+                    &ctx,
+                    &encoder,
+                    &query_units,
+                    &query_scales,
+                    &head_weights,
+                    &key_values,
+                    &key_scales,
+                    &visible_counts,
+                    output,
+                    case.key_rows.len(),
+                    1,
+                )
+                .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "{} command failed: {:?}",
+                case.name,
+                command.error()
+            );
+            let actual = read_f32(&first);
+            let repeat = read_f32(&second);
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                repeat
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{} repeat",
+                case.name
+            );
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                case.score_bits,
+                "{} score bits",
+                case.name
+            );
+            assert_eq!(
+                top_k_indices(&actual, 2).unwrap(),
+                case.top2,
+                "{} top2",
+                case.name
+            );
+            let query_rows = case
+                .query_rows
+                .iter()
+                .map(|row| fp4_row_from_bytes(row))
+                .collect::<Vec<_>>();
+            let key_rows = case
+                .key_rows
+                .iter()
+                .map(|row| fp4_row_from_bytes(row))
+                .collect::<Vec<_>>();
+            let oracle = packed_indexer_scores(
+                &query_rows,
+                &case
+                    .scaled_head_weight_bits
+                    .iter()
+                    .map(|&bits| f32::from_bits(bits))
+                    .collect::<Vec<_>>(),
+                &key_rows,
+            )
+            .unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                oracle
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn fp4_shadow_runs_pack_unpack_and_score_without_host_reconstruction() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const ROWS: usize = 9;
+        let query_inputs = (0..HEADS * INDEXER_FP4_VALUES_PER_ROW)
+            .map(|index| ((index * 17 + index / 29 + 5) % 257) as f32 * 0.0011 - 0.14)
+            .collect::<Vec<_>>();
+        let key_inputs = (0..ROWS * INDEXER_FP4_VALUES_PER_ROW)
+            .map(|index| {
+                let row = index / INDEXER_FP4_VALUES_PER_ROW;
+                ((index * 31 + row * 13 + 11) % 263) as f32 * 0.0013 - 0.17
+            })
+            .collect::<Vec<_>>();
+        let weights = (0..HEADS)
+            .map(|head| {
+                let magnitude = 0.001 + (head * 7 % 19) as f32 * 0.0004;
+                if head % 9 == 0 { -magnitude } else { magnitude }
+            })
+            .collect::<Vec<_>>();
+        let queries = offset_f32(
+            &ctx,
+            &query_inputs,
+            vec![INDEXER_FP4_VALUES_PER_ROW as u64, HEADS as u64, 1],
+        );
+        let query_values = offset_i8(
+            &ctx,
+            &vec![0xA5; HEADS * INDEXER_FP4_VALUE_BYTES],
+            vec![INDEXER_FP4_VALUE_BYTES as u64, HEADS as u64, 1],
+        );
+        let query_scales = offset_i8(
+            &ctx,
+            &vec![0xA5; HEADS * INDEXER_FP4_SCALE_BYTES],
+            vec![INDEXER_FP4_SCALE_BYTES as u64, HEADS as u64, 1],
+        );
+        let query_status = offset_i32(&ctx, &vec![-1; HEADS], vec![HEADS as u64]);
+        let query_units = offset_f16(
+            &ctx,
+            &vec![1.0; HEADS * INDEXER_FP4_VALUES_PER_ROW],
+            vec![INDEXER_FP4_VALUES_PER_ROW as u64, HEADS as u64, 1],
+        );
+        let keys = offset_f32(
+            &ctx,
+            &key_inputs,
+            vec![INDEXER_FP4_VALUES_PER_ROW as u64, ROWS as u64],
+        );
+        let key_values = offset_i8(
+            &ctx,
+            &vec![0xA5; ROWS * INDEXER_FP4_VALUE_BYTES],
+            vec![INDEXER_FP4_VALUE_BYTES as u64, ROWS as u64],
+        );
+        let key_scales = offset_i8(
+            &ctx,
+            &[0xA5; ROWS * INDEXER_FP4_SCALE_BYTES],
+            vec![INDEXER_FP4_SCALE_BYTES as u64, ROWS as u64],
+        );
+        let key_status = offset_i32(&ctx, &[-1; ROWS], vec![ROWS as u64]);
+        let head_weights = offset_f32(&ctx, &weights, vec![HEADS as u64, 1]);
+        let visible_counts = offset_i32(&ctx, &[ROWS as i32], vec![1]);
+        let scores = offset_f32(&ctx, &[0.0; ROWS], vec![ROWS as u64, 1]);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_pack_indexer_fp4_rows_shadow(
+            &ctx,
+            &encoder,
+            &queries,
+            &query_values,
+            &query_scales,
+            &query_status,
+            HEADS,
+        )
+        .unwrap();
+        encode_unpack_indexer_fp4_units_shadow(
+            &ctx,
+            &encoder,
+            &query_values,
+            &query_status,
+            &query_units,
+            HEADS,
+        )
+        .unwrap();
+        encode_pack_indexer_fp4_rows_shadow(
+            &ctx,
+            &encoder,
+            &keys,
+            &key_values,
+            &key_scales,
+            &key_status,
+            ROWS,
+        )
+        .unwrap();
+        encode_lightning_indexer_scores_fp4_matrix_shadow(
+            &ctx,
+            &encoder,
+            &query_units,
+            &query_scales,
+            &head_weights,
+            &key_values,
+            &key_scales,
+            &visible_counts,
+            &scores,
+            ROWS,
+            1,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        assert_eq!(read_i32(&query_status), vec![0; HEADS]);
+        assert_eq!(read_i32(&key_status), vec![0; ROWS]);
+
+        let query_rows = query_inputs
+            .chunks_exact(INDEXER_FP4_VALUES_PER_ROW)
+            .map(|row| pack_indexer_fp4_row(row).unwrap())
+            .collect::<Vec<_>>();
+        let key_rows = key_inputs
+            .chunks_exact(INDEXER_FP4_VALUES_PER_ROW)
+            .map(|row| pack_indexer_fp4_row(row).unwrap())
+            .collect::<Vec<_>>();
+        let expected = packed_indexer_scores(&query_rows, &weights, &key_rows).unwrap();
+        let actual = read_f32(&scores);
+        let squared_error = actual
+            .iter()
+            .zip(&expected)
+            .map(|(actual, expected)| f64::from(actual - expected).powi(2))
+            .sum::<f64>();
+        let reference_norm = expected
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum::<f64>();
+        let relative_rms = (squared_error / reference_norm).sqrt();
+        for (row, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+            let allowed = 2.0e-5 * expected.abs().max(1.0);
+            assert!(
+                (actual - expected).abs() <= allowed,
+                "row {row}: {actual} vs {expected}"
+            );
+        }
+        assert!(relative_rms <= 2.0e-5, "relative RMS {relative_rms}");
+    }
+
+    #[test]
+    fn fp4_matrix_shadow_covers_batched_queries_tails_offsets_and_envelope() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const ROWS: usize = 9;
+        const QUERIES: usize = 128;
+
+        let query_inputs = (0..QUERIES * HEADS * INDEXER_FP4_VALUES_PER_ROW)
+            .map(|index| {
+                let row = index / INDEXER_FP4_VALUES_PER_ROW;
+                let dimension = index % INDEXER_FP4_VALUES_PER_ROW;
+                let tag = (index * 19 + row * 7 + dimension * 11 + 3) % 257;
+                (tag as f32 - 128.0) * 0.0011
+            })
+            .collect::<Vec<_>>();
+        let query_rows = query_inputs
+            .chunks_exact(INDEXER_FP4_VALUES_PER_ROW)
+            .map(|row| pack_indexer_fp4_row(row).unwrap())
+            .collect::<Vec<_>>();
+        let key_inputs = (0..ROWS * INDEXER_FP4_VALUES_PER_ROW)
+            .map(|index| {
+                let row = index / INDEXER_FP4_VALUES_PER_ROW;
+                let dimension = index % INDEXER_FP4_VALUES_PER_ROW;
+                let tag = (index * 31 + row * 13 + dimension * 5 + 17) % 263;
+                (tag as f32 - 131.0) * 0.0013
+            })
+            .collect::<Vec<_>>();
+        let key_rows = key_inputs
+            .chunks_exact(INDEXER_FP4_VALUES_PER_ROW)
+            .map(|row| pack_indexer_fp4_row(row).unwrap())
+            .collect::<Vec<_>>();
+        let weights = (0..QUERIES * HEADS)
+            .map(|index| {
+                let magnitude = 0.001 + (index * 11 % 23) as f32 * 0.0003;
+                if index % 7 == 0 {
+                    -magnitude
+                } else {
+                    magnitude
+                }
+            })
+            .collect::<Vec<_>>();
+        let visible = (0..QUERIES)
+            .map(|query| [1, 7, 8, 9][query % 4])
+            .collect::<Vec<i32>>();
+
+        let query_bytes = query_rows
+            .iter()
+            .map(|row| row.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        let key_bytes = key_rows
+            .iter()
+            .map(|row| row.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        let (query_values, query_scales) = split_fp4_rows(&query_bytes);
+        let (key_values, key_scales) = split_fp4_rows(&key_bytes);
+        let query_values = offset_i8(
+            &ctx,
+            &query_values,
+            vec![INDEXER_FP4_VALUE_BYTES as u64, HEADS as u64, QUERIES as u64],
+        );
+        let query_scales = offset_i8(
+            &ctx,
+            &query_scales,
+            vec![INDEXER_FP4_SCALE_BYTES as u64, HEADS as u64, QUERIES as u64],
+        );
+        let query_status = offset_i32(
+            &ctx,
+            &vec![0; HEADS * QUERIES],
+            vec![(HEADS * QUERIES) as u64],
+        );
+        let query_units = offset_f16(
+            &ctx,
+            &vec![0.0; HEADS * QUERIES * INDEXER_FP4_VALUES_PER_ROW],
+            vec![
+                INDEXER_FP4_VALUES_PER_ROW as u64,
+                HEADS as u64,
+                QUERIES as u64,
+            ],
+        );
+        let head_weights = offset_f32(&ctx, &weights, vec![HEADS as u64, QUERIES as u64]);
+        let key_values = offset_i8(
+            &ctx,
+            &key_values,
+            vec![INDEXER_FP4_VALUE_BYTES as u64, ROWS as u64],
+        );
+        let key_scales = offset_i8(
+            &ctx,
+            &key_scales,
+            vec![INDEXER_FP4_SCALE_BYTES as u64, ROWS as u64],
+        );
+        let visible_counts = offset_i32(&ctx, &visible, vec![QUERIES as u64]);
+        let first = offset_f32(
+            &ctx,
+            &vec![0.0; ROWS * QUERIES],
+            vec![ROWS as u64, QUERIES as u64],
+        );
+        let second = offset_f32(
+            &ctx,
+            &vec![0.0; ROWS * QUERIES],
+            vec![ROWS as u64, QUERIES as u64],
+        );
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_unpack_indexer_fp4_units_shadow(
+            &ctx,
+            &encoder,
+            &query_values,
+            &query_status,
+            &query_units,
+            HEADS * QUERIES,
+        )
+        .unwrap();
+        for output in [&first, &second] {
+            encode_lightning_indexer_scores_fp4_matrix_shadow(
+                &ctx,
+                &encoder,
+                &query_units,
+                &query_scales,
+                &head_weights,
+                &key_values,
+                &key_scales,
+                &visible_counts,
+                output,
+                ROWS,
+                QUERIES,
+            )
+            .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+
+        let actual = read_f32(&first);
+        let repeat = read_f32(&second);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            repeat
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let mut squared_error = 0.0f64;
+        let mut reference_norm = 0.0f64;
+        let mut max_abs = 0.0f32;
+        for query in 0..QUERIES {
+            let query_start = query * HEADS;
+            let expected = packed_indexer_scores(
+                &query_rows[query_start..query_start + HEADS],
+                &weights[query_start..query_start + HEADS],
+                &key_rows,
+            )
+            .unwrap();
+            let visible_rows = visible[query] as usize;
+            for row in 0..ROWS {
+                let value = actual[query * ROWS + row];
+                if row >= visible_rows {
+                    assert_eq!(value, f32::NEG_INFINITY, "query {query} row {row}");
+                    continue;
+                }
+                let reference = expected[row];
+                let error = (value - reference).abs();
+                let allowed = 2.0e-5 * reference.abs().max(1.0);
+                assert!(
+                    error <= allowed,
+                    "query {query} row {row}: {value} vs {reference}, error {error} > {allowed}"
+                );
+                max_abs = max_abs.max(error);
+                squared_error += f64::from(error).powi(2);
+                reference_norm += f64::from(reference).powi(2);
+            }
+        }
+        let relative_rms = if reference_norm == 0.0 {
+            assert_eq!(squared_error, 0.0);
+            0.0
+        } else {
+            (squared_error / reference_norm).sqrt()
+        };
+        eprintln!(
+            "FP4 matrix shadow batched differential max_abs={max_abs:.9} rel_rms={relative_rms:.9}"
+        );
+        assert!(
+            relative_rms <= 2.0e-5,
+            "FP4 matrix shadow relative RMS {relative_rms}"
+        );
+    }
+
+    #[test]
+    fn fp4_matrix_shadow_preserves_selector_decisions_and_fallback() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const ROWS: usize = 1_025;
+        const QUERIES: usize = 3;
+        const TOP_K: usize = 512;
+
+        let mut query_values = vec![0u8; QUERIES * HEADS * INDEXER_FP4_VALUE_BYTES];
+        let query_scales = vec![127u8; QUERIES * HEADS * INDEXER_FP4_SCALE_BYTES];
+        query_values[0] = 2;
+        query_values[2 * HEADS * INDEXER_FP4_VALUE_BYTES] = 2;
+        let mut key_values = vec![0u8; ROWS * INDEXER_FP4_VALUE_BYTES];
+        for row in 0..ROWS {
+            key_values[row * INDEXER_FP4_VALUE_BYTES] = if row < 513 { 10 } else { 2 };
+        }
+        let key_scales = vec![127u8; ROWS * INDEXER_FP4_SCALE_BYTES];
+        let mut weights = vec![0.0f32; QUERIES * HEADS];
+        weights[0] = 1.0;
+        weights[HEADS] = 1.0;
+        weights[2 * HEADS] = f32::NAN;
+
+        let query_values = offset_i8(
+            &ctx,
+            &query_values,
+            vec![INDEXER_FP4_VALUE_BYTES as u64, HEADS as u64, QUERIES as u64],
+        );
+        let query_scales = offset_i8(
+            &ctx,
+            &query_scales,
+            vec![INDEXER_FP4_SCALE_BYTES as u64, HEADS as u64, QUERIES as u64],
+        );
+        let query_pack_status = offset_i32(
+            &ctx,
+            &vec![0; HEADS * QUERIES],
+            vec![(HEADS * QUERIES) as u64],
+        );
+        let query_units = offset_f16(
+            &ctx,
+            &vec![0.0; HEADS * QUERIES * INDEXER_FP4_VALUES_PER_ROW],
+            vec![
+                INDEXER_FP4_VALUES_PER_ROW as u64,
+                HEADS as u64,
+                QUERIES as u64,
+            ],
+        );
+        let head_weights = offset_f32(&ctx, &weights, vec![HEADS as u64, QUERIES as u64]);
+        let key_values = offset_i8(
+            &ctx,
+            &key_values,
+            vec![INDEXER_FP4_VALUE_BYTES as u64, ROWS as u64],
+        );
+        let key_scales = offset_i8(
+            &ctx,
+            &key_scales,
+            vec![INDEXER_FP4_SCALE_BYTES as u64, ROWS as u64],
+        );
+        let visible_counts = offset_i32(&ctx, &[ROWS as i32; QUERIES], vec![QUERIES as u64]);
+        let scores = MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+        let selected_mask =
+            MetalTensor::zeros_i32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+        let selected_ids =
+            MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap();
+        let selected_counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_unpack_indexer_fp4_units_shadow(
+            &ctx,
+            &encoder,
+            &query_values,
+            &query_pack_status,
+            &query_units,
+            HEADS * QUERIES,
+        )
+        .unwrap();
+        encode_lightning_indexer_scores_fp4_matrix_shadow(
+            &ctx,
+            &encoder,
+            &query_units,
+            &query_scales,
+            &head_weights,
+            &key_values,
+            &key_scales,
+            &visible_counts,
+            &scores,
+            ROWS,
+            QUERIES,
+        )
+        .unwrap();
+        encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &scores,
+            &visible_counts,
+            &selected_mask,
+            None,
+            &selected_ids,
+            &selected_counts,
+            &status,
+            ROWS,
+            ROWS,
+            TOP_K,
+            QUERIES,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+
+        let scores = read_f32(&scores);
+        assert!(scores[..513].iter().all(|score| *score == 0.0));
+        assert!(scores[513..ROWS].iter().all(|score| *score == 1.0));
+        assert!(scores[ROWS..2 * ROWS].iter().all(|score| *score == 0.0));
+        assert!(scores[2 * ROWS..].iter().all(|score| !score.is_finite()));
+        assert_eq!(read_i32(&status), vec![0, 0, 2]);
+        assert_eq!(read_i32(&selected_counts), vec![TOP_K as i32; QUERIES]);
+        let ids = read_i32(&selected_ids);
+        assert_eq!(&ids[..TOP_K], &(513..=1_024).collect::<Vec<i32>>());
+        let stable_tie = (0..TOP_K as i32).collect::<Vec<_>>();
+        assert_eq!(&ids[TOP_K..2 * TOP_K], &stable_tie);
+        assert_eq!(&ids[2 * TOP_K..], &stable_tie);
+    }
+
+    #[test]
+    fn fp4_matrix_shadow_geometry_is_checked_at_production_limits() {
+        assert!(validate_fp4_lightning_score_offsets(262_144, 128).is_ok());
+        assert!(validate_fp4_lightning_score_offsets(u32::MAX as usize, 1).is_err());
+        assert!(validate_fp4_matrix_score_geometry("fp4", 32, 256, 2_560).is_ok());
+        assert!(validate_fp4_matrix_score_geometry("fp4", 16, 256, 2_560).is_err());
+        assert!(validate_fp4_matrix_score_geometry("fp4", 32, 255, 2_560).is_err());
+        assert!(validate_fp4_matrix_score_geometry("fp4", 32, 256, 2_559).is_err());
+        assert!(validate_fp4_pack_geometry(32, 128, 596).is_ok());
+        assert!(validate_fp4_pack_geometry(16, 128, 596).is_err());
+        assert!(validate_fp4_pack_geometry(32, 127, 596).is_err());
+        assert!(validate_fp4_pack_geometry(32, 128, 595).is_err());
+    }
+
+    #[test]
     fn matrix_ceiling_lightning_scores_match_f16_cpu_oracle() {
         let Some(ctx) = metal_context() else {
             return;
@@ -18159,6 +19845,279 @@ mod tests {
         }
         eprintln!(
             "deepseek_v4 matrix_ceiling query_conversion_samples_ms={query_conversion_samples:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "focused production-shape FP4 shadow profiler; run explicitly with --nocapture"]
+    fn profile_lightning_fp4_matrix_shadow_at_far_context() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const DIM: usize = 128;
+        const MAX_ROWS: usize = 262_144;
+
+        fn timed_gpu<F>(ctx: &MetalContext, encode: F) -> f64
+        where
+            F: FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        {
+            let command = ctx.queue.commandBuffer().expect("profile command buffer");
+            let encoder = KernelEncoder::begin(&command);
+            encode(&encoder).expect("encode FP4 profiled phase");
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "FP4 profile command failed: {:?}",
+                command.error()
+            );
+            let elapsed_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            assert!(elapsed_ms.is_finite() && elapsed_ms > 0.0);
+            elapsed_ms
+        }
+
+        fn median_and_p95(mut samples: Vec<f64>) -> (f64, f64) {
+            samples.sort_by(f64::total_cmp);
+            let median = samples[samples.len() / 2];
+            let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+            (median, p95)
+        }
+
+        fn e2m1_unit(code: u8) -> f32 {
+            const MAGNITUDES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+            let magnitude = MAGNITUDES[usize::from(code & 0x07)];
+            if code & 0x08 == 0 {
+                magnitude
+            } else {
+                -magnitude
+            }
+        }
+
+        let query_values = (0..HEADS * DIM)
+            .map(|index| ((index * 17 + 3) % 113) as f32 * 0.0007 - 0.037)
+            .collect::<Vec<_>>();
+        let queries = offset_f32(&ctx, &query_values, vec![DIM as u64, HEADS as u64, 1]);
+        let query_fp4_values = MetalTensor::zeros_dtype(
+            &ctx,
+            vec![INDEXER_FP4_VALUE_BYTES as u64, HEADS as u64, 1],
+            GgmlType::I8,
+        )
+        .expect("allocate FP4 profile query values");
+        let query_fp4_scales = MetalTensor::zeros_dtype(
+            &ctx,
+            vec![INDEXER_FP4_SCALE_BYTES as u64, HEADS as u64, 1],
+            GgmlType::I8,
+        )
+        .expect("allocate FP4 profile query scales");
+        let query_pack_status = MetalTensor::zeros_i32(&ctx, vec![HEADS as u64])
+            .expect("allocate FP4 profile query status");
+        let query_fp4_units = MetalTensor::zeros_f16(
+            &ctx,
+            vec![INDEXER_FP4_VALUES_PER_ROW as u64, HEADS as u64, 1],
+        )
+        .expect("allocate FP4 profile query units");
+        let scale = 1.0 / ((HEADS * DIM) as f32).sqrt();
+        let head_weights = offset_f32(&ctx, &vec![scale; HEADS], vec![HEADS as u64, 1]);
+
+        let mut key_fp4_value_bytes = Vec::with_capacity(MAX_ROWS * INDEXER_FP4_VALUE_BYTES);
+        let mut key_fp4_scale_bytes = Vec::with_capacity(MAX_ROWS * INDEXER_FP4_SCALE_BYTES);
+        let mut key_f16_bits = Vec::with_capacity(MAX_ROWS * DIM);
+        for row in 0..MAX_ROWS {
+            for block in 0..4usize {
+                let scale_code = 124 + ((row + block * 3 + row / 251) % 7) as u8;
+                key_fp4_scale_bytes.push(scale_code);
+                let block_scale = f32::from_bits(u32::from(scale_code) << 23);
+                for pair in 0..16usize {
+                    let low = ((row * 13 + block * 7 + pair * 3 + row / 503) % 16) as u8;
+                    let high = ((row * 17 + block * 5 + pair * 11 + 1) % 16) as u8;
+                    key_fp4_value_bytes.push(low | (high << 4));
+                    key_f16_bits.push(half::f16::from_f32(e2m1_unit(low) * block_scale).to_bits());
+                    key_f16_bits.push(half::f16::from_f32(e2m1_unit(high) * block_scale).to_bits());
+                }
+            }
+        }
+        let current_keys = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&key_f16_bits),
+            vec![DIM as u64, MAX_ROWS as u64],
+            GgmlType::F16,
+        )
+        .expect("allocate FP4 profile decoded keys");
+        let key_fp4_values = offset_i8(
+            &ctx,
+            &key_fp4_value_bytes,
+            vec![INDEXER_FP4_VALUE_BYTES as u64, MAX_ROWS as u64],
+        );
+        let key_fp4_scales = offset_i8(
+            &ctx,
+            &key_fp4_scale_bytes,
+            vec![INDEXER_FP4_SCALE_BYTES as u64, MAX_ROWS as u64],
+        );
+        let current_scores = MetalTensor::zeros_f32(&ctx, vec![MAX_ROWS as u64, 1])
+            .expect("allocate current FP4 profile scores");
+        let fp4_scores = MetalTensor::zeros_f32(&ctx, vec![MAX_ROWS as u64, 1])
+            .expect("allocate FP4 shadow profile scores");
+
+        let incremental_input = queries.view_subrange(0, vec![DIM as u64, 1]);
+        let incremental_values =
+            i8_prefix(&query_fp4_values, vec![INDEXER_FP4_VALUE_BYTES as u64, 1]);
+        let incremental_scales =
+            i8_prefix(&query_fp4_scales, vec![INDEXER_FP4_SCALE_BYTES as u64, 1]);
+        let incremental_status = query_pack_status.view_subrange(0, vec![1]);
+        let incremental_pack = |encoder: &KernelEncoder| {
+            encode_pack_indexer_fp4_rows_shadow(
+                &ctx,
+                encoder,
+                &incremental_input,
+                &incremental_values,
+                &incremental_scales,
+                &incremental_status,
+                1,
+            )
+        };
+        for _ in 0..5 {
+            timed_gpu(&ctx, incremental_pack);
+        }
+        let incremental_samples = (0..20)
+            .map(|_| timed_gpu(&ctx, incremental_pack))
+            .collect::<Vec<_>>();
+        let (incremental_ms, incremental_p95_ms) = median_and_p95(incremental_samples.clone());
+        assert!(
+            incremental_ms <= 0.020,
+            "incremental FP4 K pack median {incremental_ms:.6} ms"
+        );
+        assert!(
+            incremental_p95_ms <= 0.030,
+            "incremental FP4 K pack p95 {incremental_p95_ms:.6} ms"
+        );
+
+        for row_count in [16_384usize, 65_536, MAX_ROWS] {
+            let visible_counts = offset_i32(&ctx, &[row_count as i32], vec![1]);
+            let current_key_rows =
+                current_keys.view_subrange(0, vec![DIM as u64, row_count as u64]);
+            let fp4_key_value_rows = i8_prefix(
+                &key_fp4_values,
+                vec![INDEXER_FP4_VALUE_BYTES as u64, row_count as u64],
+            );
+            let fp4_key_scale_rows = i8_prefix(
+                &key_fp4_scales,
+                vec![INDEXER_FP4_SCALE_BYTES as u64, row_count as u64],
+            );
+            let current_score_rows = current_scores.view_subrange(0, vec![row_count as u64, 1]);
+            let fp4_score_rows = fp4_scores.view_subrange(0, vec![row_count as u64, 1]);
+            let current = |encoder: &KernelEncoder| {
+                encode_lightning_indexer_scores_f16(
+                    &ctx,
+                    encoder,
+                    &queries,
+                    &head_weights,
+                    &current_key_rows,
+                    &visible_counts,
+                    &current_score_rows,
+                    HEADS,
+                    DIM,
+                    row_count,
+                    1,
+                )
+            };
+            let fp4 = |encoder: &KernelEncoder| {
+                encode_pack_indexer_fp4_rows_shadow(
+                    &ctx,
+                    encoder,
+                    &queries,
+                    &query_fp4_values,
+                    &query_fp4_scales,
+                    &query_pack_status,
+                    HEADS,
+                )?;
+                encode_unpack_indexer_fp4_units_shadow(
+                    &ctx,
+                    encoder,
+                    &query_fp4_values,
+                    &query_pack_status,
+                    &query_fp4_units,
+                    HEADS,
+                )?;
+                encode_lightning_indexer_scores_fp4_matrix_shadow(
+                    &ctx,
+                    encoder,
+                    &query_fp4_units,
+                    &query_fp4_scales,
+                    &head_weights,
+                    &fp4_key_value_rows,
+                    &fp4_key_scale_rows,
+                    &visible_counts,
+                    &fp4_score_rows,
+                    row_count,
+                    1,
+                )
+            };
+
+            for _ in 0..5 {
+                timed_gpu(&ctx, current);
+                timed_gpu(&ctx, fp4);
+            }
+            let current_before_samples = (0..20)
+                .map(|_| timed_gpu(&ctx, current))
+                .collect::<Vec<_>>();
+            let fp4_samples = (0..20).map(|_| timed_gpu(&ctx, fp4)).collect::<Vec<_>>();
+            let current_after_samples = (0..20)
+                .map(|_| timed_gpu(&ctx, current))
+                .collect::<Vec<_>>();
+            let (current_before_ms, current_before_p95_ms) =
+                median_and_p95(current_before_samples.clone());
+            let (fp4_ms, fp4_p95_ms) = median_and_p95(fp4_samples.clone());
+            let (current_after_ms, current_after_p95_ms) =
+                median_and_p95(current_after_samples.clone());
+            let current_midpoint_ms = (current_before_ms + current_after_ms) * 0.5;
+            let control_drift = 2.0 * (current_before_ms - current_after_ms).abs()
+                / (current_before_ms + current_after_ms);
+            assert!(
+                control_drift <= 0.05,
+                "invalid FP4 campaign: {row_count} row control drift {:.2}% exceeds 5%",
+                control_drift * 100.0
+            );
+            let saving_ms = current_midpoint_ms - fp4_ms;
+            assert_eq!(read_i32(&query_pack_status), vec![0; HEADS]);
+
+            eprintln!(
+                "deepseek_v4 fp4_shadow rows={row_count} token_equivalent={} current_before_ms={current_before_ms:.3} current_before_p95_ms={current_before_p95_ms:.3} fp4_pack_unpack_score_ms={fp4_ms:.3} fp4_pack_unpack_score_p95_ms={fp4_p95_ms:.3} current_after_ms={current_after_ms:.3} current_after_p95_ms={current_after_p95_ms:.3} control_drift={control_drift:.6} saving_ms={saving_ms:.3}",
+                row_count * 4,
+            );
+            eprintln!(
+                "deepseek_v4 fp4_shadow current_before_samples_ms={current_before_samples:?}"
+            );
+            eprintln!("deepseek_v4 fp4_shadow candidate_samples_ms={fp4_samples:?}");
+            eprintln!("deepseek_v4 fp4_shadow current_after_samples_ms={current_after_samples:?}");
+
+            match row_count {
+                16_384 => assert!(
+                    fp4_ms - current_midpoint_ms <= 0.05,
+                    "16K FP4 shadow regressed by {:.3} ms",
+                    fp4_ms - current_midpoint_ms
+                ),
+                65_536 => assert!(
+                    saving_ms >= 0.15,
+                    "65K FP4 shadow saved only {saving_ms:.3} ms"
+                ),
+                MAX_ROWS => {
+                    assert!(
+                        saving_ms >= 0.80,
+                        "terminal FP4 shadow saved only {saving_ms:.3} ms"
+                    );
+                    assert!(fp4_ms <= 1.30, "terminal FP4 shadow median {fp4_ms:.3} ms");
+                    assert!(
+                        fp4_p95_ms < current_before_ms && fp4_p95_ms < current_after_ms,
+                        "terminal FP4 p95 {fp4_p95_ms:.3} is not below both current medians {current_before_ms:.3}/{current_after_ms:.3}"
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+        eprintln!(
+            "deepseek_v4 fp4_shadow incremental_pack_ms={incremental_ms:.6} incremental_pack_p95_ms={incremental_p95_ms:.6} incremental_samples_ms={incremental_samples:?}"
         );
     }
 

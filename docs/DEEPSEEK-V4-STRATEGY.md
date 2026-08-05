@@ -1722,10 +1722,25 @@ to 0.518-0.519 ms/layer across two campaigns; terminal saving is
 0.008 ms. It also clears the shallower frozen gates and repeats bit-for-bit.
 This establishes about 1.585 ms/layer of available schedule budget and
 justifies testing whether packed decode fits inside it; it does not prove that
-it will. The probe is not the paper contract and has no production caller. The
-next experiment must quantize both Q and K using the repo-local 68-byte scalar
-envelope that implements the official value/scale semantics, then compare
-against its packed oracle before changing cache or snapshot ABI.
+it will. The probe is not the paper contract and has no production caller.
+
+The official packed-semantic shadow now answers that question. Four simdgroups
+pack one post-Hadamard row under exact BF16-before-amax semantics into separate
+raw-byte value and scale planes. The 68-byte scalar row remains a fixture
+envelope, not a cache layout. The first scorer decoded all 64 packed Q heads in
+every eight-row K tile and KILLed at 1.634 ms terminal, only 0.492 ms/layer
+faster than current. The admitted schedule decodes authoritative packed Q once
+into a transient 16 KiB/query F16 unit-value slab while K remains packed in the
+matrix scan. Q scales remain separate and block rescaling uses one combined
+power-of-two exponent.
+
+Two valid campaigns measure terminal current/FP4/current
+`2.127/0.841/2.126` and `2.127/0.841/2.124` ms, saving 1.285/1.284 ms/layer;
+candidate p95 is 0.842/0.842 ms. Q pack and unpack are inside the timed arm, and
+one-row K publication packing is 0.0134-0.0137 ms. Every primitive byte,
+malformed-row status, fixture score, selector decision, tail, offset, and repeat
+gate passes. This promotes a test-only schedule, not a cache: synthetic K is
+prepacked, status-0 planes are trusted, and F16 snapshot v1 is untouched.
 
 The pinned llama.cpp depth command is not a free decode-only bracket. Its
 `--n-depth` implementation executes `test_prompt(n_depth)` and serializes the
@@ -1865,9 +1880,10 @@ Gate:
 
 Broader S6 work remains:
 
-- Implement the official FP4 indexer as a shadow Metal pack/score path, then
-  migrate the cache only after packed decisions and whole-token timing clear.
-  Pack the remaining intended mixed FP8/BF16 attention cache independently.
+- Carry the official FP4 shadow into a real-weight status-carrying sidecar while
+  retaining F16 history as the differential. Migrate paged K and snapshot v2
+  only after whole-token decisions, quality, and timing clear. Pack the
+  remaining intended mixed FP8/BF16 attention cache independently.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention. All-slot routed experts have closed the first measured MoE
   boundary without changing reduction lineage.
@@ -1878,8 +1894,9 @@ Broader S6 work remains:
   product contract.
 - Preserve promoted online singleton HCA and the exact packed/legacy tiled
   differential. Defer heads8/rows16 split-K while HCA remains below CSA; reopen
-  packed/FP4 Lightning scoring first under its own numerical contract. The
-  scalar scorer and bitwise selector also remain executable differentials.
+  multi-group exact selection after the real-weight FP4 sidecar, because the
+  admitted 0.841 ms scorer now sits below the retained 1.875 ms selector. The
+  scalar scorer and bitwise selector remain executable differentials.
 
 Gates:
 
@@ -1963,13 +1980,13 @@ noise without reducing technical risk. Revisit after S5.
    exact radix4 selector from row 513 rather than entering the retired scalar
    positions-2,051-through-4,095 cliff.
 5. Preserve the promoted cooperative Lightning scorer and four-bit radix
-   selector, including their scalar and bitwise differentials. The idealized
-   matrix-score ceiling is now established but remains test-only. The official
-   scalar Q/K FP4 contract is frozen at fixture SHA-256
+   selector, including their scalar and bitwise differentials. The official
+   scalar Q/K FP4 contract remains frozen at fixture SHA-256
    `0e5e2b251a960d417e7977608a363b83e072e2d90bc286cc52820b0ea7dc2b1f`;
-   implement its Metal pack/score shadow next. Do not migrate snapshots until
-   packed-semantic decisions clear, and require a new whole-token packet rather
-   than extrapolating only from microprofiles.
+   preserve the packed matrix shadow at 0.841 ms terminal, including its exact
+   pack, unit-unpack, score, status, and query-reuse gates. Build a real-weight
+   status-carrying K sidecar next and require a whole-token decision/quality
+   packet. Do not migrate paged K or snapshots from microprofiles alone.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine

@@ -318,6 +318,15 @@ struct ds4_indexer_score_args {
     uint query_count;
 };
 
+struct ds4_indexer_fp4_rows_args {
+    uint row_count;
+};
+
+struct ds4_indexer_fp4_contract_args {
+    uint e2m1_count;
+    uint scale_count;
+};
+
 struct ds4_indexer_select_args {
     uint row_capacity;
     uint top_k;
@@ -363,6 +372,55 @@ static inline float ds4_bf16_roundtrip(float value) {
     uint bits = as_type<uint>(value);
     bits += 0x00007fffu + ((bits >> 16) & 1u);
     return as_type<float>(bits & 0xffff0000u);
+}
+
+static inline uchar ds4_indexer_e2m1_code(float value) {
+    const float absolute = min(abs(value), 6.0f);
+    const uchar magnitude = absolute > 5.0f ? 7u
+        : absolute >= 3.5f ? 6u
+        : absolute > 2.5f ? 5u
+        : absolute >= 1.75f ? 4u
+        : absolute > 1.25f ? 3u
+        : absolute >= 0.75f ? 2u
+        : absolute > 0.25f ? 1u
+        : 0u;
+    return magnitude | uchar((as_type<uint>(value) >> 28u) & 0x08u);
+}
+
+static inline half ds4_indexer_e2m1_unit(uchar code) {
+    half magnitude = 0.0h;
+    switch (code & 0x07u) {
+        case 1u: magnitude = 0.5h; break;
+        case 2u: magnitude = 1.0h; break;
+        case 3u: magnitude = 1.5h; break;
+        case 4u: magnitude = 2.0h; break;
+        case 5u: magnitude = 3.0h; break;
+        case 6u: magnitude = 4.0h; break;
+        case 7u: magnitude = 6.0h; break;
+        default: break;
+    }
+    return (code & 0x08u) == 0u ? magnitude : -magnitude;
+}
+
+static inline uchar ds4_indexer_ue8m0_scale_code(
+        float maximum,
+        thread uint & status) {
+    const float amax_floor = as_type<float>(0x01c00000u);
+    const float one_sixth = as_type<float>(0x3e2aaaabu);
+    const float ratio = max(maximum, amax_floor) * one_sixth;
+    const uint bits = as_type<uint>(ratio);
+    const uint exponent = (bits >> 23u) & 0xffu;
+    const uint mantissa = bits & 0x007fffffu;
+    const uint code = exponent + uint(mantissa != 0u);
+    if (exponent == 0u || exponent == 0xffu || code < 1u || code > 253u) {
+        status = 2u;
+        return 0u;
+    }
+    return uchar(code);
+}
+
+static inline float ds4_indexer_ue8m0_scale(uchar code) {
+    return as_type<float>(uint(code) << 23u);
 }
 
 static inline float ds4_power_of_two(int exponent) {
@@ -1071,6 +1129,157 @@ kernel void kernel_deepseek_v4_scale_f32_in_place(
     values[index] *= args.scale;
 }
 
+kernel void kernel_deepseek_v4_indexer_fp4_contract_primitives(
+        constant ds4_indexer_fp4_contract_args & args [[buffer(0)]],
+        device const float * e2m1_values [[buffer(1)]],
+        device const float * scale_maxima [[buffer(2)]],
+        device uchar * e2m1_codes [[buffer(3)]],
+        device uchar * scale_codes [[buffer(4)]],
+        device int * scale_status [[buffer(5)]],
+        uint index [[thread_position_in_grid]]) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    if (index < args.e2m1_count) {
+        e2m1_codes[index] = ds4_indexer_e2m1_code(e2m1_values[index]);
+    }
+    if (index < args.scale_count) {
+        uint status = 0u;
+        scale_codes[index] = ds4_indexer_ue8m0_scale_code(scale_maxima[index], status);
+        scale_status[index] = int(status);
+    }
+}
+
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_deepseek_v4_pack_indexer_fp4_rows_shadow(
+        constant ds4_indexer_fp4_rows_args & args [[buffer(0)]],
+        device const float * input [[buffer(1)]],
+        device uchar * packed_values [[buffer(2)]],
+        device uchar * packed_scales [[buffer(3)]],
+        device int * status [[buffer(4)]],
+        uint group [[threadgroup_position_in_grid]],
+        ushort thread_index [[thread_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]]) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    const uint row = group;
+    if (row >= args.row_count) return;
+
+    threadgroup float rounded_values[128];
+    threadgroup uchar row_values[64];
+    threadgroup uchar row_scales[4];
+    threadgroup uint block_status[4];
+    const uint input_base = row * 128u;
+
+    const uint block = uint(simdgroup);
+    const uint dimension = block * 32u + uint(lane);
+    const uint input_bits = as_type<uint>(input[input_base + dimension]);
+    uint local_status = (input_bits & 0x7f800000u) == 0x7f800000u ? 1u : 0u;
+    uint rounded_bits = input_bits;
+    rounded_bits += 0x00007fffu + ((rounded_bits >> 16u) & 1u);
+    rounded_bits &= 0xffff0000u;
+    if ((rounded_bits & 0x7f800000u) == 0x7f800000u) local_status = 1u;
+    const float rounded = local_status == 0u ? as_type<float>(rounded_bits) : 0.0f;
+    rounded_values[dimension] = rounded;
+    const uint reduced_status = simd_max(local_status);
+    const float maximum = simd_max(as_type<float>(as_type<uint>(rounded) & 0x7fffffffu));
+    if (lane == 0) {
+        uint scale_status = reduced_status;
+        const uchar scale_code = scale_status == 0u
+            ? ds4_indexer_ue8m0_scale_code(maximum, scale_status)
+            : 0u;
+        block_status[block] = scale_status;
+        row_scales[block] = scale_code;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint local_overflow = 0u;
+    if (lane < 16 && block_status[block] == 0u) {
+        const uchar scale_code = row_scales[block];
+        const float scale = ds4_indexer_ue8m0_scale(scale_code);
+        const float inverse_scale = as_type<float>((254u - uint(scale_code)) << 23u);
+        const uint pair_dimension = block * 32u + uint(lane) * 2u;
+        const uchar low = ds4_indexer_e2m1_code(
+            rounded_values[pair_dimension] * inverse_scale);
+        const uchar high = ds4_indexer_e2m1_code(
+            rounded_values[pair_dimension + 1u] * inverse_scale);
+        if (!isfinite(float(ds4_indexer_e2m1_unit(low)) * scale)
+                || !isfinite(float(ds4_indexer_e2m1_unit(high)) * scale)) {
+            local_overflow = 1u;
+        }
+        row_values[block * 16u + uint(lane)] = low | uchar(high << 4u);
+    }
+    const uint block_overflow = simd_max(local_overflow);
+    if (lane == 0 && block_status[block] == 0u && block_overflow != 0u) {
+        block_status[block] = 3u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint row_status = 0u;
+    for (uint candidate = 1u; candidate <= 3u; ++candidate) {
+        for (uint index = 0u; index < 4u; ++index) {
+            if (row_status == 0u && block_status[index] == candidate) row_status = candidate;
+        }
+    }
+    if (thread_index == 0) status[row] = int(row_status);
+    if (row_status != 0u) return;
+    if (thread_index < 64) packed_values[row * 64u + uint(thread_index)] = row_values[thread_index];
+    if (thread_index < 4) packed_scales[row * 4u + uint(thread_index)] = row_scales[thread_index];
+}
+
+kernel void kernel_deepseek_v4_unpack_indexer_fp4_units_shadow(
+        constant ds4_indexer_fp4_rows_args & args [[buffer(0)]],
+        device const uchar * packed_values [[buffer(1)]],
+        device const int * status [[buffer(2)]],
+        device half * units [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    const uint row = index / 128u;
+    const uint dimension = index - row * 128u;
+    if (row >= args.row_count) return;
+    if (status[row] != 0) {
+        units[index] = 0.0h;
+        return;
+    }
+    const uchar packed = packed_values[row * 64u + dimension / 2u];
+    const uchar code = (dimension & 1u) == 0u ? packed & 0x0fu : packed >> 4u;
+    units[index] = ds4_indexer_e2m1_unit(code);
+}
+
+kernel void kernel_deepseek_v4_validate_indexer_fp4_rows_shadow(
+        constant ds4_indexer_fp4_rows_args & args [[buffer(0)]],
+        device const uchar * packed_values [[buffer(1)]],
+        device const uchar * packed_scales [[buffer(2)]],
+        device int * status [[buffer(3)]],
+        uint row [[thread_position_in_grid]]) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    if (row >= args.row_count) return;
+    uint row_status = 0u;
+    for (uint block = 0u; block < 4u; ++block) {
+        const uchar scale_code = packed_scales[row * 4u + block];
+        if (scale_code < 1u || scale_code > 253u) {
+            row_status = 2u;
+            break;
+        }
+        const float scale = ds4_indexer_ue8m0_scale(scale_code);
+        for (uint pair = 0u; pair < 16u; ++pair) {
+            const uchar packed = packed_values[row * 64u + block * 16u + pair];
+            for (uint lane = 0u; lane < 2u; ++lane) {
+                const uchar code = lane == 0u ? packed & 0x0fu : packed >> 4u;
+                if (!isfinite(float(ds4_indexer_e2m1_unit(code)) * scale)) {
+                    row_status = 3u;
+                    break;
+                }
+            }
+            if (row_status != 0u) break;
+        }
+        if (row_status != 0u) break;
+    }
+    status[row] = int(row_status);
+}
+
 kernel void kernel_deepseek_v4_lightning_indexer_scores_f16(
         constant ds4_indexer_score_args & args [[buffer(0)]],
         device const float * queries [[buffer(1)]],
@@ -1217,6 +1426,119 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling(
                 for (uint head = 0u; head < 64u; ++head) {
                     score += max(head_dots[head * 8u + local_row], 0.0f)
                         * head_weights[weight_base + head];
+                }
+                scores[score_index] = score;
+            }
+        }
+    }
+}
+
+// Test-only packed-semantic shadow. Values and scales are separate raw-byte
+// planes; this deliberately does not define the eventual paged cache ABI.
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_deepseek_v4_lightning_indexer_scores_fp4_matrix_shadow(
+        constant ds4_indexer_score_args & args [[buffer(0)]],
+        device const half * query_units [[buffer(1)]],
+        device const uchar * query_scales [[buffer(2)]],
+        device const float * head_weights [[buffer(3)]],
+        device const uchar * key_values [[buffer(4)]],
+        device const uchar * key_scales [[buffer(5)]],
+        device const int * visible_counts [[buffer(6)]],
+        device float * scores [[buffer(7)]],
+        threadgroup half * staged_keys [[threadgroup(0)]],
+        threadgroup float * block_dots [[threadgroup(1)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort thread_index [[thread_index_in_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]]) {
+    const uint rows_per_group = 8u;
+    const uint row_base = group.x * rows_per_group;
+    const uint query = group.y;
+    if (query >= args.query_count) return;
+    const int visible = visible_counts[query];
+    float first_accumulator = 0.0f;
+    float second_accumulator = 0.0f;
+
+    for (uint block = 0u; block < 4u; ++block) {
+        for (uint element = uint(thread_index); element < 8u * 32u; element += 256u) {
+            const uint local_row = element / 32u;
+            const uint dimension = element - local_row * 32u;
+            const uint row = row_base + local_row;
+            const bool row_visible = visible >= 0 && row < args.row_capacity
+                && row < uint(visible);
+            uchar code = 0u;
+            if (row_visible) {
+                const uint byte_index = row * 64u + block * 16u + dimension / 2u;
+                const uchar packed = key_values[byte_index];
+                code = (dimension & 1u) == 0u ? packed & 0x0fu : packed >> 4u;
+            }
+            staged_keys[dimension * 8u + local_row] = ds4_indexer_e2m1_unit(code);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        const uint head_base = uint(simdgroup) * 8u;
+        const uint query_base = (query * 64u + head_base) * 128u + block * 32u;
+        simdgroup_float8x8 dots = make_filled_simdgroup_matrix<float, 8>(0.0f);
+        for (uint dimension = 0u; dimension < 32u; dimension += 8u) {
+            simdgroup_half8x8 query_tile;
+            simdgroup_half8x8 key_tile;
+            simdgroup_load(
+                query_tile,
+                query_units + query_base + dimension,
+                128u,
+                0u,
+                false);
+            simdgroup_load(key_tile, staged_keys + dimension * 8u, 8u, 0u, false);
+            simdgroup_multiply_accumulate(dots, query_tile, key_tile, dots);
+        }
+        simdgroup_store(dots, block_dots + head_base * 8u, 8u, 0u, false);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+            for (uint cell = uint(thread_index); cell < 64u * 8u; cell += 256u) {
+                const uint head = cell / 8u;
+                const uint local_row = cell - head * 8u;
+                const uint row = row_base + local_row;
+                const bool row_visible = visible >= 0 && row < args.row_capacity
+                    && row < uint(visible);
+                float scaled_dot = 0.0f;
+                if (row_visible) {
+                    const int exponent = int(query_scales[(query * 64u + head) * 4u + block])
+                        + int(key_scales[row * 4u + block]) - 254;
+                    scaled_dot = ldexp(block_dots[cell], exponent);
+                }
+                if (cell < 256u) {
+                    first_accumulator = first_accumulator + scaled_dot;
+                } else {
+                    second_accumulator = second_accumulator + scaled_dot;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    block_dots[uint(thread_index)] = first_accumulator;
+    block_dots[uint(thread_index) + 256u] = second_accumulator;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (thread_index < 8u) {
+        const uint local_row = uint(thread_index);
+        const uint row = row_base + local_row;
+        if (row < args.row_capacity) {
+            const uint score_index = query * args.row_capacity + row;
+            if (visible < 0 || row >= uint(visible)) {
+                scores[score_index] = -INFINITY;
+            } else {
+                float score = 0.0f;
+                {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+                    for (uint head = 0u; head < 64u; ++head) {
+                        const float contribution = max(block_dots[head * 8u + local_row], 0.0f)
+                            * head_weights[query * 64u + head];
+                        score = score + contribution;
+                    }
                 }
                 scores[score_index] = score;
             }

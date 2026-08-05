@@ -255,12 +255,21 @@ controls at 1.874/2.040 ms. All-tied medians are 0.907/1.075 versus
 2.025/2.203 ms. Candidate p95 remains below 1.14 ms and every full output is
 exact. This qualifies the topology, not a production dispatch switch.
 
+The model-free crossover is now frozen. Equal-capacity mixed/tied output first
+wins at 98,304 rows, but tied GPU/wall savings there are only 0.059/0.059 ms and
+remain 0.264/0.268 ms at 131,072. At 196,608 visible rows, every measured target
+capacity clears the 0.50 ms bound: tied savings are 0.691/0.677 ms at capacity
+196,608, 0.641/0.635 at decimal-million capacity 250,112, and 0.627/0.638 at
+capacity 262,144. A 262,144-row session at only 131,072 visible rows has just
+0.122/0.103 ms tied headroom, so visibility alone is insufficient.
+
 Force-ranked queue:
 
 1. **Integrate exact multi-group selection experimentally.** First measure a
-   model-free visible-row crossover against radix4. Then add session-owned
-   scratch, memory accounting, and a wrap-safe generation owner behind an
-   eligible singleton-only policy; packed, shallow, and ranked-output paths
+   session-owned scratch plan, memory accounting, and a wrap-safe generation
+   owner behind explicit opt-in. Eligibility is Q=1/K=512,
+   `visible <= capacity <= 262144`, `visible >= 196608`, and
+   `visible >= capacity - capacity / 4`; packed, shallow, and ranked-output paths
    remain current. Require exact per-layer outputs and final product state plus
    at least 0.50 ms times eligible layers of GPU and wall saving before default.
    Keep the current F16 scorer authoritative.

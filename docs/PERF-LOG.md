@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Multi-Group Crossover GO
+
+Status: model-free crossover map `GO`; freeze a narrow experimental eligibility
+predicate. Production routing remains `HOLD` until the same gate runs through
+an integrated, off-by-default seam.
+
+- Compare exact current/candidate/current output across 13 capacity/visibility
+  cells and mixed/all-tied scores. Every mask, ID, count, and status remains
+  exact; candidate calls carry fresh nonzero generations.
+- Equal-capacity selection first wins both mixed and tied at 98,304 rows, but
+  tied savings are only 0.059/0.059 ms GPU/wall. At 131,072 rows they reach only
+  0.264/0.268 ms, below the frozen production headroom.
+- At 196,608 visible rows, the full candidate clears 0.50 ms in every measured
+  target capacity: tied GPU/wall savings are 0.691/0.677 ms at capacity 196,608,
+  0.627/0.638 at 262,144, and 0.641/0.635 at decimal-million capacity 250,112.
+- The split cells reject visibility-only routing. Capacity/visible 262,144/
+  65,536 loses 0.372/0.399 ms tied; 262,144/131,072 has only 0.122/0.103 ms
+  tied saving and one unstable wall bracket.
+
+Decision: require explicit opt-in, Q=1, K=512, visible no greater than capacity,
+capacity at most 262,144, visible at least 196,608, and visible at least
+`capacity - capacity / 4`. Implement session scratch and generation ownership
+behind that seam, then rerun 24-sample exact integrated gates at capacities
+196,608/250,112/262,144. Evidence:
+`docs/bench/2026-08-05-dsv4-multigroup-crossover/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Multi-Group Full Selector GO
 
 Status: test-only 32-group, 18-dispatch Phase B `GO`; experimental production

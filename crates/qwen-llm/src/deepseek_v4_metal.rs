@@ -19526,6 +19526,232 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "focused multi-group selector crossover map; run explicitly with --nocapture"]
+    fn profile_multigroup_selector_crossover() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const TOP_K: usize = 512;
+        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+        const SAMPLES: usize = 16;
+        const CELLS: &[(usize, usize)] = &[
+            (16_384, 16_384),
+            (32_768, 32_768),
+            (49_152, 49_152),
+            (65_536, 65_536),
+            (98_304, 98_304),
+            (131_072, 131_072),
+            (196_608, 196_608),
+            (262_144, 262_144),
+            (131_072, 65_536),
+            (262_144, 65_536),
+            (262_144, 131_072),
+            (262_144, 196_608),
+            (250_112, 196_608),
+        ];
+
+        fn timed_gpu_wall<F>(ctx: &MetalContext, encode: F) -> (f64, f64)
+        where
+            F: FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        {
+            let started = std::time::Instant::now();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode(&encoder).unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            assert!(command.error().is_none(), "{:?}", command.error());
+            let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            assert!(gpu_ms.is_finite() && gpu_ms > 0.0);
+            assert!(wall_ms.is_finite() && wall_ms > 0.0);
+            (gpu_ms, wall_ms)
+        }
+
+        fn median(samples: &[f64]) -> f64 {
+            let mut sorted = samples.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            if sorted.len().is_multiple_of(2) {
+                (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) * 0.5
+            } else {
+                sorted[sorted.len() / 2]
+            }
+        }
+
+        for (cell_index, &(capacity, visible_rows)) in CELLS.iter().enumerate() {
+            assert!(visible_rows <= capacity && visible_rows > TOP_K);
+            for tied in [false, true] {
+                let case = if tied { "tied" } else { "mixed" };
+                let values = if tied {
+                    vec![0.0f32; capacity]
+                } else {
+                    (0..capacity)
+                        .map(|row| {
+                            let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
+                            bucket as f32 * 0.0003 - 1.1
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let scores = offset_f32(&ctx, &values, vec![capacity as u64, 1]);
+                let visible = offset_i32(&ctx, &[visible_rows as i32], vec![1]);
+                let current_mask = MetalTensor::zeros_i32(&ctx, vec![capacity as u64, 1]).unwrap();
+                let current_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+                let current_count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+                let current_status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+                let records = MetalTensor::zeros_i32(
+                    &ctx,
+                    vec![
+                        DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+                        GROUPS as u64,
+                    ],
+                )
+                .unwrap();
+                let partition_plan = MetalTensor::zeros_i32(
+                    &ctx,
+                    vec![
+                        DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+                        GROUPS as u64,
+                    ],
+                )
+                .unwrap();
+                let state = MetalTensor::zeros_i32(
+                    &ctx,
+                    vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+                )
+                .unwrap();
+                let private_mask =
+                    MetalTensor::zeros_dtype(&ctx, vec![capacity as u64, 1], GgmlType::I8).unwrap();
+                let private_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+                let candidate_mask =
+                    MetalTensor::zeros_i32(&ctx, vec![capacity as u64, 1]).unwrap();
+                let candidate_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+                let candidate_count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+                let candidate_status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+                let generation = std::cell::Cell::new(
+                    0x4300_0001u32
+                        .wrapping_add((cell_index as u32) << 12)
+                        .wrapping_add(u32::from(tied) << 11),
+                );
+                let next_generation = || {
+                    let current = generation.get();
+                    let next = current.wrapping_add(1);
+                    generation.set(if next == 0 { 1 } else { next });
+                    current
+                };
+                let time_current = || {
+                    timed_gpu_wall(&ctx, |encoder| {
+                        encode_select_top_k_f32(
+                            &ctx,
+                            encoder,
+                            &scores,
+                            &visible,
+                            &current_mask,
+                            None,
+                            &current_ids,
+                            &current_count,
+                            &current_status,
+                            capacity,
+                            visible_rows,
+                            TOP_K,
+                            1,
+                        )
+                    })
+                };
+                let time_candidate = || {
+                    let invocation_generation = next_generation();
+                    timed_gpu_wall(&ctx, |encoder| {
+                        encode_select_top_k_multigroup_full_f32(
+                            &ctx,
+                            encoder,
+                            &scores,
+                            &visible,
+                            &records,
+                            &partition_plan,
+                            &state,
+                            &private_mask,
+                            &private_ids,
+                            &candidate_mask,
+                            &candidate_ids,
+                            &candidate_count,
+                            &candidate_status,
+                            capacity,
+                            TOP_K,
+                            invocation_generation,
+                            None,
+                            false,
+                        )
+                    })
+                };
+
+                time_current();
+                let exact = (
+                    read_i32(&current_mask),
+                    read_i32(&current_ids),
+                    read_i32(&current_count),
+                    read_i32(&current_status),
+                );
+                time_candidate();
+                assert_eq!(
+                    (
+                        read_i32(&candidate_mask),
+                        read_i32(&candidate_ids),
+                        read_i32(&candidate_count),
+                        read_i32(&candidate_status),
+                    ),
+                    exact,
+                    "capacity={capacity} visible={visible_rows} case={case}: output"
+                );
+                for _ in 0..4 {
+                    time_current();
+                    time_candidate();
+                }
+                let before = (0..SAMPLES).map(|_| time_current()).collect::<Vec<_>>();
+                let candidate = (0..SAMPLES).map(|_| time_candidate()).collect::<Vec<_>>();
+                let after = (0..SAMPLES).map(|_| time_current()).collect::<Vec<_>>();
+                assert_eq!(
+                    (
+                        read_i32(&candidate_mask),
+                        read_i32(&candidate_ids),
+                        read_i32(&candidate_count),
+                        read_i32(&candidate_status),
+                    ),
+                    exact,
+                    "capacity={capacity} visible={visible_rows} case={case}: timed output"
+                );
+                let before_gpu = before.iter().map(|sample| sample.0).collect::<Vec<_>>();
+                let before_wall = before.iter().map(|sample| sample.1).collect::<Vec<_>>();
+                let candidate_gpu = candidate.iter().map(|sample| sample.0).collect::<Vec<_>>();
+                let candidate_wall = candidate.iter().map(|sample| sample.1).collect::<Vec<_>>();
+                let after_gpu = after.iter().map(|sample| sample.0).collect::<Vec<_>>();
+                let after_wall = after.iter().map(|sample| sample.1).collect::<Vec<_>>();
+                let before_gpu_median = median(&before_gpu);
+                let before_wall_median = median(&before_wall);
+                let candidate_gpu_median = median(&candidate_gpu);
+                let candidate_wall_median = median(&candidate_wall);
+                let after_gpu_median = median(&after_gpu);
+                let after_wall_median = median(&after_wall);
+                let gpu_drift = 2.0 * (before_gpu_median - after_gpu_median).abs()
+                    / (before_gpu_median + after_gpu_median);
+                let wall_drift = 2.0 * (before_wall_median - after_wall_median).abs()
+                    / (before_wall_median + after_wall_median);
+                let gpu_saving = before_gpu_median.min(after_gpu_median) - candidate_gpu_median;
+                let wall_saving = before_wall_median.min(after_wall_median) - candidate_wall_median;
+                let stable = gpu_drift <= 0.05 && wall_drift <= 0.05;
+                eprintln!(
+                    "deepseek_v4 multigroup_crossover capacity={capacity} visible={visible_rows} case={case} current_gpu_ms={:.6} candidate_gpu_ms={candidate_gpu_median:.6} current_wall_ms={:.6} candidate_wall_ms={candidate_wall_median:.6} gpu_saving_ms={gpu_saving:.6} wall_saving_ms={wall_saving:.6} gpu_drift={gpu_drift:.6} wall_drift={wall_drift:.6} stable={stable} win={}",
+                    before_gpu_median.min(after_gpu_median),
+                    before_wall_median.min(after_wall_median),
+                    gpu_saving > 0.0 && wall_saving > 0.0,
+                );
+                eprintln!(
+                    "deepseek_v4 multigroup_crossover capacity={capacity} visible={visible_rows} case={case} current_before_gpu_ms={before_gpu:?} current_before_wall_ms={before_wall:?} candidate_gpu_ms={candidate_gpu:?} candidate_wall_ms={candidate_wall:?} current_after_gpu_ms={after_gpu:?} current_after_wall_ms={after_wall:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "focused terminal multi-group threshold ceiling; run explicitly with --nocapture"]
     fn profile_multigroup_selector_threshold_ceiling() {
         let Some(ctx) = metal_context() else {

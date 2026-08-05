@@ -1968,10 +1968,13 @@ Broader S6 work remains:
   1.874/2.040 ms; all-tied medians are 0.907/1.075 versus 2.025/2.203 ms.
   Deterministic partition quotas preserve lower-row ties and cache-order IDs;
   private mask/ID state is structurally validated before exact publication or
-  first-K fallback. Next measure the visible-row crossover, then route only
-  eligible singleton Q=1/K=512 calls behind an experimental session-owned
-  scratch/generation policy. Preserve F16 scoring and keep packed, shallow, and
-  ranked-output routing current until a whole-token exactness/speed gate clears.
+  first-K fallback. The crossover now freezes explicit-opt-in eligibility at
+  Q=1/K=512, `visible <= capacity <= 262144`, `visible >= 196608`, and
+  `visible >= capacity - capacity / 4`. At the boundary, all-tied GPU/wall
+  savings remain 0.627/0.638 ms for max capacity and 0.641/0.635 ms for the
+  decimal-million capacity. Add session-owned scratch/generation state behind
+  that seam. Preserve F16 scoring and keep packed, shallow, and ranked-output
+  routing current until a whole-token exactness/speed gate clears.
   The diagnostics-only collapsed FP4 implementation remains negative evidence.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention. All-slot routed experts have closed the first measured MoE
@@ -2073,10 +2076,11 @@ noise without reducing technical risk. Revisit after S5.
    shadow as negative evidence without migrating paged K or snapshot v2. The
    exact multi-group full selector now clears at 32 groups with exact masks,
    cache-order IDs, status fallback, and more than 1.11 ms/layer terminal GPU
-   and wall saving. Measure its model-free crossover, then integrate it behind
-   an experimental singleton-only policy with session-owned scratch and
-   generation state. Require exact final model state and 0.50 ms times eligible
-   layers of whole-token saving before changing default dispatch.
+   and wall saving. Its crossover freezes an experimental boundary at 196,608
+   visible rows, at least three-quarters of no more than 262,144 physical rows.
+   Integrate only that singleton policy with session-owned scratch and generation
+   state. Require exact final model state and 0.50 ms times eligible layers of
+   whole-token saving before changing default dispatch.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine

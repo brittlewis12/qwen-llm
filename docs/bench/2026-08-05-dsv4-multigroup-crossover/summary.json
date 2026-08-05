@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "result": "go",
+  "scope": "model_free_capacity_visibility_crossover",
+  "source_base_git_commit": "d68bdd789a2683844edefa6182d8193841449166",
+  "shape": {
+    "query_count": 1,
+    "top_k": 512,
+    "group_count": 32,
+    "samples_per_arm": 16,
+    "warm_pairs_after_exact_check": 4
+  },
+  "run_log": {
+    "path": "run.log",
+    "bytes": 53417,
+    "sha256": "bd2d38ed740db2cc33a8d08a844d611504fedc3a57f854381a3b625e8f9b89eb"
+  },
+  "stable_results": [
+    {"capacity": 49152, "visible": 49152, "case": "tied", "gpu_saving_ms": -0.257187, "wall_saving_ms": -0.314042},
+    {"capacity": 65536, "visible": 65536, "case": "mixed", "gpu_saving_ms": 0.048167, "wall_saving_ms": 0.043188},
+    {"capacity": 65536, "visible": 65536, "case": "tied", "gpu_saving_ms": -0.153437, "wall_saving_ms": -0.183562},
+    {"capacity": 98304, "visible": 98304, "case": "mixed", "gpu_saving_ms": 0.205333, "wall_saving_ms": 0.231646},
+    {"capacity": 98304, "visible": 98304, "case": "tied", "gpu_saving_ms": 0.059375, "wall_saving_ms": 0.059021},
+    {"capacity": 131072, "visible": 131072, "case": "mixed", "gpu_saving_ms": 0.427313, "wall_saving_ms": 0.460958},
+    {"capacity": 131072, "visible": 131072, "case": "tied", "gpu_saving_ms": 0.263708, "wall_saving_ms": 0.268105},
+    {"capacity": 196608, "visible": 196608, "case": "mixed", "gpu_saving_ms": 0.848000, "wall_saving_ms": 0.875583},
+    {"capacity": 196608, "visible": 196608, "case": "tied", "gpu_saving_ms": 0.691417, "wall_saving_ms": 0.676624},
+    {"capacity": 262144, "visible": 262144, "case": "mixed", "gpu_saving_ms": 1.196625, "wall_saving_ms": 1.181812},
+    {"capacity": 262144, "visible": 262144, "case": "tied", "gpu_saving_ms": 1.099854, "wall_saving_ms": 1.103437},
+    {"capacity": 131072, "visible": 65536, "case": "mixed", "gpu_saving_ms": -0.021146, "wall_saving_ms": -0.023688},
+    {"capacity": 131072, "visible": 65536, "case": "tied", "gpu_saving_ms": -0.224271, "wall_saving_ms": -0.232459},
+    {"capacity": 262144, "visible": 65536, "case": "mixed", "gpu_saving_ms": -0.165021, "wall_saving_ms": -0.175104},
+    {"capacity": 262144, "visible": 65536, "case": "tied", "gpu_saving_ms": -0.371687, "wall_saving_ms": -0.398562},
+    {"capacity": 262144, "visible": 131072, "case": "mixed", "gpu_saving_ms": 0.296896, "wall_saving_ms": 0.310374},
+    {"capacity": 262144, "visible": 196608, "case": "mixed", "gpu_saving_ms": 0.786625, "wall_saving_ms": 0.793751},
+    {"capacity": 262144, "visible": 196608, "case": "tied", "gpu_saving_ms": 0.627458, "wall_saving_ms": 0.637834},
+    {"capacity": 250112, "visible": 196608, "case": "mixed", "gpu_saving_ms": 0.799667, "wall_saving_ms": 0.796270},
+    {"capacity": 250112, "visible": 196608, "case": "tied", "gpu_saving_ms": 0.640521, "wall_saving_ms": 0.635479}
+  ],
+  "excluded_discovery_cells": [
+    {"capacity": 16384, "visible": 16384, "reason": "control_drift"},
+    {"capacity": 32768, "visible": 32768, "reason": "control_drift"},
+    {"capacity": 49152, "visible": 49152, "case": "mixed", "reason": "control_drift"},
+    {"capacity": 262144, "visible": 131072, "case": "tied", "reason": "wall_control_drift"}
+  ],
+  "experimental_predicate": {
+    "explicit_opt_in": true,
+    "query_count": 1,
+    "top_k": 512,
+    "maximum_capacity_rows": 262144,
+    "minimum_visible_rows": 196608,
+    "minimum_visible_fraction": "capacity - capacity / 4"
+  },
+  "decision": {
+    "crossover_map": "go",
+    "integrated_experimental_route": "authorized_to_build",
+    "production_default": "hold"
+  },
+  "cx_review": "019fcf7d-e9d4-7150-b496-e70a31958e80"
+}

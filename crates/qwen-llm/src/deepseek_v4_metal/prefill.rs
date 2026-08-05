@@ -838,12 +838,44 @@ struct PackedAttentionViews {
     attention: MetalTensor,
 }
 
+#[derive(Clone)]
 struct PackedSparseCsaViews {
     query_offset: usize,
     query_count: usize,
     cache_order_ids: MetalTensor,
     selected_counts: MetalTensor,
     visible_counts: MetalTensor,
+    #[cfg(feature = "dsv4-diagnostics")]
+    index_queries: MetalTensor,
+    #[cfg(feature = "dsv4-diagnostics")]
+    head_weights: MetalTensor,
+    #[cfg(feature = "dsv4-diagnostics")]
+    scores: MetalTensor,
+    #[cfg(feature = "dsv4-diagnostics")]
+    selected_mask: MetalTensor,
+    #[cfg(feature = "dsv4-diagnostics")]
+    status: MetalTensor,
+}
+
+#[derive(Clone, Copy)]
+struct PackedCsaSelectionView<'a> {
+    query_offset: usize,
+    query_count: usize,
+    cache_order_ids: &'a MetalTensor,
+    selected_counts: &'a MetalTensor,
+    visible_counts: &'a MetalTensor,
+}
+
+impl PackedSparseCsaViews {
+    fn selection_view(&self) -> PackedCsaSelectionView<'_> {
+        PackedCsaSelectionView {
+            query_offset: self.query_offset,
+            query_count: self.query_count,
+            cache_order_ids: &self.cache_order_ids,
+            selected_counts: &self.selected_counts,
+            visible_counts: &self.visible_counts,
+        }
+    }
 }
 
 fn csa_visible_rows(position: u32) -> usize {
@@ -855,6 +887,22 @@ fn sparse_csa_query_offset(start_position: u32, n_tokens: usize) -> Option<usize
         let position = u64::from(start_position) + token as u64;
         (position + 1) / 4 > DEEPSEEK_V4_CSA_TOP_K as u64
     })
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+fn validate_fp4_selection_counterfactual_packed(
+    start_position: u32,
+    n_tokens: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    let sparse_query_count = sparse_csa_query_offset(start_position, n_tokens)
+        .map(|offset| n_tokens - offset)
+        .unwrap_or(0);
+    if sparse_query_count > 1 {
+        return invalid(format!(
+            "FP4 selection counterfactual requires at most one packed sparse query, got {sparse_query_count}"
+        ));
+    }
+    Ok(())
 }
 
 fn packed_sparse_visible_counts(
@@ -1125,6 +1173,16 @@ impl PrefillSparseCsaScratch {
             cache_order_ids,
             selected_counts,
             visible_counts,
+            #[cfg(feature = "dsv4-diagnostics")]
+            index_queries,
+            #[cfg(feature = "dsv4-diagnostics")]
+            head_weights,
+            #[cfg(feature = "dsv4-diagnostics")]
+            scores,
+            #[cfg(feature = "dsv4-diagnostics")]
+            selected_mask,
+            #[cfg(feature = "dsv4-diagnostics")]
+            status,
         })
     }
 
@@ -2529,7 +2587,7 @@ fn encode_packed_selected_sink_attention_f16(
     raw_cache: &MetalTensor,
     raw_cache_before_chunk: &MetalTensor,
     rows: DeepSeekV4CsaRows<'_>,
-    sparse: &PackedSparseCsaViews,
+    sparse: PackedCsaSelectionView<'_>,
     sinks: &MetalTensor,
     output: &MetalTensor,
     start_position: u32,
@@ -2583,14 +2641,14 @@ fn encode_packed_selected_sink_attention_f16(
         "packed selected compressed cache",
     )?;
     validate_i32(
-        &sparse.cache_order_ids,
+        sparse.cache_order_ids,
         &[DEEPSEEK_V4_CSA_TOP_K as u64, sparse.query_count as u64],
         false,
         "packed selected cache-order IDs",
     )?;
     for (tensor, name) in [
-        (&sparse.selected_counts, "packed selected row counts"),
-        (&sparse.visible_counts, "packed selected visible counts"),
+        (sparse.selected_counts, "packed selected row counts"),
+        (sparse.visible_counts, "packed selected visible counts"),
     ] {
         validate_i32(tensor, &[sparse.query_count as u64], false, name)?;
     }
@@ -2615,9 +2673,9 @@ fn encode_packed_selected_sink_attention_f16(
         raw_cache_before_chunk,
         rows.attention_cache,
         rows.capacity_rows,
-        &sparse.cache_order_ids,
-        &sparse.selected_counts,
-        &sparse.visible_counts,
+        sparse.cache_order_ids,
+        sparse.selected_counts,
+        sparse.visible_counts,
         sinks,
         output,
         start_position,
@@ -2698,6 +2756,12 @@ impl DeepSeekV4Session {
             self.capacity.validate_position(position)?;
         }
         self.validate_committed_token_append(start_position, token_ids.len())?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        if self.fp4_shadow_replace_selection {
+            // Reject unsupported geometry while the session is still ready;
+            // token staging and causal mutation both occur below this gate.
+            validate_fp4_selection_counterfactual_packed(start_position, token_ids.len())?;
+        }
         let token_values = token_ids
             .iter()
             .map(|&token| token as i32)
@@ -2708,6 +2772,15 @@ impl DeepSeekV4Session {
             "packed token IDs",
         )?;
         host_write_i32(&token_view, &token_values, "packed token IDs")?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            let final_position = end_position - 1;
+            let sparse_query_count = sparse_csa_query_offset(start_position, token_ids.len())
+                .map(|offset| token_ids.len() - offset)
+                .unwrap_or(0);
+            self.fp4_shadow_diagnostics
+                .begin_packed(final_position, sparse_query_count)?;
+        }
 
         let begun_position = self.phase.begin_mutation()?;
         debug_assert_eq!(begun_position, start_position);
@@ -2731,7 +2804,7 @@ impl DeepSeekV4Session {
     }
 
     fn prefill_tokens_inner(
-        &self,
+        &mut self,
         ctx: &MetalContext,
         token_ids: &[u32],
         token_view: &MetalTensor,
@@ -2792,6 +2865,10 @@ impl DeepSeekV4Session {
             })?;
             let encoder = KernelEncoder::begin(&command);
             let router_result = (|| {
+                #[cfg(feature = "dsv4-diagnostics")]
+                let mut captured_sparse: Option<PackedSparseCsaViews> = None;
+                #[cfg(not(feature = "dsv4-diagnostics"))]
+                let captured_sparse: Option<PackedSparseCsaViews> = None;
                 encode_copy_raw_ring_f16_bits(
                     ctx,
                     &encoder,
@@ -2966,6 +3043,44 @@ impl DeepSeekV4Session {
                         n_tokens,
                         rope,
                     )?;
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    let fp4_shadow_active = self.fp4_shadow_diagnostics.is_capturing()
+                        || self.fp4_shadow_replace_selection;
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    if fp4_shadow_active {
+                        if sparse.query_count != 1 {
+                            return invalid(format!(
+                                "FP4 packed shadow expected one sparse query, got {}",
+                                sparse.query_count
+                            ));
+                        }
+                        self.fp4_shadow.encode(
+                            ctx,
+                            &encoder,
+                            &sparse.index_queries,
+                            &sparse.head_weights,
+                            rows,
+                            &sparse.visible_counts,
+                        )?;
+                    }
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    if self.fp4_shadow_diagnostics.is_capturing() {
+                        captured_sparse = Some(sparse.clone());
+                    }
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    let selected = if self.fp4_shadow_replace_selection {
+                        PackedCsaSelectionView {
+                            query_offset: sparse.query_offset,
+                            query_count: sparse.query_count,
+                            cache_order_ids: &self.fp4_shadow.cache_order_ids,
+                            selected_counts: &self.fp4_shadow.selected_count,
+                            visible_counts: &self.fp4_shadow.eligible_visible,
+                        }
+                    } else {
+                        sparse.selection_view()
+                    };
+                    #[cfg(not(feature = "dsv4-diagnostics"))]
+                    let selected = sparse.selection_view();
                     encode_packed_selected_sink_attention_f16(
                         ctx,
                         &encoder,
@@ -2973,7 +3088,7 @@ impl DeepSeekV4Session {
                         &raw_cache,
                         &self.prefill.attention.raw_cache_before_chunk,
                         rows,
-                        &sparse,
+                        selected,
                         self.layer_tensor(layer, "attn_sinks.weight")?,
                         &attention.attention,
                         start_position,
@@ -3053,7 +3168,7 @@ impl DeepSeekV4Session {
                 } else {
                     None
                 };
-                self.prefill.moe.encode_router(
+                let moe_views = self.prefill.moe.encode_router(
                     ctx,
                     &encoder,
                     &ffn_input,
@@ -3063,10 +3178,13 @@ impl DeepSeekV4Session {
                     hash_map,
                     n_tokens,
                     rms_eps,
-                )
+                )?;
+                Ok::<_, DeepSeekV4MetalError>((moe_views, captured_sparse))
             })();
             encoder.end();
-            let moe_views = router_result?;
+            let (moe_views, captured_sparse) = router_result?;
+            #[cfg(not(feature = "dsv4-diagnostics"))]
+            let _ = captured_sparse;
             command.commit();
             command.waitUntilCompleted();
             if let Some(error) = command.error() {
@@ -3079,6 +3197,45 @@ impl DeepSeekV4Session {
                     .attention
                     .sparse_csa
                     .validate_completed(n_tokens - query_offset)?;
+            }
+            #[cfg(feature = "dsv4-diagnostics")]
+            if self.fp4_shadow_diagnostics.is_capturing()
+                && attention_kind == AttentionKind::CompressedSparse
+            {
+                let sparse = captured_sparse.as_ref().ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "FP4 packed shadow layer {layer} did not retain sparse views"
+                    ))
+                })?;
+                let rows = self
+                    .compressor_frontiers
+                    .csa_rows(layer, last_position)?
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(format!(
+                            "FP4 packed shadow layer {layer} has no published rows"
+                        ))
+                    })?;
+                let report = self.fp4_shadow.capture_layer(
+                    layer,
+                    last_position,
+                    rows,
+                    &sparse.scores,
+                    &sparse.selected_mask,
+                    &sparse.cache_order_ids,
+                    &sparse.selected_counts,
+                    &sparse.status,
+                )?;
+                self.fp4_shadow_diagnostics.capture_layer(report)?;
+            }
+            #[cfg(feature = "dsv4-diagnostics")]
+            if self.fp4_shadow_replace_selection && sparse_query_offset.is_some() {
+                self.fp4_shadow.validate_completed()?;
+                self.fp4_shadow.record_counterfactual_selection(
+                    &mut self.fp4_counterfactual_trace,
+                    DeepSeekV4Fp4ShadowExecution::Packed,
+                    last_position,
+                    layer,
+                )?;
             }
             let router_seconds = router_started.elapsed().as_secs_f64();
             router_total += router_seconds;
@@ -3196,6 +3353,8 @@ impl DeepSeekV4Session {
                 "deepseek_v4 packed totals router={router_total:.3}s route={route_total:.3}s experts={expert_total:.3}s"
             );
         }
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.fp4_shadow_diagnostics.finish()?;
         Ok(())
     }
 }
@@ -3226,6 +3385,17 @@ mod tests {
                 .to_string()
                 .contains("visibility geometry is invalid")
         );
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn fp4_selection_counterfactual_rejects_multi_query_chunks_before_encoding() {
+        validate_fp4_selection_counterfactual_packed(0, 128).unwrap();
+        validate_fp4_selection_counterfactual_packed(2_048, 4).unwrap();
+        let error = validate_fp4_selection_counterfactual_packed(2_048, 5).unwrap_err();
+        assert!(error.to_string().contains("got 2"), "{error}");
+        let error = validate_fp4_selection_counterfactual_packed(2_052, 2).unwrap_err();
+        assert!(error.to_string().contains("got 2"), "{error}");
     }
 
     #[test]
@@ -3813,6 +3983,8 @@ mod tests {
         let rows = DeepSeekV4CsaRows {
             attention_cache: &compressed,
             indexer_cache: &indexer,
+            #[cfg(feature = "dsv4-diagnostics")]
+            indexer_fp4_sidecar: None,
             count: 513,
             capacity_rows: DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
         };
@@ -3822,6 +3994,30 @@ mod tests {
             cache_order_ids: selected_ids,
             selected_counts,
             visible_counts,
+            #[cfg(feature = "dsv4-diagnostics")]
+            index_queries: MetalTensor::zeros_f32(&ctx, vec![128, 64, query_count as u64]).unwrap(),
+            #[cfg(feature = "dsv4-diagnostics")]
+            head_weights: MetalTensor::zeros_f32(&ctx, vec![64, query_count as u64]).unwrap(),
+            #[cfg(feature = "dsv4-diagnostics")]
+            scores: MetalTensor::zeros_f32(
+                &ctx,
+                vec![
+                    DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS as u64,
+                    query_count as u64,
+                ],
+            )
+            .unwrap(),
+            #[cfg(feature = "dsv4-diagnostics")]
+            selected_mask: MetalTensor::zeros_i32(
+                &ctx,
+                vec![
+                    DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS as u64,
+                    query_count as u64,
+                ],
+            )
+            .unwrap(),
+            #[cfg(feature = "dsv4-diagnostics")]
+            status: MetalTensor::zeros_i32(&ctx, vec![query_count as u64]).unwrap(),
         };
 
         let command = ctx.queue.commandBuffer().unwrap();
@@ -3884,7 +4080,7 @@ mod tests {
             &raw_cache,
             &raw_cache_before_chunk,
             rows,
-            &sparse,
+            sparse.selection_view(),
             &sinks,
             &output,
             start_position,

@@ -12,7 +12,9 @@ mod snapshot;
 #[cfg(feature = "dsv4-diagnostics")]
 pub use diagnostics::{
     DeepSeekV4CsaDecision, DeepSeekV4DecisionLayer, DeepSeekV4DecisionTranscript,
-    DeepSeekV4DiagnosticsError, DeepSeekV4RankedCsaRow, DeepSeekV4RouteDecision,
+    DeepSeekV4DiagnosticsError, DeepSeekV4Fp4CounterfactualStateDigest,
+    DeepSeekV4Fp4ShadowEligibility, DeepSeekV4Fp4ShadowExecution, DeepSeekV4Fp4ShadowLayer,
+    DeepSeekV4Fp4ShadowReport, DeepSeekV4RankedCsaRow, DeepSeekV4RouteDecision,
 };
 
 pub use snapshot::{
@@ -56,11 +58,21 @@ const DEEPSEEK_V4_ROUTE_STATUS_DUPLICATE_EXPERT: i32 = -5;
 const DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_WEIGHT: i32 = -6;
 const DEEPSEEK_V4_ROUTE_MAX_EXPERTS: usize = 256;
 const DEEPSEEK_V4_ROUTE_MAX_TOP_K: usize = 6;
+#[cfg(feature = "dsv4-diagnostics")]
+const DEEPSEEK_V4_FP4_STATUS_UNAVAILABLE: i32 = i32::MIN;
 pub use prefill::DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 /// Engine-owned evidence ceiling through the model's exact context length.
 /// A request may allocate less, but allocation never authorizes execution past
 /// this independently promoted boundary.
 pub const DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY: usize = 1_048_576;
+
+/// SHA-256 of the exact metallib embedded in this diagnostics-enabled binary.
+#[cfg(feature = "dsv4-diagnostics")]
+pub fn deepseek_v4_diagnostics_metallib_sha256() -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(crate::KERNELS_METALLIB).into()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeepSeekV4SessionCapacity {
@@ -1378,6 +1390,14 @@ pub struct DeepSeekV4Session {
     snapshot_model_content_id: Option<DeepSeekV4ModelContentId>,
     #[cfg(feature = "dsv4-diagnostics")]
     decision_diagnostics: diagnostics::DeepSeekV4DecisionCapture,
+    #[cfg(feature = "dsv4-diagnostics")]
+    fp4_shadow: DeepSeekV4Fp4ShadowScratch,
+    #[cfg(feature = "dsv4-diagnostics")]
+    fp4_shadow_diagnostics: diagnostics::DeepSeekV4Fp4ShadowCapture,
+    #[cfg(feature = "dsv4-diagnostics")]
+    fp4_shadow_replace_selection: bool,
+    #[cfg(feature = "dsv4-diagnostics")]
+    fp4_counterfactual_trace: diagnostics::DeepSeekV4Fp4CounterfactualTrace,
 }
 
 /// Compatibility name retained for the position-zero live differential.
@@ -1475,6 +1495,14 @@ impl DeepSeekV4Session {
             snapshot_model_content_id,
             #[cfg(feature = "dsv4-diagnostics")]
             decision_diagnostics: diagnostics::DeepSeekV4DecisionCapture::default(),
+            #[cfg(feature = "dsv4-diagnostics")]
+            fp4_shadow: DeepSeekV4Fp4ShadowScratch::new(ctx, capacity.csa_physical_rows())?,
+            #[cfg(feature = "dsv4-diagnostics")]
+            fp4_shadow_diagnostics: diagnostics::DeepSeekV4Fp4ShadowCapture::default(),
+            #[cfg(feature = "dsv4-diagnostics")]
+            fp4_shadow_replace_selection: false,
+            #[cfg(feature = "dsv4-diagnostics")]
+            fp4_counterfactual_trace: diagnostics::DeepSeekV4Fp4CounterfactualTrace::default(),
         })
     }
 
@@ -1519,6 +1547,53 @@ impl DeepSeekV4Session {
 
     pub fn capacity(&self) -> DeepSeekV4SessionCapacity {
         self.capacity
+    }
+
+    /// Enables exact post-Hadamard FP4 lineage capture for a diagnostics-only
+    /// observer. It must be armed before any token mutates the session so every
+    /// subsequently visible row has one unambiguous pre-F16 source.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn enable_fp4_shadow_lineage(&mut self) -> Result<(), DeepSeekV4MetalError> {
+        let position = self.phase.ready_position()?;
+        if position != 0 {
+            return invalid(format!(
+                "DeepSeek V4 FP4 shadow lineage must be enabled at position zero, got {position}"
+            ));
+        }
+        self.compressor_frontiers.enable_fp4_shadow_lineage()?;
+        self.fp4_shadow_diagnostics.enable_lineage();
+        Ok(())
+    }
+
+    /// Enables a diagnostics-only counterfactual that consumes FP4 selector
+    /// IDs while retaining the authoritative F16 attention cache. Such a
+    /// session is not compatible with snapshot-v1 export or restore.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn enable_fp4_shadow_selection_counterfactual(
+        &mut self,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        self.enable_fp4_shadow_lineage()?;
+        self.fp4_shadow_replace_selection = true;
+        Ok(())
+    }
+
+    /// Arms one diagnostics-only packed or singleton FP4 comparison. Packed
+    /// capture intentionally admits only a final single sparse query.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn arm_fp4_shadow_report(&mut self, position: u32) -> Result<(), DeepSeekV4MetalError> {
+        self.capacity.validate_position(position)?;
+        let current = self.phase.ready_position()?;
+        self.fp4_shadow_diagnostics.arm(current, position)?;
+        Ok(())
+    }
+
+    /// Takes a completed owned FP4 observer report and returns the capture to
+    /// idle so a subsequent position can be armed.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn take_fp4_shadow_report(
+        &mut self,
+    ) -> Result<DeepSeekV4Fp4ShadowReport, DeepSeekV4MetalError> {
+        Ok(self.fp4_shadow_diagnostics.take()?)
     }
 
     /// Arms the feature-gated, single-use decision capture for the next sparse
@@ -1648,8 +1723,12 @@ impl DeepSeekV4Session {
         token_id: u32,
     ) -> Result<DeepSeekV4WholeTokenProfile, DeepSeekV4MetalError> {
         #[cfg(feature = "dsv4-diagnostics")]
-        self.decision_diagnostics
-            .ensure_no_active_capture("profile a whole token")?;
+        {
+            self.decision_diagnostics
+                .ensure_no_active_capture("profile a whole token")?;
+            self.fp4_shadow_diagnostics
+                .ensure_no_active_capture("profile a whole token")?;
+        }
         let mut profile = DeepSeekV4WholeTokenProfile::default();
         self.forward_token_with_progress_and_profile(
             ctx,
@@ -1718,14 +1797,16 @@ impl DeepSeekV4Session {
             ));
         }
         self.capacity.validate_position(position)?;
-        #[cfg(feature = "dsv4-diagnostics")]
-        self.decision_diagnostics.begin_forward(position)?;
         let next_position = position
             .checked_add(1)
             .ok_or_else(|| DeepSeekV4MetalError::Invalid("position overflow".into()))?;
         self.validate_committed_token_append(position, 1)?;
 
         host_write_i32(&self.token_id, &[token_id as i32], "DeepSeek V4 token ID")?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.decision_diagnostics.begin_forward(position)?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.fp4_shadow_diagnostics.begin_singleton(position)?;
         let begun_position = self.phase.begin_mutation()?;
         debug_assert_eq!(begun_position, position);
         if let Some(profile) = whole_profile.as_deref_mut() {
@@ -1905,8 +1986,7 @@ impl DeepSeekV4Session {
                     layer_encoder.current(),
                     &raw_cache,
                     rows,
-                    &self.sparse_csa,
-                    selection_record,
+                    self.sparse_csa.selection_view(selection_record),
                     self.layer_tensor(layer, "attn_sinks.weight")?,
                     position,
                     rope,
@@ -2078,7 +2158,17 @@ impl DeepSeekV4Session {
         let decision_capture_active = self.decision_diagnostics.is_capturing();
         #[cfg(not(feature = "dsv4-diagnostics"))]
         let decision_capture_active = false;
-        if routing_profile.is_none() && stage_recorder.is_none() && !decision_capture_active {
+        #[cfg(feature = "dsv4-diagnostics")]
+        let fp4_shadow_capture_active = self.fp4_shadow_diagnostics.is_capturing();
+        #[cfg(feature = "dsv4-diagnostics")]
+        let fp4_shadow_active = fp4_shadow_capture_active || self.fp4_shadow_replace_selection;
+        #[cfg(not(feature = "dsv4-diagnostics"))]
+        let fp4_shadow_active = false;
+        if routing_profile.is_none()
+            && stage_recorder.is_none()
+            && !decision_capture_active
+            && !fp4_shadow_active
+        {
             return self.forward_token_inner_collapsed(
                 ctx,
                 token_id,
@@ -2203,13 +2293,31 @@ impl DeepSeekV4Session {
                     rope,
                     &selection_record,
                 )?;
+                #[cfg(feature = "dsv4-diagnostics")]
+                if fp4_shadow_active {
+                    self.fp4_shadow.encode(
+                        ctx,
+                        &encoder,
+                        &self.sparse_csa.index_queries,
+                        &self.sparse_csa.head_weights,
+                        rows,
+                        &selection_record.visible_count,
+                    )?;
+                }
+                #[cfg(feature = "dsv4-diagnostics")]
+                let selected = if self.fp4_shadow_replace_selection {
+                    self.fp4_shadow.selection_view()
+                } else {
+                    self.sparse_csa.selection_view(&selection_record)
+                };
+                #[cfg(not(feature = "dsv4-diagnostics"))]
+                let selected = self.sparse_csa.selection_view(&selection_record);
                 self.attention.encode_selected_attention_f16(
                     ctx,
                     &encoder,
                     &raw_cache,
                     rows,
-                    &self.sparse_csa,
-                    &selection_record,
+                    selected,
                     self.layer_tensor(layer, "attn_sinks.weight")?,
                     position,
                     rope,
@@ -2429,6 +2537,44 @@ impl DeepSeekV4Session {
                     .capture_layer(layer, csa_decision, route)?;
             }
 
+            #[cfg(feature = "dsv4-diagnostics")]
+            if self.fp4_shadow_diagnostics.is_capturing()
+                && self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
+            {
+                let rows = self
+                    .compressor_frontiers
+                    .csa_rows(layer, position)?
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(format!(
+                            "FP4 shadow CSA layer {layer} has no published rows"
+                        ))
+                    })?;
+                let report = self.fp4_shadow.capture_layer(
+                    layer,
+                    position,
+                    rows,
+                    &self.sparse_csa.scores,
+                    &self.sparse_csa.selected_mask,
+                    &self.sparse_csa.cache_order_ids,
+                    &selection_record.selected_count,
+                    &selection_record.status,
+                )?;
+                self.fp4_shadow_diagnostics.capture_layer(report)?;
+            }
+            #[cfg(feature = "dsv4-diagnostics")]
+            if self.fp4_shadow_replace_selection
+                && self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
+                && (position as usize + 1) / 4 > DEEPSEEK_V4_CSA_TOP_K
+            {
+                self.fp4_shadow.validate_completed()?;
+                self.fp4_shadow.record_counterfactual_selection(
+                    &mut self.fp4_counterfactual_trace,
+                    DeepSeekV4Fp4ShadowExecution::Singleton,
+                    position,
+                    layer,
+                )?;
+            }
+
             let command_gpu_ms = if routing_profile.is_some() || stage_sampled {
                 let gpu_seconds = command.GPUEndTime() - command.GPUStartTime();
                 if !gpu_seconds.is_finite() || gpu_seconds <= 0.0 {
@@ -2474,6 +2620,8 @@ impl DeepSeekV4Session {
 
         #[cfg(feature = "dsv4-diagnostics")]
         self.decision_diagnostics.finish()?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.fp4_shadow_diagnostics.finish()?;
 
         Ok(())
     }
@@ -2822,6 +2970,111 @@ enum DeepSeekV4CompressorPublication {
     IndexerHadamard,
 }
 
+#[cfg(feature = "dsv4-diagnostics")]
+struct DeepSeekV4IndexerFp4Sidecar {
+    enabled: bool,
+    capacity_rows: usize,
+    values: MetalTensor,
+    scales: MetalTensor,
+    status: MetalTensor,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+impl DeepSeekV4IndexerFp4Sidecar {
+    fn new(ctx: &MetalContext, capacity_rows: usize) -> Result<Self, DeepSeekV4MetalError> {
+        if capacity_rows == 0 || u32::try_from(capacity_rows).is_err() {
+            return invalid("indexer FP4 sidecar capacity must be nonzero and fit u32");
+        }
+        let unavailable = vec![DEEPSEEK_V4_FP4_STATUS_UNAVAILABLE; capacity_rows];
+        Ok(Self {
+            enabled: false,
+            capacity_rows,
+            values: MetalTensor::zeros_dtype(
+                ctx,
+                vec![
+                    crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES as u64,
+                    capacity_rows as u64,
+                ],
+                GgmlType::I8,
+            )?,
+            scales: MetalTensor::zeros_dtype(
+                ctx,
+                vec![
+                    crate::deepseek_v4_oracle::INDEXER_FP4_SCALE_BYTES as u64,
+                    capacity_rows as u64,
+                ],
+                GgmlType::I8,
+            )?,
+            status: MetalTensor::from_bytes(
+                ctx,
+                bytemuck::cast_slice(&unavailable),
+                vec![capacity_rows as u64],
+                GgmlType::I32,
+            )?,
+        })
+    }
+
+    fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    fn disable(&mut self) {
+        self.enabled = false;
+    }
+
+    fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    fn invalidate(&self) -> Result<(), DeepSeekV4MetalError> {
+        host_write_i32(
+            &self.status,
+            &vec![DEEPSEEK_V4_FP4_STATUS_UNAVAILABLE; self.capacity_rows],
+            "indexer FP4 sidecar status",
+        )
+    }
+
+    fn encode_row(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        source: &MetalTensor,
+        row: usize,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if row >= self.capacity_rows {
+            return invalid(format!(
+                "indexer FP4 sidecar row {row} exceeds capacity {}",
+                self.capacity_rows
+            ));
+        }
+        let values = raw_i8_subview(
+            &self.values,
+            checked_mul(
+                row,
+                crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES,
+                "indexer FP4 sidecar value offset",
+            )?,
+            vec![crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES as u64],
+            "indexer FP4 sidecar value row",
+        )?;
+        let scales = raw_i8_subview(
+            &self.scales,
+            checked_mul(
+                row,
+                crate::deepseek_v4_oracle::INDEXER_FP4_SCALE_BYTES,
+                "indexer FP4 sidecar scale offset",
+            )?,
+            vec![crate::deepseek_v4_oracle::INDEXER_FP4_SCALE_BYTES as u64],
+            "indexer FP4 sidecar scale row",
+        )?;
+        let status = self.status.view_subrange(row as u64, vec![1]);
+        encode_pack_indexer_fp4_rows_shadow(ctx, enc, source, &values, &scales, &status, 1)
+    }
+}
+
 struct DeepSeekV4CompressorFrontier {
     ratio: usize,
     head_dim: usize,
@@ -2836,6 +3089,8 @@ struct DeepSeekV4CompressorFrontier {
     pooled: MetalTensor,
     normalized: MetalTensor,
     published: MetalTensor,
+    #[cfg(feature = "dsv4-diagnostics")]
+    fp4_sidecar: Option<DeepSeekV4IndexerFp4Sidecar>,
 }
 
 impl DeepSeekV4CompressorFrontier {
@@ -2864,6 +3119,10 @@ impl DeepSeekV4CompressorFrontier {
         let (width, rows, state_elements) = compressor_frontier_geometry(ratio, head_dim)?;
         let zeros = vec![0.0f32; state_elements];
         let negative_infinity = vec![f32::NEG_INFINITY; state_elements];
+        #[cfg(feature = "dsv4-diagnostics")]
+        let fp4_sidecar = (publication == DeepSeekV4CompressorPublication::IndexerHadamard)
+            .then(|| DeepSeekV4IndexerFp4Sidecar::new(ctx, capacity_rows))
+            .transpose()?;
         Ok(Self {
             ratio,
             head_dim,
@@ -2888,6 +3147,8 @@ impl DeepSeekV4CompressorFrontier {
             pooled: MetalTensor::zeros_f32(ctx, vec![head_dim as u64])?,
             normalized: MetalTensor::zeros_f32(ctx, vec![head_dim as u64])?,
             published: MetalTensor::zeros_f16(ctx, vec![head_dim as u64, capacity_rows as u64])?,
+            #[cfg(feature = "dsv4-diagnostics")]
+            fp4_sidecar,
         })
     }
 
@@ -3139,6 +3400,11 @@ impl DeepSeekV4CompressorFrontier {
         )?;
         if self.publication == DeepSeekV4CompressorPublication::IndexerHadamard {
             encode_hadamard_128_in_place(ctx, enc, &self.normalized)?;
+            #[cfg(feature = "dsv4-diagnostics")]
+            self.fp4_sidecar
+                .as_ref()
+                .expect("indexer publication requires an FP4 diagnostics sidecar")
+                .encode_row(ctx, enc, &self.normalized, published_row)?;
         }
         encode_scatter_offset_f32_to_f16(
             ctx,
@@ -3239,6 +3505,68 @@ impl DeepSeekV4CompressorFrontiers {
             hidden_size,
             layers,
         })
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    fn enable_fp4_shadow_lineage(&mut self) -> Result<(), DeepSeekV4MetalError> {
+        let mut enabled = 0usize;
+        for layer in &mut self.layers {
+            if let DeepSeekV4LayerCompressorFrontiers::CompressedSparse { indexer, .. } = layer {
+                indexer
+                    .fp4_sidecar
+                    .as_mut()
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(
+                            "CSA indexer frontier is missing its FP4 diagnostics sidecar".into(),
+                        )
+                    })?
+                    .enable();
+                enabled += 1;
+            }
+        }
+        if enabled != diagnostics::CSA_LAYER_COUNT {
+            return invalid(format!(
+                "enabled {enabled} FP4 indexer sidecars, expected {}",
+                diagnostics::CSA_LAYER_COUNT
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    fn invalidate_fp4_shadow_lineage(&self) -> Result<(), DeepSeekV4MetalError> {
+        for layer in &self.layers {
+            if let DeepSeekV4LayerCompressorFrontiers::CompressedSparse { indexer, .. } = layer {
+                indexer
+                    .fp4_sidecar
+                    .as_ref()
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(
+                            "CSA indexer frontier is missing its FP4 diagnostics sidecar".into(),
+                        )
+                    })?
+                    .invalidate()?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    fn disable_fp4_shadow_lineage(&mut self) -> Result<(), DeepSeekV4MetalError> {
+        for layer in &mut self.layers {
+            if let DeepSeekV4LayerCompressorFrontiers::CompressedSparse { indexer, .. } = layer {
+                indexer
+                    .fp4_sidecar
+                    .as_mut()
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(
+                            "CSA indexer frontier is missing its FP4 diagnostics sidecar".into(),
+                        )
+                    })?
+                    .disable();
+            }
+        }
+        Ok(())
     }
 
     fn encode_layer(
@@ -3356,6 +3684,8 @@ impl DeepSeekV4CompressorFrontiers {
         Ok(Some(DeepSeekV4CsaRows {
             attention_cache: &attention.published,
             indexer_cache: &indexer.published,
+            #[cfg(feature = "dsv4-diagnostics")]
+            indexer_fp4_sidecar: indexer.fp4_sidecar.as_ref(),
             count: attention_count,
             capacity_rows: attention.capacity_rows,
         }))
@@ -3373,6 +3703,8 @@ struct DeepSeekV4PublishedRows<'a> {
 struct DeepSeekV4CsaRows<'a> {
     attention_cache: &'a MetalTensor,
     indexer_cache: &'a MetalTensor,
+    #[cfg(feature = "dsv4-diagnostics")]
+    indexer_fp4_sidecar: Option<&'a DeepSeekV4IndexerFp4Sidecar>,
     count: usize,
     capacity_rows: usize,
 }
@@ -3384,6 +3716,31 @@ struct DeepSeekV4SelectionRecord {
     visible_count: MetalTensor,
     selected_count: MetalTensor,
     status: MetalTensor,
+}
+
+#[derive(Clone, Copy)]
+struct DeepSeekV4CsaSelectionView<'a> {
+    cache_order_ids: &'a MetalTensor,
+    selected_count: &'a MetalTensor,
+    visible_count: &'a MetalTensor,
+}
+
+impl DeepSeekV4CsaSelectionView<'_> {
+    fn validate(&self) -> Result<(), DeepSeekV4MetalError> {
+        validate_i32(
+            self.cache_order_ids,
+            &[DEEPSEEK_V4_CSA_TOP_K as u64, 1],
+            false,
+            "CSA selection-view IDs",
+        )?;
+        validate_i32(self.selected_count, &[1], false, "CSA selection-view count")?;
+        validate_i32(
+            self.visible_count,
+            &[1],
+            false,
+            "CSA selection-view visibility",
+        )
+    }
 }
 
 impl DeepSeekV4SelectionRecord {
@@ -3503,6 +3860,265 @@ impl DeepSeekV4CompletedLayerSelectionRecords {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+struct DeepSeekV4Fp4ShadowScratch {
+    capacity_rows: usize,
+    query_values: MetalTensor,
+    query_scales: MetalTensor,
+    query_status: MetalTensor,
+    query_units: MetalTensor,
+    eligible_visible: MetalTensor,
+    eligibility_record: MetalTensor,
+    scores: MetalTensor,
+    selected_mask: MetalTensor,
+    cache_order_ids: MetalTensor,
+    selected_count: MetalTensor,
+    status: MetalTensor,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+impl DeepSeekV4Fp4ShadowScratch {
+    fn new(ctx: &MetalContext, capacity_rows: usize) -> Result<Self, DeepSeekV4MetalError> {
+        if capacity_rows < DEEPSEEK_V4_CSA_TOP_K
+            || !capacity_rows.is_multiple_of(DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS)
+        {
+            return invalid(format!(
+                "FP4 shadow scratch capacity {capacity_rows} is not an aligned top-k superset"
+            ));
+        }
+        Ok(Self {
+            capacity_rows,
+            query_values: MetalTensor::zeros_dtype(
+                ctx,
+                vec![
+                    crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES as u64,
+                    64,
+                    1,
+                ],
+                GgmlType::I8,
+            )?,
+            query_scales: MetalTensor::zeros_dtype(
+                ctx,
+                vec![
+                    crate::deepseek_v4_oracle::INDEXER_FP4_SCALE_BYTES as u64,
+                    64,
+                    1,
+                ],
+                GgmlType::I8,
+            )?,
+            query_status: MetalTensor::from_bytes(
+                ctx,
+                bytemuck::cast_slice(&[DEEPSEEK_V4_FP4_STATUS_UNAVAILABLE; 64]),
+                vec![64],
+                GgmlType::I32,
+            )?,
+            query_units: MetalTensor::zeros_f16(ctx, vec![128, 64, 1])?,
+            eligible_visible: MetalTensor::zeros_i32(ctx, vec![1])?,
+            eligibility_record: MetalTensor::zeros_i32(ctx, vec![3])?,
+            scores: MetalTensor::zeros_f32(ctx, vec![capacity_rows as u64, 1])?,
+            selected_mask: MetalTensor::zeros_i32(ctx, vec![capacity_rows as u64, 1])?,
+            cache_order_ids: MetalTensor::zeros_i32(ctx, vec![DEEPSEEK_V4_CSA_TOP_K as u64, 1])?,
+            selected_count: MetalTensor::zeros_i32(ctx, vec![1])?,
+            status: MetalTensor::zeros_i32(ctx, vec![1])?,
+        })
+    }
+
+    fn encode(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        index_queries: &MetalTensor,
+        head_weights: &MetalTensor,
+        rows: DeepSeekV4CsaRows<'_>,
+        requested_visible: &MetalTensor,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        require_serial(enc, "deepseek_v4_fp4_shadow")?;
+        if rows.count <= DEEPSEEK_V4_CSA_TOP_K
+            || rows.count > rows.capacity_rows
+            || rows.capacity_rows != self.capacity_rows
+        {
+            return invalid(format!(
+                "FP4 shadow requires 513..={} rows, got {}/{}",
+                self.capacity_rows, rows.count, rows.capacity_rows
+            ));
+        }
+        let sidecar = rows.indexer_fp4_sidecar.ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("FP4 shadow query has no indexer sidecar".into())
+        })?;
+        if !sidecar.is_enabled() {
+            return invalid("FP4 shadow lineage is not enabled");
+        }
+        validate_f32(
+            index_queries,
+            &[128, 64, 1],
+            false,
+            "FP4 shadow index queries",
+        )?;
+        validate_f32(head_weights, &[64, 1], false, "FP4 shadow head weights")?;
+        validate_i32(
+            requested_visible,
+            &[1],
+            false,
+            "FP4 shadow requested visibility",
+        )?;
+        encode_pack_indexer_fp4_rows_shadow(
+            ctx,
+            enc,
+            index_queries,
+            &self.query_values,
+            &self.query_scales,
+            &self.query_status,
+            64,
+        )?;
+        encode_unpack_indexer_fp4_units_shadow(
+            ctx,
+            enc,
+            &self.query_values,
+            &self.query_status,
+            &self.query_units,
+            64,
+        )?;
+        encode_indexer_fp4_shadow_preflight(
+            ctx,
+            enc,
+            &self.query_status,
+            &sidecar.status,
+            requested_visible,
+            &self.eligible_visible,
+            &self.eligibility_record,
+            rows.capacity_rows,
+            rows.count,
+        )?;
+        encode_lightning_indexer_scores_fp4_matrix_shadow(
+            ctx,
+            enc,
+            &self.query_units,
+            &self.query_scales,
+            head_weights,
+            &sidecar.values,
+            &sidecar.scales,
+            &self.eligible_visible,
+            &self.scores,
+            rows.capacity_rows,
+            1,
+        )?;
+        encode_select_top_k_f32_with_policy(
+            ctx,
+            enc,
+            &self.scores,
+            &self.eligible_visible,
+            &self.selected_mask,
+            None,
+            &self.cache_order_ids,
+            &self.selected_count,
+            &self.status,
+            rows.capacity_rows,
+            rows.count,
+            DEEPSEEK_V4_CSA_TOP_K,
+            1,
+            DeepSeekV4SelectorDispatchPolicy::Production,
+            true,
+        )
+    }
+
+    fn selection_view(&self) -> DeepSeekV4CsaSelectionView<'_> {
+        DeepSeekV4CsaSelectionView {
+            cache_order_ids: &self.cache_order_ids,
+            selected_count: &self.selected_count,
+            visible_count: &self.eligible_visible,
+        }
+    }
+
+    fn validate_completed(&self) -> Result<(), DeepSeekV4MetalError> {
+        let eligibility = host_read_i32(
+            &self.eligibility_record,
+            "completed FP4 shadow eligibility record",
+        )?;
+        let selected_count =
+            host_read_i32(&self.selected_count, "completed FP4 shadow selected count")?;
+        let status = host_read_i32(&self.status, "completed FP4 shadow selection status")?;
+        if eligibility.as_slice() != [0, -1, 0]
+            || selected_count.as_slice() != [DEEPSEEK_V4_CSA_TOP_K as i32]
+            || status.as_slice() != [0]
+        {
+            return invalid(format!(
+                "FP4 shadow selection failed with eligibility={eligibility:?} count={selected_count:?} status={status:?}"
+            ));
+        }
+        Ok(())
+    }
+
+    fn record_counterfactual_selection(
+        &self,
+        trace: &mut diagnostics::DeepSeekV4Fp4CounterfactualTrace,
+        execution: DeepSeekV4Fp4ShadowExecution,
+        position: u32,
+        layer: usize,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        let visible = host_read_i32(
+            &self.eligible_visible,
+            "consumed FP4 counterfactual visibility",
+        )?;
+        let ids = host_read_i32(&self.cache_order_ids, "consumed FP4 counterfactual IDs")?;
+        trace.record(execution, position, layer, visible[0], &ids)?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn capture_layer(
+        &self,
+        layer: usize,
+        position: u32,
+        rows: DeepSeekV4CsaRows<'_>,
+        authoritative_scores: &MetalTensor,
+        authoritative_mask: &MetalTensor,
+        authoritative_ids: &MetalTensor,
+        authoritative_count: &MetalTensor,
+        authoritative_status: &MetalTensor,
+    ) -> Result<DeepSeekV4Fp4ShadowLayer, DeepSeekV4MetalError> {
+        let sidecar = rows.indexer_fp4_sidecar.ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("FP4 shadow report has no indexer sidecar".into())
+        })?;
+        let visible_key_status = sidecar.status.view_subrange(0, vec![rows.count as u64]);
+        Ok(diagnostics::build_fp4_shadow_layer(
+            diagnostics::DeepSeekV4Fp4ShadowLayerInputs {
+                layer,
+                position,
+                visible_count: rows.count,
+                capacity_rows: rows.capacity_rows,
+                query_statuses: host_read_i32(&self.query_status, "FP4 shadow query statuses")?,
+                visible_key_statuses: host_read_i32(
+                    &visible_key_status,
+                    "FP4 shadow visible key statuses",
+                )?,
+                eligibility_record: host_read_i32(
+                    &self.eligibility_record,
+                    "FP4 shadow eligibility record",
+                )?,
+                authoritative_scores: host_read_f32(
+                    authoritative_scores,
+                    "FP4 authoritative scores",
+                )?,
+                authoritative_mask: host_read_i32(authoritative_mask, "FP4 authoritative mask")?,
+                authoritative_ids: host_read_i32(authoritative_ids, "FP4 authoritative IDs")?,
+                authoritative_count: host_read_i32(
+                    authoritative_count,
+                    "FP4 authoritative selected count",
+                )?,
+                authoritative_status: host_read_i32(
+                    authoritative_status,
+                    "FP4 authoritative selection status",
+                )?,
+                shadow_scores: host_read_f32(&self.scores, "FP4 shadow scores")?,
+                shadow_mask: host_read_i32(&self.selected_mask, "FP4 shadow mask")?,
+                shadow_ids: host_read_i32(&self.cache_order_ids, "FP4 shadow IDs")?,
+                shadow_count: host_read_i32(&self.selected_count, "FP4 shadow selected count")?,
+                shadow_status: host_read_i32(&self.status, "FP4 shadow selection status")?,
+            },
+        )?)
     }
 }
 
@@ -3718,6 +4334,17 @@ impl DeepSeekV4SparseCsaScratch {
             visible_count: self.visible_counts.clone(),
             selected_count: self.selected_counts.clone(),
             status: self.status.clone(),
+        }
+    }
+
+    fn selection_view<'a>(
+        &'a self,
+        record: &'a DeepSeekV4SelectionRecord,
+    ) -> DeepSeekV4CsaSelectionView<'a> {
+        DeepSeekV4CsaSelectionView {
+            cache_order_ids: &self.cache_order_ids,
+            selected_count: &record.selected_count,
+            visible_count: &record.visible_count,
         }
     }
 
@@ -4293,8 +4920,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         enc: &KernelEncoder,
         raw_cache: &MetalTensor,
         rows: DeepSeekV4CsaRows<'_>,
-        selection: &DeepSeekV4SparseCsaScratch,
-        record: &DeepSeekV4SelectionRecord,
+        selection: DeepSeekV4CsaSelectionView<'_>,
         sinks: &MetalTensor,
         position: u32,
         rope: DeepSeekV4RopeParameters,
@@ -4304,13 +4930,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         let dims = c.checked()?;
         self.validate_scratch(dims)?;
         validate_ds4_rope(rope, c.head_dim, c.rotary_dim)?;
-        if selection.capacity_rows != rows.capacity_rows {
-            return invalid(format!(
-                "selected attention scratch capacity {} differs from CSA capacity {}",
-                selection.capacity_rows, rows.capacity_rows
-            ));
-        }
-        record.validate()?;
+        selection.validate()?;
         let queries = self
             .queries
             .view_subrange(0, vec![dims.query_width as u64, 1]);
@@ -4325,9 +4945,9 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             raw_cache,
             rows.attention_cache,
             rows.capacity_rows,
-            &selection.cache_order_ids,
-            &record.selected_count,
-            &record.visible_count,
+            selection.cache_order_ids,
+            selection.selected_count,
+            selection.visible_count,
             sinks,
             &output,
             position,
@@ -8278,7 +8898,7 @@ fn encode_indexer_fp4_contract_primitives(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "dsv4-diagnostics"))]
 fn encode_pack_indexer_fp4_rows_shadow(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -8383,7 +9003,7 @@ fn encode_pack_indexer_fp4_rows_shadow(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "dsv4-diagnostics"))]
 fn encode_unpack_indexer_fp4_units_shadow(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -8463,6 +9083,98 @@ fn encode_unpack_indexer_fp4_units_shadow(
     Ok(())
 }
 
+#[cfg(feature = "dsv4-diagnostics")]
+fn encode_indexer_fp4_shadow_preflight(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    query_status: &MetalTensor,
+    key_status: &MetalTensor,
+    requested_visible: &MetalTensor,
+    eligible_visible: &MetalTensor,
+    eligibility_record: &MetalTensor,
+    row_capacity: usize,
+    expected_visible: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const QUERY_ROWS: usize = 64;
+    if row_capacity == 0
+        || expected_visible == 0
+        || expected_visible > row_capacity
+        || u32::try_from(row_capacity).is_err()
+        || u32::try_from(expected_visible).is_err()
+    {
+        return invalid(
+            "indexer FP4 preflight capacity/visibility must be nonzero, ordered, and fit u32",
+        );
+    }
+    validate_i32(
+        query_status,
+        &[QUERY_ROWS as u64],
+        false,
+        "indexer FP4 query status",
+    )?;
+    validate_i32(
+        key_status,
+        &[row_capacity as u64],
+        false,
+        "indexer FP4 key status",
+    )?;
+    validate_i32(
+        requested_visible,
+        &[1],
+        false,
+        "indexer FP4 requested visibility",
+    )?;
+    validate_i32(
+        eligible_visible,
+        &[1],
+        true,
+        "indexer FP4 eligible visibility",
+    )?;
+    validate_i32(
+        eligibility_record,
+        &[3],
+        true,
+        "indexer FP4 eligibility record",
+    )?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        query_rows: u32,
+        row_capacity: u32,
+        expected_visible: u32,
+    }
+
+    let pso = ctx.pipeline("kernel_deepseek_v4_indexer_fp4_shadow_preflight")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            query_rows: QUERY_ROWS as u32,
+            row_capacity: row_capacity as u32,
+            expected_visible: expected_visible as u32,
+        },
+    );
+    enc.set_tensor(1, query_status);
+    enc.set_tensor(2, key_status);
+    enc.set_tensor(3, requested_visible);
+    enc.set_tensor(4, eligible_visible);
+    enc.set_tensor(5, eligibility_record);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 fn encode_validate_indexer_fp4_rows_shadow(
     ctx: &MetalContext,
@@ -8528,7 +9240,7 @@ fn encode_validate_indexer_fp4_rows_shadow(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "dsv4-diagnostics"))]
 #[allow(clippy::too_many_arguments)]
 fn encode_lightning_indexer_scores_fp4_matrix_shadow(
     ctx: &MetalContext,
@@ -8649,7 +9361,7 @@ fn encode_lightning_indexer_scores_fp4_matrix_shadow(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "dsv4-diagnostics"))]
 fn validate_fp4_lightning_score_offsets(
     row_capacity: usize,
     query_count: usize,
@@ -8698,7 +9410,7 @@ fn validate_fp4_lightning_score_offsets(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "dsv4-diagnostics"))]
 fn validate_fp4_matrix_score_geometry(
     kernel: &str,
     thread_execution_width: usize,
@@ -8722,7 +9434,7 @@ fn validate_fp4_matrix_score_geometry(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "dsv4-diagnostics"))]
 fn validate_fp4_pack_geometry(
     thread_execution_width: usize,
     max_threads_per_group: usize,
@@ -9419,7 +10131,49 @@ fn require_serial(enc: &KernelEncoder, kernel: &str) -> Result<(), DeepSeekV4Met
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "dsv4-diagnostics"))]
+fn raw_i8_subview(
+    tensor: &MetalTensor,
+    element_offset: usize,
+    shape: Vec<u64>,
+    name: &str,
+) -> Result<MetalTensor, DeepSeekV4MetalError> {
+    if tensor.dtype != GgmlType::I8 {
+        return invalid(format!(
+            "{name} requires raw I8 storage, got {:?}",
+            tensor.dtype
+        ));
+    }
+    let elements = crate::tensor::checked_shape_elements(&shape)
+        .and_then(|elements| usize::try_from(elements).ok())
+        .ok_or_else(|| DeepSeekV4MetalError::Invalid(format!("{name} shape overflows usize")))?;
+    let end = element_offset
+        .checked_add(elements)
+        .ok_or_else(|| DeepSeekV4MetalError::Invalid(format!("{name} range overflows usize")))?;
+    if end > tensor.n_elements() as usize {
+        return invalid(format!(
+            "{name} range [{element_offset}, {end}) exceeds {} I8 elements",
+            tensor.n_elements()
+        ));
+    }
+    let offset = tensor
+        .offset
+        .checked_add(element_offset as u64)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!("{name} byte offset overflows u64"))
+        })?;
+    let view = MetalTensor {
+        buffer: tensor.buffer.clone(),
+        offset,
+        shape,
+        dtype: GgmlType::I8,
+        provenance: tensor.provenance,
+    };
+    validate_i8(&view, &view.shape, tensor.is_writable(), name)?;
+    Ok(view)
+}
+
+#[cfg(any(test, feature = "dsv4-diagnostics"))]
 fn validate_i8(
     tensor: &MetalTensor,
     shape: &[u64],
@@ -10034,7 +10788,37 @@ fn append_compressor_frontier_allocations(
             "published compressor history elements",
         )?,
         std::mem::size_of::<u16>(),
-    )
+    )?;
+    #[cfg(feature = "dsv4-diagnostics")]
+    if publication == DeepSeekV4CompressorPublication::IndexerHadamard {
+        push_session_allocation(
+            requests,
+            format!("{prefix}.fp4_values"),
+            checked_mul(
+                crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES,
+                capacity_rows,
+                "indexer FP4 sidecar value bytes",
+            )?,
+            std::mem::size_of::<u8>(),
+        )?;
+        push_session_allocation(
+            requests,
+            format!("{prefix}.fp4_scales"),
+            checked_mul(
+                crate::deepseek_v4_oracle::INDEXER_FP4_SCALE_BYTES,
+                capacity_rows,
+                "indexer FP4 sidecar scale bytes",
+            )?,
+            std::mem::size_of::<u8>(),
+        )?;
+        push_session_allocation(
+            requests,
+            format!("{prefix}.fp4_status"),
+            capacity_rows,
+            std::mem::size_of::<i32>(),
+        )?;
+    }
+    Ok(())
 }
 
 fn deepseek_v4_session_allocation_requests(
@@ -10193,6 +10977,46 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
     )?;
     for name in ["sparse_csa.selected_counts", "sparse_csa.status"] {
         push_session_allocation(&mut requests, name, 1, i32_bytes)?;
+    }
+    #[cfg(feature = "dsv4-diagnostics")]
+    {
+        push_session_allocation(
+            &mut requests,
+            "fp4_shadow.query_values",
+            crate::deepseek_v4_oracle::INDEXER_FP4_VALUE_BYTES * 64,
+            std::mem::size_of::<u8>(),
+        )?;
+        push_session_allocation(
+            &mut requests,
+            "fp4_shadow.query_scales",
+            crate::deepseek_v4_oracle::INDEXER_FP4_SCALE_BYTES * 64,
+            std::mem::size_of::<u8>(),
+        )?;
+        push_session_allocation(&mut requests, "fp4_shadow.query_status", 64, i32_bytes)?;
+        push_session_allocation(&mut requests, "fp4_shadow.query_units", 128 * 64, f16_bytes)?;
+        push_session_allocation(&mut requests, "fp4_shadow.eligible_visible", 1, i32_bytes)?;
+        push_session_allocation(&mut requests, "fp4_shadow.eligibility_record", 3, i32_bytes)?;
+        push_session_allocation(
+            &mut requests,
+            "fp4_shadow.scores",
+            capacity.csa_physical_rows(),
+            f32_bytes,
+        )?;
+        push_session_allocation(
+            &mut requests,
+            "fp4_shadow.selected_mask",
+            capacity.csa_physical_rows(),
+            i32_bytes,
+        )?;
+        push_session_allocation(
+            &mut requests,
+            "fp4_shadow.cache_order_ids",
+            DEEPSEEK_V4_CSA_TOP_K,
+            i32_bytes,
+        )?;
+        for name in ["fp4_shadow.selected_count", "fp4_shadow.status"] {
+            push_session_allocation(&mut requests, name, 1, i32_bytes)?;
+        }
     }
     push_session_allocation(
         &mut requests,
@@ -10994,13 +11818,29 @@ mod tests {
         let capacity =
             DeepSeekV4SessionCapacity::for_forward_limit(3_073, config.context_length).unwrap();
         let requests = deepseek_v4_session_allocation_requests_for_kinds(&kinds, capacity).unwrap();
-        assert_eq!(requests.len(), 542);
+        let csa_layer_count = kinds
+            .iter()
+            .filter(|&&kind| kind == AttentionKind::CompressedSparse)
+            .count();
+        let diagnostics_allocations = if cfg!(feature = "dsv4-diagnostics") {
+            csa_layer_count * 3 + 11
+        } else {
+            0
+        };
+        let diagnostics_logical = if cfg!(feature = "dsv4-diagnostics") {
+            csa_layer_count as u64 * capacity.csa_physical_rows() as u64 * 72
+                + 23_064
+                + capacity.csa_physical_rows() as u64 * 8
+        } else {
+            0
+        };
+        assert_eq!(requests.len(), 542 + diagnostics_allocations);
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            179_129_572
+            179_129_572 + diagnostics_logical
         );
         let names = requests
             .iter()
@@ -11032,12 +11872,19 @@ mod tests {
         let promoted =
             deepseek_v4_session_allocation_requests_for_kinds(&kinds, promoted_capacity).unwrap();
         assert_eq!(promoted.len(), requests.len());
+        let promoted_diagnostics_logical = if cfg!(feature = "dsv4-diagnostics") {
+            csa_layer_count as u64 * promoted_capacity.csa_physical_rows() as u64 * 72
+                + 23_064
+                + promoted_capacity.csa_physical_rows() as u64 * 8
+        } else {
+            0
+        };
         assert_eq!(
             promoted
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            7_631_942_884
+            7_631_942_884 + promoted_diagnostics_logical
         );
         assert_eq!(
             promoted
@@ -13215,6 +14062,16 @@ mod tests {
             DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
         )
         .unwrap();
+        #[cfg(feature = "dsv4-diagnostics")]
+        let mut frontier = frontier;
+        #[cfg(not(feature = "dsv4-diagnostics"))]
+        let frontier = frontier;
+        #[cfg(feature = "dsv4-diagnostics")]
+        frontier
+            .fp4_sidecar
+            .as_mut()
+            .expect("indexer frontier sidecar")
+            .enable();
         let kv_weights = (0..HIDDEN * WIDTH)
             .map(|index| ((index * 13 + index / 5 + 3) % 47) as f32 * 0.011 - 0.24)
             .collect::<Vec<_>>();
@@ -13306,6 +14163,36 @@ mod tests {
             "command failed: {:?}",
             command.error()
         );
+
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            let expected_packed = expected_rows
+                .chunks_exact(HEAD_DIM)
+                .map(|row| pack_indexer_fp4_row(row).unwrap())
+                .collect::<Vec<_>>();
+            let sidecar = frontier.fp4_sidecar.as_ref().unwrap();
+            let actual_values = read_u8(&sidecar.values);
+            let actual_scales = read_u8(&sidecar.scales);
+            for (row, expected) in expected_packed.iter().enumerate() {
+                assert_eq!(
+                    &actual_values
+                        [row * INDEXER_FP4_VALUE_BYTES..(row + 1) * INDEXER_FP4_VALUE_BYTES],
+                    &expected.as_bytes()[..INDEXER_FP4_VALUE_BYTES]
+                );
+                assert_eq!(
+                    &actual_scales
+                        [row * INDEXER_FP4_SCALE_BYTES..(row + 1) * INDEXER_FP4_SCALE_BYTES],
+                    &expected.as_bytes()[INDEXER_FP4_VALUE_BYTES..]
+                );
+            }
+            let status = read_i32(&sidecar.status);
+            assert_eq!(&status[..expected_packed.len()], &[0, 0]);
+            assert!(
+                status[expected_packed.len()..]
+                    .iter()
+                    .all(|&value| value == DEEPSEEK_V4_FP4_STATUS_UNAVAILABLE)
+            );
+        }
 
         let expected_rows = expected_rows
             .into_iter()
@@ -18370,6 +19257,148 @@ mod tests {
         assert_eq!(
             &read_i32(&cooperative_ids)[3 * TOP_K..],
             &(0..TOP_K as i32).collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn fp4_shadow_preflight_carries_operand_validity_and_fails_closed() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 768;
+        const VISIBLE: usize = 513;
+
+        let run = |query_statuses: &[i32], key_statuses: &[i32], visible: i32| {
+            let query_status = offset_i32(&ctx, query_statuses, vec![64]);
+            let key_status = offset_i32(&ctx, key_statuses, vec![CAPACITY as u64]);
+            let requested_visible = offset_i32(&ctx, &[visible], vec![1]);
+            let eligible_visible = offset_i32(&ctx, &[99], vec![1]);
+            let eligibility_record = offset_i32(&ctx, &[99, 99, 99], vec![3]);
+            let query_units = offset_f16(&ctx, &[0.0; 128 * 64], vec![128, 64, 1]);
+            let query_scales = offset_i8(&ctx, &[127; 4 * 64], vec![4, 64, 1]);
+            let head_weights = offset_f32(&ctx, &[0.0; 64], vec![64, 1]);
+            let key_values = offset_i8(&ctx, &[0; 64 * CAPACITY], vec![64, CAPACITY as u64]);
+            let key_scales = offset_i8(&ctx, &[127; 4 * CAPACITY], vec![4, CAPACITY as u64]);
+            let scores = offset_f32(&ctx, &[0.0; CAPACITY], vec![CAPACITY as u64, 1]);
+            let selected_mask = offset_i32(&ctx, &[-1; CAPACITY], vec![CAPACITY as u64, 1]);
+            let cache_order_ids = offset_i32(
+                &ctx,
+                &[-1; DEEPSEEK_V4_CSA_TOP_K],
+                vec![DEEPSEEK_V4_CSA_TOP_K as u64, 1],
+            );
+            let selected_count = offset_i32(&ctx, &[-1], vec![1]);
+            let selection_status = offset_i32(&ctx, &[-1], vec![1]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_indexer_fp4_shadow_preflight(
+                &ctx,
+                &encoder,
+                &query_status,
+                &key_status,
+                &requested_visible,
+                &eligible_visible,
+                &eligibility_record,
+                CAPACITY,
+                VISIBLE,
+            )
+            .unwrap();
+            encode_lightning_indexer_scores_fp4_matrix_shadow(
+                &ctx,
+                &encoder,
+                &query_units,
+                &query_scales,
+                &head_weights,
+                &key_values,
+                &key_scales,
+                &eligible_visible,
+                &scores,
+                CAPACITY,
+                1,
+            )
+            .unwrap();
+            encode_select_top_k_f32(
+                &ctx,
+                &encoder,
+                &scores,
+                &eligible_visible,
+                &selected_mask,
+                None,
+                &cache_order_ids,
+                &selected_count,
+                &selection_status,
+                CAPACITY,
+                VISIBLE,
+                DEEPSEEK_V4_CSA_TOP_K,
+                1,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "preflight command failed: {:?}",
+                command.error()
+            );
+            (
+                read_i32(&eligible_visible),
+                read_i32(&eligibility_record),
+                read_i32(&selected_count),
+                read_i32(&selection_status),
+                read_i32(&selected_mask)
+                    .into_iter()
+                    .filter(|&selected| selected != 0)
+                    .count(),
+            )
+        };
+
+        let ready_queries = [0; 64];
+        let mut ready_keys = [DEEPSEEK_V4_FP4_STATUS_UNAVAILABLE; CAPACITY];
+        ready_keys[..VISIBLE].fill(0);
+        assert_eq!(
+            run(&ready_queries, &ready_keys, VISIBLE as i32),
+            (vec![513], vec![0, -1, 0], vec![512], vec![0], 512)
+        );
+
+        let mut writing_query = ready_queries;
+        writing_query[17] = i32::MIN + 1;
+        assert_eq!(
+            run(&writing_query, &ready_keys, VISIBLE as i32),
+            (vec![-1], vec![2, 17, i32::MIN + 1], vec![0], vec![1], 0)
+        );
+
+        let mut unavailable_key = ready_keys;
+        unavailable_key[VISIBLE - 1] = DEEPSEEK_V4_FP4_STATUS_UNAVAILABLE;
+        assert_eq!(
+            run(&ready_queries, &unavailable_key, VISIBLE as i32),
+            (
+                vec![-1],
+                vec![3, (VISIBLE - 1) as i32, DEEPSEEK_V4_FP4_STATUS_UNAVAILABLE],
+                vec![0],
+                vec![1],
+                0,
+            )
+        );
+        assert_eq!(
+            run(&ready_queries, &ready_keys, CAPACITY as i32 + 1),
+            (
+                vec![-1],
+                vec![1, CAPACITY as i32 + 1, VISIBLE as i32],
+                vec![0],
+                vec![1],
+                0,
+            )
+        );
+        assert_eq!(
+            run(&ready_queries, &ready_keys, VISIBLE as i32 - 1),
+            (
+                vec![-1],
+                vec![1, VISIBLE as i32 - 1, VISIBLE as i32],
+                vec![0],
+                vec![1],
+                0,
+            )
         );
     }
 

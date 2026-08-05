@@ -1,0 +1,11 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.05s
+     Running tests/deepseek_v4_position_zero_live.rs (target/release/deps/deepseek_v4_position_zero_live-8da5d2a309b52828)
+
+running 1 test
+test current_deepseek_v4_fp4_selection_counterfactual_packet ... deepseek_v4 current FP4 packed argmax=35/35 cosine=0.9999999671239518 rel_rms=0.000260574412802494 max_abs=0.0035266876
+deepseek_v4 current FP4 singleton argmax=201/201 cosine=0.9999999958084599 rel_rms=0.00009157974322444668 max_abs=0.001985073
+deepseek_v4 current FP4 repeated control medians=46.51258350349963/46.67299974244088 candidate=47.72131284698844 drift=0.003442941136460409
+deepseek_v4 current FP4 packet=/Users/tito/code/qwen-llm/target/dsv4-current-fp4-selection-counterfactual-final.json
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 203.60s

@@ -189,19 +189,37 @@ pack byte, score vector, decision, tail, offset, and status gate passes. This is
 test-only schedule evidence: synthetic K is prepacked, status-0 planes are
 trusted, and no cache or snapshot ABI changes.
 
+The real-weight sidecar now clears its first whole-token decision and quality
+gate. Post-Hadamard, pre-F16 K rows publish into separate packed value/scale
+planes under transactional status; one preflight validates exact visibility,
+all 64 Q statuses, and every visible K status. The counterfactual borrows only
+FP4 selector IDs while selected attention retains F16 history. On the refreshed
+asset, packed/singleton masks are exact in 8/21 and 11/21 CSA layers; every
+difference is one reciprocal rank-512/rank-513 exchange. Packed and singleton
+logits preserve argmax at cosine 0.999999967/0.999999996 and relative RMS
+0.000260574/0.000091580. Controls are bit-identical and all snapshot, restore,
+trace, memory, and fail-closed gates pass.
+
+This promotes diagnostics infrastructure, not production FP4 selection. The
+first-sparse-boundary packet deliberately computes both scorers; its positions
+2,053-2,060 timing bracket spans only 513-515 visible rows and measures candidate
+47.721 ms versus a 46.593 ms control midpoint. It cannot authorize terminal
+savings. Snapshot v1 remains F16-authoritative, and exact selector identity is a
+failed falsifier rather than a hidden gate change.
+
 Force-ranked queue:
 
-1. **Real-weight FP4 sidecar and whole-token packet.** Populate a status-carrying
-   packed K sidecar from post-Hadamard pre-F16 publication while retaining the
-   F16 cache as the differential. Carry validated Q/K status into the shadow
-   dispatch, compare every selector decision and downstream logit against the
-   current path, and measure whole-token saving on the refreshed asset. Do not
-   define paged K or snapshot v2 until this packet clears quality and product
-   gates.
+1. **No-double-score FP4 experimental arm.** Use the promoted status-carrying
+   sidecar and borrowed selection view, but omit authoritative scorer work on
+   timed positions while retaining F16 history as the differential. Preserve a
+   paired dual-score audit endpoint in the same useful deep/current-product
+   packet. Do not require a 32K cold replay when a cheaper state can exercise
+   materially more than one cutoff exchange. Keep production and snapshot v1
+   unchanged until both quality and terminal whole-token savings clear.
 2. **Multi-group selection.** The terminal FP4 shadow moves scoring below the
    retained 1.875 ms radix4 selector. Reopen global histograms,
    query-scaled scratch, and producer/reducer dispatches after or alongside the
-   real-weight sidecar, preserving exact threshold and tie order.
+   no-double-score FP4 lane, preserving exact threshold and tie order.
 3. **GPU-resident deterministic packed routing.** Remove prefill's router
    commit/wait and CPU schedule construction with integer counts, deterministic
    expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,

@@ -150,6 +150,16 @@ impl DeepSeekV4Session {
     pub fn capture_causal_snapshot(
         &self,
     ) -> Result<DeepSeekV4CausalSnapshot, DeepSeekV4MetalError> {
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            if self.fp4_shadow_replace_selection {
+                return invalid("FP4 selection-counterfactual sessions cannot export snapshot v1");
+            }
+            self.decision_diagnostics
+                .ensure_no_active_capture("capture a causal snapshot")?;
+            self.fp4_shadow_diagnostics
+                .ensure_no_active_capture("capture a causal snapshot")?;
+        }
         let model_content_id = self.snapshot_model_content_id.ok_or_else(|| {
             DeepSeekV4MetalError::Invalid(
                 "DeepSeek V4 session has no bound model-content identity".into(),
@@ -176,8 +186,15 @@ impl DeepSeekV4Session {
         snapshot: &DeepSeekV4CausalSnapshot,
     ) -> Result<(), DeepSeekV4MetalError> {
         #[cfg(feature = "dsv4-diagnostics")]
-        self.decision_diagnostics
-            .ensure_no_active_capture("restore a causal snapshot")?;
+        {
+            if self.fp4_shadow_replace_selection {
+                return invalid("FP4 selection-counterfactual sessions cannot restore snapshot v1");
+            }
+            self.decision_diagnostics
+                .ensure_no_active_capture("restore a causal snapshot")?;
+            self.fp4_shadow_diagnostics
+                .ensure_no_active_capture("restore a causal snapshot")?;
+        }
         let model_content_id = self.snapshot_model_content_id.ok_or_else(|| {
             DeepSeekV4MetalError::Invalid(
                 "DeepSeek V4 session has no bound model-content identity".into(),
@@ -192,7 +209,56 @@ impl DeepSeekV4Session {
             &self.raw_cache,
             &self.compressor_frontiers,
             snapshot,
-        )
+        )?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            self.compressor_frontiers.disable_fp4_shadow_lineage()?;
+            self.fp4_shadow_diagnostics.invalidate_lineage();
+        }
+        Ok(())
+    }
+
+    /// Hashes the current causal arenas for a diagnostics-only FP4 selection
+    /// counterfactual without authorizing snapshot-v1 export or restore.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn fp4_counterfactual_state_digest(
+        &self,
+    ) -> Result<DeepSeekV4Fp4CounterfactualStateDigest, DeepSeekV4MetalError> {
+        if !self.fp4_shadow_replace_selection {
+            return invalid("session is not an FP4 selection counterfactual");
+        }
+        self.decision_diagnostics
+            .ensure_no_active_capture("digest counterfactual state")?;
+        self.fp4_shadow_diagnostics
+            .ensure_no_active_capture("digest counterfactual state")?;
+        let model_content_id = self.snapshot_model_content_id.ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "DeepSeek V4 session has no bound model-content identity".into(),
+            )
+        })?;
+        let state = capture_causal_state(
+            self.residency.config(),
+            self.capacity,
+            self.phase,
+            &self.committed_tokens,
+            model_content_id,
+            &self.raw_cache,
+            &self.compressor_frontiers,
+        )?;
+        let state_digest = *state.causal_digest();
+        let (selection_trace_digest, consumed_layer_count) = self.fp4_counterfactual_trace.digest();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"qwen-dsv4-fp4-selection-counterfactual-v1\0");
+        hasher.update(&state_digest);
+        hasher.update(&selection_trace_digest);
+        hasher.update(&consumed_layer_count.to_le_bytes());
+        Ok(DeepSeekV4Fp4CounterfactualStateDigest {
+            prefix_digest: *state.prefix_digest(),
+            state_digest,
+            selection_trace_digest,
+            consumed_layer_count,
+            counterfactual_domain_digest: *hasher.finalize().as_bytes(),
+        })
     }
 }
 
@@ -293,6 +359,8 @@ fn restore_causal_state(
         &snapshot.compressor_f32_bits,
         &snapshot.published_f16_bits,
     );
+    #[cfg(feature = "dsv4-diagnostics")]
+    frontiers.invalidate_fp4_shadow_lineage()?;
     committed_tokens.clear();
     committed_tokens.extend_from_slice(&snapshot.prefix_tokens);
     phase.complete_restore(replaced_position, snapshot.next_position)

@@ -1742,6 +1742,41 @@ malformed-row status, fixture score, selector decision, tail, offset, and repeat
 gate passes. This promotes a test-only schedule, not a cache: synthetic K is
 prepacked, status-0 planes are trusted, and F16 snapshot v1 is untouched.
 
+The real-weight status-carrying sidecar closes that synthetic-K gap at the first
+sparse boundary. Every CSA indexer row packs from the exact post-Hadamard,
+pre-F16 publication seam into split value and scale planes. Publication writes
+unavailable/writing/final status around a device barrier; one preflight checks
+exact authoritative visibility, all 64 Q heads, and every visible K row before
+the packed scorer can expose a selection. Invalid observation remains reportable
+without a shadow decision, while invalid counterfactual consumption poisons the
+causal token.
+
+One refreshed-asset A/candidate/B campaign advances three fresh sessions through
+2,061 forwards. All 21 packed and singleton reports have ready Q/K, count 512,
+and selector status zero. Packed masks are exact in 8/21 layers and singleton
+masks in 11/21; all remaining differences are one reciprocal rank-512/rank-513
+exchange. This keeps the original exact-identity falsifier failed. A separate
+FP4-ID/F16-cache counterfactual preserves packed argmax 35 at cosine
+0.999999967 / relative RMS 0.000260574 and singleton argmax 201 at
+0.999999996 / 0.000091580. Maximum absolute errors are 0.003527/0.001985.
+
+Controls repeat bit-for-bit in logits, reports, and transcripts, and their
+causal-state digests are exact. The candidate trace binds packed/singleton kind,
+position, layer, visibility, and every consumed ID across exactly 21 packed and
+42 cumulative singleton CSA layers. Snapshot v1 export/restore is forbidden for
+the counterfactual; ordinary restore disables the sidecar and invalidates
+capture lineage while preserving an ordinary F16 continuation. The diagnostics
+plan includes every sidecar and scratch buffer. At full context it adds
+398,481,944 logical bytes without changing the production plan.
+
+This is a diagnostics decision/quality `GO`, not a production or speed
+promotion. Every arm deliberately computes both scorers, and positions
+2,053-2,060 span only 513-515 visible rows; candidate 47.721 ms versus a
+46.593 ms GPU control midpoint is therefore not the terminal packed-shadow
+comparison. A no-double-score experimental arm with a paired dual-score audit
+endpoint and a useful deep/current-product packet remain required before cache
+or snapshot migration.
+
 The pinned llama.cpp depth command is not a free decode-only bracket. Its
 `--n-depth` implementation executes `test_prompt(n_depth)` and serializes the
 resulting state before timed generation on the first repetition at every new
@@ -1880,10 +1915,11 @@ Gate:
 
 Broader S6 work remains:
 
-- Carry the official FP4 shadow into a real-weight status-carrying sidecar while
-  retaining F16 history as the differential. Migrate paged K and snapshot v2
-  only after whole-token decisions, quality, and timing clear. Pack the
-  remaining intended mixed FP8/BF16 attention cache independently.
+- Use the promoted real-weight status sidecar in a no-double-score experimental
+  arm while retaining F16 history as the differential. Require a useful deep
+  decision/quality packet and terminal whole-token timing before production,
+  paged K, or snapshot v2. Pack the remaining intended mixed FP8/BF16 attention
+  cache independently.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention. All-slot routed experts have closed the first measured MoE
   boundary without changing reduction lineage.
@@ -1894,7 +1930,7 @@ Broader S6 work remains:
   product contract.
 - Preserve promoted online singleton HCA and the exact packed/legacy tiled
   differential. Defer heads8/rows16 split-K while HCA remains below CSA; reopen
-  multi-group exact selection after the real-weight FP4 sidecar, because the
+  multi-group exact selection alongside the no-double-score FP4 arm, because the
   admitted 0.841 ms scorer now sits below the retained 1.875 ms selector. The
   scalar scorer and bitwise selector remain executable differentials.
 
@@ -1984,9 +2020,12 @@ noise without reducing technical risk. Revisit after S5.
    scalar Q/K FP4 contract remains frozen at fixture SHA-256
    `0e5e2b251a960d417e7977608a363b83e072e2d90bc286cc52820b0ea7dc2b1f`;
    preserve the packed matrix shadow at 0.841 ms terminal, including its exact
-   pack, unit-unpack, score, status, and query-reuse gates. Build a real-weight
-   status-carrying K sidecar next and require a whole-token decision/quality
-   packet. Do not migrate paged K or snapshots from microprofiles alone.
+   pack, unit-unpack, score, status, and query-reuse gates. The real-weight
+   status-carrying sidecar and shallow whole-token counterfactual are promoted
+   under diagnostics: all status gates pass, every selector delta is one cutoff
+   exchange, and downstream logits remain far inside their frozen bands. Build
+   a no-double-score deep/current-product packet next; do not migrate paged K or
+   snapshots from shallow quality evidence or microprofiles alone.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine

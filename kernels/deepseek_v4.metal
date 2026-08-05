@@ -322,6 +322,12 @@ struct ds4_indexer_fp4_rows_args {
     uint row_count;
 };
 
+struct ds4_indexer_fp4_preflight_args {
+    uint query_rows;
+    uint row_capacity;
+    uint expected_visible;
+};
+
 struct ds4_indexer_fp4_contract_args {
     uint e2m1_count;
     uint scale_count;
@@ -1165,6 +1171,8 @@ kernel void kernel_deepseek_v4_pack_indexer_fp4_rows_shadow(
     const uint row = group;
     if (row >= args.row_count) return;
 
+    if (thread_index == 0) status[row] = INT_MIN + 1;
+
     threadgroup float rounded_values[128];
     threadgroup uchar row_values[64];
     threadgroup uchar row_scales[4];
@@ -1221,10 +1229,16 @@ kernel void kernel_deepseek_v4_pack_indexer_fp4_rows_shadow(
             if (row_status == 0u && block_status[index] == candidate) row_status = candidate;
         }
     }
+    if (row_status == 0u) {
+        if (thread_index < 64) {
+            packed_values[row * 64u + uint(thread_index)] = row_values[thread_index];
+        }
+        if (thread_index < 4) {
+            packed_scales[row * 4u + uint(thread_index)] = row_scales[thread_index];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_device);
     if (thread_index == 0) status[row] = int(row_status);
-    if (row_status != 0u) return;
-    if (thread_index < 64) packed_values[row * 64u + uint(thread_index)] = row_values[thread_index];
-    if (thread_index < 4) packed_scales[row * 4u + uint(thread_index)] = row_scales[thread_index];
 }
 
 kernel void kernel_deepseek_v4_unpack_indexer_fp4_units_shadow(
@@ -1278,6 +1292,50 @@ kernel void kernel_deepseek_v4_validate_indexer_fp4_rows_shadow(
         if (row_status != 0u) break;
     }
     status[row] = int(row_status);
+}
+
+kernel void kernel_deepseek_v4_indexer_fp4_shadow_preflight(
+        constant ds4_indexer_fp4_preflight_args & args [[buffer(0)]],
+        device const int * query_status [[buffer(1)]],
+        device const int * key_status [[buffer(2)]],
+        device const int * requested_visible [[buffer(3)]],
+        device int * eligible_visible [[buffer(4)]],
+        device int * eligibility_record [[buffer(5)]],
+        uint index [[thread_position_in_grid]]) {
+    if (index != 0u) return;
+    const int visible = requested_visible[0];
+    if (visible <= 0 || uint(visible) > args.row_capacity
+            || uint(visible) != args.expected_visible) {
+        eligible_visible[0] = -1;
+        eligibility_record[0] = 1;
+        eligibility_record[1] = visible;
+        eligibility_record[2] = int(args.expected_visible);
+        return;
+    }
+    for (uint head = 0u; head < args.query_rows; ++head) {
+        const int candidate = query_status[head];
+        if (candidate != 0) {
+            eligible_visible[0] = -1;
+            eligibility_record[0] = 2;
+            eligibility_record[1] = int(head);
+            eligibility_record[2] = candidate;
+            return;
+        }
+    }
+    for (uint row = 0u; row < uint(visible); ++row) {
+        const int candidate = key_status[row];
+        if (candidate != 0) {
+            eligible_visible[0] = -1;
+            eligibility_record[0] = 3;
+            eligibility_record[1] = int(row);
+            eligibility_record[2] = candidate;
+            return;
+        }
+    }
+    eligible_visible[0] = visible;
+    eligibility_record[0] = 0;
+    eligibility_record[1] = -1;
+    eligibility_record[2] = 0;
 }
 
 kernel void kernel_deepseek_v4_lightning_indexer_scores_f16(

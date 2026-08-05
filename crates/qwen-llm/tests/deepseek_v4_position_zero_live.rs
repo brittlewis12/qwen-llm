@@ -1,8 +1,6 @@
 use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::deepseek_v4::{AttentionKind, DeepSeekV4Model};
 use qwen_llm::deepseek_v4_census::PinnedDeepSeekV4AssetV1;
-#[cfg(feature = "dsv4-diagnostics")]
-use qwen_llm::deepseek_v4_metal::DeepSeekV4DecisionTranscript;
 use qwen_llm::deepseek_v4_metal::{
     DeepSeekV4CausalSnapshot, DeepSeekV4CommandProfile, DeepSeekV4MetalResidency,
     DeepSeekV4ModelContentId, DeepSeekV4PositionZeroForward, DeepSeekV4RoutingKind,
@@ -10,14 +8,25 @@ use qwen_llm::deepseek_v4_metal::{
     DeepSeekV4StageProfile, DeepSeekV4WholeTokenProfile, decode_causal_snapshot,
     encode_causal_snapshot, load_causal_snapshot_file, publish_causal_snapshot_file,
 };
+#[cfg(feature = "dsv4-diagnostics")]
+use qwen_llm::deepseek_v4_metal::{
+    DeepSeekV4DecisionTranscript, DeepSeekV4Fp4ShadowEligibility, DeepSeekV4Fp4ShadowExecution,
+    DeepSeekV4Fp4ShadowReport, deepseek_v4_diagnostics_metallib_sha256,
+};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{MetalContext, kernel_trace_begin, kernel_trace_snapshot};
 use sha2::{Digest, Sha256};
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "dsv4-diagnostics")]
+use std::process::Command;
 use std::time::Instant;
 
+#[cfg(feature = "dsv4-diagnostics")]
+use objc2_metal::MTLDevice;
+
 const DEFAULT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+const DEFAULT_CURRENT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 const DEFAULT_DURABLE_SNAPSHOT: &str = "target/dsv4-position1024.ds4c";
 const DEFAULT_DURABLE_POSITION_2048_SNAPSHOT: &str = "target/dsv4-position2048.ds4c";
 const DEFAULT_DURABLE_POSITION_2052_SNAPSHOT: &str = "target/dsv4-position2052.ds4c";
@@ -30,6 +39,8 @@ const ORACLE_BYTES: &[u8] = include_bytes!("fixtures/deepseek_v4_token35_positio
 const ORACLE_MANIFEST: &str = include_str!("fixtures/deepseek_v4_token35_position0_b10222.json");
 const LEGACY_CENSUS_MANIFEST: &str =
     include_str!("fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_census_v1.json");
+const CURRENT_CENSUS_MANIFEST: &str =
+    include_str!("fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_current_2026_08_04_census_v1.json");
 const POSITION_ONE_ORACLE_BYTES: &[u8] =
     include_bytes!("fixtures/deepseek_v4_tokens35_201_position1_b10222.f32");
 const POSITION_ONE_ORACLE_MANIFEST: &str =
@@ -245,6 +256,26 @@ fn open_pinned_legacy_gguf(model_path: &Path) -> GgufFile {
         "DSV4_LEGACY_MODEL does not match the pinned 2026-07-31 asset"
     );
     gguf
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+fn open_pinned_current_gguf(model_path: &Path) -> (GgufFile, DeepSeekV4ModelContentId) {
+    let gguf = GgufFile::open(model_path).expect("open current DS4 GGUF shards");
+    PinnedDeepSeekV4AssetV1::parse(CURRENT_CENSUS_MANIFEST)
+        .expect("parse current DS4 census")
+        .validate_observed(&gguf)
+        .expect("current DS4 schema and quant census match");
+    let identity_cache_path = std::env::var_os("DSV4_CURRENT_IDENTITY_CACHE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("target/.qwen-dsv4-current-model-identity-v2")
+        });
+    let content =
+        checkpoint_content_identity(&gguf, &CheckpointIdentityCache::new(identity_cache_path))
+            .expect("resolve current DS4 ordered-content identity");
+    (gguf, DeepSeekV4ModelContentId::new(content.content_id))
 }
 
 fn assert_hca_long_prefix_gate(label: &str, comparison: &LogitComparison) {
@@ -537,14 +568,27 @@ fn native_deepseek_v4_full_context_session_plan_is_exact_and_admitted() {
     assert_eq!(plan.session_capacity().hca_physical_rows(), 8_192);
     let memory = plan.memory_plan().clone();
     eprintln!("deepseek_v4 full-context planned memory={memory}");
-    assert_eq!(memory.session_allocations().len(), 542);
-    assert_eq!(memory.session_logical_bytes(), 7_631_942_884);
-    assert_eq!(memory.session_priced_upper_bytes(), 7_636_467_712);
-    assert_eq!(memory.total_priced_upper_bytes(), 110_631_092_224);
+    #[cfg(not(feature = "dsv4-diagnostics"))]
+    {
+        assert_eq!(memory.session_allocations().len(), 542);
+        assert_eq!(memory.session_logical_bytes(), 7_631_942_884);
+        assert_eq!(memory.session_priced_upper_bytes(), 7_636_467_712);
+        assert_eq!(memory.total_priced_upper_bytes(), 110_631_092_224);
+    }
+    #[cfg(feature = "dsv4-diagnostics")]
+    {
+        assert_eq!(memory.session_allocations().len(), 616);
+        assert_eq!(memory.session_logical_bytes(), 8_030_424_828);
+        assert_eq!(memory.session_priced_upper_bytes(), 8_035_074_048);
+        assert_eq!(memory.total_priced_upper_bytes(), 111_029_698_560);
+    }
     let required = memory
         .required_with_reserve_bytes()
         .expect("price full-context plan with reserve");
+    #[cfg(not(feature = "dsv4-diagnostics"))]
     assert_eq!(required, 111_167_963_136);
+    #[cfg(feature = "dsv4-diagnostics")]
+    assert_eq!(required, 111_566_569_472);
     let admission = memory.admission(ctx.memory_signals());
     assert!(
         admission.admitted,
@@ -1220,17 +1264,37 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         "memory planning must not realize Metal buffers"
     );
     let memory_plan = load_plan.memory_plan().clone();
-    assert_eq!(memory_plan.session_allocations().len(), 542);
-    assert_eq!(memory_plan.session_logical_bytes(), 179_129_572);
-    assert_eq!(memory_plan.session_priced_upper_bytes(), 183_681_024);
+    #[cfg(not(feature = "dsv4-diagnostics"))]
+    {
+        assert_eq!(memory_plan.session_allocations().len(), 542);
+        assert_eq!(memory_plan.session_logical_bytes(), 179_129_572);
+        assert_eq!(memory_plan.session_priced_upper_bytes(), 183_681_024);
+    }
+    #[cfg(feature = "dsv4-diagnostics")]
+    {
+        assert_eq!(memory_plan.session_allocations().len(), 616);
+        assert_eq!(memory_plan.session_logical_bytes(), 180_319_996);
+        assert_eq!(memory_plan.session_priced_upper_bytes(), 185_581_568);
+    }
     assert_eq!(memory_plan.residency_buffer_count(), 7);
     assert_eq!(memory_plan.residency_logical_bytes(), 102_994_608_640);
     assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_624_512);
-    assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_305_536);
-    assert_eq!(
-        memory_plan.required_with_reserve_bytes().unwrap(),
-        103_715_176_448
-    );
+    #[cfg(not(feature = "dsv4-diagnostics"))]
+    {
+        assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_305_536);
+        assert_eq!(
+            memory_plan.required_with_reserve_bytes().unwrap(),
+            103_715_176_448
+        );
+    }
+    #[cfg(feature = "dsv4-diagnostics")]
+    {
+        assert_eq!(memory_plan.total_priced_upper_bytes(), 103_180_206_080);
+        assert_eq!(
+            memory_plan.required_with_reserve_bytes().unwrap(),
+            103_717_076_992
+        );
+    }
     assert_eq!(load_plan.residency_report().window_count, 3);
     assert_eq!(load_plan.residency_report().fallback_count, 4);
     assert_eq!(
@@ -1285,6 +1349,963 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
         })
         .expect("reconcile admitted DS4 allocation samples");
     eprintln!("memory_reconciliation={reconciliation}");
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+#[test]
+#[ignore = "requires the current 97.05 GiB DS4 asset and three 2,053-token sessions"]
+fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
+    const SOURCE_BASE_GIT_COMMIT: &str = "f7df1aeec29b14049ca2fc34e05aca274ea09b86";
+    const FORWARD_LIMIT: usize = 2_061;
+    const PACKED_POSITION: u32 = 2_051;
+    const SINGLETON_POSITION: u32 = 2_052;
+    const MIN_LOGIT_COSINE: f64 = 0.999_999;
+    const MAX_LOGIT_RELATIVE_RMS: f64 = 0.001;
+    const MAX_LOGIT_ABSOLUTE_ERROR: f32 = 0.01;
+    const MAX_CONTROL_GPU_DRIFT: f64 = 0.05;
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn campaign_source_sha256() -> String {
+        const SOURCES: &[(&str, &[u8])] = &[
+            (
+                "crates/qwen-llm/src/deepseek_v4_metal.rs",
+                include_bytes!("../src/deepseek_v4_metal.rs"),
+            ),
+            (
+                "crates/qwen-llm/src/deepseek_v4_metal/diagnostics.rs",
+                include_bytes!("../src/deepseek_v4_metal/diagnostics.rs"),
+            ),
+            (
+                "crates/qwen-llm/src/deepseek_v4_metal/prefill.rs",
+                include_bytes!("../src/deepseek_v4_metal/prefill.rs"),
+            ),
+            (
+                "crates/qwen-llm/src/deepseek_v4_metal/snapshot.rs",
+                include_bytes!("../src/deepseek_v4_metal/snapshot.rs"),
+            ),
+            (
+                "crates/qwen-llm/tests/deepseek_v4_position_zero_live.rs",
+                include_bytes!("deepseek_v4_position_zero_live.rs"),
+            ),
+            (
+                "kernels/deepseek_v4.metal",
+                include_bytes!("../../../kernels/deepseek_v4.metal"),
+            ),
+        ];
+        let mut hasher = Sha256::new();
+        hasher.update(b"qwen-dsv4-fp4-campaign-source-v1\0");
+        for (path, bytes) in SOURCES {
+            hasher.update((path.len() as u64).to_le_bytes());
+            hasher.update(path.as_bytes());
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        }
+        format!("{:x}", hasher.finalize())
+    }
+
+    fn file_sha256(path: &Path) -> (String, u64) {
+        let mut file = std::fs::File::open(path)
+            .unwrap_or_else(|error| panic!("open {} for hashing: {error}", path.display()));
+        let mut hasher = Sha256::new();
+        let mut bytes = 0_u64;
+        let mut buffer = vec![0_u8; 1024 * 1024];
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .unwrap_or_else(|error| panic!("hash {}: {error}", path.display()));
+            if count == 0 {
+                break;
+            }
+            hasher.update(&buffer[..count]);
+            bytes = bytes.checked_add(count as u64).expect("executable size");
+        }
+        (format!("{:x}", hasher.finalize()), bytes)
+    }
+
+    fn command_identity(program: &str, args: &[&str]) -> String {
+        let output = Command::new(program)
+            .args(args)
+            .output()
+            .unwrap_or_else(|error| panic!("run {program} {args:?}: {error}"));
+        assert!(
+            output.status.success(),
+            "{program} {args:?} failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut bytes = output.stdout;
+        if !output.stderr.is_empty() {
+            bytes.extend_from_slice(&output.stderr);
+        }
+        String::from_utf8(bytes)
+            .unwrap_or_else(|error| panic!("{program} identity is not UTF-8: {error}"))
+            .trim()
+            .to_owned()
+    }
+
+    struct Run {
+        committed_tokens: Vec<u32>,
+        packed_logits: Vec<f32>,
+        singleton_logits: Vec<f32>,
+        packed_prefix_digest: [u8; 32],
+        packed_causal_digest: [u8; 32],
+        packed_counterfactual_domain_digest: Option<[u8; 32]>,
+        packed_selection_trace_digest: Option<[u8; 32]>,
+        packed_consumed_layer_count: u64,
+        singleton_prefix_digest: [u8; 32],
+        singleton_causal_digest: [u8; 32],
+        singleton_counterfactual_domain_digest: Option<[u8; 32]>,
+        singleton_selection_trace_digest: Option<[u8; 32]>,
+        singleton_consumed_layer_count: u64,
+        singleton_decisions: DeepSeekV4DecisionTranscript,
+        packed_fp4: Option<DeepSeekV4Fp4ShadowReport>,
+        singleton_fp4: Option<DeepSeekV4Fp4ShadowReport>,
+        after_session_bytes: u64,
+        after_first_forward_bytes: u64,
+        prefix_ms: f64,
+        packed_ms: f64,
+        singleton_wall_ms: f64,
+        singleton_gpu_ms: f64,
+        repeated_singleton_gpu_ms: Vec<f64>,
+        restore_probe: Option<DeepSeekV4CausalSnapshot>,
+    }
+
+    fn execute(
+        ctx: &MetalContext,
+        residency: DeepSeekV4MetalResidency,
+        model_content_id: DeepSeekV4ModelContentId,
+        prefix: &[u32],
+        final_four: &[u32],
+        timing_tokens: &[u32],
+        observe_fp4: bool,
+        replace_selection: bool,
+        restore_probe: Option<&DeepSeekV4CausalSnapshot>,
+        retain_restore_probe: bool,
+    ) -> (DeepSeekV4MetalResidency, Run) {
+        let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
+            ctx,
+            residency,
+            model_content_id,
+        )
+        .expect("construct current-asset FP4 observer session");
+        if replace_selection {
+            session
+                .enable_fp4_shadow_selection_counterfactual()
+                .expect("enable FP4 selection counterfactual at position zero");
+        } else if observe_fp4 {
+            session
+                .enable_fp4_shadow_lineage()
+                .expect("enable FP4 sidecar lineage at position zero");
+        }
+        if let Some(snapshot) = restore_probe {
+            let error = session.restore_causal_snapshot(snapshot).unwrap_err();
+            assert!(error.to_string().contains("cannot restore snapshot v1"));
+            assert_eq!(session.next_position(), 0);
+        }
+        let after_session_bytes = ctx.current_allocated_size();
+
+        let prefix_started = Instant::now();
+        let mut after_first_forward_bytes = None;
+        for chunk in prefix.chunks_exact(128) {
+            session
+                .advance_tokens(ctx, chunk)
+                .expect("advance current-asset packed FP4 prefix");
+            after_first_forward_bytes.get_or_insert_with(|| ctx.current_allocated_size());
+        }
+        assert_eq!(session.next_position(), 2_048);
+        let prefix_ms = prefix_started.elapsed().as_secs_f64() * 1e3;
+
+        if observe_fp4 {
+            session
+                .arm_fp4_shadow_report(PACKED_POSITION)
+                .expect("arm packed FP4 observer");
+        }
+        let packed_started = Instant::now();
+        session
+            .prefill_tokens(ctx, final_four)
+            .expect("execute first-sparse packed chunk");
+        let packed_ms = packed_started.elapsed().as_secs_f64() * 1e3;
+        let packed_logits = session
+            .copy_logits_f32()
+            .expect("copy first-sparse packed logits");
+        let packed_fp4 = observe_fp4.then(|| {
+            session
+                .take_fp4_shadow_report()
+                .expect("take packed FP4 observer report")
+        });
+        let (
+            packed_prefix_digest,
+            packed_causal_digest,
+            packed_counterfactual_domain_digest,
+            packed_selection_trace_digest,
+            packed_consumed_layer_count,
+            retained_restore_probe,
+        ) = if replace_selection {
+            assert!(
+                session
+                    .capture_causal_snapshot()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot export snapshot v1")
+            );
+            let digest = session
+                .fp4_counterfactual_state_digest()
+                .expect("digest first-sparse counterfactual state");
+            (
+                digest.prefix_digest,
+                digest.state_digest,
+                Some(digest.counterfactual_domain_digest),
+                Some(digest.selection_trace_digest),
+                digest.consumed_layer_count,
+                None,
+            )
+        } else {
+            let snapshot = session
+                .capture_causal_snapshot()
+                .expect("capture first-sparse packed state");
+            assert_eq!(snapshot.next_position(), PACKED_POSITION + 1);
+            let retained_restore_probe = retain_restore_probe.then_some(snapshot.clone());
+            (
+                *snapshot.prefix_digest(),
+                *snapshot.causal_digest(),
+                None,
+                None,
+                0,
+                retained_restore_probe,
+            )
+        };
+
+        session
+            .arm_decision_transcript(SINGLETON_POSITION)
+            .expect("arm authoritative singleton decisions");
+        if observe_fp4 {
+            session
+                .arm_fp4_shadow_report(SINGLETON_POSITION)
+                .expect("arm singleton FP4 observer");
+        }
+        let singleton_profile = session
+            .forward_token_profiled(ctx, 35)
+            .expect("execute current-asset singleton FP4 comparison");
+        let singleton_logits = session
+            .copy_logits_f32()
+            .expect("copy singleton FP4 comparison logits");
+        let singleton_fp4 = observe_fp4.then(|| {
+            session
+                .take_fp4_shadow_report()
+                .expect("take singleton FP4 observer report")
+        });
+        let singleton_decisions = session
+            .take_decision_transcript()
+            .expect("take authoritative singleton decisions");
+        let (
+            singleton_prefix_digest,
+            singleton_causal_digest,
+            singleton_counterfactual_domain_digest,
+            singleton_selection_trace_digest,
+            singleton_consumed_layer_count,
+        ) = if replace_selection {
+            let digest = session
+                .fp4_counterfactual_state_digest()
+                .expect("digest singleton counterfactual state");
+            (
+                digest.prefix_digest,
+                digest.state_digest,
+                Some(digest.counterfactual_domain_digest),
+                Some(digest.selection_trace_digest),
+                digest.consumed_layer_count,
+            )
+        } else {
+            let snapshot = session
+                .capture_causal_snapshot()
+                .expect("capture singleton FP4 comparison state");
+            assert_eq!(snapshot.next_position(), SINGLETON_POSITION + 1);
+            (
+                *snapshot.prefix_digest(),
+                *snapshot.causal_digest(),
+                None,
+                None,
+                0,
+            )
+        };
+
+        let mut repeated_singleton_gpu_ms = Vec::with_capacity(timing_tokens.len());
+        for &token in timing_tokens {
+            let position = session.next_position();
+            session
+                .arm_fp4_shadow_report(position)
+                .expect("arm repeated FP4 timing report");
+            let profile = session
+                .forward_token_profiled(ctx, token)
+                .expect("execute repeated FP4 timing token");
+            let report = session
+                .take_fp4_shadow_report()
+                .expect("take repeated FP4 timing report");
+            assert_eq!(report.position, position);
+            assert_eq!(report.layers.len(), 21);
+            assert!(report.layers.iter().all(|layer| {
+                layer.eligibility == DeepSeekV4Fp4ShadowEligibility::Ready
+                    && layer.shadow.is_some()
+                    && layer.shadow_selection_status == 0
+                    && layer.shadow_selected_count == 512
+            }));
+            repeated_singleton_gpu_ms.push(profile.command_gpu_ms());
+        }
+
+        let run = Run {
+            committed_tokens: session.committed_tokens().to_vec(),
+            packed_logits,
+            singleton_logits,
+            packed_prefix_digest,
+            packed_causal_digest,
+            packed_counterfactual_domain_digest,
+            packed_selection_trace_digest,
+            packed_consumed_layer_count,
+            singleton_prefix_digest,
+            singleton_causal_digest,
+            singleton_counterfactual_domain_digest,
+            singleton_selection_trace_digest,
+            singleton_consumed_layer_count,
+            singleton_decisions,
+            packed_fp4,
+            singleton_fp4,
+            after_session_bytes,
+            after_first_forward_bytes: after_first_forward_bytes
+                .expect("prefix executes at least one packed forward"),
+            prefix_ms,
+            packed_ms,
+            singleton_wall_ms: singleton_profile.forward_wall_ms,
+            singleton_gpu_ms: singleton_profile.command_gpu_ms(),
+            repeated_singleton_gpu_ms,
+            restore_probe: retained_restore_probe,
+        };
+        (session.into_residency(), run)
+    }
+
+    fn assert_f32_bits_equal(label: &str, left: &[f32], right: &[f32]) {
+        assert_eq!(left.len(), right.len(), "{label} length");
+        assert!(left.iter().chain(right).all(|value| value.is_finite()));
+        assert!(
+            left.iter()
+                .zip(right)
+                .all(|(&left, &right)| left.to_bits() == right.to_bits()),
+            "{label} differs at the bit level"
+        );
+    }
+
+    fn hex(bytes: &[u8; 32]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn assert_report(label: &str, report: &DeepSeekV4Fp4ShadowReport) {
+        assert_eq!(report.layers.len(), 21, "{label} layer count");
+        for layer in &report.layers {
+            assert_eq!(layer.eligibility, DeepSeekV4Fp4ShadowEligibility::Ready);
+            assert!(layer.query_statuses.iter().all(|&status| status == 0));
+            assert!(layer.visible_key_statuses.iter().all(|&status| status == 0));
+            let shadow = layer
+                .shadow
+                .as_ref()
+                .unwrap_or_else(|| panic!("{label} layer {} lacks shadow", layer.layer));
+            assert_eq!(shadow.selected_count, 512);
+            assert_eq!(shadow.selection_status, 0);
+            assert!(layer.max_abs_score_error.is_some_and(f32::is_finite));
+            assert!(layer.relative_rms_score_error.is_some_and(f64::is_finite));
+            let authoritative_only = layer
+                .authoritative
+                .cache_order_selected_ids
+                .iter()
+                .copied()
+                .filter(|id| !shadow.cache_order_selected_ids.contains(id))
+                .collect::<Vec<_>>();
+            let shadow_only = shadow
+                .cache_order_selected_ids
+                .iter()
+                .copied()
+                .filter(|id| !layer.authoritative.cache_order_selected_ids.contains(id))
+                .collect::<Vec<_>>();
+            assert!(
+                matches!(
+                    (authoritative_only.as_slice(), shadow_only.as_slice()),
+                    ([], []) | ([_], [_])
+                ),
+                "{label} layer {} has a non-cutoff selector delta",
+                layer.layer
+            );
+            assert_eq!(
+                layer.selected_mask_exact,
+                authoritative_only.is_empty(),
+                "{label} layer {} mask/ID consistency",
+                layer.layer
+            );
+            if let ([authoritative_only], [shadow_only]) =
+                (authoritative_only.as_slice(), shadow_only.as_slice())
+            {
+                assert_eq!(
+                    shadow.rank_513.row_id, *authoritative_only,
+                    "{label} layer {} authoritative-only row is not FP4 rank 513",
+                    layer.layer
+                );
+                assert_eq!(
+                    layer.authoritative.rank_513.row_id, *shadow_only,
+                    "{label} layer {} FP4-only row is not authoritative rank 513",
+                    layer.layer
+                );
+            }
+        }
+    }
+
+    struct LogitDelta {
+        reference_argmax: usize,
+        candidate_argmax: usize,
+        cosine: f64,
+        relative_rms: f64,
+        max_abs: f32,
+    }
+
+    fn logit_delta(reference: &[f32], candidate: &[f32]) -> LogitDelta {
+        assert_eq!(reference.len(), candidate.len());
+        assert!(
+            reference
+                .iter()
+                .chain(candidate)
+                .all(|value| value.is_finite())
+        );
+        let mut dot = 0.0f64;
+        let mut reference_norm = 0.0f64;
+        let mut candidate_norm = 0.0f64;
+        let mut squared_error = 0.0f64;
+        let mut max_abs = 0.0f32;
+        for (&reference, &candidate) in reference.iter().zip(candidate) {
+            dot += f64::from(reference) * f64::from(candidate);
+            reference_norm += f64::from(reference).powi(2);
+            candidate_norm += f64::from(candidate).powi(2);
+            squared_error += f64::from(candidate - reference).powi(2);
+            max_abs = max_abs.max((candidate - reference).abs());
+        }
+        let argmax = |values: &[f32]| {
+            values
+                .iter()
+                .enumerate()
+                .max_by(|left, right| left.1.total_cmp(right.1))
+                .unwrap()
+                .0
+        };
+        LogitDelta {
+            reference_argmax: argmax(reference),
+            candidate_argmax: argmax(candidate),
+            cosine: dot / (reference_norm.sqrt() * candidate_norm.sqrt()),
+            relative_rms: (squared_error / reference_norm).sqrt(),
+            max_abs,
+        }
+    }
+
+    fn median(values: &[f64]) -> f64 {
+        assert!(!values.is_empty());
+        let mut values = values.to_vec();
+        values.sort_by(f64::total_cmp);
+        let middle = values.len() / 2;
+        if values.len().is_multiple_of(2) {
+            (values[middle - 1] + values[middle]) * 0.5
+        } else {
+            values[middle]
+        }
+    }
+
+    let model_path = std::env::var_os("DSV4_MODEL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CURRENT_MODEL));
+    assert!(
+        model_path.exists(),
+        "missing current DS4 model at {}",
+        model_path.display()
+    );
+    let ctx = MetalContext::new().expect("create current-asset Metal context");
+    let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
+    let load_plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
+        .expect("plan current-asset FP4 observer residency");
+    let memory_plan = load_plan.memory_plan().clone();
+    let admitted = load_plan
+        .admit(ctx.memory_signals())
+        .expect("admit current-asset FP4 observer residency");
+    let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+        .expect("realize current-asset FP4 observer residency");
+    let (residency, refreshed_admission, after_residency_bytes) = realized.into_parts();
+    let before_residency_bytes = refreshed_admission.signals.current_allocated_bytes;
+    memory_plan
+        .reconcile_residency(before_residency_bytes, after_residency_bytes)
+        .expect("reconcile current-asset residency");
+
+    let pattern = [35_u32, 201, 200, 34];
+    let prefix = pattern.repeat(512);
+    let final_four = pattern;
+    let timing_tokens = pattern.repeat(2);
+    let mut expected_tokens = pattern.repeat(513);
+    expected_tokens.push(35);
+    expected_tokens.extend_from_slice(&timing_tokens);
+    assert_eq!(prefix.len(), 2_048);
+    assert_eq!(expected_tokens.len(), FORWARD_LIMIT);
+
+    if std::env::var_os("DSV4_FP4_OBSERVE_ONLY").is_some() {
+        let (_residency, candidate) = execute(
+            &ctx,
+            residency,
+            model_content_id,
+            &prefix,
+            &final_four,
+            &timing_tokens,
+            true,
+            false,
+            None,
+            false,
+        );
+        assert_eq!(candidate.committed_tokens, expected_tokens);
+        memory_plan
+            .reconcile(qwen_llm::deepseek_v4_metal::DeepSeekV4MemorySamples {
+                before_residency_bytes,
+                after_residency_bytes,
+                after_session_bytes: candidate.after_session_bytes,
+                after_first_forward_bytes: candidate.after_first_forward_bytes,
+            })
+            .expect("reconcile observational FP4 session");
+        let packed_report = candidate.packed_fp4.as_ref().unwrap();
+        let singleton_report = candidate.singleton_fp4.as_ref().unwrap();
+        for (execution, report) in [("packed", packed_report), ("singleton", singleton_report)] {
+            for layer in &report.layers {
+                let shadow = layer.shadow.as_ref().expect("eligible shadow decision");
+                let symmetric_difference = layer
+                    .authoritative
+                    .cache_order_selected_ids
+                    .iter()
+                    .filter(|id| !shadow.cache_order_selected_ids.contains(id))
+                    .count()
+                    + shadow
+                        .cache_order_selected_ids
+                        .iter()
+                        .filter(|id| !layer.authoritative.cache_order_selected_ids.contains(id))
+                        .count();
+                eprintln!(
+                    "deepseek_v4 fp4 observe execution={execution} layer={} mask_exact={} symmetric_difference={} current_margin={} shadow_margin={} max_abs={} rel_rms={}",
+                    layer.layer,
+                    layer.selected_mask_exact,
+                    symmetric_difference,
+                    layer.authoritative.rank_512_margin,
+                    shadow.rank_512_margin,
+                    layer.max_abs_score_error.unwrap(),
+                    layer.relative_rms_score_error.unwrap(),
+                );
+            }
+        }
+        let packet = serde_json::json!({
+            "schema_version": 1,
+            "mode": "observe_only",
+            "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs-current-2026-08-04",
+            "model_content_id_blake3": model_content_id
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "timings_ms": {
+                "prefix": candidate.prefix_ms,
+                "packed": candidate.packed_ms,
+                "singleton_wall": candidate.singleton_wall_ms,
+                "singleton_gpu": candidate.singleton_gpu_ms,
+            },
+            "packed_logit_sha256_f32_le": f32_sha256(&candidate.packed_logits),
+            "singleton_logit_sha256_f32_le": f32_sha256(&candidate.singleton_logits),
+            "packed_report": packed_report,
+            "singleton_report": singleton_report,
+        });
+        let packet_path = std::env::var_os("DSV4_FP4_PACKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("target/dsv4-current-fp4-observer-candidate.json")
+            });
+        if let Some(parent) = packet_path.parent() {
+            std::fs::create_dir_all(parent).expect("create observational FP4 packet directory");
+        }
+        std::fs::write(
+            &packet_path,
+            serde_json::to_vec_pretty(&packet).expect("serialize observational FP4 packet"),
+        )
+        .expect("write observational FP4 packet");
+        eprintln!(
+            "deepseek_v4 observational FP4 packet={}",
+            packet_path.display()
+        );
+        return;
+    }
+
+    let (residency, control_a) = execute(
+        &ctx,
+        residency,
+        model_content_id,
+        &prefix,
+        &final_four,
+        &timing_tokens,
+        true,
+        false,
+        None,
+        true,
+    );
+    let (residency, candidate) = execute(
+        &ctx,
+        residency,
+        model_content_id,
+        &prefix,
+        &final_four,
+        &timing_tokens,
+        true,
+        true,
+        control_a.restore_probe.as_ref(),
+        false,
+    );
+    let (residency, control_b) = execute(
+        &ctx,
+        residency,
+        model_content_id,
+        &prefix,
+        &final_four,
+        &timing_tokens,
+        true,
+        false,
+        None,
+        false,
+    );
+
+    let mut restored_observer =
+        DeepSeekV4PositionZeroForward::new_with_model_content_id(&ctx, residency, model_content_id)
+            .expect("construct restored observer probe");
+    restored_observer
+        .enable_fp4_shadow_lineage()
+        .expect("enable observer lineage before restore");
+    restored_observer
+        .restore_causal_snapshot(control_a.restore_probe.as_ref().unwrap())
+        .expect("restore authoritative snapshot into observer");
+    let error = restored_observer
+        .arm_fp4_shadow_report(PACKED_POSITION + 1)
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("lineage must be enabled"),
+        "{error}"
+    );
+    assert_eq!(restored_observer.next_position(), PACKED_POSITION + 1);
+    restored_observer
+        .forward_token(&ctx, 35)
+        .expect("ordinary F16 continuation remains valid after observer restore");
+    assert_eq!(restored_observer.next_position(), PACKED_POSITION + 2);
+
+    for (label, run) in [
+        ("control-a", &control_a),
+        ("candidate", &candidate),
+        ("control-b", &control_b),
+    ] {
+        assert_eq!(run.committed_tokens, expected_tokens, "{label} tokens");
+        memory_plan
+            .reconcile(qwen_llm::deepseek_v4_metal::DeepSeekV4MemorySamples {
+                before_residency_bytes,
+                after_residency_bytes,
+                after_session_bytes: run.after_session_bytes,
+                after_first_forward_bytes: run.after_first_forward_bytes,
+            })
+            .unwrap_or_else(|error| panic!("{label} memory reconciliation: {error}"));
+    }
+    assert_f32_bits_equal(
+        "control packed logits",
+        &control_a.packed_logits,
+        &control_b.packed_logits,
+    );
+    assert_f32_bits_equal(
+        "control singleton logits",
+        &control_a.singleton_logits,
+        &control_b.singleton_logits,
+    );
+    assert_eq!(
+        control_a.packed_prefix_digest,
+        control_b.packed_prefix_digest
+    );
+    assert_eq!(
+        control_a.packed_causal_digest,
+        control_b.packed_causal_digest
+    );
+    assert_eq!(
+        control_a.singleton_prefix_digest,
+        control_b.singleton_prefix_digest
+    );
+    assert_eq!(
+        control_a.singleton_causal_digest,
+        control_b.singleton_causal_digest
+    );
+    assert_eq!(control_a.singleton_decisions, control_b.singleton_decisions);
+    assert_eq!(control_a.packed_fp4, control_b.packed_fp4);
+    assert_eq!(control_a.singleton_fp4, control_b.singleton_fp4);
+    assert_eq!(
+        candidate.packed_prefix_digest,
+        control_a.packed_prefix_digest
+    );
+    assert_eq!(
+        candidate.singleton_prefix_digest,
+        control_a.singleton_prefix_digest
+    );
+    assert!(control_a.packed_counterfactual_domain_digest.is_none());
+    assert!(control_b.packed_counterfactual_domain_digest.is_none());
+    assert!(candidate.packed_counterfactual_domain_digest.is_some());
+    assert!(candidate.singleton_counterfactual_domain_digest.is_some());
+    assert_eq!(candidate.packed_consumed_layer_count, 21);
+    assert_eq!(candidate.singleton_consumed_layer_count, 42);
+    assert!(candidate.packed_selection_trace_digest.is_some());
+    assert!(candidate.singleton_selection_trace_digest.is_some());
+    assert_eq!(control_a.packed_consumed_layer_count, 0);
+    assert!(control_a.packed_selection_trace_digest.is_none());
+
+    let packed_report = candidate.packed_fp4.as_ref().unwrap();
+    let singleton_report = candidate.singleton_fp4.as_ref().unwrap();
+    assert_eq!(packed_report.position, PACKED_POSITION);
+    assert_eq!(
+        packed_report.execution,
+        DeepSeekV4Fp4ShadowExecution::Packed
+    );
+    assert_eq!(singleton_report.position, SINGLETON_POSITION);
+    assert_eq!(
+        singleton_report.execution,
+        DeepSeekV4Fp4ShadowExecution::Singleton
+    );
+    assert_report("packed", packed_report);
+    assert_report("singleton", singleton_report);
+    assert_report("control-a packed", control_a.packed_fp4.as_ref().unwrap());
+    assert_report(
+        "control-a singleton",
+        control_a.singleton_fp4.as_ref().unwrap(),
+    );
+    let transcript_csa = candidate
+        .singleton_decisions
+        .layers
+        .iter()
+        .filter_map(|layer| layer.csa.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(transcript_csa.len(), singleton_report.layers.len());
+    for (transcript, shadow) in transcript_csa.iter().zip(&singleton_report.layers) {
+        assert_eq!(**transcript, shadow.authoritative);
+    }
+    let packed_logit_delta = logit_delta(&control_a.packed_logits, &candidate.packed_logits);
+    let singleton_logit_delta =
+        logit_delta(&control_a.singleton_logits, &candidate.singleton_logits);
+
+    let control_a_repeated_median = median(&control_a.repeated_singleton_gpu_ms);
+    let candidate_repeated_median = median(&candidate.repeated_singleton_gpu_ms);
+    let control_b_repeated_median = median(&control_b.repeated_singleton_gpu_ms);
+    let control_midpoint_gpu_ms = (control_a_repeated_median + control_b_repeated_median) * 0.5;
+    let control_drift =
+        (control_a_repeated_median - control_b_repeated_median).abs() / control_midpoint_gpu_ms;
+
+    assert_eq!(
+        packed_logit_delta.reference_argmax,
+        packed_logit_delta.candidate_argmax
+    );
+    assert!(packed_logit_delta.cosine >= MIN_LOGIT_COSINE);
+    assert!(packed_logit_delta.relative_rms <= MAX_LOGIT_RELATIVE_RMS);
+    assert!(packed_logit_delta.max_abs <= MAX_LOGIT_ABSOLUTE_ERROR);
+    assert_eq!(
+        singleton_logit_delta.reference_argmax,
+        singleton_logit_delta.candidate_argmax
+    );
+    assert!(singleton_logit_delta.cosine >= MIN_LOGIT_COSINE);
+    assert!(singleton_logit_delta.relative_rms <= MAX_LOGIT_RELATIVE_RMS);
+    assert!(singleton_logit_delta.max_abs <= MAX_LOGIT_ABSOLUTE_ERROR);
+    assert!(
+        control_drift <= MAX_CONTROL_GPU_DRIFT,
+        "FP4 observer control GPU drift is {:.2}%",
+        control_drift * 100.0
+    );
+
+    let token_sha = {
+        let mut hasher = Sha256::new();
+        for token in &expected_tokens {
+            hasher.update(token.to_le_bytes());
+        }
+        format!("{:x}", hasher.finalize())
+    };
+    let model_content_id_blake3 = hex(model_content_id.as_bytes());
+    let campaign_source_sha256 = campaign_source_sha256();
+    let kernel_source_sha256 = sha256_hex(include_bytes!("../../../kernels/deepseek_v4.metal"));
+    let embedded_metallib_sha256 = hex(&deepseek_v4_diagnostics_metallib_sha256());
+    let executable_path = std::env::current_exe().expect("resolve FP4 campaign executable");
+    let (executable_sha256, executable_bytes) = file_sha256(&executable_path);
+    let rustc_identity = command_identity("rustc", &["--version", "--verbose"]);
+    let metal_compiler_identity =
+        command_identity("xcrun", &["-sdk", "macosx", "metal", "--version"]);
+    let macos_sdk_version = command_identity("xcrun", &["--sdk", "macosx", "--show-sdk-version"]);
+    let packet = serde_json::json!({
+        "schema_version": 2,
+        "result": "pass",
+        "mode": "fp4_selection_counterfactual",
+        "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs-current-2026-08-04",
+        "model_content_id_blake3": model_content_id_blake3,
+        "implementation": {
+            "source_base_git_commit": SOURCE_BASE_GIT_COMMIT,
+            "campaign_source_sha256": campaign_source_sha256,
+            "kernel_source_sha256": kernel_source_sha256,
+            "embedded_metallib_sha256": embedded_metallib_sha256,
+            "test_executable_sha256": executable_sha256,
+            "test_executable_bytes": executable_bytes,
+            "cargo_package_version": env!("CARGO_PKG_VERSION"),
+            "features": ["dsv4-diagnostics"],
+            "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        },
+        "environment": {
+            "device_name": ctx.device.name().to_string(),
+            "device_registry_id": ctx.device.registryID(),
+            "target_arch": std::env::consts::ARCH,
+            "target_os": std::env::consts::OS,
+            "rustc": rustc_identity,
+            "metal_compiler": metal_compiler_identity,
+            "macos_sdk_version": macos_sdk_version,
+        },
+        "forward_limit": FORWARD_LIMIT,
+        "token_sha256_u32_le": token_sha,
+        "acceptance_gates": {
+            "minimum_logit_cosine": MIN_LOGIT_COSINE,
+            "maximum_logit_relative_rms": MAX_LOGIT_RELATIVE_RMS,
+            "maximum_logit_absolute_error": MAX_LOGIT_ABSOLUTE_ERROR,
+            "maximum_control_gpu_drift": MAX_CONTROL_GPU_DRIFT,
+            "expected_selected_count": 512,
+            "expected_packed_consumed_layers": 21,
+            "expected_singleton_cumulative_consumed_layers": 42,
+        },
+        "memory": {
+            "residency_logical_bytes": memory_plan.residency_logical_bytes(),
+            "residency_priced_upper_bytes": memory_plan.residency_priced_upper_bytes(),
+            "session_logical_bytes": memory_plan.session_logical_bytes(),
+            "session_priced_upper_bytes": memory_plan.session_priced_upper_bytes(),
+            "required_with_reserve_bytes": memory_plan.required_with_reserve_bytes().unwrap(),
+        },
+        "logit_sha256_f32_le": {
+            "control_packed": f32_sha256(&control_a.packed_logits),
+            "candidate_packed": f32_sha256(&candidate.packed_logits),
+            "control_b_packed": f32_sha256(&control_b.packed_logits),
+            "control_singleton": f32_sha256(&control_a.singleton_logits),
+            "candidate_singleton": f32_sha256(&candidate.singleton_logits),
+            "control_b_singleton": f32_sha256(&control_b.singleton_logits),
+        },
+        "logit_delta": {
+            "packed": {
+                "reference_argmax": packed_logit_delta.reference_argmax,
+                "candidate_argmax": packed_logit_delta.candidate_argmax,
+                "cosine": packed_logit_delta.cosine,
+                "relative_rms": packed_logit_delta.relative_rms,
+                "max_abs": packed_logit_delta.max_abs,
+            },
+            "singleton": {
+                "reference_argmax": singleton_logit_delta.reference_argmax,
+                "candidate_argmax": singleton_logit_delta.candidate_argmax,
+                "cosine": singleton_logit_delta.cosine,
+                "relative_rms": singleton_logit_delta.relative_rms,
+                "max_abs": singleton_logit_delta.max_abs,
+            },
+        },
+        "state_digest": {
+            "control_packed": hex(&control_a.packed_causal_digest),
+            "control_b_packed": hex(&control_b.packed_causal_digest),
+            "candidate_packed": hex(&candidate.packed_causal_digest),
+            "candidate_packed_domain": hex(
+                candidate.packed_counterfactual_domain_digest.as_ref().unwrap(),
+            ),
+            "candidate_packed_selection_trace": hex(
+                candidate.packed_selection_trace_digest.as_ref().unwrap(),
+            ),
+            "candidate_packed_consumed_layers": candidate.packed_consumed_layer_count,
+            "control_singleton": hex(&control_a.singleton_causal_digest),
+            "control_b_singleton": hex(&control_b.singleton_causal_digest),
+            "candidate_singleton": hex(&candidate.singleton_causal_digest),
+            "candidate_singleton_domain": hex(
+                candidate
+                    .singleton_counterfactual_domain_digest
+                    .as_ref()
+                    .unwrap(),
+            ),
+            "candidate_singleton_selection_trace": hex(
+                candidate
+                    .singleton_selection_trace_digest
+                    .as_ref()
+                    .unwrap(),
+            ),
+            "candidate_singleton_consumed_layers": candidate.singleton_consumed_layer_count,
+        },
+        "timings_ms": {
+            "control_a": {
+                "prefix": control_a.prefix_ms,
+                "packed": control_a.packed_ms,
+                "singleton_wall": control_a.singleton_wall_ms,
+                "singleton_gpu": control_a.singleton_gpu_ms,
+                "repeated_singleton_gpu": control_a.repeated_singleton_gpu_ms,
+                "repeated_singleton_gpu_median": control_a_repeated_median,
+            },
+            "candidate": {
+                "prefix": candidate.prefix_ms,
+                "packed": candidate.packed_ms,
+                "singleton_wall": candidate.singleton_wall_ms,
+                "singleton_gpu": candidate.singleton_gpu_ms,
+                "repeated_singleton_gpu": candidate.repeated_singleton_gpu_ms,
+                "repeated_singleton_gpu_median": candidate_repeated_median,
+            },
+            "control_b": {
+                "prefix": control_b.prefix_ms,
+                "packed": control_b.packed_ms,
+                "singleton_wall": control_b.singleton_wall_ms,
+                "singleton_gpu": control_b.singleton_gpu_ms,
+                "repeated_singleton_gpu": control_b.repeated_singleton_gpu_ms,
+                "repeated_singleton_gpu_median": control_b_repeated_median,
+            },
+            "control_gpu_drift": control_drift,
+        },
+        "control_packed_report": control_a.packed_fp4.as_ref().unwrap(),
+        "candidate_packed_report": packed_report,
+        "control_singleton_report": control_a.singleton_fp4.as_ref().unwrap(),
+        "candidate_singleton_report": singleton_report,
+    });
+    let packet_path = std::env::var_os("DSV4_FP4_PACKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("target/dsv4-current-fp4-selection-counterfactual.json")
+        });
+    eprintln!(
+        "deepseek_v4 current FP4 packed argmax={}/{} cosine={} rel_rms={} max_abs={}",
+        packed_logit_delta.reference_argmax,
+        packed_logit_delta.candidate_argmax,
+        packed_logit_delta.cosine,
+        packed_logit_delta.relative_rms,
+        packed_logit_delta.max_abs,
+    );
+    eprintln!(
+        "deepseek_v4 current FP4 singleton argmax={}/{} cosine={} rel_rms={} max_abs={}",
+        singleton_logit_delta.reference_argmax,
+        singleton_logit_delta.candidate_argmax,
+        singleton_logit_delta.cosine,
+        singleton_logit_delta.relative_rms,
+        singleton_logit_delta.max_abs,
+    );
+    eprintln!(
+        "deepseek_v4 current FP4 repeated control medians={}/{} candidate={} drift={}",
+        control_a_repeated_median,
+        control_b_repeated_median,
+        candidate_repeated_median,
+        control_drift,
+    );
+    if let Some(parent) = packet_path.parent() {
+        std::fs::create_dir_all(parent).expect("create current FP4 packet directory");
+    }
+    std::fs::write(
+        &packet_path,
+        serde_json::to_vec_pretty(&packet).expect("serialize current FP4 packet"),
+    )
+    .expect("write current FP4 packet");
+    eprintln!("deepseek_v4 current FP4 packet={}", packet_path.display());
 }
 
 /// Manual only: maps the 95.93 GiB model and executes all 43 native layers.

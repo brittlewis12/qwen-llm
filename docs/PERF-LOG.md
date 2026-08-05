@@ -6,6 +6,44 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 Real-Weight FP4 Sidecar GO
+
+Status: real-weight sidecar and FP4-ID/F16-cache counterfactual `GO` under
+`dsv4-diagnostics`; production selection, cache migration, snapshot v2, and a
+terminal speed claim remain `HOLD`.
+
+- Every CSA indexer K row is packed at the post-Hadamard, pre-F16 publication
+  seam under a transactional unavailable/writing/ready status. Q and all visible
+  K statuses plus exact authoritative visibility pass one fail-closed preflight.
+  Packed and singleton selection borrow FP4 IDs without overwriting the F16
+  selector records or changing the F16 selected-attention cache.
+- On the refreshed asset, all 21 packed and singleton CSA layers report ready Q
+  and K, count 512, and status zero. Packed selection is exact in 8/21 layers
+  and singleton selection in 11/21; every difference is one reciprocal
+  rank-512/rank-513 exchange. The original exact-decision falsifier therefore
+  remains failed rather than silently relaxed.
+- The separately frozen counterfactual preserves packed argmax 35 at cosine
+  0.999999967 / relative RMS 0.000260574 / max abs 0.003527 and singleton
+  argmax 201 at 0.999999996 / 0.000091580 / 0.001985. Consumed-ID traces bind
+  execution kind, position, layer, visibility, and all 512 IDs for exactly 21
+  packed and 42 cumulative singleton layer decisions.
+- F16 observer controls are bit-identical in logits, reports, transcripts, and
+  causal digests. Counterfactual snapshot-v1 export/restore is rejected;
+  ordinary restore invalidates sidecars and lineage while F16 continuation
+  remains valid. The current 2,061-forward plan prices 185,581,568 session
+  bytes and 104,925,102,080 bytes including residency and reserve.
+- Repeated control medians are 46.513/46.673 ms GPU with 0.344% drift; the
+  double-score candidate is 47.721 ms. This packet is a decision/quality gate,
+  not a speed claim: all arms compute both scorers while the timing bracket spans
+  only 513-515 visible rows.
+
+Decision: retain the F16 cache differential and proceed to a no-double-score
+experimental arm plus a useful deep/current-product packet before production or
+snapshot migration. Multi-group exact selection may proceed in parallel. Full
+protocol, identities, per-layer exchanges, and compact evidence are retained in
+`docs/bench/2026-08-04-dsv4-fp4-real-weight-sidecar/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-04 - DeepSeek V4 Packed FP4 Matrix Shadow GO
 
 Status: packed-semantic schedule `GO` as a test-only shadow; production cache,

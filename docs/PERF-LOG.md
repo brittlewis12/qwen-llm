@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Packed-Prefill Attribution GO
+
+Status: attribution `GO`; direct packed all-slot expert execution is `KILL` as
+a performance ceiling. Exact GPU scheduling and grouped compute remain bounded
+falsifiers.
+
+- Split each packed layer into pre-expert GPU, signed wait residual, host
+  route/schedule, and post-route GPU timing. Instrumentation is environment
+  gated, buffers records until chunk completion, and is absent ordinarily.
+- On the current asset's 140-token code fixture, prefill is 6.065 seconds. Host
+  routing plus stable expert-major scheduling is only 30 ms across both chunks;
+  ordinary command residual contributes about 17 ms across 86 waits.
+- Post-route GPU work is 3.434 seconds, while pre-expert GPU work is 1.302
+  seconds. Large additional pre-expert residuals cluster at a few first-touch
+  layers and remain unattributed rather than being priced as removable sync.
+- The old 58% router framing is retired: it combined attention, compressors,
+  mHC, router projection, waiting, and the actual host route.
+
+Decision: prove exact deterministic GPU route-and-schedule ownership because it
+unlocks command merging, but do not expect that seam alone to move TTFT. Then
+falsify grouped IQ2_XS gate/up plus IQ3_XXS down at N=12/32/128; widen formats
+only if N=128 aggregate GPU and wall improve at least 15%. Evidence:
+`docs/bench/2026-08-05-dsv4-packed-prefill-attribution/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Multi-Group Integration GO
 
 Status: bounded off-by-default singleton route `GO`; production default and

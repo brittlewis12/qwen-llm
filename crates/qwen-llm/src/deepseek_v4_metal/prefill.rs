@@ -1877,6 +1877,23 @@ struct ExpertBucket {
     len: usize,
 }
 
+struct PackedLayerTrace {
+    layer: usize,
+    pre_expert_seconds: f64,
+    pre_expert_gpu_seconds: f64,
+    pre_expert_encode_seconds: f64,
+    pre_expert_wait_seconds: f64,
+    pre_expert_wait_residual_seconds: f64,
+    pre_expert_post_seconds: f64,
+    route_seconds: f64,
+    post_route_seconds: f64,
+    post_route_gpu_seconds: f64,
+    post_route_encode_seconds: f64,
+    post_route_wait_seconds: f64,
+    post_route_wait_residual_seconds: f64,
+    bucket_count: usize,
+}
+
 enum PackedRouteSource<'a> {
     Hash,
     Learned(&'a MetalTensor),
@@ -2870,9 +2887,11 @@ impl DeepSeekV4Session {
             self.fp4_score_dispatch_ledger = None;
         }
         let trace_layers = std::env::var_os("QWEN_DSV4_PREFILL_TRACE").is_some();
-        let mut router_total = 0.0_f64;
-        let mut route_total = 0.0_f64;
-        let mut expert_total = 0.0_f64;
+        let mut layer_traces = Vec::with_capacity(if trace_layers {
+            DEEPSEEK_V4_LAYER_COUNT
+        } else {
+            0
+        });
         let embedding = f32_prefix(
             &self.prefill.embedding,
             vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, n_tokens as u64],
@@ -2898,7 +2917,7 @@ impl DeepSeekV4Session {
         )?;
 
         for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
-            let router_started = std::time::Instant::now();
+            let pre_expert_started = trace_layers.then(std::time::Instant::now);
             let raw_cache = self.raw_cache_layer(layer)?;
             let rope = deepseek_v4_layer_rope(self.residency.config(), layer)?;
             let attention_kind = self.residency.config().attention_kinds[layer];
@@ -3255,8 +3274,24 @@ impl DeepSeekV4Session {
             let (moe_views, captured_sparse) = router_result?;
             #[cfg(not(feature = "dsv4-diagnostics"))]
             let _ = captured_sparse;
+            let pre_expert_encode_seconds = pre_expert_started
+                .as_ref()
+                .map_or(0.0, |started| started.elapsed().as_secs_f64());
+            let pre_expert_wait_started = trace_layers.then(std::time::Instant::now);
             command.commit();
             command.waitUntilCompleted();
+            let pre_expert_wait_seconds = pre_expert_wait_started
+                .as_ref()
+                .map_or(0.0, |started| started.elapsed().as_secs_f64());
+            let pre_expert_command_seconds = pre_expert_started
+                .as_ref()
+                .map_or(0.0, |started| started.elapsed().as_secs_f64());
+            let pre_expert_gpu_seconds = if trace_layers {
+                command.GPUEndTime() - command.GPUStartTime()
+            } else {
+                0.0
+            };
+            let pre_expert_wait_residual_seconds = pre_expert_wait_seconds - pre_expert_gpu_seconds;
             if let Some(error) = command.error() {
                 return invalid(format!(
                     "packed layer {layer} router command failed: {error:?}"
@@ -3319,10 +3354,12 @@ impl DeepSeekV4Session {
                     layer,
                 )?;
             }
-            let router_seconds = router_started.elapsed().as_secs_f64();
-            router_total += router_seconds;
+            let pre_expert_seconds = pre_expert_started
+                .as_ref()
+                .map_or(0.0, |started| started.elapsed().as_secs_f64());
+            let pre_expert_post_seconds = pre_expert_seconds - pre_expert_command_seconds;
 
-            let route_started = std::time::Instant::now();
+            let route_started = trace_layers.then(std::time::Instant::now);
             let source = if layer < self.residency.config().hash_layer_count as usize {
                 PackedRouteSource::Hash
             } else {
@@ -3334,10 +3371,11 @@ impl DeepSeekV4Session {
                 n_tokens,
                 self.residency.config().expert_weights_scale,
             )?;
-            let route_seconds = route_started.elapsed().as_secs_f64();
-            route_total += route_seconds;
+            let route_seconds = route_started
+                .as_ref()
+                .map_or(0.0, |started| started.elapsed().as_secs_f64());
 
-            let expert_started = std::time::Instant::now();
+            let post_route_started = trace_layers.then(std::time::Instant::now);
             let command = ctx.queue.commandBuffer().ok_or_else(|| {
                 DeepSeekV4MetalError::Invalid(format!(
                     "failed to allocate packed layer {layer} expert command buffer"
@@ -3413,26 +3451,127 @@ impl DeepSeekV4Session {
             })();
             encoder.end();
             expert_result?;
+            let post_route_encode_seconds = post_route_started
+                .as_ref()
+                .map_or(0.0, |started| started.elapsed().as_secs_f64());
+            let post_route_wait_started = trace_layers.then(std::time::Instant::now);
             command.commit();
             command.waitUntilCompleted();
+            let post_route_wait_seconds = post_route_wait_started
+                .as_ref()
+                .map_or(0.0, |started| started.elapsed().as_secs_f64());
+            let post_route_gpu_seconds = if trace_layers {
+                command.GPUEndTime() - command.GPUStartTime()
+            } else {
+                0.0
+            };
+            let post_route_wait_residual_seconds = post_route_wait_seconds - post_route_gpu_seconds;
             if let Some(error) = command.error() {
                 return invalid(format!(
                     "packed layer {layer} expert command failed: {error:?}"
                 ));
             }
-            let expert_seconds = expert_started.elapsed().as_secs_f64();
-            expert_total += expert_seconds;
+            let post_route_seconds = post_route_started
+                .as_ref()
+                .map_or(0.0, |started| started.elapsed().as_secs_f64());
             if trace_layers {
-                eprintln!(
-                    "deepseek_v4 packed layer={layer} router={router_seconds:.4}s route={route_seconds:.4}s experts={expert_seconds:.4}s buckets={}",
-                    schedule.len()
-                );
+                layer_traces.push(PackedLayerTrace {
+                    layer,
+                    pre_expert_seconds,
+                    pre_expert_gpu_seconds,
+                    pre_expert_encode_seconds,
+                    pre_expert_wait_seconds,
+                    pre_expert_wait_residual_seconds,
+                    pre_expert_post_seconds,
+                    route_seconds,
+                    post_route_seconds,
+                    post_route_gpu_seconds,
+                    post_route_encode_seconds,
+                    post_route_wait_seconds,
+                    post_route_wait_residual_seconds,
+                    bucket_count: schedule.len(),
+                });
             }
             layer_completed(layer);
         }
         if trace_layers {
+            for trace in &layer_traces {
+                eprintln!(
+                    "deepseek_v4 packed layer={} pre_expert={:.4}s pre_expert_gpu={:.4}s pre_expert_encode={:.4}s pre_expert_wait={:.4}s pre_expert_wait_residual={:.4}s pre_expert_post={:.4}s route={:.4}s post_route={:.4}s post_route_gpu={:.4}s post_route_encode={:.4}s post_route_wait={:.4}s post_route_wait_residual={:.4}s buckets={}",
+                    trace.layer,
+                    trace.pre_expert_seconds,
+                    trace.pre_expert_gpu_seconds,
+                    trace.pre_expert_encode_seconds,
+                    trace.pre_expert_wait_seconds,
+                    trace.pre_expert_wait_residual_seconds,
+                    trace.pre_expert_post_seconds,
+                    trace.route_seconds,
+                    trace.post_route_seconds,
+                    trace.post_route_gpu_seconds,
+                    trace.post_route_encode_seconds,
+                    trace.post_route_wait_seconds,
+                    trace.post_route_wait_residual_seconds,
+                    trace.bucket_count,
+                );
+            }
+            let pre_expert_total = layer_traces
+                .iter()
+                .map(|trace| trace.pre_expert_seconds)
+                .sum::<f64>();
+            let pre_expert_gpu_total = layer_traces
+                .iter()
+                .map(|trace| trace.pre_expert_gpu_seconds)
+                .sum::<f64>();
+            let pre_expert_encode_total = layer_traces
+                .iter()
+                .map(|trace| trace.pre_expert_encode_seconds)
+                .sum::<f64>();
+            let pre_expert_wait_total = layer_traces
+                .iter()
+                .map(|trace| trace.pre_expert_wait_seconds)
+                .sum::<f64>();
+            let pre_expert_wait_residual_total = layer_traces
+                .iter()
+                .map(|trace| trace.pre_expert_wait_residual_seconds)
+                .sum::<f64>();
+            let pre_expert_post_total = layer_traces
+                .iter()
+                .map(|trace| trace.pre_expert_post_seconds)
+                .sum::<f64>();
+            let route_total = layer_traces
+                .iter()
+                .map(|trace| trace.route_seconds)
+                .sum::<f64>();
+            let post_route_total = layer_traces
+                .iter()
+                .map(|trace| trace.post_route_seconds)
+                .sum::<f64>();
+            let post_route_gpu_total = layer_traces
+                .iter()
+                .map(|trace| trace.post_route_gpu_seconds)
+                .sum::<f64>();
+            let post_route_encode_total = layer_traces
+                .iter()
+                .map(|trace| trace.post_route_encode_seconds)
+                .sum::<f64>();
+            let post_route_wait_total = layer_traces
+                .iter()
+                .map(|trace| trace.post_route_wait_seconds)
+                .sum::<f64>();
+            let post_route_wait_residual_total = layer_traces
+                .iter()
+                .map(|trace| trace.post_route_wait_residual_seconds)
+                .sum::<f64>();
+            let pre_expert_negative_residuals = layer_traces
+                .iter()
+                .filter(|trace| trace.pre_expert_wait_residual_seconds < 0.0)
+                .count();
+            let post_route_negative_residuals = layer_traces
+                .iter()
+                .filter(|trace| trace.post_route_wait_residual_seconds < 0.0)
+                .count();
             eprintln!(
-                "deepseek_v4 packed totals router={router_total:.3}s route={route_total:.3}s experts={expert_total:.3}s"
+                "deepseek_v4 packed totals pre_expert={pre_expert_total:.3}s pre_expert_gpu={pre_expert_gpu_total:.3}s pre_expert_encode={pre_expert_encode_total:.3}s pre_expert_wait={pre_expert_wait_total:.3}s pre_expert_wait_residual={pre_expert_wait_residual_total:.3}s pre_expert_post={pre_expert_post_total:.3}s pre_expert_negative_residuals={pre_expert_negative_residuals} route={route_total:.3}s post_route={post_route_total:.3}s post_route_gpu={post_route_gpu_total:.3}s post_route_encode={post_route_encode_total:.3}s post_route_wait={post_route_wait_total:.3}s post_route_wait_residual={post_route_wait_residual_total:.3}s post_route_negative_residuals={post_route_negative_residuals}"
             );
         }
         #[cfg(feature = "dsv4-diagnostics")]

@@ -277,11 +277,15 @@ bounded hidden opt-in, not default-on or wider-device routing.
 
 Force-ranked queue:
 
-1. **GPU-resident deterministic packed routing.** Remove prefill's router
-   commit/wait and CPU schedule construction with integer counts, deterministic
-   expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,
-   and slot-order reduction. Follow with grouped MXFP4 down. Mixture-of-Kittens
-   informs scheduling and determinism, not a CUDA-style monolithic Metal kernel.
+1. **Exact GPU packed schedule, then grouped expert compute.** Attribution on a
+   current-asset 140-token request puts CPU route/schedule at only 30 ms and the
+   ordinary 86-boundary residual near 17 ms, versus 3.434 seconds of post-route
+   GPU work. First prove token-major exact routes plus deterministic
+   expert/token/slot schedules without a readback. Then falsify only the dominant
+   IQ2_XS gate/up plus IQ3_XXS down pairing at N=12/32/128. Require at least 15%
+   aggregate GPU and wall saving at N=128 before widening formats. Do not replace
+   the existing expert-major reuse with a direct token-slot all-slot backend.
+   Mixture-of-Kittens informs scheduling, not a monolithic Metal kernel.
 2. **Decide bounded selector product promotion.** Keep the qualified current
    policy hidden and off by default while its device/asset scope is explicit.
    A future default or user-facing switch needs a separately reviewed product

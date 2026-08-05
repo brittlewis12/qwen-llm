@@ -571,25 +571,25 @@ fn native_deepseek_v4_full_context_session_plan_is_exact_and_admitted() {
     eprintln!("deepseek_v4 full-context planned memory={memory}");
     #[cfg(not(feature = "dsv4-diagnostics"))]
     {
-        assert_eq!(memory.session_allocations().len(), 542);
-        assert_eq!(memory.session_logical_bytes(), 7_631_942_884);
-        assert_eq!(memory.session_priced_upper_bytes(), 7_636_467_712);
-        assert_eq!(memory.total_priced_upper_bytes(), 110_631_092_224);
+        assert_eq!(memory.session_allocations().len(), 543);
+        assert_eq!(memory.session_logical_bytes(), 7_638_234_340);
+        assert_eq!(memory.session_priced_upper_bytes(), 7_642_759_168);
+        assert_eq!(memory.total_priced_upper_bytes(), 110_637_383_680);
     }
     #[cfg(feature = "dsv4-diagnostics")]
     {
-        assert_eq!(memory.session_allocations().len(), 616);
-        assert_eq!(memory.session_logical_bytes(), 8_030_424_828);
-        assert_eq!(memory.session_priced_upper_bytes(), 8_035_074_048);
-        assert_eq!(memory.total_priced_upper_bytes(), 111_029_698_560);
+        assert_eq!(memory.session_allocations().len(), 624);
+        assert_eq!(memory.session_logical_bytes(), 8_036_850_460);
+        assert_eq!(memory.session_priced_upper_bytes(), 8_041_594_880);
+        assert_eq!(memory.total_priced_upper_bytes(), 111_036_219_392);
     }
     let required = memory
         .required_with_reserve_bytes()
         .expect("price full-context plan with reserve");
     #[cfg(not(feature = "dsv4-diagnostics"))]
-    assert_eq!(required, 111_167_963_136);
+    assert_eq!(required, 111_174_254_592);
     #[cfg(feature = "dsv4-diagnostics")]
-    assert_eq!(required, 111_566_569_472);
+    assert_eq!(required, 111_573_090_304);
     let admission = memory.admission(ctx.memory_signals());
     assert!(
         admission.admitted,
@@ -1267,33 +1267,33 @@ fn native_deepseek_v4_memory_plan_admits_and_reconciles() {
     let memory_plan = load_plan.memory_plan().clone();
     #[cfg(not(feature = "dsv4-diagnostics"))]
     {
-        assert_eq!(memory_plan.session_allocations().len(), 542);
-        assert_eq!(memory_plan.session_logical_bytes(), 179_129_572);
-        assert_eq!(memory_plan.session_priced_upper_bytes(), 183_681_024);
+        assert_eq!(memory_plan.session_allocations().len(), 543);
+        assert_eq!(memory_plan.session_logical_bytes(), 185_421_028);
+        assert_eq!(memory_plan.session_priced_upper_bytes(), 189_972_480);
     }
     #[cfg(feature = "dsv4-diagnostics")]
     {
-        assert_eq!(memory_plan.session_allocations().len(), 616);
-        assert_eq!(memory_plan.session_logical_bytes(), 180_319_996);
-        assert_eq!(memory_plan.session_priced_upper_bytes(), 185_581_568);
+        assert_eq!(memory_plan.session_allocations().len(), 624);
+        assert_eq!(memory_plan.session_logical_bytes(), 186_745_628);
+        assert_eq!(memory_plan.session_priced_upper_bytes(), 192_102_400);
     }
     assert_eq!(memory_plan.residency_buffer_count(), 7);
     assert_eq!(memory_plan.residency_logical_bytes(), 102_994_608_640);
     assert_eq!(memory_plan.residency_priced_upper_bytes(), 102_994_624_512);
     #[cfg(not(feature = "dsv4-diagnostics"))]
     {
-        assert_eq!(memory_plan.total_priced_upper_bytes(), 103_178_305_536);
+        assert_eq!(memory_plan.total_priced_upper_bytes(), 103_184_596_992);
         assert_eq!(
             memory_plan.required_with_reserve_bytes().unwrap(),
-            103_715_176_448
+            103_721_467_904
         );
     }
     #[cfg(feature = "dsv4-diagnostics")]
     {
-        assert_eq!(memory_plan.total_priced_upper_bytes(), 103_180_206_080);
+        assert_eq!(memory_plan.total_priced_upper_bytes(), 103_186_726_912);
         assert_eq!(
             memory_plan.required_with_reserve_bytes().unwrap(),
-            103_717_076_992
+            103_723_597_824
         );
     }
     assert_eq!(load_plan.residency_report().window_count, 3);

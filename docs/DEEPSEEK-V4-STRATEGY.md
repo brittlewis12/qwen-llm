@@ -2096,8 +2096,16 @@ noise without reducing technical risk. Revisit after S5.
    every recorded state digest. The uninstrumented candidate also regresses one
    warm comparison by 2.15%; the later audit-inclusive timing is not an isolated
    seam measurement. Keep the topology under diagnostics and preserve ordinary
-   Rust routing. Next falsify grouped IQ2_XS gate/up plus IQ3_XXS down at
-   N=12/32/128 using the exact Rust schedule; do not revive a monolithic Metal
-   FFN kernel.
+   Rust routing. The independent grouped-compute lane now promotes the 25
+   current-asset IQ2_XS/IQ2_XS/IQ3_XXS layers on Apple M4 Max: compact
+   expert-major tiles feed grouped gate/up + SwiGLU and down/scatter kernels
+   while preserving current-asset output bits and recorded state identity at
+   N=12/32/128. N=128 R5 wall medians improve 30.409%, while traced R3 medians
+   improve 35.91% post-route GPU and 21.64% summed packed-command GPU. One R3
+   wall bracket misses at 12.2%, so this is not a per-run guarantee. Retain the
+   isolated rollback, capability/dtype fallback, and 6,291,456-byte admitted
+   scratch. Next falsify the 16 all-IQ3_XXS layers separately; keep MXFP4 down
+   and GPU route arithmetic unchanged and do not revive a monolithic FFN
+   kernel.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

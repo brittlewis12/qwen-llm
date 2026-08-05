@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Packed Grouped Experts GO
+
+Status: the IQ2_XS gate/up plus IQ3_XXS down path is `GO` as the
+qualified Apple M4 Max default. Rust routing remains authoritative; unsupported
+devices, dtypes, and explicit rollback retain the old per-bucket compute path.
+
+- Consume the exact stable expert-major schedule through one grouped gate/up +
+  SwiGLU dispatch and one grouped down/scatter dispatch. The current asset has
+  25 eligible layers; its other 18 layers remain unchanged.
+- Model-free N=1/12/31/32/33/64/128 differentials preserve every inner and
+  output bit plus output guards. Current-asset N=12/32/128 integration preserves
+  logits, normalized hidden output, restored continuation logits, state
+  digests, and committed tokens exactly.
+- The N=128 R5 wall medians are 3,617.414 / 2,517.379 / 3,729.075 ms, a 30.409%
+  saving against the faster control with 3.040% drift. Every candidate sample
+  is below every control sample.
+- Wall timing is not a per-run guarantee: one R3 bracket missed the 15% gate at
+  12.2%. The traced R3 packet records 35.91% post-route GPU, 21.64% summed
+  packed-command GPU, and 15.316% instrumented wall savings.
+- Admit one 6,291,456-byte F32 scratch buffer in all sessions. A fail-closed
+  tri-state switch provides isolated rollback without changing the IQ3 MM
+  policy; rollback output/state identity is live-verified.
+
+Decision: promote only this exact dtype/device contract. The widening gate now
+clears; next falsify grouped IQ3_XXS gate/up plus IQ3_XXS down for the remaining
+16 all-IQ3 layers. Evidence:
+`docs/bench/2026-08-05-dsv4-packed-grouped-experts/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Packed GPU Route Integration KILL
 
 Status: current GPU route arithmetic is `KILL` for packed production. The exact

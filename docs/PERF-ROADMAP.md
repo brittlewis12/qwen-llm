@@ -285,16 +285,28 @@ one warm comparison by 91.910 ms, or 2.15%; the final instrumented bracket is
 not an isolated seam timing. Remove its ordinary switch and seven allocations;
 retain the exact topology and fault harness under diagnostics.
 
+The independent grouped-compute lane now clears. The exact Rust schedule feeds
+compact 32-assignment expert-major tiles; 25 current-asset
+IQ2_XS/IQ2_XS/IQ3_XXS layers replace their per-bucket chain with grouped
+gate/up + SwiGLU and grouped down/scatter dispatches. Model-free edge cases and
+current-asset N=12/32/128 integration preserve output bits and recorded state
+identity. N=128 R5 wall medians improve from the faster 3,617.414 ms control to
+2,517.379 ms, or 30.409%, with 3.040% control drift. One R3 bracket misses the
+wall gate at 12.2%, so this is a strong median benefit, not a per-run guarantee.
+Traced R3 medians save 35.91% post-route GPU and 21.64% summed packed-command
+GPU. Enable only on the qualified Apple M4 Max by default, retain an isolated
+rollback and capability fallback, and admit the 6,291,456-byte scratch even
+when fallback executes.
+
 Force-ranked queue:
 
-1. **Falsify grouped packed experts.** Use the current exact Rust route schedule
-   and target only IQ2_XS gate/up plus IQ3_XXS down at N=12/32/128. Require at
-   least 15% aggregate GPU and wall saving at N=128 before widening formats. Do
-   not replace expert-major bank reuse with direct token-slot all-slot execution.
-   The current GPU route integration is KILL on both packed state and wall;
-   retain its exact topology as a future consumer dependency, not a prerequisite
-   for measuring grouped compute. Mixture-of-Kittens informs deterministic
-   expert/token/slot scheduling, not a monolithic Metal kernel.
+1. **Widen grouped packed experts once.** Target the 16 current-asset
+   IQ3_XXS/IQ3_XXS/IQ3_XXS layers while retaining exact Rust routing, compact
+   expert-major tiles, fixed slot ownership, and the forced-current
+   differential. Reuse the promoted two-dispatch shape only if N=128 aggregate
+   GPU and wall savings remain material; keep the two MXFP4-down layers on the
+   old path. Do not replace bank reuse with token-slot all-slot execution or
+   reopen GPU route arithmetic.
 2. **Decide bounded selector product promotion.** Keep the qualified current
    policy hidden and off by default while its device/asset scope is explicit.
    A future default or user-facing switch needs a separately reviewed product

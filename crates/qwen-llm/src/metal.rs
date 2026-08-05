@@ -2534,6 +2534,21 @@ impl KernelEncoder {
         }
     }
 
+    /// Bind a nonempty Pod slice inline. Metal limits inline payloads to 4 KiB.
+    pub(crate) fn set_bytes_slice<T: bytemuck::Pod>(&self, index: usize, values: &[T]) {
+        let bytes: &[u8] = bytemuck::cast_slice(values);
+        assert!(!bytes.is_empty(), "inline Metal slice must not be empty");
+        assert!(
+            bytes.len() <= 4_096,
+            "inline Metal slice exceeds the 4 KiB API limit"
+        );
+        let ptr = std::ptr::NonNull::new(bytes.as_ptr() as *mut std::ffi::c_void)
+            .expect("non-null bytemuck pointer");
+        unsafe {
+            self.raw.setBytes_length_atIndex(ptr, bytes.len(), index);
+        }
+    }
+
     /// Bind threadgroup memory of `n_bytes` at slot `index`.
     pub fn set_threadgroup_memory(&self, index: usize, n_bytes: usize) {
         unsafe {
@@ -4784,6 +4799,10 @@ pub fn encode_mat_mat_iq2_s_f32(
 }
 
 crate::env_flag!(default_on matmat_iq3_xxs_mm_enabled, "QWEN_MATMAT_IQ3_XXS_MM");
+
+pub(crate) fn matmat_iq3_xxs_mm_is_enabled() -> bool {
+    matmat_iq3_xxs_mm_enabled()
+}
 
 pub fn encode_mat_mat_iq3_xxs_f32(
     ctx: &MetalContext,

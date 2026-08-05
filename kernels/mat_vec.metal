@@ -55,6 +55,23 @@ struct mat_mat_args {
     uint n_query;
 };
 
+struct ds4_packed_grouped_expert_args {
+    uint hidden;
+    uint ffn;
+    uint n_expert;
+    uint top_k;
+    uint n_tokens;
+    float clamp;
+};
+
+struct ds4_packed_expert_tile {
+    uint expert;
+    uint start;
+    uint count;
+};
+
+static_assert(sizeof(ds4_packed_expert_tile) == 12);
+
 constant float iq4nl_values[16] = {
     -127.0f, -104.0f, -83.0f, -65.0f, -49.0f, -35.0f, -22.0f, -10.0f,
        1.0f,   13.0f,  25.0f,  38.0f,  53.0f,  69.0f,  89.0f, 113.0f,
@@ -3212,6 +3229,71 @@ kernel void kernel_mat_mat_iq2_xs_f32(
 
     if (q < args.n_query) {
         y[row + q * args.n_out] = acc;
+    }
+}
+
+kernel void kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_f32(
+        constant ds4_packed_grouped_expert_args & args [[buffer(0)]],
+        device const uchar * gate_weight [[buffer(1)]],
+        device const uchar * up_weight [[buffer(2)]],
+        device const float * x [[buffer(3)]],
+        device const int * slots [[buffer(4)]],
+        constant ds4_packed_expert_tile * tiles [[buffer(5)]],
+        device float * inner [[buffer(6)]],
+        threadgroup float * wtile [[threadgroup(0)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint row = tgpig.x;
+    if (row >= args.ffn) return;
+
+    const ds4_packed_expert_tile tile = tiles[tgpig.y];
+    if (tile.expert >= args.n_expert || tile.count == 0u || tile.count > 32u
+            || tile.start + tile.count > args.n_tokens * args.top_k) return;
+
+    const uint local_q = uint(tiisg);
+    bool active = local_q < tile.count;
+    int slot = -1;
+    uint token = 0;
+    if (active) {
+        slot = slots[tile.start + local_q];
+        active = slot >= 0 && uint(slot) < args.n_tokens * args.top_k;
+        token = active ? uint(slot) / args.top_k : 0u;
+    }
+
+    const uint nb = args.hidden / 256u;
+    const ulong row_stride = (ulong)nb * 74u;
+    const ulong expert_stride = (ulong)args.ffn * row_stride;
+    device const uchar * gate_row = gate_weight
+        + (ulong)tile.expert * expert_stride + (ulong)row * row_stride;
+    device const uchar * up_row = up_weight
+        + (ulong)tile.expert * expert_stride + (ulong)row * row_stride;
+    float gate_acc = 0.0f;
+    float up_acc = 0.0f;
+
+    for (uint bidx = 0; bidx < nb; ++bidx) {
+        device const uchar * gate_block = gate_row + (ulong)bidx * 74u;
+        device const uchar * up_block = up_row + (ulong)bidx * 74u;
+        const uint base = bidx * 256u;
+        for (uint k0 = 0; k0 < 256u; k0 += 32u) {
+            wtile[tiisg] = deq_iq2_xs_bytes(gate_block, k0 + tiisg);
+            wtile[32u + tiisg] = deq_iq2_xs_bytes(up_block, k0 + tiisg);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (active) {
+                device const float * x_row = x + (ulong)token * args.hidden + base + k0;
+                for (uint j = 0; j < 32u; ++j) {
+                    gate_acc += x_row[j] * wtile[j];
+                    up_acc += x_row[j] * wtile[32u + j];
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+
+    if (active) {
+        const float clamped_gate = min(gate_acc, args.clamp);
+        const float clamped_up = clamp(up_acc, -args.clamp, args.clamp);
+        inner[(ulong)slot * args.ffn + row] =
+            clamped_gate / (1.0f + exp(-clamped_gate)) * clamped_up;
     }
 }
 

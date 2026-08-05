@@ -13821,6 +13821,288 @@ mod tests {
 
     #[cfg(feature = "dsv4-diagnostics")]
     #[test]
+    #[ignore = "requires the current 97.05 GiB DS4 asset"]
+    fn current_asset_packed_grouped_expert_integration_packet() {
+        const CONTINUATION_TOKEN: u32 = 35;
+        const ELIGIBLE_LAYERS: u32 = 25;
+
+        struct Evidence {
+            logits: Vec<f32>,
+            hidden: Vec<f32>,
+            causal_digest: [u8; 32],
+            prefix_digest: [u8; 32],
+            compatibility_digest: [u8; 32],
+            continuation_logits: Vec<f32>,
+            continuation_causal_digest: [u8; 32],
+            committed_tokens: Vec<u32>,
+            grouped_invocations: u32,
+            wall_ms: f64,
+        }
+
+        fn bits(values: &[f32]) -> Vec<u32> {
+            values.iter().map(|value| value.to_bits()).collect()
+        }
+
+        fn digest_hex(digest: impl AsRef<[u8]>) -> String {
+            digest
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            residency: DeepSeekV4MetalResidency,
+            model_content_id: DeepSeekV4ModelContentId,
+            prefix: &[u32],
+            grouped_target: bool,
+        ) -> (DeepSeekV4MetalResidency, Evidence) {
+            let mut session =
+                DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
+                    .expect("construct packed grouped expert session");
+            let started = std::time::Instant::now();
+            if grouped_target {
+                session
+                    .prefill_tokens(ctx, prefix)
+                    .expect("execute ordinary packed grouped expert prefix");
+            } else {
+                session
+                    .execute_packed_tokens_with_expert_policy_for_test(ctx, prefix, true, false)
+                    .expect("execute forced-current packed expert prefix");
+            }
+            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            let logits = session
+                .copy_logits_f32()
+                .expect("copy packed grouped logits");
+            let hidden = host_read_f32(
+                session
+                    .final_normalized_hidden()
+                    .expect("packed grouped final hidden is visible"),
+                "packed grouped final hidden",
+            )
+            .expect("copy packed grouped hidden");
+            let snapshot = session
+                .capture_causal_snapshot()
+                .expect("capture packed grouped state");
+            let causal_digest = *snapshot.causal_digest();
+            let prefix_digest = *snapshot.prefix_digest();
+            let compatibility_digest = *snapshot.compatibility_digest().as_bytes();
+            session
+                .restore_causal_snapshot(&snapshot)
+                .expect("restore packed grouped state");
+            session
+                .forward_token(ctx, CONTINUATION_TOKEN)
+                .expect("continue packed grouped state");
+            let continuation_logits = session
+                .copy_logits_f32()
+                .expect("copy packed grouped continuation logits");
+            let continuation = session
+                .capture_causal_snapshot()
+                .expect("capture packed grouped continuation state");
+            let evidence = Evidence {
+                logits,
+                hidden,
+                causal_digest,
+                prefix_digest,
+                compatibility_digest,
+                continuation_logits,
+                continuation_causal_digest: *continuation.causal_digest(),
+                committed_tokens: session.committed_tokens().to_vec(),
+                grouped_invocations: session.packed_grouped_expert_invocations_for_test(),
+                wall_ms,
+            };
+            (session.into_residency(), evidence)
+        }
+
+        fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
+            assert_eq!(
+                bits(&actual.logits),
+                bits(&expected.logits),
+                "{label} logits"
+            );
+            assert_eq!(
+                bits(&actual.hidden),
+                bits(&expected.hidden),
+                "{label} hidden"
+            );
+            assert_eq!(
+                actual.causal_digest, expected.causal_digest,
+                "{label} causal"
+            );
+            assert_eq!(
+                actual.prefix_digest, expected.prefix_digest,
+                "{label} prefix"
+            );
+            assert_eq!(
+                actual.compatibility_digest, expected.compatibility_digest,
+                "{label} compatibility"
+            );
+            assert_eq!(
+                bits(&actual.continuation_logits),
+                bits(&expected.continuation_logits),
+                "{label} continuation logits"
+            );
+            assert_eq!(
+                actual.continuation_causal_digest, expected.continuation_causal_digest,
+                "{label} continuation causal"
+            );
+            assert_eq!(
+                actual.committed_tokens, expected.committed_tokens,
+                "{label} committed tokens"
+            );
+        }
+
+        fn execute_samples(
+            ctx: &MetalContext,
+            mut residency: DeepSeekV4MetalResidency,
+            model_content_id: DeepSeekV4ModelContentId,
+            prefix: &[u32],
+            grouped_target: bool,
+            samples: usize,
+        ) -> (DeepSeekV4MetalResidency, Vec<Evidence>) {
+            let mut evidence = Vec::with_capacity(samples);
+            for _ in 0..samples {
+                let (next, sample) =
+                    execute(ctx, residency, model_content_id, prefix, grouped_target);
+                residency = next;
+                evidence.push(sample);
+            }
+            (residency, evidence)
+        }
+
+        fn median_wall_ms(samples: &[Evidence]) -> f64 {
+            let mut values = samples
+                .iter()
+                .map(|sample| sample.wall_ms)
+                .collect::<Vec<_>>();
+            values.sort_by(f64::total_cmp);
+            values[values.len() / 2]
+        }
+
+        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+            });
+        assert!(model_path.exists(), "missing current DS4 model");
+        let ctx = MetalContext::new().expect("create Metal context");
+        let grouped_enabled = prefill::packed_grouped_expert_enabled_for_test(&ctx);
+        let expected_grouped_invocations = if grouped_enabled { ELIGIBLE_LAYERS } else { 0 };
+        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
+        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 129)
+            .expect("plan packed grouped session");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit packed grouped session");
+        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+            .expect("realize current DS4 residency");
+        let mut residency = realized.into_residency();
+
+        let samples = std::env::var("QWEN_DSV4_PACKED_GROUPED_SAMPLES")
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .expect("QWEN_DSV4_PACKED_GROUPED_SAMPLES must be an integer")
+            })
+            .unwrap_or(1);
+        assert!((1..=5).contains(&samples), "samples must be in 1..=5");
+        let only_n = std::env::var("QWEN_DSV4_PACKED_GROUPED_ONLY_N")
+            .ok()
+            .map(|value| {
+                value
+                    .parse::<usize>()
+                    .expect("QWEN_DSV4_PACKED_GROUPED_ONLY_N must be an integer")
+            });
+        if let Some(n_tokens) = only_n {
+            assert!(
+                [12, 32, 128].contains(&n_tokens),
+                "QWEN_DSV4_PACKED_GROUPED_ONLY_N must be 12, 32, or 128"
+            );
+        }
+
+        for n_tokens in [12usize, 32, 128]
+            .into_iter()
+            .filter(|n_tokens| only_n.is_none_or(|only_n| only_n == *n_tokens))
+        {
+            let prefix = (0..n_tokens)
+                .map(|index| [35, 201, 200, 34][index % 4])
+                .collect::<Vec<_>>();
+
+            if samples > 1 {
+                let (next, warm_control) =
+                    execute(&ctx, residency, model_content_id, &prefix, false);
+                let (next, warm_candidate) = execute(&ctx, next, model_content_id, &prefix, true);
+                residency = next;
+                assert_exact("warm candidate", &warm_candidate, &warm_control);
+            }
+
+            let (next, current_before) =
+                execute_samples(&ctx, residency, model_content_id, &prefix, false, samples);
+            let (next, candidate) =
+                execute_samples(&ctx, next, model_content_id, &prefix, true, samples);
+            let (next, current_after) =
+                execute_samples(&ctx, next, model_content_id, &prefix, false, samples);
+            residency = next;
+
+            let reference = &current_before[0];
+            for sample in &current_before {
+                assert_exact("leading control", sample, reference);
+                assert_eq!(sample.grouped_invocations, 0);
+            }
+            for sample in &candidate {
+                assert_exact("grouped candidate", sample, reference);
+                assert_eq!(sample.grouped_invocations, expected_grouped_invocations);
+            }
+            for sample in &current_after {
+                assert_exact("trailing control", sample, reference);
+                assert_eq!(sample.grouped_invocations, 0);
+            }
+
+            let current_before_median = median_wall_ms(&current_before);
+            let candidate_median = median_wall_ms(&candidate);
+            let current_after_median = median_wall_ms(&current_after);
+            let faster_control = current_before_median.min(current_after_median);
+            let wall_saving = (faster_control - candidate_median) / faster_control;
+            let control_drift = 2.0 * (current_before_median - current_after_median).abs()
+                / (current_before_median + current_after_median);
+            let current_before_ms = current_before
+                .iter()
+                .map(|sample| sample.wall_ms)
+                .collect::<Vec<_>>();
+            let candidate_ms = candidate
+                .iter()
+                .map(|sample| sample.wall_ms)
+                .collect::<Vec<_>>();
+            let current_after_ms = current_after
+                .iter()
+                .map(|sample| sample.wall_ms)
+                .collect::<Vec<_>>();
+            eprintln!(
+                "deepseek_v4 packed_grouped_expert_integration n={n_tokens} samples={samples} grouped_enabled={grouped_enabled} current_before_wall_ms={current_before_ms:?} current_before_median_ms={current_before_median:.3} candidate_wall_ms={candidate_ms:?} candidate_median_ms={candidate_median:.3} current_after_wall_ms={current_after_ms:?} current_after_median_ms={current_after_median:.3} wall_saving={wall_saving:.6} control_drift={control_drift:.6} candidate_invocations={} candidate_dispatches={} logits_sha256={} causal_digest={} continuation_causal_digest={}",
+                candidate[0].grouped_invocations,
+                candidate[0].grouped_invocations * 2,
+                digest_hex(Sha256::digest(bytemuck::cast_slice(&reference.logits))),
+                digest_hex(reference.causal_digest),
+                digest_hex(reference.continuation_causal_digest),
+            );
+            if grouped_enabled && n_tokens == 128 && samples >= 3 {
+                assert!(
+                    wall_saving >= 0.15,
+                    "N=128 grouped expert wall saving {wall_saving:.3} missed 15% gate"
+                );
+                assert!(
+                    control_drift <= 0.05,
+                    "N=128 grouped expert control drift {control_drift:.3} exceeded 5%"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
     fn fp4_score_plans_are_exhaustive_and_dispatch_ledgers_fail_closed() {
         let cases = [
             (
@@ -13937,14 +14219,14 @@ mod tests {
         };
         assert_eq!(
             requests.len(),
-            542 + diagnostics_allocations + packed_route_allocations
+            543 + diagnostics_allocations + packed_route_allocations
         );
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            179_129_572 + diagnostics_logical + packed_route_logical
+            185_421_028 + diagnostics_logical + packed_route_logical
         );
         let names = requests
             .iter()
@@ -13979,6 +14261,13 @@ mod tests {
                 .sum::<u64>(),
             packed_route_logical
         );
+        assert_eq!(
+            requests
+                .iter()
+                .find(|request| request.name == "prefill.moe.grouped_inner")
+                .map(|request| request.logical_bytes),
+            Some(6_291_456)
+        );
 
         let promoted_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
             DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
@@ -14000,7 +14289,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            7_632_210_316 + promoted_diagnostics_logical + packed_route_logical
+            7_638_501_772 + promoted_diagnostics_logical + packed_route_logical
         );
         assert_eq!(
             promoted

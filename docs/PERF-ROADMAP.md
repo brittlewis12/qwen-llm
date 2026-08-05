@@ -309,13 +309,25 @@ total packed GPU and 56.534% in the 16 affected layers while unchanged-layer GPU
 time is flat. Retain the exact test-only implementation and negative evidence;
 do not retry the same condition or build fused IQ3 gate/up.
 
+The first pre-expert subphase now closes. M4 stage-boundary pass intervals can
+overlap, so an eight-stage all-layer profiler fails its frozen ambiguity gate
+and is removed as a live lane. A narrower three-pass instrument isolates the
+complete 128-row chronological publication loop while preserving dispatch work
+and exact outputs plus matching causal identities. Ordinary controls total
+1,082.499/1,051.893/1,058.030 ms GPU; sampled runs total
+1,058.170/1,074.016 ms. Chronological work normalizes to
+74.620/71.925 ms, with a 54.163 ms/5.099% uncertainty-adjusted lower bound.
+That misses the 150 ms/15% authorization floor. Keep it as a CSA-weighted
+piggyback opportunity, not a standalone optimization target.
+
 Force-ranked queue:
 
-1. **Attribute the packed pre-expert GPU span.** Split the roughly 1.057-second
-   N=128 region into attention, compressor/mHC, chronological row work, and
-   router projection before changing any kernel. Preserve one encoder and exact
-   output/state identity; choose the next optimization only from the measured
-   dominant subphase.
+1. **Attribute packed attention body plus output.** Reuse the accepted narrow
+   instrument across all 43 layers. Begin after chronological publication,
+   include dense/sparse attention, inverse RoPE, and both output projections,
+   then end before attention mHC post. Keep ordinary execution at one encoder;
+   treat diagnostic pass envelopes as attribution only. Split body from output
+   only if the combined target clears its authorization gate.
 2. **Attribute unchanged packed post-route work.** The 27 layers outside the
    all-IQ3 candidate remain at roughly 688 ms in both traced arms. Separate
    dtype mix, expert compute, and fixed dispatch overhead before attempting

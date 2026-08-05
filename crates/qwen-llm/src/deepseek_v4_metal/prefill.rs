@@ -2903,6 +2903,469 @@ struct PackedLayerTrace {
     bucket_count: usize,
 }
 
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PackedPrefillStageKind {
+    BeforeChronological,
+    ChronologicalRows,
+    AfterChronological,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 3] = [
+    PackedPrefillStageKind::BeforeChronological,
+    PackedPrefillStageKind::ChronologicalRows,
+    PackedPrefillStageKind::AfterChronological,
+];
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Debug)]
+pub(super) struct PackedPrefillStageTiming {
+    pub(super) kind: PackedPrefillStageKind,
+    pub(super) start_timestamp: Option<u64>,
+    pub(super) end_timestamp: Option<u64>,
+    pub(super) duration_ticks: u64,
+    pub(super) duration_ms_scaled: f64,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Debug)]
+pub(super) struct PackedPrefillStageTransition {
+    pub(super) from: PackedPrefillStageKind,
+    pub(super) to: PackedPrefillStageKind,
+    pub(super) delta_ticks: i128,
+    pub(super) gap_ticks: u64,
+    pub(super) overlap_ticks: u64,
+    pub(super) gap_ms_scaled: f64,
+    pub(super) overlap_ms_scaled: f64,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Debug)]
+pub(super) struct PackedPrefillSampledLayerProfile {
+    pub(super) layer: usize,
+    pub(super) command_gpu_ms: f64,
+    pub(super) sampled_span_ticks: u64,
+    pub(super) raw_span_ms_assuming_ns: f64,
+    pub(super) raw_coverage_assuming_ns: f64,
+    pub(super) encoder_gap_ms_scaled: f64,
+    pub(super) encoder_overlap_ms_scaled: f64,
+    pub(super) stages: Vec<PackedPrefillStageTiming>,
+    pub(super) transitions: Vec<PackedPrefillStageTransition>,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Debug)]
+pub(super) struct PackedPrefillStageProfile {
+    pub(super) sampled: bool,
+    pub(super) command_gpu_ms: Vec<f64>,
+    pub(super) sampled_layers: Vec<PackedPrefillSampledLayerProfile>,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Copy, Debug)]
+struct PackedPrefillPendingStageSample {
+    layer: usize,
+    kind: PackedPrefillStageKind,
+    samples: Option<(usize, usize)>,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+fn resolve_packed_prefill_layer_stage_samples(
+    layer: usize,
+    records: &[PackedPrefillPendingStageSample],
+    timestamps: &[u64],
+    command_gpu_ms: f64,
+    allowed_empty: Option<PackedPrefillStageKind>,
+) -> Result<PackedPrefillSampledLayerProfile, DeepSeekV4MetalError> {
+    if records.len() != PACKED_PREFILL_STAGE_KINDS.len() {
+        return invalid(format!(
+            "packed prefill sampled layer {layer} produced {} stages, expected {}",
+            records.len(),
+            PACKED_PREFILL_STAGE_KINDS.len()
+        ));
+    }
+    if !command_gpu_ms.is_finite() || command_gpu_ms <= 0.0 {
+        return invalid(format!(
+            "packed prefill sampled layer {layer} has invalid command GPU duration {command_gpu_ms}"
+        ));
+    }
+    for (record, expected) in records.iter().zip(PACKED_PREFILL_STAGE_KINDS) {
+        if record.layer != layer || record.kind != expected {
+            return invalid(format!(
+                "packed prefill sampled layer {layer} recorded {:?} for layer {}, expected {expected:?}",
+                record.kind, record.layer
+            ));
+        }
+        match record.samples {
+            Some((start_sample, end_sample)) => {
+                if start_sample >= timestamps.len() || end_sample >= timestamps.len() {
+                    return invalid(format!(
+                        "packed prefill sampled layer {layer} stage {:?} indexes samples {start_sample}..{end_sample} from {} timestamps",
+                        record.kind,
+                        timestamps.len()
+                    ));
+                }
+            }
+            None => {
+                if Some(record.kind) != allowed_empty {
+                    return invalid(format!(
+                        "packed prefill sampled layer {layer} has unexpected empty stage {:?}",
+                        record.kind
+                    ));
+                }
+            }
+        }
+    }
+
+    let first_timestamp = records
+        .iter()
+        .find_map(|record| record.samples.map(|(start, _)| timestamps[start]))
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "packed prefill sampled layer {layer} has no physical stages"
+            ))
+        })?;
+    let last_timestamp = records
+        .iter()
+        .rev()
+        .find_map(|record| record.samples.map(|(_, end)| timestamps[end]))
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "packed prefill sampled layer {layer} has no physical stages"
+            ))
+        })?;
+    let sampled_span_ticks = last_timestamp.checked_sub(first_timestamp).ok_or_else(|| {
+        DeepSeekV4MetalError::Invalid(format!(
+            "packed prefill sampled layer {layer} returned non-monotonic span timestamps"
+        ))
+    })?;
+    if sampled_span_ticks == 0 {
+        return invalid(format!(
+            "packed prefill sampled layer {layer} returned a zero timestamp span"
+        ));
+    }
+
+    let scale_ms_per_tick = command_gpu_ms / sampled_span_ticks as f64;
+    let mut stage_ticks = 0u64;
+    let mut gap_ticks = 0u64;
+    let mut overlap_ticks = 0u64;
+    let mut previous_start = None;
+    let mut previous_end = None;
+    let mut previous_kind = None;
+    let mut stages = Vec::with_capacity(records.len());
+    let mut transitions = Vec::with_capacity(records.len() - 1);
+    for record in records {
+        let Some((start_sample, end_sample)) = record.samples else {
+            stages.push(PackedPrefillStageTiming {
+                kind: record.kind,
+                start_timestamp: None,
+                end_timestamp: None,
+                duration_ticks: 0,
+                duration_ms_scaled: 0.0,
+            });
+            continue;
+        };
+        let start_timestamp = timestamps[start_sample];
+        let end_timestamp = timestamps[end_sample];
+        let duration_ticks = end_timestamp.checked_sub(start_timestamp).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "packed prefill sampled layer {layer} stage {:?} returned inverted timestamps",
+                record.kind
+            ))
+        })?;
+        if previous_start.is_some_and(|previous| start_timestamp < previous)
+            || previous_end.is_some_and(|previous| end_timestamp < previous)
+        {
+            return invalid(format!(
+                "packed prefill sampled layer {layer} stage {:?} reverses physical start/end order",
+                record.kind
+            ));
+        }
+        if let (Some(previous_end), Some(previous_kind)) = (previous_end, previous_kind) {
+            let delta_ticks = start_timestamp as i128 - previous_end as i128;
+            let (transition_gap, transition_overlap) = if delta_ticks >= 0 {
+                (delta_ticks as u64, 0)
+            } else {
+                (0, (-delta_ticks) as u64)
+            };
+            gap_ticks = gap_ticks.checked_add(transition_gap).ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed prefill encoder-gap tick total overflow".into(),
+                )
+            })?;
+            overlap_ticks = overlap_ticks
+                .checked_add(transition_overlap)
+                .ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(
+                        "packed prefill encoder-overlap tick total overflow".into(),
+                    )
+                })?;
+            transitions.push(PackedPrefillStageTransition {
+                from: previous_kind,
+                to: record.kind,
+                delta_ticks,
+                gap_ticks: transition_gap,
+                overlap_ticks: transition_overlap,
+                gap_ms_scaled: transition_gap as f64 * scale_ms_per_tick,
+                overlap_ms_scaled: transition_overlap as f64 * scale_ms_per_tick,
+            });
+        }
+        previous_start = Some(start_timestamp);
+        previous_end = Some(end_timestamp);
+        previous_kind = Some(record.kind);
+        stage_ticks = stage_ticks.checked_add(duration_ticks).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("packed prefill sampled stage tick total overflow".into())
+        })?;
+        stages.push(PackedPrefillStageTiming {
+            kind: record.kind,
+            start_timestamp: Some(start_timestamp),
+            end_timestamp: Some(end_timestamp),
+            duration_ticks,
+            duration_ms_scaled: duration_ticks as f64 * scale_ms_per_tick,
+        });
+    }
+    let accounted_ticks = stage_ticks as i128 + gap_ticks as i128 - overlap_ticks as i128;
+    if accounted_ticks != sampled_span_ticks as i128 {
+        return invalid(format!(
+            "packed prefill sampled layer {layer} stage/gap/overlap ticks {accounted_ticks} do not close span {sampled_span_ticks}"
+        ));
+    }
+    let raw_span_ms_assuming_ns = sampled_span_ticks as f64 * 1e-6;
+    Ok(PackedPrefillSampledLayerProfile {
+        layer,
+        command_gpu_ms,
+        sampled_span_ticks,
+        raw_span_ms_assuming_ns,
+        raw_coverage_assuming_ns: raw_span_ms_assuming_ns / command_gpu_ms,
+        encoder_gap_ms_scaled: gap_ticks as f64 * scale_ms_per_tick,
+        encoder_overlap_ms_scaled: overlap_ticks as f64 * scale_ms_per_tick,
+        stages,
+        transitions,
+    })
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+struct PackedPrefillStageRecorder {
+    sampled: bool,
+    samples: Option<MetalTimestampSampleBuffer>,
+    next_sample: usize,
+    records: Vec<PackedPrefillPendingStageSample>,
+    command_gpu_ms: [Option<f64>; DEEPSEEK_V4_LAYER_COUNT],
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+impl PackedPrefillStageRecorder {
+    fn new(ctx: &MetalContext, sampled: bool) -> Result<Self, DeepSeekV4MetalError> {
+        let record_count = DEEPSEEK_V4_LAYER_COUNT
+            .checked_mul(PACKED_PREFILL_STAGE_KINDS.len())
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed prefill timestamp record count overflow".into(),
+                )
+            })?;
+        let sample_count = record_count.checked_mul(2).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("packed prefill timestamp sample count overflow".into())
+        })?;
+        Ok(Self {
+            sampled,
+            samples: if sampled {
+                Some(ctx.timestamp_sample_buffer(sample_count)?)
+            } else {
+                None
+            },
+            next_sample: 0,
+            records: Vec::with_capacity(if sampled { record_count } else { 0 }),
+            command_gpu_ms: [None; DEEPSEEK_V4_LAYER_COUNT],
+        })
+    }
+
+    fn begin_encoder(
+        &mut self,
+        command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        layer: usize,
+        kind: PackedPrefillStageKind,
+    ) -> Result<KernelEncoder, DeepSeekV4MetalError> {
+        if !self.sampled || layer >= DEEPSEEK_V4_LAYER_COUNT {
+            return invalid("packed prefill stage recorder received an invalid sampled layer");
+        }
+        let start_sample = self.next_sample;
+        let end_sample = start_sample.checked_add(1).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("packed prefill sample index overflow".into())
+        })?;
+        let samples = self.samples.as_ref().ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("packed prefill timestamp buffer is absent".into())
+        })?;
+        if end_sample >= samples.sample_count() {
+            return invalid(format!(
+                "packed prefill timestamp buffer exhausted at sample {end_sample}"
+            ));
+        }
+        self.next_sample = end_sample + 1;
+        self.records.push(PackedPrefillPendingStageSample {
+            layer,
+            kind,
+            samples: Some((start_sample, end_sample)),
+        });
+        Ok(KernelEncoder::try_begin_sampled(
+            command,
+            samples,
+            start_sample,
+            end_sample,
+            false,
+        )?)
+    }
+
+    fn record_command_gpu_seconds(
+        &mut self,
+        layer: usize,
+        command_gpu_seconds: f64,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if layer >= DEEPSEEK_V4_LAYER_COUNT
+            || !command_gpu_seconds.is_finite()
+            || command_gpu_seconds <= 0.0
+            || self.command_gpu_ms[layer].is_some()
+        {
+            return invalid(format!(
+                "packed prefill layer {layer} has invalid or duplicate GPU duration {command_gpu_seconds}"
+            ));
+        }
+        self.command_gpu_ms[layer] = Some(command_gpu_seconds * 1e3);
+        Ok(())
+    }
+
+    fn resolve(
+        self,
+        ctx: &MetalContext,
+    ) -> Result<PackedPrefillStageProfile, DeepSeekV4MetalError> {
+        let command_gpu_ms = self
+            .command_gpu_ms
+            .into_iter()
+            .enumerate()
+            .map(|(layer, duration)| {
+                duration.ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "packed prefill layer {layer} has no GPU duration"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !self.sampled {
+            if self.samples.is_some() || self.next_sample != 0 || !self.records.is_empty() {
+                return invalid("ordinary packed prefill profile retained sampled state");
+            }
+            return Ok(PackedPrefillStageProfile {
+                sampled: false,
+                command_gpu_ms,
+                sampled_layers: Vec::new(),
+            });
+        }
+        let expected_records = DEEPSEEK_V4_LAYER_COUNT * PACKED_PREFILL_STAGE_KINDS.len();
+        let expected_samples = expected_records * 2;
+        if self.records.len() != expected_records || self.next_sample != expected_samples {
+            return invalid(format!(
+                "packed prefill stage recorder produced {} records/{} samples, expected {expected_records}/{expected_samples}",
+                self.records.len(),
+                self.next_sample
+            ));
+        }
+        let samples = self.samples.as_ref().ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("packed prefill timestamp buffer is absent".into())
+        })?;
+        let timestamps = ctx.resolve_timestamp_samples(samples, self.next_sample)?;
+        let mut sampled_layers = Vec::with_capacity(DEEPSEEK_V4_LAYER_COUNT);
+        for (layer, &duration) in command_gpu_ms.iter().enumerate() {
+            let records = &self.records[layer * PACKED_PREFILL_STAGE_KINDS.len()
+                ..(layer + 1) * PACKED_PREFILL_STAGE_KINDS.len()];
+            sampled_layers.push(resolve_packed_prefill_layer_stage_samples(
+                layer,
+                records,
+                &timestamps,
+                duration,
+                None,
+            )?);
+        }
+        Ok(PackedPrefillStageProfile {
+            sampled: true,
+            command_gpu_ms,
+            sampled_layers,
+        })
+    }
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+struct PackedPrefillLayerEncoder<'command, 'recorder> {
+    command: &'command Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    layer: usize,
+    sampled: bool,
+    recorder: Option<&'recorder mut PackedPrefillStageRecorder>,
+    encoder: Option<KernelEncoder>,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+impl<'command, 'recorder> PackedPrefillLayerEncoder<'command, 'recorder> {
+    fn begin(
+        command: &'command Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        layer: usize,
+        mut recorder: Option<&'recorder mut PackedPrefillStageRecorder>,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        let sampled = recorder.as_deref().is_some_and(|recorder| recorder.sampled);
+        let encoder = if sampled {
+            recorder.as_deref_mut().unwrap().begin_encoder(
+                command,
+                layer,
+                PackedPrefillStageKind::BeforeChronological,
+            )?
+        } else {
+            KernelEncoder::begin(command)
+        };
+        Ok(Self {
+            command,
+            layer,
+            sampled,
+            recorder,
+            encoder: Some(encoder),
+        })
+    }
+
+    fn boundary(&mut self, next: PackedPrefillStageKind) -> Result<(), DeepSeekV4MetalError> {
+        if !self.sampled {
+            return Ok(());
+        }
+        if let Some(encoder) = self.encoder.take() {
+            encoder.end();
+        }
+        self.encoder = Some(
+            self.recorder
+                .as_deref_mut()
+                .ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(
+                        "sampled packed prefill encoder lost its recorder".into(),
+                    )
+                })?
+                .begin_encoder(self.command, self.layer, next)?,
+        );
+        Ok(())
+    }
+
+    fn end(mut self) {
+        if let Some(encoder) = self.encoder.take() {
+            encoder.end();
+        }
+    }
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+impl std::ops::Deref for PackedPrefillLayerEncoder<'_, '_> {
+    type Target = KernelEncoder;
+
+    fn deref(&self) -> &Self::Target {
+        self.encoder
+            .as_ref()
+            .expect("packed prefill layer encoder ended before stage completion")
+    }
+}
+
 #[derive(Clone, Copy)]
 enum PackedRouteSource<'a> {
     Hash,
@@ -4423,6 +4886,7 @@ impl DeepSeekV4Session {
             emit_logits,
             route_policy,
             PackedExpertPolicy::Current,
+            None,
             &mut |_| {},
         )
     }
@@ -4450,8 +4914,30 @@ impl DeepSeekV4Session {
             emit_logits,
             PackedRoutePolicy::Cpu,
             expert_policy,
+            None,
             &mut |_| {},
         )
+    }
+
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    pub(super) fn execute_packed_tokens_with_stage_profile_for_test(
+        &mut self,
+        ctx: &MetalContext,
+        token_ids: &[u32],
+        emit_logits: bool,
+        sampled: bool,
+    ) -> Result<PackedPrefillStageProfile, DeepSeekV4MetalError> {
+        let mut recorder = PackedPrefillStageRecorder::new(ctx, sampled)?;
+        self.execute_packed_tokens_with_progress_policy(
+            ctx,
+            token_ids,
+            emit_logits,
+            PackedRoutePolicy::Cpu,
+            PackedExpertPolicy::GroupedIq2XsIq3Xxs,
+            Some(&mut recorder),
+            &mut |_| {},
+        )?;
+        recorder.resolve(ctx)
     }
 
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -4483,6 +4969,8 @@ impl DeepSeekV4Session {
             emit_logits,
             PackedRoutePolicy::Cpu,
             expert_policy,
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            None,
             layer_completed,
         )
     }
@@ -4494,6 +4982,9 @@ impl DeepSeekV4Session {
         emit_logits: bool,
         route_policy: PackedRoutePolicy,
         expert_policy: PackedExpertPolicy,
+        #[cfg(all(test, feature = "dsv4-diagnostics"))] stage_recorder: Option<
+            &mut PackedPrefillStageRecorder,
+        >,
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
         #[cfg(feature = "dsv4-diagnostics")]
@@ -4561,6 +5052,8 @@ impl DeepSeekV4Session {
             emit_logits,
             route_policy,
             expert_policy,
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            stage_recorder,
             layer_completed,
         );
         match result {
@@ -4583,6 +5076,9 @@ impl DeepSeekV4Session {
         emit_logits: bool,
         route_policy: PackedRoutePolicy,
         expert_policy: PackedExpertPolicy,
+        #[cfg(all(test, feature = "dsv4-diagnostics"))] mut stage_recorder: Option<
+            &mut PackedPrefillStageRecorder,
+        >,
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
         let n_tokens = token_ids.len();
@@ -4661,6 +5157,10 @@ impl DeepSeekV4Session {
                     "failed to allocate packed layer {layer} router command buffer"
                 ))
             })?;
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            let mut encoder =
+                PackedPrefillLayerEncoder::begin(&command, layer, stage_recorder.as_deref_mut())?;
+            #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
             let encoder = KernelEncoder::begin(&command);
             let router_result = (|| {
                 #[cfg(feature = "dsv4-diagnostics")]
@@ -4703,6 +5203,7 @@ impl DeepSeekV4Session {
                     rms_eps,
                     hc_eps,
                 )?;
+
                 let attention = self.prefill.attention.encode_prepare(
                     ctx,
                     &encoder,
@@ -4716,6 +5217,7 @@ impl DeepSeekV4Session {
                     n_tokens,
                     rms_eps,
                 )?;
+
                 let compressor = self.prefill.compressor.encode_layer_projections(
                     ctx,
                     &encoder,
@@ -4724,6 +5226,10 @@ impl DeepSeekV4Session {
                     &attention.normalized_input,
                     n_tokens,
                 )?;
+
+                #[cfg(all(test, feature = "dsv4-diagnostics"))]
+                encoder.boundary(PackedPrefillStageKind::ChronologicalRows)?;
+
                 for row in 0..n_tokens {
                     let position = start_position
                         .checked_add(u32::try_from(row).map_err(|_| {
@@ -4775,6 +5281,10 @@ impl DeepSeekV4Session {
                         rms_eps,
                     )?;
                 }
+
+                #[cfg(all(test, feature = "dsv4-diagnostics"))]
+                encoder.boundary(PackedPrefillStageKind::AfterChronological)?;
+
                 let compressed = self
                     .compressor_frontiers
                     .attention_rows(layer, last_position)?;
@@ -4965,6 +5475,7 @@ impl DeepSeekV4Session {
                     self.layer_tensor(layer, "attn_output_b.weight")?,
                     n_tokens,
                 )?;
+
                 self.prefill.hyper.encode_post(
                     ctx,
                     &encoder,
@@ -4984,6 +5495,7 @@ impl DeepSeekV4Session {
                     rms_eps,
                     hc_eps,
                 )?;
+
                 let hash_map = if layer < self.residency.config().hash_layer_count as usize {
                     Some(self.layer_tensor(layer, "ffn_gate_tid2eid.weight")?)
                 } else {
@@ -5037,7 +5549,11 @@ impl DeepSeekV4Session {
             let pre_expert_command_seconds = pre_expert_started
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
-            let pre_expert_gpu_seconds = if trace_layers {
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            let stage_profile_active = stage_recorder.is_some();
+            #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
+            let stage_profile_active = false;
+            let pre_expert_gpu_seconds = if trace_layers || stage_profile_active {
                 command.GPUEndTime() - command.GPUStartTime()
             } else {
                 0.0
@@ -5047,6 +5563,10 @@ impl DeepSeekV4Session {
                 return invalid(format!(
                     "packed layer {layer} router command failed: {error:?}"
                 ));
+            }
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            if let Some(recorder) = stage_recorder.as_deref_mut() {
+                recorder.record_command_gpu_seconds(layer, pre_expert_gpu_seconds)?;
             }
             if let Some(query_offset) = sparse_query_offset
                 && {
@@ -5413,6 +5933,101 @@ mod tests {
     const PACKED_ROUTE_SLOT_GUARD_BYTES: usize = 64;
     const PACKED_ROUTE_SLOT_PREFIX: u8 = 0xa5;
     const PACKED_ROUTE_SLOT_SUFFIX: u8 = 0x5a;
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn packed_prefill_stage_resolver_closes_signed_overlaps() {
+        let mut records = Vec::new();
+        let mut timestamps = Vec::new();
+        let mut cursor = 100u64;
+        for (index, kind) in PACKED_PREFILL_STAGE_KINDS.into_iter().enumerate() {
+            let start_sample = timestamps.len();
+            let start_timestamp = if index == 1 { cursor - 5 } else { cursor };
+            timestamps.push(start_timestamp);
+            cursor = start_timestamp + 10 + index as u64;
+            let end_sample = timestamps.len();
+            timestamps.push(cursor);
+            records.push(PackedPrefillPendingStageSample {
+                layer: 0,
+                kind,
+                samples: Some((start_sample, end_sample)),
+            });
+            cursor += 3;
+        }
+        let profile =
+            resolve_packed_prefill_layer_stage_samples(0, &records, &timestamps, 2.0, None)
+                .unwrap();
+        assert_eq!(profile.layer, 0);
+        assert_eq!(profile.command_gpu_ms, 2.0);
+        assert_eq!(profile.stages.len(), PACKED_PREFILL_STAGE_KINDS.len());
+        assert!(profile.sampled_span_ticks > 0);
+        assert!(profile.raw_span_ms_assuming_ns > 0.0);
+        assert!(profile.raw_coverage_assuming_ns > 0.0);
+        assert!(profile.encoder_gap_ms_scaled > 0.0);
+        assert!(profile.encoder_overlap_ms_scaled > 0.0);
+        let stage_ms = profile
+            .stages
+            .iter()
+            .zip(PACKED_PREFILL_STAGE_KINDS)
+            .map(|(stage, expected)| {
+                assert_eq!(stage.kind, expected);
+                if let (Some(start), Some(end)) = (stage.start_timestamp, stage.end_timestamp) {
+                    assert_eq!(stage.duration_ticks, end - start);
+                } else {
+                    panic!("physical test stage {expected:?} has no samples");
+                }
+                stage.duration_ms_scaled
+            })
+            .sum::<f64>();
+        assert!(
+            (stage_ms + profile.encoder_gap_ms_scaled - profile.encoder_overlap_ms_scaled - 2.0)
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn packed_prefill_stage_resolver_represents_empty_stage_explicitly() {
+        let records = [
+            PackedPrefillPendingStageSample {
+                layer: 0,
+                kind: PackedPrefillStageKind::BeforeChronological,
+                samples: Some((0, 1)),
+            },
+            PackedPrefillPendingStageSample {
+                layer: 0,
+                kind: PackedPrefillStageKind::ChronologicalRows,
+                samples: None,
+            },
+            PackedPrefillPendingStageSample {
+                layer: 0,
+                kind: PackedPrefillStageKind::AfterChronological,
+                samples: Some((2, 3)),
+            },
+        ];
+        let profile = resolve_packed_prefill_layer_stage_samples(
+            0,
+            &records,
+            &[100, 110, 113, 130],
+            1.0,
+            Some(PackedPrefillStageKind::ChronologicalRows),
+        )
+        .unwrap();
+        assert_eq!(profile.stages[1].start_timestamp, None);
+        assert_eq!(profile.stages[1].end_timestamp, None);
+        assert_eq!(profile.stages[1].duration_ticks, 0);
+        assert_eq!(profile.stages[1].duration_ms_scaled, 0.0);
+        assert_eq!(profile.transitions.len(), 1);
+        assert_eq!(
+            profile.transitions[0].from,
+            PackedPrefillStageKind::BeforeChronological
+        );
+        assert_eq!(
+            profile.transitions[0].to,
+            PackedPrefillStageKind::AfterChronological
+        );
+    }
 
     fn grouped_test_bank(
         ctx: &MetalContext,

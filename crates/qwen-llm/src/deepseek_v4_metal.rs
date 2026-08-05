@@ -14280,6 +14280,581 @@ mod tests {
 
     #[cfg(feature = "dsv4-diagnostics")]
     #[test]
+    #[ignore = "requires the current 97.05 GiB DS4 asset"]
+    fn current_asset_packed_pre_expert_stage_attribution_packet() {
+        const PREFIX_TOKENS: usize = 128;
+        const CONTINUATION_TOKEN: u32 = 35;
+        const ORDINARY_ENCODERS: u64 = (DEEPSEEK_V4_LAYER_COUNT * 2) as u64;
+        const SAMPLED_ENCODERS: u64 =
+            (DEEPSEEK_V4_LAYER_COUNT * (prefill::PACKED_PREFILL_STAGE_KINDS.len() + 1)) as u64;
+
+        struct Evidence {
+            logits: Vec<f32>,
+            hidden: Vec<f32>,
+            causal_digest: [u8; 32],
+            prefix_digest: [u8; 32],
+            compatibility_digest: [u8; 32],
+            continuation_logits: Vec<f32>,
+            continuation_causal_digest: [u8; 32],
+            committed_tokens: Vec<u32>,
+            profile: prefill::PackedPrefillStageProfile,
+            counters: crate::metal::KernelTraceCounters,
+            dispatch_count: usize,
+            dispatch_digest: [u8; 32],
+            wall_ms: f64,
+        }
+
+        #[derive(Clone, Debug)]
+        struct Summary {
+            stage_ms: [f64; 3],
+            cohort_stage_ms: [[f64; 3]; 3],
+            cohort_command_ms: [f64; 3],
+            cohort_gap_ms: [f64; 3],
+            cohort_overlap_ms: [f64; 3],
+            command_gpu_ms: f64,
+            raw_span_ms: f64,
+            gap_ms: f64,
+            overlap_ms: f64,
+            max_layer_coverage_error: f64,
+            max_layer_transition_ambiguity: f64,
+            max_single_transition_ambiguity: f64,
+        }
+
+        fn bits(values: &[f32]) -> Vec<u32> {
+            values.iter().map(|value| value.to_bits()).collect()
+        }
+
+        fn profile_digest_hex(digest: impl AsRef<[u8]>) -> String {
+            digest
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        }
+
+        fn stage_index(kind: prefill::PackedPrefillStageKind) -> usize {
+            match kind {
+                prefill::PackedPrefillStageKind::BeforeChronological => 0,
+                prefill::PackedPrefillStageKind::ChronologicalRows => 1,
+                prefill::PackedPrefillStageKind::AfterChronological => 2,
+            }
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            residency: DeepSeekV4MetalResidency,
+            model_content_id: DeepSeekV4ModelContentId,
+            prefix: &[u32],
+            sampled: bool,
+        ) -> (DeepSeekV4MetalResidency, Evidence) {
+            let mut session =
+                DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
+                    .expect("construct packed stage-profile session");
+            crate::metal::dispatch_census_begin();
+            let trace_guard = crate::metal::kernel_trace_begin();
+            let started = std::time::Instant::now();
+            let profile = session
+                .execute_packed_tokens_with_stage_profile_for_test(ctx, prefix, true, sampled)
+                .expect("execute packed stage-profile prefix");
+            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            let counters = crate::metal::kernel_trace_snapshot();
+            let census = crate::metal::dispatch_census_take();
+            drop(trace_guard);
+            let mut dispatch_hasher = Sha256::new();
+            for row in &census {
+                dispatch_hasher.update((row.family.len() as u64).to_le_bytes());
+                dispatch_hasher.update(row.family.as_bytes());
+                dispatch_hasher.update((row.kernel.len() as u64).to_le_bytes());
+                dispatch_hasher.update(row.kernel.as_bytes());
+                for extent in [
+                    row.grid_width,
+                    row.grid_height,
+                    row.grid_depth,
+                    row.threads_width,
+                    row.threads_height,
+                    row.threads_depth,
+                ] {
+                    dispatch_hasher.update(extent.to_le_bytes());
+                }
+            }
+            let dispatch_digest = dispatch_hasher.finalize().into();
+            let logits = session
+                .copy_logits_f32()
+                .expect("copy packed stage-profile logits");
+            let hidden = host_read_f32(
+                session
+                    .final_normalized_hidden()
+                    .expect("packed stage-profile final hidden is visible"),
+                "packed stage-profile final hidden",
+            )
+            .expect("copy packed stage-profile hidden");
+            let snapshot = session
+                .capture_causal_snapshot()
+                .expect("capture packed stage-profile state");
+            let causal_digest = *snapshot.causal_digest();
+            let prefix_digest = *snapshot.prefix_digest();
+            let compatibility_digest = *snapshot.compatibility_digest().as_bytes();
+            session
+                .restore_causal_snapshot(&snapshot)
+                .expect("restore packed stage-profile state");
+            session
+                .forward_token(ctx, CONTINUATION_TOKEN)
+                .expect("continue packed stage-profile state");
+            let continuation_logits = session
+                .copy_logits_f32()
+                .expect("copy packed stage-profile continuation logits");
+            let continuation = session
+                .capture_causal_snapshot()
+                .expect("capture packed stage-profile continuation state");
+            let evidence = Evidence {
+                logits,
+                hidden,
+                causal_digest,
+                prefix_digest,
+                compatibility_digest,
+                continuation_logits,
+                continuation_causal_digest: *continuation.causal_digest(),
+                committed_tokens: session.committed_tokens().to_vec(),
+                profile,
+                counters,
+                dispatch_count: census.len(),
+                dispatch_digest,
+                wall_ms,
+            };
+            (session.into_residency(), evidence)
+        }
+
+        fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
+            assert_eq!(
+                bits(&actual.logits),
+                bits(&expected.logits),
+                "{label} logits"
+            );
+            assert_eq!(
+                bits(&actual.hidden),
+                bits(&expected.hidden),
+                "{label} hidden"
+            );
+            assert_eq!(
+                actual.causal_digest, expected.causal_digest,
+                "{label} causal"
+            );
+            assert_eq!(
+                actual.prefix_digest, expected.prefix_digest,
+                "{label} prefix"
+            );
+            assert_eq!(
+                actual.compatibility_digest, expected.compatibility_digest,
+                "{label} compatibility"
+            );
+            assert_eq!(
+                bits(&actual.continuation_logits),
+                bits(&expected.continuation_logits),
+                "{label} continuation logits"
+            );
+            assert_eq!(
+                actual.continuation_causal_digest, expected.continuation_causal_digest,
+                "{label} continuation causal"
+            );
+            assert_eq!(
+                actual.committed_tokens, expected.committed_tokens,
+                "{label} committed tokens"
+            );
+            assert_eq!(
+                actual.counters.dispatches, expected.counters.dispatches,
+                "{label} dispatch count"
+            );
+            assert_eq!(
+                actual.dispatch_count, expected.dispatch_count,
+                "{label} dispatch census count"
+            );
+            assert_eq!(
+                actual.dispatch_digest, expected.dispatch_digest,
+                "{label} dispatch order/shape digest"
+            );
+        }
+
+        fn assert_topology(evidence: &Evidence, sampled: bool) {
+            assert_eq!(evidence.profile.sampled, sampled);
+            assert_eq!(
+                evidence.profile.command_gpu_ms.len(),
+                DEEPSEEK_V4_LAYER_COUNT
+            );
+            assert_eq!(evidence.counters.concurrent_encoders, 0);
+            assert_eq!(
+                evidence.counters.encoders,
+                if sampled {
+                    SAMPLED_ENCODERS
+                } else {
+                    ORDINARY_ENCODERS
+                }
+            );
+            assert_eq!(
+                evidence.counters.dispatches as usize,
+                evidence.dispatch_count
+            );
+            assert_eq!(
+                evidence.profile.sampled_layers.len(),
+                if sampled { DEEPSEEK_V4_LAYER_COUNT } else { 0 }
+            );
+        }
+
+        fn summarize(profile: &prefill::PackedPrefillStageProfile) -> Summary {
+            assert!(profile.sampled);
+            let config = crate::deepseek_v4::flash_0731_config_fixture();
+            let mut stage_ms = [0.0; 3];
+            let mut cohort_stage_ms = [[0.0; 3]; 3];
+            let mut cohort_command_ms = [0.0; 3];
+            let mut cohort_gap_ms = [0.0; 3];
+            let mut cohort_overlap_ms = [0.0; 3];
+            let mut raw_span_ms = 0.0;
+            let mut gap_ms = 0.0;
+            let mut overlap_ms = 0.0;
+            let mut max_layer_coverage_error = 0.0f64;
+            let mut max_layer_transition_ambiguity = 0.0f64;
+            let mut max_single_transition_ambiguity = 0.0f64;
+            for (layer, sampled_layer) in profile.sampled_layers.iter().enumerate() {
+                assert_eq!(sampled_layer.layer, layer);
+                assert_eq!(sampled_layer.stages.len(), 3);
+                assert_eq!(sampled_layer.transitions.len(), 2);
+                assert!(
+                    (sampled_layer.command_gpu_ms - profile.command_gpu_ms[layer]).abs() < 1e-9
+                );
+                max_layer_coverage_error = max_layer_coverage_error
+                    .max((sampled_layer.raw_coverage_assuming_ns - 1.0).abs());
+                let cohort = match config.attention_kinds[layer] {
+                    AttentionKind::SlidingWindow => 0,
+                    AttentionKind::CompressedSparse => 1,
+                    AttentionKind::HeavilyCompressed => 2,
+                };
+                cohort_command_ms[cohort] += sampled_layer.command_gpu_ms;
+                let mut layer_stage_ms = 0.0;
+                for (expected_index, stage) in sampled_layer.stages.iter().enumerate() {
+                    let index = stage_index(stage.kind);
+                    assert_eq!(index, expected_index);
+                    match (stage.start_timestamp, stage.end_timestamp) {
+                        (Some(start), Some(end)) => {
+                            assert!(start <= end);
+                            assert_eq!(stage.duration_ticks, end - start);
+                        }
+                        _ => panic!("layer {layer} stage {:?} is not physical", stage.kind),
+                    }
+                    stage_ms[index] += stage.duration_ms_scaled;
+                    cohort_stage_ms[cohort][index] += stage.duration_ms_scaled;
+                    layer_stage_ms += stage.duration_ms_scaled;
+                }
+                for transition in &sampled_layer.transitions {
+                    assert_eq!(
+                        transition.delta_ticks,
+                        transition.gap_ticks as i128 - transition.overlap_ticks as i128
+                    );
+                    assert!(transition.gap_ticks == 0 || transition.overlap_ticks == 0);
+                    max_single_transition_ambiguity = max_single_transition_ambiguity.max(
+                        (transition.gap_ms_scaled + transition.overlap_ms_scaled)
+                            / sampled_layer.command_gpu_ms,
+                    );
+                }
+                let layer_artifact =
+                    sampled_layer.encoder_gap_ms_scaled + sampled_layer.encoder_overlap_ms_scaled;
+                max_layer_transition_ambiguity = max_layer_transition_ambiguity
+                    .max(layer_artifact / sampled_layer.command_gpu_ms);
+                assert!(
+                    (layer_stage_ms + sampled_layer.encoder_gap_ms_scaled
+                        - sampled_layer.encoder_overlap_ms_scaled
+                        - sampled_layer.command_gpu_ms)
+                        .abs()
+                        < 1e-6
+                );
+                raw_span_ms += sampled_layer.raw_span_ms_assuming_ns;
+                gap_ms += sampled_layer.encoder_gap_ms_scaled;
+                overlap_ms += sampled_layer.encoder_overlap_ms_scaled;
+                cohort_gap_ms[cohort] += sampled_layer.encoder_gap_ms_scaled;
+                cohort_overlap_ms[cohort] += sampled_layer.encoder_overlap_ms_scaled;
+            }
+            let command_gpu_ms = profile.command_gpu_ms.iter().sum::<f64>();
+            assert!(
+                (stage_ms.iter().sum::<f64>() + gap_ms - overlap_ms - command_gpu_ms).abs() < 1e-6
+            );
+            Summary {
+                stage_ms,
+                cohort_stage_ms,
+                cohort_command_ms,
+                cohort_gap_ms,
+                cohort_overlap_ms,
+                command_gpu_ms,
+                raw_span_ms,
+                gap_ms,
+                overlap_ms,
+                max_layer_coverage_error,
+                max_layer_transition_ambiguity,
+                max_single_transition_ambiguity,
+            }
+        }
+
+        fn drift(values: &[f64]) -> f64 {
+            let minimum = values.iter().copied().reduce(f64::min).unwrap();
+            let maximum = values.iter().copied().reduce(f64::max).unwrap();
+            2.0 * (maximum - minimum) / (maximum + minimum)
+        }
+
+        fn median(values: &[f64]) -> f64 {
+            let mut values = values.to_vec();
+            values.sort_by(f64::total_cmp);
+            if values.len().is_multiple_of(2) {
+                (values[values.len() / 2 - 1] + values[values.len() / 2]) * 0.5
+            } else {
+                values[values.len() / 2]
+            }
+        }
+
+        fn chronological_share(summary: &Summary) -> f64 {
+            summary.stage_ms[1] / summary.command_gpu_ms
+        }
+
+        fn cohort_chronological_shares(summary: &Summary) -> [f64; 3] {
+            std::array::from_fn(|cohort| {
+                summary.cohort_stage_ms[cohort][1] / summary.cohort_command_ms[cohort]
+            })
+        }
+
+        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+            });
+        assert!(model_path.exists(), "missing current DS4 model");
+        let ctx = MetalContext::new().expect("create Metal context");
+        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
+        let grouped_default = prefill::packed_grouped_expert_enabled_for_test(&ctx);
+        assert!(
+            grouped_default,
+            "packed stage attribution requires the qualified grouped IQ2 default"
+        );
+        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 129)
+            .expect("plan packed stage-profile session");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit packed stage-profile session");
+        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+            .expect("realize current DS4 residency");
+        let mut residency = realized.into_residency();
+        let prefix = (0..PREFIX_TOKENS)
+            .map(|index| [35, 201, 200, 34][index % 4])
+            .collect::<Vec<_>>();
+
+        let (next, warm_control) = execute(&ctx, residency, model_content_id, &prefix, false);
+        let (next, warm_sampled) = execute(&ctx, next, model_content_id, &prefix, true);
+        residency = next;
+        assert_exact("sampled warm-up", &warm_sampled, &warm_control);
+        assert_topology(&warm_control, false);
+        assert_topology(&warm_sampled, true);
+
+        let mut controls = Vec::with_capacity(3);
+        let mut sampled_runs = Vec::with_capacity(2);
+        for sampled in [false, true, false, true, false] {
+            let (next, evidence) = execute(&ctx, residency, model_content_id, &prefix, sampled);
+            residency = next;
+            assert_exact("timed stage-profile arm", &evidence, &warm_control);
+            assert_topology(&evidence, sampled);
+            if sampled {
+                sampled_runs.push(evidence);
+            } else {
+                controls.push(evidence);
+            }
+        }
+        drop(residency);
+
+        let control_gpu_ms = controls
+            .iter()
+            .map(|evidence| evidence.profile.command_gpu_ms.iter().sum::<f64>())
+            .collect::<Vec<_>>();
+        let sampled_gpu_ms = sampled_runs
+            .iter()
+            .map(|evidence| evidence.profile.command_gpu_ms.iter().sum::<f64>())
+            .collect::<Vec<_>>();
+        let control_wall_ms = controls
+            .iter()
+            .map(|evidence| evidence.wall_ms)
+            .collect::<Vec<_>>();
+        let sampled_wall_ms = sampled_runs
+            .iter()
+            .map(|evidence| evidence.wall_ms)
+            .collect::<Vec<_>>();
+        let control_drift = drift(&control_gpu_ms);
+        let sampled_drift = drift(&sampled_gpu_ms);
+        let interpolated_control_gpu_ms = [
+            (control_gpu_ms[0] + control_gpu_ms[1]) * 0.5,
+            (control_gpu_ms[1] + control_gpu_ms[2]) * 0.5,
+        ];
+        let perturbation = std::array::from_fn::<_, 2, _>(|index| {
+            sampled_gpu_ms[index] / interpolated_control_gpu_ms[index] - 1.0
+        });
+        let summaries = sampled_runs
+            .iter()
+            .map(|evidence| summarize(&evidence.profile))
+            .collect::<Vec<_>>();
+        let target_shares = [
+            chronological_share(&summaries[0]),
+            chronological_share(&summaries[1]),
+        ];
+        let target_repeat_delta = (target_shares[0] - target_shares[1]).abs();
+        let cohort_shares = [
+            cohort_chronological_shares(&summaries[0]),
+            cohort_chronological_shares(&summaries[1]),
+        ];
+        let cohort_share_delta: [f64; 3] = std::array::from_fn(|cohort| {
+            (cohort_shares[0][cohort] - cohort_shares[1][cohort]).abs()
+        });
+        let transition_uncertainty = summaries
+            .iter()
+            .map(|summary| (summary.gap_ms + summary.overlap_ms) / summary.command_gpu_ms)
+            .reduce(f64::max)
+            .unwrap();
+        let topology_uncertainty = perturbation
+            .iter()
+            .map(|value| value.abs())
+            .reduce(f64::max)
+            .unwrap();
+        let coverage_uncertainty = summaries
+            .iter()
+            .map(|summary| (summary.raw_span_ms / summary.command_gpu_ms - 1.0).abs())
+            .reduce(f64::max)
+            .unwrap();
+        let observer_uncertainty = transition_uncertainty
+            .max(topology_uncertainty)
+            .max(target_repeat_delta);
+        let mean_target_share = (target_shares[0] + target_shares[1]) * 0.5;
+        let lower_target_share = (mean_target_share - observer_uncertainty).max(0.0);
+        let normalized_target_ms = [
+            target_shares[0] * interpolated_control_gpu_ms[0],
+            target_shares[1] * interpolated_control_gpu_ms[1],
+        ];
+        let ordinary_gpu_median = median(&control_gpu_ms);
+        let normalized_target_median_ms = median(&normalized_target_ms);
+        let lower_target_ms =
+            (normalized_target_median_ms - observer_uncertainty * ordinary_gpu_median).max(0.0);
+        let mean_cohort_share: [f64; 3] = std::array::from_fn(|cohort| {
+            (cohort_shares[0][cohort] + cohort_shares[1][cohort]) * 0.5
+        });
+        let chronological_authorized = lower_target_share >= 0.15
+            && lower_target_ms >= 150.0
+            && mean_cohort_share[1] >= 0.10
+            && mean_cohort_share[2] >= 0.10;
+
+        eprintln!(
+            "deepseek_v4 packed_chronological_profile n={PREFIX_TOKENS} grouped_default={grouped_default} control_gpu_ms={control_gpu_ms:?} interpolated_control_gpu_ms={interpolated_control_gpu_ms:?} sampled_gpu_ms={sampled_gpu_ms:?} audit_inclusive_control_wall_ms={control_wall_ms:?} audit_inclusive_sampled_wall_ms={sampled_wall_ms:?} control_drift={control_drift:.6} sampled_drift={sampled_drift:.6} sampled_perturbation={perturbation:?} target_shares={target_shares:?} target_repeat_delta={target_repeat_delta:.6} cohort_shares={cohort_shares:?} cohort_share_delta={cohort_share_delta:?} normalized_target_ms={normalized_target_ms:?} normalized_target_median_ms={normalized_target_median_ms:.3} lower_target_share={lower_target_share:.6} lower_target_ms={lower_target_ms:.3} transition_uncertainty={transition_uncertainty:.6} topology_uncertainty={topology_uncertainty:.6} coverage_uncertainty={coverage_uncertainty:.6} observer_uncertainty={observer_uncertainty:.6} chronological_authorized={chronological_authorized} dispatches={} ordinary_encoders={ORDINARY_ENCODERS} sampled_encoders={SAMPLED_ENCODERS} dispatch_sha256={} model_content_id={} logits_sha256={} hidden_sha256={} causal_digest={} prefix_digest={} compatibility_digest={} continuation_logits_sha256={} continuation_causal_digest={} committed_tokens_sha256={}",
+            warm_control.dispatch_count,
+            profile_digest_hex(warm_control.dispatch_digest),
+            profile_digest_hex(model_content_id.as_bytes()),
+            profile_digest_hex(Sha256::digest(bytemuck::cast_slice(&warm_control.logits))),
+            profile_digest_hex(Sha256::digest(bytemuck::cast_slice(&warm_control.hidden))),
+            profile_digest_hex(warm_control.causal_digest),
+            profile_digest_hex(warm_control.prefix_digest),
+            profile_digest_hex(warm_control.compatibility_digest),
+            profile_digest_hex(Sha256::digest(bytemuck::cast_slice(
+                &warm_control.continuation_logits,
+            ))),
+            profile_digest_hex(warm_control.continuation_causal_digest),
+            profile_digest_hex(Sha256::digest(bytemuck::cast_slice(
+                &warm_control.committed_tokens,
+            ))),
+        );
+        for (index, control) in controls.iter().enumerate() {
+            eprintln!(
+                "deepseek_v4 packed_chronological_profile_control index={index} layer_command_gpu_ms={:?}",
+                control.profile.command_gpu_ms
+            );
+        }
+        for (index, summary) in summaries.iter().enumerate() {
+            eprintln!(
+                "deepseek_v4 packed_chronological_profile_sample index={index} command_gpu_ms={:.3} raw_span_ms={:.3} raw_coverage={:.6} gap_ms={:.3} overlap_ms={:.3} transition_ambiguity={:.6} max_layer_coverage_error={:.6} max_layer_transition_ambiguity={:.6} max_single_transition_ambiguity={:.6} stage_ms={:?} target_share={:.6} cohort_stage_ms={:?} cohort_command_ms={:?} cohort_target_share={:?} cohort_gap_ms={:?} cohort_overlap_ms={:?}",
+                summary.command_gpu_ms,
+                summary.raw_span_ms,
+                summary.raw_span_ms / summary.command_gpu_ms,
+                summary.gap_ms,
+                summary.overlap_ms,
+                (summary.gap_ms + summary.overlap_ms) / summary.command_gpu_ms,
+                summary.max_layer_coverage_error,
+                summary.max_layer_transition_ambiguity,
+                summary.max_single_transition_ambiguity,
+                summary.stage_ms,
+                target_shares[index],
+                summary.cohort_stage_ms,
+                summary.cohort_command_ms,
+                cohort_shares[index],
+                summary.cohort_gap_ms,
+                summary.cohort_overlap_ms,
+            );
+            let config = crate::deepseek_v4::flash_0731_config_fixture();
+            for layer in &sampled_runs[index].profile.sampled_layers {
+                let stage_ticks: [u64; 3] =
+                    std::array::from_fn(|stage| layer.stages[stage].duration_ticks);
+                let stage_ms: [f64; 3] =
+                    std::array::from_fn(|stage| layer.stages[stage].duration_ms_scaled);
+                eprintln!(
+                    "deepseek_v4 packed_chronological_profile_layer sample={index} layer={} attention_kind={:?} command_gpu_ms={:.6} raw_span_ticks={} raw_span_ms={:.6} raw_coverage={:.9} gap_ms={:.6} overlap_ms={:.6} transition_ambiguity={:.9} target_share={:.9} stage_ticks={stage_ticks:?} stage_ms={stage_ms:?} transitions={:?}",
+                    layer.layer,
+                    config.attention_kinds[layer.layer],
+                    layer.command_gpu_ms,
+                    layer.sampled_span_ticks,
+                    layer.raw_span_ms_assuming_ns,
+                    layer.raw_coverage_assuming_ns,
+                    layer.encoder_gap_ms_scaled,
+                    layer.encoder_overlap_ms_scaled,
+                    (layer.encoder_gap_ms_scaled + layer.encoder_overlap_ms_scaled)
+                        / layer.command_gpu_ms,
+                    layer.stages[1].duration_ms_scaled / layer.command_gpu_ms,
+                    layer.transitions,
+                );
+            }
+        }
+
+        assert!(control_drift <= 0.05, "control GPU drift exceeded 5%");
+        assert!(sampled_drift <= 0.05, "sampled GPU drift exceeded 5%");
+        assert!(
+            perturbation.iter().all(|&value| value.abs() <= 0.10),
+            "sampled GPU perturbation exceeded 10%: {perturbation:?}"
+        );
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| summary.max_layer_coverage_error <= 0.02),
+            "per-layer raw timestamp coverage exceeded 2%"
+        );
+        assert!(
+            coverage_uncertainty <= 0.005,
+            "aggregate raw timestamp coverage exceeded 0.5%"
+        );
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| summary.max_single_transition_ambiguity <= 0.05),
+            "single transition ambiguity exceeded 5%"
+        );
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| summary.max_layer_transition_ambiguity <= 0.075),
+            "per-layer combined transition ambiguity exceeded 7.5%"
+        );
+        assert!(
+            transition_uncertainty <= 0.025,
+            "aggregate transition ambiguity exceeded 2.5%"
+        );
+        assert!(
+            target_repeat_delta <= 0.02,
+            "chronological share changed by more than two points"
+        );
+        assert!(
+            cohort_share_delta[1] <= 0.03 && cohort_share_delta[2] <= 0.03,
+            "CSA/HCA chronological shares changed by more than three points"
+        );
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
     fn fp4_score_plans_are_exhaustive_and_dispatch_ledgers_fail_closed() {
         let cases = [
             (

@@ -1978,13 +1978,15 @@ Broader S6 work remains:
   The diagnostics-only collapsed FP4 implementation remains negative evidence.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention only after packed attribution identifies one of those seams.
-  The next packet first splits the roughly 1.057-second N=128 pre-expert GPU
-  span into attention, compressor/mHC, chronological row work, and router
-  projection. Then split the unchanged roughly 688 ms post-route span before
-  widening another grouped format. Whole-token submission, per-layer
-  route/selector failure records, and verified-prefix callbacks are promoted.
-  An asynchronously immutable SSD-streaming ticket remains a separate product
-  contract.
+  The first narrow packet kills chronological publication as a standalone
+  N=128 target: its normalized 73.273 ms envelope has a 54.163 ms/5.099%
+  uncertainty-adjusted lower bound, below the frozen 150 ms/15% floor. Next
+  isolate attention body plus output from the post-row boundary through
+  `encode_output`; split them only if the combined target clears. Then split the
+  unchanged roughly 688 ms post-route span before widening another grouped
+  format. Whole-token submission, per-layer route/selector failure records, and
+  verified-prefix callbacks are promoted. An asynchronously immutable
+  SSD-streaming ticket remains a separate product contract.
 - Preserve promoted online singleton HCA and the exact packed/legacy tiled
   differential. Defer heads8/rows16 split-K while HCA remains below CSA; reopen
   HCA only if attribution returns it to the lead. The scalar scorer and bitwise
@@ -2115,8 +2117,17 @@ noise without reducing technical risk. Revisit after S5.
    in the affected layers with unchanged-layer time flat; it is attribution,
    not a balanced promotion gate. Retain the implementation under diagnostics,
    authorize no same-condition retry, and do not build fused IQ3 gate/up now.
-   Next attribute the roughly 1.057-second pre-expert GPU span and unchanged
-   roughly 688 ms post-route span. Keep MXFP4 down and GPU route arithmetic
-   unchanged and do not revive a monolithic FFN kernel.
+   The first pre-expert attribution removes chronological row publication from
+   the standalone queue. A three-pass all-layer packet preserves bit-exact
+   logits/hidden and continuation logits plus matching causal identities,
+   tokens, and 47,990 complete dispatch geometries. Controls are stable within
+   2.868%; sampled topology perturbation is at most 1.806%. Chronological work
+   occupies 6.992%/6.818% and normalizes to 74.620/71.925 ms; its frozen lower
+   bound is only 54.163 ms/5.099%. The earlier broad profiler is retained only
+   as negative evidence because adjacent Metal pass envelopes overlap and its
+   layer-41 ambiguity gate fails. No eight-stage live lane remains. Next measure
+   attention body plus output together, then attribute the unchanged roughly
+   688 ms post-route span. Keep MXFP4 down and GPU route arithmetic unchanged
+   and do not revive a monolithic FFN kernel.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

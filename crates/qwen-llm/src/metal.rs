@@ -303,15 +303,21 @@ fn kernel_trace_record_dispatch() {
 
 // ===========================================================================
 // Dispatch census (bench-only; v0.495 W-program attribution). Records
-// (stage_family, kernel_name, grid_tgs, tg_threads) per dispatch while
-// active. Zero production cost when never enabled (one atomic load per
-// dispatch, same pattern as kernel_trace).
+// Kernel name, stage family, complete grid/threadgroup geometry, and flattened
+// launch volumes per dispatch while active. Zero production cost when never
+// enabled (one atomic load per dispatch, same pattern as kernel_trace).
 // ===========================================================================
 
 #[derive(Clone, Debug)]
 pub struct DispatchCensusRow {
     pub family: &'static str,
     pub kernel: String,
+    pub grid_width: u64,
+    pub grid_height: u64,
+    pub grid_depth: u64,
+    pub threads_width: u64,
+    pub threads_height: u64,
+    pub threads_depth: u64,
     pub grid_tgs: u64,
     pub tg_threads: u64,
 }
@@ -370,6 +376,12 @@ fn census_record_dispatch(grid: MTLSize, threads: MTLSize) {
             rows.push(DispatchCensusRow {
                 family: CENSUS_FAMILY.with(|f| f.get()),
                 kernel: CENSUS_LAST_PSO.with(|p| p.borrow().clone()),
+                grid_width: grid.width as u64,
+                grid_height: grid.height as u64,
+                grid_depth: grid.depth as u64,
+                threads_width: threads.width as u64,
+                threads_height: threads.height as u64,
+                threads_depth: threads.depth as u64,
                 grid_tgs: (grid.width * grid.height.max(1) * grid.depth.max(1)) as u64,
                 tg_threads: (threads.width * threads.height.max(1) * threads.depth.max(1)) as u64,
             });
@@ -2383,6 +2395,17 @@ impl KernelEncoder {
         end_sample: usize,
         concurrent: bool,
     ) -> Self {
+        Self::try_begin_sampled(cmd, samples, start_sample, end_sample, concurrent)
+            .expect("sampled compute encoder")
+    }
+
+    pub fn try_begin_sampled(
+        cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        samples: &MetalTimestampSampleBuffer,
+        start_sample: usize,
+        end_sample: usize,
+        concurrent: bool,
+    ) -> Result<Self, MetalError> {
         let pass = MTLComputePassDescriptor::computePassDescriptor();
         pass.setDispatchType(if concurrent {
             MTLDispatchType::Concurrent
@@ -2398,9 +2421,11 @@ impl KernelEncoder {
         }
         let raw = cmd
             .computeCommandEncoderWithDescriptor(&pass)
-            .expect("sampled compute encoder");
+            .ok_or_else(|| {
+                MetalError::Counter("could not create sampled compute encoder".into())
+            })?;
         kernel_trace_record_encoder(concurrent);
-        Self::new(raw, concurrent)
+        Ok(Self::new(raw, concurrent))
     }
 
     /// Debug-only hazard note: declare that a dispatch in this encoder

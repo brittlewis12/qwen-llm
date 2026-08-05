@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Packed Chronological Attribution KILL
+
+Status: chronological row publication is `KILL` as the standalone next N=128
+packed-prefill optimization. The bounded profiler/evidence checkpoint is `GO`;
+ordinary execution is unchanged.
+
+- Add fallible stage-boundary sampling and a signed pass-envelope resolver.
+  Metal pass intervals may overlap, so gaps and overlaps remain separate and
+  closure is not presented as additive stage time.
+- Reject the broad eight-stage live topology after two nonoverlap falsifiers and
+  one frozen layer-41 ambiguity failure. Retain those logs as negative instrument
+  evidence; no stage values are accepted from them.
+- Isolate only the 128-row chronological loop with three pre-expert encoders per
+  layer. Ordinary/sampled arms execute 86/172 total encoders but preserve the
+  same 47,990 dispatches and complete family/kernel/grid/thread geometry digest.
+- Controls measure 1,082.499/1,051.893/1,058.030 ms GPU with 2.868% drift;
+  sampled runs measure 1,058.170/1,074.016 ms with 1.486% drift and
+  -0.846%/+1.806% interpolated perturbation.
+- The target occupies 6.992%/6.818%. Its normalized estimate is
+  74.620/71.925 ms; the 1.806%-uncertainty lower bound is 5.099%/54.163 ms,
+  below the frozen 15%/150 ms authorization floor.
+- Packed logits/hidden and restored continuation logits remain bit-exact;
+  causal/prefix/compatibility digests and tokens match. All timestamp,
+  ambiguity, drift, perturbation, and repeat gates pass.
+
+Decision: do not open a dedicated chronological fusion campaign. Preserve it as
+a later piggyback opportunity, especially in CSA. Next measure attention body
+plus output from the post-row boundary through `encode_output`, before mHC post;
+split body from output only if the combined family clears. Evidence:
+`docs/bench/2026-08-05-dsv4-packed-chronological-attribution/README.md`. CX:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Packed All-IQ3 Widening HOLD
 
 Status: all-IQ3 grouped execution is exact and remains test-only; production

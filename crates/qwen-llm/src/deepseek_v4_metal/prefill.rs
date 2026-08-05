@@ -3589,6 +3589,1662 @@ impl DeepSeekV4Session {
 mod tests {
     use super::*;
 
+    const PACKED_ROUTE_AGGREGATE_WIDTH: usize = 4;
+    const PACKED_ROUTE_STALE_ROUTE: i32 = -101;
+    const PACKED_ROUTE_FAILED_ROUTE: i32 = -102;
+    const PACKED_ROUTE_INVALID_ID: i32 = -103;
+    const PACKED_ROUTE_DUPLICATE_ID: i32 = -104;
+    const PACKED_ROUTE_INVALID_WEIGHT: i32 = -105;
+    const PACKED_ROUTE_STALE_SCHEDULE: i32 = -106;
+    const PACKED_ROUTE_INVALID_COUNT: i32 = -107;
+    const PACKED_ROUTE_INVALID_SCHEDULE: i32 = -108;
+    const PACKED_ROUTE_INVALID_PADDING: i32 = -109;
+    const PACKED_ROUTE_INVALID_AGGREGATE: i32 = -200;
+    const PACKED_ROUTE_SLOT_GUARD_BYTES: usize = 64;
+    const PACKED_ROUTE_SLOT_PREFIX: u8 = 0xa5;
+    const PACKED_ROUTE_SLOT_SUFFIX: u8 = 0x5a;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct PackedRouteArgs {
+        expert_count: u32,
+        top_k: u32,
+        n_tokens: u32,
+        vocab_size: u32,
+        generation: u32,
+        routed_scale: f32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct PackedRouteScheduleArgs {
+        expert_count: u32,
+        top_k: u32,
+        n_tokens: u32,
+        generation: u32,
+    }
+
+    struct PackedRouteGenerationOwner {
+        next: Cell<u32>,
+    }
+
+    impl PackedRouteGenerationOwner {
+        fn new() -> Self {
+            Self { next: Cell::new(1) }
+        }
+
+        fn with_next(next: u32) -> Self {
+            Self {
+                next: Cell::new(next),
+            }
+        }
+
+        fn take(&self) -> Result<NonZeroU32, DeepSeekV4MetalError> {
+            let generation = NonZeroU32::new(self.next.get()).ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid("packed route generation owner reached zero".into())
+            })?;
+            let next = generation.get().checked_add(1).ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed route generation owner exhausted before wrap".into(),
+                )
+            })?;
+            self.next.set(next);
+            Ok(generation)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum PackedRouteMicroproofSource {
+        Learned,
+        Hash,
+    }
+
+    struct PackedRouteMicroproofScratch {
+        logits: MetalTensor,
+        token_ids: MetalTensor,
+        expert_ids: MetalTensor,
+        weights: MetalTensor,
+        route_generations: MetalTensor,
+        route_status: MetalTensor,
+        counts: MetalTensor,
+        slot_ids: MetalTensor,
+        schedule_generations: MetalTensor,
+        aggregate: MetalTensor,
+        signature: MetalTensor,
+    }
+
+    struct PackedRouteCapture {
+        generation: u32,
+        expert_ids: Vec<i32>,
+        weights: Vec<f32>,
+        route_generations: Vec<i32>,
+        route_status: Vec<i32>,
+        counts: Vec<i32>,
+        slot_ids: Vec<i32>,
+        schedule_generations: Vec<i32>,
+        aggregate: Vec<i32>,
+        signature: Vec<i32>,
+    }
+
+    impl PackedRouteMicroproofScratch {
+        fn new(ctx: &MetalContext) -> Result<Self, DeepSeekV4MetalError> {
+            let n = DEEPSEEK_V4_PREFILL_MAX_TOKENS as u64;
+            let slot_elements = DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_EXPERT_COUNT;
+            let mut guarded_slots = vec![
+                PACKED_ROUTE_SLOT_PREFIX;
+                PACKED_ROUTE_SLOT_GUARD_BYTES
+                    + slot_elements * std::mem::size_of::<i32>()
+                    + PACKED_ROUTE_SLOT_GUARD_BYTES
+            ];
+            guarded_slots
+                [PACKED_ROUTE_SLOT_GUARD_BYTES + slot_elements * std::mem::size_of::<i32>()..]
+                .fill(PACKED_ROUTE_SLOT_SUFFIX);
+            let slot_ids = MetalTensor {
+                buffer: ctx.buffer_from(&guarded_slots)?,
+                offset: PACKED_ROUTE_SLOT_GUARD_BYTES as u64,
+                shape: vec![n, MOE_EXPERT_COUNT as u64],
+                dtype: GgmlType::I32,
+                provenance: MetalTensorProvenance::OwnedWritable,
+            };
+            Ok(Self {
+                logits: MetalTensor::zeros_f32(ctx, vec![MOE_EXPERT_COUNT as u64, n])?,
+                token_ids: MetalTensor::zeros_i32(ctx, vec![n])?,
+                expert_ids: MetalTensor::zeros_i32(ctx, vec![MOE_TOP_K as u64, n])?,
+                weights: MetalTensor::zeros_f32(ctx, vec![MOE_TOP_K as u64, n])?,
+                route_generations: MetalTensor::zeros_i32(ctx, vec![n])?,
+                route_status: MetalTensor::zeros_i32(ctx, vec![n])?,
+                counts: MetalTensor::zeros_i32(ctx, vec![MOE_EXPERT_COUNT as u64])?,
+                slot_ids,
+                schedule_generations: MetalTensor::zeros_i32(ctx, vec![MOE_EXPERT_COUNT as u64])?,
+                aggregate: MetalTensor::zeros_i32(ctx, vec![PACKED_ROUTE_AGGREGATE_WIDTH as u64])?,
+                signature: MetalTensor::zeros_i32(ctx, vec![PACKED_ROUTE_AGGREGATE_WIDTH as u64])?,
+            })
+        }
+
+        fn assert_slot_guards(&self) {
+            let payload_bytes = self.slot_ids.n_bytes() as usize;
+            let base = self.slot_ids.buffer.contents().as_ptr().cast::<u8>();
+            let prefix = unsafe {
+                std::slice::from_raw_parts(
+                    base.add(self.slot_ids.offset as usize - PACKED_ROUTE_SLOT_GUARD_BYTES),
+                    PACKED_ROUTE_SLOT_GUARD_BYTES,
+                )
+            };
+            let suffix = unsafe {
+                std::slice::from_raw_parts(
+                    base.add(self.slot_ids.offset as usize + payload_bytes),
+                    PACKED_ROUTE_SLOT_GUARD_BYTES,
+                )
+            };
+            assert!(prefix.iter().all(|&byte| byte == PACKED_ROUTE_SLOT_PREFIX));
+            assert!(suffix.iter().all(|&byte| byte == PACKED_ROUTE_SLOT_SUFFIX));
+        }
+
+        fn checked_tokens(n_tokens: usize) -> Result<u32, DeepSeekV4MetalError> {
+            checked_token_count(n_tokens)
+        }
+
+        fn route_args(
+            n_tokens: usize,
+            vocab_size: usize,
+            generation: NonZeroU32,
+        ) -> Result<PackedRouteArgs, DeepSeekV4MetalError> {
+            Ok(PackedRouteArgs {
+                expert_count: MOE_EXPERT_COUNT as u32,
+                top_k: MOE_TOP_K as u32,
+                n_tokens: Self::checked_tokens(n_tokens)?,
+                vocab_size: u32::try_from(vocab_size).map_err(|_| {
+                    DeepSeekV4MetalError::Invalid("packed route vocabulary exceeds u32".into())
+                })?,
+                generation: generation.get(),
+                routed_scale: 1.5,
+            })
+        }
+
+        fn schedule_args(
+            n_tokens: usize,
+            generation: NonZeroU32,
+        ) -> Result<PackedRouteScheduleArgs, DeepSeekV4MetalError> {
+            Ok(PackedRouteScheduleArgs {
+                expert_count: MOE_EXPERT_COUNT as u32,
+                top_k: MOE_TOP_K as u32,
+                n_tokens: Self::checked_tokens(n_tokens)?,
+                generation: generation.get(),
+            })
+        }
+
+        fn encode_learned(
+            &self,
+            ctx: &MetalContext,
+            enc: &KernelEncoder,
+            bias: &MetalTensor,
+            n_tokens: usize,
+            produced_tokens: usize,
+            generation: NonZeroU32,
+        ) -> Result<(), DeepSeekV4MetalError> {
+            require_serial(enc, "packed learned route microproof")?;
+            if produced_tokens == 0 || produced_tokens > n_tokens {
+                return invalid(format!(
+                    "packed learned route producer count {produced_tokens} is outside 1..={n_tokens}"
+                ));
+            }
+            validate_f32(
+                bias,
+                &[MOE_EXPERT_COUNT as u64],
+                false,
+                "packed learned route bias",
+            )?;
+            let pso = ctx.pipeline("kernel_deepseek_v4_packed_route_learned")?;
+            if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 256 {
+                return invalid("packed learned route requires SIMD width 32 and 256 threads");
+            }
+            enc.set_pipeline(&pso);
+            enc.set_bytes(0, &Self::route_args(n_tokens, 0, generation)?);
+            enc.set_tensor(1, &self.logits);
+            enc.set_tensor(2, bias);
+            enc.set_tensor(3, &self.expert_ids);
+            enc.set_tensor(4, &self.weights);
+            enc.set_tensor(5, &self.route_generations);
+            enc.set_tensor(6, &self.route_status);
+            enc.dispatch(
+                MTLSize {
+                    width: 1,
+                    height: produced_tokens,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            Ok(())
+        }
+
+        fn encode_hash(
+            &self,
+            ctx: &MetalContext,
+            enc: &KernelEncoder,
+            token_to_expert: &MetalTensor,
+            n_tokens: usize,
+            produced_tokens: usize,
+            generation: NonZeroU32,
+        ) -> Result<(), DeepSeekV4MetalError> {
+            require_serial(enc, "packed hash route microproof")?;
+            if produced_tokens == 0 || produced_tokens > n_tokens {
+                return invalid(format!(
+                    "packed hash route producer count {produced_tokens} is outside 1..={n_tokens}"
+                ));
+            }
+            validate_i32_bank(token_to_expert, MOE_TOP_K, "packed hash route map")?;
+            let vocab_size = usize::try_from(token_to_expert.shape[1]).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed hash vocabulary exceeds usize".into())
+            })?;
+            let pso = ctx.pipeline("kernel_deepseek_v4_packed_route_hash")?;
+            if pso.maxTotalThreadsPerThreadgroup() < produced_tokens {
+                return invalid("packed hash route exceeds pipeline threadgroup capacity");
+            }
+            enc.set_pipeline(&pso);
+            enc.set_bytes(0, &Self::route_args(n_tokens, vocab_size, generation)?);
+            enc.set_tensor(1, &self.logits);
+            enc.set_tensor(2, &self.token_ids);
+            enc.set_tensor(3, token_to_expert);
+            enc.set_tensor(4, &self.expert_ids);
+            enc.set_tensor(5, &self.weights);
+            enc.set_tensor(6, &self.route_generations);
+            enc.set_tensor(7, &self.route_status);
+            enc.dispatch(
+                MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: produced_tokens,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            Ok(())
+        }
+
+        fn encode_schedule(
+            &self,
+            ctx: &MetalContext,
+            enc: &KernelEncoder,
+            n_tokens: usize,
+            produced_experts: usize,
+            generation: NonZeroU32,
+        ) -> Result<(), DeepSeekV4MetalError> {
+            require_serial(enc, "packed route schedule microproof")?;
+            if produced_experts == 0 || produced_experts > MOE_EXPERT_COUNT {
+                return invalid(format!(
+                    "packed schedule producer count {produced_experts} is outside 1..={MOE_EXPERT_COUNT}"
+                ));
+            }
+            let pso = ctx.pipeline("kernel_deepseek_v4_packed_route_schedule")?;
+            if pso.maxTotalThreadsPerThreadgroup() < produced_experts {
+                return invalid("packed schedule exceeds pipeline threadgroup capacity");
+            }
+            enc.set_pipeline(&pso);
+            enc.set_bytes(0, &Self::schedule_args(n_tokens, generation)?);
+            enc.set_tensor(1, &self.expert_ids);
+            enc.set_tensor(2, &self.counts);
+            enc.set_tensor(3, &self.slot_ids);
+            enc.set_tensor(4, &self.schedule_generations);
+            enc.dispatch(
+                MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: produced_experts,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            Ok(())
+        }
+
+        fn encode_validate(
+            &self,
+            ctx: &MetalContext,
+            enc: &KernelEncoder,
+            n_tokens: usize,
+            generation: NonZeroU32,
+        ) -> Result<(), DeepSeekV4MetalError> {
+            require_serial(enc, "packed route validator microproof")?;
+            let pso = ctx.pipeline("kernel_deepseek_v4_packed_route_validate")?;
+            if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 256 {
+                return invalid("packed route validator requires SIMD width 32 and 256 threads");
+            }
+            enc.set_pipeline(&pso);
+            enc.set_bytes(0, &Self::schedule_args(n_tokens, generation)?);
+            enc.set_tensor(1, &self.route_generations);
+            enc.set_tensor(2, &self.route_status);
+            enc.set_tensor(3, &self.expert_ids);
+            enc.set_tensor(4, &self.weights);
+            enc.set_tensor(5, &self.counts);
+            enc.set_tensor(6, &self.slot_ids);
+            enc.set_tensor(7, &self.schedule_generations);
+            enc.set_tensor(8, &self.aggregate);
+            enc.dispatch(
+                MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            Ok(())
+        }
+
+        fn encode_signature(
+            &self,
+            ctx: &MetalContext,
+            enc: &KernelEncoder,
+            n_tokens: usize,
+            generation: NonZeroU32,
+        ) -> Result<(), DeepSeekV4MetalError> {
+            require_serial(enc, "packed route signature microproof")?;
+            let pso = ctx.pipeline("kernel_deepseek_v4_packed_route_signature")?;
+            if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 256 {
+                return invalid("packed route signature requires SIMD width 32 and 256 threads");
+            }
+            enc.set_pipeline(&pso);
+            enc.set_bytes(0, &Self::schedule_args(n_tokens, generation)?);
+            enc.set_tensor(1, &self.aggregate);
+            enc.set_tensor(2, &self.expert_ids);
+            enc.set_tensor(3, &self.weights);
+            enc.set_tensor(4, &self.counts);
+            enc.set_tensor(5, &self.slot_ids);
+            enc.set_tensor(6, &self.signature);
+            enc.dispatch(
+                MTLSize {
+                    width: 1,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn encode_pipeline(
+            &self,
+            ctx: &MetalContext,
+            enc: &KernelEncoder,
+            source: PackedRouteMicroproofSource,
+            bias: &MetalTensor,
+            token_to_expert: &MetalTensor,
+            n_tokens: usize,
+            produced_tokens: usize,
+            produced_experts: usize,
+            generation: NonZeroU32,
+        ) -> Result<(), DeepSeekV4MetalError> {
+            match source {
+                PackedRouteMicroproofSource::Learned => {
+                    self.encode_learned(ctx, enc, bias, n_tokens, produced_tokens, generation)?
+                }
+                PackedRouteMicroproofSource::Hash => self.encode_hash(
+                    ctx,
+                    enc,
+                    token_to_expert,
+                    n_tokens,
+                    produced_tokens,
+                    generation,
+                )?,
+            }
+            self.encode_schedule(ctx, enc, n_tokens, produced_experts, generation)?;
+            self.encode_validate(ctx, enc, n_tokens, generation)?;
+            self.encode_signature(ctx, enc, n_tokens, generation)
+        }
+
+        fn capture(&self, n_tokens: usize, generation: u32) -> PackedRouteCapture {
+            let routes = n_tokens * MOE_TOP_K;
+            let schedule = n_tokens * MOE_EXPERT_COUNT;
+            let mut expert_ids = host_read_i32(&self.expert_ids, "packed route IDs").unwrap();
+            let mut weights = host_read_f32(&self.weights, "packed route weights").unwrap();
+            let mut route_generations =
+                host_read_i32(&self.route_generations, "packed route generations").unwrap();
+            let mut route_status =
+                host_read_i32(&self.route_status, "packed route statuses").unwrap();
+            let mut slot_ids = host_read_i32(&self.slot_ids, "packed route slot IDs").unwrap();
+            expert_ids.truncate(routes);
+            weights.truncate(routes);
+            route_generations.truncate(n_tokens);
+            route_status.truncate(n_tokens);
+            slot_ids.truncate(schedule);
+            PackedRouteCapture {
+                generation,
+                expert_ids,
+                weights,
+                route_generations,
+                route_status,
+                counts: host_read_i32(&self.counts, "packed route counts").unwrap(),
+                slot_ids,
+                schedule_generations: host_read_i32(
+                    &self.schedule_generations,
+                    "packed schedule generations",
+                )
+                .unwrap(),
+                aggregate: host_read_i32(&self.aggregate, "packed route aggregate").unwrap(),
+                signature: host_read_i32(&self.signature, "packed route signature").unwrap(),
+            }
+        }
+    }
+
+    struct PackedRouteFixture {
+        scratch: PackedRouteMicroproofScratch,
+        bias: MetalTensor,
+        token_to_expert: MetalTensor,
+        logits: Vec<f32>,
+        bias_values: Vec<f32>,
+        token_ids: Vec<i32>,
+        hash_map: Vec<i32>,
+        generations: PackedRouteGenerationOwner,
+    }
+
+    impl PackedRouteFixture {
+        fn new(ctx: &MetalContext) -> Self {
+            const VOCAB_SIZE: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1;
+            let scratch = PackedRouteMicroproofScratch::new(ctx).unwrap();
+            let logits = (0..DEEPSEEK_V4_PREFILL_MAX_TOKENS)
+                .flat_map(|token| {
+                    (0..MOE_EXPERT_COUNT).map(move |expert| {
+                        if token.is_multiple_of(29) {
+                            (token % 5) as f32 * 0.125 - 0.25
+                        } else {
+                            let mixed =
+                                expert * 1_103 + token * 7_919 + (expert ^ token) * 53 + token / 3;
+                            (mixed % 8_191) as f32 * 0.0025 - 10.0
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            let bias_values = (0..MOE_EXPERT_COUNT)
+                .map(|expert| ((expert * 193 + 7) % 257) as f32 * 0.0002 - 0.0256)
+                .collect::<Vec<_>>();
+            let token_ids = (0..DEEPSEEK_V4_PREFILL_MAX_TOKENS as i32).collect::<Vec<_>>();
+            let hash_map = (0..VOCAB_SIZE)
+                .flat_map(|token| {
+                    (0..MOE_TOP_K).map(move |slot| ((token * 17 + slot * 37) % 256) as i32)
+                })
+                .collect::<Vec<_>>();
+            for row in hash_map.chunks_exact(MOE_TOP_K) {
+                let mut sorted = row.to_vec();
+                sorted.sort_unstable();
+                sorted.dedup();
+                assert_eq!(sorted.len(), MOE_TOP_K);
+            }
+            host_write_f32(&scratch.logits, &logits, "packed route fixture logits").unwrap();
+            host_write_i32(
+                &scratch.token_ids,
+                &token_ids,
+                "packed route fixture token IDs",
+            )
+            .unwrap();
+            let bias = MetalTensor::from_bytes(
+                ctx,
+                bytemuck::cast_slice(&bias_values),
+                vec![MOE_EXPERT_COUNT as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let token_to_expert = MetalTensor::from_bytes(
+                ctx,
+                bytemuck::cast_slice(&hash_map),
+                vec![MOE_TOP_K as u64, VOCAB_SIZE as u64],
+                GgmlType::I32,
+            )
+            .unwrap();
+            Self {
+                scratch,
+                bias,
+                token_to_expert,
+                logits,
+                bias_values,
+                token_ids,
+                hash_map,
+                generations: PackedRouteGenerationOwner::new(),
+            }
+        }
+
+        fn run(
+            &self,
+            ctx: &MetalContext,
+            source: PackedRouteMicroproofSource,
+            n_tokens: usize,
+            produced_tokens: usize,
+            produced_experts: usize,
+        ) -> PackedRouteCapture {
+            let generation = self.generations.take().unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            self.scratch
+                .encode_pipeline(
+                    ctx,
+                    &encoder,
+                    source,
+                    &self.bias,
+                    &self.token_to_expert,
+                    n_tokens,
+                    produced_tokens,
+                    produced_experts,
+                    generation,
+                )
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "packed route command failed: {:?}",
+                command.error()
+            );
+            self.scratch.capture(n_tokens, generation.get())
+        }
+
+        fn expected_routes(
+            &self,
+            source: PackedRouteMicroproofSource,
+            n_tokens: usize,
+        ) -> (Vec<i32>, Vec<f32>) {
+            let mut ids = Vec::with_capacity(n_tokens * MOE_TOP_K);
+            let mut weights = Vec::with_capacity(n_tokens * MOE_TOP_K);
+            for token in 0..n_tokens {
+                let logits = &self.logits[token * MOE_EXPERT_COUNT..(token + 1) * MOE_EXPERT_COUNT];
+                let scores = crate::deepseek_v4_oracle::sqrt_softplus_scores(logits).unwrap();
+                let decision = match source {
+                    PackedRouteMicroproofSource::Learned => {
+                        crate::deepseek_v4_oracle::learned_route(
+                            &scores,
+                            &self.bias_values,
+                            MOE_TOP_K,
+                            1.5,
+                        )
+                    }
+                    PackedRouteMicroproofSource::Hash => {
+                        let token_id = self.token_ids[token] as usize;
+                        let selected = self.hash_map
+                            [token_id * MOE_TOP_K..(token_id + 1) * MOE_TOP_K]
+                            .iter()
+                            .map(|&expert| expert as usize)
+                            .collect::<Vec<_>>();
+                        crate::deepseek_v4_oracle::hash_route(&scores, &selected, 1.5)
+                    }
+                }
+                .unwrap();
+                ids.extend(decision.expert_ids.iter().map(|&expert| expert as i32));
+                weights.extend_from_slice(&decision.weights);
+            }
+            (ids, weights)
+        }
+    }
+
+    fn packed_route_completion(generation: u32, n_tokens: usize) -> u32 {
+        0xd551_0000 ^ generation ^ ((n_tokens as u32) << 8)
+    }
+
+    fn packed_route_signature_completion(generation: u32, n_tokens: usize) -> u32 {
+        0xd552_0000 ^ generation ^ ((n_tokens as u32) << 8)
+    }
+
+    fn packed_route_signature_mix(hash: u32, value: u32) -> u32 {
+        (hash ^ value).wrapping_mul(16_777_619)
+    }
+
+    fn packed_route_signature_hash(
+        expert_ids: &[i32],
+        weights: &[f32],
+        counts: &[i32],
+        slot_ids: &[i32],
+        n_tokens: usize,
+    ) -> u32 {
+        assert_eq!(expert_ids.len(), n_tokens * MOE_TOP_K);
+        assert_eq!(weights.len(), expert_ids.len());
+        assert_eq!(counts.len(), MOE_EXPERT_COUNT);
+        assert_eq!(slot_ids.len(), n_tokens * MOE_EXPERT_COUNT);
+        let mut partials = [0u32; 256];
+        for tid in 0..256 {
+            let mut hash = 2_166_136_261 ^ tid as u32;
+            for index in (tid..expert_ids.len()).step_by(256) {
+                hash = packed_route_signature_mix(hash, expert_ids[index] as u32);
+                hash = packed_route_signature_mix(hash, weights[index].to_bits());
+            }
+            hash = packed_route_signature_mix(hash, counts[tid] as u32);
+            let base = tid * n_tokens;
+            for &slot in &slot_ids[base..base + n_tokens] {
+                hash = packed_route_signature_mix(hash, slot as u32);
+            }
+            partials[tid] = hash;
+        }
+        partials
+            .into_iter()
+            .fold(2_166_136_261, packed_route_signature_mix)
+    }
+
+    fn expected_packed_schedule(expert_ids: &[i32], n_tokens: usize) -> (Vec<i32>, Vec<i32>) {
+        let mut counts = vec![0; MOE_EXPERT_COUNT];
+        let mut slots = vec![-1; MOE_EXPERT_COUNT * n_tokens];
+        for expert in 0..MOE_EXPERT_COUNT {
+            let mut count = 0;
+            for token in 0..n_tokens {
+                for slot in 0..MOE_TOP_K {
+                    let global_slot = token * MOE_TOP_K + slot;
+                    if expert_ids[global_slot] == expert as i32 {
+                        slots[expert * n_tokens + count] = global_slot as i32;
+                        count += 1;
+                    }
+                }
+            }
+            counts[expert] = count as i32;
+        }
+        (counts, slots)
+    }
+
+    fn write_raw_f32(tensor: &MetalTensor, values: &[f32]) {
+        assert_eq!(tensor.dtype, GgmlType::F32);
+        assert!(tensor.is_writable());
+        assert_eq!(tensor.n_elements() as usize, values.len());
+        let destination = unsafe {
+            tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize)
+                .cast::<f32>()
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(values.as_ptr(), destination, values.len());
+        }
+    }
+
+    fn assert_packed_route_capture(
+        fixture: &PackedRouteFixture,
+        source: PackedRouteMicroproofSource,
+        n_tokens: usize,
+        capture: &PackedRouteCapture,
+    ) {
+        let (expected_ids, expected_weights) = fixture.expected_routes(source, n_tokens);
+        assert_eq!(capture.expert_ids, expected_ids);
+        for (index, (&actual, &expected)) in
+            capture.weights.iter().zip(&expected_weights).enumerate()
+        {
+            let allowed = 1e-4 * expected.abs().max(1.0);
+            assert!(
+                (actual - expected).abs() <= allowed,
+                "packed route weight {index}: {actual} vs {expected}, allowed {allowed}"
+            );
+        }
+        let (expected_counts, expected_slots) = expected_packed_schedule(&expected_ids, n_tokens);
+        assert_eq!(capture.counts, expected_counts);
+        assert_eq!(capture.slot_ids, expected_slots);
+        assert_eq!(
+            capture.route_generations,
+            vec![capture.generation as i32; n_tokens]
+        );
+        assert_eq!(
+            capture.route_status,
+            vec![DEEPSEEK_V4_ROUTE_STATUS_READY; n_tokens]
+        );
+        assert_eq!(
+            capture.schedule_generations,
+            vec![capture.generation as i32; MOE_EXPERT_COUNT]
+        );
+        assert_eq!(
+            capture.aggregate,
+            vec![
+                capture.generation as i32,
+                DEEPSEEK_V4_ROUTE_STATUS_READY,
+                (n_tokens * MOE_TOP_K) as i32,
+                packed_route_completion(capture.generation, n_tokens) as i32,
+            ]
+        );
+        assert_eq!(capture.signature[0], capture.generation as i32);
+        assert_eq!(capture.signature[1], DEEPSEEK_V4_ROUTE_STATUS_READY);
+        assert_eq!(
+            capture.signature[2] as u32,
+            packed_route_signature_hash(
+                &capture.expert_ids,
+                &capture.weights,
+                &capture.counts,
+                &capture.slot_ids,
+                n_tokens,
+            )
+        );
+        assert_eq!(
+            capture.signature[3],
+            packed_route_signature_completion(capture.generation, n_tokens) as i32
+        );
+    }
+
+    fn assert_packed_route_failure(
+        capture: &PackedRouteCapture,
+        n_tokens: usize,
+        status: i32,
+        total: i32,
+    ) {
+        assert_eq!(
+            capture.aggregate,
+            vec![
+                capture.generation as i32,
+                status,
+                total,
+                packed_route_completion(capture.generation, n_tokens) as i32,
+            ]
+        );
+        assert_eq!(
+            capture.signature,
+            vec![
+                capture.generation as i32,
+                PACKED_ROUTE_INVALID_AGGREGATE,
+                0,
+                packed_route_signature_completion(capture.generation, n_tokens) as i32,
+            ]
+        );
+    }
+
+    #[test]
+    fn packed_gpu_routes_and_schedules_match_cpu_for_every_chunk_width() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let fixture = PackedRouteFixture::new(&ctx);
+        for n_tokens in 1..=DEEPSEEK_V4_PREFILL_MAX_TOKENS {
+            for source in [
+                PackedRouteMicroproofSource::Learned,
+                PackedRouteMicroproofSource::Hash,
+            ] {
+                let capture = fixture.run(&ctx, source, n_tokens, n_tokens, MOE_EXPERT_COUNT);
+                assert_packed_route_capture(&fixture, source, n_tokens, &capture);
+            }
+        }
+    }
+
+    #[test]
+    fn packed_gpu_routes_are_bitwise_singleton_equivalent_on_adversarial_scores() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let packed = PackedRouteMicroproofScratch::new(&ctx).unwrap();
+        let singleton = DeepSeekV4MoeScratch::new(
+            &ctx,
+            DeepSeekV4MoeConfig {
+                hidden_size: 1,
+                ffn_size: 1,
+                expert_count: MOE_EXPERT_COUNT,
+                top_k: MOE_TOP_K,
+                routed_scale: 1.5,
+            },
+        )
+        .unwrap();
+        let generations = PackedRouteGenerationOwner::new();
+        let branch_values = [
+            f32::from_bits((-20.0f32).to_bits() + 1),
+            -20.0,
+            f32::from_bits((-20.0f32).to_bits() - 1),
+            f32::from_bits(20.0f32.to_bits() - 1),
+            20.0,
+            f32::from_bits(20.0f32.to_bits() + 1),
+            -f32::MAX,
+            f32::MAX,
+        ];
+        let mut cutoff_bias = vec![-1.0; MOE_EXPERT_COUNT];
+        cutoff_bias[..7].fill(0.25);
+        cutoff_bias[6] = f32::from_bits(0.25f32.to_bits() - 1);
+        let cases = [
+            (vec![0.0; MOE_EXPERT_COUNT], vec![0.0; MOE_EXPERT_COUNT]),
+            (vec![0.0; MOE_EXPERT_COUNT], cutoff_bias),
+            (
+                (0..MOE_EXPERT_COUNT)
+                    .map(|expert| branch_values[expert % branch_values.len()])
+                    .collect(),
+                (0..MOE_EXPERT_COUNT)
+                    .map(|expert| (expert % 11) as f32 * 0.0001 - 0.0005)
+                    .collect(),
+            ),
+        ];
+        let hash_values = (0..MOE_TOP_K as i32).collect::<Vec<_>>();
+        let hash_map = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&hash_values),
+            vec![MOE_TOP_K as u64, 1],
+            GgmlType::I32,
+        )
+        .unwrap();
+        host_write_i32(
+            &packed.token_ids,
+            &vec![0; DEEPSEEK_V4_PREFILL_MAX_TOKENS],
+            "singleton-equivalent packed token IDs",
+        )
+        .unwrap();
+
+        for (case, (logits, bias_values)) in cases.into_iter().enumerate() {
+            host_write_f32(
+                &singleton.logits,
+                &logits,
+                "singleton-equivalent singleton logits",
+            )
+            .unwrap();
+            let mut packed_logits = vec![0.0; MOE_EXPERT_COUNT * DEEPSEEK_V4_PREFILL_MAX_TOKENS];
+            packed_logits[..MOE_EXPERT_COUNT].copy_from_slice(&logits);
+            host_write_f32(
+                &packed.logits,
+                &packed_logits,
+                "singleton-equivalent packed logits",
+            )
+            .unwrap();
+            let bias = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&bias_values),
+                vec![MOE_EXPERT_COUNT as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+
+            for source in [
+                PackedRouteMicroproofSource::Learned,
+                PackedRouteMicroproofSource::Hash,
+            ] {
+                let generation = generations.take().unwrap();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                match source {
+                    PackedRouteMicroproofSource::Learned => {
+                        singleton
+                            .encode_route_learned_gpu(&ctx, &encoder, &bias)
+                            .unwrap();
+                        packed
+                            .encode_learned(&ctx, &encoder, &bias, 1, 1, generation)
+                            .unwrap();
+                    }
+                    PackedRouteMicroproofSource::Hash => {
+                        singleton
+                            .encode_route_hash_gpu(&ctx, &encoder, 0, &hash_map)
+                            .unwrap();
+                        packed
+                            .encode_hash(&ctx, &encoder, &hash_map, 1, 1, generation)
+                            .unwrap();
+                    }
+                }
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(command.error().is_none(), "route case {case} failed");
+                let expected = singleton.capture_gpu_route_record().unwrap();
+                let mut actual_ids =
+                    host_read_i32(&packed.expert_ids, "singleton-equivalent packed IDs").unwrap();
+                let mut actual_weights =
+                    host_read_f32(&packed.weights, "singleton-equivalent packed weights").unwrap();
+                let actual_status =
+                    host_read_i32(&packed.route_status, "singleton-equivalent packed status")
+                        .unwrap();
+                actual_ids.truncate(MOE_TOP_K);
+                actual_weights.truncate(MOE_TOP_K);
+                assert_eq!(actual_status[0], expected.status, "case {case}");
+                assert_eq!(actual_ids, expected.expert_ids, "case {case}");
+                assert_eq!(
+                    actual_weights
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected
+                        .weights
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    "case {case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn packed_route_signature_binds_each_payload_class() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let fixture = PackedRouteFixture::new(&ctx);
+        let n_tokens = 12;
+        let capture = fixture.run(
+            &ctx,
+            PackedRouteMicroproofSource::Learned,
+            n_tokens,
+            n_tokens,
+            MOE_EXPERT_COUNT,
+        );
+        assert_packed_route_capture(
+            &fixture,
+            PackedRouteMicroproofSource::Learned,
+            n_tokens,
+            &capture,
+        );
+        let hash = |ids: &[i32], weights: &[f32], counts: &[i32], slots: &[i32]| {
+            packed_route_signature_hash(ids, weights, counts, slots, n_tokens)
+        };
+        let baseline = hash(
+            &capture.expert_ids,
+            &capture.weights,
+            &capture.counts,
+            &capture.slot_ids,
+        );
+
+        let mut ids = capture.expert_ids.clone();
+        ids[0] ^= 1;
+        assert_ne!(
+            hash(&ids, &capture.weights, &capture.counts, &capture.slot_ids),
+            baseline
+        );
+        let mut weights = capture.weights.clone();
+        weights[0] = f32::from_bits(weights[0].to_bits() ^ 1);
+        assert_ne!(
+            hash(
+                &capture.expert_ids,
+                &weights,
+                &capture.counts,
+                &capture.slot_ids,
+            ),
+            baseline
+        );
+        let mut counts = capture.counts.clone();
+        counts[0] ^= 1;
+        assert_ne!(
+            hash(
+                &capture.expert_ids,
+                &capture.weights,
+                &counts,
+                &capture.slot_ids,
+            ),
+            baseline
+        );
+        let mut slots = capture.slot_ids.clone();
+        let occupied = slots.iter().position(|&slot| slot >= 0).unwrap();
+        slots[occupied] ^= 1;
+        assert_ne!(
+            hash(
+                &capture.expert_ids,
+                &capture.weights,
+                &capture.counts,
+                &slots,
+            ),
+            baseline
+        );
+        let mut padding = capture.slot_ids.clone();
+        let sentinel = padding.iter().position(|&slot| slot == -1).unwrap();
+        padding[sentinel] = -2;
+        assert_ne!(
+            hash(
+                &capture.expert_ids,
+                &capture.weights,
+                &capture.counts,
+                &padding,
+            ),
+            baseline
+        );
+    }
+
+    #[test]
+    fn packed_gpu_route_records_repeat_and_reject_missing_producers() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let fixture = PackedRouteFixture::new(&ctx);
+        for (source, n_tokens) in [
+            (PackedRouteMicroproofSource::Learned, 12),
+            (PackedRouteMicroproofSource::Hash, 128),
+        ] {
+            let first = fixture.run(&ctx, source, n_tokens, n_tokens, MOE_EXPERT_COUNT);
+            let second = fixture.run(&ctx, source, n_tokens, n_tokens, MOE_EXPERT_COUNT);
+            assert_packed_route_capture(&fixture, source, n_tokens, &first);
+            assert_packed_route_capture(&fixture, source, n_tokens, &second);
+            assert_eq!(second.expert_ids, first.expert_ids);
+            assert_eq!(
+                second
+                    .weights
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                first
+                    .weights
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(second.counts, first.counts);
+            assert_eq!(second.slot_ids, first.slot_ids);
+            assert_eq!(second.signature[2], first.signature[2]);
+        }
+
+        let n_tokens = 12;
+        fixture.run(
+            &ctx,
+            PackedRouteMicroproofSource::Learned,
+            n_tokens,
+            n_tokens,
+            MOE_EXPERT_COUNT,
+        );
+        let missing_route = fixture.run(
+            &ctx,
+            PackedRouteMicroproofSource::Learned,
+            n_tokens,
+            n_tokens - 1,
+            MOE_EXPERT_COUNT,
+        );
+        assert_packed_route_failure(
+            &missing_route,
+            n_tokens,
+            PACKED_ROUTE_STALE_ROUTE,
+            (n_tokens * MOE_TOP_K) as i32,
+        );
+
+        let missing_schedule = fixture.run(
+            &ctx,
+            PackedRouteMicroproofSource::Learned,
+            n_tokens,
+            n_tokens,
+            MOE_EXPERT_COUNT - 1,
+        );
+        assert_packed_route_failure(
+            &missing_schedule,
+            n_tokens,
+            PACKED_ROUTE_STALE_SCHEDULE,
+            missing_schedule.counts[..MOE_EXPERT_COUNT - 1].iter().sum(),
+        );
+
+        let valid_before_missing_validator = fixture.run(
+            &ctx,
+            PackedRouteMicroproofSource::Learned,
+            n_tokens,
+            n_tokens,
+            MOE_EXPERT_COUNT,
+        );
+        let generation = fixture.generations.take().unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        fixture
+            .scratch
+            .encode_learned(
+                &ctx,
+                &encoder,
+                &fixture.bias,
+                n_tokens,
+                n_tokens,
+                generation,
+            )
+            .unwrap();
+        fixture
+            .scratch
+            .encode_schedule(&ctx, &encoder, n_tokens, MOE_EXPERT_COUNT, generation)
+            .unwrap();
+        fixture
+            .scratch
+            .encode_signature(&ctx, &encoder, n_tokens, generation)
+            .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        let missing_validator = fixture.scratch.capture(n_tokens, generation.get());
+        assert_eq!(
+            missing_validator.aggregate,
+            valid_before_missing_validator.aggregate
+        );
+        assert_eq!(
+            missing_validator.signature,
+            vec![
+                generation.get() as i32,
+                PACKED_ROUTE_INVALID_AGGREGATE,
+                0,
+                packed_route_signature_completion(generation.get(), n_tokens) as i32,
+            ]
+        );
+
+        fixture.scratch.assert_slot_guards();
+
+        let concurrent_command = ctx.queue.commandBuffer().unwrap();
+        let concurrent = KernelEncoder::begin_concurrent(&concurrent_command);
+        let concurrent_generation = fixture.generations.take().unwrap();
+        for error in [
+            fixture.scratch.encode_learned(
+                &ctx,
+                &concurrent,
+                &fixture.bias,
+                n_tokens,
+                n_tokens,
+                concurrent_generation,
+            ),
+            fixture.scratch.encode_hash(
+                &ctx,
+                &concurrent,
+                &fixture.token_to_expert,
+                n_tokens,
+                n_tokens,
+                concurrent_generation,
+            ),
+            fixture.scratch.encode_schedule(
+                &ctx,
+                &concurrent,
+                n_tokens,
+                MOE_EXPERT_COUNT,
+                concurrent_generation,
+            ),
+            fixture
+                .scratch
+                .encode_validate(&ctx, &concurrent, n_tokens, concurrent_generation),
+            fixture
+                .scratch
+                .encode_signature(&ctx, &concurrent, n_tokens, concurrent_generation),
+        ] {
+            assert!(error.unwrap_err().to_string().contains("ordered serial"));
+        }
+        concurrent.end();
+
+        let exhausted = PackedRouteGenerationOwner::with_next(u32::MAX);
+        let error = exhausted.take().unwrap_err();
+        assert!(error.to_string().contains("exhausted before wrap"));
+        assert!(
+            exhausted
+                .take()
+                .unwrap_err()
+                .to_string()
+                .contains("exhausted")
+        );
+    }
+
+    #[test]
+    fn packed_route_authority_rejects_invalid_producers_and_private_state() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let fixture = PackedRouteFixture::new(&ctx);
+        let run_pipeline = |source: PackedRouteMicroproofSource,
+                            bias: &MetalTensor,
+                            token_to_expert: &MetalTensor,
+                            n_tokens: usize| {
+            let generation = fixture.generations.take().unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            fixture
+                .scratch
+                .encode_pipeline(
+                    &ctx,
+                    &encoder,
+                    source,
+                    bias,
+                    token_to_expert,
+                    n_tokens,
+                    n_tokens,
+                    MOE_EXPERT_COUNT,
+                    generation,
+                )
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            fixture.scratch.capture(n_tokens, generation.get())
+        };
+
+        let mut nonfinite_logits = fixture.logits.clone();
+        nonfinite_logits[0] = f32::NAN;
+        write_raw_f32(&fixture.scratch.logits, &nonfinite_logits);
+        let failed = run_pipeline(
+            PackedRouteMicroproofSource::Learned,
+            &fixture.bias,
+            &fixture.token_to_expert,
+            1,
+        );
+        assert_eq!(
+            failed.route_status[0],
+            DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_LOGIT
+        );
+        assert_packed_route_failure(&failed, 1, PACKED_ROUTE_FAILED_ROUTE, 0);
+
+        host_write_f32(
+            &fixture.scratch.logits,
+            &fixture.logits,
+            "restore packed route logits",
+        )
+        .unwrap();
+        let mut nonfinite_bias = fixture.bias_values.clone();
+        nonfinite_bias[0] = f32::NAN;
+        let nonfinite_bias = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&nonfinite_bias),
+            vec![MOE_EXPERT_COUNT as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let failed = run_pipeline(
+            PackedRouteMicroproofSource::Learned,
+            &nonfinite_bias,
+            &fixture.token_to_expert,
+            1,
+        );
+        assert_eq!(
+            failed.route_status[0],
+            DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_BIAS
+        );
+        assert_packed_route_failure(&failed, 1, PACKED_ROUTE_FAILED_ROUTE, 0);
+
+        let mut invalid_tokens = fixture.token_ids.clone();
+        invalid_tokens[0] = -1;
+        host_write_i32(
+            &fixture.scratch.token_ids,
+            &invalid_tokens,
+            "invalid packed hash token",
+        )
+        .unwrap();
+        let failed = run_pipeline(
+            PackedRouteMicroproofSource::Hash,
+            &fixture.bias,
+            &fixture.token_to_expert,
+            1,
+        );
+        assert_eq!(
+            failed.route_status[0],
+            DEEPSEEK_V4_ROUTE_STATUS_INVALID_TOKEN
+        );
+        assert_packed_route_failure(&failed, 1, PACKED_ROUTE_FAILED_ROUTE, 0);
+        host_write_i32(
+            &fixture.scratch.token_ids,
+            &fixture.token_ids,
+            "restore packed hash tokens",
+        )
+        .unwrap();
+
+        for (map, expected_status) in [
+            (
+                vec![-1, 1, 2, 3, 4, 5],
+                DEEPSEEK_V4_ROUTE_STATUS_INVALID_EXPERT,
+            ),
+            (
+                vec![0, 0, 2, 3, 4, 5],
+                DEEPSEEK_V4_ROUTE_STATUS_DUPLICATE_EXPERT,
+            ),
+        ] {
+            let map = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&map),
+                vec![MOE_TOP_K as u64, 1],
+                GgmlType::I32,
+            )
+            .unwrap();
+            let failed = run_pipeline(PackedRouteMicroproofSource::Hash, &fixture.bias, &map, 1);
+            assert_eq!(failed.route_status[0], expected_status);
+            assert_packed_route_failure(&failed, 1, PACKED_ROUTE_FAILED_ROUTE, 0);
+        }
+
+        write_raw_f32(&fixture.scratch.logits, &nonfinite_logits);
+        let failed = run_pipeline(
+            PackedRouteMicroproofSource::Hash,
+            &fixture.bias,
+            &fixture.token_to_expert,
+            1,
+        );
+        assert_eq!(
+            failed.route_status[0],
+            DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_LOGIT
+        );
+        assert_packed_route_failure(&failed, 1, PACKED_ROUTE_FAILED_ROUTE, 0);
+        host_write_f32(
+            &fixture.scratch.logits,
+            &fixture.logits,
+            "restore packed route logits after hash fault",
+        )
+        .unwrap();
+
+        let write_route_state =
+            |generation: NonZeroU32, n_tokens: usize, expert_ids: &[i32], weights: &[f32]| {
+                let mut full_ids = vec![-1; DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_TOP_K];
+                full_ids[..expert_ids.len()].copy_from_slice(expert_ids);
+                host_write_i32(&fixture.scratch.expert_ids, &full_ids, "prepared route IDs")
+                    .unwrap();
+                let mut full_weights = vec![0.0; DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_TOP_K];
+                full_weights[..weights.len()].copy_from_slice(weights);
+                write_raw_f32(&fixture.scratch.weights, &full_weights);
+                let mut generations = vec![0; DEEPSEEK_V4_PREFILL_MAX_TOKENS];
+                generations[..n_tokens].fill(generation.get() as i32);
+                host_write_i32(
+                    &fixture.scratch.route_generations,
+                    &generations,
+                    "prepared route generations",
+                )
+                .unwrap();
+                let mut statuses = vec![0; DEEPSEEK_V4_PREFILL_MAX_TOKENS];
+                statuses[..n_tokens].fill(DEEPSEEK_V4_ROUTE_STATUS_READY);
+                host_write_i32(
+                    &fixture.scratch.route_status,
+                    &statuses,
+                    "prepared route statuses",
+                )
+                .unwrap();
+            };
+        let run_route_state = |n_tokens: usize, expert_ids: &[i32], weights: &[f32]| {
+            let generation = fixture.generations.take().unwrap();
+            write_route_state(generation, n_tokens, expert_ids, weights);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            fixture
+                .scratch
+                .encode_schedule(&ctx, &encoder, n_tokens, MOE_EXPERT_COUNT, generation)
+                .unwrap();
+            fixture
+                .scratch
+                .encode_validate(&ctx, &encoder, n_tokens, generation)
+                .unwrap();
+            fixture
+                .scratch
+                .encode_signature(&ctx, &encoder, n_tokens, generation)
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            fixture.scratch.capture(n_tokens, generation.get())
+        };
+
+        let n_tokens = 12;
+        let valid = fixture.run(
+            &ctx,
+            PackedRouteMicroproofSource::Learned,
+            n_tokens,
+            n_tokens,
+            MOE_EXPERT_COUNT,
+        );
+        let mut invalid_ids = valid.expert_ids.clone();
+        invalid_ids[0] = -1;
+        let failed = run_route_state(n_tokens, &invalid_ids, &valid.weights);
+        assert_packed_route_failure(
+            &failed,
+            n_tokens,
+            PACKED_ROUTE_INVALID_ID,
+            (n_tokens * MOE_TOP_K - 1) as i32,
+        );
+
+        let mut duplicate_ids = valid.expert_ids.clone();
+        duplicate_ids[1] = duplicate_ids[0];
+        let failed = run_route_state(n_tokens, &duplicate_ids, &valid.weights);
+        assert_packed_route_failure(
+            &failed,
+            n_tokens,
+            PACKED_ROUTE_DUPLICATE_ID,
+            (n_tokens * MOE_TOP_K) as i32,
+        );
+
+        let mut invalid_weights = valid.weights.clone();
+        invalid_weights[0] = f32::NAN;
+        let failed = run_route_state(n_tokens, &valid.expert_ids, &invalid_weights);
+        assert_packed_route_failure(
+            &failed,
+            n_tokens,
+            PACKED_ROUTE_INVALID_WEIGHT,
+            (n_tokens * MOE_TOP_K) as i32,
+        );
+
+        let run_schedule_state =
+            |counts: &[i32], slot_ids: &[i32], expected_status: i32, expected_total: i32| {
+                let generation = fixture.generations.take().unwrap();
+                write_route_state(generation, n_tokens, &valid.expert_ids, &valid.weights);
+                host_write_i32(&fixture.scratch.counts, counts, "corrupt schedule counts").unwrap();
+                let mut full_slots = vec![-1; DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_EXPERT_COUNT];
+                full_slots[..slot_ids.len()].copy_from_slice(slot_ids);
+                host_write_i32(
+                    &fixture.scratch.slot_ids,
+                    &full_slots,
+                    "corrupt schedule slots",
+                )
+                .unwrap();
+                host_write_i32(
+                    &fixture.scratch.schedule_generations,
+                    &vec![generation.get() as i32; MOE_EXPERT_COUNT],
+                    "corrupt schedule generations",
+                )
+                .unwrap();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                fixture
+                    .scratch
+                    .encode_validate(&ctx, &encoder, n_tokens, generation)
+                    .unwrap();
+                fixture
+                    .scratch
+                    .encode_signature(&ctx, &encoder, n_tokens, generation)
+                    .unwrap();
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(command.error().is_none());
+                let capture = fixture.scratch.capture(n_tokens, generation.get());
+                assert_packed_route_failure(&capture, n_tokens, expected_status, expected_total);
+            };
+
+        let mut invalid_counts = valid.counts.clone();
+        let counted_expert = valid.expert_ids[0] as usize;
+        let omitted_count = invalid_counts[counted_expert];
+        invalid_counts[counted_expert] = n_tokens as i32 + 1;
+        run_schedule_state(
+            &invalid_counts,
+            &valid.slot_ids,
+            PACKED_ROUTE_INVALID_COUNT,
+            (n_tokens * MOE_TOP_K) as i32 - omitted_count,
+        );
+        let mut invalid_slots = valid.slot_ids.clone();
+        let occupied = invalid_slots.iter().position(|&slot| slot >= 0).unwrap();
+        invalid_slots[occupied] ^= 1;
+        run_schedule_state(
+            &valid.counts,
+            &invalid_slots,
+            PACKED_ROUTE_INVALID_SCHEDULE,
+            (n_tokens * MOE_TOP_K) as i32,
+        );
+        let mut invalid_padding = valid.slot_ids.clone();
+        let padding = invalid_padding.iter().position(|&slot| slot == -1).unwrap();
+        invalid_padding[padding] = -2;
+        run_schedule_state(
+            &valid.counts,
+            &invalid_padding,
+            PACKED_ROUTE_INVALID_PADDING,
+            (n_tokens * MOE_TOP_K) as i32,
+        );
+
+        let terminal = fixture.run(
+            &ctx,
+            PackedRouteMicroproofSource::Learned,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            MOE_EXPERT_COUNT,
+        );
+        let terminal_ids = vec![255; DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_TOP_K];
+        let failed = run_route_state(
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            &terminal_ids,
+            &terminal.weights,
+        );
+        assert_packed_route_failure(
+            &failed,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            PACKED_ROUTE_INVALID_COUNT,
+            0,
+        );
+        assert_eq!(
+            failed.counts[255],
+            (DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_TOP_K) as i32
+        );
+        fixture.scratch.assert_slot_guards();
+    }
+
+    fn percentile_ms(values: &[f64], percentile: f64) -> f64 {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let rank = (percentile * sorted.len() as f64).ceil() as usize;
+        sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+    }
+
+    fn median_ms(values: &[f64]) -> f64 {
+        percentile_ms(values, 0.5)
+    }
+
+    fn relative_drift(left: f64, right: f64) -> f64 {
+        (left - right).abs() / left.min(right)
+    }
+
+    #[test]
+    #[ignore = "focused exact packed-route profiler; run release with --nocapture"]
+    fn profile_exact_packed_gpu_route_and_schedule_packet() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let fixture = PackedRouteFixture::new(&ctx);
+        let sample = |n_tokens: usize, stages: usize| {
+            assert!((1..=4).contains(&stages));
+            let started = std::time::Instant::now();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let mut last_generation = None;
+            for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
+                let generation = fixture.generations.take().unwrap();
+                let source = if layer < 3 {
+                    PackedRouteMicroproofSource::Hash
+                } else {
+                    PackedRouteMicroproofSource::Learned
+                };
+                match source {
+                    PackedRouteMicroproofSource::Learned => fixture
+                        .scratch
+                        .encode_learned(
+                            &ctx,
+                            &encoder,
+                            &fixture.bias,
+                            n_tokens,
+                            n_tokens,
+                            generation,
+                        )
+                        .unwrap(),
+                    PackedRouteMicroproofSource::Hash => fixture
+                        .scratch
+                        .encode_hash(
+                            &ctx,
+                            &encoder,
+                            &fixture.token_to_expert,
+                            n_tokens,
+                            n_tokens,
+                            generation,
+                        )
+                        .unwrap(),
+                }
+                if stages >= 2 {
+                    fixture
+                        .scratch
+                        .encode_schedule(&ctx, &encoder, n_tokens, MOE_EXPERT_COUNT, generation)
+                        .unwrap();
+                }
+                if stages >= 3 {
+                    fixture
+                        .scratch
+                        .encode_validate(&ctx, &encoder, n_tokens, generation)
+                        .unwrap();
+                }
+                if stages >= 4 {
+                    fixture
+                        .scratch
+                        .encode_signature(&ctx, &encoder, n_tokens, generation)
+                        .unwrap();
+                }
+                last_generation = Some(generation);
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            assert!(command.error().is_none());
+            let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            let generation = last_generation.unwrap();
+            if stages == 4 {
+                let signature =
+                    host_read_i32(&fixture.scratch.signature, "profile signature").unwrap();
+                assert_eq!(signature[0], generation.get() as i32);
+                assert_eq!(signature[1], DEEPSEEK_V4_ROUTE_STATUS_READY);
+                assert_eq!(
+                    signature[3],
+                    packed_route_signature_completion(generation.get(), n_tokens) as i32
+                );
+            }
+            (gpu_ms, wall_ms)
+        };
+
+        for n_tokens in [12, 128] {
+            let warm_started = std::time::Instant::now();
+            let mut warm_samples = 0;
+            while warm_samples < 96 || warm_started.elapsed() < std::time::Duration::from_secs(1) {
+                sample(n_tokens, 4);
+                warm_samples += 1;
+            }
+            for stages in 1..=4 {
+                for _ in 0..2 {
+                    sample(n_tokens, stages);
+                }
+                let phase_samples = (0..9).map(|_| sample(n_tokens, stages)).collect::<Vec<_>>();
+                let phase_gpu = phase_samples
+                    .iter()
+                    .map(|sample| sample.0)
+                    .collect::<Vec<_>>();
+                let phase_wall = phase_samples
+                    .iter()
+                    .map(|sample| sample.1)
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "deepseek_v4 packed_route_stage n={n_tokens} stages={stages} gpu_median_ms={:.6} gpu_p95_ms={:.6} wall_median_ms={:.6} wall_p95_ms={:.6}",
+                    median_ms(&phase_gpu),
+                    percentile_ms(&phase_gpu, 0.95),
+                    median_ms(&phase_wall),
+                    percentile_ms(&phase_wall, 0.95),
+                );
+            }
+            for _ in 0..32 {
+                sample(n_tokens, 4);
+            }
+            let collect =
+                |count: usize| (0..count).map(|_| sample(n_tokens, 4)).collect::<Vec<_>>();
+            let control_a = collect(12);
+            let candidate = collect(40);
+            let control_b = collect(12);
+            let split = |samples: &[(f64, f64)]| {
+                (
+                    samples.iter().map(|sample| sample.0).collect::<Vec<_>>(),
+                    samples.iter().map(|sample| sample.1).collect::<Vec<_>>(),
+                )
+            };
+            let (control_a_gpu, control_a_wall) = split(&control_a);
+            let (candidate_gpu, candidate_wall) = split(&candidate);
+            let (control_b_gpu, control_b_wall) = split(&control_b);
+            let gpu_drift = relative_drift(median_ms(&control_a_gpu), median_ms(&control_b_gpu));
+            let wall_drift = relative_drift(median_ms(&control_a_wall), median_ms(&control_b_wall));
+            let gpu_p95 = percentile_ms(&candidate_gpu, 0.95);
+            let wall_p95 = percentile_ms(&candidate_wall, 0.95);
+            eprintln!(
+                "deepseek_v4 packed_route_packet n={n_tokens} candidate_gpu_ms={candidate_gpu:?} candidate_wall_ms={candidate_wall:?} control_a_gpu_ms={control_a_gpu:?} control_a_wall_ms={control_a_wall:?} control_b_gpu_ms={control_b_gpu:?} control_b_wall_ms={control_b_wall:?} gpu_p95_ms={gpu_p95:.6} wall_p95_ms={wall_p95:.6} gpu_control_drift={gpu_drift:.6} wall_control_drift={wall_drift:.6}"
+            );
+            let ceiling_ms = if n_tokens == 12 { 4.3 } else { 8.6 };
+            assert!(gpu_p95 <= ceiling_ms, "GPU p95 {gpu_p95} > {ceiling_ms}");
+            assert!(wall_p95 <= ceiling_ms, "wall p95 {wall_p95} > {ceiling_ms}");
+            assert!(gpu_drift <= 0.05, "GPU control drift {gpu_drift}");
+            assert!(wall_drift <= 0.05, "wall control drift {wall_drift}");
+        }
+    }
+
     #[test]
     fn packed_sparse_visibility_tracks_publication_cadence() {
         assert_eq!(

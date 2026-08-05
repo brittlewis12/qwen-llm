@@ -277,15 +277,18 @@ bounded hidden opt-in, not default-on or wider-device routing.
 
 Force-ranked queue:
 
-1. **Exact GPU packed schedule, then grouped expert compute.** Attribution on a
-   current-asset 140-token request puts CPU route/schedule at only 30 ms and the
-   ordinary 86-boundary residual near 17 ms, versus 3.434 seconds of post-route
-   GPU work. First prove token-major exact routes plus deterministic
-   expert/token/slot schedules without a readback. Then falsify only the dominant
-   IQ2_XS gate/up plus IQ3_XXS down pairing at N=12/32/128. Require at least 15%
-   aggregate GPU and wall saving at N=128 before widening formats. Do not replace
-   the existing expert-major reuse with a direct token-slot all-slot backend.
-   Mixture-of-Kittens informs scheduling, not a monolithic Metal kernel.
+1. **Integrate exact GPU scheduling, then falsify grouped experts.** The
+   route/schedule microproof is GO: deployed singleton route bits, deterministic
+   expert/token/original-slot order, generation authority, malformed terminal
+   bounds, and all N=1..128 pass. The complete 43-layer packet is 1.314/1.600 ms
+   GPU/wall p95 at N=12 and 7.064/7.273 ms at N=128. Add admitted scratch and
+   generation ownership behind an off-by-default packed seam while retaining
+   current CPU grouped experts; require integrated current/candidate/current
+   output/state before promotion. Then falsify only IQ2_XS gate/up plus IQ3_XXS
+   down at N=12/32/128, requiring at least 15% aggregate GPU and wall saving at
+   N=128 before widening formats. Do not replace expert-major reuse with direct
+   token-slot all-slot execution. Mixture-of-Kittens informs scheduling, not a
+   monolithic Metal kernel.
 2. **Decide bounded selector product promotion.** Keep the qualified current
    policy hidden and off by default while its device/asset scope is explicit.
    A future default or user-facing switch needs a separately reviewed product

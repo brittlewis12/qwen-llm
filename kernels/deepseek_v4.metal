@@ -18,6 +18,22 @@ struct ds4_route_args {
     float routed_scale;
 };
 
+struct ds4_packed_route_args {
+    uint expert_count;
+    uint top_k;
+    uint n_tokens;
+    uint vocab_size;
+    uint generation;
+    float routed_scale;
+};
+
+struct ds4_packed_route_schedule_args {
+    uint expert_count;
+    uint top_k;
+    uint n_tokens;
+    uint generation;
+};
+
 constant int DS4_ROUTE_PENDING = 0;
 constant int DS4_ROUTE_READY = 1;
 constant int DS4_ROUTE_NONFINITE_LOGIT = -1;
@@ -26,6 +42,18 @@ constant int DS4_ROUTE_INVALID_TOKEN = -3;
 constant int DS4_ROUTE_INVALID_EXPERT = -4;
 constant int DS4_ROUTE_DUPLICATE_EXPERT = -5;
 constant int DS4_ROUTE_NONFINITE_WEIGHT = -6;
+
+constant int DS4_PACKED_ROUTE_STALE_ROUTE = -101;
+constant int DS4_PACKED_ROUTE_FAILED_ROUTE = -102;
+constant int DS4_PACKED_ROUTE_INVALID_ID = -103;
+constant int DS4_PACKED_ROUTE_DUPLICATE_ID = -104;
+constant int DS4_PACKED_ROUTE_INVALID_WEIGHT = -105;
+constant int DS4_PACKED_ROUTE_STALE_SCHEDULE = -106;
+constant int DS4_PACKED_ROUTE_INVALID_COUNT = -107;
+constant int DS4_PACKED_ROUTE_INVALID_SCHEDULE = -108;
+constant int DS4_PACKED_ROUTE_INVALID_PADDING = -109;
+constant int DS4_PACKED_ROUTE_INVALID_TOTAL = -110;
+constant int DS4_PACKED_ROUTE_INVALID_AGGREGATE = -200;
 
 inline float ds4_router_score_exact(float value) {
     float softplus;
@@ -201,6 +229,457 @@ kernel void kernel_deepseek_v4_route_hash(
         weights[slot] = selected_weights[slot];
     }
     status[0] = DS4_ROUTE_READY;
+}
+
+inline uint ds4_packed_route_completion(uint generation, uint n_tokens) {
+    return 0xd5510000u ^ generation ^ (n_tokens << 8u);
+}
+
+inline uint ds4_packed_route_signature_completion(uint generation, uint n_tokens) {
+    return 0xd5520000u ^ generation ^ (n_tokens << 8u);
+}
+
+inline void ds4_packed_route_initialize(
+        constant ds4_packed_route_args & args,
+        device int * expert_ids,
+        device float * weights,
+        device int * status,
+        uint token,
+        uint tid) {
+    if (tid != 0) return;
+    const ulong base = (ulong)token * args.top_k;
+    status[token] = DS4_ROUTE_PENDING;
+    for (uint slot = 0; slot < args.top_k; ++slot) {
+        expert_ids[base + slot] = -1;
+        weights[base + slot] = 0.0f;
+    }
+}
+
+inline void ds4_packed_route_finish(
+        constant ds4_packed_route_args & args,
+        device uint * generations,
+        device int * status,
+        uint token,
+        int result) {
+    generations[token] = args.generation;
+    status[token] = result;
+}
+
+kernel void kernel_deepseek_v4_packed_route_learned(
+        constant ds4_packed_route_args & args [[buffer(0)]],
+        device const float * logits [[buffer(1)]],
+        device const float * correction_bias [[buffer(2)]],
+        device int * expert_ids [[buffer(3)]],
+        device float * weights [[buffer(4)]],
+        device uint * generations [[buffer(5)]],
+        device int * status [[buffer(6)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        uint tid [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    const uint token = tgpig.y;
+    if (token >= args.n_tokens) return;
+    threadgroup float group_scores[8];
+    threadgroup uint group_ids[8];
+    threadgroup uint selected_ids[6];
+    threadgroup uint route_error;
+    ds4_packed_route_initialize(args, expert_ids, weights, status, token, tid);
+    const ulong logits_base = (ulong)token * args.expert_count;
+    const ulong output_base = (ulong)token * args.top_k;
+    const bool active = tid < args.expert_count;
+    const float logit = active ? logits[logits_base + tid] : 0.0f;
+    const float bias = active ? correction_bias[tid] : 0.0f;
+    const float unbiased_score = active && isfinite(logit)
+        ? ds4_router_score_exact(logit)
+        : 0.0f;
+    float selection_score = unbiased_score + bias;
+    const uint local_error = !active ? 0u
+        : (!isfinite(logit) || !isfinite(unbiased_score) ? 1u
+        : (!isfinite(bias) || !isfinite(selection_score) ? 2u : 0u));
+    const uint simd_error = simd_max(local_error);
+    if (tiisg == 0) group_ids[sgitg] = simd_error;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgitg == 0) {
+        const uint group_error = tiisg < 8 ? group_ids[tiisg] : 0u;
+        const uint reduced_error = simd_max(group_error);
+        if (tiisg == 0) route_error = reduced_error;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (route_error != 0u) {
+        if (tid == 0) {
+            ds4_packed_route_finish(
+                args,
+                generations,
+                status,
+                token,
+                route_error == 1u
+                    ? DS4_ROUTE_NONFINITE_LOGIT
+                    : DS4_ROUTE_NONFINITE_BIAS
+            );
+        }
+        return;
+    }
+
+    for (uint slot = 0; slot < args.top_k; ++slot) {
+        const float simd_score = simd_max(active ? selection_score : -INFINITY);
+        const uint simd_id = simd_min(
+            active && selection_score == simd_score ? tid : UINT_MAX
+        );
+        if (tiisg == 0) {
+            group_scores[sgitg] = simd_score;
+            group_ids[sgitg] = simd_id;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sgitg == 0) {
+            const float candidate_score = tiisg < 8 ? group_scores[tiisg] : -INFINITY;
+            const uint candidate_id = tiisg < 8 ? group_ids[tiisg] : UINT_MAX;
+            const float best_score = simd_max(candidate_score);
+            const uint best_id = simd_min(
+                candidate_score == best_score ? candidate_id : UINT_MAX
+            );
+            if (tiisg == 0) {
+                selected_ids[slot] = best_id;
+                expert_ids[output_base + slot] = int(best_id);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (active && tid == selected_ids[slot]) selection_score = -INFINITY;
+    }
+
+    if (tid == 0) {
+        float selected_weights[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        float sum = 0.0f;
+        for (uint slot = 0; slot < args.top_k; ++slot) {
+            selected_weights[slot]
+                = ds4_router_score_exact(logits[logits_base + selected_ids[slot]]);
+            sum += selected_weights[slot];
+        }
+        const float denominator = max(sum, 6.1035156e-5f);
+        for (uint slot = 0; slot < args.top_k; ++slot) {
+            const float weight = selected_weights[slot] / denominator * args.routed_scale;
+            if (!isfinite(weight)) {
+                ds4_packed_route_finish(
+                    args,
+                    generations,
+                    status,
+                    token,
+                    DS4_ROUTE_NONFINITE_WEIGHT
+                );
+                return;
+            }
+            weights[output_base + slot] = weight;
+        }
+        ds4_packed_route_finish(
+            args,
+            generations,
+            status,
+            token,
+            DS4_ROUTE_READY
+        );
+    }
+}
+
+kernel void kernel_deepseek_v4_packed_route_hash(
+        constant ds4_packed_route_args & args [[buffer(0)]],
+        device const float * logits [[buffer(1)]],
+        device const int * token_ids [[buffer(2)]],
+        device const int * token_to_expert [[buffer(3)]],
+        device int * expert_ids [[buffer(4)]],
+        device float * weights [[buffer(5)]],
+        device uint * generations [[buffer(6)]],
+        device int * status [[buffer(7)]],
+        uint token [[thread_position_in_grid]]) {
+    if (token >= args.n_tokens) return;
+    ds4_packed_route_initialize(args, expert_ids, weights, status, token, 0u);
+    const ulong logits_base = (ulong)token * args.expert_count;
+    const ulong output_base = (ulong)token * args.top_k;
+    const int token_id = token_ids[token];
+    if (token_id < 0 || uint(token_id) >= args.vocab_size) {
+        ds4_packed_route_finish(
+            args,
+            generations,
+            status,
+            token,
+            DS4_ROUTE_INVALID_TOKEN
+        );
+        return;
+    }
+    for (uint expert = 0; expert < args.expert_count; ++expert) {
+        if (!isfinite(logits[logits_base + expert])) {
+            ds4_packed_route_finish(
+                args,
+                generations,
+                status,
+                token,
+                DS4_ROUTE_NONFINITE_LOGIT
+            );
+            return;
+        }
+    }
+
+    int selected[6] = {-1, -1, -1, -1, -1, -1};
+    float selected_weights[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    const ulong row = (ulong)uint(token_id) * args.top_k;
+    for (uint slot = 0; slot < args.top_k; ++slot) {
+        const int expert = token_to_expert[row + slot];
+        if (expert < 0 || uint(expert) >= args.expert_count) {
+            ds4_packed_route_finish(
+                args,
+                generations,
+                status,
+                token,
+                DS4_ROUTE_INVALID_EXPERT
+            );
+            return;
+        }
+        for (uint prior = 0; prior < slot; ++prior) {
+            if (selected[prior] == expert) {
+                ds4_packed_route_finish(
+                    args,
+                    generations,
+                    status,
+                    token,
+                    DS4_ROUTE_DUPLICATE_EXPERT
+                );
+                return;
+            }
+        }
+        selected[slot] = expert;
+        selected_weights[slot]
+            = ds4_router_score_exact(logits[logits_base + uint(expert)]);
+    }
+
+    float sum = 0.0f;
+    for (uint slot = 0; slot < args.top_k; ++slot) sum += selected_weights[slot];
+    const float denominator = max(sum, 6.1035156e-5f);
+    for (uint slot = 0; slot < args.top_k; ++slot) {
+        const float weight = selected_weights[slot] / denominator * args.routed_scale;
+        if (!isfinite(weight)) {
+            ds4_packed_route_finish(
+                args,
+                generations,
+                status,
+                token,
+                DS4_ROUTE_NONFINITE_WEIGHT
+            );
+            return;
+        }
+        expert_ids[output_base + slot] = selected[slot];
+        weights[output_base + slot] = weight;
+    }
+    ds4_packed_route_finish(
+        args,
+        generations,
+        status,
+        token,
+        DS4_ROUTE_READY
+    );
+}
+
+kernel void kernel_deepseek_v4_packed_route_schedule(
+        constant ds4_packed_route_schedule_args & args [[buffer(0)]],
+        device const int * expert_ids [[buffer(1)]],
+        device int * counts [[buffer(2)]],
+        device int * slot_ids [[buffer(3)]],
+        device uint * generations [[buffer(4)]],
+        uint expert [[thread_position_in_grid]]) {
+    if (expert >= args.expert_count) return;
+    const ulong schedule_base = (ulong)expert * args.n_tokens;
+    for (uint index = 0; index < args.n_tokens; ++index) {
+        slot_ids[schedule_base + index] = -1;
+    }
+    uint count = 0;
+    for (uint token = 0; token < args.n_tokens; ++token) {
+        const uint route_base = token * args.top_k;
+        for (uint slot = 0; slot < args.top_k; ++slot) {
+            if (expert_ids[route_base + slot] == int(expert)) {
+                if (count < args.n_tokens) {
+                    slot_ids[schedule_base + count] = int(route_base + slot);
+                }
+                count += 1;
+            }
+        }
+    }
+    counts[expert] = int(count);
+    generations[expert] = args.generation;
+}
+
+kernel void kernel_deepseek_v4_packed_route_validate(
+        constant ds4_packed_route_schedule_args & args [[buffer(0)]],
+        device const uint * route_generations [[buffer(1)]],
+        device const int * route_status [[buffer(2)]],
+        device const int * expert_ids [[buffer(3)]],
+        device const float * weights [[buffer(4)]],
+        device const int * counts [[buffer(5)]],
+        device const int * slot_ids [[buffer(6)]],
+        device const uint * schedule_generations [[buffer(7)]],
+        device uint * aggregate [[buffer(8)]],
+        uint tid [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    threadgroup uint group_errors[8];
+    threadgroup uint group_totals[8];
+    uint local_error = 0u;
+    uint local_total = 0u;
+
+    if (tid < args.n_tokens) {
+        if (route_generations[tid] != args.generation) {
+            local_error = 1u;
+        } else if (route_status[tid] != DS4_ROUTE_READY) {
+            local_error = 2u;
+        } else {
+            const uint route_base = tid * args.top_k;
+            for (uint slot = 0; slot < args.top_k; ++slot) {
+                const int expert = expert_ids[route_base + slot];
+                if (expert < 0 || uint(expert) >= args.expert_count) {
+                    local_error = max(local_error, 3u);
+                }
+                for (uint prior = 0; prior < slot; ++prior) {
+                    if (expert_ids[route_base + prior] == expert) {
+                        local_error = max(local_error, 4u);
+                    }
+                }
+                const float weight = weights[route_base + slot];
+                if (!isfinite(weight) || weight < 0.0f) {
+                    local_error = max(local_error, 5u);
+                }
+            }
+        }
+    }
+
+    if (tid < args.expert_count) {
+        if (schedule_generations[tid] != args.generation) {
+            local_error = max(local_error, 6u);
+        } else {
+            const int count_i = counts[tid];
+            if (count_i < 0 || uint(count_i) > args.n_tokens) {
+                local_error = max(local_error, 7u);
+            } else {
+                const uint count = uint(count_i);
+                const ulong schedule_base = (ulong)tid * args.n_tokens;
+                uint expected_count = 0u;
+                for (uint token = 0; token < args.n_tokens; ++token) {
+                    const uint route_base = token * args.top_k;
+                    for (uint slot = 0; slot < args.top_k; ++slot) {
+                        if (expert_ids[route_base + slot] == int(tid)) {
+                            const int expected_slot = int(route_base + slot);
+                            if (expected_count >= count
+                                    || slot_ids[schedule_base + expected_count]
+                                        != expected_slot) {
+                                local_error = max(local_error, 8u);
+                            }
+                            expected_count += 1u;
+                        }
+                    }
+                }
+                if (expected_count != count) local_error = max(local_error, 8u);
+                for (uint index = count; index < args.n_tokens; ++index) {
+                    if (slot_ids[schedule_base + index] != -1) {
+                        local_error = max(local_error, 9u);
+                    }
+                }
+                local_total = count;
+            }
+        }
+    }
+
+    const uint simd_error = simd_max(local_error);
+    const uint simd_total = simd_sum(local_total);
+    if (tiisg == 0) {
+        group_errors[sgitg] = simd_error;
+        group_totals[sgitg] = simd_total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgitg != 0) return;
+    const uint group_error = tiisg < 8 ? group_errors[tiisg] : 0u;
+    const uint group_total = tiisg < 8 ? group_totals[tiisg] : 0u;
+    uint final_error = simd_max(group_error);
+    const uint final_total = simd_sum(group_total);
+    if (tiisg != 0) return;
+    if (final_error == 0u && final_total != args.n_tokens * args.top_k) {
+        final_error = 10u;
+    }
+    const int result = final_error == 0u
+        ? DS4_ROUTE_READY
+        : (final_error == 1u ? DS4_PACKED_ROUTE_STALE_ROUTE
+        : (final_error == 2u ? DS4_PACKED_ROUTE_FAILED_ROUTE
+        : (final_error == 3u ? DS4_PACKED_ROUTE_INVALID_ID
+        : (final_error == 4u ? DS4_PACKED_ROUTE_DUPLICATE_ID
+        : (final_error == 5u ? DS4_PACKED_ROUTE_INVALID_WEIGHT
+        : (final_error == 6u ? DS4_PACKED_ROUTE_STALE_SCHEDULE
+        : (final_error == 7u ? DS4_PACKED_ROUTE_INVALID_COUNT
+        : (final_error == 8u ? DS4_PACKED_ROUTE_INVALID_SCHEDULE
+        : (final_error == 9u ? DS4_PACKED_ROUTE_INVALID_PADDING
+        : DS4_PACKED_ROUTE_INVALID_TOTAL)))))))));
+    aggregate[0] = args.generation;
+    aggregate[1] = as_type<uint>(result);
+    aggregate[2] = final_total;
+    aggregate[3] = ds4_packed_route_completion(args.generation, args.n_tokens);
+}
+
+inline uint ds4_packed_route_signature_mix(uint hash, uint value) {
+    return (hash ^ value) * 16777619u;
+}
+
+kernel void kernel_deepseek_v4_packed_route_signature(
+        constant ds4_packed_route_schedule_args & args [[buffer(0)]],
+        device const uint * aggregate [[buffer(1)]],
+        device const int * expert_ids [[buffer(2)]],
+        device const float * weights [[buffer(3)]],
+        device const int * counts [[buffer(4)]],
+        device const int * slot_ids [[buffer(5)]],
+        device uint * signature [[buffer(6)]],
+        uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup uint valid_aggregate;
+    threadgroup uint partial_hashes[256];
+    const uint expected_total = args.n_tokens * args.top_k;
+    if (tid == 0) {
+        signature[0] = args.generation;
+        signature[1] = as_type<uint>(DS4_ROUTE_PENDING);
+        signature[2] = 0u;
+        signature[3] = 0u;
+        valid_aggregate = aggregate[0] == args.generation
+            && as_type<int>(aggregate[1]) == DS4_ROUTE_READY
+            && aggregate[2] == expected_total
+            && aggregate[3]
+                == ds4_packed_route_completion(args.generation, args.n_tokens);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (valid_aggregate == 0u) {
+        if (tid == 0) {
+            signature[1] = as_type<uint>(DS4_PACKED_ROUTE_INVALID_AGGREGATE);
+            signature[3]
+                = ds4_packed_route_signature_completion(args.generation, args.n_tokens);
+        }
+        return;
+    }
+
+    uint hash = 2166136261u ^ tid;
+    for (uint index = tid; index < expected_total; index += 256u) {
+        hash = ds4_packed_route_signature_mix(hash, as_type<uint>(expert_ids[index]));
+        hash = ds4_packed_route_signature_mix(hash, as_type<uint>(weights[index]));
+    }
+    if (tid < args.expert_count) {
+        hash = ds4_packed_route_signature_mix(hash, as_type<uint>(counts[tid]));
+        const ulong base = (ulong)tid * args.n_tokens;
+        for (uint index = 0; index < args.n_tokens; ++index) {
+            hash = ds4_packed_route_signature_mix(
+                hash,
+                as_type<uint>(slot_ids[base + index])
+            );
+        }
+    }
+    partial_hashes[tid] = hash;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid != 0) return;
+    hash = 2166136261u;
+    for (uint index = 0; index < 256u; ++index) {
+        hash = ds4_packed_route_signature_mix(hash, partial_hashes[index]);
+    }
+    signature[1] = as_type<uint>(DS4_ROUTE_READY);
+    signature[2] = hash;
+    signature[3]
+        = ds4_packed_route_signature_completion(args.generation, args.n_tokens);
 }
 
 kernel void kernel_deepseek_v4_clamped_swiglu(

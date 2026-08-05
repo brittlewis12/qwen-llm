@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Exact Packed Route/Schedule GO
+
+Status: test-only exact topology `GO`; off-by-default production integration is
+authorized. Grouped experts, default routing, and net TTFT claims remain `HOLD`.
+
+- Learned and hash routing preserve deployed singleton Metal IDs, statuses, and
+  weight bits across ties, one-ULP cutoff pressure, softplus boundaries, and
+  finite extremes. All N=1..128 match the CPU route/schedule oracle.
+- One expert thread scans token then original slot into deterministic fixed
+  stride storage. Generation-tagged route, schedule, aggregate, and signature
+  records reject omitted, stale, malformed, nonfinite, and concurrent work.
+- Full counts remain authoritative without unsafe writes. A terminal malformed
+  bucket reaches count 768, publishes `INVALID_COUNT`, and preserves both slot
+  buffer guards.
+- A Rust transcription reproduces the cooperative payload signature exactly for
+  every N/source. Mutating any ID, weight, count, occupied slot, or padding
+  sentinel changes it.
+- The stabilized 43-layer packet clears p95 GPU/wall at 1.314/1.600 ms for N=12
+  and 7.064/7.273 ms for N=128. Maximum control drift is 0.999%.
+- Retain the rejected one-thread signature: about 10.15 ms GPU p95 at N=12 made
+  a serial full-schedule consumer a decisive KILL.
+
+Decision: add admitted scratch and generation ownership behind an off-by-default
+packed production seam while retaining CPU grouped experts. Require an
+integrated current/candidate/current state/output gate before promotion. Grouped
+IQ2_XS gate/up plus IQ3_XXS down remains separate. Evidence:
+`docs/bench/2026-08-05-dsv4-packed-route-microproof/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Packed-Prefill Attribution GO
 
 Status: attribution `GO`; direct packed all-slot expert execution is `KILL` as

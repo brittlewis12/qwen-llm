@@ -1972,18 +1972,19 @@ Broader S6 work remains:
   Q=1/K=512, `visible <= capacity <= 262144`, `visible >= 196608`, and
   `visible >= capacity - capacity / 4`. At the boundary, all-tied GPU/wall
   savings remain 0.627/0.638 ms for max capacity and 0.641/0.635 ms for the
-  decimal-million capacity. Add session-owned scratch/generation state behind
-  that seam. Preserve F16 scoring and keep packed, shallow, and ranked-output
-  routing current until a whole-token exactness/speed gate clears.
+  decimal-million capacity. The bounded singleton integration owns admitted
+  scratch and non-reusing generation state behind that seam. Preserve F16
+  scoring and keep packed, shallow, and ranked-output routing current.
   The diagnostics-only collapsed FP4 implementation remains negative evidence.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
-  sparse attention. All-slot routed experts have closed the first measured MoE
-  boundary without changing reduction lineage.
-- Re-attribute the remaining one-encoder GPU span with in-encoder counter
-  samples, then fuse only the measured stage boundary. Whole-token submission,
-  per-layer route/selector failure records, and verified-prefix callbacks are
-  promoted. An asynchronously immutable SSD-streaming ticket remains a separate
-  product contract.
+  sparse attention only after packed attribution identifies one of those seams.
+  The next packet first splits the roughly 1.057-second N=128 pre-expert GPU
+  span into attention, compressor/mHC, chronological row work, and router
+  projection. Then split the unchanged roughly 688 ms post-route span before
+  widening another grouped format. Whole-token submission, per-layer
+  route/selector failure records, and verified-prefix callbacks are promoted.
+  An asynchronously immutable SSD-streaming ticket remains a separate product
+  contract.
 - Preserve promoted online singleton HCA and the exact packed/legacy tiled
   differential. Defer heads8/rows16 split-K while HCA remains below CSA; reopen
   HCA only if attribution returns it to the lead. The scalar scorer and bitwise
@@ -2104,8 +2105,18 @@ noise without reducing technical risk. Revisit after S5.
    improve 35.91% post-route GPU and 21.64% summed packed-command GPU. One R3
    wall bracket misses at 12.2%, so this is not a per-run guarantee. Retain the
    isolated rollback, capability/dtype fallback, and 6,291,456-byte admitted
-   scratch. Next falsify the 16 all-IQ3_XXS layers separately; keep MXFP4 down
-   and GPU route arithmetic unchanged and do not revive a monolithic FFN
-   kernel.
+   scratch. The separate all-IQ3 widening is exact but remains `HOLD`: a mapped
+   IQ3 projection plus exact gate/up arena aliases execute all 16 layers in four
+   test-only dispatches without another allocation. Model-free stagewise and
+   current-asset N=12/32/128 outputs and state are bit-exact. Two R5 campaigns
+   are rejected for control drift; the sealed balanced R8 stabilizes controls
+   at 0.721% but misses candidate stationarity at 6.050% against a 5% gate. A
+   separate traced bracket records 9.929% total packed GPU saving and 56.534%
+   in the affected layers with unchanged-layer time flat; it is attribution,
+   not a balanced promotion gate. Retain the implementation under diagnostics,
+   authorize no same-condition retry, and do not build fused IQ3 gate/up now.
+   Next attribute the roughly 1.057-second pre-expert GPU span and unchanged
+   roughly 688 ms post-route span. Keep MXFP4 down and GPU route arithmetic
+   unchanged and do not revive a monolithic FFN kernel.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

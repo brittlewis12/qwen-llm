@@ -13824,7 +13824,16 @@ mod tests {
     #[ignore = "requires the current 97.05 GiB DS4 asset"]
     fn current_asset_packed_grouped_expert_integration_packet() {
         const CONTINUATION_TOKEN: u32 = 35;
-        const ELIGIBLE_LAYERS: u32 = 25;
+        const IQ2_ELIGIBLE_LAYERS: u32 = 25;
+        const IQ3_ELIGIBLE_LAYERS: u32 = 16;
+
+        #[derive(Clone, Copy, Eq, PartialEq)]
+        enum ExpertArm {
+            Current,
+            Ordinary,
+            Iq2Baseline,
+            Iq2AndIq3Candidate,
+        }
 
         struct Evidence {
             logits: Vec<f32>,
@@ -13835,7 +13844,8 @@ mod tests {
             continuation_logits: Vec<f32>,
             continuation_causal_digest: [u8; 32],
             committed_tokens: Vec<u32>,
-            grouped_invocations: u32,
+            grouped_iq2_invocations: u32,
+            grouped_iq3_invocations: u32,
             wall_ms: f64,
         }
 
@@ -13856,20 +13866,35 @@ mod tests {
             residency: DeepSeekV4MetalResidency,
             model_content_id: DeepSeekV4ModelContentId,
             prefix: &[u32],
-            grouped_target: bool,
+            arm: ExpertArm,
         ) -> (DeepSeekV4MetalResidency, Evidence) {
             let mut session =
                 DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
                     .expect("construct packed grouped expert session");
             let started = std::time::Instant::now();
-            if grouped_target {
-                session
-                    .prefill_tokens(ctx, prefix)
-                    .expect("execute ordinary packed grouped expert prefix");
-            } else {
-                session
-                    .execute_packed_tokens_with_expert_policy_for_test(ctx, prefix, true, false)
-                    .expect("execute forced-current packed expert prefix");
+            match arm {
+                ExpertArm::Ordinary => {
+                    session
+                        .prefill_tokens(ctx, prefix)
+                        .expect("execute ordinary packed grouped expert prefix");
+                }
+                ExpertArm::Current | ExpertArm::Iq2Baseline | ExpertArm::Iq2AndIq3Candidate => {
+                    let (grouped_iq2, grouped_iq3) = match arm {
+                        ExpertArm::Current => (false, false),
+                        ExpertArm::Iq2Baseline => (true, false),
+                        ExpertArm::Iq2AndIq3Candidate => (true, true),
+                        ExpertArm::Ordinary => unreachable!(),
+                    };
+                    session
+                        .execute_packed_tokens_with_expert_policy_for_test(
+                            ctx,
+                            prefix,
+                            true,
+                            grouped_iq2,
+                            grouped_iq3,
+                        )
+                        .expect("execute forced packed expert policy");
+                }
             }
             let wall_ms = started.elapsed().as_secs_f64() * 1e3;
             let logits = session
@@ -13909,7 +13934,8 @@ mod tests {
                 continuation_logits,
                 continuation_causal_digest: *continuation.causal_digest(),
                 committed_tokens: session.committed_tokens().to_vec(),
-                grouped_invocations: session.packed_grouped_expert_invocations_for_test(),
+                grouped_iq2_invocations: session.packed_grouped_iq2_invocations_for_test(),
+                grouped_iq3_invocations: session.packed_grouped_iq3_invocations_for_test(),
                 wall_ms,
             };
             (session.into_residency(), evidence)
@@ -13958,13 +13984,12 @@ mod tests {
             mut residency: DeepSeekV4MetalResidency,
             model_content_id: DeepSeekV4ModelContentId,
             prefix: &[u32],
-            grouped_target: bool,
+            arm: ExpertArm,
             samples: usize,
         ) -> (DeepSeekV4MetalResidency, Vec<Evidence>) {
             let mut evidence = Vec::with_capacity(samples);
             for _ in 0..samples {
-                let (next, sample) =
-                    execute(ctx, residency, model_content_id, prefix, grouped_target);
+                let (next, sample) = execute(ctx, residency, model_content_id, prefix, arm);
                 residency = next;
                 evidence.push(sample);
             }
@@ -13977,7 +14002,20 @@ mod tests {
                 .map(|sample| sample.wall_ms)
                 .collect::<Vec<_>>();
             values.sort_by(f64::total_cmp);
-            values[values.len() / 2]
+            if values.len().is_multiple_of(2) {
+                (values[values.len() / 2 - 1] + values[values.len() / 2]) * 0.5
+            } else {
+                values[values.len() / 2]
+            }
+        }
+
+        fn p95_wall_ms(samples: &[Evidence]) -> f64 {
+            let mut values = samples
+                .iter()
+                .map(|sample| sample.wall_ms)
+                .collect::<Vec<_>>();
+            values.sort_by(f64::total_cmp);
+            values[(values.len() * 95).div_ceil(100) - 1]
         }
 
         let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
@@ -13990,7 +14028,27 @@ mod tests {
         assert!(model_path.exists(), "missing current DS4 model");
         let ctx = MetalContext::new().expect("create Metal context");
         let grouped_enabled = prefill::packed_grouped_expert_enabled_for_test(&ctx);
-        let expected_grouped_invocations = if grouped_enabled { ELIGIBLE_LAYERS } else { 0 };
+        let iq3_experiment = std::env::var_os("QWEN_DSV4_PACKED_GROUPED_IQ3_EXPERIMENT").is_some();
+        let (control_arm, candidate_arm) = if iq3_experiment {
+            (ExpertArm::Iq2Baseline, ExpertArm::Iq2AndIq3Candidate)
+        } else {
+            (ExpertArm::Current, ExpertArm::Ordinary)
+        };
+        let expected_control_iq2 = if iq3_experiment {
+            IQ2_ELIGIBLE_LAYERS
+        } else {
+            0
+        };
+        let expected_candidate_iq2 = if iq3_experiment || grouped_enabled {
+            IQ2_ELIGIBLE_LAYERS
+        } else {
+            0
+        };
+        let expected_candidate_iq3 = if iq3_experiment {
+            IQ3_ELIGIBLE_LAYERS
+        } else {
+            0
+        };
         let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 129)
             .expect("plan packed grouped session");
@@ -14008,7 +14066,10 @@ mod tests {
                     .expect("QWEN_DSV4_PACKED_GROUPED_SAMPLES must be an integer")
             })
             .unwrap_or(1);
-        assert!((1..=5).contains(&samples), "samples must be in 1..=5");
+        assert!((1..=8).contains(&samples), "samples must be in 1..=8");
+        if iq3_experiment && samples > 1 {
+            assert_eq!(samples, 8, "grouped IQ3 timing requires balanced R8");
+        }
         let only_n = std::env::var("QWEN_DSV4_PACKED_GROUPED_ONLY_N")
             .ok()
             .map(|value| {
@@ -14031,34 +14092,106 @@ mod tests {
                 .map(|index| [35, 201, 200, 34][index % 4])
                 .collect::<Vec<_>>();
 
-            if samples > 1 {
+            if iq3_experiment && samples > 1 {
+                let mut next = residency;
+                let mut warm_reference = None;
+                for arm in [
+                    control_arm,
+                    candidate_arm,
+                    candidate_arm,
+                    control_arm,
+                    candidate_arm,
+                    control_arm,
+                    control_arm,
+                    candidate_arm,
+                ] {
+                    let (residency, sample) = execute(&ctx, next, model_content_id, &prefix, arm);
+                    next = residency;
+                    if let Some(reference) = &warm_reference {
+                        assert_exact("balanced warm-up", &sample, reference);
+                    } else {
+                        warm_reference = Some(sample);
+                    }
+                }
+                residency = next;
+            } else if samples > 1 {
                 let (next, warm_control) =
-                    execute(&ctx, residency, model_content_id, &prefix, false);
-                let (next, warm_candidate) = execute(&ctx, next, model_content_id, &prefix, true);
+                    execute(&ctx, residency, model_content_id, &prefix, control_arm);
+                let (next, warm_candidate) =
+                    execute(&ctx, next, model_content_id, &prefix, candidate_arm);
                 residency = next;
                 assert_exact("warm candidate", &warm_candidate, &warm_control);
             }
 
-            let (next, current_before) =
-                execute_samples(&ctx, residency, model_content_id, &prefix, false, samples);
-            let (next, candidate) =
-                execute_samples(&ctx, next, model_content_id, &prefix, true, samples);
-            let (next, current_after) =
-                execute_samples(&ctx, next, model_content_id, &prefix, false, samples);
+            let (next, current_before, candidate, current_after) = if iq3_experiment && samples > 1
+            {
+                let mut next = residency;
+                let mut controls = Vec::with_capacity(samples);
+                let mut candidate = Vec::with_capacity(samples);
+                for _ in 0..samples / 4 {
+                    for arm in [
+                        control_arm,
+                        candidate_arm,
+                        candidate_arm,
+                        control_arm,
+                        candidate_arm,
+                        control_arm,
+                        control_arm,
+                        candidate_arm,
+                    ] {
+                        let (residency, sample) =
+                            execute(&ctx, next, model_content_id, &prefix, arm);
+                        next = residency;
+                        if arm == control_arm {
+                            controls.push(sample);
+                        } else {
+                            candidate.push(sample);
+                        }
+                    }
+                }
+                assert_eq!(controls.len(), samples);
+                assert_eq!(candidate.len(), samples);
+                let current_after = controls.split_off(samples / 2);
+                let current_before = controls;
+                (next, current_before, candidate, current_after)
+            } else {
+                let (next, current_before) = execute_samples(
+                    &ctx,
+                    residency,
+                    model_content_id,
+                    &prefix,
+                    control_arm,
+                    samples,
+                );
+                let (next, candidate) = execute_samples(
+                    &ctx,
+                    next,
+                    model_content_id,
+                    &prefix,
+                    candidate_arm,
+                    samples,
+                );
+                let (next, current_after) =
+                    execute_samples(&ctx, next, model_content_id, &prefix, control_arm, samples);
+                (next, current_before, candidate, current_after)
+            };
             residency = next;
 
             let reference = &current_before[0];
             for sample in &current_before {
                 assert_exact("leading control", sample, reference);
-                assert_eq!(sample.grouped_invocations, 0);
+                assert_eq!(sample.grouped_iq2_invocations, expected_control_iq2);
+                assert_eq!(sample.grouped_iq3_invocations, 0);
             }
             for sample in &candidate {
                 assert_exact("grouped candidate", sample, reference);
-                assert_eq!(sample.grouped_invocations, expected_grouped_invocations);
+                assert_eq!(sample.grouped_iq2_invocations, expected_candidate_iq2);
+                assert_eq!(sample.grouped_iq3_invocations, expected_candidate_iq3);
             }
             for sample in &current_after {
                 assert_exact("trailing control", sample, reference);
-                assert_eq!(sample.grouped_invocations, 0);
+                assert_eq!(sample.grouped_iq2_invocations, expected_control_iq2);
+                assert_eq!(sample.grouped_iq3_invocations, 0);
             }
 
             let current_before_median = median_wall_ms(&current_before);
@@ -14068,6 +14201,22 @@ mod tests {
             let wall_saving = (faster_control - candidate_median) / faster_control;
             let control_drift = 2.0 * (current_before_median - current_after_median).abs()
                 / (current_before_median + current_after_median);
+            let current_before_p95 = p95_wall_ms(&current_before);
+            let candidate_p95 = p95_wall_ms(&candidate);
+            let current_after_p95 = p95_wall_ms(&current_after);
+            let (candidate_first_median, candidate_second_median) = if iq3_experiment && samples > 1
+            {
+                (
+                    median_wall_ms(&candidate[..samples / 2]),
+                    median_wall_ms(&candidate[samples / 2..]),
+                )
+            } else {
+                (candidate_median, candidate_median)
+            };
+            let candidate_drift = 2.0 * (candidate_first_median - candidate_second_median).abs()
+                / (candidate_first_median + candidate_second_median);
+            let first_half_saving = 1.0 - candidate_first_median / current_before_median;
+            let second_half_saving = 1.0 - candidate_second_median / current_after_median;
             let current_before_ms = current_before
                 .iter()
                 .map(|sample| sample.wall_ms)
@@ -14080,15 +14229,43 @@ mod tests {
                 .iter()
                 .map(|sample| sample.wall_ms)
                 .collect::<Vec<_>>();
+            let candidate_dispatches =
+                candidate[0].grouped_iq2_invocations * 2 + candidate[0].grouped_iq3_invocations * 4;
             eprintln!(
-                "deepseek_v4 packed_grouped_expert_integration n={n_tokens} samples={samples} grouped_enabled={grouped_enabled} current_before_wall_ms={current_before_ms:?} current_before_median_ms={current_before_median:.3} candidate_wall_ms={candidate_ms:?} candidate_median_ms={candidate_median:.3} current_after_wall_ms={current_after_ms:?} current_after_median_ms={current_after_median:.3} wall_saving={wall_saving:.6} control_drift={control_drift:.6} candidate_invocations={} candidate_dispatches={} logits_sha256={} causal_digest={} continuation_causal_digest={}",
-                candidate[0].grouped_invocations,
-                candidate[0].grouped_invocations * 2,
+                "deepseek_v4 packed_grouped_expert_integration experiment={} n={n_tokens} samples={samples} grouped_enabled={grouped_enabled} current_before_wall_ms={current_before_ms:?} current_before_median_ms={current_before_median:.3} current_before_p95_ms={current_before_p95:.3} candidate_wall_ms={candidate_ms:?} candidate_median_ms={candidate_median:.3} candidate_p95_ms={candidate_p95:.3} candidate_first_median_ms={candidate_first_median:.3} candidate_second_median_ms={candidate_second_median:.3} current_after_wall_ms={current_after_ms:?} current_after_median_ms={current_after_median:.3} current_after_p95_ms={current_after_p95:.3} wall_saving={wall_saving:.6} first_half_saving={first_half_saving:.6} second_half_saving={second_half_saving:.6} control_drift={control_drift:.6} candidate_drift={candidate_drift:.6} candidate_iq2_invocations={} candidate_iq3_invocations={} candidate_dispatches={} logits_sha256={} causal_digest={} continuation_causal_digest={}",
+                if iq3_experiment { "iq3" } else { "iq2" },
+                candidate[0].grouped_iq2_invocations,
+                candidate[0].grouped_iq3_invocations,
+                candidate_dispatches,
                 digest_hex(Sha256::digest(bytemuck::cast_slice(&reference.logits))),
                 digest_hex(reference.causal_digest),
                 digest_hex(reference.continuation_causal_digest),
             );
-            if grouped_enabled && n_tokens == 128 && samples >= 3 {
+            if iq3_experiment && samples >= 8 {
+                assert!(
+                    control_drift <= 0.05,
+                    "N={n_tokens} grouped IQ3 control drift {control_drift:.3} exceeded 5%"
+                );
+                assert!(
+                    candidate_drift <= 0.05,
+                    "N={n_tokens} grouped IQ3 candidate drift {candidate_drift:.3} exceeded 5%"
+                );
+                if n_tokens == 128 {
+                    assert!(
+                        first_half_saving >= 0.05 && second_half_saving >= 0.05,
+                        "N=128 grouped IQ3 half savings {first_half_saving:.3}/{second_half_saving:.3} missed 5% gate"
+                    );
+                    assert!(
+                        candidate_p95 <= current_before_p95.max(current_after_p95),
+                        "N=128 grouped IQ3 p95 {candidate_p95:.3} exceeded control p95"
+                    );
+                } else {
+                    assert!(
+                        first_half_saving >= -0.02 && second_half_saving >= -0.02,
+                        "N={n_tokens} grouped IQ3 half regression exceeded 2%: {first_half_saving:.3}/{second_half_saving:.3}"
+                    );
+                }
+            } else if grouped_enabled && n_tokens == 128 && samples >= 3 {
                 assert!(
                     wall_saving >= 0.15,
                     "N=128 grouped expert wall saving {wall_saving:.3} missed 15% gate"

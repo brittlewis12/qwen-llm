@@ -298,21 +298,34 @@ GPU. Enable only on the qualified Apple M4 Max by default, retain an isolated
 rollback and capability fallback, and admit the 6,291,456-byte scratch even
 when fallback executes.
 
+The one authorized widening does not promote. A separate mapped IQ3_XXS kernel
+and exact arena proof let all 16 IQ3_XXS/IQ3_XXS/IQ3_XXS layers execute as four
+diagnostic dispatches without another allocation. Model-free stagewise and
+current-asset N=12/32/128 output/state comparisons are bit-exact. Two R5
+campaigns are rejected for control drift. The sealed balanced R8 stabilizes
+controls at 0.721% drift and observes 10.224%/16.103% half savings, but candidate
+drift is 6.050%, above the frozen 5% gate. A separate traced bracket saves 9.929%
+total packed GPU and 56.534% in the 16 affected layers while unchanged-layer GPU
+time is flat. Retain the exact test-only implementation and negative evidence;
+do not retry the same condition or build fused IQ3 gate/up.
+
 Force-ranked queue:
 
-1. **Widen grouped packed experts once.** Target the 16 current-asset
-   IQ3_XXS/IQ3_XXS/IQ3_XXS layers while retaining exact Rust routing, compact
-   expert-major tiles, fixed slot ownership, and the forced-current
-   differential. Reuse the promoted two-dispatch shape only if N=128 aggregate
-   GPU and wall savings remain material; keep the two MXFP4-down layers on the
-   old path. Do not replace bank reuse with token-slot all-slot execution or
-   reopen GPU route arithmetic.
-2. **Decide bounded selector product promotion.** Keep the qualified current
+1. **Attribute the packed pre-expert GPU span.** Split the roughly 1.057-second
+   N=128 region into attention, compressor/mHC, chronological row work, and
+   router projection before changing any kernel. Preserve one encoder and exact
+   output/state identity; choose the next optimization only from the measured
+   dominant subphase.
+2. **Attribute unchanged packed post-route work.** The 27 layers outside the
+   all-IQ3 candidate remain at roughly 688 ms in both traced arms. Separate
+   dtype mix, expert compute, and fixed dispatch overhead before attempting
+   another grouped format or fusion. Keep the two MXFP4-down layers current.
+3. **Decide bounded selector product promotion.** Keep the qualified current
    policy hidden and off by default while its device/asset scope is explicit.
    A future default or user-facing switch needs a separately reviewed product
    contract; do not repeat the 5.43 GB restore campaign absent code, device, or
    asset drift.
-3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+4. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

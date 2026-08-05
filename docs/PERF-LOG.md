@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Packed All-IQ3 Widening HOLD
+
+Status: all-IQ3 grouped execution is exact and remains test-only; production
+promotion is `HOLD`. The qualified Apple M4 Max default still groups only the 25
+IQ2_XS/IQ2_XS/IQ3_XXS layers.
+
+- Add a separate mapped IQ3_XXS projection kernel with explicit source-row and
+  destination-slot maps. Sixteen all-IQ3 layers use four diagnostic dispatches:
+  gate, up, exact clamped SwiGLU, and down/scatter.
+- Prove exact disjoint gate/up aliases in the existing output arena and reuse the
+  admitted 6,291,456-byte grouped-inner scratch. Ordinary allocation, snapshot,
+  policy, and fallback contracts do not change.
+- Model-free N=1/12/31/32/33/64/128 stagewise differentials preserve every bit
+  and guard. Current-asset N=12/32/128 candidates preserve logits, normalized
+  hidden output, restored continuation logits, state digests, and tokens exactly.
+- Two five-sample timing campaigns are rejected for 12.692% and 10.857% control
+  drift. The sealed balanced R8 stabilizes controls at 0.721% drift, but candidate
+  first/second-half drift is 6.050%, above the frozen 5% gate. No retry is
+  authorized under the same condition.
+- A separate traced bracket records a credible 9.929% incremental total packed
+  GPU saving and 56.534% in the 16 affected layers; unchanged-layer GPU time is
+  flat. This is attribution, not a balanced promotion gate.
+
+Decision: retain the exact mapped kernel, alias proof, negative campaigns, and
+test-only policy. Do not fuse IQ3 gate/up or promote the widening. Next split the
+roughly 1.057-second pre-expert GPU span, then the unchanged roughly 688 ms
+post-route span. Evidence:
+`docs/bench/2026-08-05-dsv4-packed-grouped-iq3-hold/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Packed Grouped Experts GO
 
 Status: the IQ2_XS gate/up plus IQ3_XXS down path is `GO` as the

@@ -10,7 +10,8 @@ use qwen_llm::deepseek_v4_metal::{
 };
 #[cfg(feature = "dsv4-diagnostics")]
 use qwen_llm::deepseek_v4_metal::{
-    DeepSeekV4DecisionTranscript, DeepSeekV4Fp4ShadowEligibility, DeepSeekV4Fp4ShadowExecution,
+    DeepSeekV4DecisionTranscript, DeepSeekV4Fp4ScoreDispatchLedger, DeepSeekV4Fp4ScorePlanKind,
+    DeepSeekV4Fp4SelectionSource, DeepSeekV4Fp4ShadowEligibility, DeepSeekV4Fp4ShadowExecution,
     DeepSeekV4Fp4ShadowReport, deepseek_v4_diagnostics_metallib_sha256,
 };
 use qwen_llm::gguf::GgufFile;
@@ -1363,6 +1364,7 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
     const MAX_LOGIT_RELATIVE_RMS: f64 = 0.001;
     const MAX_LOGIT_ABSOLUTE_ERROR: f32 = 0.01;
     const MAX_CONTROL_GPU_DRIFT: f64 = 0.05;
+    const MIN_NO_DOUBLE_SCORE_GPU_SAVING_MS: f64 = 1.0;
 
     fn sha256_hex(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
@@ -1446,6 +1448,23 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
             .to_owned()
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RunMode {
+        F16Observer,
+        PairedCounterfactual,
+        Fp4OnlyExperimental,
+    }
+
+    impl RunMode {
+        fn is_counterfactual(self) -> bool {
+            self != Self::F16Observer
+        }
+
+        fn is_fp4_only(self) -> bool {
+            self == Self::Fp4OnlyExperimental
+        }
+    }
+
     struct Run {
         committed_tokens: Vec<u32>,
         packed_logits: Vec<f32>,
@@ -1460,9 +1479,17 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
         singleton_counterfactual_domain_digest: Option<[u8; 32]>,
         singleton_selection_trace_digest: Option<[u8; 32]>,
         singleton_consumed_layer_count: u64,
+        final_logits: Vec<f32>,
+        final_causal_digest: [u8; 32],
+        final_counterfactual_domain_digest: Option<[u8; 32]>,
+        final_selection_trace_digest: Option<[u8; 32]>,
+        final_consumed_layer_count: u64,
         singleton_decisions: DeepSeekV4DecisionTranscript,
         packed_fp4: Option<DeepSeekV4Fp4ShadowReport>,
         singleton_fp4: Option<DeepSeekV4Fp4ShadowReport>,
+        packed_score_ledger: DeepSeekV4Fp4ScoreDispatchLedger,
+        singleton_score_ledger: DeepSeekV4Fp4ScoreDispatchLedger,
+        repeated_score_ledgers: Vec<DeepSeekV4Fp4ScoreDispatchLedger>,
         after_session_bytes: u64,
         after_first_forward_bytes: u64,
         prefix_ms: f64,
@@ -1480,25 +1507,31 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
         prefix: &[u32],
         final_four: &[u32],
         timing_tokens: &[u32],
-        observe_fp4: bool,
-        replace_selection: bool,
+        mode: RunMode,
+        capture_repeated_reports: bool,
         restore_probe: Option<&DeepSeekV4CausalSnapshot>,
         retain_restore_probe: bool,
     ) -> (DeepSeekV4MetalResidency, Run) {
+        assert!(
+            !mode.is_fp4_only() || !capture_repeated_reports,
+            "FP4-only timing positions must remain unaudited"
+        );
         let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
             ctx,
             residency,
             model_content_id,
         )
         .expect("construct current-asset FP4 observer session");
-        if replace_selection {
-            session
-                .enable_fp4_shadow_selection_counterfactual()
-                .expect("enable FP4 selection counterfactual at position zero");
-        } else if observe_fp4 {
-            session
+        match mode {
+            RunMode::F16Observer => session
                 .enable_fp4_shadow_lineage()
-                .expect("enable FP4 sidecar lineage at position zero");
+                .expect("enable FP4 sidecar lineage at position zero"),
+            RunMode::PairedCounterfactual => session
+                .enable_fp4_shadow_selection_counterfactual()
+                .expect("enable paired FP4 selection counterfactual"),
+            RunMode::Fp4OnlyExperimental => session
+                .enable_fp4_no_double_score_experiment()
+                .expect("enable FP4-only score experiment"),
         }
         if let Some(snapshot) = restore_probe {
             let error = session.restore_causal_snapshot(snapshot).unwrap_err();
@@ -1518,7 +1551,7 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
         assert_eq!(session.next_position(), 2_048);
         let prefix_ms = prefix_started.elapsed().as_secs_f64() * 1e3;
 
-        if observe_fp4 {
+        if !mode.is_fp4_only() {
             session
                 .arm_fp4_shadow_report(PACKED_POSITION)
                 .expect("arm packed FP4 observer");
@@ -1531,11 +1564,14 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
         let packed_logits = session
             .copy_logits_f32()
             .expect("copy first-sparse packed logits");
-        let packed_fp4 = observe_fp4.then(|| {
+        let packed_fp4 = (!mode.is_fp4_only()).then(|| {
             session
                 .take_fp4_shadow_report()
                 .expect("take packed FP4 observer report")
         });
+        let packed_score_ledger = session
+            .take_fp4_score_dispatch_ledger()
+            .expect("take packed FP4 score dispatch ledger");
         let (
             packed_prefix_digest,
             packed_causal_digest,
@@ -1543,7 +1579,7 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
             packed_selection_trace_digest,
             packed_consumed_layer_count,
             retained_restore_probe,
-        ) = if replace_selection {
+        ) = if mode.is_counterfactual() {
             assert!(
                 session
                     .capture_causal_snapshot()
@@ -1578,10 +1614,14 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
             )
         };
 
-        session
-            .arm_decision_transcript(SINGLETON_POSITION)
-            .expect("arm authoritative singleton decisions");
-        if observe_fp4 {
+        if mode.is_fp4_only() {
+            session
+                .arm_fp4_paired_singleton_audit(SINGLETON_POSITION)
+                .expect("arm paired audit inside FP4-only experiment");
+        } else {
+            session
+                .arm_decision_transcript(SINGLETON_POSITION)
+                .expect("arm authoritative singleton decisions");
             session
                 .arm_fp4_shadow_report(SINGLETON_POSITION)
                 .expect("arm singleton FP4 observer");
@@ -1592,11 +1632,14 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
         let singleton_logits = session
             .copy_logits_f32()
             .expect("copy singleton FP4 comparison logits");
-        let singleton_fp4 = observe_fp4.then(|| {
+        let singleton_fp4 = Some(
             session
                 .take_fp4_shadow_report()
-                .expect("take singleton FP4 observer report")
-        });
+                .expect("take singleton FP4 observer report"),
+        );
+        let singleton_score_ledger = session
+            .take_fp4_score_dispatch_ledger()
+            .expect("take singleton FP4 score dispatch ledger");
         let singleton_decisions = session
             .take_decision_transcript()
             .expect("take authoritative singleton decisions");
@@ -1606,7 +1649,7 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
             singleton_counterfactual_domain_digest,
             singleton_selection_trace_digest,
             singleton_consumed_layer_count,
-        ) = if replace_selection {
+        ) = if mode.is_counterfactual() {
             let digest = session
                 .fp4_counterfactual_state_digest()
                 .expect("digest singleton counterfactual state");
@@ -1632,27 +1675,62 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
         };
 
         let mut repeated_singleton_gpu_ms = Vec::with_capacity(timing_tokens.len());
+        let mut repeated_score_ledgers = Vec::with_capacity(timing_tokens.len());
         for &token in timing_tokens {
             let position = session.next_position();
-            session
-                .arm_fp4_shadow_report(position)
-                .expect("arm repeated FP4 timing report");
+            if capture_repeated_reports {
+                session
+                    .arm_fp4_shadow_report(position)
+                    .expect("arm repeated FP4 timing report");
+            }
             let profile = session
                 .forward_token_profiled(ctx, token)
                 .expect("execute repeated FP4 timing token");
-            let report = session
-                .take_fp4_shadow_report()
-                .expect("take repeated FP4 timing report");
-            assert_eq!(report.position, position);
-            assert_eq!(report.layers.len(), 21);
-            assert!(report.layers.iter().all(|layer| {
-                layer.eligibility == DeepSeekV4Fp4ShadowEligibility::Ready
-                    && layer.shadow.is_some()
-                    && layer.shadow_selection_status == 0
-                    && layer.shadow_selected_count == 512
-            }));
+            if capture_repeated_reports {
+                let report = session
+                    .take_fp4_shadow_report()
+                    .expect("take repeated FP4 timing report");
+                assert_eq!(report.position, position);
+                assert_eq!(report.layers.len(), 21);
+                assert!(report.layers.iter().all(|layer| {
+                    layer.eligibility == DeepSeekV4Fp4ShadowEligibility::Ready
+                        && layer.shadow.is_some()
+                        && layer.shadow_selection_status == 0
+                        && layer.shadow_selected_count == 512
+                }));
+            }
+            repeated_score_ledgers.push(
+                session
+                    .take_fp4_score_dispatch_ledger()
+                    .expect("take repeated FP4 score dispatch ledger"),
+            );
             repeated_singleton_gpu_ms.push(profile.command_gpu_ms());
         }
+
+        let final_logits = session
+            .copy_logits_f32()
+            .expect("copy final repeated FP4 logits");
+        let (
+            final_causal_digest,
+            final_counterfactual_domain_digest,
+            final_selection_trace_digest,
+            final_consumed_layer_count,
+        ) = if mode.is_counterfactual() {
+            let digest = session
+                .fp4_counterfactual_state_digest()
+                .expect("digest final repeated counterfactual state");
+            (
+                digest.state_digest,
+                Some(digest.counterfactual_domain_digest),
+                Some(digest.selection_trace_digest),
+                digest.consumed_layer_count,
+            )
+        } else {
+            let snapshot = session
+                .capture_causal_snapshot()
+                .expect("capture final repeated observer state");
+            (*snapshot.causal_digest(), None, None, 0)
+        };
 
         let run = Run {
             committed_tokens: session.committed_tokens().to_vec(),
@@ -1668,9 +1746,17 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
             singleton_counterfactual_domain_digest,
             singleton_selection_trace_digest,
             singleton_consumed_layer_count,
+            final_logits,
+            final_causal_digest,
+            final_counterfactual_domain_digest,
+            final_selection_trace_digest,
+            final_consumed_layer_count,
             singleton_decisions,
             packed_fp4,
             singleton_fp4,
+            packed_score_ledger,
+            singleton_score_ledger,
+            repeated_score_ledgers,
             after_session_bytes,
             after_first_forward_bytes: after_first_forward_bytes
                 .expect("prefix executes at least one packed forward"),
@@ -1755,6 +1841,41 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
                 );
             }
         }
+    }
+
+    fn assert_score_ledger(
+        label: &str,
+        ledger: &DeepSeekV4Fp4ScoreDispatchLedger,
+        expected_execution: DeepSeekV4Fp4ShadowExecution,
+        expected_position: u32,
+        expected_plan: DeepSeekV4Fp4ScorePlanKind,
+        expected_source: DeepSeekV4Fp4SelectionSource,
+    ) {
+        assert_eq!(ledger.schema_version, 1, "{label} schema");
+        assert_eq!(ledger.execution, expected_execution, "{label} execution");
+        assert_eq!(ledger.position, expected_position, "{label} position");
+        assert_eq!(ledger.plan, expected_plan, "{label} plan");
+        assert_eq!(ledger.consumed_source, expected_source, "{label} source");
+        assert_eq!(ledger.sparse_layer_count, 21, "{label} sparse layers");
+        assert_eq!(ledger.common_prepare_invocations, 21, "{label} prepare");
+        let expected_f16 = if expected_plan == DeepSeekV4Fp4ScorePlanKind::Fp4Only {
+            0
+        } else {
+            21
+        };
+        let expected_fp4 = if expected_plan == DeepSeekV4Fp4ScorePlanKind::F16Only {
+            0
+        } else {
+            21
+        };
+        assert_eq!(
+            ledger.f16_score_selector_pipeline_invocations, expected_f16,
+            "{label} F16 score/selector pipeline"
+        );
+        assert_eq!(
+            ledger.fp4_pipeline_invocations, expected_fp4,
+            "{label} FP4 pipeline"
+        );
     }
 
     struct LogitDelta {
@@ -1856,8 +1977,8 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
             &prefix,
             &final_four,
             &timing_tokens,
+            RunMode::F16Observer,
             true,
-            false,
             None,
             false,
         );
@@ -1940,6 +2061,361 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
         return;
     }
 
+    if std::env::var_os("DSV4_FP4_NO_DOUBLE_SCORE").is_some() {
+        let (residency, paired_a) = execute(
+            &ctx,
+            residency,
+            model_content_id,
+            &prefix,
+            &final_four,
+            &timing_tokens,
+            RunMode::PairedCounterfactual,
+            false,
+            None,
+            false,
+        );
+        let (residency, fp4_only) = execute(
+            &ctx,
+            residency,
+            model_content_id,
+            &prefix,
+            &final_four,
+            &timing_tokens,
+            RunMode::Fp4OnlyExperimental,
+            false,
+            None,
+            false,
+        );
+        let (_residency, paired_b) = execute(
+            &ctx,
+            residency,
+            model_content_id,
+            &prefix,
+            &final_four,
+            &timing_tokens,
+            RunMode::PairedCounterfactual,
+            false,
+            None,
+            false,
+        );
+
+        for (label, run) in [
+            ("paired-a", &paired_a),
+            ("fp4-only", &fp4_only),
+            ("paired-b", &paired_b),
+        ] {
+            assert_eq!(run.committed_tokens, expected_tokens, "{label} tokens");
+            memory_plan
+                .reconcile(qwen_llm::deepseek_v4_metal::DeepSeekV4MemorySamples {
+                    before_residency_bytes,
+                    after_residency_bytes,
+                    after_session_bytes: run.after_session_bytes,
+                    after_first_forward_bytes: run.after_first_forward_bytes,
+                })
+                .unwrap_or_else(|error| panic!("{label} memory reconciliation: {error}"));
+        }
+
+        assert_f32_bits_equal(
+            "paired controls packed logits",
+            &paired_a.packed_logits,
+            &paired_b.packed_logits,
+        );
+        assert_f32_bits_equal(
+            "FP4-only packed logits",
+            &paired_a.packed_logits,
+            &fp4_only.packed_logits,
+        );
+        assert_f32_bits_equal(
+            "paired controls singleton logits",
+            &paired_a.singleton_logits,
+            &paired_b.singleton_logits,
+        );
+        assert_f32_bits_equal(
+            "FP4-only singleton logits",
+            &paired_a.singleton_logits,
+            &fp4_only.singleton_logits,
+        );
+        assert_f32_bits_equal(
+            "paired controls final logits",
+            &paired_a.final_logits,
+            &paired_b.final_logits,
+        );
+        assert_f32_bits_equal(
+            "FP4-only final logits",
+            &paired_a.final_logits,
+            &fp4_only.final_logits,
+        );
+        assert_eq!(paired_a.packed_causal_digest, paired_b.packed_causal_digest);
+        assert_eq!(paired_a.packed_causal_digest, fp4_only.packed_causal_digest);
+        assert_eq!(
+            paired_a.singleton_causal_digest,
+            paired_b.singleton_causal_digest
+        );
+        assert_eq!(
+            paired_a.singleton_causal_digest,
+            fp4_only.singleton_causal_digest
+        );
+        assert_eq!(paired_a.final_causal_digest, paired_b.final_causal_digest);
+        assert_eq!(paired_a.final_causal_digest, fp4_only.final_causal_digest);
+        assert_eq!(
+            paired_a.packed_selection_trace_digest,
+            paired_b.packed_selection_trace_digest
+        );
+        assert_eq!(
+            paired_a.packed_selection_trace_digest,
+            fp4_only.packed_selection_trace_digest
+        );
+        assert_eq!(
+            paired_a.singleton_selection_trace_digest,
+            paired_b.singleton_selection_trace_digest
+        );
+        assert_eq!(
+            paired_a.singleton_selection_trace_digest,
+            fp4_only.singleton_selection_trace_digest
+        );
+        assert_eq!(
+            paired_a.final_selection_trace_digest,
+            paired_b.final_selection_trace_digest
+        );
+        assert_eq!(
+            paired_a.final_selection_trace_digest,
+            fp4_only.final_selection_trace_digest
+        );
+        assert_eq!(
+            paired_a.final_counterfactual_domain_digest,
+            paired_b.final_counterfactual_domain_digest
+        );
+        assert_eq!(
+            paired_a.final_counterfactual_domain_digest,
+            fp4_only.final_counterfactual_domain_digest
+        );
+        assert_eq!(paired_a.packed_consumed_layer_count, 21);
+        assert_eq!(fp4_only.packed_consumed_layer_count, 21);
+        assert_eq!(paired_a.singleton_consumed_layer_count, 42);
+        assert_eq!(fp4_only.singleton_consumed_layer_count, 42);
+        assert_eq!(paired_a.final_consumed_layer_count, 210);
+        assert_eq!(fp4_only.final_consumed_layer_count, 210);
+        assert_eq!(paired_a.singleton_decisions, paired_b.singleton_decisions);
+        assert_eq!(paired_a.singleton_decisions, fp4_only.singleton_decisions);
+        assert_eq!(paired_a.packed_fp4, paired_b.packed_fp4);
+        assert!(fp4_only.packed_fp4.is_none());
+        assert_eq!(paired_a.singleton_fp4, paired_b.singleton_fp4);
+        assert_eq!(paired_a.singleton_fp4, fp4_only.singleton_fp4);
+
+        for (label, run) in [("paired-a", &paired_a), ("paired-b", &paired_b)] {
+            assert_score_ledger(
+                &format!("{label} packed"),
+                &run.packed_score_ledger,
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                PACKED_POSITION,
+                DeepSeekV4Fp4ScorePlanKind::Paired,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            );
+            assert_score_ledger(
+                &format!("{label} singleton"),
+                &run.singleton_score_ledger,
+                DeepSeekV4Fp4ShadowExecution::Singleton,
+                SINGLETON_POSITION,
+                DeepSeekV4Fp4ScorePlanKind::Paired,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            );
+            for (offset, ledger) in run.repeated_score_ledgers.iter().enumerate() {
+                assert_score_ledger(
+                    &format!("{label} repeated"),
+                    ledger,
+                    DeepSeekV4Fp4ShadowExecution::Singleton,
+                    SINGLETON_POSITION + 1 + u32::try_from(offset).unwrap(),
+                    DeepSeekV4Fp4ScorePlanKind::Paired,
+                    DeepSeekV4Fp4SelectionSource::Fp4,
+                );
+            }
+        }
+        assert_score_ledger(
+            "FP4-only packed",
+            &fp4_only.packed_score_ledger,
+            DeepSeekV4Fp4ShadowExecution::Packed,
+            PACKED_POSITION,
+            DeepSeekV4Fp4ScorePlanKind::Fp4Only,
+            DeepSeekV4Fp4SelectionSource::Fp4,
+        );
+        assert_score_ledger(
+            "FP4-only paired singleton audit",
+            &fp4_only.singleton_score_ledger,
+            DeepSeekV4Fp4ShadowExecution::Singleton,
+            SINGLETON_POSITION,
+            DeepSeekV4Fp4ScorePlanKind::Paired,
+            DeepSeekV4Fp4SelectionSource::Fp4,
+        );
+        for (offset, ledger) in fp4_only.repeated_score_ledgers.iter().enumerate() {
+            assert_score_ledger(
+                "FP4-only repeated",
+                ledger,
+                DeepSeekV4Fp4ShadowExecution::Singleton,
+                SINGLETON_POSITION + 1 + u32::try_from(offset).unwrap(),
+                DeepSeekV4Fp4ScorePlanKind::Fp4Only,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            );
+        }
+
+        let paired_a_median = median(&paired_a.repeated_singleton_gpu_ms);
+        let fp4_only_median = median(&fp4_only.repeated_singleton_gpu_ms);
+        let paired_b_median = median(&paired_b.repeated_singleton_gpu_ms);
+        let paired_midpoint = (paired_a_median + paired_b_median) * 0.5;
+        let control_gap_ms = (paired_a_median - paired_b_median).abs();
+        let control_drift = control_gap_ms / paired_midpoint;
+        let midpoint_saving_ms = paired_midpoint - fp4_only_median;
+        let worst_control_saving_ms = paired_a_median.min(paired_b_median) - fp4_only_median;
+        assert!(
+            control_drift <= MAX_CONTROL_GPU_DRIFT,
+            "paired control GPU drift is {:.2}%",
+            control_drift * 100.0
+        );
+        assert!(
+            fp4_only_median < paired_a_median.min(paired_b_median),
+            "FP4-only median {fp4_only_median:.3} ms does not beat both paired controls {paired_a_median:.3}/{paired_b_median:.3} ms"
+        );
+        assert!(
+            worst_control_saving_ms >= MIN_NO_DOUBLE_SCORE_GPU_SAVING_MS,
+            "FP4-only worst-control saving {worst_control_saving_ms:.3} ms misses {:.3} ms gate",
+            MIN_NO_DOUBLE_SCORE_GPU_SAVING_MS
+        );
+
+        let token_sha256_u32_le = {
+            let mut hasher = Sha256::new();
+            for token in &expected_tokens {
+                hasher.update(token.to_le_bytes());
+            }
+            format!("{:x}", hasher.finalize())
+        };
+        let executable_path = std::env::current_exe().expect("resolve no-double-score executable");
+        let (executable_sha256, executable_bytes) = file_sha256(&executable_path);
+        let rustc_identity = command_identity("rustc", &["--version", "--verbose"]);
+        let metal_compiler_identity =
+            command_identity("xcrun", &["-sdk", "macosx", "metal", "--version"]);
+        let macos_sdk_version =
+            command_identity("xcrun", &["--sdk", "macosx", "--show-sdk-version"]);
+
+        let packet = serde_json::json!({
+            "schema_version": 2,
+            "result": "pass",
+            "mode": "fp4_no_double_score_falsifier",
+            "asset_id": "deepseek-v4-flash-0731-ud-iq3_xxs-current-2026-08-04",
+            "model_content_id_blake3": hex(model_content_id.as_bytes()),
+            "implementation": {
+                "source_base_git_commit": "cdf4e0a570989c9f4c9f0fc8e125ba1b3de2a1e0",
+                "campaign_source_sha256": campaign_source_sha256(),
+                "kernel_source_sha256": sha256_hex(include_bytes!("../../../kernels/deepseek_v4.metal")),
+                "embedded_metallib_sha256": hex(&deepseek_v4_diagnostics_metallib_sha256()),
+                "test_executable_sha256": executable_sha256,
+                "test_executable_bytes": executable_bytes,
+                "cargo_package_version": env!("CARGO_PKG_VERSION"),
+                "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+                "features": ["dsv4-diagnostics"],
+            },
+            "environment": {
+                "device_name": ctx.device.name().to_string(),
+                "device_registry_id": ctx.device.registryID(),
+                "target_arch": std::env::consts::ARCH,
+                "target_os": std::env::consts::OS,
+                "rustc": rustc_identity,
+                "metal_compiler": metal_compiler_identity,
+                "macos_sdk_version": macos_sdk_version,
+            },
+            "request": {
+                "forward_limit": FORWARD_LIMIT,
+                "token_sha256_u32_le": token_sha256_u32_le,
+                "packed_position": PACKED_POSITION,
+                "singleton_audit_position": SINGLETON_POSITION,
+                "timing_positions": [SINGLETON_POSITION + 1, FORWARD_LIMIT as u32 - 1],
+            },
+            "memory": {
+                "residency_logical_bytes": memory_plan.residency_logical_bytes(),
+                "residency_priced_upper_bytes": memory_plan.residency_priced_upper_bytes(),
+                "session_logical_bytes": memory_plan.session_logical_bytes(),
+                "session_priced_upper_bytes": memory_plan.session_priced_upper_bytes(),
+                "required_with_reserve_bytes": memory_plan.required_with_reserve_bytes().unwrap(),
+            },
+            "acceptance_gates": {
+                "paired_fp4_only_exact": true,
+                "maximum_control_gpu_drift": MAX_CONTROL_GPU_DRIFT,
+                "minimum_no_double_score_gpu_saving_ms": MIN_NO_DOUBLE_SCORE_GPU_SAVING_MS,
+            },
+            "logit_sha256_f32_le": {
+                "paired_a_packed": f32_sha256(&paired_a.packed_logits),
+                "fp4_only_packed": f32_sha256(&fp4_only.packed_logits),
+                "paired_b_packed": f32_sha256(&paired_b.packed_logits),
+                "paired_a_singleton_audit": f32_sha256(&paired_a.singleton_logits),
+                "fp4_only_singleton_audit": f32_sha256(&fp4_only.singleton_logits),
+                "paired_b_singleton_audit": f32_sha256(&paired_b.singleton_logits),
+                "paired_a_final": f32_sha256(&paired_a.final_logits),
+                "fp4_only_final": f32_sha256(&fp4_only.final_logits),
+                "paired_b_final": f32_sha256(&paired_b.final_logits),
+            },
+            "state_digest": {
+                "paired_a_packed": hex(&paired_a.packed_causal_digest),
+                "fp4_only_packed": hex(&fp4_only.packed_causal_digest),
+                "paired_b_packed": hex(&paired_b.packed_causal_digest),
+                "paired_a_singleton_audit": hex(&paired_a.singleton_causal_digest),
+                "fp4_only_singleton_audit": hex(&fp4_only.singleton_causal_digest),
+                "paired_b_singleton_audit": hex(&paired_b.singleton_causal_digest),
+                "paired_a_final": hex(&paired_a.final_causal_digest),
+                "fp4_only_final": hex(&fp4_only.final_causal_digest),
+                "paired_b_final": hex(&paired_b.final_causal_digest),
+                "packed_trace": hex(fp4_only.packed_selection_trace_digest.as_ref().unwrap()),
+                "singleton_trace": hex(fp4_only.singleton_selection_trace_digest.as_ref().unwrap()),
+                "final_trace": hex(fp4_only.final_selection_trace_digest.as_ref().unwrap()),
+                "final_counterfactual_domain": hex(fp4_only.final_counterfactual_domain_digest.as_ref().unwrap()),
+                "final_consumed_layers": fp4_only.final_consumed_layer_count,
+            },
+            "dispatch_ledgers": {
+                "paired_packed": &paired_a.packed_score_ledger,
+                "fp4_only_packed": &fp4_only.packed_score_ledger,
+                "paired_singleton": &paired_a.singleton_score_ledger,
+                "fp4_only_singleton_audit": &fp4_only.singleton_score_ledger,
+                "paired_repeated": &paired_a.repeated_score_ledgers,
+                "fp4_only_repeated": &fp4_only.repeated_score_ledgers,
+                "paired_b_packed": &paired_b.packed_score_ledger,
+                "paired_b_singleton": &paired_b.singleton_score_ledger,
+                "paired_b_repeated": &paired_b.repeated_score_ledgers,
+            },
+            "timings_ms": {
+                "paired_a_gpu": &paired_a.repeated_singleton_gpu_ms,
+                "paired_a_gpu_median": paired_a_median,
+                "fp4_only_gpu": &fp4_only.repeated_singleton_gpu_ms,
+                "fp4_only_gpu_median": fp4_only_median,
+                "paired_b_gpu": &paired_b.repeated_singleton_gpu_ms,
+                "paired_b_gpu_median": paired_b_median,
+                "paired_control_midpoint": paired_midpoint,
+                "paired_control_gap": control_gap_ms,
+                "paired_control_drift": control_drift,
+                "no_double_score_midpoint_saving": midpoint_saving_ms,
+                "no_double_score_worst_control_saving": worst_control_saving_ms,
+            },
+            "paired_singleton_audit_report": fp4_only.singleton_fp4.as_ref().unwrap(),
+        });
+        let packet_path = std::env::var_os("DSV4_FP4_PACKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("target/dsv4-current-fp4-no-double-score.json")
+            });
+        if let Some(parent) = packet_path.parent() {
+            std::fs::create_dir_all(parent).expect("create no-double-score packet directory");
+        }
+        std::fs::write(
+            &packet_path,
+            serde_json::to_vec_pretty(&packet).expect("serialize no-double-score packet"),
+        )
+        .expect("write no-double-score packet");
+        eprintln!(
+            "deepseek_v4 FP4 no-double-score paired={paired_a_median:.3}/{paired_b_median:.3}ms candidate={fp4_only_median:.3}ms midpoint_saving={midpoint_saving_ms:.3}ms worst_saving={worst_control_saving_ms:.3}ms drift={:.3}% packet={}",
+            control_drift * 100.0,
+            packet_path.display(),
+        );
+        return;
+    }
+
     let (residency, control_a) = execute(
         &ctx,
         residency,
@@ -1947,8 +2423,8 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
         &prefix,
         &final_four,
         &timing_tokens,
+        RunMode::F16Observer,
         true,
-        false,
         None,
         true,
     );
@@ -1959,7 +2435,7 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
         &prefix,
         &final_four,
         &timing_tokens,
-        true,
+        RunMode::PairedCounterfactual,
         true,
         control_a.restore_probe.as_ref(),
         false,
@@ -1971,8 +2447,8 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
         &prefix,
         &final_four,
         &timing_tokens,
+        RunMode::F16Observer,
         true,
-        false,
         None,
         false,
     );

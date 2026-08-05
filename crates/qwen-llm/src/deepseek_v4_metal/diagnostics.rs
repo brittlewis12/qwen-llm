@@ -62,6 +62,115 @@ pub enum DeepSeekV4Fp4ShadowExecution {
     Singleton,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeepSeekV4Fp4SelectionSource {
+    F16,
+    Fp4,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeepSeekV4Fp4ScorePlanKind {
+    F16Only,
+    Fp4Only,
+    Paired,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DeepSeekV4Fp4ScoreDispatchLedger {
+    pub schema_version: u32,
+    pub execution: DeepSeekV4Fp4ShadowExecution,
+    pub position: u32,
+    pub plan: DeepSeekV4Fp4ScorePlanKind,
+    pub consumed_source: DeepSeekV4Fp4SelectionSource,
+    pub sparse_layer_count: u32,
+    pub common_prepare_invocations: u32,
+    pub f16_score_selector_pipeline_invocations: u32,
+    pub fp4_pipeline_invocations: u32,
+}
+
+impl DeepSeekV4Fp4ScoreDispatchLedger {
+    pub(crate) fn new(
+        execution: DeepSeekV4Fp4ShadowExecution,
+        position: u32,
+        plan: DeepSeekV4Fp4ScorePlanKind,
+        consumed_source: DeepSeekV4Fp4SelectionSource,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            execution,
+            position,
+            plan,
+            consumed_source,
+            sparse_layer_count: 0,
+            common_prepare_invocations: 0,
+            f16_score_selector_pipeline_invocations: 0,
+            fp4_pipeline_invocations: 0,
+        }
+    }
+
+    fn increment(value: &mut u32) -> Result<(), DeepSeekV4DiagnosticsError> {
+        *value = value.checked_add(1).ok_or_else(|| {
+            DeepSeekV4DiagnosticsError::Shape("FP4 score dispatch count overflow".into())
+        })?;
+        Ok(())
+    }
+
+    pub(crate) fn record_common_prepare(&mut self) -> Result<(), DeepSeekV4DiagnosticsError> {
+        Self::increment(&mut self.sparse_layer_count)?;
+        Self::increment(&mut self.common_prepare_invocations)
+    }
+
+    pub(crate) fn record_f16_score_and_selector(
+        &mut self,
+    ) -> Result<(), DeepSeekV4DiagnosticsError> {
+        Self::increment(&mut self.f16_score_selector_pipeline_invocations)
+    }
+
+    pub(crate) fn record_fp4_pipeline(&mut self) -> Result<(), DeepSeekV4DiagnosticsError> {
+        Self::increment(&mut self.fp4_pipeline_invocations)
+    }
+
+    pub(crate) fn validate_completed(&self) -> Result<(), DeepSeekV4DiagnosticsError> {
+        let layers = self.sparse_layer_count;
+        let f16 = match self.plan {
+            DeepSeekV4Fp4ScorePlanKind::F16Only | DeepSeekV4Fp4ScorePlanKind::Paired => layers,
+            DeepSeekV4Fp4ScorePlanKind::Fp4Only => 0,
+        };
+        let fp4 = match self.plan {
+            DeepSeekV4Fp4ScorePlanKind::F16Only => 0,
+            DeepSeekV4Fp4ScorePlanKind::Fp4Only | DeepSeekV4Fp4ScorePlanKind::Paired => layers,
+        };
+        let actual = [
+            self.common_prepare_invocations,
+            self.f16_score_selector_pipeline_invocations,
+            self.fp4_pipeline_invocations,
+        ];
+        let expected = [layers, f16, fp4];
+        if actual != expected {
+            return Err(DeepSeekV4DiagnosticsError::Shape(format!(
+                "FP4 score dispatch ledger {actual:?} differs from {expected:?}"
+            )));
+        }
+        let source_valid = match self.plan {
+            DeepSeekV4Fp4ScorePlanKind::F16Only => {
+                self.consumed_source == DeepSeekV4Fp4SelectionSource::F16
+            }
+            DeepSeekV4Fp4ScorePlanKind::Fp4Only => {
+                self.consumed_source == DeepSeekV4Fp4SelectionSource::Fp4
+            }
+            DeepSeekV4Fp4ScorePlanKind::Paired => true,
+        };
+        if !source_valid {
+            return Err(DeepSeekV4DiagnosticsError::Shape(
+                "FP4 score plan and consumed source disagree".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DeepSeekV4Fp4ShadowEligibility {
@@ -122,7 +231,7 @@ pub(crate) struct DeepSeekV4Fp4CounterfactualTrace {
 impl Default for DeepSeekV4Fp4CounterfactualTrace {
     fn default() -> Self {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"qwen-dsv4-fp4-selection-trace-v2\0");
+        hasher.update(b"qwen-dsv4-fp4-selection-trace-v3\0");
         Self {
             hasher,
             consumed_layer_count: 0,
@@ -134,6 +243,7 @@ impl DeepSeekV4Fp4CounterfactualTrace {
     pub(crate) fn record(
         &mut self,
         execution: DeepSeekV4Fp4ShadowExecution,
+        source: DeepSeekV4Fp4SelectionSource,
         position: u32,
         layer: usize,
         visible_count: i32,
@@ -152,6 +262,10 @@ impl DeepSeekV4Fp4CounterfactualTrace {
         self.hasher.update(&[match execution {
             DeepSeekV4Fp4ShadowExecution::Packed => 0,
             DeepSeekV4Fp4ShadowExecution::Singleton => 1,
+        }]);
+        self.hasher.update(&[match source {
+            DeepSeekV4Fp4SelectionSource::F16 => 0,
+            DeepSeekV4Fp4SelectionSource::Fp4 => 1,
         }]);
         self.hasher.update(&position.to_le_bytes());
         self.hasher.update(&(layer as u32).to_le_bytes());
@@ -237,8 +351,12 @@ impl DeepSeekV4Fp4ShadowCapture {
         self.state = Fp4ShadowCaptureState::Idle;
     }
 
-    pub(crate) fn arm(
-        &mut self,
+    pub(crate) fn lineage_enabled(&self) -> bool {
+        self.lineage_enabled
+    }
+
+    pub(crate) fn validate_arm(
+        &self,
         current_position: u32,
         position: u32,
     ) -> Result<(), DeepSeekV4DiagnosticsError> {
@@ -260,6 +378,15 @@ impl DeepSeekV4Fp4ShadowCapture {
         if !matches!(self.state, Fp4ShadowCaptureState::Idle) {
             return Err(DeepSeekV4DiagnosticsError::Fp4ShadowDuplicate);
         }
+        Ok(())
+    }
+
+    pub(crate) fn arm(
+        &mut self,
+        current_position: u32,
+        position: u32,
+    ) -> Result<(), DeepSeekV4DiagnosticsError> {
+        self.validate_arm(current_position, position)?;
         self.state = Fp4ShadowCaptureState::Armed { position };
         Ok(())
     }
@@ -421,7 +548,7 @@ impl DeepSeekV4DecisionCapture {
         matches!(self.state, CaptureState::Capturing { .. })
     }
 
-    pub(crate) fn arm(&mut self, position: u32) -> Result<(), DeepSeekV4DiagnosticsError> {
+    pub(crate) fn validate_arm(&self, position: u32) -> Result<(), DeepSeekV4DiagnosticsError> {
         if position < FIRST_SPARSE_CSA_POSITION {
             return Err(DeepSeekV4DiagnosticsError::SparseSelectionUnavailable {
                 minimum: FIRST_SPARSE_CSA_POSITION,
@@ -431,6 +558,11 @@ impl DeepSeekV4DecisionCapture {
         if !matches!(self.state, CaptureState::Idle) {
             return Err(DeepSeekV4DiagnosticsError::DuplicateCapture);
         }
+        Ok(())
+    }
+
+    pub(crate) fn arm(&mut self, position: u32) -> Result<(), DeepSeekV4DiagnosticsError> {
+        self.validate_arm(position)?;
         self.state = CaptureState::Armed { position };
         Ok(())
     }
@@ -1238,38 +1370,117 @@ mod tests {
         let ids = (0..512).collect::<Vec<_>>();
         let mut first = DeepSeekV4Fp4CounterfactualTrace::default();
         first
-            .record(DeepSeekV4Fp4ShadowExecution::Packed, 2_051, 2, 513, &ids)
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                2,
+                513,
+                &ids,
+            )
             .unwrap();
         first
-            .record(DeepSeekV4Fp4ShadowExecution::Packed, 2_051, 4, 513, &ids)
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                4,
+                513,
+                &ids,
+            )
             .unwrap();
         let mut repeat = DeepSeekV4Fp4CounterfactualTrace::default();
         repeat
-            .record(DeepSeekV4Fp4ShadowExecution::Packed, 2_051, 2, 513, &ids)
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                2,
+                513,
+                &ids,
+            )
             .unwrap();
         repeat
-            .record(DeepSeekV4Fp4ShadowExecution::Packed, 2_051, 4, 513, &ids)
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                4,
+                513,
+                &ids,
+            )
             .unwrap();
         assert_eq!(first.digest(), repeat.digest());
         assert_eq!(first.digest().1, 2);
 
         let mut changed = DeepSeekV4Fp4CounterfactualTrace::default();
         changed
-            .record(DeepSeekV4Fp4ShadowExecution::Packed, 2_052, 2, 513, &ids)
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_052,
+                2,
+                513,
+                &ids,
+            )
             .unwrap();
         changed
-            .record(DeepSeekV4Fp4ShadowExecution::Packed, 2_051, 4, 513, &ids)
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                4,
+                513,
+                &ids,
+            )
             .unwrap();
         assert_ne!(first.digest().0, changed.digest().0);
 
         let mut changed_execution = DeepSeekV4Fp4CounterfactualTrace::default();
         changed_execution
-            .record(DeepSeekV4Fp4ShadowExecution::Singleton, 2_051, 2, 513, &ids)
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Singleton,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                2,
+                513,
+                &ids,
+            )
             .unwrap();
         changed_execution
-            .record(DeepSeekV4Fp4ShadowExecution::Packed, 2_051, 4, 513, &ids)
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                4,
+                513,
+                &ids,
+            )
             .unwrap();
         assert_ne!(first.digest().0, changed_execution.digest().0);
+
+        let mut changed_source = DeepSeekV4Fp4CounterfactualTrace::default();
+        changed_source
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                DeepSeekV4Fp4SelectionSource::F16,
+                2_051,
+                2,
+                513,
+                &ids,
+            )
+            .unwrap();
+        changed_source
+            .record(
+                DeepSeekV4Fp4ShadowExecution::Packed,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+                2_051,
+                4,
+                513,
+                &ids,
+            )
+            .unwrap();
+        assert_ne!(first.digest().0, changed_source.digest().0);
 
         let mut invalid = DeepSeekV4Fp4CounterfactualTrace::default();
         let mut duplicate = ids;
@@ -1278,6 +1489,7 @@ mod tests {
             invalid
                 .record(
                     DeepSeekV4Fp4ShadowExecution::Packed,
+                    DeepSeekV4Fp4SelectionSource::Fp4,
                     2_051,
                     2,
                     513,

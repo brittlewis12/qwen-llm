@@ -845,15 +845,10 @@ struct PackedSparseCsaViews {
     cache_order_ids: MetalTensor,
     selected_counts: MetalTensor,
     visible_counts: MetalTensor,
-    #[cfg(feature = "dsv4-diagnostics")]
     index_queries: MetalTensor,
-    #[cfg(feature = "dsv4-diagnostics")]
     head_weights: MetalTensor,
-    #[cfg(feature = "dsv4-diagnostics")]
     scores: MetalTensor,
-    #[cfg(feature = "dsv4-diagnostics")]
     selected_mask: MetalTensor,
-    #[cfg(feature = "dsv4-diagnostics")]
     status: MetalTensor,
 }
 
@@ -958,8 +953,41 @@ fn tiled_hca_query_offset(start_position: u32, n_tokens: usize) -> Option<usize>
 }
 
 impl PrefillSparseCsaScratch {
+    #[cfg(not(feature = "dsv4-diagnostics"))]
     #[allow(clippy::too_many_arguments)]
     fn encode(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        q_lora: &MetalTensor,
+        normalized_input: &MetalTensor,
+        indexer_q_weight: &MetalTensor,
+        indexer_projection: &MetalTensor,
+        rows: DeepSeekV4CsaRows<'_>,
+        start_position: u32,
+        query_offset: usize,
+        n_tokens: usize,
+        rope: DeepSeekV4RopeParameters,
+    ) -> Result<PackedSparseCsaViews, DeepSeekV4MetalError> {
+        let prepared = self.encode_prepare(
+            ctx,
+            enc,
+            q_lora,
+            normalized_input,
+            indexer_q_weight,
+            indexer_projection,
+            rows,
+            start_position,
+            query_offset,
+            n_tokens,
+            rope,
+        )?;
+        self.encode_f16_score_and_select(ctx, enc, rows, &prepared)?;
+        Ok(prepared)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_prepare(
         &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
@@ -1139,51 +1167,55 @@ impl PrefillSparseCsaScratch {
             1.0 / (INDEXER_HEAD_COUNT as f32 * INDEXER_HEAD_DIM as f32).sqrt(),
             "packed indexer head weights",
         )?;
-        encode_lightning_indexer_scores_f16(
-            ctx,
-            enc,
-            &index_queries,
-            &head_weights,
-            rows.indexer_cache,
-            &visible_counts,
-            &scores,
-            INDEXER_HEAD_COUNT,
-            INDEXER_HEAD_DIM,
-            rows.capacity_rows,
-            query_count,
-        )?;
-        encode_select_top_k_f32(
-            ctx,
-            enc,
-            &scores,
-            &visible_counts,
-            &selected_mask,
-            None,
-            &cache_order_ids,
-            &selected_counts,
-            &status,
-            rows.capacity_rows,
-            rows.count,
-            DEEPSEEK_V4_CSA_TOP_K,
-            query_count,
-        )?;
         Ok(PackedSparseCsaViews {
             query_offset,
             query_count,
             cache_order_ids,
             selected_counts,
             visible_counts,
-            #[cfg(feature = "dsv4-diagnostics")]
             index_queries,
-            #[cfg(feature = "dsv4-diagnostics")]
             head_weights,
-            #[cfg(feature = "dsv4-diagnostics")]
             scores,
-            #[cfg(feature = "dsv4-diagnostics")]
             selected_mask,
-            #[cfg(feature = "dsv4-diagnostics")]
             status,
         })
+    }
+
+    fn encode_f16_score_and_select(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        rows: DeepSeekV4CsaRows<'_>,
+        prepared: &PackedSparseCsaViews,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        encode_lightning_indexer_scores_f16(
+            ctx,
+            enc,
+            &prepared.index_queries,
+            &prepared.head_weights,
+            rows.indexer_cache,
+            &prepared.visible_counts,
+            &prepared.scores,
+            INDEXER_HEAD_COUNT,
+            INDEXER_HEAD_DIM,
+            rows.capacity_rows,
+            prepared.query_count,
+        )?;
+        encode_select_top_k_f32(
+            ctx,
+            enc,
+            &prepared.scores,
+            &prepared.visible_counts,
+            &prepared.selected_mask,
+            None,
+            &prepared.cache_order_ids,
+            &prepared.selected_counts,
+            &prepared.status,
+            rows.capacity_rows,
+            rows.count,
+            DEEPSEEK_V4_CSA_TOP_K,
+            prepared.query_count,
+        )
     }
 
     fn validate_completed(&self, query_count: usize) -> Result<(), DeepSeekV4MetalError> {
@@ -2757,7 +2789,7 @@ impl DeepSeekV4Session {
         }
         self.validate_committed_token_append(start_position, token_ids.len())?;
         #[cfg(feature = "dsv4-diagnostics")]
-        if self.fp4_shadow_replace_selection {
+        if self.fp4_selection_mode.is_counterfactual() {
             // Reject unsupported geometry while the session is still ready;
             // token staging and causal mutation both occur below this gate.
             validate_fp4_selection_counterfactual_packed(start_position, token_ids.len())?;
@@ -2822,6 +2854,21 @@ impl DeepSeekV4Session {
         let hc_eps = self.residency.config().hyper_connection_epsilon;
         let attention_config = deepseek_v4_session_attention_config();
         let attention_dims = attention_config.checked()?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        let fp4_score_plan = self
+            .fp4_selection_mode
+            .score_plan(self.fp4_shadow_diagnostics.is_capturing());
+        #[cfg(feature = "dsv4-diagnostics")]
+        let mut fp4_score_dispatch_ledger = DeepSeekV4Fp4ScoreDispatchLedger::new(
+            DeepSeekV4Fp4ShadowExecution::Packed,
+            last_position,
+            fp4_score_plan.kind(),
+            fp4_score_plan.consumed_source(),
+        );
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            self.fp4_score_dispatch_ledger = None;
+        }
         let trace_layers = std::env::var_os("QWEN_DSV4_PREFILL_TRACE").is_some();
         let mut router_total = 0.0_f64;
         let mut route_total = 0.0_f64;
@@ -3030,6 +3077,7 @@ impl DeepSeekV4Session {
                             query_offset,
                         )?;
                     }
+                    #[cfg(not(feature = "dsv4-diagnostics"))]
                     let sparse = self.prefill.attention.sparse_csa.encode(
                         ctx,
                         &encoder,
@@ -3044,10 +3092,31 @@ impl DeepSeekV4Session {
                         rope,
                     )?;
                     #[cfg(feature = "dsv4-diagnostics")]
-                    let fp4_shadow_active = self.fp4_shadow_diagnostics.is_capturing()
-                        || self.fp4_shadow_replace_selection;
+                    let sparse = self.prefill.attention.sparse_csa.encode_prepare(
+                        ctx,
+                        &encoder,
+                        &attention.q_lora,
+                        &attention.normalized_input,
+                        self.layer_tensor(layer, "indexer.attn_q_b.weight")?,
+                        self.layer_tensor(layer, "indexer.proj.weight")?,
+                        rows,
+                        start_position,
+                        query_offset,
+                        n_tokens,
+                        rope,
+                    )?;
                     #[cfg(feature = "dsv4-diagnostics")]
-                    if fp4_shadow_active {
+                    fp4_score_dispatch_ledger.record_common_prepare()?;
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    if fp4_score_plan.runs_f16() {
+                        self.prefill
+                            .attention
+                            .sparse_csa
+                            .encode_f16_score_and_select(ctx, &encoder, rows, &sparse)?;
+                        fp4_score_dispatch_ledger.record_f16_score_and_selector()?;
+                    }
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    if fp4_score_plan.runs_fp4() {
                         if sparse.query_count != 1 {
                             return invalid(format!(
                                 "FP4 packed shadow expected one sparse query, got {}",
@@ -3062,13 +3131,14 @@ impl DeepSeekV4Session {
                             rows,
                             &sparse.visible_counts,
                         )?;
+                        fp4_score_dispatch_ledger.record_fp4_pipeline()?;
                     }
                     #[cfg(feature = "dsv4-diagnostics")]
                     if self.fp4_shadow_diagnostics.is_capturing() {
                         captured_sparse = Some(sparse.clone());
                     }
                     #[cfg(feature = "dsv4-diagnostics")]
-                    let selected = if self.fp4_shadow_replace_selection {
+                    let selected = if fp4_score_plan.consumes_fp4() {
                         PackedCsaSelectionView {
                             query_offset: sparse.query_offset,
                             query_count: sparse.query_count,
@@ -3192,7 +3262,18 @@ impl DeepSeekV4Session {
                     "packed layer {layer} router command failed: {error:?}"
                 ));
             }
-            if let Some(query_offset) = sparse_query_offset {
+            if let Some(query_offset) = sparse_query_offset
+                && {
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    {
+                        fp4_score_plan.runs_f16()
+                    }
+                    #[cfg(not(feature = "dsv4-diagnostics"))]
+                    {
+                        true
+                    }
+                }
+            {
                 self.prefill
                     .attention
                     .sparse_csa
@@ -3228,11 +3309,12 @@ impl DeepSeekV4Session {
                 self.fp4_shadow_diagnostics.capture_layer(report)?;
             }
             #[cfg(feature = "dsv4-diagnostics")]
-            if self.fp4_shadow_replace_selection && sparse_query_offset.is_some() {
+            if fp4_score_plan.consumes_fp4() && sparse_query_offset.is_some() {
                 self.fp4_shadow.validate_completed()?;
                 self.fp4_shadow.record_counterfactual_selection(
                     &mut self.fp4_counterfactual_trace,
                     DeepSeekV4Fp4ShadowExecution::Packed,
+                    DeepSeekV4Fp4SelectionSource::Fp4,
                     last_position,
                     layer,
                 )?;
@@ -3355,6 +3437,11 @@ impl DeepSeekV4Session {
         }
         #[cfg(feature = "dsv4-diagnostics")]
         self.fp4_shadow_diagnostics.finish()?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            fp4_score_dispatch_ledger.validate_completed()?;
+            self.fp4_score_dispatch_ledger = Some(fp4_score_dispatch_ledger);
+        }
         Ok(())
     }
 }

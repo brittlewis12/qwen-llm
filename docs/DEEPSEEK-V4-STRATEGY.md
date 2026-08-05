@@ -1773,9 +1773,34 @@ This is a diagnostics decision/quality `GO`, not a production or speed
 promotion. Every arm deliberately computes both scorers, and positions
 2,053-2,060 span only 513-515 visible rows; candidate 47.721 ms versus a
 46.593 ms GPU control midpoint is therefore not the terminal packed-shadow
-comparison. A no-double-score experimental arm with a paired dual-score audit
-endpoint and a useful deep/current-product packet remain required before cache
-or snapshot migration.
+comparison. The next gate was a no-double-score experimental arm with a paired
+dual-score audit endpoint. Its result follows; a useful deep/current-product
+packet still remains required before cache or snapshot migration.
+
+The bounded no-double-score arm now passes its falsifier. Session authority is
+an exhaustive F16-authoritative, paired-counterfactual, or FP4-only-experimental
+mode; each forward derives F16-only, paired, or FP4-only execution. Common
+query/head-weight preparation is shared, while singleton and packed FP4-only
+positions encode no F16 score/selection pipeline. An explicit singleton audit
+atomically restores paired scoring without changing FP4 consumption.
+
+Paired A, FP4-only, and paired B remain bit-identical through packed position
+2,051, the position-2,052 paired audit, and final position 2,060. Final logits
+share SHA-256
+`99726fc307b0068e05cd0dd7fec1910752e8709d95a5cfeac827580a90c1f7bd`;
+final causal state shares digest
+`68122e6f8c0ff2ab4b6265ed7993b28e25d29a92a79b8c6fa338f34977732d5c`;
+all 210 consumed CSA-layer selections share source-bound trace
+`28ddb115041232ba85e6a03fbd6a36646a6677a6a001f2d6d88a0f5d237b3ce3`.
+The paired audit also reproduces the prior 11 exact / ten cutoff-exchange
+selector topology.
+
+Without reports in any timed arm, paired/FP4-only/paired GPU medians are
+46.738/45.291/46.802 ms. Control drift is 0.136%; FP4-only saves 1.479 ms
+against the midpoint and 1.447 ms against the faster control. This clears the
+frozen 1.0 ms gate and authorizes collapsed-command engineering, not a speed or
+production claim: the schedule remains one command per layer and sees only
+513-515 rows.
 
 The pinned llama.cpp depth command is not a free decode-only bracket. Its
 `--n-depth` implementation executes `test_prompt(n_depth)` and serializes the
@@ -1915,11 +1940,12 @@ Gate:
 
 Broader S6 work remains:
 
-- Use the promoted real-weight status sidecar in a no-double-score experimental
-  arm while retaining F16 history as the differential. Require a useful deep
-  decision/quality packet and terminal whole-token timing before production,
-  paged K, or snapshot v2. Pack the remaining intended mixed FP8/BF16 attention
-  cache independently.
+- Carry the promoted no-double-score plan into collapsed one-command execution.
+  Retain layer-addressed FP4 IDs and compact completion records, validate and
+  trace them after the command, and keep paired audits instrumented. Then require
+  a useful deep decision/quality packet and terminal whole-token timing before
+  production, paged K, or snapshot v2. Pack the remaining intended mixed
+  FP8/BF16 attention cache independently.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention. All-slot routed experts have closed the first measured MoE
   boundary without changing reduction lineage.
@@ -1930,7 +1956,7 @@ Broader S6 work remains:
   product contract.
 - Preserve promoted online singleton HCA and the exact packed/legacy tiled
   differential. Defer heads8/rows16 split-K while HCA remains below CSA; reopen
-  multi-group exact selection alongside the no-double-score FP4 arm, because the
+  multi-group exact selection alongside the collapsed FP4 arm, because the
   admitted 0.841 ms scorer now sits below the retained 1.875 ms selector. The
   scalar scorer and bitwise selector remain executable differentials.
 
@@ -2024,8 +2050,11 @@ noise without reducing technical risk. Revisit after S5.
    status-carrying sidecar and shallow whole-token counterfactual are promoted
    under diagnostics: all status gates pass, every selector delta is one cutoff
    exchange, and downstream logits remain far inside their frozen bands. Build
-   a no-double-score deep/current-product packet next; do not migrate paged K or
-   snapshots from shallow quality evidence or microprofiles alone.
+   the now-qualified no-double-score plan into collapsed execution next, then
+   require a deep/current-product packet. Do not migrate paged K or snapshots
+   from shallow quality evidence or microprofiles alone. The bounded instrumented
+   arm omits F16 scoring exactly and saves 1.447 ms against the faster paired
+   control; promote that plan before paying the deeper prefix.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine

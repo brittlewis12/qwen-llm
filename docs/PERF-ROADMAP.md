@@ -207,19 +207,35 @@ first-sparse-boundary packet deliberately computes both scorers; its positions
 savings. Snapshot v1 remains F16-authoritative, and exact selector identity is a
 failed falsifier rather than a hidden gate change.
 
+The bounded no-double-score falsifier now clears. Exhaustive session modes derive
+F16-only, FP4-only, or paired execution, and common query preparation is split
+from F16 score/selection in singleton and packed paths. Across paired A,
+FP4-only, and paired B, positions 2,051/2,052/2,060 are bit-identical in logits,
+causal state, consumed-ID trace, and committed-token transcript. Decision
+transcripts including routes and FP4 reports are exact across all arms at the
+singleton audit. Packed reports compare paired controls only; timed positions
+capture none. Encode-time ledgers prove zero F16 score/selector pipeline
+invocations on FP4-only positions.
+
+With no report work in any timed arm, repeated GPU medians are
+46.738/45.291/46.802 ms. FP4-only saves 1.447 ms against the faster control with
+0.136% control drift, clearing the frozen 1.0 ms gate. This authorizes collapsed
+engineering only: the campaign uses one command per layer at 513-515 visible
+rows and cannot establish ordinary-token or terminal savings.
+
 Force-ranked queue:
 
-1. **No-double-score FP4 experimental arm.** Use the promoted status-carrying
-   sidecar and borrowed selection view, but omit authoritative scorer work on
-   timed positions while retaining F16 history as the differential. Preserve a
-   paired dual-score audit endpoint in the same useful deep/current-product
-   packet. Do not require a 32K cold replay when a cheaper state can exercise
-   materially more than one cutoff exchange. Keep production and snapshot v1
-   unchanged until both quality and terminal whole-token savings clear.
+1. **Collapsed one-command FP4 experiment.** Retain 43 layer-addressed slices of
+   512 IDs plus source/visibility/count/status/preflight records. Let attention
+   consume each slice in-command, then bulk-read, validate, and trace records in
+   layer order before token commit. Reuse query, score, and mask scratch; keep
+   paired audits instrumented. Require exact agreement with paired FP4
+   consumption before timing ordinary tokens, then use one lineage-preserving
+   prefix to position 3,070 for the first deeper product packet.
 2. **Multi-group selection.** The terminal FP4 shadow moves scoring below the
    retained 1.875 ms radix4 selector. Reopen global histograms,
    query-scaled scratch, and producer/reducer dispatches after or alongside the
-   no-double-score FP4 lane, preserving exact threshold and tie order.
+   collapsed FP4 lane, preserving exact threshold and tie order.
 3. **GPU-resident deterministic packed routing.** Remove prefill's router
    commit/wait and CPU schedule construction with integer counts, deterministic
    expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,

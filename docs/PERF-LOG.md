@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-04 - DeepSeek V4 FP4 No-Double-Score Falsifier GO
+
+Status: bounded instrumented no-double-score `GO`; collapsed one-command
+engineering is authorized. Ordinary-token, terminal-speed, production selection,
+cache migration, and snapshot v2 remain `HOLD`.
+
+- Replace the counterfactual boolean with exhaustive F16-authoritative,
+  paired-counterfactual, and FP4-only-experimental session modes. Derive an
+  F16-only, FP4-only, or paired plan per forward; an explicit singleton audit
+  atomically arms the F16 decision transcript and FP4 report.
+- Split common singleton and packed query/head-weight preparation from F16
+  score/selection. FP4-only retains common work, the complete validated FP4
+  pipeline, and F16 selected-attention history while encoding zero F16
+  score/selector pipeline invocations.
+- A/FP4-only/A produces bit-identical packed, singleton-audit, and final logits,
+  causal-state digests, consumed-ID traces, and 2,061-token transcripts. At the
+  singleton audit, decision transcripts including routes and FP4 reports are
+  exact across all arms. Packed reports compare paired controls only; timed
+  positions intentionally capture none. Final logit SHA-256 is
+  `99726fc307b0068e05cd0dd7fec1910752e8709d95a5cfeac827580a90c1f7bd`;
+  210 consumed CSA-layer selections share trace BLAKE3
+  `28ddb115041232ba85e6a03fbd6a36646a6677a6a001f2d6d88a0f5d237b3ce3`.
+- Unreported paired/FP4-only/paired timing medians are
+  `46.738/45.291/46.802` ms GPU. Control drift is 0.136%; FP4-only saves
+  1.479 ms against the midpoint and 1.447 ms against the faster control,
+  clearing the frozen 1.0 ms worst-control gate.
+- Per-position ledgers bind schema, execution, position, plan, consumed source,
+  and composite pipeline invocations. Packed and repeated FP4-only positions
+  record 21 common / 0 F16 / 21 FP4 invocations; paired records 21/21/21.
+
+Decision: proceed to collapsed B with layer-addressed retained FP4 IDs and small
+completion records, while reusing score/mask scratch. Keep paired audits
+instrumented. Then pay one lineage-preserving real-weight prefix to position
+3,070 for the first deeper packet. Full protocol and compact evidence are in
+`docs/bench/2026-08-04-dsv4-fp4-no-double-score/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-04 - DeepSeek V4 Real-Weight FP4 Sidecar GO
 
 Status: real-weight sidecar and FP4-ID/F16-cache counterfactual `GO` under

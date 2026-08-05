@@ -152,7 +152,7 @@ impl DeepSeekV4Session {
     ) -> Result<DeepSeekV4CausalSnapshot, DeepSeekV4MetalError> {
         #[cfg(feature = "dsv4-diagnostics")]
         {
-            if self.fp4_shadow_replace_selection {
+            if self.fp4_selection_mode.is_counterfactual() {
                 return invalid("FP4 selection-counterfactual sessions cannot export snapshot v1");
             }
             self.decision_diagnostics
@@ -187,7 +187,7 @@ impl DeepSeekV4Session {
     ) -> Result<(), DeepSeekV4MetalError> {
         #[cfg(feature = "dsv4-diagnostics")]
         {
-            if self.fp4_shadow_replace_selection {
+            if self.fp4_selection_mode.is_counterfactual() {
                 return invalid("FP4 selection-counterfactual sessions cannot restore snapshot v1");
             }
             self.decision_diagnostics
@@ -224,7 +224,7 @@ impl DeepSeekV4Session {
     pub fn fp4_counterfactual_state_digest(
         &self,
     ) -> Result<DeepSeekV4Fp4CounterfactualStateDigest, DeepSeekV4MetalError> {
-        if !self.fp4_shadow_replace_selection {
+        if !self.fp4_selection_mode.is_counterfactual() {
             return invalid("session is not an FP4 selection counterfactual");
         }
         self.decision_diagnostics

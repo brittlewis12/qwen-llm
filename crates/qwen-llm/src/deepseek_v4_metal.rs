@@ -13,6 +13,7 @@ mod snapshot;
 pub use diagnostics::{
     DeepSeekV4CsaDecision, DeepSeekV4DecisionLayer, DeepSeekV4DecisionTranscript,
     DeepSeekV4DiagnosticsError, DeepSeekV4Fp4CounterfactualStateDigest,
+    DeepSeekV4Fp4ScoreDispatchLedger, DeepSeekV4Fp4ScorePlanKind, DeepSeekV4Fp4SelectionSource,
     DeepSeekV4Fp4ShadowEligibility, DeepSeekV4Fp4ShadowExecution, DeepSeekV4Fp4ShadowLayer,
     DeepSeekV4Fp4ShadowReport, DeepSeekV4RankedCsaRow, DeepSeekV4RouteDecision,
 };
@@ -1355,6 +1356,90 @@ struct DeepSeekV4EncodedLayer {
     sparse_visible_count: Option<usize>,
 }
 
+#[cfg(feature = "dsv4-diagnostics")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeepSeekV4Fp4ScorePlan {
+    F16Only,
+    Fp4Only,
+    Paired {
+        consume: DeepSeekV4Fp4SelectionSource,
+    },
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+impl DeepSeekV4Fp4ScorePlan {
+    fn runs_f16(self) -> bool {
+        matches!(self, Self::F16Only | Self::Paired { .. })
+    }
+
+    fn runs_fp4(self) -> bool {
+        matches!(self, Self::Fp4Only | Self::Paired { .. })
+    }
+
+    fn consumes_fp4(self) -> bool {
+        matches!(
+            self,
+            Self::Fp4Only
+                | Self::Paired {
+                    consume: DeepSeekV4Fp4SelectionSource::Fp4,
+                }
+        )
+    }
+
+    fn kind(self) -> DeepSeekV4Fp4ScorePlanKind {
+        match self {
+            Self::F16Only => DeepSeekV4Fp4ScorePlanKind::F16Only,
+            Self::Fp4Only => DeepSeekV4Fp4ScorePlanKind::Fp4Only,
+            Self::Paired { .. } => DeepSeekV4Fp4ScorePlanKind::Paired,
+        }
+    }
+
+    fn consumed_source(self) -> DeepSeekV4Fp4SelectionSource {
+        match self {
+            Self::F16Only
+            | Self::Paired {
+                consume: DeepSeekV4Fp4SelectionSource::F16,
+            } => DeepSeekV4Fp4SelectionSource::F16,
+            Self::Fp4Only
+            | Self::Paired {
+                consume: DeepSeekV4Fp4SelectionSource::Fp4,
+            } => DeepSeekV4Fp4SelectionSource::Fp4,
+        }
+    }
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum DeepSeekV4Fp4SessionMode {
+    #[default]
+    F16Authoritative,
+    PairedCounterfactual,
+    Fp4OnlyExperimental,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+impl DeepSeekV4Fp4SessionMode {
+    fn score_plan(self, audit_active: bool) -> DeepSeekV4Fp4ScorePlan {
+        match (self, audit_active) {
+            (Self::F16Authoritative, false) => DeepSeekV4Fp4ScorePlan::F16Only,
+            (Self::F16Authoritative, true) => DeepSeekV4Fp4ScorePlan::Paired {
+                consume: DeepSeekV4Fp4SelectionSource::F16,
+            },
+            (Self::PairedCounterfactual, _) => DeepSeekV4Fp4ScorePlan::Paired {
+                consume: DeepSeekV4Fp4SelectionSource::Fp4,
+            },
+            (Self::Fp4OnlyExperimental, false) => DeepSeekV4Fp4ScorePlan::Fp4Only,
+            (Self::Fp4OnlyExperimental, true) => DeepSeekV4Fp4ScorePlan::Paired {
+                consume: DeepSeekV4Fp4SelectionSource::Fp4,
+            },
+        }
+    }
+
+    fn is_counterfactual(self) -> bool {
+        self != Self::F16Authoritative
+    }
+}
+
 impl DeepSeekV4CommandProfile {
     pub fn encode_cpu_ms(&self) -> f64 {
         self.layers.iter().map(|layer| layer.encode_cpu_ms).sum()
@@ -1395,9 +1480,11 @@ pub struct DeepSeekV4Session {
     #[cfg(feature = "dsv4-diagnostics")]
     fp4_shadow_diagnostics: diagnostics::DeepSeekV4Fp4ShadowCapture,
     #[cfg(feature = "dsv4-diagnostics")]
-    fp4_shadow_replace_selection: bool,
+    fp4_selection_mode: DeepSeekV4Fp4SessionMode,
     #[cfg(feature = "dsv4-diagnostics")]
     fp4_counterfactual_trace: diagnostics::DeepSeekV4Fp4CounterfactualTrace,
+    #[cfg(feature = "dsv4-diagnostics")]
+    fp4_score_dispatch_ledger: Option<DeepSeekV4Fp4ScoreDispatchLedger>,
 }
 
 /// Compatibility name retained for the position-zero live differential.
@@ -1500,9 +1587,11 @@ impl DeepSeekV4Session {
             #[cfg(feature = "dsv4-diagnostics")]
             fp4_shadow_diagnostics: diagnostics::DeepSeekV4Fp4ShadowCapture::default(),
             #[cfg(feature = "dsv4-diagnostics")]
-            fp4_shadow_replace_selection: false,
+            fp4_selection_mode: DeepSeekV4Fp4SessionMode::default(),
             #[cfg(feature = "dsv4-diagnostics")]
             fp4_counterfactual_trace: diagnostics::DeepSeekV4Fp4CounterfactualTrace::default(),
+            #[cfg(feature = "dsv4-diagnostics")]
+            fp4_score_dispatch_ledger: None,
         })
     }
 
@@ -1572,8 +1661,41 @@ impl DeepSeekV4Session {
     pub fn enable_fp4_shadow_selection_counterfactual(
         &mut self,
     ) -> Result<(), DeepSeekV4MetalError> {
+        if self.fp4_selection_mode != DeepSeekV4Fp4SessionMode::F16Authoritative {
+            return invalid("DeepSeek V4 FP4 score plan is already sealed");
+        }
         self.enable_fp4_shadow_lineage()?;
-        self.fp4_shadow_replace_selection = true;
+        self.fp4_selection_mode = DeepSeekV4Fp4SessionMode::PairedCounterfactual;
+        Ok(())
+    }
+
+    /// Enables lineage and seals a diagnostics-only FP4-only score plan at
+    /// position zero. Use [`Self::seal_fp4_no_double_score_experiment`] after
+    /// an ordinary lineage-preserving prefix instead.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn enable_fp4_no_double_score_experiment(&mut self) -> Result<(), DeepSeekV4MetalError> {
+        self.enable_fp4_shadow_lineage()?;
+        self.seal_fp4_no_double_score_experiment()
+    }
+
+    /// Seals a diagnostics-only FP4-only score plan for all later sparse
+    /// positions. Lineage must already have been enabled at position zero.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn seal_fp4_no_double_score_experiment(&mut self) -> Result<(), DeepSeekV4MetalError> {
+        self.phase.ready_position()?;
+        if self.fp4_selection_mode != DeepSeekV4Fp4SessionMode::F16Authoritative {
+            return invalid("DeepSeek V4 FP4 score plan is already sealed");
+        }
+        if !self.fp4_shadow_diagnostics.lineage_enabled() {
+            return invalid(
+                "DeepSeek V4 FP4 lineage must be enabled before sealing the no-double-score experiment",
+            );
+        }
+        self.decision_diagnostics
+            .ensure_no_active_capture("seal the FP4 score plan")?;
+        self.fp4_shadow_diagnostics
+            .ensure_no_active_capture("seal the FP4 score plan")?;
+        self.fp4_selection_mode = DeepSeekV4Fp4SessionMode::Fp4OnlyExperimental;
         Ok(())
     }
 
@@ -1587,6 +1709,33 @@ impl DeepSeekV4Session {
         Ok(())
     }
 
+    /// Atomically arms a singleton paired-score audit while an FP4-only
+    /// experiment remains the consumed selection authority.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn arm_fp4_paired_singleton_audit(
+        &mut self,
+        position: u32,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if self.fp4_selection_mode != DeepSeekV4Fp4SessionMode::Fp4OnlyExperimental {
+            return invalid("paired FP4 audit requires a sealed FP4-only experiment");
+        }
+        self.capacity.validate_position(position)?;
+        let current = self.phase.ready_position()?;
+        if position != current {
+            return Err(DeepSeekV4DiagnosticsError::WrongPosition {
+                expected: current,
+                actual: position,
+            }
+            .into());
+        }
+        self.decision_diagnostics.validate_arm(position)?;
+        self.fp4_shadow_diagnostics
+            .validate_arm(current, position)?;
+        self.decision_diagnostics.arm(position)?;
+        self.fp4_shadow_diagnostics.arm(current, position)?;
+        Ok(())
+    }
+
     /// Takes a completed owned FP4 observer report and returns the capture to
     /// idle so a subsequent position can be armed.
     #[cfg(feature = "dsv4-diagnostics")]
@@ -1596,10 +1745,28 @@ impl DeepSeekV4Session {
         Ok(self.fp4_shadow_diagnostics.take()?)
     }
 
+    /// Takes the last successfully encoded singleton or packed CSA score
+    /// schedule. The ledger records operation invocations, not GPU duration.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn take_fp4_score_dispatch_ledger(
+        &mut self,
+    ) -> Result<DeepSeekV4Fp4ScoreDispatchLedger, DeepSeekV4MetalError> {
+        self.fp4_score_dispatch_ledger.take().ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "DeepSeek V4 FP4 score dispatch ledger is unavailable".into(),
+            )
+        })
+    }
+
     /// Arms the feature-gated, single-use decision capture for the next sparse
     /// CSA token.
     #[cfg(feature = "dsv4-diagnostics")]
     pub fn arm_decision_transcript(&mut self, position: u32) -> Result<(), DeepSeekV4MetalError> {
+        if self.fp4_selection_mode == DeepSeekV4Fp4SessionMode::Fp4OnlyExperimental {
+            return invalid(
+                "FP4-only sessions must arm decisions through arm_fp4_paired_singleton_audit",
+            );
+        }
         self.capacity.validate_position(position)?;
         if position != self.phase.ready_position()? {
             return Err(DeepSeekV4DiagnosticsError::WrongPosition {
@@ -2161,7 +2328,26 @@ impl DeepSeekV4Session {
         #[cfg(feature = "dsv4-diagnostics")]
         let fp4_shadow_capture_active = self.fp4_shadow_diagnostics.is_capturing();
         #[cfg(feature = "dsv4-diagnostics")]
-        let fp4_shadow_active = fp4_shadow_capture_active || self.fp4_shadow_replace_selection;
+        let fp4_score_plan = self
+            .fp4_selection_mode
+            .score_plan(fp4_shadow_capture_active);
+        #[cfg(feature = "dsv4-diagnostics")]
+        if decision_capture_active && !fp4_score_plan.runs_f16() {
+            return invalid("decision capture requires an F16 or paired CSA score plan");
+        }
+        #[cfg(feature = "dsv4-diagnostics")]
+        let fp4_shadow_active = fp4_score_plan.runs_fp4();
+        #[cfg(feature = "dsv4-diagnostics")]
+        let mut fp4_score_dispatch_ledger = DeepSeekV4Fp4ScoreDispatchLedger::new(
+            DeepSeekV4Fp4ShadowExecution::Singleton,
+            position,
+            fp4_score_plan.kind(),
+            fp4_score_plan.consumed_source(),
+        );
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            self.fp4_score_dispatch_ledger = None;
+        }
         #[cfg(not(feature = "dsv4-diagnostics"))]
         let fp4_shadow_active = false;
         if routing_profile.is_none()
@@ -2281,6 +2467,7 @@ impl DeepSeekV4Session {
             }
             let csa_rows = self.compressor_frontiers.csa_rows(layer, position)?;
             if let Some(rows) = csa_rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
+                #[cfg(not(feature = "dsv4-diagnostics"))]
                 self.sparse_csa.encode(
                     ctx,
                     &encoder,
@@ -2294,7 +2481,32 @@ impl DeepSeekV4Session {
                     &selection_record,
                 )?;
                 #[cfg(feature = "dsv4-diagnostics")]
-                if fp4_shadow_active {
+                {
+                    self.sparse_csa.encode_prepare(
+                        ctx,
+                        &encoder,
+                        self.attention.q_lora(),
+                        self.attention.normalized_input(),
+                        self.layer_tensor(layer, "indexer.attn_q_b.weight")?,
+                        self.layer_tensor(layer, "indexer.proj.weight")?,
+                        rows,
+                        position,
+                        rope,
+                        &selection_record,
+                    )?;
+                    fp4_score_dispatch_ledger.record_common_prepare()?;
+                    if fp4_score_plan.runs_f16() {
+                        self.sparse_csa.encode_f16_score_and_select(
+                            ctx,
+                            &encoder,
+                            rows,
+                            &selection_record,
+                        )?;
+                        fp4_score_dispatch_ledger.record_f16_score_and_selector()?;
+                    }
+                }
+                #[cfg(feature = "dsv4-diagnostics")]
+                if fp4_score_plan.runs_fp4() {
                     self.fp4_shadow.encode(
                         ctx,
                         &encoder,
@@ -2303,9 +2515,10 @@ impl DeepSeekV4Session {
                         rows,
                         &selection_record.visible_count,
                     )?;
+                    fp4_score_dispatch_ledger.record_fp4_pipeline()?;
                 }
                 #[cfg(feature = "dsv4-diagnostics")]
-                let selected = if self.fp4_shadow_replace_selection {
+                let selected = if fp4_score_plan.consumes_fp4() {
                     self.fp4_shadow.selection_view()
                 } else {
                     self.sparse_csa.selection_view(&selection_record)
@@ -2510,6 +2723,16 @@ impl DeepSeekV4Session {
                 .validate_gpu_route_record_completed(&route_record)?;
             if self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
                 && (position as usize + 1) / 4 > DEEPSEEK_V4_CSA_TOP_K
+                && {
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    {
+                        fp4_score_plan.runs_f16()
+                    }
+                    #[cfg(not(feature = "dsv4-diagnostics"))]
+                    {
+                        true
+                    }
+                }
             {
                 self.sparse_csa.validate_completed(&selection_record)?;
             }
@@ -2562,7 +2785,7 @@ impl DeepSeekV4Session {
                 self.fp4_shadow_diagnostics.capture_layer(report)?;
             }
             #[cfg(feature = "dsv4-diagnostics")]
-            if self.fp4_shadow_replace_selection
+            if fp4_score_plan.consumes_fp4()
                 && self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
                 && (position as usize + 1) / 4 > DEEPSEEK_V4_CSA_TOP_K
             {
@@ -2570,6 +2793,7 @@ impl DeepSeekV4Session {
                 self.fp4_shadow.record_counterfactual_selection(
                     &mut self.fp4_counterfactual_trace,
                     DeepSeekV4Fp4ShadowExecution::Singleton,
+                    DeepSeekV4Fp4SelectionSource::Fp4,
                     position,
                     layer,
                 )?;
@@ -2622,6 +2846,11 @@ impl DeepSeekV4Session {
         self.decision_diagnostics.finish()?;
         #[cfg(feature = "dsv4-diagnostics")]
         self.fp4_shadow_diagnostics.finish()?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            fp4_score_dispatch_ledger.validate_completed()?;
+            self.fp4_score_dispatch_ledger = Some(fp4_score_dispatch_ledger);
+        }
 
         Ok(())
     }
@@ -4055,6 +4284,7 @@ impl DeepSeekV4Fp4ShadowScratch {
         &self,
         trace: &mut diagnostics::DeepSeekV4Fp4CounterfactualTrace,
         execution: DeepSeekV4Fp4ShadowExecution,
+        source: DeepSeekV4Fp4SelectionSource,
         position: u32,
         layer: usize,
     ) -> Result<(), DeepSeekV4MetalError> {
@@ -4063,7 +4293,7 @@ impl DeepSeekV4Fp4ShadowScratch {
             "consumed FP4 counterfactual visibility",
         )?;
         let ids = host_read_i32(&self.cache_order_ids, "consumed FP4 counterfactual IDs")?;
-        trace.record(execution, position, layer, visible[0], &ids)?;
+        trace.record(execution, source, position, layer, visible[0], &ids)?;
         Ok(())
     }
 
@@ -4224,6 +4454,35 @@ impl DeepSeekV4SparseCsaScratch {
         rope: DeepSeekV4RopeParameters,
         record: &DeepSeekV4SelectionRecord,
     ) -> Result<(), DeepSeekV4MetalError> {
+        self.encode_prepare(
+            ctx,
+            enc,
+            q_lora,
+            normalized_input,
+            indexer_q_weight,
+            indexer_projection,
+            rows,
+            position,
+            rope,
+            record,
+        )?;
+        self.encode_f16_score_and_select(ctx, enc, rows, record)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_prepare(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        q_lora: &MetalTensor,
+        normalized_input: &MetalTensor,
+        indexer_q_weight: &MetalTensor,
+        indexer_projection: &MetalTensor,
+        rows: DeepSeekV4CsaRows<'_>,
+        position: u32,
+        rope: DeepSeekV4RopeParameters,
+        record: &DeepSeekV4SelectionRecord,
+    ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_sparse_csa_indexer")?;
         if rows.count <= DEEPSEEK_V4_CSA_TOP_K
             || rows.count > rows.capacity_rows
@@ -4295,7 +4554,16 @@ impl DeepSeekV4SparseCsaScratch {
             &self.head_weights,
             1.0 / (64.0f32 * 128.0).sqrt(),
             "indexer head weights",
-        )?;
+        )
+    }
+
+    fn encode_f16_score_and_select(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        rows: DeepSeekV4CsaRows<'_>,
+        record: &DeepSeekV4SelectionRecord,
+    ) -> Result<(), DeepSeekV4MetalError> {
         encode_lightning_indexer_scores_f16_with_policy(
             ctx,
             enc,
@@ -11807,6 +12075,87 @@ mod tests {
                 .to_string()
                 .contains("poisoned")
         );
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn fp4_score_plans_are_exhaustive_and_dispatch_ledgers_fail_closed() {
+        let cases = [
+            (
+                DeepSeekV4Fp4SessionMode::F16Authoritative,
+                false,
+                DeepSeekV4Fp4ScorePlanKind::F16Only,
+                DeepSeekV4Fp4SelectionSource::F16,
+            ),
+            (
+                DeepSeekV4Fp4SessionMode::F16Authoritative,
+                true,
+                DeepSeekV4Fp4ScorePlanKind::Paired,
+                DeepSeekV4Fp4SelectionSource::F16,
+            ),
+            (
+                DeepSeekV4Fp4SessionMode::PairedCounterfactual,
+                false,
+                DeepSeekV4Fp4ScorePlanKind::Paired,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            ),
+            (
+                DeepSeekV4Fp4SessionMode::PairedCounterfactual,
+                true,
+                DeepSeekV4Fp4ScorePlanKind::Paired,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            ),
+            (
+                DeepSeekV4Fp4SessionMode::Fp4OnlyExperimental,
+                false,
+                DeepSeekV4Fp4ScorePlanKind::Fp4Only,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            ),
+            (
+                DeepSeekV4Fp4SessionMode::Fp4OnlyExperimental,
+                true,
+                DeepSeekV4Fp4ScorePlanKind::Paired,
+                DeepSeekV4Fp4SelectionSource::Fp4,
+            ),
+        ];
+        for (mode, audit_active, expected_kind, expected_source) in cases {
+            let plan = mode.score_plan(audit_active);
+            assert_eq!(plan.kind(), expected_kind);
+            assert_eq!(plan.consumed_source(), expected_source);
+            let mut ledger = DeepSeekV4Fp4ScoreDispatchLedger::new(
+                DeepSeekV4Fp4ShadowExecution::Singleton,
+                2_051,
+                plan.kind(),
+                plan.consumed_source(),
+            );
+            for _ in 0..diagnostics::CSA_LAYER_COUNT {
+                ledger.record_common_prepare().unwrap();
+                if plan.runs_f16() {
+                    ledger.record_f16_score_and_selector().unwrap();
+                }
+                if plan.runs_fp4() {
+                    ledger.record_fp4_pipeline().unwrap();
+                }
+            }
+            ledger.validate_completed().unwrap();
+            assert_eq!(ledger.sparse_layer_count, 21);
+            assert_eq!(
+                ledger.f16_score_selector_pipeline_invocations == 0,
+                !plan.runs_f16()
+            );
+            assert_eq!(ledger.fp4_pipeline_invocations == 0, !plan.runs_fp4());
+        }
+
+        let mut invalid = DeepSeekV4Fp4ScoreDispatchLedger::new(
+            DeepSeekV4Fp4ShadowExecution::Packed,
+            2_051,
+            DeepSeekV4Fp4ScorePlanKind::Fp4Only,
+            DeepSeekV4Fp4SelectionSource::Fp4,
+        );
+        invalid.record_common_prepare().unwrap();
+        invalid.record_fp4_pipeline().unwrap();
+        invalid.f16_score_selector_pipeline_invocations = 1;
+        assert!(invalid.validate_completed().is_err());
     }
 
     #[test]

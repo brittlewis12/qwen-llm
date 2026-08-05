@@ -1756,6 +1756,13 @@ constant uint DS4_SELECTOR_MG_STATE_THRESHOLD_KEY = 6u;
 constant uint DS4_SELECTOR_MG_STATE_THRESHOLD_TAKE = 7u;
 constant uint DS4_SELECTOR_MG_STATE_SELECTED_COUNT = 8u;
 constant uint DS4_SELECTOR_MG_STATE_COMPLETION = 9u;
+constant uint DS4_SELECTOR_MG_PLAN_WORDS = 5u;
+constant uint DS4_SELECTOR_MG_PLAN_GREATER = 0u;
+constant uint DS4_SELECTOR_MG_PLAN_EQUAL = 1u;
+constant uint DS4_SELECTOR_MG_PLAN_TIE_QUOTA = 2u;
+constant uint DS4_SELECTOR_MG_PLAN_SELECTED = 3u;
+constant uint DS4_SELECTOR_MG_PLAN_ID_OFFSET = 4u;
+constant uint DS4_SELECTOR_MG_COMPACT_PHASE = 8u;
 
 static inline uint ds4_selector_mg_record_completion(
         uint generation,
@@ -1766,6 +1773,10 @@ static inline uint ds4_selector_mg_record_completion(
 
 static inline uint ds4_selector_mg_state_completion(uint generation, uint digit) {
     return 0xd5420000u ^ generation ^ (digit << 12u);
+}
+
+static inline uint ds4_selector_mg_compact_completion(uint generation, uint group) {
+    return 0xd5430000u ^ generation ^ group;
 }
 
 kernel void kernel_deepseek_v4_select_top_k_multigroup_histogram_f32(
@@ -1807,9 +1818,10 @@ kernel void kernel_deepseek_v4_select_top_k_multigroup_histogram_f32(
     uint local_bins[16];
     for (uint bin = 0u; bin < 16u; ++bin) local_bins[bin] = 0u;
     if (local_error == 0u) {
-        const uint chunk = (args.row_capacity + args.group_count - 1u) / args.group_count;
-        const uint start = min(group * chunk, args.row_capacity);
-        const uint end = min(start + chunk, args.row_capacity);
+        const uint chunk = args.row_capacity / args.group_count
+            + uint(args.row_capacity % args.group_count != 0u);
+        const uint start = uint(min(ulong(group) * ulong(chunk), ulong(args.row_capacity)));
+        const uint end = uint(min(ulong(start) + ulong(chunk), ulong(args.row_capacity)));
         for (uint row = start + lane; row < end && row < visible; row += width) {
             const float score = scores[row];
             if (!isfinite(score)) {
@@ -1860,7 +1872,7 @@ kernel void kernel_deepseek_v4_select_top_k_multigroup_reduce_f32(
         constant ds4_indexer_multigroup_select_args & args [[buffer(0)]],
         device const int * visible_counts [[buffer(1)]],
         device const uint * records [[buffer(2)]],
-        device uint * partition_counts [[buffer(3)]],
+        device uint * partition_plan [[buffer(3)]],
         device uint * state [[buffer(4)]],
         uint index [[thread_position_in_grid]]) {
     if (index != 0u) return;
@@ -1927,22 +1939,32 @@ kernel void kernel_deepseek_v4_select_top_k_multigroup_reduce_f32(
     if (status == 0u) {
         for (uint group = 0u; group < args.group_count; ++group) {
             const uint base = group * DS4_SELECTOR_MG_RECORD_WORDS;
-            uint greater = args.digit == 0u ? 0u : partition_counts[group * 2u];
+            const uint plan_base = group * DS4_SELECTOR_MG_PLAN_WORDS;
+            uint greater = args.digit == 0u
+                ? 0u
+                : partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_GREATER];
             for (uint bin = chosen + 1u; bin < 16u; ++bin) {
                 greater += records[base + DS4_SELECTOR_MG_RECORD_BINS + bin];
             }
-            partition_counts[group * 2u] = greater;
-            partition_counts[group * 2u + 1u] = args.digit == 7u
+            partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_GREATER] = greater;
+            partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_EQUAL] = args.digit == 7u
                 ? records[base + DS4_SELECTOR_MG_RECORD_BINS + chosen]
                 : 0u;
+            if (args.digit == 0u) {
+                partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_TIE_QUOTA] = 0u;
+                partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_SELECTED] = 0u;
+                partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_ID_OFFSET] = 0u;
+            }
         }
         prefix |= chosen << args.shift;
         prefix_mask |= 0xfu << args.shift;
         rank = remaining;
-    } else if (args.digit == 0u) {
+    } else {
         for (uint group = 0u; group < args.group_count; ++group) {
-            partition_counts[group * 2u] = 0u;
-            partition_counts[group * 2u + 1u] = 0u;
+            const uint plan_base = group * DS4_SELECTOR_MG_PLAN_WORDS;
+            for (uint word = 0u; word < DS4_SELECTOR_MG_PLAN_WORDS; ++word) {
+                partition_plan[plan_base + word] = 0u;
+            }
         }
     }
 
@@ -1952,14 +1974,42 @@ kernel void kernel_deepseek_v4_select_top_k_multigroup_reduce_f32(
         uint greater_total = 0u;
         uint equal_total = 0u;
         for (uint group = 0u; group < args.group_count; ++group) {
-            greater_total += partition_counts[group * 2u];
-            equal_total += partition_counts[group * 2u + 1u];
+            const uint plan_base = group * DS4_SELECTOR_MG_PLAN_WORDS;
+            greater_total += partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_GREATER];
+            equal_total += partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_EQUAL];
         }
         if (rank == 0u || rank > equal_total || greater_total + rank != selected_count) {
             status = 3u;
         } else {
-            threshold_key = prefix;
-            threshold_take = rank;
+            uint remaining_ties = rank;
+            uint output_offset = 0u;
+            for (uint group = 0u; group < args.group_count; ++group) {
+                const uint plan_base = group * DS4_SELECTOR_MG_PLAN_WORDS;
+                const uint greater = partition_plan[
+                    plan_base + DS4_SELECTOR_MG_PLAN_GREATER];
+                const uint equal = partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_EQUAL];
+                const uint quota = min(equal, remaining_ties);
+                const uint selected = greater + quota;
+                partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_TIE_QUOTA] = quota;
+                partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_SELECTED] = selected;
+                partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_ID_OFFSET] = output_offset;
+                remaining_ties -= quota;
+                output_offset += selected;
+            }
+            if (remaining_ties != 0u || output_offset != selected_count) {
+                status = 3u;
+            } else {
+                threshold_key = prefix;
+                threshold_take = rank;
+            }
+        }
+    }
+    if (args.digit == 7u && status != 0u) {
+        for (uint group = 0u; group < args.group_count; ++group) {
+            const uint plan_base = group * DS4_SELECTOR_MG_PLAN_WORDS;
+            for (uint word = 0u; word < DS4_SELECTOR_MG_PLAN_WORDS; ++word) {
+                partition_plan[plan_base + word] = 0u;
+            }
         }
     }
 
@@ -1976,6 +2026,358 @@ kernel void kernel_deepseek_v4_select_top_k_multigroup_reduce_f32(
     threadgroup_barrier(mem_flags::mem_device);
     state[DS4_SELECTOR_MG_STATE_COMPLETION]
         = ds4_selector_mg_state_completion(args.generation, args.digit);
+}
+
+kernel void kernel_deepseek_v4_select_top_k_multigroup_compact_f32(
+        constant ds4_indexer_multigroup_select_args & args [[buffer(0)]],
+        device const float * scores [[buffer(1)]],
+        device const int * visible_counts [[buffer(2)]],
+        device const uint * state [[buffer(3)]],
+        device const uint * partition_plan [[buffer(4)]],
+        device uchar * private_mask [[buffer(5)]],
+        device int * private_ids [[buffer(6)]],
+        device uint * records [[buffer(7)]],
+        threadgroup uint * scratch [[threadgroup(0)]],
+        uint lane [[thread_index_in_threadgroup]],
+        uint group [[threadgroup_position_in_grid]],
+        uint width [[threads_per_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
+    if (group >= args.group_count) return;
+    const uint record_base = group * DS4_SELECTOR_MG_RECORD_WORDS;
+    const uint plan_base = group * DS4_SELECTOR_MG_PLAN_WORDS;
+    const uint simdgroup_count = (width + 31u) / 32u;
+    const uint shared_base = 3u * width + 16u;
+    if (lane == 0u) {
+        records[record_base + DS4_SELECTOR_MG_RECORD_COMPLETION] = 0u;
+    }
+
+    const int visible_i = visible_counts[0];
+    const bool geometry_valid = visible_i > 0 && uint(visible_i) <= args.row_capacity
+        && args.top_k > 0u && args.top_k <= args.row_capacity;
+    const uint visible = geometry_valid ? uint(visible_i) : 0u;
+    uint local_error = geometry_valid ? 0u : 1u;
+    if (geometry_valid) {
+        const bool state_valid = state[DS4_SELECTOR_MG_STATE_GENERATION] == args.generation
+            && state[DS4_SELECTOR_MG_STATE_DIGIT] == 7u
+            && state[DS4_SELECTOR_MG_STATE_COMPLETION]
+                == ds4_selector_mg_state_completion(args.generation, 7u);
+        if (!state_valid) {
+            local_error = 3u;
+        } else {
+            const uint state_status = state[DS4_SELECTOR_MG_STATE_STATUS];
+            local_error = state_status == 0u || state_status == 2u || state_status == 3u
+                ? state_status
+                : 3u;
+            if (local_error == 0u) {
+                const bool final_state_valid = state[DS4_SELECTOR_MG_STATE_PREFIX_MASK]
+                        == 0xffffffffu
+                    && state[DS4_SELECTOR_MG_STATE_PREFIX]
+                        == state[DS4_SELECTOR_MG_STATE_THRESHOLD_KEY]
+                    && state[DS4_SELECTOR_MG_STATE_RANK]
+                        == state[DS4_SELECTOR_MG_STATE_THRESHOLD_TAKE]
+                    && state[DS4_SELECTOR_MG_STATE_THRESHOLD_TAKE] > 0u
+                    && state[DS4_SELECTOR_MG_STATE_SELECTED_COUNT] == min(visible, args.top_k);
+                if (!final_state_valid) local_error = 3u;
+            }
+        }
+    }
+
+    const uint capacity_chunk = args.row_capacity / args.group_count
+        + uint(args.row_capacity % args.group_count != 0u);
+    const uint partition_start = uint(min(
+        ulong(group) * ulong(capacity_chunk), ulong(args.row_capacity)));
+    const uint partition_end = uint(min(
+        ulong(partition_start) + ulong(capacity_chunk), ulong(args.row_capacity)));
+    const uint partition_rows = partition_end - partition_start;
+    const uint lane_chunk = (partition_rows + width - 1u) / width;
+    const uint lane_start = min(partition_start + lane * lane_chunk, partition_end);
+    const uint lane_end = min(lane_start + lane_chunk, partition_end);
+    const uint threshold_key = local_error == 0u
+        ? state[DS4_SELECTOR_MG_STATE_THRESHOLD_KEY]
+        : 0u;
+    uint local_greater = 0u;
+    uint local_equal = 0u;
+    if (local_error == 0u) {
+        for (uint row = lane_start; row < lane_end && row < visible; ++row) {
+            const float score = scores[row];
+            if (!isfinite(score)) {
+                local_error = 2u;
+                continue;
+            }
+            const uint key = ds4_selector_order_key(score);
+            local_greater += uint(key > threshold_key);
+            local_equal += uint(key == threshold_key);
+        }
+    }
+    scratch[lane] = local_greater;
+    scratch[width + lane] = local_equal;
+    const uint simd_error = simd_max(local_error);
+    if (simd_lane == 0u) scratch[3u * width + uint(simdgroup)] = simd_error;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane == 0u) {
+        uint error = 0u;
+        for (uint index = 0u; index < simdgroup_count; ++index) {
+            error = max(error, scratch[3u * width + index]);
+        }
+        uint greater_total = 0u;
+        uint equal_total = 0u;
+        uint selected_total = 0u;
+        uint remaining_lane_ties = error == 0u
+            ? partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_TIE_QUOTA]
+            : 0u;
+        for (uint index = 0u; index < width; ++index) {
+            const uint greater = scratch[index];
+            const uint equal = scratch[width + index];
+            const uint lane_ties = min(equal, remaining_lane_ties);
+            scratch[index] = lane_ties;
+            scratch[2u * width + index] = selected_total;
+            greater_total += greater;
+            equal_total += equal;
+            selected_total += greater + lane_ties;
+            remaining_lane_ties -= lane_ties;
+        }
+        if (error == 0u) {
+            const uint plan_greater = partition_plan[
+                plan_base + DS4_SELECTOR_MG_PLAN_GREATER];
+            const uint plan_equal = partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_EQUAL];
+            const uint plan_quota = partition_plan[
+                plan_base + DS4_SELECTOR_MG_PLAN_TIE_QUOTA];
+            const uint plan_selected = partition_plan[
+                plan_base + DS4_SELECTOR_MG_PLAN_SELECTED];
+            const uint plan_offset = partition_plan[
+                plan_base + DS4_SELECTOR_MG_PLAN_ID_OFFSET];
+            const bool plan_valid = plan_quota <= plan_equal
+                && plan_selected == plan_greater + plan_quota
+                && plan_offset <= args.top_k
+                && plan_selected <= args.top_k - plan_offset
+                && remaining_lane_ties == 0u
+                && greater_total == plan_greater
+                && equal_total == plan_equal
+                && selected_total == plan_selected;
+            if (!plan_valid) error = 3u;
+        }
+        scratch[shared_base] = error;
+        scratch[shared_base + 1u] = greater_total;
+        scratch[shared_base + 2u] = equal_total;
+        scratch[shared_base + 3u] = selected_total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint group_error = scratch[shared_base];
+    uint written = 0u;
+    if (group_error == 0u) {
+        const uint lane_ties = scratch[lane];
+        uint output_slot = partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_ID_OFFSET]
+            + scratch[2u * width + lane];
+        uint equal_seen = 0u;
+        for (uint row = lane_start; row < lane_end; ++row) {
+            bool selected = false;
+            if (row < visible) {
+                const uint key = ds4_selector_order_key(scores[row]);
+                const bool at_threshold = key == threshold_key;
+                selected = key > threshold_key || (at_threshold && equal_seen < lane_ties);
+                if (at_threshold) ++equal_seen;
+            }
+            private_mask[row] = uchar(selected);
+            if (selected) {
+                private_ids[output_slot] = int(row);
+                ++output_slot;
+                ++written;
+            }
+        }
+    }
+    scratch[2u * width + lane] = written;
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    if (lane == 0u && group_error == 0u) {
+        uint written_total = 0u;
+        for (uint index = 0u; index < width; ++index) {
+            written_total += scratch[2u * width + index];
+        }
+        if (written_total != scratch[shared_base + 3u]) {
+            group_error = 3u;
+            scratch[shared_base] = group_error;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (lane == 0u) {
+        for (uint word = 0u; word < DS4_SELECTOR_MG_RECORD_WORDS; ++word) {
+            records[record_base + word] = 0u;
+        }
+        records[record_base + DS4_SELECTOR_MG_RECORD_GENERATION] = args.generation;
+        records[record_base + DS4_SELECTOR_MG_RECORD_DIGIT] = DS4_SELECTOR_MG_COMPACT_PHASE;
+        records[record_base + DS4_SELECTOR_MG_RECORD_ERROR] = scratch[shared_base];
+        records[record_base + 4u] = scratch[shared_base + 1u];
+        records[record_base + 5u] = scratch[shared_base + 2u];
+        records[record_base + 6u] = scratch[shared_base + 3u];
+        records[record_base + 7u] = scratch[shared_base] == 0u
+            ? partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_ID_OFFSET]
+            : 0u;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    if (lane == 0u) {
+        records[record_base + DS4_SELECTOR_MG_RECORD_COMPLETION]
+            = ds4_selector_mg_compact_completion(args.generation, group);
+    }
+}
+
+kernel void kernel_deepseek_v4_select_top_k_multigroup_publish_f32(
+        constant ds4_indexer_multigroup_select_args & args [[buffer(0)]],
+        device const int * visible_counts [[buffer(1)]],
+        device const uint * state [[buffer(2)]],
+        device const uint * partition_plan [[buffer(3)]],
+        device const uint * records [[buffer(4)]],
+        device const uchar * private_mask [[buffer(5)]],
+        device const int * private_ids [[buffer(6)]],
+        device int * selected_mask [[buffer(7)]],
+        device int * cache_order_ids [[buffer(8)]],
+        device int * selected_counts [[buffer(9)]],
+        device int * status_output [[buffer(10)]],
+        threadgroup uint * scratch [[threadgroup(0)]],
+        uint lane [[thread_index_in_threadgroup]],
+        uint width [[threads_per_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
+    const uint simdgroup_count = (width + 31u) / 32u;
+    const int visible_i = visible_counts[0];
+    const bool geometry_valid = visible_i > 0 && uint(visible_i) <= args.row_capacity
+        && args.top_k > 0u && args.top_k <= args.row_capacity;
+    const uint visible = geometry_valid ? uint(visible_i) : 0u;
+    const uint selected_count = min(visible, args.top_k);
+    if (lane == 0u) {
+        selected_counts[0] = -1;
+        status_output[0] = -1;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+
+    if (lane == 0u) {
+        uint status = geometry_valid ? 0u : 1u;
+        bool state_valid = false;
+        if (geometry_valid) {
+            state_valid = state[DS4_SELECTOR_MG_STATE_GENERATION] == args.generation
+                && state[DS4_SELECTOR_MG_STATE_DIGIT] == 7u
+                && state[DS4_SELECTOR_MG_STATE_COMPLETION]
+                    == ds4_selector_mg_state_completion(args.generation, 7u);
+            status = state_valid ? state[DS4_SELECTOR_MG_STATE_STATUS] : 3u;
+            if (status > 3u || status == 1u) status = 3u;
+        }
+        if (geometry_valid && state_valid && (status == 0u || status == 2u)) {
+            bool stale = false;
+            ulong output_offset = 0ul;
+            ulong quota_total = 0ul;
+            for (uint group = 0u; group < args.group_count; ++group) {
+                const uint record_base = group * DS4_SELECTOR_MG_RECORD_WORDS;
+                const uint plan_base = group * DS4_SELECTOR_MG_PLAN_WORDS;
+                stale = stale
+                    || records[record_base + DS4_SELECTOR_MG_RECORD_GENERATION]
+                        != args.generation
+                    || records[record_base + DS4_SELECTOR_MG_RECORD_DIGIT]
+                        != DS4_SELECTOR_MG_COMPACT_PHASE
+                    || records[record_base + DS4_SELECTOR_MG_RECORD_ERROR] != status
+                    || records[record_base + DS4_SELECTOR_MG_RECORD_COMPLETION]
+                        != ds4_selector_mg_compact_completion(args.generation, group);
+                if (status == 0u) {
+                    const uint greater = partition_plan[
+                        plan_base + DS4_SELECTOR_MG_PLAN_GREATER];
+                    const uint equal = partition_plan[plan_base + DS4_SELECTOR_MG_PLAN_EQUAL];
+                    const uint quota = partition_plan[
+                        plan_base + DS4_SELECTOR_MG_PLAN_TIE_QUOTA];
+                    const uint selected = partition_plan[
+                        plan_base + DS4_SELECTOR_MG_PLAN_SELECTED];
+                    const uint offset = partition_plan[
+                        plan_base + DS4_SELECTOR_MG_PLAN_ID_OFFSET];
+                    const bool range_valid = offset <= args.top_k
+                        && selected <= args.top_k - min(offset, args.top_k);
+                    stale = stale || quota > equal || selected != greater + quota
+                        || ulong(offset) != output_offset
+                        || !range_valid
+                        || records[record_base + 4u] != greater
+                        || records[record_base + 5u] != equal
+                        || records[record_base + 6u] != selected
+                        || records[record_base + 7u] != offset;
+                    for (uint word = 8u; word < DS4_SELECTOR_MG_RECORD_WORDS; ++word) {
+                        stale = stale || records[record_base + word] != 0u;
+                    }
+                    if (range_valid) output_offset += ulong(selected);
+                    quota_total += ulong(quota);
+                }
+            }
+            if (status == 0u) {
+                stale = stale
+                    || state[DS4_SELECTOR_MG_STATE_PREFIX_MASK] != 0xffffffffu
+                    || state[DS4_SELECTOR_MG_STATE_PREFIX]
+                        != state[DS4_SELECTOR_MG_STATE_THRESHOLD_KEY]
+                    || state[DS4_SELECTOR_MG_STATE_RANK]
+                        != state[DS4_SELECTOR_MG_STATE_THRESHOLD_TAKE]
+                    || state[DS4_SELECTOR_MG_STATE_THRESHOLD_TAKE] == 0u
+                    || state[DS4_SELECTOR_MG_STATE_SELECTED_COUNT] != selected_count
+                    || quota_total != ulong(state[DS4_SELECTOR_MG_STATE_THRESHOLD_TAKE])
+                    || output_offset != ulong(selected_count);
+            }
+            if (stale) status = 3u;
+        }
+        scratch[0] = status;
+        scratch[1] = selected_count;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint local_population = 0u;
+    uint local_error = 0u;
+    if (scratch[0] == 0u) {
+        for (uint row = lane; row < args.row_capacity; row += width) {
+            const uint value = uint(private_mask[row]);
+            local_error = max(local_error, uint(value > 1u) * 3u);
+            local_population += uint(value == 1u);
+        }
+        for (uint slot = lane; slot < selected_count; slot += width) {
+            const int id = private_ids[slot];
+            const bool in_range = id >= 0 && uint(id) < visible;
+            const bool ordered = slot == 0u || id > private_ids[slot - 1u];
+            const bool masked = in_range && private_mask[uint(id)] == uchar(1);
+            if (!in_range || !ordered || !masked) local_error = 3u;
+        }
+    }
+    const uint simd_population = simd_sum(local_population);
+    const uint simd_error = simd_max(local_error);
+    if (simd_lane == 0u) {
+        scratch[4u + uint(simdgroup)] = simd_population;
+        scratch[12u + uint(simdgroup)] = simd_error;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (simdgroup == 0u) {
+        const uint population = simd_lane < simdgroup_count
+            ? scratch[4u + uint(simd_lane)]
+            : 0u;
+        const uint error = simd_lane < simdgroup_count
+            ? scratch[12u + uint(simd_lane)]
+            : 0u;
+        const uint total_population = simd_sum(population);
+        const uint reduced_error = simd_max(error);
+        if (simd_lane == 0u && scratch[0] == 0u
+                && (reduced_error != 0u || total_population != selected_count)) {
+            scratch[0] = 3u;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const uint final_status = scratch[0];
+    for (uint row = lane; row < args.row_capacity; row += width) {
+        selected_mask[row] = final_status == 0u
+            ? int(private_mask[row])
+            : int(row < selected_count);
+    }
+    for (uint slot = lane; slot < args.top_k; slot += width) {
+        cache_order_ids[slot] = final_status == 0u && slot < selected_count
+            ? private_ids[slot]
+            : (final_status != 0u && slot < selected_count ? int(slot) : -1);
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (lane == 0u) {
+        selected_counts[0] = int(selected_count);
+        status_output[0] = int(final_status);
+    }
 }
 
 template <bool Radix4>

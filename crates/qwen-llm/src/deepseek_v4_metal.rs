@@ -10321,6 +10321,22 @@ const DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS: usize = 20;
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS: usize = 10;
 #[cfg(test)]
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_DIGITS: usize = 8;
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS: usize = 5;
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS: usize = 32;
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_GREATER: usize = 0;
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_EQUAL: usize = 1;
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_TIE_QUOTA: usize = 2;
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_SELECTED: usize = 3;
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_ID_OFFSET: usize = 4;
+#[cfg(test)]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_COMPACT_PHASE: i32 = 8;
 
 #[cfg(test)]
 fn deepseek_v4_multigroup_selector_record_completion(
@@ -10337,6 +10353,11 @@ fn deepseek_v4_multigroup_selector_state_completion(generation: u32, digit: usiz
 }
 
 #[cfg(test)]
+fn deepseek_v4_multigroup_selector_compact_completion(generation: u32, group: usize) -> u32 {
+    0xd543_0000 ^ generation ^ group as u32
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn encode_select_top_k_multigroup_threshold_f32(
     ctx: &MetalContext,
@@ -10344,7 +10365,7 @@ fn encode_select_top_k_multigroup_threshold_f32(
     scores: &MetalTensor,
     visible_counts: &MetalTensor,
     records: &MetalTensor,
-    partition_counts: &MetalTensor,
+    partition_plan: &MetalTensor,
     state: &MetalTensor,
     row_capacity: usize,
     top_k: usize,
@@ -10375,7 +10396,11 @@ fn encode_select_top_k_multigroup_threshold_f32(
         group_count,
         "multi-group selector record elements",
     )?;
-    let partition_elements = checked_mul(2, group_count, "multi-group selector partitions")?;
+    let partition_elements = checked_mul(
+        DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS,
+        group_count,
+        "multi-group selector partition plan",
+    )?;
     if [score_elements, record_elements, partition_elements]
         .into_iter()
         .any(|value| u32::try_from(value).is_err())
@@ -10404,10 +10429,13 @@ fn encode_select_top_k_multigroup_threshold_f32(
         "multi-group selector records",
     )?;
     validate_i32(
-        partition_counts,
-        &[2, group_count as u64],
+        partition_plan,
+        &[
+            DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+            group_count as u64,
+        ],
         true,
-        "multi-group selector partition counts",
+        "multi-group selector partition plan",
     )?;
     validate_i32(
         state,
@@ -10474,7 +10502,7 @@ fn encode_select_top_k_multigroup_threshold_f32(
         enc.set_bytes(0, &args);
         enc.set_tensor(1, visible_counts);
         enc.set_tensor(2, records);
-        enc.set_tensor(3, partition_counts);
+        enc.set_tensor(3, partition_plan);
         enc.set_tensor(4, state);
         enc.dispatch(
             MTLSize {
@@ -10489,6 +10517,316 @@ fn encode_select_top_k_multigroup_threshold_f32(
             },
         );
     }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_select_top_k_multigroup_full_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    visible_counts: &MetalTensor,
+    records: &MetalTensor,
+    partition_plan: &MetalTensor,
+    state: &MetalTensor,
+    private_mask: &MetalTensor,
+    private_ids: &MetalTensor,
+    selected_mask: &MetalTensor,
+    cache_order_ids: &MetalTensor,
+    selected_counts: &MetalTensor,
+    status: &MetalTensor,
+    row_capacity: usize,
+    top_k: usize,
+    generation: u32,
+    fault_digit: Option<usize>,
+    omit_last_compactor: bool,
+) -> Result<(), DeepSeekV4MetalError> {
+    const THREADGROUP_WIDTH: usize = 256;
+    const COMPACT_SCRATCH_WORDS: usize = 3 * THREADGROUP_WIDTH + 20;
+    const PUBLISH_SCRATCH_WORDS: usize = 20;
+    let group_count = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+    require_serial(enc, "deepseek_v4_multigroup_selector_full")?;
+    validate_i8(
+        private_mask,
+        &[row_capacity as u64, 1],
+        true,
+        "multi-group selector private mask",
+    )?;
+    for (tensor, shape, name) in [
+        (
+            private_ids,
+            vec![top_k as u64, 1],
+            "multi-group selector private IDs",
+        ),
+        (
+            selected_mask,
+            vec![row_capacity as u64, 1],
+            "multi-group selector published mask",
+        ),
+        (
+            cache_order_ids,
+            vec![top_k as u64, 1],
+            "multi-group selector published IDs",
+        ),
+        (
+            selected_counts,
+            vec![1],
+            "multi-group selector published count",
+        ),
+        (status, vec![1], "multi-group selector published status"),
+    ] {
+        validate_i32(tensor, &shape, true, name)?;
+    }
+    let compactor = ctx.pipeline("kernel_deepseek_v4_select_top_k_multigroup_compact_f32")?;
+    validate_parallel_selector_pipeline(
+        compactor.threadExecutionWidth(),
+        compactor.maxTotalThreadsPerThreadgroup(),
+    )?;
+    let publisher = ctx.pipeline("kernel_deepseek_v4_select_top_k_multigroup_publish_f32")?;
+    validate_parallel_selector_pipeline(
+        publisher.threadExecutionWidth(),
+        publisher.maxTotalThreadsPerThreadgroup(),
+    )?;
+
+    encode_select_top_k_multigroup_threshold_f32(
+        ctx,
+        enc,
+        scores,
+        visible_counts,
+        records,
+        partition_plan,
+        state,
+        row_capacity,
+        top_k,
+        group_count,
+        generation,
+        fault_digit,
+    )?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        row_capacity: u32,
+        top_k: u32,
+        group_count: u32,
+        generation: u32,
+        digit: u32,
+        shift: u32,
+    }
+    let args = Args {
+        row_capacity: row_capacity as u32,
+        top_k: top_k as u32,
+        group_count: group_count as u32,
+        generation,
+        digit: DEEPSEEK_V4_MULTIGROUP_SELECTOR_DIGITS as u32,
+        shift: 0,
+    };
+    enc.set_pipeline(&compactor);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, scores);
+    enc.set_tensor(2, visible_counts);
+    enc.set_tensor(3, state);
+    enc.set_tensor(4, partition_plan);
+    enc.set_tensor(5, private_mask);
+    enc.set_tensor(6, private_ids);
+    enc.set_tensor(7, records);
+    enc.set_threadgroup_memory(0, COMPACT_SCRATCH_WORDS * std::mem::size_of::<u32>());
+    enc.dispatch(
+        MTLSize {
+            width: group_count - usize::from(omit_last_compactor),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: THREADGROUP_WIDTH,
+            height: 1,
+            depth: 1,
+        },
+    );
+
+    enc.set_pipeline(&publisher);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, visible_counts);
+    enc.set_tensor(2, state);
+    enc.set_tensor(3, partition_plan);
+    enc.set_tensor(4, records);
+    enc.set_tensor(5, private_mask);
+    enc.set_tensor(6, private_ids);
+    enc.set_tensor(7, selected_mask);
+    enc.set_tensor(8, cache_order_ids);
+    enc.set_tensor(9, selected_counts);
+    enc.set_tensor(10, status);
+    enc.set_threadgroup_memory(0, PUBLISH_SCRATCH_WORDS * std::mem::size_of::<u32>());
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: THREADGROUP_WIDTH,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_select_top_k_multigroup_publish_only_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    visible_counts: &MetalTensor,
+    records: &MetalTensor,
+    partition_plan: &MetalTensor,
+    state: &MetalTensor,
+    private_mask: &MetalTensor,
+    private_ids: &MetalTensor,
+    selected_mask: &MetalTensor,
+    cache_order_ids: &MetalTensor,
+    selected_counts: &MetalTensor,
+    status: &MetalTensor,
+    row_capacity: usize,
+    top_k: usize,
+    generation: u32,
+) -> Result<(), DeepSeekV4MetalError> {
+    const THREADGROUP_WIDTH: usize = 256;
+    const PUBLISH_SCRATCH_WORDS: usize = 20;
+    let group_count = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+    require_serial(enc, "deepseek_v4_multigroup_selector_publish_only")?;
+    if row_capacity == 0
+        || top_k == 0
+        || top_k > row_capacity
+        || generation == 0
+        || [row_capacity, top_k]
+            .into_iter()
+            .any(|value| u32::try_from(value).is_err())
+    {
+        return invalid("multi-group selector publisher geometry is invalid");
+    }
+    validate_i32(
+        visible_counts,
+        &[1],
+        false,
+        "multi-group selector publisher visibility",
+    )?;
+    validate_i32(
+        records,
+        &[
+            DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+            group_count as u64,
+        ],
+        false,
+        "multi-group selector publisher records",
+    )?;
+    validate_i32(
+        partition_plan,
+        &[
+            DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+            group_count as u64,
+        ],
+        false,
+        "multi-group selector publisher plan",
+    )?;
+    validate_i32(
+        state,
+        &[DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+        false,
+        "multi-group selector publisher state",
+    )?;
+    validate_i8(
+        private_mask,
+        &[row_capacity as u64, 1],
+        false,
+        "multi-group selector publisher private mask",
+    )?;
+    for (tensor, shape, writable, name) in [
+        (
+            private_ids,
+            vec![top_k as u64, 1],
+            false,
+            "multi-group selector publisher private IDs",
+        ),
+        (
+            selected_mask,
+            vec![row_capacity as u64, 1],
+            true,
+            "multi-group selector publisher mask",
+        ),
+        (
+            cache_order_ids,
+            vec![top_k as u64, 1],
+            true,
+            "multi-group selector publisher IDs",
+        ),
+        (
+            selected_counts,
+            vec![1],
+            true,
+            "multi-group selector publisher count",
+        ),
+        (
+            status,
+            vec![1],
+            true,
+            "multi-group selector publisher status",
+        ),
+    ] {
+        validate_i32(tensor, &shape, writable, name)?;
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        row_capacity: u32,
+        top_k: u32,
+        group_count: u32,
+        generation: u32,
+        digit: u32,
+        shift: u32,
+    }
+    let publisher = ctx.pipeline("kernel_deepseek_v4_select_top_k_multigroup_publish_f32")?;
+    validate_parallel_selector_pipeline(
+        publisher.threadExecutionWidth(),
+        publisher.maxTotalThreadsPerThreadgroup(),
+    )?;
+    enc.set_pipeline(&publisher);
+    enc.set_bytes(
+        0,
+        &Args {
+            row_capacity: row_capacity as u32,
+            top_k: top_k as u32,
+            group_count: group_count as u32,
+            generation,
+            digit: DEEPSEEK_V4_MULTIGROUP_SELECTOR_DIGITS as u32,
+            shift: 0,
+        },
+    );
+    enc.set_tensor(1, visible_counts);
+    enc.set_tensor(2, state);
+    enc.set_tensor(3, partition_plan);
+    enc.set_tensor(4, records);
+    enc.set_tensor(5, private_mask);
+    enc.set_tensor(6, private_ids);
+    enc.set_tensor(7, selected_mask);
+    enc.set_tensor(8, cache_order_ids);
+    enc.set_tensor(9, selected_counts);
+    enc.set_tensor(10, status);
+    enc.set_threadgroup_memory(0, PUBLISH_SCRATCH_WORDS * std::mem::size_of::<u32>());
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: THREADGROUP_WIDTH,
+            height: 1,
+            depth: 1,
+        },
+    );
     Ok(())
 }
 
@@ -12608,7 +12946,7 @@ mod tests {
         selected_count: u32,
         threshold_key: u32,
         threshold_take: u32,
-        partition_counts: Vec<u32>,
+        partition_plan: Vec<u32>,
     }
 
     fn multigroup_selector_threshold_oracle(
@@ -12634,7 +12972,7 @@ mod tests {
             selected_count: selected_count as u32,
             threshold_key: 0,
             threshold_take: 0,
-            partition_counts: vec![0; group_count * 2],
+            partition_plan: vec![0; group_count * DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS],
         };
         if !geometry_valid {
             return result;
@@ -12656,17 +12994,41 @@ mod tests {
         result.threshold_take = (selected_count - greater_total) as u32;
         let chunk = row_capacity.div_ceil(group_count);
         for group in 0..group_count {
-            let start = (group * chunk).min(row_capacity);
+            let plan_base = group * DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS;
+            let start = (group * chunk).min(row_capacity).min(visible);
             let end = (start + chunk).min(row_capacity).min(visible);
             for &score in &scores[start..end] {
                 let key = deployed_selector_order_key(score);
                 if key > result.threshold_key {
-                    result.partition_counts[group * 2] += 1;
+                    result.partition_plan
+                        [plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_GREATER] += 1;
                 } else if key == result.threshold_key {
-                    result.partition_counts[group * 2 + 1] += 1;
+                    result.partition_plan
+                        [plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_EQUAL] += 1;
                 }
             }
         }
+        let mut remaining_ties = result.threshold_take;
+        let mut output_offset = 0u32;
+        for group in 0..group_count {
+            let plan_base = group * DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS;
+            let greater =
+                result.partition_plan[plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_GREATER];
+            let equal =
+                result.partition_plan[plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_EQUAL];
+            let quota = equal.min(remaining_ties);
+            let selected = greater + quota;
+            result.partition_plan[plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_TIE_QUOTA] =
+                quota;
+            result.partition_plan[plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_SELECTED] =
+                selected;
+            result.partition_plan[plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_ID_OFFSET] =
+                output_offset;
+            remaining_ties -= quota;
+            output_offset += selected;
+        }
+        assert_eq!(remaining_ties, 0);
+        assert_eq!(output_offset, result.selected_count);
         result
     }
 
@@ -18086,8 +18448,14 @@ mod tests {
                     GROUPS as u64,
                 ],
             );
-            let partition_counts =
-                offset_i32(&ctx, &[i32::MIN; 2 * GROUPS], vec![2, GROUPS as u64]);
+            let partition_plan = offset_i32(
+                &ctx,
+                &[i32::MIN; DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS * GROUPS],
+                vec![
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+                    GROUPS as u64,
+                ],
+            );
             let state = offset_i32(
                 &ctx,
                 &[i32::MIN; DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS],
@@ -18102,7 +18470,7 @@ mod tests {
                     &scores,
                     &visible_counts,
                     &records,
-                    &partition_counts,
+                    &partition_plan,
                     &state,
                     CAPACITY,
                     TOP_K,
@@ -18117,7 +18485,7 @@ mod tests {
                 assert!(command.error().is_none(), "{label}: {:?}", command.error());
                 (
                     read_i32(&records),
-                    read_i32(&partition_counts),
+                    read_i32(&partition_plan),
                     read_i32(&state),
                 )
             };
@@ -18150,8 +18518,8 @@ mod tests {
             );
             assert_eq!(
                 first.1.iter().map(|&word| word as u32).collect::<Vec<_>>(),
-                expected.partition_counts,
-                "{label}: partition counts"
+                expected.partition_plan,
+                "{label}: partition plan"
             );
             let expected_record_error = expected.status.min(2);
             for group in 0..GROUPS {
@@ -18288,7 +18656,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let partition_counts = MetalTensor::zeros_i32(&ctx, vec![2, GROUPS as u64]).unwrap();
+        let partition_plan = MetalTensor::zeros_i32(
+            &ctx,
+            vec![
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+                GROUPS as u64,
+            ],
+        )
+        .unwrap();
         let state = MetalTensor::zeros_i32(
             &ctx,
             vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
@@ -18302,7 +18677,7 @@ mod tests {
             &scores,
             &visible,
             &records,
-            &partition_counts,
+            &partition_plan,
             &state,
             CAPACITY,
             TOP_K,
@@ -18351,6 +18726,802 @@ mod tests {
                 deepseek_v4_multigroup_selector_record_completion(GENERATION, 7, group),
                 "stale record completion group={group}"
             );
+        }
+    }
+
+    #[test]
+    fn multigroup_selector_full_matches_current_and_fails_closed() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 4_096;
+        const TOP_K: usize = 512;
+        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+
+        #[derive(Debug, Eq, PartialEq)]
+        struct PublishedSelection {
+            mask: Vec<i32>,
+            ids: Vec<i32>,
+            count: Vec<i32>,
+            status: Vec<i32>,
+        }
+
+        let run_case = |label: &str, values: &[f32], visible: i32, generation: u32| {
+            let scores = offset_f32(&ctx, values, vec![CAPACITY as u64, 1]);
+            let visible_counts = offset_i32(&ctx, &[visible], vec![1]);
+            let current_mask = offset_i32(&ctx, &vec![-7; CAPACITY], vec![CAPACITY as u64, 1]);
+            let current_ids = offset_i32(&ctx, &[-7; TOP_K], vec![TOP_K as u64, 1]);
+            let current_count = offset_i32(&ctx, &[-7], vec![1]);
+            let current_status = offset_i32(&ctx, &[-7], vec![1]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_select_top_k_f32(
+                &ctx,
+                &encoder,
+                &scores,
+                &visible_counts,
+                &current_mask,
+                None,
+                &current_ids,
+                &current_count,
+                &current_status,
+                CAPACITY,
+                CAPACITY,
+                TOP_K,
+                1,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{label}: current command");
+            let current = PublishedSelection {
+                mask: read_i32(&current_mask),
+                ids: read_i32(&current_ids),
+                count: read_i32(&current_count),
+                status: read_i32(&current_status),
+            };
+
+            let records = offset_i32(
+                &ctx,
+                &vec![i32::MIN; DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS * GROUPS],
+                vec![
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+                    GROUPS as u64,
+                ],
+            );
+            let partition_plan = offset_i32(
+                &ctx,
+                &vec![i32::MIN; DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS * GROUPS],
+                vec![
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+                    GROUPS as u64,
+                ],
+            );
+            let state = offset_i32(
+                &ctx,
+                &[i32::MIN; DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS],
+                vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+            );
+            let private_mask = offset_i8(&ctx, &vec![0xa5; CAPACITY], vec![CAPACITY as u64, 1]);
+            let private_ids = offset_i32(&ctx, &[-11; TOP_K], vec![TOP_K as u64, 1]);
+            let selected_mask = offset_i32(&ctx, &vec![-13; CAPACITY], vec![CAPACITY as u64, 1]);
+            let cache_order_ids = offset_i32(&ctx, &[-13; TOP_K], vec![TOP_K as u64, 1]);
+            let selected_count = offset_i32(&ctx, &[-13], vec![1]);
+            let status = offset_i32(&ctx, &[-13], vec![1]);
+            let execute = |invocation_generation: u32| {
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                encode_select_top_k_multigroup_full_f32(
+                    &ctx,
+                    &encoder,
+                    &scores,
+                    &visible_counts,
+                    &records,
+                    &partition_plan,
+                    &state,
+                    &private_mask,
+                    &private_ids,
+                    &selected_mask,
+                    &cache_order_ids,
+                    &selected_count,
+                    &status,
+                    CAPACITY,
+                    TOP_K,
+                    invocation_generation,
+                    None,
+                    false,
+                )
+                .unwrap();
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(command.error().is_none(), "{label}: candidate command");
+                PublishedSelection {
+                    mask: read_i32(&selected_mask),
+                    ids: read_i32(&cache_order_ids),
+                    count: read_i32(&selected_count),
+                    status: read_i32(&status),
+                }
+            };
+            let first = execute(generation);
+            let repeat = execute(generation + 1);
+            assert_eq!(first, current, "{label}: candidate/current output");
+            assert_eq!(repeat, first, "{label}: generation-repeat output");
+
+            let expected =
+                multigroup_selector_threshold_oracle(values, CAPACITY, visible, TOP_K, GROUPS);
+            assert_eq!(
+                read_i32(&partition_plan)
+                    .into_iter()
+                    .map(|word| word as u32)
+                    .collect::<Vec<_>>(),
+                expected.partition_plan,
+                "{label}: partition plan"
+            );
+            let state_words = read_i32(&state)
+                .into_iter()
+                .map(|word| word as u32)
+                .collect::<Vec<_>>();
+            assert_eq!(state_words[0], generation + 1, "{label}: state generation");
+            assert_eq!(state_words[5], expected.status, "{label}: state status");
+            assert_eq!(
+                state_words[8], expected.selected_count,
+                "{label}: state selected count"
+            );
+            let record_words = read_i32(&records);
+            for group in 0..GROUPS {
+                let record_base = group * DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS;
+                let plan_base = group * DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS;
+                assert_eq!(
+                    record_words[record_base] as u32,
+                    generation + 1,
+                    "{label}: compact generation group={group}"
+                );
+                assert_eq!(
+                    record_words[record_base + 1],
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_COMPACT_PHASE,
+                    "{label}: compact phase group={group}"
+                );
+                assert_eq!(
+                    record_words[record_base + 2] as u32,
+                    expected.status,
+                    "{label}: compact status group={group}"
+                );
+                assert_eq!(
+                    record_words[record_base + 3] as u32,
+                    deepseek_v4_multigroup_selector_compact_completion(generation + 1, group,),
+                    "{label}: compact completion group={group}"
+                );
+                if expected.status == 0 {
+                    assert_eq!(
+                        record_words[record_base + 4] as u32,
+                        expected.partition_plan
+                            [plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_GREATER],
+                        "{label}: compact greater group={group}"
+                    );
+                    assert_eq!(
+                        record_words[record_base + 5] as u32,
+                        expected.partition_plan
+                            [plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_EQUAL],
+                        "{label}: compact equal group={group}"
+                    );
+                    assert_eq!(
+                        record_words[record_base + 6] as u32,
+                        expected.partition_plan
+                            [plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_SELECTED],
+                        "{label}: compact selected group={group}"
+                    );
+                    assert_eq!(
+                        record_words[record_base + 7] as u32,
+                        expected.partition_plan
+                            [plan_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_ID_OFFSET],
+                        "{label}: compact offset group={group}"
+                    );
+                } else {
+                    assert_eq!(
+                        &record_words[record_base + 4..record_base + 8],
+                        [0; 4],
+                        "{label}: failed compact payload group={group}"
+                    );
+                }
+                assert_eq!(
+                    &record_words[record_base + 8
+                        ..record_base + DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS],
+                    [0; DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS - 8],
+                    "{label}: compact reserved words group={group}"
+                );
+            }
+            if expected.status == 0 {
+                assert_eq!(
+                    read_u8(&private_mask),
+                    current
+                        .mask
+                        .iter()
+                        .map(|&value| value as u8)
+                        .collect::<Vec<_>>(),
+                    "{label}: private mask"
+                );
+                assert_eq!(
+                    &read_i32(&private_ids)[..expected.selected_count as usize],
+                    &current.ids[..expected.selected_count as usize],
+                    "{label}: private IDs"
+                );
+            }
+        };
+
+        let mixed = (0..CAPACITY)
+            .map(|row| {
+                let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
+                bucket as f32 * 0.0003 - 1.1
+            })
+            .collect::<Vec<_>>();
+        run_case("mixed", &mixed, CAPACITY as i32, 0x3100_0001);
+        run_case(
+            "all tied",
+            &vec![0.0; CAPACITY],
+            CAPACITY as i32,
+            0x3100_0011,
+        );
+
+        let mut crossing_tie = vec![-1.0; CAPACITY];
+        crossing_tie[..480].fill(2.0);
+        crossing_tie[500..541].fill(1.0);
+        run_case(
+            "cutoff tie crosses partition",
+            &crossing_tie,
+            CAPACITY as i32,
+            0x3100_0021,
+        );
+
+        let mut canonical_tie = vec![-1.0; CAPACITY];
+        canonical_tie[..500].fill(2.0);
+        for (offset, value) in canonical_tie[500..701].iter_mut().enumerate() {
+            *value = match offset % 4 {
+                0 => 0.0,
+                1 => -0.0,
+                2 => f32::from_bits(1),
+                _ => f32::from_bits(0x8000_0001),
+            };
+        }
+        run_case(
+            "canonical tie crosses partition",
+            &canonical_tie,
+            CAPACITY as i32,
+            0x3100_0031,
+        );
+        run_case("visible below top-k", &mixed, 511, 0x3100_0041);
+        let mut outside_nonfinite = mixed.clone();
+        outside_nonfinite[CAPACITY - 1] = f32::INFINITY;
+        run_case(
+            "nonfinite outside visibility",
+            &outside_nonfinite,
+            CAPACITY as i32 - 1,
+            0x3100_0051,
+        );
+        let mut visible_nonfinite = mixed.clone();
+        visible_nonfinite[CAPACITY / 2] = f32::NAN;
+        run_case(
+            "visible nonfinite fallback",
+            &visible_nonfinite,
+            CAPACITY as i32,
+            0x3100_0061,
+        );
+        run_case("invalid visibility fallback", &mixed, 0, 0x3100_0071);
+
+        let run_internal_fault = |label: &str,
+                                  generation: u32,
+                                  fault_digit: Option<usize>,
+                                  omit_last_compactor: bool| {
+            let scores = offset_f32(&ctx, &mixed, vec![CAPACITY as u64, 1]);
+            let visible = offset_i32(&ctx, &[CAPACITY as i32], vec![1]);
+            let records = MetalTensor::zeros_i32(
+                &ctx,
+                vec![
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+                    GROUPS as u64,
+                ],
+            )
+            .unwrap();
+            let partition_plan = MetalTensor::zeros_i32(
+                &ctx,
+                vec![
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+                    GROUPS as u64,
+                ],
+            )
+            .unwrap();
+            let state = MetalTensor::zeros_i32(
+                &ctx,
+                vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+            )
+            .unwrap();
+            let private_mask =
+                MetalTensor::zeros_dtype(&ctx, vec![CAPACITY as u64, 1], GgmlType::I8).unwrap();
+            let private_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+            let mask = offset_i32(&ctx, &vec![-17; CAPACITY], vec![CAPACITY as u64, 1]);
+            let ids = offset_i32(&ctx, &[-17; TOP_K], vec![TOP_K as u64, 1]);
+            let count = offset_i32(&ctx, &[-17], vec![1]);
+            let status = offset_i32(&ctx, &[-17], vec![1]);
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_select_top_k_multigroup_full_f32(
+                &ctx,
+                &encoder,
+                &scores,
+                &visible,
+                &records,
+                &partition_plan,
+                &state,
+                &private_mask,
+                &private_ids,
+                &mask,
+                &ids,
+                &count,
+                &status,
+                CAPACITY,
+                TOP_K,
+                generation,
+                fault_digit,
+                omit_last_compactor,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{label}: command");
+            assert_eq!(read_i32(&status), [3], "{label}: status");
+            assert_eq!(read_i32(&count), [TOP_K as i32], "{label}: count");
+            assert_eq!(
+                read_i32(&mask),
+                (0..CAPACITY)
+                    .map(|row| i32::from(row < TOP_K))
+                    .collect::<Vec<_>>(),
+                "{label}: fallback mask"
+            );
+            assert_eq!(
+                read_i32(&ids),
+                (0..TOP_K as i32).collect::<Vec<_>>(),
+                "{label}: fallback IDs"
+            );
+        };
+        run_internal_fault("missing histogram producer", 0x3100_0081, Some(3), false);
+        run_internal_fault("missing compactor", 0x3100_0091, None, true);
+    }
+
+    #[test]
+    fn multigroup_selector_publisher_rejects_corrupt_private_state() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 4_096;
+        const TOP_K: usize = 512;
+        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+        const GENERATION: u32 = 0x3200_0001;
+
+        let values = (0..CAPACITY)
+            .map(|row| {
+                let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
+                bucket as f32 * 0.0003 - 1.1
+            })
+            .collect::<Vec<_>>();
+        let scores = offset_f32(&ctx, &values, vec![CAPACITY as u64, 1]);
+        let visible = offset_i32(&ctx, &[CAPACITY as i32], vec![1]);
+        let records = MetalTensor::zeros_i32(
+            &ctx,
+            vec![
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+                GROUPS as u64,
+            ],
+        )
+        .unwrap();
+        let partition_plan = MetalTensor::zeros_i32(
+            &ctx,
+            vec![
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+                GROUPS as u64,
+            ],
+        )
+        .unwrap();
+        let state = MetalTensor::zeros_i32(
+            &ctx,
+            vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+        )
+        .unwrap();
+        let private_mask =
+            MetalTensor::zeros_dtype(&ctx, vec![CAPACITY as u64, 1], GgmlType::I8).unwrap();
+        let private_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+        let ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_select_top_k_multigroup_full_f32(
+            &ctx,
+            &encoder,
+            &scores,
+            &visible,
+            &records,
+            &partition_plan,
+            &state,
+            &private_mask,
+            &private_ids,
+            &mask,
+            &ids,
+            &count,
+            &status,
+            CAPACITY,
+            TOP_K,
+            GENERATION,
+            None,
+            false,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        assert_eq!(read_i32(&status), [0]);
+
+        let exact_mask = read_u8(&private_mask);
+        let exact_ids = read_i32(&private_ids);
+        let exact_plan = read_i32(&partition_plan);
+        let exact_records = read_i32(&records);
+        let assert_fault = |label: &str| {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_select_top_k_multigroup_publish_only_f32(
+                &ctx,
+                &encoder,
+                &visible,
+                &records,
+                &partition_plan,
+                &state,
+                &private_mask,
+                &private_ids,
+                &mask,
+                &ids,
+                &count,
+                &status,
+                CAPACITY,
+                TOP_K,
+                GENERATION,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{label}: command");
+            assert_eq!(read_i32(&status), [3], "{label}: status");
+            assert_eq!(read_i32(&count), [TOP_K as i32], "{label}: count");
+            assert_eq!(
+                read_i32(&mask),
+                (0..CAPACITY)
+                    .map(|row| i32::from(row < TOP_K))
+                    .collect::<Vec<_>>(),
+                "{label}: fallback mask"
+            );
+            assert_eq!(
+                read_i32(&ids),
+                (0..TOP_K as i32).collect::<Vec<_>>(),
+                "{label}: fallback IDs"
+            );
+        };
+
+        let selected_row = exact_ids[0] as usize;
+        unsafe {
+            let pointer = private_mask
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(private_mask.offset as usize + selected_row);
+            pointer.write(2);
+        }
+        assert_fault("non-binary private mask");
+        unsafe {
+            let destination = private_mask
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(private_mask.offset as usize);
+            std::ptr::copy_nonoverlapping(exact_mask.as_ptr(), destination, exact_mask.len());
+        }
+
+        let mut corrupt_ids = exact_ids.clone();
+        corrupt_ids[1] = corrupt_ids[0];
+        host_write_i32(&private_ids, &corrupt_ids, "corrupt private selector IDs").unwrap();
+        assert_fault("duplicate private ID");
+        host_write_i32(&private_ids, &exact_ids, "restore private selector IDs").unwrap();
+
+        let mut corrupt_plan = exact_plan.clone();
+        corrupt_plan[DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_ID_OFFSET] += 1;
+        host_write_i32(&partition_plan, &corrupt_plan, "corrupt selector plan").unwrap();
+        assert_fault("corrupt partition offset");
+        host_write_i32(&partition_plan, &exact_plan, "restore selector plan").unwrap();
+
+        let mut corrupt_records = exact_records.clone();
+        corrupt_records[3] ^= 1;
+        host_write_i32(&records, &corrupt_records, "corrupt compaction records").unwrap();
+        assert_fault("corrupt compaction completion");
+    }
+
+    #[test]
+    #[ignore = "focused terminal full multi-group selector ceiling; run explicitly with --nocapture"]
+    fn profile_multigroup_selector_full_ceiling() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const CAPACITY: usize = 262_144;
+        const TOP_K: usize = 512;
+        const GROUPS: usize = DEEPSEEK_V4_MULTIGROUP_SELECTOR_PHASE_B_GROUPS;
+        const SAMPLES: usize = 24;
+        const MAX_MEDIAN_MS: f64 = 1.35;
+        const MAX_P95_MS: f64 = 1.40;
+        const MIN_SAVING_MS: f64 = 0.50;
+
+        #[derive(Clone, Debug, Eq, PartialEq)]
+        struct PublishedSelection {
+            mask: Vec<i32>,
+            ids: Vec<i32>,
+            count: Vec<i32>,
+            status: Vec<i32>,
+        }
+
+        fn timed_gpu_wall<F>(ctx: &MetalContext, encode: F) -> (f64, f64)
+        where
+            F: FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        {
+            let started = std::time::Instant::now();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode(&encoder).unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            assert!(command.error().is_none(), "{:?}", command.error());
+            let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+            assert!(gpu_ms.is_finite() && gpu_ms > 0.0);
+            assert!(wall_ms.is_finite() && wall_ms > 0.0);
+            (gpu_ms, wall_ms)
+        }
+
+        fn median_and_p95(samples: &[f64]) -> (f64, f64) {
+            let mut sorted = samples.to_vec();
+            sorted.sort_by(f64::total_cmp);
+            let median = if sorted.len().is_multiple_of(2) {
+                (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) * 0.5
+            } else {
+                sorted[sorted.len() / 2]
+            };
+            let p95 = sorted[(sorted.len() * 95).div_ceil(100) - 1];
+            (median, p95)
+        }
+
+        let mixed_values = (0..CAPACITY)
+            .map(|row| {
+                let bucket = (row * 193 + row / 7 + row / 1_003) % 8_191;
+                bucket as f32 * 0.0003 - 1.1
+            })
+            .collect::<Vec<_>>();
+        let tied_values = vec![0.0f32; CAPACITY];
+        let mixed_scores = offset_f32(&ctx, &mixed_values, vec![CAPACITY as u64, 1]);
+        let tied_scores = offset_f32(&ctx, &tied_values, vec![CAPACITY as u64, 1]);
+        let visible = offset_i32(&ctx, &[CAPACITY as i32], vec![1]);
+
+        let current_mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+        let current_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let current_count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let current_status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let records = MetalTensor::zeros_i32(
+            &ctx,
+            vec![
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS as u64,
+                GROUPS as u64,
+            ],
+        )
+        .unwrap();
+        let partition_plan = MetalTensor::zeros_i32(
+            &ctx,
+            vec![
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+                GROUPS as u64,
+            ],
+        )
+        .unwrap();
+        let state = MetalTensor::zeros_i32(
+            &ctx,
+            vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
+        )
+        .unwrap();
+        let private_mask =
+            MetalTensor::zeros_dtype(&ctx, vec![CAPACITY as u64, 1], GgmlType::I8).unwrap();
+        let private_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let candidate_mask = MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, 1]).unwrap();
+        let candidate_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
+        let candidate_count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let candidate_status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
+        let generation = std::cell::Cell::new(0x4200_0001u32);
+        let next_generation = || {
+            let current = generation.get();
+            let next = current.wrapping_add(1);
+            generation.set(if next == 0 { 1 } else { next });
+            current
+        };
+
+        let read_current = || PublishedSelection {
+            mask: read_i32(&current_mask),
+            ids: read_i32(&current_ids),
+            count: read_i32(&current_count),
+            status: read_i32(&current_status),
+        };
+        let read_candidate = || PublishedSelection {
+            mask: read_i32(&candidate_mask),
+            ids: read_i32(&candidate_ids),
+            count: read_i32(&candidate_count),
+            status: read_i32(&candidate_status),
+        };
+        let time_current = |scores: &MetalTensor| {
+            timed_gpu_wall(&ctx, |encoder| {
+                encode_select_top_k_f32(
+                    &ctx,
+                    encoder,
+                    scores,
+                    &visible,
+                    &current_mask,
+                    None,
+                    &current_ids,
+                    &current_count,
+                    &current_status,
+                    CAPACITY,
+                    CAPACITY,
+                    TOP_K,
+                    1,
+                )
+            })
+        };
+        let time_candidate = |scores: &MetalTensor| {
+            let invocation_generation = next_generation();
+            timed_gpu_wall(&ctx, |encoder| {
+                encode_select_top_k_multigroup_full_f32(
+                    &ctx,
+                    encoder,
+                    scores,
+                    &visible,
+                    &records,
+                    &partition_plan,
+                    &state,
+                    &private_mask,
+                    &private_ids,
+                    &candidate_mask,
+                    &candidate_ids,
+                    &candidate_count,
+                    &candidate_status,
+                    CAPACITY,
+                    TOP_K,
+                    invocation_generation,
+                    None,
+                    false,
+                )
+            })
+        };
+
+        for (label, values, scores) in [
+            ("mixed", mixed_values.as_slice(), &mixed_scores),
+            ("tied", tied_values.as_slice(), &tied_scores),
+        ] {
+            time_current(scores);
+            let expected_output = read_current();
+            time_candidate(scores);
+            assert_eq!(read_candidate(), expected_output, "{label}: untimed output");
+            for _ in 0..5 {
+                time_current(scores);
+                time_candidate(scores);
+            }
+
+            let before = (0..SAMPLES)
+                .map(|_| time_current(scores))
+                .collect::<Vec<_>>();
+            assert_eq!(read_current(), expected_output, "{label}: before output");
+            let candidate = (0..SAMPLES)
+                .map(|_| time_candidate(scores))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                read_candidate(),
+                expected_output,
+                "{label}: candidate output"
+            );
+            let after = (0..SAMPLES)
+                .map(|_| time_current(scores))
+                .collect::<Vec<_>>();
+            assert_eq!(read_current(), expected_output, "{label}: after output");
+
+            let expected = multigroup_selector_threshold_oracle(
+                values,
+                CAPACITY,
+                CAPACITY as i32,
+                TOP_K,
+                GROUPS,
+            );
+            assert_eq!(expected.status, 0, "{label}: oracle status");
+            assert_eq!(
+                read_i32(&partition_plan)
+                    .into_iter()
+                    .map(|word| word as u32)
+                    .collect::<Vec<_>>(),
+                expected.partition_plan,
+                "{label}: candidate plan"
+            );
+            let state_words = read_i32(&state)
+                .into_iter()
+                .map(|word| word as u32)
+                .collect::<Vec<_>>();
+            let final_generation = generation.get().wrapping_sub(1);
+            assert_eq!(state_words[0], final_generation, "{label}: generation");
+            assert_eq!(state_words[5], 0, "{label}: status");
+            assert_eq!(state_words[6], expected.threshold_key, "{label}: threshold");
+            assert_eq!(state_words[7], expected.threshold_take, "{label}: take");
+            assert_eq!(state_words[8], TOP_K as u32, "{label}: count");
+            let record_words = read_i32(&records);
+            for group in 0..GROUPS {
+                let base = group * DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS;
+                assert_eq!(
+                    record_words[base] as u32, final_generation,
+                    "{label}: record generation group={group}"
+                );
+                assert_eq!(
+                    record_words[base + 1],
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_COMPACT_PHASE,
+                    "{label}: record phase group={group}"
+                );
+                assert_eq!(
+                    record_words[base + 2],
+                    0,
+                    "{label}: record error group={group}"
+                );
+                assert_eq!(
+                    record_words[base + 3] as u32,
+                    deepseek_v4_multigroup_selector_compact_completion(final_generation, group,),
+                    "{label}: record completion group={group}"
+                );
+            }
+
+            let before_gpu = before.iter().map(|sample| sample.0).collect::<Vec<_>>();
+            let before_wall = before.iter().map(|sample| sample.1).collect::<Vec<_>>();
+            let candidate_gpu = candidate.iter().map(|sample| sample.0).collect::<Vec<_>>();
+            let candidate_wall = candidate.iter().map(|sample| sample.1).collect::<Vec<_>>();
+            let after_gpu = after.iter().map(|sample| sample.0).collect::<Vec<_>>();
+            let after_wall = after.iter().map(|sample| sample.1).collect::<Vec<_>>();
+            let (before_gpu_median, _) = median_and_p95(&before_gpu);
+            let (before_wall_median, _) = median_and_p95(&before_wall);
+            let (candidate_gpu_median, candidate_gpu_p95) = median_and_p95(&candidate_gpu);
+            let (candidate_wall_median, candidate_wall_p95) = median_and_p95(&candidate_wall);
+            let (after_gpu_median, _) = median_and_p95(&after_gpu);
+            let (after_wall_median, _) = median_and_p95(&after_wall);
+            let gpu_drift = 2.0 * (before_gpu_median - after_gpu_median).abs()
+                / (before_gpu_median + after_gpu_median);
+            let wall_drift = 2.0 * (before_wall_median - after_wall_median).abs()
+                / (before_wall_median + after_wall_median);
+            let gpu_saving = before_gpu_median.min(after_gpu_median) - candidate_gpu_median;
+            let wall_saving = before_wall_median.min(after_wall_median) - candidate_wall_median;
+            let passed = gpu_drift <= 0.05
+                && wall_drift <= 0.05
+                && candidate_gpu_median <= MAX_MEDIAN_MS
+                && candidate_gpu_p95 <= MAX_P95_MS
+                && candidate_wall_median <= MAX_MEDIAN_MS
+                && candidate_wall_p95 <= MAX_P95_MS
+                && gpu_saving >= MIN_SAVING_MS
+                && wall_saving >= MIN_SAVING_MS;
+            eprintln!(
+                "deepseek_v4 multigroup_full case={label} current_before_gpu_median_ms={before_gpu_median:.6} current_before_wall_median_ms={before_wall_median:.6} candidate_gpu_median_ms={candidate_gpu_median:.6} candidate_gpu_p95_ms={candidate_gpu_p95:.6} candidate_wall_median_ms={candidate_wall_median:.6} candidate_wall_p95_ms={candidate_wall_p95:.6} current_after_gpu_median_ms={after_gpu_median:.6} current_after_wall_median_ms={after_wall_median:.6} gpu_drift={gpu_drift:.6} wall_drift={wall_drift:.6} faster_control_gpu_saving_ms={gpu_saving:.6} faster_control_wall_saving_ms={wall_saving:.6} pass={passed}"
+            );
+            eprintln!(
+                "deepseek_v4 multigroup_full case={label} current_before_gpu_ms={before_gpu:?} current_before_wall_ms={before_wall:?} candidate_gpu_ms={candidate_gpu:?} candidate_wall_ms={candidate_wall:?} current_after_gpu_ms={after_gpu:?} current_after_wall_ms={after_wall:?}"
+            );
+            assert!(passed, "{label}: full multi-group selector gate failed");
         }
     }
 
@@ -18430,7 +19601,14 @@ mod tests {
                 ],
             )
             .unwrap();
-            let partition_counts = MetalTensor::zeros_i32(&ctx, vec![2, groups as u64]).unwrap();
+            let partition_plan = MetalTensor::zeros_i32(
+                &ctx,
+                vec![
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS as u64,
+                    groups as u64,
+                ],
+            )
+            .unwrap();
             let state = MetalTensor::zeros_i32(
                 &ctx,
                 vec![DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS as u64],
@@ -18444,7 +19622,7 @@ mod tests {
                         scores,
                         &visible,
                         &records,
-                        &partition_counts,
+                        &partition_plan,
                         &state,
                         CAPACITY,
                         TOP_K,
@@ -18482,11 +19660,11 @@ mod tests {
                     "{label} count groups={groups}"
                 );
                 assert_eq!(
-                    read_i32(&partition_counts)
+                    read_i32(&partition_plan)
                         .into_iter()
                         .map(|word| word as u32)
                         .collect::<Vec<_>>(),
-                    expected.partition_counts,
+                    expected.partition_plan,
                     "{label} partitions groups={groups}"
                 );
             };
@@ -18561,8 +19739,8 @@ mod tests {
                                 .iter()
                                 .map(|&word| word as u32)
                                 .collect::<Vec<_>>(),
-                            expected.partition_counts,
-                            "{label} {arm} partition counts groups={groups}"
+                            expected.partition_plan,
+                            "{label} {arm} partition plan groups={groups}"
                         );
                         for group in 0..groups {
                             let base = group * DEEPSEEK_V4_MULTIGROUP_SELECTOR_RECORD_WORDS;
@@ -18635,7 +19813,7 @@ mod tests {
                 assert_current_output("before");
                 let exact_before = (
                     read_i32(&records),
-                    read_i32(&partition_counts),
+                    read_i32(&partition_plan),
                     read_i32(&state),
                 );
                 assert_candidate_snapshot("before", &exact_before);
@@ -18643,7 +19821,7 @@ mod tests {
                     median_and_p95((0..SAMPLES).map(|_| time_candidate(scores)).collect());
                 let exact_after = (
                     read_i32(&records),
-                    read_i32(&partition_counts),
+                    read_i32(&partition_plan),
                     read_i32(&state),
                 );
                 assert_candidate_snapshot("after", &exact_after);

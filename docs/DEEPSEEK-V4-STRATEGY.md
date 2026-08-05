@@ -1963,14 +1963,16 @@ Gate:
 
 Broader S6 work remains:
 
-- The exact multi-group selector's threshold-only ceiling clears at 32 producer
-  groups. Eight producer/reducer pairs take 0.351/0.351 ms median/p95 for mixed
-  terminal scores and 0.600/0.600 ms for all ties, leaving 1.507/1.410 ms against
-  the faster radix4 controls. Complete the frozen 18-dispatch full-output
-  falsifier before production: deterministic per-partition tie quotas and
-  offsets, exact cache-order IDs/mask, then separate completion validation and
-  first-K fallback. Preserve the F16 scorer, visibility, and failure status. The
-  diagnostics-only collapsed FP4 implementation remains negative evidence.
+- The exact 32-group, 18-dispatch full selector clears its terminal gate. Mixed
+  GPU/wall medians are 0.674/0.818 ms versus faster radix4 controls at
+  1.874/2.040 ms; all-tied medians are 0.907/1.075 versus 2.025/2.203 ms.
+  Deterministic partition quotas preserve lower-row ties and cache-order IDs;
+  private mask/ID state is structurally validated before exact publication or
+  first-K fallback. Next measure the visible-row crossover, then route only
+  eligible singleton Q=1/K=512 calls behind an experimental session-owned
+  scratch/generation policy. Preserve F16 scoring and keep packed, shallow, and
+  ranked-output routing current until a whole-token exactness/speed gate clears.
+  The diagnostics-only collapsed FP4 implementation remains negative evidence.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention. All-slot routed experts have closed the first measured MoE
   boundary without changing reduction lineage.
@@ -2069,10 +2071,12 @@ noise without reducing technical risk. Revisit after S5.
    executable differentials. Direct FP4-Q/K replacement is closed by the
    position-3,070 quality and speed KILL; keep its diagnostics and packed matrix
    shadow as negative evidence without migrating paged K or snapshot v2. The
-   exact multi-group threshold ceiling now clears at 32 groups and fails at the
-   frozen 64/80 alternatives. Complete its 18-dispatch full-output falsifier
-   next, requiring exact masks, cache-order IDs, failure fallback, and at least
-   0.50 ms all-in saving before changing production dispatch.
+   exact multi-group full selector now clears at 32 groups with exact masks,
+   cache-order IDs, status fallback, and more than 1.11 ms/layer terminal GPU
+   and wall saving. Measure its model-free crossover, then integrate it behind
+   an experimental singleton-only policy with session-owned scratch and
+   generation state. Require exact final model state and 0.50 ms times eligible
+   layers of whole-token saving before changing default dispatch.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine

@@ -246,15 +246,24 @@ ms against the faster current controls. The 64- and 80-group alternatives fail
 the tied-case gate and are closed. This is Phase-A feasibility only: it emits
 validated threshold state and per-partition counts, not masks or IDs.
 
+The frozen 18-dispatch full selector now clears as well. The final reducer owns
+partition tie quotas and cache-order offsets; 32 compactors write private byte
+masks/IDs; one publisher validates generation, plans, completion, mask
+population, and strict ID membership before exposing output or first-K
+fallback. Terminal mixed GPU/wall medians are 0.674/0.818 ms versus faster
+controls at 1.874/2.040 ms. All-tied medians are 0.907/1.075 versus
+2.025/2.203 ms. Candidate p95 remains below 1.14 ms and every full output is
+exact. This qualifies the topology, not a production dispatch switch.
+
 Force-ranked queue:
 
-1. **Complete multi-group exact selection.** Freeze 32 producer groups and the
-   18-dispatch Phase-B topology. Add deterministic per-partition tie quotas and
-   output offsets, exact cache-order IDs and mask, then a separate completion
-   validator that alone publishes status/count or deterministic first-K
-   fallback. Require bit-exact full outputs and at most 1.35/1.40 ms median/p95
-   with at least 0.50 ms GPU and wall saving before production routing. Keep the
-   current F16 scorer authoritative.
+1. **Integrate exact multi-group selection experimentally.** First measure a
+   model-free visible-row crossover against radix4. Then add session-owned
+   scratch, memory accounting, and a wrap-safe generation owner behind an
+   eligible singleton-only policy; packed, shallow, and ranked-output paths
+   remain current. Require exact per-layer outputs and final product state plus
+   at least 0.50 ms times eligible layers of GPU and wall saving before default.
+   Keep the current F16 scorer authoritative.
 2. **GPU-resident deterministic packed routing.** Remove prefill's router
    commit/wait and CPU schedule construction with integer counts, deterministic
    expert/token/slot offsets, unique slot destinations, fixed expert overlaunch,

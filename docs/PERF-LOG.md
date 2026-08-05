@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Multi-Group Full Selector GO
+
+Status: test-only 32-group, 18-dispatch Phase B `GO`; experimental production
+integration is authorized, but default routing remains `HOLD`.
+
+- Extend the final exact threshold reducer with deterministic per-partition
+  tie quotas, selected counts, and cache-order output offsets. Thirty-two
+  contiguous compactor groups preserve lower-row ties without atomics.
+- Stage one-byte private masks and cache-order IDs. A separate publisher checks
+  generation, state, every plan/completion record, mask binary/population
+  invariants, strict ascending in-range IDs, and ID-to-mask membership before
+  publishing exact output or deterministic first-K fallback.
+- Active differentials cover mixed/all-tied scores, cutoff and canonical
+  zero/subnormal ties across partitions, visible counts below K, invisible and
+  visible nonfinite values, generation repeats, missing producers/compactors,
+  and corrupt private mask/ID/plan/completion state.
+- At 262,144 rows, mixed candidate GPU median/p95 is 0.674/0.677 ms and wall is
+  0.818/0.875 ms. All-tied GPU is 0.907/0.917 and wall is 1.075/1.137. Savings
+  against faster controls remain 1.200/1.222 ms mixed and 1.117/1.129 ms tied.
+
+Decision: qualify the full selector topology and retain the current radix4 path
+as production. Next establish a small model-free visible-row crossover, then
+add session-owned scratch and a wrap-safe invocation generation behind an
+experimental singleton-only policy. Default routing requires exact per-layer
+outputs plus final logits, causal state, transcript, consumed-ID trace, and at
+least 0.50 ms times eligible CSA layers of GPU and wall saving. Evidence:
+`docs/bench/2026-08-05-dsv4-multigroup-full-selector/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Multi-Group Threshold Ceiling GO
 
 Status: threshold-only diagnostics `GO`; freeze 32 producer groups and proceed

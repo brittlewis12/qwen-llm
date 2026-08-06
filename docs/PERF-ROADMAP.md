@@ -473,17 +473,23 @@ phase timing. Remove the one-shot harness and use only this exact schedule in
 the primary campaign; synthetic permutations no longer constrain the KILL
 claim.
 
+The sole exact-route phase campaign is `INCONCLUSIVE - timestamp-invalid`.
+Gate validation and one untimed D/W/W/D conditioning block finish, but empty
+gate pre-bracket command 1 receives equal finite GPU start/end timestamps. The
+frozen contract rejects that censored duration before any retained gate sample;
+the down campaign never allocates or executes. Preserve no phase timing or
+economic result. Remove the profiler and keep grouped-IQ2 on
+`HOLD - closed inconclusive`.
+
 Force-ranked queue:
 
-1. **Grouped-IQ2 phase ceiling.** Use the exact captured production route IDs
-   and unchanged kernels to time grouped gate/up/SwiGLU and down/scatter
-   independently at H=4096/F=2048/E=256/K=6/N=128. Aggregate all 25 serial
-   per-layer command buffers per sample. Require exact schedule reconstruction,
-   disjoint and warm controls, validated output mutation and guards, matched
-   empty brackets, balanced 12-sample cells, no sample deletion, <=5% drift,
-   and `U_phase = max(disjoint_p95, warm_p95) + max(5 * max(disjoint_range,
-   warm_range), empty_pre_gpu_ms, empty_post_gpu_ms)`. Implement no replacement
-   kernel unless one stable phase reaches 158.3 ms.
+1. **Grouped-IQ2 instrumentation reopen.** Do not retry the censored empty-
+   command protocol. First design and separately review a conservative upper
+   bound for commands below Metal timestamp resolution, likely a matched minimal
+   nonempty dispatch that can only enlarge the uncertainty term. Preserve exact
+   routes, 25-command matching, every retained sample, <=5% drift, and the
+   phase-only 158.3 ms decision boundary. No kernel work precedes a valid phase
+   result.
 2. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.

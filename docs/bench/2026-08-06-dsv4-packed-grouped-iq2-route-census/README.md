@@ -119,6 +119,13 @@ Any allocation, Metal, validation, timestamp, or stability failure is
 phase-only lane. Stable `U_phase >= 158.3 ms` authorizes candidate design only.
 Neither outcome transfers to another phase, a joint rewrite, or product timing.
 
+The sole subsequent campaign is `INCONCLUSIVE - timestamp-invalid`: the second
+empty gate pre-bracket command has equal finite GPU start/end timestamps. No
+retained gate cell or down campaign executes, and no phase timing claim
+survives. The profiler is removed. Reopen only under a separately reviewed
+conservative treatment of timestamp-resolution-censored empty commands or
+relevant device/toolchain/observer drift; never treat equality as zero overhead.
+
 ## Validation
 
 - The canonical route-fixture release test passes.

@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Phase Ceiling Inconclusive
+
+Status: `INCONCLUSIVE - timestamp-invalid`; the phase lane remains
+`HOLD - closed inconclusive`. No grouped-IQ2 kernel is authorized.
+
+- The sole frozen model-free campaign uses exact production routes, deployed
+  grouped IQ2/IQ3 encoders, 25 serial commands per phase sample, disjoint/warm
+  production banks, and complete first-touch and output/state validation.
+- Gate disjoint/warm validation and one untimed D/W/W/D conditioning block
+  finish. Empty gate pre-bracket command 1 then reports equal finite Metal GPU
+  timestamps, `1482098.413132..1482098.413132`, and fails closed.
+- No retained gate sample and no down campaign execute. Publish no latency,
+  drift, p95, `U_phase`, KILL, candidate authorization, or product claim.
+- The run takes 19.60 seconds in-test and reaches 9,317,089,280 bytes maximum
+  RSS with zero swaps. Those are provenance facts only.
+
+Decision: archive the exact log/source/binary, remove the one-shot profiler, and
+do not retry this protocol. Reopen only with separately reviewed conservative
+handling for resolution-censored empty commands, relevant device/toolchain
+drift, or a new accepted production observer. Evidence:
+`docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling/README.md`. CX:
+`019fd588-96b0-7033-afd1-66d7e354e523`.
+
 ## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Route Census GO
 
 Status: the exact current-asset route census is `GO` for replacing synthetic

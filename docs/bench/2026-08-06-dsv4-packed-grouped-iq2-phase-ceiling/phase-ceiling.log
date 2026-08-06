@@ -1,0 +1,36 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::prefill::tests::profile_exact_route_grouped_iq2_production_phases ... 
+thread 'deepseek_v4_metal::prefill::tests::profile_exact_route_grouped_iq2_production_phases' (258829306) panicked at crates/qwen-llm/src/deepseek_v4_metal/prefill.rs:8315:13:
+grouped gate empty command 1 has invalid GPU timestamps 1482098.413132..1482098.413132
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::prefill::tests::profile_exact_route_grouped_iq2_production_phases
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 679 filtered out; finished in 19.60s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`
+       19.79 real        14.76 user         1.64 sys
+          9317089280  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              601806  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+                  25  voluntary context switches
+                1741  involuntary context switches
+          1242444876  instructions retired
+           382341603  cycles elapsed
+            48808512  peak memory footprint

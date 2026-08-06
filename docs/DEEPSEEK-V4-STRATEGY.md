@@ -2239,6 +2239,14 @@ noise without reducing technical risk. Revisit after S5.
    sample, use disjoint/warm controls and matched empty brackets, retain every
    sample, and enforce <=5% drift. Preserve padding as an operation-count
    result, not a timing claim. Require a stable conservative >=158.3 ms phase
-   ceiling before kernel implementation; keep HCA tiling deferred.
+   ceiling before kernel implementation. The sole frozen campaign stops
+   `INCONCLUSIVE - timestamp-invalid`: after valid gate controls and one untimed
+   conditioning block, empty pre-bracket command 1 has equal finite Metal GPU
+   start/end timestamps. No retained gate cell or down campaign executes, and
+   no phase result survives. Remove the profiler, leave grouped-IQ2 on
+   `HOLD - closed inconclusive`, and do not retry the protocol. Reopen only after
+   separate review of a conservative bound for timestamp-resolution-censored
+   commands, relevant device/toolchain drift, or a new accepted observer. Keep
+   HCA tiling deferred.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

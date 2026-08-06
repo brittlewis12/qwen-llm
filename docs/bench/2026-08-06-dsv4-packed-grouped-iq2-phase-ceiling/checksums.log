@@ -1,0 +1,20 @@
+$ pwd
+/Users/tito/code/qwen-llm
+
+$ shasum -a 256 docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling/experiment-source.diff docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling/phase-ceiling.log docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling/retained-source.diff
+11cb87eb3d1eeb04ad8990a10a0190528fe62cb33007be1ccc742dc80ca68863  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling/experiment-source.diff
+3961d15deac2aa87e51e9fcab37446d97bbf4c8a8f9bd83425e0662ade2c7101  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling/phase-ceiling.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling/retained-source.diff
+
+$ shasum -a 256 target/release/deps/qwen_llm-246719edcad9c805
+bcab454496d0d560a23f65e454b7c57cf651c57dd43f7f55b523bafbb857bdae  target/release/deps/qwen_llm-246719edcad9c805
+
+The binary hash was recorded immediately before the sole campaign. It contains
+the exact source archived by experiment-source.diff. The retained-source diff
+is empty because the one-shot profiler was removed after adjudication.
+
+$ shasum -a 256 target/release/deps/qwen_llm-246719edcad9c805
+843dcd945dfbea5082165ea8de0e0bc9d4f30e474359a237e31ea71859120901  target/release/deps/qwen_llm-246719edcad9c805
+
+The final binary hash was recorded after profiler removal, both focused release
+diagnostics tests, and strict release diagnostics Clippy.

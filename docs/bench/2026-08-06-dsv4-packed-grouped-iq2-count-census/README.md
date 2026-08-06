@@ -1,9 +1,9 @@
 # DeepSeek V4 Packed Grouped-IQ2 Count Census
 
-Status: exact current-asset count census `GO`. It authorizes one bounded
-model-free attribution of the existing grouped gate/up/SwiGLU and down/scatter
-phases. It does not authorize a replacement kernel, current-asset candidate,
-or performance claim.
+Status: exact current-asset count census `GO` as operation-count evidence. Its
+one bounded model-free phase-attribution authorization was consumed by the
+subsequent timestamp-invalid campaign. It now authorizes no new execution,
+replacement kernel, current-asset candidate, or performance claim.
 
 The census closes dispatch aggregation structurally: each eligible layer already
 uses one gate/up/SwiGLU and one down/scatter dispatch. Other schedule-derived
@@ -105,29 +105,18 @@ active fixture validation. Remove the ignored one-shot asset harness after
 archiving its reconstructing diff. The extracted JSON and committed test
 fixture are byte-identical.
 
-The subsequent exact-route census supersedes the synthetic-slot handoff. It
-binds all 19,200 production slot-major route IDs and proves that they reconstruct
-these exact counts and the production expert-major schedule. Use that fixture,
-not an invented permutation, for the primary model-free profiler over unchanged
-kernels at H=4096, F=2048, E=256, K=6, and N=128. Every sample must aggregate
-all 25 gate/up/SwiGLU dispatches or all 25 down/scatter dispatches. Use disjoint
-and warm weight controls, balanced ordering, first touch and conditioning
-outside timing, output mutation and guards, direct GPU brackets, no sample
-deletion, and the established 5% stability rule.
+The subsequent exact-route census supersedes the synthetic-slot handoff and
+binds all 19,200 production slot-major route IDs. That route packet consumed
+this census's sole phase-attribution authorization. Its frozen campaign stops
+`INCONCLUSIVE - timestamp-invalid` at the gate empty pre-bracket, before any
+retained phase cell or down execution. No latency, drift, p95, `U_phase`, KILL,
+candidate authorization, or product claim survives.
 
-For each phase:
-
-```text
-U_phase = max(disjoint_p95, warm_p95)
-        + max(5 * max(disjoint_range, warm_range),
-              empty_pre_gpu_ms,
-              empty_post_gpu_ms)
-```
-
-Stable `U_phase < 158.3 ms` closes that phase-only lane; instability is
-`INCONCLUSIVE` and the lane remains on `HOLD`; stable `U_phase >= 158.3 ms`
-authorizes only candidate kernel design. Product promotion still requires exact
-current-asset A/B evidence and material wall/GPU movement.
+Do not retry that protocol or infer timing from these count ratios. Reopen only
+after separately reviewed conservative handling for timestamp-resolution-
+censored empty commands, relevant device/toolchain drift, or a new accepted
+production observer. This census remains valid exact route geometry and
+operation-count evidence; it authorizes no new profiler or kernel by itself.
 
 ## Provenance
 

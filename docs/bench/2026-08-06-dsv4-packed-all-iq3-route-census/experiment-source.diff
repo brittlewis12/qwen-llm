@@ -1,0 +1,258 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal.rs b/crates/qwen-llm/src/deepseek_v4_metal.rs
+index 5034f43..1654ed9 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@ -13682,6 +13682,253 @@ mod tests {
+         );
+     }
+ 
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "one-shot current-asset packed all-IQ3 route census"]
++    fn current_asset_packed_all_iq3_route_census() {
++        const PREFIX_TOKENS: usize = 128;
++        const TOP_K: usize = 6;
++        const EXPERT_COUNT: usize = 256;
++        const ROUTE_COUNT: usize = PREFIX_TOKENS * TOP_K;
++        const COUNT_PAYLOAD_DOMAIN: &[u8] = b"qwen-llm:dsv4:packed-all-iq3-counts:v1\0";
++        const ROUTE_PAYLOAD_DOMAIN: &[u8] = b"qwen-llm:dsv4:packed-all-iq3-route-ids:v1\0";
++        const ALL_IQ3_LAYERS: [usize; 16] =
++            [1, 4, 5, 8, 9, 20, 24, 27, 28, 29, 30, 31, 32, 33, 34, 40];
++        const ALL_IQ3_BUCKETS: [usize; 16] = [
++            23, 38, 46, 68, 73, 72, 71, 79, 75, 79, 84, 77, 65, 62, 59, 65,
++        ];
++
++        fn hex(digest: impl AsRef<[u8]>) -> String {
++            digest
++                .as_ref()
++                .iter()
++                .map(|byte| format!("{byte:02x}"))
++                .collect()
++        }
++
++        fn decode_hex_32(value: &str) -> [u8; 32] {
++            assert_eq!(value.len(), 64);
++            std::array::from_fn(|index| {
++                u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
++                    .expect("valid expected digest")
++            })
++        }
++
++        let expected_model_content_id =
++            decode_hex_32("ae11d1ea13ccfd98509d248705a589384412cd67c502450158f84a8bd143b5e2");
++        let expected_prompt_digest =
++            decode_hex_32("b57816bcb0d5fdf5a8e2ddc7a0afe9e57fb0ca6ffc2b849285e1635d04772843");
++        let expected_logits_digest =
++            decode_hex_32("45c414408cdc688eeeb4f40166013b2ac7261e5a2c2655cdf9f51e818941f2d5");
++        let expected_hidden_digest =
++            decode_hex_32("8a9106b6c70c9069461ce1ef05d9dfb1349b6da7c4123b3e2e7b896c9d5278af");
++        let expected_causal_digest =
++            decode_hex_32("3de61f2054ff7e540be5beb113c5c3884875b7018de800696aa58a0393535035");
++        let expected_prefix_digest =
++            decode_hex_32("42428fa6efe61408f76b1ebc342f75cfa333af202b801c3031f34a7551cb870a");
++        let expected_compatibility_digest =
++            decode_hex_32("e7fb64be2f9fd96c52c9d5aa9384e09652e899650558dd50c4ba998e834bf076");
++
++        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
++            .map(PathBuf::from)
++            .unwrap_or_else(|| {
++                PathBuf::from(
++                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
++                )
++            });
++        assert!(model_path.exists(), "missing current DS4 model");
++        let ctx = MetalContext::new().expect("create Metal context");
++        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
++        assert_eq!(model_content_id.as_bytes(), &expected_model_content_id);
++        assert!(
++            prefill::packed_grouped_expert_enabled_for_test(&ctx),
++            "route census requires the qualified grouped-IQ2 default"
++        );
++        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, PREFIX_TOKENS)
++            .expect("plan packed all-IQ3 route census session");
++        let admitted = plan
++            .admit(ctx.memory_signals())
++            .expect("admit packed all-IQ3 route census session");
++        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
++            .expect("realize current DS4 residency");
++        let mut session = DeepSeekV4Session::new_with_model_content_id(
++            &ctx,
++            realized.into_residency(),
++            model_content_id,
++        )
++        .expect("construct packed all-IQ3 route census session");
++        let prefix = (0..PREFIX_TOKENS)
++            .map(|index| [35, 201, 200, 34][index % 4])
++            .collect::<Vec<_>>();
++        let prompt_digest: [u8; 32] = Sha256::digest(bytemuck::cast_slice(&prefix)).into();
++        assert_eq!(prompt_digest, expected_prompt_digest);
++
++        let profile = session
++            .execute_packed_tokens_with_post_route_stage_profile_for_test(
++                &ctx, &prefix, true, false, false,
++            )
++            .expect("execute packed all-IQ3 route census prefix");
++        assert!(!profile.sampled);
++        assert_eq!(profile.metadata.len(), DEEPSEEK_V4_LAYER_COUNT);
++        assert_eq!(session.packed_grouped_iq2_invocations_for_test(), 25);
++        assert_eq!(session.packed_grouped_iq3_invocations_for_test(), 0);
++
++        let logits = session
++            .copy_logits_f32()
++            .expect("copy packed all-IQ3 route census logits");
++        let hidden = host_read_f32(
++            session
++                .final_normalized_hidden()
++                .expect("packed all-IQ3 route census hidden is visible"),
++            "packed all-IQ3 route census hidden",
++        )
++        .expect("copy packed all-IQ3 route census hidden");
++        let snapshot = session
++            .capture_causal_snapshot()
++            .expect("capture packed all-IQ3 route census state");
++        let logits_digest: [u8; 32] = Sha256::digest(bytemuck::cast_slice(&logits)).into();
++        let hidden_digest: [u8; 32] = Sha256::digest(bytemuck::cast_slice(&hidden)).into();
++        assert_eq!(logits_digest, expected_logits_digest);
++        assert_eq!(hidden_digest, expected_hidden_digest);
++        assert_eq!(snapshot.causal_digest(), &expected_causal_digest);
++        assert_eq!(snapshot.prefix_digest(), &expected_prefix_digest);
++        assert_eq!(
++            snapshot.compatibility_digest().as_bytes(),
++            &expected_compatibility_digest
++        );
++        assert_eq!(session.committed_tokens(), prefix.as_slice());
++        assert_eq!(
++            <[u8; 32]>::from(Sha256::digest(bytemuck::cast_slice(
++                session.committed_tokens()
++            ))),
++            prompt_digest
++        );
++
++        let all_iq3 = profile
++            .metadata
++            .iter()
++            .filter(|metadata| {
++                !metadata.grouped_iq2
++                    && metadata.gate_dtype == GgmlType::IQ3_XXS
++                    && metadata.up_dtype == GgmlType::IQ3_XXS
++                    && metadata.down_dtype == GgmlType::IQ3_XXS
++            })
++            .collect::<Vec<_>>();
++        assert_eq!(
++            all_iq3
++                .iter()
++                .map(|metadata| metadata.layer)
++                .collect::<Vec<_>>(),
++            ALL_IQ3_LAYERS
++        );
++        assert_eq!(
++            all_iq3
++                .iter()
++                .map(|metadata| metadata.bucket_count)
++                .collect::<Vec<_>>(),
++            ALL_IQ3_BUCKETS
++        );
++
++        let mut count_payload = Sha256::new();
++        count_payload.update(COUNT_PAYLOAD_DOMAIN);
++        count_payload.update(model_content_id.as_bytes());
++        count_payload.update(prompt_digest);
++        for value in [
++            PREFIX_TOKENS,
++            TOP_K,
++            EXPERT_COUNT,
++            ALL_IQ3_LAYERS.len(),
++            ROUTE_COUNT,
++        ] {
++            count_payload.update((value as u32).to_le_bytes());
++        }
++        for metadata in &all_iq3 {
++            count_payload.update((metadata.layer as u32).to_le_bytes());
++            for &count in &metadata.expert_counts {
++                count_payload.update(count.to_le_bytes());
++            }
++        }
++        let count_payload_digest: [u8; 32] = count_payload.finalize().into();
++
++        let mut route_payload = Sha256::new();
++        route_payload.update(ROUTE_PAYLOAD_DOMAIN);
++        route_payload.update(model_content_id.as_bytes());
++        route_payload.update(prompt_digest);
++        route_payload.update(count_payload_digest);
++        for value in [
++            PREFIX_TOKENS,
++            TOP_K,
++            EXPERT_COUNT,
++            ALL_IQ3_LAYERS.len(),
++            ROUTE_COUNT,
++        ] {
++            route_payload.update((value as u32).to_le_bytes());
++        }
++        let mut total_t32 = 0usize;
++        let mut total_padding = 0usize;
++        let mut layers = Vec::with_capacity(all_iq3.len());
++        for metadata in all_iq3 {
++            assert_eq!(metadata.route_expert_ids.len(), ROUTE_COUNT);
++            let mut observed_counts = [0u16; EXPERT_COUNT];
++            for token_ids in metadata.route_expert_ids.chunks_exact(TOP_K) {
++                let mut seen = [false; EXPERT_COUNT];
++                for &expert in token_ids {
++                    let expert = usize::from(expert);
++                    assert!(expert < EXPERT_COUNT);
++                    assert!(!std::mem::replace(&mut seen[expert], true));
++                    observed_counts[expert] += 1;
++                }
++            }
++            assert_eq!(observed_counts, metadata.expert_counts);
++            assert_eq!(
++                observed_counts.iter().filter(|&&count| count > 0).count(),
++                metadata.bucket_count
++            );
++            let t32 = observed_counts
++                .iter()
++                .map(|&count| usize::from(count).div_ceil(32))
++                .sum::<usize>();
++            let padding = t32 * 32 - ROUTE_COUNT;
++            total_t32 += t32;
++            total_padding += padding;
++            route_payload.update((metadata.layer as u32).to_le_bytes());
++            for &expert in &metadata.route_expert_ids {
++                route_payload.update(expert.to_le_bytes());
++            }
++            layers.push(serde_json::json!({
++                "layer": metadata.layer,
++                "active_experts": metadata.bucket_count,
++                "t32": t32,
++                "padding": padding,
++                "expert_counts": metadata.expert_counts.to_vec(),
++                "route_expert_ids": metadata.route_expert_ids,
++            }));
++        }
++        let census = serde_json::json!({
++            "schema_version": 1,
++            "count_payload_domain_hex": hex(COUNT_PAYLOAD_DOMAIN),
++            "count_payload_sha256": hex(count_payload_digest),
++            "route_payload_domain_hex": hex(ROUTE_PAYLOAD_DOMAIN),
++            "route_payload_sha256": hex(route_payload.finalize()),
++            "model_content_id": hex(model_content_id.as_bytes()),
++            "prompt_token_ids_sha256": hex(prompt_digest),
++            "n_tokens": PREFIX_TOKENS,
++            "top_k": TOP_K,
++            "expert_count": EXPERT_COUNT,
++            "layer_count": ALL_IQ3_LAYERS.len(),
++            "route_count": ROUTE_COUNT,
++            "total_active_experts": 1_036,
++            "total_t32": total_t32,
++            "total_padding": total_padding,
++            "all_iq3_layer_ids": ALL_IQ3_LAYERS,
++            "layers": layers,
++        });
++        eprintln!(
++            "deepseek_v4 packed_all_iq3_route_census {}",
++            serde_json::to_string(&census).expect("serialize packed all-IQ3 route census")
++        );
++    }
++
+     #[cfg(feature = "dsv4-diagnostics")]
+     #[test]
+     #[ignore = "requires the current 97.05 GiB DS4 asset"]

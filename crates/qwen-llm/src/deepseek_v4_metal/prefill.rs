@@ -7113,6 +7113,9 @@ mod tests {
     #[cfg(feature = "dsv4-diagnostics")]
     const PACKED_GROUPED_IQ2_ROUTE_CENSUS_FIXTURE: &str =
         include_str!("../../tests/fixtures/deepseek_v4_packed_grouped_iq2_route_census_v1.json");
+    #[cfg(feature = "dsv4-diagnostics")]
+    const PACKED_ALL_IQ3_ROUTE_CENSUS_FIXTURE: &str =
+        include_str!("../../tests/fixtures/deepseek_v4_packed_all_iq3_route_census_v1.json");
 
     #[cfg(feature = "dsv4-diagnostics")]
     #[derive(serde::Deserialize)]
@@ -7175,6 +7178,41 @@ mod tests {
     }
 
     #[cfg(feature = "dsv4-diagnostics")]
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PackedAllIq3RouteCensusFixture {
+        schema_version: usize,
+        count_payload_domain_hex: String,
+        count_payload_sha256: String,
+        route_payload_domain_hex: String,
+        route_payload_sha256: String,
+        model_content_id: String,
+        prompt_token_ids_sha256: String,
+        n_tokens: usize,
+        top_k: usize,
+        expert_count: usize,
+        layer_count: usize,
+        route_count: usize,
+        total_active_experts: usize,
+        total_t32: usize,
+        total_padding: usize,
+        all_iq3_layer_ids: Vec<usize>,
+        layers: Vec<PackedAllIq3RouteLayerFixture>,
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PackedAllIq3RouteLayerFixture {
+        layer: usize,
+        active_experts: usize,
+        t32: usize,
+        padding: usize,
+        expert_counts: Vec<u16>,
+        route_expert_ids: Vec<u16>,
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
     fn packed_grouped_iq2_count_census_fixture() -> PackedGroupedIq2CountCensusFixture {
         serde_json::from_str(PACKED_GROUPED_IQ2_COUNT_CENSUS_FIXTURE)
             .expect("valid grouped-IQ2 count census fixture")
@@ -7184,6 +7222,12 @@ mod tests {
     fn packed_grouped_iq2_route_census_fixture() -> PackedGroupedIq2RouteCensusFixture {
         serde_json::from_str(PACKED_GROUPED_IQ2_ROUTE_CENSUS_FIXTURE)
             .expect("valid grouped-IQ2 route census fixture")
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    fn packed_all_iq3_route_census_fixture() -> PackedAllIq3RouteCensusFixture {
+        serde_json::from_str(PACKED_ALL_IQ3_ROUTE_CENSUS_FIXTURE)
+            .expect("valid packed all-IQ3 route census fixture")
     }
 
     #[cfg(feature = "dsv4-diagnostics")]
@@ -7931,6 +7975,169 @@ mod tests {
             }
         }
         assert_eq!(hex(route_payload.finalize()), routes.route_payload_sha256);
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn packed_all_iq3_route_census_fixture_is_canonical() {
+        const COUNT_DOMAIN: &[u8] = b"qwen-llm:dsv4:packed-all-iq3-counts:v1\0";
+        const ROUTE_DOMAIN: &[u8] = b"qwen-llm:dsv4:packed-all-iq3-route-ids:v1\0";
+        const LAYERS: [usize; 16] = [1, 4, 5, 8, 9, 20, 24, 27, 28, 29, 30, 31, 32, 33, 34, 40];
+        const BUCKETS: [usize; 16] = [
+            23, 38, 46, 68, 73, 72, 71, 79, 75, 79, 84, 77, 65, 62, 59, 65,
+        ];
+
+        fn hex(digest: impl AsRef<[u8]>) -> String {
+            digest
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        }
+
+        fn decode_hex_32(value: &str) -> [u8; 32] {
+            assert_eq!(value.len(), 64);
+            std::array::from_fn(|index| {
+                u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).unwrap()
+            })
+        }
+
+        let fixture = packed_all_iq3_route_census_fixture();
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.count_payload_domain_hex, hex(COUNT_DOMAIN));
+        assert_eq!(fixture.route_payload_domain_hex, hex(ROUTE_DOMAIN));
+        assert_eq!(
+            fixture.count_payload_sha256,
+            "72b5d2dba179d5d65334ec413bd82df784b9001d545b8c6e7b74aa29f309ff7c"
+        );
+        assert_eq!(
+            fixture.route_payload_sha256,
+            "ee106712f42aed80cc559414140327537dd9f256110b6acffee6a1b893319582"
+        );
+        assert_eq!(
+            fixture.model_content_id,
+            "ae11d1ea13ccfd98509d248705a589384412cd67c502450158f84a8bd143b5e2"
+        );
+        assert_eq!(
+            fixture.prompt_token_ids_sha256,
+            "b57816bcb0d5fdf5a8e2ddc7a0afe9e57fb0ca6ffc2b849285e1635d04772843"
+        );
+        assert_eq!(fixture.n_tokens, 128);
+        assert_eq!(fixture.top_k, MOE_TOP_K);
+        assert_eq!(fixture.expert_count, MOE_EXPERT_COUNT);
+        assert_eq!(fixture.layer_count, LAYERS.len());
+        assert_eq!(fixture.route_count, fixture.n_tokens * fixture.top_k);
+        assert_eq!(fixture.all_iq3_layer_ids, LAYERS);
+        assert_eq!(fixture.layers.len(), fixture.layer_count);
+
+        let mut count_payload = Sha256::new();
+        count_payload.update(COUNT_DOMAIN);
+        count_payload.update(decode_hex_32(&fixture.model_content_id));
+        count_payload.update(decode_hex_32(&fixture.prompt_token_ids_sha256));
+        for value in [
+            fixture.n_tokens,
+            fixture.top_k,
+            fixture.expert_count,
+            fixture.layer_count,
+            fixture.route_count,
+        ] {
+            count_payload.update((value as u32).to_le_bytes());
+        }
+
+        let mut route_payload = Sha256::new();
+        route_payload.update(ROUTE_DOMAIN);
+        route_payload.update(decode_hex_32(&fixture.model_content_id));
+        route_payload.update(decode_hex_32(&fixture.prompt_token_ids_sha256));
+        route_payload.update(decode_hex_32(&fixture.count_payload_sha256));
+        for value in [
+            fixture.n_tokens,
+            fixture.top_k,
+            fixture.expert_count,
+            fixture.layer_count,
+            fixture.route_count,
+        ] {
+            route_payload.update((value as u32).to_le_bytes());
+        }
+
+        let mut total_active_experts = 0usize;
+        let mut total_t32 = 0usize;
+        let mut total_padding = 0usize;
+        for (index, layer) in fixture.layers.iter().enumerate() {
+            assert_eq!(layer.layer, LAYERS[index]);
+            assert_eq!(layer.active_experts, BUCKETS[index]);
+            assert_eq!(layer.expert_counts.len(), MOE_EXPERT_COUNT);
+            assert_eq!(layer.route_expert_ids.len(), fixture.route_count);
+            assert_eq!(
+                layer
+                    .expert_counts
+                    .iter()
+                    .map(|&count| usize::from(count))
+                    .sum::<usize>(),
+                fixture.route_count
+            );
+            assert_eq!(
+                layer
+                    .expert_counts
+                    .iter()
+                    .filter(|&&count| count > 0)
+                    .count(),
+                layer.active_experts
+            );
+            let t32 = layer
+                .expert_counts
+                .iter()
+                .map(|&count| usize::from(count).div_ceil(32))
+                .sum::<usize>();
+            assert_eq!(layer.t32, t32);
+            assert_eq!(layer.padding, t32 * 32 - fixture.route_count);
+
+            let (expert_ids, rows, slots, schedule) =
+                packed_grouped_schedule_from_route_ids(fixture.n_tokens, &layer.route_expert_ids);
+            assert_eq!(schedule.len(), layer.active_experts);
+            assert_eq!(
+                packed_post_route_expert_ids(
+                    fixture.n_tokens,
+                    &expert_ids,
+                    &rows,
+                    &slots,
+                    &schedule,
+                )
+                .unwrap(),
+                layer.route_expert_ids
+            );
+            assert_eq!(
+                packed_post_route_expert_counts(fixture.n_tokens, &schedule)
+                    .unwrap()
+                    .as_slice(),
+                layer.expert_counts.as_slice()
+            );
+            assert_eq!(
+                packed_grouped_expert_tiles(fixture.n_tokens, &schedule)
+                    .unwrap()
+                    .len(),
+                layer.t32
+            );
+
+            count_payload.update((layer.layer as u32).to_le_bytes());
+            for &count in &layer.expert_counts {
+                count_payload.update(count.to_le_bytes());
+            }
+            route_payload.update((layer.layer as u32).to_le_bytes());
+            for &expert in &layer.route_expert_ids {
+                route_payload.update(expert.to_le_bytes());
+            }
+            total_active_experts += layer.active_experts;
+            total_t32 += layer.t32;
+            total_padding += layer.padding;
+        }
+        assert_eq!(total_active_experts, 1_036);
+        assert_eq!(total_t32, 1_187);
+        assert_eq!(total_padding, 25_696);
+        assert_eq!(fixture.total_active_experts, total_active_experts);
+        assert_eq!(fixture.total_t32, total_t32);
+        assert_eq!(fixture.total_padding, total_padding);
+        assert_eq!(hex(count_payload.finalize()), fixture.count_payload_sha256);
+        assert_eq!(hex(route_payload.finalize()), fixture.route_payload_sha256);
     }
 
     #[test]

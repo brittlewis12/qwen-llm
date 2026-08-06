@@ -463,18 +463,27 @@ Width-16/32 and width-8/16/32 down plans have 36.10% and 50.92% column-work
 ceilings, while gate/up masks inactive accumulation but retains shared tile
 dequantization. Preserve these as operation counts, not latency projections.
 
+The exact-route census closes the last schedule-control ambiguity before phase
+attribution. One additional bound current-asset run captures 25x768 slot-major
+expert IDs with canonical SHA-256 `505cb93f...afdd`. Every token has six
+distinct IDs, and independent reconstruction exactly reproduces production
+source rows, destination slots, ascending expert buckets, and the prior count
+fixture. The 6.76-second runtime and zero swaps are capture provenance, not
+phase timing. Remove the one-shot harness and use only this exact schedule in
+the primary campaign; synthetic permutations no longer constrain the KILL
+claim.
+
 Force-ranked queue:
 
-1. **Grouped-IQ2 phase ceiling.** Use the exact captured counts and unchanged
-   production kernels to time grouped gate/up/SwiGLU and down/scatter
-   independently at H=4096/F=2048/E=256/K=6/N=128. Aggregate all 25 phase
-   dispatches per sample. Preregister deterministic legal source-row/destination-
-   slot permutations because the fixture binds counts, not slots. Require
-   disjoint and warm controls, validated output mutation and guards, balanced
-   direct GPU brackets, no sample deletion, <=5% drift, and
-   `U_phase = max(disjoint_p95, warm_p95) + max(5 * max(disjoint_range,
-   warm_range), empty_gpu_ms)`. Implement no replacement kernel unless one
-   stable phase clears 158.3 ms.
+1. **Grouped-IQ2 phase ceiling.** Use the exact captured production route IDs
+   and unchanged kernels to time grouped gate/up/SwiGLU and down/scatter
+   independently at H=4096/F=2048/E=256/K=6/N=128. Aggregate all 25 serial
+   per-layer command buffers per sample. Require exact schedule reconstruction,
+   disjoint and warm controls, validated output mutation and guards, matched
+   empty brackets, balanced 12-sample cells, no sample deletion, <=5% drift,
+   and `U_phase = max(disjoint_p95, warm_p95) + max(5 * max(disjoint_range,
+   warm_range), empty_pre_gpu_ms, empty_post_gpu_ms)`. Implement no replacement
+   kernel unless one stable phase reaches 158.3 ms.
 2. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.

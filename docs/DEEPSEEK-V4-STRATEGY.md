@@ -2228,12 +2228,17 @@ noise without reducing technical risk. Revisit after S5.
    occupy only 34.325% of down-column capacity. Tile classes are
    1,395/100/35/12 for one through four panels; continuation panels are 11.78%
    of tile count, but that is a ranking signal rather than a latency ceiling.
-   Retain the canonical fixture and diagnostics metadata, remove the one-shot
-   asset harness, and move the queue to a model-free gate/up/SwiGLU versus
-   down/scatter phase ceiling over the exact counts. Aggregate all 25 dispatches
-   per phase and preregister deterministic legal slot permutations because the
-   fixture does not bind slots. Preserve padding as an operation-count result,
-   not a timing claim. Require a stable conservative >=158.3 ms phase ceiling
-   before kernel implementation; keep HCA tiling deferred.
+   Retain the canonical fixture and diagnostics metadata, then use one additional
+   bound current-asset run to capture all 25x768 exact slot-major route IDs. Its
+   canonical payload hashes to `505cb93f...afdd`; every token has six distinct
+   experts, and independent reconstruction exactly reproduces production rows,
+   slots, buckets, and the count fixture. The 6.76-second execution and zero
+   swaps are provenance, not phase timing. Remove the one-shot harness and use
+   only this exact schedule for a model-free gate/up/SwiGLU versus down/scatter
+   phase ceiling. Aggregate 25 serial per-layer command buffers per phase
+   sample, use disjoint/warm controls and matched empty brackets, retain every
+   sample, and enforce <=5% drift. Preserve padding as an operation-count
+   result, not a timing claim. Require a stable conservative >=158.3 ms phase
+   ceiling before kernel implementation; keep HCA tiling deferred.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

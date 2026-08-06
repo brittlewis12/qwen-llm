@@ -1,0 +1,346 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal.rs b/crates/qwen-llm/src/deepseek_v4_metal.rs
+index 5034f43..ebc53fa 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@ -15098,0 +15099,199 @@ mod tests {
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "one-shot current-asset grouped-IQ2 route-ID census"]
++    fn current_asset_packed_grouped_iq2_route_id_census() {
++        const PREFIX_TOKENS: usize = 128;
++        const TOP_K: usize = 6;
++        const EXPERT_COUNT: usize = 256;
++        const ROUTE_COUNT: usize = PREFIX_TOKENS * TOP_K;
++        const COUNT_PAYLOAD_DOMAIN: &[u8] = b"qwen-llm:dsv4:packed-grouped-iq2-counts:v1\0";
++        const ROUTE_PAYLOAD_DOMAIN: &[u8] = b"qwen-llm:dsv4:packed-grouped-iq2-route-ids:v1\0";
++        const GROUPED_LAYERS: [usize; 25] = [
++            0, 2, 3, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 35, 36, 37, 38,
++            39, 41,
++        ];
++
++        fn hex(digest: impl AsRef<[u8]>) -> String {
++            digest
++                .as_ref()
++                .iter()
++                .map(|byte| format!("{byte:02x}"))
++                .collect()
++        }
++
++        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
++            .map(PathBuf::from)
++            .unwrap_or_else(|| {
++                PathBuf::from(
++                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
++                )
++            });
++        assert!(model_path.exists(), "missing current DS4 model");
++        let ctx = MetalContext::new().expect("create Metal context");
++        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
++        assert_eq!(
++            hex(model_content_id.as_bytes()),
++            "ae11d1ea13ccfd98509d248705a589384412cd67c502450158f84a8bd143b5e2"
++        );
++        assert!(
++            prefill::packed_grouped_expert_enabled_for_test(&ctx),
++            "route-ID census requires the qualified grouped IQ2 default"
++        );
++        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, PREFIX_TOKENS)
++            .expect("plan grouped-IQ2 route-ID census session");
++        let admitted = plan
++            .admit(ctx.memory_signals())
++            .expect("admit grouped-IQ2 route-ID census session");
++        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
++            .expect("realize current DS4 residency");
++        let mut session = DeepSeekV4Session::new_with_model_content_id(
++            &ctx,
++            realized.into_residency(),
++            model_content_id,
++        )
++        .expect("construct grouped-IQ2 route-ID census session");
++        let prefix = (0..PREFIX_TOKENS)
++            .map(|index| [35, 201, 200, 34][index % 4])
++            .collect::<Vec<_>>();
++        let prompt_digest = Sha256::digest(bytemuck::cast_slice(&prefix));
++        assert_eq!(
++            hex(prompt_digest),
++            "b57816bcb0d5fdf5a8e2ddc7a0afe9e57fb0ca6ffc2b849285e1635d04772843"
++        );
++
++        let profile = session
++            .execute_packed_tokens_with_post_route_stage_profile_for_test(
++                &ctx, &prefix, true, false, false,
++            )
++            .expect("execute grouped-IQ2 route-ID census prefix");
++        assert!(!profile.sampled);
++        assert_eq!(profile.metadata.len(), DEEPSEEK_V4_LAYER_COUNT);
++        assert_eq!(session.packed_grouped_iq2_invocations_for_test(), 25);
++
++        let logits = session
++            .copy_logits_f32()
++            .expect("copy grouped-IQ2 route-ID census logits");
++        let hidden = host_read_f32(
++            session
++                .final_normalized_hidden()
++                .expect("grouped-IQ2 route-ID census hidden is visible"),
++            "grouped-IQ2 route-ID census hidden",
++        )
++        .expect("copy grouped-IQ2 route-ID census hidden");
++        let snapshot = session
++            .capture_causal_snapshot()
++            .expect("capture grouped-IQ2 route-ID census state");
++        assert_eq!(
++            hex(Sha256::digest(bytemuck::cast_slice(&logits))),
++            "45c414408cdc688eeeb4f40166013b2ac7261e5a2c2655cdf9f51e818941f2d5"
++        );
++        assert_eq!(
++            hex(Sha256::digest(bytemuck::cast_slice(&hidden))),
++            "8a9106b6c70c9069461ce1ef05d9dfb1349b6da7c4123b3e2e7b896c9d5278af"
++        );
++        assert_eq!(
++            hex(snapshot.causal_digest()),
++            "3de61f2054ff7e540be5beb113c5c3884875b7018de800696aa58a0393535035"
++        );
++        assert_eq!(
++            hex(snapshot.prefix_digest()),
++            "42428fa6efe61408f76b1ebc342f75cfa333af202b801c3031f34a7551cb870a"
++        );
++        assert_eq!(
++            hex(snapshot.compatibility_digest().as_bytes()),
++            "e7fb64be2f9fd96c52c9d5aa9384e09652e899650558dd50c4ba998e834bf076"
++        );
++        assert_eq!(session.committed_tokens(), prefix.as_slice());
++        assert_eq!(
++            hex(Sha256::digest(bytemuck::cast_slice(
++                session.committed_tokens()
++            ))),
++            hex(prompt_digest)
++        );
++
++        let grouped = profile
++            .metadata
++            .iter()
++            .filter(|metadata| metadata.grouped_iq2)
++            .collect::<Vec<_>>();
++        assert_eq!(
++            grouped
++                .iter()
++                .map(|metadata| metadata.layer)
++                .collect::<Vec<_>>(),
++            GROUPED_LAYERS
++        );
++
++        let mut count_payload = Sha256::new();
++        count_payload.update(COUNT_PAYLOAD_DOMAIN);
++        for metadata in &grouped {
++            count_payload.update((metadata.layer as u32).to_le_bytes());
++            for &count in &metadata.expert_counts {
++                count_payload.update(count.to_le_bytes());
++            }
++        }
++        let count_payload_digest = count_payload.finalize();
++        assert_eq!(
++            hex(count_payload_digest),
++            "0ab9925350288116288794f3d7f5081595dfad4ffdb9671a9a146f27568358a6"
++        );
++
++        let mut route_payload = Sha256::new();
++        route_payload.update(ROUTE_PAYLOAD_DOMAIN);
++        route_payload.update(model_content_id.as_bytes());
++        route_payload.update(prompt_digest);
++        route_payload.update(count_payload_digest);
++        for value in [
++            PREFIX_TOKENS,
++            TOP_K,
++            EXPERT_COUNT,
++            GROUPED_LAYERS.len(),
++            ROUTE_COUNT,
++        ] {
++            route_payload.update((value as u32).to_le_bytes());
++        }
++        let mut layers = Vec::with_capacity(grouped.len());
++        for metadata in grouped {
++            assert_eq!(metadata.route_expert_ids.len(), ROUTE_COUNT);
++            let mut observed_counts = [0u16; EXPERT_COUNT];
++            for token_ids in metadata.route_expert_ids.chunks_exact(TOP_K) {
++                let mut seen = [false; EXPERT_COUNT];
++                for &expert in token_ids {
++                    let expert = usize::from(expert);
++                    assert!(expert < EXPERT_COUNT);
++                    assert!(!std::mem::replace(&mut seen[expert], true));
++                    observed_counts[expert] += 1;
++                }
++            }
++            assert_eq!(observed_counts, metadata.expert_counts);
++            route_payload.update((metadata.layer as u32).to_le_bytes());
++            for &expert in &metadata.route_expert_ids {
++                route_payload.update(expert.to_le_bytes());
++            }
++            layers.push(serde_json::json!({
++                "layer": metadata.layer,
++                "route_expert_ids": metadata.route_expert_ids,
++            }));
++        }
++        let route_payload_sha256 = hex(route_payload.finalize());
++        let census = serde_json::json!({
++            "schema_version": 1,
++            "route_payload_domain_hex": hex(ROUTE_PAYLOAD_DOMAIN),
++            "route_payload_sha256": route_payload_sha256,
++            "model_content_id": hex(model_content_id.as_bytes()),
++            "prompt_token_ids_sha256": hex(prompt_digest),
++            "count_payload_sha256": hex(count_payload_digest),
++            "n_tokens": PREFIX_TOKENS,
++            "top_k": TOP_K,
++            "expert_count": EXPERT_COUNT,
++            "layer_count": GROUPED_LAYERS.len(),
++            "route_count": ROUTE_COUNT,
++            "grouped_layer_ids": GROUPED_LAYERS,
++            "layers": layers,
++        });
++        eprintln!(
++            "deepseek_v4 packed_grouped_iq2_route_id_census {}",
++            serde_json::to_string(&census).expect("serialize grouped-IQ2 route-ID census")
++        );
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+index f3b4d9b..01206bd 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@ -3882 +3882,78 @@ fn packed_post_route_expert_counts(
+-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++fn packed_post_route_expert_ids(
++    n_tokens: usize,
++    expert_ids: &[i32],
++    bucket_rows: &[i32],
++    bucket_slots: &[i32],
++    schedule: &[ExpertBucket],
++) -> Result<Vec<u16>, DeepSeekV4MetalError> {
++    validate_packed_expert_schedule(n_tokens, expert_ids, bucket_rows, bucket_slots, schedule)?;
++    let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed route-ID coverage")?;
++    let mut reconstructed = vec![u16::MAX; route_count];
++    for bucket in schedule {
++        for index in bucket.start..bucket.start + bucket.len {
++            let slot = usize::try_from(bucket_slots[index]).map_err(|_| {
++                DeepSeekV4MetalError::Invalid("packed route-ID slot is negative".into())
++            })?;
++            if slot >= route_count || reconstructed[slot] != u16::MAX {
++                return invalid("packed route-ID slot coverage is invalid");
++            }
++            reconstructed[slot] = u16::try_from(bucket.expert).map_err(|_| {
++                DeepSeekV4MetalError::Invalid("packed route-ID expert exceeds u16".into())
++            })?;
++        }
++    }
++    if reconstructed.iter().any(|&expert| expert == u16::MAX) {
++        return invalid("packed route-ID capture omitted a slot");
++    }
++    for (&reconstructed, &stored) in reconstructed.iter().zip(expert_ids) {
++        if usize::from(reconstructed) >= MOE_EXPERT_COUNT || i32::from(reconstructed) != stored {
++            return invalid("packed route-ID capture differs from routed storage");
++        }
++    }
++    for token_ids in reconstructed.chunks_exact(MOE_TOP_K) {
++        let mut seen = [false; MOE_EXPERT_COUNT];
++        for &expert in token_ids {
++            if std::mem::replace(&mut seen[usize::from(expert)], true) {
++                return invalid("packed route-ID capture duplicates an expert within a token");
++            }
++        }
++    }
++
++    let mut rebuilt_rows = Vec::with_capacity(route_count);
++    let mut rebuilt_slots = Vec::with_capacity(route_count);
++    let mut rebuilt_schedule = Vec::with_capacity(schedule.len());
++    for expert in 0..MOE_EXPERT_COUNT {
++        let start = rebuilt_slots.len();
++        for (slot, &routed_expert) in reconstructed.iter().enumerate() {
++            if usize::from(routed_expert) == expert {
++                rebuilt_rows.push((slot / MOE_TOP_K) as i32);
++                rebuilt_slots.push(slot as i32);
++            }
++        }
++        if rebuilt_slots.len() > start {
++            rebuilt_schedule.push(ExpertBucket {
++                expert,
++                start,
++                len: rebuilt_slots.len() - start,
++            });
++        }
++    }
++    if rebuilt_rows != bucket_rows
++        || rebuilt_slots != bucket_slots
++        || rebuilt_schedule.len() != schedule.len()
++    {
++        return invalid("packed route-ID capture does not rebuild the routed schedule");
++    }
++    for (rebuilt, original) in rebuilt_schedule.iter().zip(schedule) {
++        if rebuilt.expert != original.expert
++            || rebuilt.start != original.start
++            || rebuilt.len != original.len
++        {
++            return invalid("packed route-ID capture changes expert bucket geometry");
++        }
++    }
++    Ok(reconstructed)
++}
++
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++#[derive(Clone, Debug, Eq, PartialEq)]
+@@ -3889,0 +3967 @@ pub(super) struct PackedPostRouteLayerMetadata {
++    pub(super) route_expert_ids: Vec<u16>,
+@@ -4096 +4174 @@ impl PackedPostRouteStageRecorder {
+-            metadata: [None; DEEPSEEK_V4_LAYER_COUNT],
++            metadata: std::array::from_fn(|_| None),
+@@ -4141,3 +4219,2 @@ impl PackedPostRouteStageRecorder {
+-        if metadata.layer >= DEEPSEEK_V4_LAYER_COUNT
+-            || self.metadata[metadata.layer].replace(metadata).is_some()
+-        {
++        let layer = metadata.layer;
++        if layer >= DEEPSEEK_V4_LAYER_COUNT || self.metadata[layer].replace(metadata).is_some() {
+@@ -4145,2 +4222 @@ impl PackedPostRouteStageRecorder {
+-                "packed post-route layer {} has invalid or duplicate metadata",
+-                metadata.layer
++                "packed post-route layer {layer} has invalid or duplicate metadata"
+@@ -6727,0 +6804,25 @@ impl DeepSeekV4Session {
++                let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed metadata routes")?;
++                let expert_ids = host_read_i32(
++                    &i32_prefix(
++                        &self.prefill.moe.expert_ids,
++                        vec![route_count as u64],
++                        "packed metadata expert IDs",
++                    )?,
++                    "packed metadata expert IDs",
++                )?;
++                let bucket_rows = host_read_i32(
++                    &i32_prefix(
++                        &self.prefill.moe.bucket_rows,
++                        vec![route_count as u64],
++                        "packed metadata bucket rows",
++                    )?,
++                    "packed metadata bucket rows",
++                )?;
++                let bucket_slots = host_read_i32(
++                    &i32_prefix(
++                        &self.prefill.moe.bucket_slots,
++                        vec![route_count as u64],
++                        "packed metadata bucket slots",
++                    )?,
++                    "packed metadata bucket slots",
++                )?;
+@@ -6734,0 +6836,7 @@ impl DeepSeekV4Session {
++                    route_expert_ids: packed_post_route_expert_ids(
++                        n_tokens,
++                        &expert_ids,
++                        &bucket_rows,
++                        &bucket_slots,
++                        &schedule,
++                    )?,
+@@ -7441,0 +7550,8 @@ mod tests {
++        #[cfg(feature = "dsv4-diagnostics")]
++        assert_eq!(
++            packed_post_route_expert_ids(128, &expert_ids, &rows, &slots, &schedule).unwrap(),
++            expert_ids
++                .iter()
++                .map(|&expert| expert as u16)
++                .collect::<Vec<_>>()
++        );

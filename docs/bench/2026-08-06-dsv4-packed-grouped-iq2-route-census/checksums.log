@@ -1,0 +1,28 @@
+$ shasum -a 256 experiment-source.diff current-asset-route-census.log route-census.json retained-source.diff
+a8b32c041f67a664a08f653bccd37ac5f7ae1e8e02cebae28fa897ff0e42275a  experiment-source.diff
+d63715f4353b7a8e3c4a7406a5c774818aee60d938a20430ecc2e8b82610bb56  current-asset-route-census.log
+8c907f02b026d05bacbaf861c114795d0a7b86086f7eb20566fc12c04370d67f  route-census.json
+a38f7f78e218113174244e41642d35505c69c03e52b8b29835ebc6254e42d45e  retained-source.diff
+
+$ pwd
+/Users/tito/code/qwen-llm/docs/bench/2026-08-06-dsv4-packed-grouped-iq2-route-census
+
+$ cmp route-census.json ../../../crates/qwen-llm/tests/fixtures/deepseek_v4_packed_grouped_iq2_route_census_v1.json
+(exit status 0; files are byte-identical)
+
+$ shasum -a 256 ../../../crates/qwen-llm/tests/fixtures/deepseek_v4_packed_grouped_iq2_route_census_v1.json
+8c907f02b026d05bacbaf861c114795d0a7b86086f7eb20566fc12c04370d67f  ../../../crates/qwen-llm/tests/fixtures/deepseek_v4_packed_grouped_iq2_route_census_v1.json
+
+$ shasum -a 256 ../../../target/release/deps/qwen_llm-246719edcad9c805
+866619818f5c2672c3e96bd37fd460b6921d480a8ab068cd1018e6778cfdf577  ../../../target/release/deps/qwen_llm-246719edcad9c805
+
+The binary hash above was recorded after release compilation and immediately
+before the sole current-asset execution. The same path was later rebuilt after
+the one-shot harness was removed and active fixture validation was added.
+
+$ shasum -a 256 ../../../target/release/deps/qwen_llm-246719edcad9c805
+ac084b0628d1044d100d971898dc232b1dc7af649e6661298a58ecdbe075f0de  ../../../target/release/deps/qwen_llm-246719edcad9c805
+
+The final binary hash was recorded after the retained focused release test. The
+strict release diagnostics Clippy and formatting gates are reported in the
+checkpoint README rather than retroactively changing either binary.

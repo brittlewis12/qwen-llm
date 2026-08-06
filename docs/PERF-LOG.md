@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Route Census GO
+
+Status: the exact current-asset route census is `GO` for replacing synthetic
+slot controls with one canonical production schedule in the bounded model-free
+phase campaign. It contains no phase timing and authorizes no kernel.
+
+- One additional ordinary unsampled N=128 execution binds the same current
+  asset, prompt, accepted output/state identity, count payload, grouped policy,
+  and 25 layer IDs before capturing 768 slot-major route IDs per layer.
+- The 25x768 route payload hashes to `505cb93f...afdd`. Every six-ID token group
+  is distinct and in range; independent reconstruction exactly reproduces
+  production rows, destination slots, ascending expert buckets, and all prior
+  count histograms.
+- The sole run passes in 6.76 seconds in-test with zero swaps. Those values are
+  capture provenance, not routed-phase or prefill timing. The one-shot asset
+  harness is removed after archival.
+- Exact production slots now make a stable phase result decisive for the frozen
+  phase-only question. Preserve 25 serial command boundaries per sample,
+  disjoint/warm controls, matched empty brackets, balanced 12-sample cells, no
+  filtering, and the existing 5% drift rule.
+
+Decision: use the route fixture as the sole primary schedule for grouped-IQ2
+gate/up/SwiGLU and down/scatter attribution. Stable `U_phase < 158.3 ms` closes
+only that phase lane; stable `U_phase >= 158.3 ms` authorizes candidate design.
+Evidence:
+`docs/bench/2026-08-06-dsv4-packed-grouped-iq2-route-census/README.md`. CX:
+`019fd588-96b0-7033-afd1-66d7e354e523`.
+
 ## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Count Census GO
 
 Status: the exact current-asset count census is `GO` for one bounded model-free
@@ -28,10 +56,12 @@ current-asset candidate.
   gate/up masks inactive accumulations and must be measured independently.
 
 Decision: retain diagnostics-only count metadata and the canonical fixture;
-remove the one-shot asset harness. Next aggregate all 25 unchanged grouped
-gate/up/SwiGLU or down/scatter dispatches per sample over deterministic legal
-slot permutations and disjoint/warm controls. Require a stable conservative
-phase ceiling of at least 158.3 ms before kernel design. Evidence:
+remove the one-shot asset harness. Historical handoff, superseded by the exact-
+route census above: aggregate all 25 unchanged grouped gate/up/SwiGLU or
+down/scatter dispatches over deterministic legal slot permutations and
+disjoint/warm controls. The exact-route fixture now replaces those synthetic
+permutations. Require a stable conservative phase ceiling of at least 158.3 ms
+before kernel design. Evidence:
 `docs/bench/2026-08-06-dsv4-packed-grouped-iq2-count-census/README.md`. CX:
 `019fd588-96b0-7033-afd1-66d7e354e523`.
 

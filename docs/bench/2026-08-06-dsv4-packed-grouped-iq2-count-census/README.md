@@ -105,26 +105,29 @@ active fixture validation. Remove the ignored one-shot asset harness after
 archiving its reconstructing diff. The extracted JSON and committed test
 fixture are byte-identical.
 
-Next write one model-free profiler over the 25 exact count schedules and
-unchanged production kernels at H=4096, F=2048, E=256, K=6, and N=128. Every
-sample must aggregate all 25 gate/up/SwiGLU dispatches or all 25 down/scatter
-dispatches. The fixture binds counts and tiles, not source rows or destination
-slots; preregister a deterministic legal permutation and a second control before
-coding. Use disjoint and warm weight controls, balanced ordering, first touch
-and conditioning outside timing, output mutation and guards, direct GPU
-brackets, no sample deletion, and the established 5% stability rule.
+The subsequent exact-route census supersedes the synthetic-slot handoff. It
+binds all 19,200 production slot-major route IDs and proves that they reconstruct
+these exact counts and the production expert-major schedule. Use that fixture,
+not an invented permutation, for the primary model-free profiler over unchanged
+kernels at H=4096, F=2048, E=256, K=6, and N=128. Every sample must aggregate
+all 25 gate/up/SwiGLU dispatches or all 25 down/scatter dispatches. Use disjoint
+and warm weight controls, balanced ordering, first touch and conditioning
+outside timing, output mutation and guards, direct GPU brackets, no sample
+deletion, and the established 5% stability rule.
 
 For each phase:
 
 ```text
 U_phase = max(disjoint_p95, warm_p95)
-        + max(5 * max(disjoint_range, warm_range), empty_gpu_ms)
+        + max(5 * max(disjoint_range, warm_range),
+              empty_pre_gpu_ms,
+              empty_post_gpu_ms)
 ```
 
-Stable `U_phase < 158.3 ms` closes that phase-only lane; instability is `HOLD`;
-stable `U_phase >= 158.3 ms` authorizes only candidate kernel design. Product
-promotion still requires exact current-asset A/B evidence and material wall/GPU
-movement.
+Stable `U_phase < 158.3 ms` closes that phase-only lane; instability is
+`INCONCLUSIVE` and the lane remains on `HOLD`; stable `U_phase >= 158.3 ms`
+authorizes only candidate kernel design. Product promotion still requires exact
+current-asset A/B evidence and material wall/GPU movement.
 
 ## Provenance
 

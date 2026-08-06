@@ -2205,9 +2205,17 @@ noise without reducing technical risk. Revisit after S5.
    aggregate wall saving and candidate stationarity fail at 12.725% and 8.773%
    drift. Close Q8 output replacement under this asset/device contract; retain
    the committed model-free kernel/tests only as bounded arithmetic evidence.
-   Next require a new model-free ceiling for an exact joint chronological-
-   publication/attention-body rewrite rather than adding their old standalone
-   attribution estimates. Keep bounded MXFP4-down cleanup second and deferred
-   HCA tiling third.
+   The exact joint chronological-publication/attention-body follow-up stops
+   before implementation. Its model-free screen times all 21,887 current
+   query/KV/inverse-RoPE and raw-publication dispatches and grants impossible
+   zero-work credit against the existing 158.3 ms floor. The first and sole
+   conditioned campaigns report suggestive 46.299/65.659 ms upper estimates,
+   but fail stationarity at 6.675% warm drift and then 12.843%/15.213% disjoint/
+   warm drift. Preserve both as `HOLD - closed inconclusive`, remove the live
+   profiler, and implement no kernels. Reopen only for materially better GPU
+   instrumentation, an independently corrected timing cause, or relevant
+   device/compiler drift under a new reviewed protocol. Move the active packed-
+   prefill queue to a direct production-shape grouped MXFP4-down ceiling for the
+   two outlier layers; keep HCA tiling deferred.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

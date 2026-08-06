@@ -1,0 +1,369 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+index ee1cd28..bfb1b40 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@ -12254,4 +12254,364 @@ mod tests {
+                 .collect::<Vec<_>>()
+         );
+     }
++
++    #[test]
++    #[ignore = "one-shot zero-work ceiling; rerun only for material device or compiler drift"]
++    fn profile_packed_rope_publication_ladder_zero_work_ceiling() {
++        const LAYERS: usize = DEEPSEEK_V4_LAYER_COUNT;
++        const N_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
++        const SAMPLES_PER_REGIME: usize = 12;
++        const ECONOMIC_FLOOR_MS: f64 = 158.3;
++
++        struct LadderBank {
++            queries: MetalTensor,
++            kv: MetalTensor,
++            raw_cache: MetalTensor,
++            attention: MetalTensor,
++        }
++
++        fn encode_ladder(
++            ctx: &MetalContext,
++            encoder: &KernelEncoder,
++            bank: &LadderBank,
++            rope: DeepSeekV4RopeParameters,
++            config: DeepSeekV4PositionZeroAttentionConfig,
++        ) {
++            let dims = config.checked().unwrap();
++            for row in 0..N_TOKENS {
++                let position = row as u32;
++                let queries = f32_row(
++                    &bank.queries,
++                    row,
++                    dims.query_width,
++                    vec![config.head_dim as u64, config.head_count as u64],
++                    "zero-work query row",
++                )
++                .unwrap();
++                let kv = f32_row(
++                    &bank.kv,
++                    row,
++                    config.head_dim,
++                    vec![config.head_dim as u64],
++                    "zero-work KV row",
++                )
++                .unwrap();
++                encode_ds4_rope_tail_adjacent_in_place(
++                    ctx, encoder, &queries, position, rope, false,
++                )
++                .unwrap();
++                encode_ds4_rope_tail_adjacent_in_place(ctx, encoder, &kv, position, rope, false)
++                    .unwrap();
++                encode_scatter_offset_f32_to_f16(
++                    ctx,
++                    encoder,
++                    &kv,
++                    &bank.raw_cache,
++                    row * config.head_dim,
++                    config.head_dim,
++                )
++                .unwrap();
++            }
++            for row in 0..N_TOKENS {
++                let attention = f32_row(
++                    &bank.attention,
++                    row,
++                    dims.query_width,
++                    vec![config.head_dim as u64, config.head_count as u64],
++                    "zero-work attention row",
++                )
++                .unwrap();
++                encode_ds4_rope_tail_adjacent_in_place(
++                    ctx, encoder, &attention, row as u32, rope, true,
++                )
++                .unwrap();
++            }
++        }
++
++        fn run(
++            ctx: &MetalContext,
++            banks: &[LadderBank],
++            warm_bank: &LadderBank,
++            disjoint: bool,
++            ropes: &[DeepSeekV4RopeParameters],
++            config: DeepSeekV4PositionZeroAttentionConfig,
++        ) -> (f64, f64) {
++            let command = ctx.queue.commandBuffer().unwrap();
++            let encoder = KernelEncoder::begin(&command);
++            for layer in 0..LAYERS {
++                let bank = if disjoint { &banks[layer] } else { warm_bank };
++                encode_ladder(ctx, &encoder, bank, ropes[layer], config);
++            }
++            encoder.end();
++            let wall_started = std::time::Instant::now();
++            command.commit();
++            command.waitUntilCompleted();
++            let wall_ms = wall_started.elapsed().as_secs_f64() * 1e3;
++            assert!(command.error().is_none(), "{:?}", command.error());
++            let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
++            assert!(gpu_ms.is_finite() && gpu_ms > 0.0);
++            (gpu_ms, wall_ms)
++        }
++
++        fn empty_bracket(ctx: &MetalContext) -> f64 {
++            let command = ctx.queue.commandBuffer().unwrap();
++            let encoder = KernelEncoder::begin(&command);
++            encoder.end();
++            command.commit();
++            command.waitUntilCompleted();
++            assert!(command.error().is_none(), "{:?}", command.error());
++            ((command.GPUEndTime() - command.GPUStartTime()) * 1e3).max(0.0)
++        }
++
++        fn p95(values: &[f64]) -> f64 {
++            let mut values = values.to_vec();
++            values.sort_by(f64::total_cmp);
++            values[(values.len() * 95).div_ceil(100) - 1]
++        }
++
++        fn relative_span(values: &[f64]) -> f64 {
++            let minimum = values.iter().copied().reduce(f64::min).unwrap();
++            let maximum = values.iter().copied().reduce(f64::max).unwrap();
++            2.0 * (maximum - minimum) / (maximum + minimum)
++        }
++
++        fn absolute_span(values: &[f64]) -> f64 {
++            let minimum = values.iter().copied().reduce(f64::min).unwrap();
++            let maximum = values.iter().copied().reduce(f64::max).unwrap();
++            maximum - minimum
++        }
++
++        fn validate_bank(
++            label: &str,
++            bank: &LadderBank,
++            config: DeepSeekV4PositionZeroAttentionConfig,
++            initial_query_row: &[f32],
++            initial_attention_row: &[f32],
++        ) -> [u64; 4] {
++            let dims = config.checked().unwrap();
++            let read_row = |tensor: &MetalTensor, width: usize, name: &str| {
++                let row = f32_row(tensor, 1, width, vec![width as u64], name).unwrap();
++                host_read_f32(&row, name).unwrap()
++            };
++            let query = read_row(&bank.queries, dims.query_width, "zero-work query row one");
++            let attention = read_row(
++                &bank.attention,
++                dims.query_width,
++                "zero-work attention row one",
++            );
++            let kv = read_row(&bank.kv, config.head_dim, "zero-work KV row one");
++            for (name, values) in [
++                ("query", query.as_slice()),
++                ("attention", attention.as_slice()),
++                ("KV", kv.as_slice()),
++            ] {
++                assert!(
++                    values.iter().all(|value| value.is_finite()),
++                    "{label} {name} contains a nonfinite value"
++                );
++            }
++            assert_ne!(
++                query
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .collect::<Vec<_>>(),
++                initial_query_row
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .collect::<Vec<_>>(),
++                "{label} query row one did not rotate"
++            );
++            assert_ne!(
++                attention
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .collect::<Vec<_>>(),
++                initial_attention_row
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .collect::<Vec<_>>(),
++                "{label} attention row one did not rotate"
++            );
++            let raw = unsafe {
++                std::slice::from_raw_parts(
++                    bank.raw_cache
++                        .buffer
++                        .contents()
++                        .as_ptr()
++                        .cast::<u8>()
++                        .add(
++                            bank.raw_cache.offset as usize
++                                + config.head_dim * std::mem::size_of::<u16>(),
++                        )
++                        .cast::<u16>(),
++                    config.head_dim,
++                )
++            };
++            let expected_raw = kv
++                .iter()
++                .map(|value| half::f16::from_f32(*value).to_bits())
++                .collect::<Vec<_>>();
++            assert_eq!(raw, expected_raw, "{label} raw row one differs from KV");
++            let checksum_f32 = |values: &[f32]| {
++                values.iter().fold(0u64, |hash, value| {
++                    hash.rotate_left(5) ^ u64::from(value.to_bits())
++                })
++            };
++            let raw_checksum = raw
++                .iter()
++                .fold(0u64, |hash, value| hash.rotate_left(5) ^ u64::from(*value));
++            [
++                checksum_f32(&query),
++                checksum_f32(&attention),
++                checksum_f32(&kv),
++                raw_checksum,
++            ]
++        }
++
++        let ctx = MetalContext::new().expect("zero-work ceiling requires Metal");
++        assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
++        let config = deepseek_v4_session_attention_config();
++        let dims = config.checked().unwrap();
++        let model_config = crate::deepseek_v4::flash_0731_config_fixture();
++        let ropes = (0..LAYERS)
++            .map(|layer| deepseek_v4_layer_rope(&model_config, layer).unwrap())
++            .collect::<Vec<_>>();
++        assert_eq!(ropes.len(), LAYERS);
++        assert!(ropes[..2].iter().all(|rope| rope.scaling_factor == 1.0));
++        assert!(ropes[2..].iter().all(|rope| rope.scaling_factor > 1.0));
++        assert!(ropes.iter().all(|rope| rope.rotary_dim == 64));
++
++        let query_values = (0..N_TOKENS * dims.query_width)
++            .map(|index| {
++                let token = index / dims.query_width;
++                let within = index % dims.query_width;
++                let tag = (token * 37 + within * 13 + within / 17) % 257;
++                (tag as f32 - 128.0) * 0.001953125
++            })
++            .collect::<Vec<_>>();
++        let kv_values = (0..N_TOKENS * config.head_dim)
++            .map(|index| {
++                let token = index / config.head_dim;
++                let dimension = index % config.head_dim;
++                let tag = (token * 29 + dimension * 19 + dimension / 11) % 251;
++                (tag as f32 - 125.0) * 0.00244140625
++            })
++            .collect::<Vec<_>>();
++        let attention_values = (0..N_TOKENS * dims.query_width)
++            .map(|index| {
++                let token = index / dims.query_width;
++                let within = index % dims.query_width;
++                let tag = (token * 31 + within * 7 + token / 3) % 263;
++                (tag as f32 - 131.0) * 0.001708984375
++            })
++            .collect::<Vec<_>>();
++
++        let make_bank = || LadderBank {
++            queries: MetalTensor::from_bytes(
++                &ctx,
++                bytemuck::cast_slice(&query_values),
++                vec![dims.query_width as u64, N_TOKENS as u64],
++                GgmlType::F32,
++            )
++            .unwrap(),
++            kv: MetalTensor::from_bytes(
++                &ctx,
++                bytemuck::cast_slice(&kv_values),
++                vec![config.head_dim as u64, N_TOKENS as u64],
++                GgmlType::F32,
++            )
++            .unwrap(),
++            raw_cache: MetalTensor::zeros_f16(
++                &ctx,
++                vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
++            )
++            .unwrap(),
++            attention: MetalTensor::from_bytes(
++                &ctx,
++                bytemuck::cast_slice(&attention_values),
++                vec![dims.query_width as u64, N_TOKENS as u64],
++                GgmlType::F32,
++            )
++            .unwrap(),
++        };
++        let banks = (0..LAYERS).map(|_| make_bank()).collect::<Vec<_>>();
++        let warm_bank = make_bank();
++
++        run(&ctx, &banks, &warm_bank, true, &ropes, config);
++        run(&ctx, &banks, &warm_bank, false, &ropes, config);
++        let empty_gpu_ms = empty_bracket(&ctx);
++        for disjoint in [true, false, false, true] {
++            run(&ctx, &banks, &warm_bank, disjoint, &ropes, config);
++        }
++        let mut disjoint_gpu_ms = Vec::with_capacity(SAMPLES_PER_REGIME);
++        let mut disjoint_wall_ms = Vec::with_capacity(SAMPLES_PER_REGIME);
++        let mut warm_gpu_ms = Vec::with_capacity(SAMPLES_PER_REGIME);
++        let mut warm_wall_ms = Vec::with_capacity(SAMPLES_PER_REGIME);
++        for _ in 0..SAMPLES_PER_REGIME / 2 {
++            for disjoint in [true, false, false, true] {
++                let (gpu_ms, wall_ms) = run(&ctx, &banks, &warm_bank, disjoint, &ropes, config);
++                if disjoint {
++                    disjoint_gpu_ms.push(gpu_ms);
++                    disjoint_wall_ms.push(wall_ms);
++                } else {
++                    warm_gpu_ms.push(gpu_ms);
++                    warm_wall_ms.push(wall_ms);
++                }
++            }
++        }
++        assert_eq!(disjoint_gpu_ms.len(), SAMPLES_PER_REGIME);
++        assert_eq!(warm_gpu_ms.len(), SAMPLES_PER_REGIME);
++
++        let disjoint_gpu_p95 = p95(&disjoint_gpu_ms);
++        let warm_gpu_p95 = p95(&warm_gpu_ms);
++        let disjoint_gpu_drift = relative_span(&disjoint_gpu_ms);
++        let warm_gpu_drift = relative_span(&warm_gpu_ms);
++        let drift_allowance_ms =
++            5.0 * absolute_span(&disjoint_gpu_ms).max(absolute_span(&warm_gpu_ms));
++        let uncertainty_ms = drift_allowance_ms.max(empty_gpu_ms);
++        let optimistic_upper_ms = disjoint_gpu_p95.max(warm_gpu_p95) + uncertainty_ms;
++        let stable = disjoint_gpu_drift <= 0.05 && warm_gpu_drift <= 0.05;
++        let initial_query_row = &query_values[dims.query_width..2 * dims.query_width];
++        let initial_attention_row = &attention_values[dims.query_width..2 * dims.query_width];
++        let checksums = [
++            validate_bank(
++                "first disjoint",
++                &banks[0],
++                config,
++                initial_query_row,
++                initial_attention_row,
++            ),
++            validate_bank(
++                "last disjoint",
++                &banks[LAYERS - 1],
++                config,
++                initial_query_row,
++                initial_attention_row,
++            ),
++            validate_bank(
++                "warm",
++                &warm_bank,
++                config,
++                initial_query_row,
++                initial_attention_row,
++            ),
++        ];
++        let decision = if !stable {
++            "INCONCLUSIVE"
++        } else if optimistic_upper_ms < ECONOMIC_FLOOR_MS {
++            "KILL"
++        } else {
++            "PROCEED"
++        };
++
++        eprintln!(
++            "deepseek_v4 packed_rope_publication_zero_work layers={LAYERS} n={N_TOKENS} dispatches_per_layer=509 samples_per_regime={SAMPLES_PER_REGIME} disjoint_gpu_ms={disjoint_gpu_ms:?} warm_gpu_ms={warm_gpu_ms:?} disjoint_wall_ms={disjoint_wall_ms:?} warm_wall_ms={warm_wall_ms:?} disjoint_gpu_p95={disjoint_gpu_p95:.6} warm_gpu_p95={warm_gpu_p95:.6} disjoint_gpu_drift={disjoint_gpu_drift:.6} warm_gpu_drift={warm_gpu_drift:.6} empty_gpu_ms={empty_gpu_ms:.6} drift_allowance_ms={drift_allowance_ms:.6} uncertainty_ms={uncertainty_ms:.6} optimistic_upper_ms={optimistic_upper_ms:.6} economic_floor_ms={ECONOMIC_FLOOR_MS:.6} stable={stable} decision={decision} checksums={checksums:016x?}",
++        );
++
++        assert!(stable, "zero-work ceiling controls are unstable");
++        assert!(
++            optimistic_upper_ms >= ECONOMIC_FLOOR_MS,
++            "zero-work ceiling {optimistic_upper_ms:.3} ms misses {ECONOMIC_FLOOR_MS:.3} ms; do not implement the fused ladder"
++        );
++    }
+ }

@@ -1,0 +1,21 @@
+$ cargo test --release -p qwen-llm --lib deepseek_v4_metal::prefill::tests::profile_packed_rope_publication_ladder_zero_work_ceiling -- --ignored --exact --nocapture --test-threads=1
+
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-31f5cb53565adb87)
+
+running 1 test
+test deepseek_v4_metal::prefill::tests::profile_packed_rope_publication_ladder_zero_work_ceiling ... deepseek_v4 packed_rope_publication_zero_work layers=43 n=128 dispatches_per_layer=509 samples_per_regime=12 disjoint_gpu_ms=[36.23670828528702, 36.6414999589324, 36.80925001390278, 36.288749892264605, 36.69412503950298, 36.1197916790843, 36.38125001452863, 36.007875110954046, 36.396208219230175, 40.571083314716816, 40.876791812479496, 40.94974999316037] warm_gpu_ms=[30.06500005722046, 29.635250102728605, 29.92916665971279, 29.793125111609697, 29.351874953135848, 28.915249975398183, 29.723874991759658, 29.28787493146956, 28.878958197310567, 29.200291726738214, 33.63387496210635, 29.65366654098034] disjoint_wall_ms=[36.868875, 37.363125, 37.497791, 36.962165999999996, 37.376125, 36.869417, 37.16175, 36.730708, 37.091833, 41.244749999999996, 41.631958, 41.700292] warm_wall_ms=[30.781291999999997, 30.425250000000002, 30.612292, 30.519000000000002, 30.077167, 29.651457999999998, 30.401792, 30.034875, 29.58775, 29.876875000000002, 34.318959, 30.435958] disjoint_gpu_p95=40.949750 warm_gpu_p95=33.633875 disjoint_gpu_drift=0.128431 warm_gpu_drift=0.152126 empty_gpu_ms=0.000125 drift_allowance_ms=24.709374 uncertainty_ms=24.709374 optimistic_upper_ms=65.659124 economic_floor_ms=158.300000 stable=false decision=INCONCLUSIVE checksums=[[0cd6d4517ee68b1e, 3e050923f1f042e8, 79b54820f038f2d0, e8b0f07ba31bbaa1], [181996f8e54ba1fe, 936954e5248c989f, accdc48e2777f6b6, ea4ca9e78f2c2a98], [20bf3de936a6e511, 736d7a3b841674a2, 61706fcc3619a922, 6a37ed37dea95ba5]]
+
+thread 'deepseek_v4_metal::prefill::tests::profile_packed_rope_publication_ladder_zero_work_ceiling' panicked at crates/qwen-llm/src/deepseek_v4_metal/prefill.rs:12611:9:
+zero-work ceiling controls are unstable
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::prefill::tests::profile_packed_rope_publication_ladder_zero_work_ceiling
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 651 filtered out; finished in 1.35s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`

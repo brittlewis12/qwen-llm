@@ -420,18 +420,26 @@ candidate wall drift is 8.773%. Remove the live seam and close this output
 family under the current asset/device contract. Retain the model-free kernel and
 tests only as bounded arithmetic evidence.
 
+The exact joint chronological/attention candidate stops before implementation.
+A deliberately impossible zero-work screen times all 21,887 current N=128
+query/KV/inverse-RoPE and raw-publication dispatches in one command over 43
+disjoint production-sized banks and one independent warm bank. It grants the
+candidate removal of every operation and byte, then requires stable controls
+before comparing p95 plus five times the observed range with the existing
+158.3 ms floor. The first and one conditioned campaign produce suggestive upper
+estimates of 46.299 and 65.659 ms, but warm drift first reaches 6.675% and the
+conditioned run later shifts both regimes to 12.843%/15.213%. Both are
+`INCONCLUSIVE`. Enforce the one-repair stop: archive both, remove the profiler,
+and implement no kernels. Reopen only for materially better instrumentation, an
+independently corrected timing cause, or relevant device/compiler drift under a
+new protocol.
+
 Force-ranked queue:
 
-1. **Joint chronological/attention-body rewrite.** Combine only the
-   already-attributed memory boundaries shared by the individually sub-threshold
-   chronological and attention-body regions. Require a new model-free ceiling;
-   do not add their old sampled estimates as if they were independent dispatch
-   costs. Preserve chronological publication, RoPE, visibility, and attention
-   reduction bits before any current-asset campaign.
-2. **Grouped MXFP4-down cleanup.** Keep the two current outlier layers bounded
+1. **Grouped MXFP4-down cleanup.** Keep the two current outlier layers bounded
    behind a direct production-shape ceiling. Their 62.874 ms routed subtotal is
    not by itself authorization for a broad expert rewrite.
-3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+2. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

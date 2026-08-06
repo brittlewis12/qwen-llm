@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Joint Packed Ceiling HOLD
+
+Status: the exact joint RoPE/raw-publication/inverse-RoPE candidate is
+`HOLD - closed inconclusive` before kernel implementation. Both allowed
+model-free ceiling campaigns fail their frozen stationarity gate; no retry,
+kernel, or current-asset run is authorized.
+
+- Time all 43 current N=128 ladders in one command: 127 query RoPE, 127 KV
+  RoPE, 128 raw F16 publications, and 127 inverse RoPE dispatches per layer.
+  Forty-three disjoint production-sized banks and one separate warm bank use
+  about 1.4 GB without model weights.
+- Give the candidate impossible credit for removing all 21,887 dispatches,
+  arithmetic, and traffic. Require stable disjoint/warm controls before
+  comparing the conservative p95-plus-five-ranges upper estimate with the
+  existing 158.3 ms economic floor.
+- The first campaign records 36.655/29.860 ms disjoint/warm p95 and 1.472% /
+  6.675% drift. Its 46.299 ms estimate is invalidated by warm instability.
+- One preregistered untimed ABBA conditioning block precedes the sole repaired
+  campaign. Late timing nonstationarity raises disjoint/warm drift to
+  12.843%/15.213%; its 65.659 ms estimate is also non-decision-grade.
+- Both runs validate real row-one RoPE mutation, finite KV, and exact final
+  KV-to-F16 publication. The failure is measurement stationarity, not missing
+  work, silent skip, or output validation.
+
+Decision: preserve both complete packets, remove the live profiler, and stop
+without implementing the three candidate kernels. The low estimates are
+suggestive negative evidence only, not a KILL. Reopen for materially improved
+GPU instrumentation, an independently corrected timing cause, or relevant
+device/compiler drift under a new protocol. Move next to a direct grouped
+MXFP4-down production-shape ceiling. Evidence:
+`docs/bench/2026-08-06-dsv4-packed-rope-publication-zero-work-ceiling/README.md`.
+CX review: `019fd588-96b0-7033-afd1-66d7e354e523`.
+
 ## 2026-08-06 - DeepSeek V4 Packed Q8 F32 Asset Gate KILL
 
 Status: the fixed F32 `R2C4K64` attention-output schedule is a decisive

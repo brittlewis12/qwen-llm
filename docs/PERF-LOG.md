@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Packed Q8 F32 Asset Gate KILL
+
+Status: the fixed F32 `R2C4K64` attention-output schedule is a decisive
+current-asset `KILL`. Its model-free arithmetic result remains valid, but no
+ordinary policy, opt-in, or additional same-family experiment is authorized.
+
+- The sole canonical 140-token packet applies F32 matrix A+B only to
+  position-zero N=128, then exact N=12 and a restored singleton continuation.
+  Invocation and metadata gates pass; observations and continuation route
+  transcripts repeat bit-for-bit. One detailed pair captures packed decisions.
+- All argmaxes remain 305/12,122/20,332. Position-128 logits/hidden pass at
+  0.027230466/0.037484206 relative RMS, but position-140 hidden reaches
+  0.066547844 and continuation hidden reaches 0.052519175. The latter two also
+  miss the 0.999 cosine floor.
+- Packed expert IDs/schedules and continuation IDs change. Maximum packed and
+  continuation route-weight deltas are 0.352247149/0.129800946; no shallow CSA
+  selector executes.
+- First-chunk and aggregate pre-expert GPU savings pass at 26.554%/22.064%.
+  Aggregate wall saving is only 12.725% and candidate wall drift is 8.773%, so
+  performance fails independently; exact-tail GPU regression is 0.201%.
+- Removing half operands repaired synthetic A+B RMS by 220.7x but improved the
+  integrated vectors by only about 6-16%. The observed divergence is consistent
+  with crossing near-tie MoE cutoffs and amplification through different
+  experts; the packet does not isolate one dominant mechanism.
+
+Decision: remove the live experiment seam and retain the committed model-free
+kernel/tests only as bounded arithmetic evidence. Close Q8 output replacement
+for this asset/device contract. Rank an exact joint chronological-publication /
+attention-body model-free ceiling first, bounded MXFP4-down cleanup second, and
+defer HCA tiling. Evidence:
+`docs/bench/2026-08-06-dsv4-packed-f32-q8-output-kill/README.md`. CX review:
+`019fd56e-3f17-7491-aaf2-07dd5bee62c6`.
+
 ## 2026-08-06 - DeepSeek V4 Packed Q8 F32 Matrix Model-Free GO
 
 Status: one fixed F32 `R2C4K64` packed attention-output arithmetic is

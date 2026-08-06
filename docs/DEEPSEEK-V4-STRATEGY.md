@@ -2193,16 +2193,21 @@ noise without reducing technical risk. Revisit after S5.
    hot GPU/wall medians regress 0.5713%/0.7625% and sparse medians regress
    1.8763%/1.8684%. Keep its test-only kernel and sealed harness as negative
    evidence; do not run the current asset, sweep the same accumulator geometry,
-   or reinterpret it as the spent four-stage gate. Move next to a newly
-   preregistered precision-recovering packed Q8 output design, not the killed
-   one-pass F16-staged schedule. That model-free branch is now `GO`: one fixed
-   F32 `R2C4K64` matrix removes both half operand conversions, reducing A+B
-   relative RMS from 0.001230151 to 0.000005573 while reaching a 2.485250 ms
-   GPU median and 72.2179%/70.8481% GPU/wall median savings. Every precision,
-   p95, stationarity, resource, repeat, and guard gate passes. The result is
-   synthetic output-subgraph evidence only. It authorizes drafting and static
-   review of the canonical position-zero N=128 plus exact N=12/restore/
-   continuation asset gate; it does not authorize running it or changing the
-   ordinary path.
+   or reinterpret it as the spent four-stage gate. The subsequent
+   precision-recovering packed Q8 output design clears model-free and fails its
+   sole canonical asset gate. One fixed F32 `R2C4K64` matrix removes both half
+   operand conversions, reducing synthetic A+B relative RMS from 0.001230151 to
+   0.000005573 while reaching a 2.485250 ms GPU median and
+   72.2179%/70.8481% GPU/wall median savings. At full-model positions 128/140
+   and restored continuation, however, position-140 and continuation hidden RMS
+   remain 0.066547844/0.052519175, and packed plus continuation expert IDs
+   change. First-chunk and aggregate GPU savings pass at 26.554%/22.064%, while
+   aggregate wall saving and candidate stationarity fail at 12.725% and 8.773%
+   drift. Close Q8 output replacement under this asset/device contract; retain
+   the committed model-free kernel/tests only as bounded arithmetic evidence.
+   Next require a new model-free ceiling for an exact joint chronological-
+   publication/attention-body rewrite rather than adding their old standalone
+   attribution estimates. Keep bounded MXFP4-down cleanup second and deferred
+   HCA tiling third.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

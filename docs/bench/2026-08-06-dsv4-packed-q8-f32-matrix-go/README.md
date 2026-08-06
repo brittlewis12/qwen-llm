@@ -5,10 +5,11 @@ both F16 operand conversions from the killed packed attention-output schedule.
 It clears every frozen numerical, resource, stationarity, median, p95, wall,
 and absolute-time gate on the qualified Apple M4 Max.
 
-This packet authorizes only drafting and statically reviewing one canonical
-position-zero 128+12 current-asset gate. It does not authorize running that
-gate, changing ordinary execution, or making model, routing, causal-state,
-quality, or product claims.
+At this checkpoint, the packet authorized only drafting and statically reviewing
+one canonical position-zero 128+12 current-asset gate. That gate subsequently
+received a separate static GO and produced a decisive full-model `KILL`; see
+`../2026-08-06-dsv4-packed-f32-q8-output-kill/README.md`. The later result closes
+the live output family while preserving this model-free arithmetic evidence.
 
 ## Question
 

@@ -408,32 +408,30 @@ well. Do not run the current asset, retune the same 16-accumulator geometry, or
 repeat this condition. Retain the test-only path as executable negative
 evidence.
 
-The precision-recovering Q8 branch is now model-free `GO`. A single fixed F32
-`R2C4K64` geometry removes both half operand conversions while retaining the
-same 25-dispatch output topology. On the prior production-shape fixture, A+B
-relative RMS improves from 0.001230151 to 0.000005573 and max absolute error
-from 0.032827854 to 0.000164986. The sole 24-sample A/B/A packet is stationary
-within 0.1676% and records a 2.485250 ms candidate GPU median, 72.2179% GPU
-median saving, 70.8481% wall median saving, and more than 70.5% p95 saving.
-This clears the model-free precision and 57.4%-derived economic gates; it does
-not establish model quality or authorize an asset execution.
+The precision-recovering Q8 branch clears model-free and fails full-model
+promotion. A single fixed F32 `R2C4K64` geometry removes both half operand
+conversions and improves synthetic A+B relative RMS 220.7x to 0.000005573 while
+saving 72.2179% GPU median. In the sole canonical current-asset packet, however,
+position-140 and restored-continuation hidden relative RMS remain
+0.066547844/0.052519175; packed and continuation expert IDs change with a
+0.352247149 maximum packed route-weight delta. First-chunk/aggregate GPU saving
+passes at 26.554%/22.064%, but aggregate wall saving is only 12.725% and
+candidate wall drift is 8.773%. Remove the live seam and close this output
+family under the current asset/device contract. Retain the model-free kernel and
+tests only as bounded arithmetic evidence.
 
 Force-ranked queue:
 
-1. **Canonical Q8 F32 asset-gate design.** Draft and statically review exactly
-   one position-zero N=128 candidate followed by exact N=12, position-128/140
-   checkpoints, canonical restore, and singleton continuation. Preserve the
-   prior exact route transcripts, quality gates, invocation ownership, and
-   first-chunk performance floor. Static GO is required before the 104 GB run.
-2. **Joint chronological/attention-body rewrite.** If Q8 precision recovery
-   fails its live gate, combine only the already-attributed memory boundaries
-   shared by the individually sub-threshold chronological and attention-body
-   regions. Require a new model-free ceiling; do not add their old sampled
-   estimates as if they were independent dispatch costs.
-3. **Grouped MXFP4-down cleanup.** Keep the two current outlier layers bounded
+1. **Joint chronological/attention-body rewrite.** Combine only the
+   already-attributed memory boundaries shared by the individually sub-threshold
+   chronological and attention-body regions. Require a new model-free ceiling;
+   do not add their old sampled estimates as if they were independent dispatch
+   costs. Preserve chronological publication, RoPE, visibility, and attention
+   reduction bits before any current-asset campaign.
+2. **Grouped MXFP4-down cleanup.** Keep the two current outlier layers bounded
    behind a direct production-shape ceiling. Their 62.874 ms routed subtotal is
    not by itself authorization for a broad expert rewrite.
-4. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

@@ -1,0 +1,24 @@
+$ cargo test --release -p qwen-llm --features dsv4-diagnostics --lib deepseek_v4_metal::tests::current_asset_packed_f32_q8_first_chunk_packet -- --ignored --exact --nocapture --test-threads=1
+
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::tests::current_asset_packed_f32_q8_first_chunk_packet ... deepseek_v4 packed_f32_q8_first_chunk prompt_tokens=140 chunks=128+12 prompt_ids_sha256=8dc3a3091bc13e6f8e982e25e251e3995565d26b89e70a1f7cc8da36060de2f7 invocation_gate=true metadata_gate=true quality_gate=false decision_gate=false performance_gate=false control_argmaxes=[305, 12122, 20332] candidate_argmaxes=[305, 12122, 20332] quality_differentials=[("first_logits", (0.9996309063269827, 0.02723046601470814, 1.0726643)), ("first_hidden", (0.9992972208410199, 0.03748420621295175, 0.048322678)), ("tail_logits", (0.9989816322776249, 0.045150382352549034, 1.4050465)), ("tail_hidden", (0.9977833836911845, 0.06654784390109257, 0.09124276)), ("continuation_logits", (0.9991050495007723, 0.04230572070201077, 1.0621438)), ("continuation_hidden", (0.9986199425980682, 0.05251917544688334, 0.16178823))]
+deepseek_v4 packed_f32_q8_performance first_control_gpu_ms=[1090.8330839592963, 1089.9826250970364, 1104.9509167205542] first_candidate_gpu_ms=[802.1335420198739, 798.9564172457904] aggregate_control_gpu_ms=[1314.9059587158263, 1318.258208455518, 1328.7476659752429] aggregate_candidate_gpu_ms=[1026.8685838673264, 1022.7128758560866] first_control_wall_ms=[3719.537542, 3750.793709, 3744.619666] first_candidate_wall_ms=[2979.581625, 3322.381334] aggregate_control_wall_ms=[4460.497, 4498.744209, 4489.260333] aggregate_candidate_wall_ms=[3722.1458329999996, 4063.653251] tail_control_gpu_ms=[224.07287475652993, 228.27558335848153, 223.79674925468862] tail_candidate_gpu_ms=[224.73504184745252, 223.75645861029625] control_gpu_drift=0.010472 candidate_gpu_drift=0.004055 control_wall_drift=0.008538 candidate_wall_drift=0.087726 first_gpu_saving=0.265543 aggregate_gpu_saving=0.220636 aggregate_wall_saving=0.127250 tail_gpu_regression=0.002006
+deepseek_v4 packed_f32_q8_decisions packed_route_structure_exact=false packed_sparse_selector_invocations=0 packed_max_weight_delta=0.352247149 min_control_cutoff_margin=0.000021935 min_candidate_cutoff_margin=0.000002861 max_cutoff_margin_delta=0.304895401 continuation_route_ids_exact=false continuation_sparse_decisions=0 continuation_max_weight_delta=0.129800946 control_packed_decisions_sha256=b1b98be5d50863ac6d4fc8bca538e5cb494e8695c17b09afd8eefbec911e74a7 candidate_packed_decisions_sha256=7cacecc65eb6170f7dd810c4378b327a7035523018602f89d8bbea957576ee94
+deepseek_v4 packed_f32_q8_digests control_first_logits=71d31fe3b1fa19f32a94633d58f48865b798a5b7861c289f75efa6f32d214ea7 candidate_first_logits=a9282ee94c743e1ff7a53e03ce0e61f722a1a6e99cea4214044007b7bedbff47 control_tail_logits=25bffc0109fd4846ad2391bcd2f43bec4fe9acfdb36b2e9c93a2845ec64f1415 candidate_tail_logits=7c56d3303cfbaf507fa74832f5ec28de4fa86628b861c7efbd1dafbe948b1e4a control_continuation_logits=3e494d8e8740a5f4a4bb7e4a118ea8436a40a657f4b187936e086f54ed611390 candidate_continuation_logits=ac6b2aa5736509ea11d7d1eee68e38a8642dc10f5a360fc62a08cb2c4687d551 control_first_causal=eda614bab4142f90062eeb129c77671efe52aed6dd66cb24d041cd8423a61b23 candidate_first_causal=49642408f48cefcad8e102d29714b181c13b577dd8d4b47ec27bd69161d64cc2 control_tail_causal=9c0df3e04c4072e5d00b3ffe7e6a7f3452010d2b078fade09c50b6ba38ea1c06 candidate_tail_causal=819d7142a37e55203249c043374a073a9ecf8aefd689344b837110a51c1c30c0 control_continuation_causal=cc7fd554e8ebae0a13b6d65691305b33c4875084b83d0d78bd1c103d1b9306d6 candidate_continuation_causal=9d5294e4813a50709cdb18d921898318f1299e3da96e84fc954123d77a0c2638
+
+thread 'deepseek_v4_metal::tests::current_asset_packed_f32_q8_first_chunk_packet' panicked at crates/qwen-llm/src/deepseek_v4_metal.rs:14437:9:
+F32 Q8 quality envelope failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::tests::current_asset_packed_f32_q8_first_chunk_packet
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 677 filtered out; finished in 67.80s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`

@@ -1,0 +1,1565 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal.rs b/crates/qwen-llm/src/deepseek_v4_metal.rs
+index 5034f43..99e34ec 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@ -1872,6 +1872,20 @@ impl DeepSeekV4Session {
+         Ok(())
+     }
+ 
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    fn arm_route_transcript_for_test(&mut self, position: u32) -> Result<(), DeepSeekV4MetalError> {
++        self.capacity.validate_position(position)?;
++        if position != self.phase.ready_position()? {
++            return Err(DeepSeekV4DiagnosticsError::WrongPosition {
++                expected: position,
++                actual: self.phase.next_position(),
++            }
++            .into());
++        }
++        self.decision_diagnostics.arm_routes_only(position)?;
++        Ok(())
++    }
++
+     /// Takes a complete owned transcript. Partial or duplicate takes fail closed.
+     #[cfg(feature = "dsv4-diagnostics")]
+     pub fn take_decision_transcript(
+@@ -2895,7 +2909,7 @@ impl DeepSeekV4Session {
+             }
+ 
+             #[cfg(feature = "dsv4-diagnostics")]
+-            let csa_decision = if self.decision_diagnostics.is_capturing()
++            let csa_decision = if self.decision_diagnostics.captures_sparse_decisions()
+                 && self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
+             {
+                 let rows = self.compressor_frontiers.csa_rows(layer, position)?;
+@@ -13682,6 +13696,750 @@ mod tests {
+         );
+     }
+ 
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "requires the current 97.05 GiB DS4 asset"]
++    fn current_asset_packed_f32_q8_first_chunk_packet() {
++        const PREFIX_TOKENS: usize = 140;
++        const FIRST_CHUNK_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
++        const TAIL_TOKENS: usize = PREFIX_TOKENS - FIRST_CHUNK_TOKENS;
++        const CONTINUATION_TOKEN: u32 = 35;
++
++        #[derive(Clone)]
++        struct Observation {
++            logits: Vec<f32>,
++            hidden: Vec<f32>,
++            causal_digest: [u8; 32],
++            prefix_digest: [u8; 32],
++            compatibility_digest: [u8; 32],
++            next_position: u32,
++            source_observation: DeepSeekV4SnapshotObservation,
++            committed_tokens: Vec<u32>,
++        }
++
++        struct Evidence {
++            first: Observation,
++            tail: Observation,
++            continuation_logits: Vec<f32>,
++            continuation_hidden: Vec<f32>,
++            continuation_causal_digest: [u8; 32],
++            committed_tokens: Vec<u32>,
++            continuation_decision: DeepSeekV4DecisionTranscript,
++            matrix_invocations_after_first: (u32, u32),
++            matrix_invocations_after_tail: (u32, u32),
++            matrix_invocations_after_continuation: (u32, u32),
++            first_pre_expert_gpu_ms: f64,
++            tail_pre_expert_gpu_ms: f64,
++            first_wall_ms: f64,
++            tail_wall_ms: f64,
++            packed_decisions: Option<prefill::PackedPrefillDecisionCapture>,
++        }
++
++        struct PackedDecisionAudit {
++            structure_exact: bool,
++            sparse_selector_invocations: usize,
++            maximum_weight_delta: f32,
++            minimum_control_cutoff_margin: f32,
++            minimum_candidate_cutoff_margin: f32,
++            maximum_cutoff_margin_delta: f32,
++        }
++
++        fn bits(values: &[f32]) -> Vec<u32> {
++            values.iter().map(|value| value.to_bits()).collect()
++        }
++
++        fn digest_hex(digest: impl AsRef<[u8]>) -> String {
++            digest
++                .as_ref()
++                .iter()
++                .map(|byte| format!("{byte:02x}"))
++                .collect()
++        }
++
++        fn argmax(values: &[f32]) -> usize {
++            values
++                .iter()
++                .enumerate()
++                .max_by(|(left_index, left), (right_index, right)| {
++                    left.total_cmp(right)
++                        .then_with(|| right_index.cmp(left_index))
++                })
++                .expect("nonempty logits")
++                .0
++        }
++
++        fn differential(actual: &[f32], expected: &[f32]) -> (f64, f64, f32) {
++            assert_eq!(actual.len(), expected.len());
++            let mut dot = 0.0f64;
++            let mut actual_norm = 0.0f64;
++            let mut expected_norm = 0.0f64;
++            let mut error = 0.0f64;
++            let mut max_abs = 0.0f32;
++            for (&actual, &expected) in actual.iter().zip(expected) {
++                let actual_f64 = actual as f64;
++                let expected_f64 = expected as f64;
++                let delta = actual - expected;
++                dot += actual_f64 * expected_f64;
++                actual_norm += actual_f64 * actual_f64;
++                expected_norm += expected_f64 * expected_f64;
++                error += (delta as f64) * (delta as f64);
++                max_abs = max_abs.max(delta.abs());
++            }
++            (
++                dot / (actual_norm * expected_norm).sqrt(),
++                (error / expected_norm).sqrt(),
++                max_abs,
++            )
++        }
++
++        fn median(values: &[f64]) -> f64 {
++            let mut values = values.to_vec();
++            values.sort_by(f64::total_cmp);
++            if values.len().is_multiple_of(2) {
++                (values[values.len() / 2 - 1] + values[values.len() / 2]) * 0.5
++            } else {
++                values[values.len() / 2]
++            }
++        }
++
++        fn relative_span(values: &[f64]) -> f64 {
++            let minimum = values.iter().copied().reduce(f64::min).unwrap();
++            let maximum = values.iter().copied().reduce(f64::max).unwrap();
++            2.0 * (maximum - minimum) / (maximum + minimum)
++        }
++
++        fn observe(session: &DeepSeekV4Session) -> (Observation, DeepSeekV4CausalSnapshot) {
++            let logits = session
++                .copy_logits_f32()
++                .expect("copy packed F32 Q8 logits");
++            let hidden = host_read_f32(
++                session
++                    .final_normalized_hidden()
++                    .expect("packed F32 Q8 final hidden is visible"),
++                "packed F32 Q8 final hidden",
++            )
++            .expect("copy packed F32 Q8 hidden");
++            let snapshot = session
++                .capture_causal_snapshot()
++                .expect("capture packed F32 Q8 state");
++            let observation = Observation {
++                logits,
++                hidden,
++                causal_digest: *snapshot.causal_digest(),
++                prefix_digest: *snapshot.prefix_digest(),
++                compatibility_digest: *snapshot.compatibility_digest().as_bytes(),
++                next_position: snapshot.next_position(),
++                source_observation: snapshot.source_observation(),
++                committed_tokens: session.committed_tokens().to_vec(),
++            };
++            (observation, snapshot)
++        }
++
++        fn execute(
++            ctx: &MetalContext,
++            residency: DeepSeekV4MetalResidency,
++            model_content_id: DeepSeekV4ModelContentId,
++            prefix: &[u32],
++            matrix_candidate: bool,
++            detailed: bool,
++        ) -> (DeepSeekV4MetalResidency, Evidence) {
++            assert_eq!(prefix.len(), PREFIX_TOKENS);
++            let mut session =
++                DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
++                    .expect("construct packed F32 Q8 session");
++            let mut packed_decisions = detailed.then(prefill::PackedPrefillDecisionCapture::new);
++
++            let first_started = std::time::Instant::now();
++            let first_profile = session
++                .execute_packed_tokens_with_first_chunk_matrix_output_profile_for_test(
++                    ctx,
++                    &prefix[..FIRST_CHUNK_TOKENS],
++                    true,
++                    matrix_candidate,
++                    packed_decisions.as_mut(),
++                )
++                .expect("execute first packed F32 Q8 chunk");
++            let first_wall_ms = first_started.elapsed().as_secs_f64() * 1e3;
++            assert!(!first_profile.sampled);
++            assert_eq!(first_profile.command_gpu_ms.len(), DEEPSEEK_V4_LAYER_COUNT);
++            let first_pre_expert_gpu_ms = first_profile.command_gpu_ms.iter().sum();
++            let (first, _) = observe(&session);
++            let matrix_invocations_after_first =
++                session.packed_matrix_q8_output_invocations_for_test();
++
++            let tail_started = std::time::Instant::now();
++            let tail_profile = session
++                .execute_packed_tokens_with_first_chunk_matrix_output_profile_for_test(
++                    ctx,
++                    &prefix[FIRST_CHUNK_TOKENS..],
++                    true,
++                    matrix_candidate,
++                    packed_decisions.as_mut(),
++                )
++                .expect("execute exact packed F32 Q8 tail");
++            let tail_wall_ms = tail_started.elapsed().as_secs_f64() * 1e3;
++            assert!(!tail_profile.sampled);
++            assert_eq!(tail_profile.command_gpu_ms.len(), DEEPSEEK_V4_LAYER_COUNT);
++            let tail_pre_expert_gpu_ms = tail_profile.command_gpu_ms.iter().sum();
++            let (tail, tail_snapshot) = observe(&session);
++            let matrix_invocations_after_tail =
++                session.packed_matrix_q8_output_invocations_for_test();
++
++            session
++                .restore_causal_snapshot(&tail_snapshot)
++                .expect("restore packed F32 Q8 state");
++            session
++                .arm_route_transcript_for_test(PREFIX_TOKENS as u32)
++                .expect("arm restored F32 Q8 continuation routes");
++            session
++                .forward_token(ctx, CONTINUATION_TOKEN)
++                .expect("continue packed F32 Q8 state");
++            let continuation_decision = session
++                .take_decision_transcript()
++                .expect("capture restored F32 Q8 continuation routes");
++            let continuation_logits = session
++                .copy_logits_f32()
++                .expect("copy packed F32 Q8 continuation logits");
++            let continuation_hidden = host_read_f32(
++                session
++                    .final_normalized_hidden()
++                    .expect("F32 Q8 continuation hidden is visible"),
++                "packed F32 Q8 continuation hidden",
++            )
++            .expect("copy packed F32 Q8 continuation hidden");
++            let continuation = session
++                .capture_causal_snapshot()
++                .expect("capture packed F32 Q8 continuation state");
++            let evidence = Evidence {
++                first,
++                tail,
++                continuation_logits,
++                continuation_hidden,
++                continuation_causal_digest: *continuation.causal_digest(),
++                committed_tokens: session.committed_tokens().to_vec(),
++                continuation_decision,
++                matrix_invocations_after_first,
++                matrix_invocations_after_tail,
++                matrix_invocations_after_continuation: session
++                    .packed_matrix_q8_output_invocations_for_test(),
++                first_pre_expert_gpu_ms,
++                tail_pre_expert_gpu_ms,
++                first_wall_ms,
++                tail_wall_ms,
++                packed_decisions,
++            };
++            (session.into_residency(), evidence)
++        }
++
++        fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
++            fn assert_observation(label: &str, actual: &Observation, expected: &Observation) {
++                assert_eq!(
++                    bits(&actual.logits),
++                    bits(&expected.logits),
++                    "{label} logits"
++                );
++                assert_eq!(
++                    bits(&actual.hidden),
++                    bits(&expected.hidden),
++                    "{label} hidden"
++                );
++                assert_eq!(
++                    actual.causal_digest, expected.causal_digest,
++                    "{label} causal"
++                );
++                assert_eq!(
++                    actual.prefix_digest, expected.prefix_digest,
++                    "{label} prefix"
++                );
++                assert_eq!(
++                    actual.compatibility_digest, expected.compatibility_digest,
++                    "{label} compatibility"
++                );
++                assert_eq!(
++                    actual.next_position, expected.next_position,
++                    "{label} position"
++                );
++                assert_eq!(
++                    actual.source_observation, expected.source_observation,
++                    "{label} source observation"
++                );
++                assert_eq!(
++                    actual.committed_tokens, expected.committed_tokens,
++                    "{label} committed tokens"
++                );
++            }
++
++            assert_observation(&format!("{label} first"), &actual.first, &expected.first);
++            assert_observation(&format!("{label} tail"), &actual.tail, &expected.tail);
++            assert_eq!(
++                bits(&actual.continuation_logits),
++                bits(&expected.continuation_logits),
++                "{label} continuation logits"
++            );
++            assert_eq!(
++                bits(&actual.continuation_hidden),
++                bits(&expected.continuation_hidden),
++                "{label} continuation hidden"
++            );
++            assert_eq!(
++                actual.continuation_causal_digest, expected.continuation_causal_digest,
++                "{label} continuation causal"
++            );
++            assert_eq!(
++                actual.committed_tokens, expected.committed_tokens,
++                "{label} committed tokens"
++            );
++            assert_eq!(
++                actual.continuation_decision, expected.continuation_decision,
++                "{label} continuation decisions"
++            );
++            assert_eq!(
++                actual.matrix_invocations_after_first, expected.matrix_invocations_after_first,
++                "{label} first matrix invocations"
++            );
++            assert_eq!(
++                actual.matrix_invocations_after_tail, expected.matrix_invocations_after_tail,
++                "{label} tail matrix invocations"
++            );
++            assert_eq!(
++                actual.matrix_invocations_after_continuation,
++                expected.matrix_invocations_after_continuation,
++                "{label} continuation matrix invocations"
++            );
++        }
++
++        fn packed_decision_digest(capture: &prefill::PackedPrefillDecisionCapture) -> [u8; 32] {
++            let mut digest = Sha256::new();
++            for record in &capture.layers {
++                digest.update(record.chunk_start.to_le_bytes());
++                digest.update((record.n_tokens as u64).to_le_bytes());
++                digest.update((record.layer as u64).to_le_bytes());
++                digest.update([match record.attention_kind {
++                    AttentionKind::SlidingWindow => 0,
++                    AttentionKind::CompressedSparse => 1,
++                    AttentionKind::HeavilyCompressed => 2,
++                }]);
++                digest.update(
++                    record
++                        .sparse_query_offset
++                        .map_or(u64::MAX, |offset| offset as u64)
++                        .to_le_bytes(),
++                );
++                digest.update([match record.route_source {
++                    prefill::PackedPrefillRouteSourceKind::Hash => 0,
++                    prefill::PackedPrefillRouteSourceKind::Learned => 1,
++                }]);
++                digest.update(bytemuck::cast_slice(&record.expert_ids));
++                for value in &record.weights {
++                    digest.update(value.to_bits().to_le_bytes());
++                }
++                digest.update(bytemuck::cast_slice(&record.bucket_rows));
++                digest.update(bytemuck::cast_slice(&record.bucket_slots));
++                for bucket in &record.buckets {
++                    digest.update((bucket.expert as u64).to_le_bytes());
++                    digest.update((bucket.start as u64).to_le_bytes());
++                    digest.update((bucket.len as u64).to_le_bytes());
++                }
++                for margin in &record.learned_cutoff_margins {
++                    digest.update(margin.to_bits().to_le_bytes());
++                }
++            }
++            digest.finalize().into()
++        }
++
++        fn audit_packed_decisions(
++            control: &prefill::PackedPrefillDecisionCapture,
++            candidate: &prefill::PackedPrefillDecisionCapture,
++        ) -> PackedDecisionAudit {
++            let mut structure_exact = control.layers.len() == candidate.layers.len();
++            let mut sparse_selector_invocations = 0usize;
++            let mut maximum_weight_delta = 0.0f32;
++            let mut minimum_control_cutoff_margin = f32::INFINITY;
++            let mut minimum_candidate_cutoff_margin = f32::INFINITY;
++            let mut maximum_cutoff_margin_delta = 0.0f32;
++            for (control, candidate) in control.layers.iter().zip(&candidate.layers) {
++                sparse_selector_invocations += usize::from(control.sparse_query_offset.is_some());
++                sparse_selector_invocations += usize::from(candidate.sparse_query_offset.is_some());
++                structure_exact &= control.chunk_start == candidate.chunk_start
++                    && control.n_tokens == candidate.n_tokens
++                    && control.layer == candidate.layer
++                    && control.attention_kind == candidate.attention_kind
++                    && control.sparse_query_offset == candidate.sparse_query_offset
++                    && control.route_source == candidate.route_source
++                    && control.expert_ids == candidate.expert_ids
++                    && control.bucket_rows == candidate.bucket_rows
++                    && control.bucket_slots == candidate.bucket_slots
++                    && control.buckets == candidate.buckets
++                    && control.weights.len() == candidate.weights.len()
++                    && control.learned_cutoff_margins.len()
++                        == candidate.learned_cutoff_margins.len();
++                for (&control, &candidate) in control.weights.iter().zip(&candidate.weights) {
++                    maximum_weight_delta = maximum_weight_delta.max((candidate - control).abs());
++                }
++                for (&control, &candidate) in control
++                    .learned_cutoff_margins
++                    .iter()
++                    .zip(&candidate.learned_cutoff_margins)
++                {
++                    minimum_control_cutoff_margin = minimum_control_cutoff_margin.min(control);
++                    minimum_candidate_cutoff_margin =
++                        minimum_candidate_cutoff_margin.min(candidate);
++                    maximum_cutoff_margin_delta =
++                        maximum_cutoff_margin_delta.max((candidate - control).abs());
++                }
++            }
++            PackedDecisionAudit {
++                structure_exact,
++                sparse_selector_invocations,
++                maximum_weight_delta,
++                minimum_control_cutoff_margin,
++                minimum_candidate_cutoff_margin,
++                maximum_cutoff_margin_delta,
++            }
++        }
++
++        fn continuation_route_audit(
++            control: &DeepSeekV4DecisionTranscript,
++            candidate: &DeepSeekV4DecisionTranscript,
++        ) -> (bool, usize, f32) {
++            let mut ids_exact = control.position == candidate.position
++                && control.layers.len() == candidate.layers.len();
++            let mut sparse_decisions = 0usize;
++            let mut maximum_weight_delta = 0.0f32;
++            for (control, candidate) in control.layers.iter().zip(&candidate.layers) {
++                sparse_decisions += usize::from(control.csa.is_some());
++                sparse_decisions += usize::from(candidate.csa.is_some());
++                ids_exact &= control.layer == candidate.layer
++                    && control.route.expert_ids == candidate.route.expert_ids
++                    && control.route.normalized_scaled_weights.len()
++                        == candidate.route.normalized_scaled_weights.len();
++                for (&control, &candidate) in control
++                    .route
++                    .normalized_scaled_weights
++                    .iter()
++                    .zip(&candidate.route.normalized_scaled_weights)
++                {
++                    maximum_weight_delta = maximum_weight_delta.max((candidate - control).abs());
++                }
++            }
++            (ids_exact, sparse_decisions, maximum_weight_delta)
++        }
++
++        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
++            .map(PathBuf::from)
++            .unwrap_or_else(|| {
++                PathBuf::from(
++                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
++                )
++            });
++        assert!(model_path.exists(), "missing current DS4 model");
++        let ctx = MetalContext::new().expect("create Metal context");
++        assert!(
++            prefill::packed_grouped_expert_enabled_for_test(&ctx),
++            "F32 Q8 packet requires the qualified grouped-expert default"
++        );
++        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
++        let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf)
++            .expect("load current DS4 tokenizer for F32 Q8 packet");
++        let prompt = "Review this Metal inference change as a careful systems engineer. The change replaces repeated single-row Q8 attention output projections with a packed matrix schedule for the first full prompt chunk. Check numerical stability, causal state ownership, deterministic expert routing, exact tail fallback, snapshot restoration, and whether measured latency savings survive realistic execution. Explain any boundary where the optimization must remain disabled. Treat prompt processing latency and token generation latency as separate product objectives. Do not infer correctness from matching argmax alone, and do not infer throughput from a synthetic kernel without an integrated model run. Compare intermediate normalized hidden vectors, full vocabulary logits, routing decisions, cutoff margins, committed token transcripts, and snapshot digests. Require repeated runs to preserve their own floating-point lineage bit for bit. The implementation must fail closed when the chunk does not begin at position zero or does not contain exactly one hundred twenty-eight tokens. A later twelve-token tail must use the existing exact projection path. Finally, restore the completed prefix and evaluate one continuation token so that any approximation carried through causal state becomes visible.";
++        let encoded = tokenizer
++            .encode(prompt, false)
++            .expect("tokenize F32 Q8 packet prompt");
++        assert!(
++            encoded.len() >= PREFIX_TOKENS,
++            "F32 Q8 packet prompt produced only {} tokens",
++            encoded.len()
++        );
++        let prefix = encoded[..PREFIX_TOKENS]
++            .iter()
++            .map(|&token| u32::try_from(token).expect("DS4 token ID is nonnegative"))
++            .collect::<Vec<_>>();
++        let prompt_sha256: [u8; 32] = Sha256::digest(bytemuck::cast_slice(&prefix)).into();
++        assert_eq!(
++            digest_hex(prompt_sha256),
++            "8dc3a3091bc13e6f8e982e25e251e3995565d26b89e70a1f7cc8da36060de2f7",
++            "F32 Q8 packet prompt IDs changed"
++        );
++
++        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, PREFIX_TOKENS + 1)
++            .expect("plan packed F32 Q8 session");
++        let admitted = plan
++            .admit(ctx.memory_signals())
++            .expect("admit packed F32 Q8 session");
++        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
++            .expect("realize current DS4 residency");
++        let residency = realized.into_residency();
++
++        let (next, detailed_control) =
++            execute(&ctx, residency, model_content_id, &prefix, false, true);
++        let (next, detailed_candidate) = execute(&ctx, next, model_content_id, &prefix, true, true);
++        let (next, control_a) = execute(&ctx, next, model_content_id, &prefix, false, false);
++        let (next, candidate_a) = execute(&ctx, next, model_content_id, &prefix, true, false);
++        let (next, control_b) = execute(&ctx, next, model_content_id, &prefix, false, false);
++        let (next, candidate_b) = execute(&ctx, next, model_content_id, &prefix, true, false);
++        let (residency, control_c) = execute(&ctx, next, model_content_id, &prefix, false, false);
++
++        assert_exact("F32 Q8 detailed/control A", &detailed_control, &control_a);
++        assert_exact("F32 Q8 control B/control A", &control_b, &control_a);
++        assert_exact("F32 Q8 control C/control A", &control_c, &control_a);
++        assert_exact(
++            "F32 Q8 detailed/candidate A",
++            &detailed_candidate,
++            &candidate_a,
++        );
++        assert_exact("F32 Q8 candidate B/candidate A", &candidate_b, &candidate_a);
++
++        let expected_matrix_invocations = (
++            DEEPSEEK_V4_LAYER_COUNT as u32,
++            DEEPSEEK_V4_LAYER_COUNT as u32,
++        );
++        let invocation_gate = [&detailed_control, &control_a, &control_b, &control_c]
++            .into_iter()
++            .all(|evidence| {
++                evidence.matrix_invocations_after_first == (0, 0)
++                    && evidence.matrix_invocations_after_tail == (0, 0)
++                    && evidence.matrix_invocations_after_continuation == (0, 0)
++            })
++            && [&detailed_candidate, &candidate_a, &candidate_b]
++                .into_iter()
++                .all(|evidence| {
++                    evidence.matrix_invocations_after_first == expected_matrix_invocations
++                        && evidence.matrix_invocations_after_tail == expected_matrix_invocations
++                        && evidence.matrix_invocations_after_continuation
++                            == expected_matrix_invocations
++                });
++
++        let metadata_gate = [&detailed_candidate, &candidate_a, &candidate_b]
++            .into_iter()
++            .all(|candidate| {
++                candidate.first.prefix_digest == control_a.first.prefix_digest
++                    && candidate.first.compatibility_digest == control_a.first.compatibility_digest
++                    && candidate.first.next_position == FIRST_CHUNK_TOKENS as u32
++                    && candidate.first.source_observation == control_a.first.source_observation
++                    && candidate.first.committed_tokens == prefix[..FIRST_CHUNK_TOKENS]
++                    && candidate.tail.prefix_digest == control_a.tail.prefix_digest
++                    && candidate.tail.compatibility_digest == control_a.tail.compatibility_digest
++                    && candidate.tail.next_position == PREFIX_TOKENS as u32
++                    && candidate.tail.source_observation == control_a.tail.source_observation
++                    && candidate.tail.committed_tokens == prefix
++                    && candidate.committed_tokens.len() == PREFIX_TOKENS + 1
++                    && candidate.committed_tokens[..PREFIX_TOKENS] == prefix
++                    && candidate.committed_tokens[PREFIX_TOKENS] == CONTINUATION_TOKEN
++            });
++
++        let quality_differentials = [
++            (
++                "first_logits",
++                differential(
++                    &detailed_candidate.first.logits,
++                    &detailed_control.first.logits,
++                ),
++            ),
++            (
++                "first_hidden",
++                differential(
++                    &detailed_candidate.first.hidden,
++                    &detailed_control.first.hidden,
++                ),
++            ),
++            (
++                "tail_logits",
++                differential(
++                    &detailed_candidate.tail.logits,
++                    &detailed_control.tail.logits,
++                ),
++            ),
++            (
++                "tail_hidden",
++                differential(
++                    &detailed_candidate.tail.hidden,
++                    &detailed_control.tail.hidden,
++                ),
++            ),
++            (
++                "continuation_logits",
++                differential(
++                    &detailed_candidate.continuation_logits,
++                    &detailed_control.continuation_logits,
++                ),
++            ),
++            (
++                "continuation_hidden",
++                differential(
++                    &detailed_candidate.continuation_hidden,
++                    &detailed_control.continuation_hidden,
++                ),
++            ),
++        ];
++        let control_argmaxes = [
++            argmax(&detailed_control.first.logits),
++            argmax(&detailed_control.tail.logits),
++            argmax(&detailed_control.continuation_logits),
++        ];
++        let candidate_argmaxes = [
++            argmax(&detailed_candidate.first.logits),
++            argmax(&detailed_candidate.tail.logits),
++            argmax(&detailed_candidate.continuation_logits),
++        ];
++        let quality_gate = candidate_argmaxes == control_argmaxes
++            && quality_differentials
++                .iter()
++                .all(|(_, differential)| differential.0 >= 0.999 && differential.1 <= 0.05);
++
++        let control_decisions = detailed_control
++            .packed_decisions
++            .as_ref()
++            .expect("detailed control packed decisions");
++        let candidate_decisions = detailed_candidate
++            .packed_decisions
++            .as_ref()
++            .expect("detailed candidate packed decisions");
++        let decision_audit = audit_packed_decisions(control_decisions, candidate_decisions);
++        let (continuation_ids_exact, continuation_sparse_decisions, continuation_weight_delta) =
++            continuation_route_audit(
++                &detailed_control.continuation_decision,
++                &detailed_candidate.continuation_decision,
++            );
++        let decision_gate = control_decisions.layers.len() == 2 * DEEPSEEK_V4_LAYER_COUNT
++            && candidate_decisions.layers.len() == 2 * DEEPSEEK_V4_LAYER_COUNT
++            && decision_audit.structure_exact
++            && decision_audit.sparse_selector_invocations == 0
++            && continuation_ids_exact
++            && continuation_sparse_decisions == 0
++            && decision_audit.maximum_weight_delta.is_finite()
++            && decision_audit.minimum_control_cutoff_margin.is_finite()
++            && decision_audit.minimum_candidate_cutoff_margin.is_finite()
++            && decision_audit.maximum_cutoff_margin_delta.is_finite()
++            && continuation_weight_delta.is_finite();
++
++        let controls = [&control_a, &control_b, &control_c];
++        let candidates = [&candidate_a, &candidate_b];
++        let first_control_gpu = controls
++            .iter()
++            .map(|evidence| evidence.first_pre_expert_gpu_ms)
++            .collect::<Vec<_>>();
++        let first_candidate_gpu = candidates
++            .iter()
++            .map(|evidence| evidence.first_pre_expert_gpu_ms)
++            .collect::<Vec<_>>();
++        let aggregate_control_gpu = controls
++            .iter()
++            .map(|evidence| evidence.first_pre_expert_gpu_ms + evidence.tail_pre_expert_gpu_ms)
++            .collect::<Vec<_>>();
++        let aggregate_candidate_gpu = candidates
++            .iter()
++            .map(|evidence| evidence.first_pre_expert_gpu_ms + evidence.tail_pre_expert_gpu_ms)
++            .collect::<Vec<_>>();
++        let first_control_wall = controls
++            .iter()
++            .map(|evidence| evidence.first_wall_ms)
++            .collect::<Vec<_>>();
++        let first_candidate_wall = candidates
++            .iter()
++            .map(|evidence| evidence.first_wall_ms)
++            .collect::<Vec<_>>();
++        let tail_control_gpu = controls
++            .iter()
++            .map(|evidence| evidence.tail_pre_expert_gpu_ms)
++            .collect::<Vec<_>>();
++        let tail_candidate_gpu = candidates
++            .iter()
++            .map(|evidence| evidence.tail_pre_expert_gpu_ms)
++            .collect::<Vec<_>>();
++        let aggregate_control_wall = controls
++            .iter()
++            .map(|evidence| evidence.first_wall_ms + evidence.tail_wall_ms)
++            .collect::<Vec<_>>();
++        let aggregate_candidate_wall = candidates
++            .iter()
++            .map(|evidence| evidence.first_wall_ms + evidence.tail_wall_ms)
++            .collect::<Vec<_>>();
++
++        let faster_first_control_gpu = first_control_gpu.iter().copied().reduce(f64::min).unwrap();
++        let faster_aggregate_control_gpu = aggregate_control_gpu
++            .iter()
++            .copied()
++            .reduce(f64::min)
++            .unwrap();
++        let faster_aggregate_control_wall = aggregate_control_wall
++            .iter()
++            .copied()
++            .reduce(f64::min)
++            .unwrap();
++        let faster_tail_control_gpu = tail_control_gpu.iter().copied().reduce(f64::min).unwrap();
++        let first_gpu_saving = 1.0 - median(&first_candidate_gpu) / faster_first_control_gpu;
++        let aggregate_gpu_saving =
++            1.0 - median(&aggregate_candidate_gpu) / faster_aggregate_control_gpu;
++        let aggregate_wall_saving =
++            1.0 - median(&aggregate_candidate_wall) / faster_aggregate_control_wall;
++        let tail_gpu_regression = median(&tail_candidate_gpu) / faster_tail_control_gpu - 1.0;
++        let control_gpu_drift = relative_span(&aggregate_control_gpu);
++        let candidate_gpu_drift = relative_span(&aggregate_candidate_gpu);
++        let control_wall_drift = relative_span(&aggregate_control_wall);
++        let candidate_wall_drift = relative_span(&aggregate_candidate_wall);
++        let performance_gate = control_gpu_drift <= 0.05
++            && candidate_gpu_drift <= 0.05
++            && control_wall_drift <= 0.05
++            && candidate_wall_drift <= 0.05
++            && first_gpu_saving >= 0.20
++            && aggregate_gpu_saving >= 0.15
++            && aggregate_wall_saving >= 0.15
++            && tail_gpu_regression <= 0.05;
++
++        eprintln!(
++            "deepseek_v4 packed_f32_q8_first_chunk prompt_tokens={PREFIX_TOKENS} chunks={FIRST_CHUNK_TOKENS}+{TAIL_TOKENS} prompt_ids_sha256={} invocation_gate={invocation_gate} metadata_gate={metadata_gate} quality_gate={quality_gate} decision_gate={decision_gate} performance_gate={performance_gate} control_argmaxes={control_argmaxes:?} candidate_argmaxes={candidate_argmaxes:?} quality_differentials={quality_differentials:?}",
++            digest_hex(prompt_sha256),
++        );
++        eprintln!(
++            "deepseek_v4 packed_f32_q8_performance first_control_gpu_ms={first_control_gpu:?} first_candidate_gpu_ms={first_candidate_gpu:?} aggregate_control_gpu_ms={aggregate_control_gpu:?} aggregate_candidate_gpu_ms={aggregate_candidate_gpu:?} first_control_wall_ms={first_control_wall:?} first_candidate_wall_ms={first_candidate_wall:?} aggregate_control_wall_ms={aggregate_control_wall:?} aggregate_candidate_wall_ms={aggregate_candidate_wall:?} tail_control_gpu_ms={tail_control_gpu:?} tail_candidate_gpu_ms={tail_candidate_gpu:?} control_gpu_drift={control_gpu_drift:.6} candidate_gpu_drift={candidate_gpu_drift:.6} control_wall_drift={control_wall_drift:.6} candidate_wall_drift={candidate_wall_drift:.6} first_gpu_saving={first_gpu_saving:.6} aggregate_gpu_saving={aggregate_gpu_saving:.6} aggregate_wall_saving={aggregate_wall_saving:.6} tail_gpu_regression={tail_gpu_regression:.6}",
++        );
++        eprintln!(
++            "deepseek_v4 packed_f32_q8_decisions packed_route_structure_exact={} packed_sparse_selector_invocations={} packed_max_weight_delta={:.9} min_control_cutoff_margin={:.9} min_candidate_cutoff_margin={:.9} max_cutoff_margin_delta={:.9} continuation_route_ids_exact={continuation_ids_exact} continuation_sparse_decisions={continuation_sparse_decisions} continuation_max_weight_delta={continuation_weight_delta:.9} control_packed_decisions_sha256={} candidate_packed_decisions_sha256={}",
++            decision_audit.structure_exact,
++            decision_audit.sparse_selector_invocations,
++            decision_audit.maximum_weight_delta,
++            decision_audit.minimum_control_cutoff_margin,
++            decision_audit.minimum_candidate_cutoff_margin,
++            decision_audit.maximum_cutoff_margin_delta,
++            digest_hex(packed_decision_digest(control_decisions)),
++            digest_hex(packed_decision_digest(candidate_decisions)),
++        );
++        eprintln!(
++            "deepseek_v4 packed_f32_q8_digests control_first_logits={} candidate_first_logits={} control_tail_logits={} candidate_tail_logits={} control_continuation_logits={} candidate_continuation_logits={} control_first_causal={} candidate_first_causal={} control_tail_causal={} candidate_tail_causal={} control_continuation_causal={} candidate_continuation_causal={}",
++            digest_hex(Sha256::digest(bytemuck::cast_slice(
++                &detailed_control.first.logits
++            ))),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(
++                &detailed_candidate.first.logits
++            ))),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(
++                &detailed_control.tail.logits
++            ))),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(
++                &detailed_candidate.tail.logits
++            ))),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(
++                &detailed_control.continuation_logits,
++            ))),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(
++                &detailed_candidate.continuation_logits,
++            ))),
++            digest_hex(detailed_control.first.causal_digest),
++            digest_hex(detailed_candidate.first.causal_digest),
++            digest_hex(detailed_control.tail.causal_digest),
++            digest_hex(detailed_candidate.tail.causal_digest),
++            digest_hex(detailed_control.continuation_causal_digest),
++            digest_hex(detailed_candidate.continuation_causal_digest),
++        );
++
++        assert!(invocation_gate, "F32 Q8 invocation ownership failed");
++        assert!(metadata_gate, "F32 Q8 snapshot metadata changed");
++        assert!(quality_gate, "F32 Q8 quality envelope failed");
++        assert!(decision_gate, "F32 Q8 decision envelope failed");
++        assert!(performance_gate, "F32 Q8 performance envelope failed");
++        drop(residency);
++    }
++
+     #[cfg(feature = "dsv4-diagnostics")]
+     #[test]
+     #[ignore = "requires the current 97.05 GiB DS4 asset"]
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/diagnostics.rs b/crates/qwen-llm/src/deepseek_v4_metal/diagnostics.rs
+index 4ae865e..8c89f6a 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/diagnostics.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/diagnostics.rs
+@@ -566,20 +566,38 @@ enum CaptureState {
+     Idle,
+     Armed {
+         position: u32,
++        mode: DecisionCaptureMode,
+     },
+     Capturing {
+         position: u32,
++        mode: DecisionCaptureMode,
+         layers: Vec<DeepSeekV4DecisionLayer>,
+     },
+     Complete(DeepSeekV4DecisionTranscript),
+     Taken,
+ }
+ 
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum DecisionCaptureMode {
++    SparseDecisions,
++    RoutesOnly,
++}
++
+ impl DeepSeekV4DecisionCapture {
+     pub(crate) fn is_capturing(&self) -> bool {
+         matches!(self.state, CaptureState::Capturing { .. })
+     }
+ 
++    pub(crate) fn captures_sparse_decisions(&self) -> bool {
++        matches!(
++            self.state,
++            CaptureState::Capturing {
++                mode: DecisionCaptureMode::SparseDecisions,
++                ..
++            }
++        )
++    }
++
+     pub(crate) fn validate_arm(&self, position: u32) -> Result<(), DeepSeekV4DiagnosticsError> {
+         if position < FIRST_SPARSE_CSA_POSITION {
+             return Err(DeepSeekV4DiagnosticsError::SparseSelectionUnavailable {
+@@ -595,7 +613,24 @@ impl DeepSeekV4DecisionCapture {
+ 
+     pub(crate) fn arm(&mut self, position: u32) -> Result<(), DeepSeekV4DiagnosticsError> {
+         self.validate_arm(position)?;
+-        self.state = CaptureState::Armed { position };
++        self.state = CaptureState::Armed {
++            position,
++            mode: DecisionCaptureMode::SparseDecisions,
++        };
++        Ok(())
++    }
++
++    pub(crate) fn arm_routes_only(
++        &mut self,
++        position: u32,
++    ) -> Result<(), DeepSeekV4DiagnosticsError> {
++        if !matches!(self.state, CaptureState::Idle) {
++            return Err(DeepSeekV4DiagnosticsError::DuplicateCapture);
++        }
++        self.state = CaptureState::Armed {
++            position,
++            mode: DecisionCaptureMode::RoutesOnly,
++        };
+         Ok(())
+     }
+ 
+@@ -616,7 +651,7 @@ impl DeepSeekV4DecisionCapture {
+         &mut self,
+         actual_position: u32,
+     ) -> Result<(), DeepSeekV4DiagnosticsError> {
+-        let CaptureState::Armed { position } = self.state else {
++        let CaptureState::Armed { position, mode } = self.state else {
+             return Ok(());
+         };
+         if actual_position != position {
+@@ -627,6 +662,7 @@ impl DeepSeekV4DecisionCapture {
+         }
+         self.state = CaptureState::Capturing {
+             position,
++            mode,
+             layers: Vec::with_capacity(LAYER_COUNT),
+         };
+         Ok(())
+@@ -638,7 +674,7 @@ impl DeepSeekV4DecisionCapture {
+         csa: Option<DeepSeekV4CsaDecision>,
+         route: DeepSeekV4RouteDecision,
+     ) -> Result<(), DeepSeekV4DiagnosticsError> {
+-        let CaptureState::Capturing { layers, .. } = &mut self.state else {
++        let CaptureState::Capturing { mode, layers, .. } = &mut self.state else {
+             return Ok(());
+         };
+         if layer != layers.len() {
+@@ -647,9 +683,10 @@ impl DeepSeekV4DecisionCapture {
+                 actual: layer,
+             });
+         }
+-        if csa.is_some() != is_csa_layer(layer) {
++        let expects_csa = *mode == DecisionCaptureMode::SparseDecisions && is_csa_layer(layer);
++        if csa.is_some() != expects_csa {
+             return Err(DeepSeekV4DiagnosticsError::Shape(format!(
+-                "layer {layer} CSA decision presence does not match Flash-0731 geometry"
++                "layer {layer} CSA decision presence does not match {mode:?} capture geometry"
+             )));
+         }
+         validate_csa(csa.as_ref())?;
+@@ -666,27 +703,42 @@ impl DeepSeekV4DecisionCapture {
+         if !matches!(self.state, CaptureState::Capturing { .. }) {
+             return Ok(());
+         }
+-        let CaptureState::Capturing { position, layers } =
+-            std::mem::replace(&mut self.state, CaptureState::Taken)
++        let CaptureState::Capturing {
++            position,
++            mode,
++            layers,
++        } = std::mem::replace(&mut self.state, CaptureState::Taken)
+         else {
+             unreachable!("capturing state was checked before replacement");
+         };
+         if layers.len() != LAYER_COUNT {
+-            self.state = CaptureState::Capturing { position, layers };
++            self.state = CaptureState::Capturing {
++                position,
++                mode,
++                layers,
++            };
+             return Err(self.incomplete_error());
+         }
+         let csa_count = layers.iter().filter(|layer| layer.csa.is_some()).count();
+-        if csa_count != CSA_LAYER_COUNT {
+-            self.state = CaptureState::Capturing { position, layers };
++        let expected_csa_count = match mode {
++            DecisionCaptureMode::SparseDecisions => CSA_LAYER_COUNT,
++            DecisionCaptureMode::RoutesOnly => 0,
++        };
++        if csa_count != expected_csa_count {
++            self.state = CaptureState::Capturing {
++                position,
++                mode,
++                layers,
++            };
+             return Err(DeepSeekV4DiagnosticsError::Shape(format!(
+-                "captured {csa_count} CSA layers, expected {CSA_LAYER_COUNT}"
++                "captured {csa_count} CSA layers, expected {expected_csa_count}"
+             )));
+         }
+         self.state = CaptureState::Complete(DeepSeekV4DecisionTranscript {
+             schema_version: SCHEMA_VERSION,
+             position,
+             layer_count: LAYER_COUNT as u32,
+-            csa_layer_count: CSA_LAYER_COUNT as u32,
++            csa_layer_count: expected_csa_count as u32,
+             layers,
+         });
+         Ok(())
+@@ -1255,6 +1307,23 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn route_only_capture_is_complete_without_sparse_selection() {
++        let mut capture = DeepSeekV4DecisionCapture::default();
++        capture.arm_routes_only(140).unwrap();
++        capture.begin_forward(140).unwrap();
++        assert!(!capture.captures_sparse_decisions());
++        for layer in 0..LAYER_COUNT {
++            capture.capture_layer(layer, None, route()).unwrap();
++        }
++        capture.finish().unwrap();
++        let transcript = capture.take().unwrap();
++        assert_eq!(transcript.position, 140);
++        assert_eq!(transcript.layer_count, LAYER_COUNT as u32);
++        assert_eq!(transcript.csa_layer_count, 0);
++        assert!(transcript.layers.iter().all(|layer| layer.csa.is_none()));
++    }
++
+     #[test]
+     fn csa_boundary_ranks_and_margin_follow_cpu_semantics() {
+         let scores = (0..513).map(|row| row as f32).collect::<Vec<_>>();
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+index ee1cd28..8578ff1 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@ -394,6 +394,10 @@ struct PrefillAttentionScratch {
+     group_input: MetalTensor,
+     group_output: MetalTensor,
+     sparse_csa: PrefillSparseCsaScratch,
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    matrix_q8_a_invocations: Cell<u32>,
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    matrix_q8_b_invocations: Cell<u32>,
+ }
+ 
+ struct PrefillSparseCsaScratch {
+@@ -543,6 +547,10 @@ impl DeepSeekV4PrefillScratch {
+                     selected_counts: MetalTensor::zeros_i32(ctx, vec![n])?,
+                     status: MetalTensor::zeros_i32(ctx, vec![n])?,
+                 },
++                #[cfg(all(test, feature = "dsv4-diagnostics"))]
++                matrix_q8_a_invocations: Cell::new(0),
++                #[cfg(all(test, feature = "dsv4-diagnostics"))]
++                matrix_q8_b_invocations: Cell::new(0),
+             },
+             compressor: PrefillCompressorScratch {
+                 attention_kv: MetalTensor::zeros_f32(
+@@ -1372,6 +1380,13 @@ enum Q8PrecisionProjection {
+     F32Matrix,
+ }
+ 
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum PackedAttentionOutputPolicy {
++    Exact,
++    F32MatrixQ8Both,
++}
++
+ #[derive(Clone)]
+ struct PackedSparseCsaViews {
+     query_offset: usize,
+@@ -1781,6 +1796,52 @@ impl PrefillSparseCsaScratch {
+ }
+ 
+ impl PrefillAttentionScratch {
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    fn next_matrix_q8_invocations(
++        &self,
++        policy: PackedAttentionOutputPolicy,
++    ) -> Result<Option<(u32, u32)>, DeepSeekV4MetalError> {
++        if policy == PackedAttentionOutputPolicy::Exact {
++            return Ok(None);
++        }
++        let increment = DEEPSEEK_V4_LAYER_COUNT as u32;
++        let a = self
++            .matrix_q8_a_invocations
++            .get()
++            .checked_add(increment)
++            .ok_or_else(|| {
++                DeepSeekV4MetalError::Invalid(
++                    "packed F32 Q8 output-A invocation count overflow".into(),
++                )
++            })?;
++        let b = self
++            .matrix_q8_b_invocations
++            .get()
++            .checked_add(increment)
++            .ok_or_else(|| {
++                DeepSeekV4MetalError::Invalid(
++                    "packed F32 Q8 output-B invocation count overflow".into(),
++                )
++            })?;
++        Ok(Some((a, b)))
++    }
++
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    fn commit_matrix_q8_invocations(&self, invocations: Option<(u32, u32)>) {
++        if let Some((a, b)) = invocations {
++            self.matrix_q8_a_invocations.set(a);
++            self.matrix_q8_b_invocations.set(b);
++        }
++    }
++
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    fn matrix_q8_invocations(&self) -> (u32, u32) {
++        (
++            self.matrix_q8_a_invocations.get(),
++            self.matrix_q8_b_invocations.get(),
++        )
++    }
++
+     #[allow(clippy::too_many_arguments)]
+     fn encode_prepare(
+         &self,
+@@ -2539,6 +2600,83 @@ struct ExpertBucket {
+     len: usize,
+ }
+ 
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(super) enum PackedPrefillRouteSourceKind {
++    Hash,
++    Learned,
++}
++
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(super) struct PackedPrefillExpertBucket {
++    pub(super) expert: usize,
++    pub(super) start: usize,
++    pub(super) len: usize,
++}
++
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++#[derive(Clone, Debug, PartialEq)]
++pub(super) struct PackedPrefillDecisionLayer {
++    pub(super) chunk_start: u32,
++    pub(super) n_tokens: usize,
++    pub(super) layer: usize,
++    pub(super) attention_kind: AttentionKind,
++    pub(super) sparse_query_offset: Option<usize>,
++    pub(super) route_source: PackedPrefillRouteSourceKind,
++    pub(super) expert_ids: Vec<i32>,
++    pub(super) weights: Vec<f32>,
++    pub(super) bucket_rows: Vec<i32>,
++    pub(super) bucket_slots: Vec<i32>,
++    pub(super) buckets: Vec<PackedPrefillExpertBucket>,
++    pub(super) learned_cutoff_margins: Vec<f32>,
++}
++
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++#[derive(Clone, Debug, Default, PartialEq)]
++pub(super) struct PackedPrefillDecisionCapture {
++    pub(super) layers: Vec<PackedPrefillDecisionLayer>,
++}
++
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++impl PackedPrefillDecisionCapture {
++    pub(super) fn new() -> Self {
++        Self {
++            layers: Vec::with_capacity(DEEPSEEK_V4_LAYER_COUNT * 2),
++        }
++    }
++
++    fn push(&mut self, record: PackedPrefillDecisionLayer) -> Result<(), DeepSeekV4MetalError> {
++        if let Some(previous) = self.layers.last() {
++            let same_chunk = previous.chunk_start == record.chunk_start;
++            let ordered = if same_chunk {
++                record.n_tokens == previous.n_tokens && record.layer == previous.layer + 1
++            } else {
++                let previous_tokens = u32::try_from(previous.n_tokens).map_err(|_| {
++                    DeepSeekV4MetalError::Invalid("packed decision token count exceeds u32".into())
++                })?;
++                record.layer == 0
++                    && record.chunk_start
++                        == previous
++                            .chunk_start
++                            .checked_add(previous_tokens)
++                            .ok_or_else(|| {
++                                DeepSeekV4MetalError::Invalid(
++                                    "packed decision chunk position overflow".into(),
++                                )
++                            })?
++            };
++            if !ordered {
++                return invalid("packed decision records are not in chunk/layer order");
++            }
++        } else if record.layer != 0 {
++            return invalid("packed decision capture must begin at layer zero");
++        }
++        self.layers.push(record);
++        Ok(())
++    }
++}
++
+ const PACKED_GROUPED_EXPERT_TILE_ROWS: usize = 32;
+ const PACKED_GROUPED_EXPERT_MAX_TILES: usize = 272;
+ 
+@@ -4953,6 +5091,107 @@ impl PrefillMoeScratch {
+         Ok(schedule)
+     }
+ 
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    #[allow(clippy::too_many_arguments)]
++    fn capture_shallow_decision_layer(
++        &self,
++        views: &PackedMoeViews,
++        source: PackedRouteSource<'_>,
++        schedule: &[ExpertBucket],
++        chunk_start: u32,
++        n_tokens: usize,
++        layer: usize,
++        attention_kind: AttentionKind,
++        sparse_query_offset: Option<usize>,
++    ) -> Result<PackedPrefillDecisionLayer, DeepSeekV4MetalError> {
++        if sparse_query_offset.is_some() {
++            return invalid(
++                "shallow packed decision capture does not authorize sparse CSA selection",
++            );
++        }
++        let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed decision route count")?;
++        let mut expert_ids = host_read_i32(&self.expert_ids, "packed decision expert IDs")?;
++        let mut weights = host_read_f32(&self.weights, "packed decision weights")?;
++        let mut bucket_rows = host_read_i32(&self.bucket_rows, "packed decision bucket rows")?;
++        let mut bucket_slots = host_read_i32(&self.bucket_slots, "packed decision bucket slots")?;
++        expert_ids.truncate(route_count);
++        weights.truncate(route_count);
++        bucket_rows.truncate(route_count);
++        bucket_slots.truncate(route_count);
++        validate_packed_expert_schedule(
++            n_tokens,
++            &expert_ids,
++            &bucket_rows,
++            &bucket_slots,
++            schedule,
++        )?;
++        if weights.iter().any(|weight| !weight.is_finite()) {
++            return invalid("packed decision capture observed a nonfinite route weight");
++        }
++
++        let (route_source, learned_cutoff_margins) = match source {
++            PackedRouteSource::Hash => (PackedPrefillRouteSourceKind::Hash, Vec::new()),
++            PackedRouteSource::Learned(bias) => {
++                let logits = host_read_f32(&views.logits, "packed decision route logits")?;
++                let bias = host_read_f32(bias, "packed decision correction bias")?;
++                let expected_logits =
++                    checked_mul(n_tokens, MOE_EXPERT_COUNT, "packed decision route logits")?;
++                if logits.len() < expected_logits || bias.len() != MOE_EXPERT_COUNT {
++                    return invalid("packed decision route inputs have invalid lengths");
++                }
++                let mut margins = Vec::with_capacity(n_tokens);
++                for token in 0..n_tokens {
++                    let start = token * MOE_EXPERT_COUNT;
++                    let scores = crate::deepseek_v4_oracle::sqrt_softplus_scores(
++                        &logits[start..start + MOE_EXPERT_COUNT],
++                    )
++                    .map_err(|error| {
++                        DeepSeekV4MetalError::Invalid(format!(
++                            "packed decision scores for token {token}: {error}"
++                        ))
++                    })?;
++                    let mut ranked = (0..MOE_EXPERT_COUNT).collect::<Vec<_>>();
++                    ranked.sort_unstable_by(|&left, &right| {
++                        (scores[right] + bias[right])
++                            .total_cmp(&(scores[left] + bias[left]))
++                            .then_with(|| left.cmp(&right))
++                    });
++                    let margin = (scores[ranked[MOE_TOP_K - 1]] + bias[ranked[MOE_TOP_K - 1]])
++                        - (scores[ranked[MOE_TOP_K]] + bias[ranked[MOE_TOP_K]]);
++                    if !margin.is_finite() || margin < 0.0 {
++                        return invalid(format!(
++                            "packed decision token {token} has invalid cutoff margin {margin}"
++                        ));
++                    }
++                    margins.push(margin);
++                }
++                (PackedPrefillRouteSourceKind::Learned, margins)
++            }
++        };
++
++        Ok(PackedPrefillDecisionLayer {
++            chunk_start,
++            n_tokens,
++            layer,
++            attention_kind,
++            sparse_query_offset,
++            route_source,
++            expert_ids,
++            weights,
++            bucket_rows,
++            bucket_slots,
++            buckets: schedule
++                .iter()
++                .map(|bucket| PackedPrefillExpertBucket {
++                    expert: bucket.expert,
++                    start: bucket.start,
++                    len: bucket.len,
++                })
++                .collect(),
++            learned_cutoff_margins,
++        })
++    }
++
+     #[allow(clippy::too_many_arguments)]
+     fn encode_experts(
+         &self,
+@@ -5818,6 +6057,8 @@ impl DeepSeekV4Session {
+             emit_logits,
+             route_policy,
+             PackedExpertPolicy::Current,
++            PackedAttentionOutputPolicy::Exact,
++            None,
+             None,
+             None,
+             &mut |_| {},
+@@ -5847,12 +6088,48 @@ impl DeepSeekV4Session {
+             emit_logits,
+             PackedRoutePolicy::Cpu,
+             expert_policy,
++            PackedAttentionOutputPolicy::Exact,
++            None,
+             None,
+             None,
+             &mut |_| {},
+         )
+     }
+ 
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    pub(super) fn execute_packed_tokens_with_first_chunk_matrix_output_profile_for_test(
++        &mut self,
++        ctx: &MetalContext,
++        token_ids: &[u32],
++        emit_logits: bool,
++        matrix_q8_first_chunk: bool,
++        decision_capture: Option<&mut PackedPrefillDecisionCapture>,
++    ) -> Result<PackedPrefillStageProfile, DeepSeekV4MetalError> {
++        let start_position = self.phase.ready_position()?;
++        let attention_output_policy = if matrix_q8_first_chunk
++            && start_position == 0
++            && token_ids.len() == DEEPSEEK_V4_PREFILL_MAX_TOKENS
++        {
++            PackedAttentionOutputPolicy::F32MatrixQ8Both
++        } else {
++            PackedAttentionOutputPolicy::Exact
++        };
++        let mut recorder = PackedPrefillStageRecorder::new(ctx, false)?;
++        self.execute_packed_tokens_with_progress_policy(
++            ctx,
++            token_ids,
++            emit_logits,
++            PackedRoutePolicy::Cpu,
++            packed_grouped_expert_policy(ctx),
++            attention_output_policy,
++            Some(&mut recorder),
++            None,
++            decision_capture,
++            &mut |_| {},
++        )?;
++        recorder.resolve(ctx)
++    }
++
+     #[cfg(all(test, feature = "dsv4-diagnostics"))]
+     pub(super) fn execute_packed_tokens_with_stage_profile_for_test(
+         &mut self,
+@@ -5868,8 +6145,10 @@ impl DeepSeekV4Session {
+             emit_logits,
+             PackedRoutePolicy::Cpu,
+             PackedExpertPolicy::GroupedIq2XsIq3Xxs,
++            PackedAttentionOutputPolicy::Exact,
+             Some(&mut recorder),
+             None,
++            None,
+             &mut |_| {},
+         )?;
+         recorder.resolve(ctx)
+@@ -5896,8 +6175,10 @@ impl DeepSeekV4Session {
+             emit_logits,
+             PackedRoutePolicy::Cpu,
+             expert_policy,
++            PackedAttentionOutputPolicy::Exact,
+             None,
+             Some(&mut recorder),
++            None,
+             &mut |_| {},
+         )?;
+         recorder.resolve(ctx)
+@@ -5918,6 +6199,11 @@ impl DeepSeekV4Session {
+         self.prefill.moe.grouped_iq3_invocations.get()
+     }
+ 
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    pub(super) fn packed_matrix_q8_output_invocations_for_test(&self) -> (u32, u32) {
++        self.prefill.attention.matrix_q8_invocations()
++    }
++
+     fn execute_packed_tokens_with_progress(
+         &mut self,
+         ctx: &MetalContext,
+@@ -5933,6 +6219,10 @@ impl DeepSeekV4Session {
+             PackedRoutePolicy::Cpu,
+             expert_policy,
+             #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            PackedAttentionOutputPolicy::Exact,
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            None,
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+             None,
+             #[cfg(all(test, feature = "dsv4-diagnostics"))]
+             None,
+@@ -5947,12 +6237,17 @@ impl DeepSeekV4Session {
+         emit_logits: bool,
+         route_policy: PackedRoutePolicy,
+         expert_policy: PackedExpertPolicy,
++        #[cfg(all(test, feature = "dsv4-diagnostics"))]
++        attention_output_policy: PackedAttentionOutputPolicy,
+         #[cfg(all(test, feature = "dsv4-diagnostics"))] stage_recorder: Option<
+             &mut PackedPrefillStageRecorder,
+         >,
+         #[cfg(all(test, feature = "dsv4-diagnostics"))] post_route_stage_recorder: Option<
+             &mut PackedPostRouteStageRecorder,
+         >,
++        #[cfg(all(test, feature = "dsv4-diagnostics"))] decision_capture: Option<
++            &mut PackedPrefillDecisionCapture,
++        >,
+         layer_completed: &mut impl FnMut(usize),
+     ) -> Result<(), DeepSeekV4MetalError> {
+         #[cfg(feature = "dsv4-diagnostics")]
+@@ -5965,6 +6260,10 @@ impl DeepSeekV4Session {
+                 ctx.device.registryID()
+             ));
+         }
++        #[cfg(all(test, feature = "dsv4-diagnostics"))]
++        if decision_capture.is_some() && route_policy != PackedRoutePolicy::Cpu {
++            return invalid("packed decision capture requires CPU routing");
++        }
+         let n_tokens = checked_token_count(token_ids.len())?;
+         let start_position = self.phase.ready_position()?;
+         let end_position = start_position
+@@ -5990,6 +6289,11 @@ impl DeepSeekV4Session {
+             // token staging and causal mutation both occur below this gate.
+             validate_fp4_selection_counterfactual_packed(start_position, token_ids.len())?;
+         }
++        #[cfg(all(test, feature = "dsv4-diagnostics"))]
++        let pending_matrix_q8_invocations = self
++            .prefill
++            .attention
++            .next_matrix_q8_invocations(attention_output_policy)?;
+         let token_values = token_ids
+             .iter()
+             .map(|&token| token as i32)
+@@ -6021,9 +6325,13 @@ impl DeepSeekV4Session {
+             route_policy,
+             expert_policy,
+             #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            attention_output_policy,
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+             stage_recorder,
+             #[cfg(all(test, feature = "dsv4-diagnostics"))]
+             post_route_stage_recorder,
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            decision_capture,
+             layer_completed,
+         );
+         match result {
+@@ -6031,6 +6339,10 @@ impl DeepSeekV4Session {
+                 self.commit_tokens(token_ids);
+                 self.phase
+                     .complete_mutation(start_position, end_position, emit_logits)?;
++                #[cfg(all(test, feature = "dsv4-diagnostics"))]
++                self.prefill
++                    .attention
++                    .commit_matrix_q8_invocations(pending_matrix_q8_invocations);
+                 Ok(())
+             }
+             Err(error) => Err(error),
+@@ -6046,12 +6358,17 @@ impl DeepSeekV4Session {
+         emit_logits: bool,
+         route_policy: PackedRoutePolicy,
+         expert_policy: PackedExpertPolicy,
++        #[cfg(all(test, feature = "dsv4-diagnostics"))]
++        attention_output_policy: PackedAttentionOutputPolicy,
+         #[cfg(all(test, feature = "dsv4-diagnostics"))] mut stage_recorder: Option<
+             &mut PackedPrefillStageRecorder,
+         >,
+         #[cfg(all(test, feature = "dsv4-diagnostics"))] mut post_route_stage_recorder: Option<
+             &mut PackedPostRouteStageRecorder,
+         >,
++        #[cfg(all(test, feature = "dsv4-diagnostics"))] mut decision_capture: Option<
++            &mut PackedPrefillDecisionCapture,
++        >,
+         layer_completed: &mut impl FnMut(usize),
+     ) -> Result<(), DeepSeekV4MetalError> {
+         let n_tokens = token_ids.len();
+@@ -6441,6 +6758,36 @@ impl DeepSeekV4Session {
+                 #[cfg(all(test, feature = "dsv4-diagnostics"))]
+                 encoder.boundary(PackedPrefillStageKind::AttentionOutputProjections)?;
+ 
++                #[cfg(all(test, feature = "dsv4-diagnostics"))]
++                let attention_output = {
++                    let output_a = self.layer_tensor(layer, "attn_output_a.weight")?;
++                    let output_b = self.layer_tensor(layer, "attn_output_b.weight")?;
++                    match attention_output_policy {
++                        PackedAttentionOutputPolicy::Exact => {
++                            self.prefill.attention.encode_output(
++                                ctx,
++                                &encoder,
++                                &attention.attention,
++                                output_a,
++                                output_b,
++                                n_tokens,
++                            )?
++                        }
++                        PackedAttentionOutputPolicy::F32MatrixQ8Both => {
++                            self.prefill.attention.encode_output_q8_precision_for_test(
++                                ctx,
++                                &encoder,
++                                &attention.attention,
++                                output_a,
++                                output_b,
++                                n_tokens,
++                                Q8PrecisionProjection::F32Matrix,
++                                Q8PrecisionProjection::F32Matrix,
++                            )?
++                        }
++                    }
++                };
++                #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
+                 let attention_output = self.prefill.attention.encode_output(
+                     ctx,
+                     &encoder,
+@@ -6608,24 +6955,22 @@ impl DeepSeekV4Session {
+             let pre_expert_post_seconds = pre_expert_seconds - pre_expert_command_seconds;
+ 
+             let route_started = trace_layers.then(std::time::Instant::now);
++            let route_source = if layer < self.residency.config().hash_layer_count as usize {
++                PackedRouteSource::Hash
++            } else {
++                PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
++            };
+             #[cfg(feature = "dsv4-diagnostics")]
+             let schedule = if let Some(generation) = gpu_route_generation {
+                 #[cfg(test)]
+-                let cpu_route = {
+-                    let source = if layer < self.residency.config().hash_layer_count as usize {
+-                        PackedRouteSource::Hash
+-                    } else {
+-                        PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
+-                    };
+-                    self.prefill.moe.audit_gpu_route_against_cpu(
+-                        &moe_views,
+-                        source,
+-                        n_tokens,
+-                        layer,
+-                        start_position,
+-                        generation,
+-                    )?
+-                };
++                let cpu_route = self.prefill.moe.audit_gpu_route_against_cpu(
++                    &moe_views,
++                    route_source,
++                    n_tokens,
++                    layer,
++                    start_position,
++                    generation,
++                )?;
+                 let schedule = self
+                     .prefill
+                     .moe
+@@ -6651,32 +6996,33 @@ impl DeepSeekV4Session {
+                 }
+                 schedule
+             } else {
+-                let source = if layer < self.residency.config().hash_layer_count as usize {
+-                    PackedRouteSource::Hash
+-                } else {
+-                    PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
+-                };
+                 self.prefill.moe.route(
+                     &moe_views,
+-                    source,
++                    route_source,
+                     n_tokens,
+                     self.residency.config().expert_weights_scale,
+                 )?
+             };
+             #[cfg(not(feature = "dsv4-diagnostics"))]
+-            let schedule = {
+-                let source = if layer < self.residency.config().hash_layer_count as usize {
+-                    PackedRouteSource::Hash
+-                } else {
+-                    PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
+-                };
+-                self.prefill.moe.route(
++            let schedule = self.prefill.moe.route(
++                &moe_views,
++                route_source,
++                n_tokens,
++                self.residency.config().expert_weights_scale,
++            )?;
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            if let Some(capture) = decision_capture.as_deref_mut() {
++                capture.push(self.prefill.moe.capture_shallow_decision_layer(
+                     &moe_views,
+-                    source,
++                    route_source,
++                    &schedule,
++                    start_position,
+                     n_tokens,
+-                    self.residency.config().expert_weights_scale,
+-                )?
+-            };
++                    layer,
++                    attention_kind,
++                    sparse_query_offset,
++                )?)?;
++            }
+             let route_seconds = route_started
+                 .as_ref()
+                 .map_or(0.0, |started| started.elapsed().as_secs_f64());

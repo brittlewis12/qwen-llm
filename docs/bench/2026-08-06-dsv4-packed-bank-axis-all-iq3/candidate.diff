@@ -1,0 +1,1332 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+index 581a569..be7347b 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@ -3021,6 +3021,170 @@ fn encode_packed_grouped_mapped_iq3_xxs_f32(
+     Ok(())
+ }
+ 
++#[cfg(test)]
++#[allow(clippy::too_many_arguments)]
++fn encode_packed_grouped_mapped_bank_iq3_xxs_f32(
++    ctx: &MetalContext,
++    enc: &KernelEncoder,
++    gate_bank: &MetalTensor,
++    up_bank: &MetalTensor,
++    input: &MetalTensor,
++    source_rows: &MetalTensor,
++    destination_slots: &MetalTensor,
++    schedule: &[ExpertBucket],
++    gate_up_arena: &MetalTensor,
++    n_in: usize,
++    n_out: usize,
++    expert_count: usize,
++    top_k: usize,
++    n_tokens: usize,
++    source_count: usize,
++    destination_count: usize,
++) -> Result<(), DeepSeekV4MetalError> {
++    require_serial(enc, "packed grouped mapped bank-axis IQ3_XXS projection")?;
++    if !crate::metal::matmat_iq3_xxs_mm_is_enabled() {
++        return invalid("packed grouped mapped bank-axis IQ3_XXS requires the SIMD-matrix policy");
++    }
++    if !n_in.is_multiple_of(256)
++        || !n_out.is_multiple_of(64)
++        || n_in != 2 * n_out
++        || expert_count != MOE_EXPERT_COUNT
++        || top_k != MOE_TOP_K
++        || source_count == 0
++        || destination_count == 0
++        || gate_bank.dtype != GgmlType::IQ3_XXS
++        || up_bank.dtype != GgmlType::IQ3_XXS
++    {
++        return invalid("packed grouped mapped bank-axis IQ3_XXS has invalid geometry or storage");
++    }
++    validate_expert_bank(
++        gate_bank,
++        n_in,
++        n_out,
++        expert_count,
++        "packed grouped mapped bank-axis IQ3_XXS gate bank",
++    )?;
++    validate_expert_bank(
++        up_bank,
++        n_in,
++        n_out,
++        expert_count,
++        "packed grouped mapped bank-axis IQ3_XXS up bank",
++    )?;
++    validate_f32(
++        input,
++        &[n_in as u64, source_count as u64],
++        false,
++        "packed grouped mapped bank-axis IQ3_XXS input",
++    )?;
++    let map_count = checked_mul(n_tokens, top_k, "packed grouped mapped bank-axis row count")?;
++    validate_i32(
++        source_rows,
++        &[map_count as u64],
++        false,
++        "packed grouped mapped bank-axis IQ3_XXS source rows",
++    )?;
++    validate_i32(
++        destination_slots,
++        &[map_count as u64],
++        false,
++        "packed grouped mapped bank-axis IQ3_XXS destination slots",
++    )?;
++    let (gate, up) =
++        packed_grouped_iq3_gate_up_views(gate_up_arena, n_in, n_out, destination_count)?;
++    let tiles = packed_grouped_expert_tiles(n_tokens, schedule)?;
++    let tile_count = tiles.len();
++    #[repr(C)]
++    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
++    struct Args {
++        m: u32,
++        k: u32,
++        nb01: u32,
++        stride_b: u32,
++        n_expert: u32,
++        map_count: u32,
++        source_count: u32,
++        destination_count: u32,
++    }
++    let row_bytes = checked_mul(
++        n_in / 256,
++        98,
++        "packed grouped mapped bank-axis IQ3_XXS row",
++    )?;
++    let pso = ctx.pipeline("kernel_deepseek_v4_packed_grouped_mapped_bank_iq3_xxs_f32_mm")?;
++    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
++        return invalid("packed grouped mapped bank-axis IQ3_XXS requires four SIMD groups");
++    }
++    enc.set_pipeline(&pso);
++    enc.set_bytes(
++        0,
++        &Args {
++            m: u32::try_from(n_out).map_err(|_| {
++                DeepSeekV4MetalError::Invalid(
++                    "packed grouped mapped bank-axis output exceeds u32".into(),
++                )
++            })?,
++            k: u32::try_from(n_in).map_err(|_| {
++                DeepSeekV4MetalError::Invalid(
++                    "packed grouped mapped bank-axis input exceeds u32".into(),
++                )
++            })?,
++            nb01: u32::try_from(row_bytes).map_err(|_| {
++                DeepSeekV4MetalError::Invalid(
++                    "packed grouped mapped bank-axis row bytes exceed u32".into(),
++                )
++            })?,
++            stride_b: u32::try_from(n_in).map_err(|_| {
++                DeepSeekV4MetalError::Invalid(
++                    "packed grouped mapped bank-axis stride exceeds u32".into(),
++                )
++            })?,
++            n_expert: u32::try_from(expert_count).map_err(|_| {
++                DeepSeekV4MetalError::Invalid(
++                    "packed grouped mapped bank-axis experts exceed u32".into(),
++                )
++            })?,
++            map_count: u32::try_from(map_count).map_err(|_| {
++                DeepSeekV4MetalError::Invalid(
++                    "packed grouped mapped bank-axis count exceeds u32".into(),
++                )
++            })?,
++            source_count: u32::try_from(source_count).map_err(|_| {
++                DeepSeekV4MetalError::Invalid(
++                    "packed grouped mapped bank-axis source count exceeds u32".into(),
++                )
++            })?,
++            destination_count: u32::try_from(destination_count).map_err(|_| {
++                DeepSeekV4MetalError::Invalid(
++                    "packed grouped mapped bank-axis destination count exceeds u32".into(),
++                )
++            })?,
++        },
++    );
++    enc.set_tensor(1, gate_bank);
++    enc.set_tensor(2, up_bank);
++    enc.set_tensor(3, input);
++    enc.set_tensor(4, source_rows);
++    enc.set_tensor(5, destination_slots);
++    enc.set_bytes_slice(6, &tiles);
++    enc.set_tensor(7, &gate);
++    enc.set_tensor(8, &up);
++    enc.set_threadgroup_memory(0, 8_192);
++    enc.dispatch(
++        MTLSize {
++            width: tile_count,
++            height: n_out / 64,
++            depth: 2,
++        },
++        MTLSize {
++            width: 128,
++            height: 1,
++            depth: 1,
++        },
++    );
++    Ok(())
++}
++
+ #[cfg(test)]
+ fn packed_grouped_tensor_ranges_overlap(left: &MetalTensor, right: &MetalTensor) -> bool {
+     if Retained::as_ptr(&left.buffer) != Retained::as_ptr(&right.buffer) {
+@@ -3280,6 +3444,21 @@ fn packed_grouped_iq3_candidate_supported(ctx: &MetalContext) -> bool {
+     projection.threadExecutionWidth() == 32 && projection.maxTotalThreadsPerThreadgroup() >= 128
+ }
+ 
++#[cfg(test)]
++fn packed_grouped_iq3_bank_candidate_supported(ctx: &MetalContext) -> bool {
++    if !crate::metal::matmat_iq3_xxs_mm_is_enabled()
++        || ctx.device.maxThreadgroupMemoryLength() < 8_192
++    {
++        return false;
++    }
++    let Ok(projection) =
++        ctx.pipeline("kernel_deepseek_v4_packed_grouped_mapped_bank_iq3_xxs_f32_mm")
++    else {
++        return false;
++    };
++    projection.threadExecutionWidth() == 32 && projection.maxTotalThreadsPerThreadgroup() >= 128
++}
++
+ #[cfg(test)]
+ fn packed_grouped_iq3_fused_candidate_supported(ctx: &MetalContext) -> bool {
+     if !crate::metal::matmat_iq3_xxs_mm_is_enabled()
+@@ -3890,8 +4069,8 @@ fn packed_post_route_expert_ids(
+     let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed route-ID coverage")?;
+     let mut reconstructed = vec![u16::MAX; route_count];
+     for bucket in schedule {
+-        for index in bucket.start..bucket.start + bucket.len {
+-            let slot = usize::try_from(bucket_slots[index]).map_err(|_| {
++        for &stored_slot in &bucket_slots[bucket.start..bucket.start + bucket.len] {
++            let slot = usize::try_from(stored_slot).map_err(|_| {
+                 DeepSeekV4MetalError::Invalid("packed route-ID slot is negative".into())
+             })?;
+             if slot >= route_count || reconstructed[slot] != u16::MAX {
+@@ -3902,7 +4081,7 @@ fn packed_post_route_expert_ids(
+             })?;
+         }
+     }
+-    if reconstructed.iter().any(|&expert| expert == u16::MAX) {
++    if reconstructed.contains(&u16::MAX) {
+         return invalid("packed route-ID capture omitted a slot");
+     }
+     for (&reconstructed, &stored) in reconstructed.iter().zip(expert_ids) {
+@@ -7923,7 +8102,7 @@ mod tests {
+             }
+         }
+         let count_payload_digest = count_payload.finalize();
+-        assert_eq!(hex(&count_payload_digest), routes.count_payload_sha256);
++        assert_eq!(hex(count_payload_digest), routes.count_payload_sha256);
+ 
+         let mut route_payload = Sha256::new();
+         route_payload.update(ROUTE_DOMAIN);
+@@ -9086,6 +9265,10 @@ mod tests {
+             packed_grouped_iq3_fused_candidate_supported(&ctx),
+             "fused all-IQ3 pipeline is not qualified"
+         );
++        assert!(
++            packed_grouped_iq3_bank_candidate_supported(&ctx),
++            "bank-axis all-IQ3 pipeline is not qualified"
++        );
+         const H: usize = 512;
+         const F: usize = 256;
+         const E: usize = MOE_EXPERT_COUNT;
+@@ -9426,6 +9609,177 @@ mod tests {
+                 "N={n_tokens} inner after down"
+             );
+ 
++            let bank_arena =
++                grouped_guarded_f32(&ctx, vec![H as u64, K as u64, n_tokens as u64], 43.0);
++            let bank_output = bank_arena.view_subrange(0, vec![H as u64, route_count as u64]);
++            let (bank_gate, bank_up) =
++                packed_grouped_iq3_gate_up_views(&bank_output, H, F, route_count).unwrap();
++            let bank_inner = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 47.0);
++            submit(&ctx, "all-IQ3 bank-axis gate/up", |encoder| {
++                encode_packed_grouped_mapped_bank_iq3_xxs_f32(
++                    &ctx,
++                    encoder,
++                    &gate_bank,
++                    &up_bank,
++                    &input,
++                    &bucket_rows,
++                    &bucket_slots,
++                    &schedule,
++                    &bank_output,
++                    H,
++                    F,
++                    E,
++                    K,
++                    n_tokens,
++                    n_tokens,
++                    route_count,
++                )
++            });
++            assert_eq!(
++                bits(&bank_gate),
++                bits(&control_gate),
++                "N={n_tokens} bank-axis gate"
++            );
++            assert_eq!(
++                bits(&bank_up),
++                bits(&control_up),
++                "N={n_tokens} bank-axis up"
++            );
++            let bank_gate_after = bits(&bank_gate);
++            let bank_up_after = bits(&bank_up);
++            submit(&ctx, "all-IQ3 bank-axis SwiGLU", |encoder| {
++                encode_ds4_clamped_swiglu(
++                    &ctx,
++                    encoder,
++                    &bank_gate.view_subrange(0, vec![(F * route_count) as u64]),
++                    &bank_up.view_subrange(0, vec![(F * route_count) as u64]),
++                    &bank_inner.view_subrange(0, vec![(F * route_count) as u64]),
++                    CLAMP,
++                )
++            });
++            assert_eq!(
++                bits(&bank_gate),
++                bank_gate_after,
++                "N={n_tokens} bank-axis gate after SwiGLU"
++            );
++            assert_eq!(
++                bits(&bank_up),
++                bank_up_after,
++                "N={n_tokens} bank-axis up after SwiGLU"
++            );
++            assert_eq!(
++                bits(&bank_inner),
++                bits(&control_inner),
++                "N={n_tokens} bank-axis inner"
++            );
++            let bank_inner_after = bits(&bank_inner);
++            submit(&ctx, "all-IQ3 bank-axis down", |encoder| {
++                encode_packed_grouped_mapped_iq3_xxs_f32(
++                    &ctx,
++                    encoder,
++                    &down_bank,
++                    &bank_inner,
++                    &bucket_slots,
++                    &bucket_slots,
++                    &schedule,
++                    &bank_output,
++                    F,
++                    H,
++                    E,
++                    K,
++                    n_tokens,
++                    route_count,
++                    route_count,
++                )
++            });
++            assert_eq!(
++                bits(&bank_arena),
++                bits(&control_output),
++                "N={n_tokens} bank-axis output"
++            );
++            assert_eq!(
++                bits(&bank_inner),
++                bank_inner_after,
++                "N={n_tokens} bank-axis inner after down"
++            );
++
++            let bank_repeat_arena =
++                grouped_guarded_f32(&ctx, vec![H as u64, K as u64, n_tokens as u64], 53.0);
++            let bank_repeat_output =
++                bank_repeat_arena.view_subrange(0, vec![H as u64, route_count as u64]);
++            let bank_repeat_inner =
++                grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 59.0);
++            let bank_trace = {
++                let _trace = crate::metal::kernel_trace_begin();
++                submit(&ctx, "all-IQ3 bank-axis one-command chain", |encoder| {
++                    encode_packed_grouped_mapped_bank_iq3_xxs_f32(
++                        &ctx,
++                        encoder,
++                        &gate_bank,
++                        &up_bank,
++                        &input,
++                        &bucket_rows,
++                        &bucket_slots,
++                        &schedule,
++                        &bank_repeat_output,
++                        H,
++                        F,
++                        E,
++                        K,
++                        n_tokens,
++                        n_tokens,
++                        route_count,
++                    )?;
++                    let (repeat_gate, repeat_up) =
++                        packed_grouped_iq3_gate_up_views(&bank_repeat_output, H, F, route_count)?;
++                    encode_ds4_clamped_swiglu(
++                        &ctx,
++                        encoder,
++                        &repeat_gate.view_subrange(0, vec![(F * route_count) as u64]),
++                        &repeat_up.view_subrange(0, vec![(F * route_count) as u64]),
++                        &bank_repeat_inner.view_subrange(0, vec![(F * route_count) as u64]),
++                        CLAMP,
++                    )?;
++                    encode_packed_grouped_mapped_iq3_xxs_f32(
++                        &ctx,
++                        encoder,
++                        &down_bank,
++                        &bank_repeat_inner,
++                        &bucket_slots,
++                        &bucket_slots,
++                        &schedule,
++                        &bank_repeat_output,
++                        F,
++                        H,
++                        E,
++                        K,
++                        n_tokens,
++                        route_count,
++                        route_count,
++                    )
++                });
++                crate::metal::kernel_trace_take_delta()
++            };
++            assert_eq!(bank_trace.encoders, 1, "N={n_tokens} bank-axis encoders");
++            assert_eq!(
++                bank_trace.concurrent_encoders, 0,
++                "N={n_tokens} bank-axis concurrent encoders"
++            );
++            assert_eq!(
++                bank_trace.dispatches, 3,
++                "N={n_tokens} bank-axis dispatches"
++            );
++            assert_eq!(
++                bits(&bank_repeat_arena),
++                bits(&control_output),
++                "N={n_tokens} bank-axis repeat output"
++            );
++            assert_eq!(
++                bits(&bank_repeat_inner),
++                bits(&control_inner),
++                "N={n_tokens} bank-axis repeat inner"
++            );
++
+             let fused_arena =
+                 grouped_guarded_f32(&ctx, vec![H as u64, K as u64, n_tokens as u64], 23.0);
+             let fused_output = fused_arena.view_subrange(0, vec![H as u64, route_count as u64]);
+@@ -9714,6 +10068,10 @@ mod tests {
+                 ("all-IQ3 control output", &control_output),
+                 ("all-IQ3 candidate arena", &candidate_arena),
+                 ("all-IQ3 candidate inner", &candidate_inner),
++                ("all-IQ3 bank-axis arena", &bank_arena),
++                ("all-IQ3 bank-axis inner", &bank_inner),
++                ("all-IQ3 bank-axis repeat arena", &bank_repeat_arena),
++                ("all-IQ3 bank-axis repeat inner", &bank_repeat_inner),
+                 ("all-IQ3 fused arena", &fused_arena),
+                 ("all-IQ3 fused inner", &fused_inner),
+                 ("all-IQ3 fused repeat arena", &fused_repeat_arena),
+@@ -9729,7 +10087,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn packed_grouped_fused_all_iq3_rejects_invalid_contracts_before_dispatch() {
++    fn packed_grouped_all_iq3_candidates_reject_invalid_contracts_before_dispatch() {
+         let Ok(ctx) = MetalContext::new() else {
+             return;
+         };
+@@ -9771,8 +10129,75 @@ mod tests {
+         .unwrap();
+         let malformed_rows = MetalTensor::zeros_f32(&ctx, vec![K as u64]).unwrap();
+         let arena = MetalTensor::zeros_f32(&ctx, vec![H as u64, K as u64]).unwrap();
++        let malformed_arena = MetalTensor::zeros_f32(&ctx, vec![F as u64, K as u64]).unwrap();
+         let inner = MetalTensor::zeros_f32(&ctx, vec![F as u64, K as u64]).unwrap();
+ 
++        let error = reject(&ctx, |encoder| {
++            encode_packed_grouped_mapped_bank_iq3_xxs_f32(
++                &ctx,
++                encoder,
++                &gate_bank,
++                &wrong_dtype_bank,
++                &input,
++                &source_rows,
++                &destination_slots,
++                &schedule,
++                &arena,
++                H,
++                F,
++                E,
++                K,
++                N,
++                N,
++                K,
++            )
++        });
++        assert!(error.contains("invalid geometry or storage"), "{error}");
++
++        let error = reject(&ctx, |encoder| {
++            encode_packed_grouped_mapped_bank_iq3_xxs_f32(
++                &ctx,
++                encoder,
++                &gate_bank,
++                &up_bank,
++                &input,
++                &malformed_rows,
++                &destination_slots,
++                &schedule,
++                &arena,
++                H,
++                F,
++                E,
++                K,
++                N,
++                N,
++                K,
++            )
++        });
++        assert!(error.contains("source rows"), "{error}");
++
++        let error = reject(&ctx, |encoder| {
++            encode_packed_grouped_mapped_bank_iq3_xxs_f32(
++                &ctx,
++                encoder,
++                &gate_bank,
++                &up_bank,
++                &input,
++                &source_rows,
++                &destination_slots,
++                &schedule,
++                &malformed_arena,
++                H,
++                F,
++                E,
++                K,
++                N,
++                N,
++                K,
++            )
++        });
++        assert!(error.contains("gate/up arena"), "{error}");
++
+         let error = reject(&ctx, |encoder| {
+             encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                 &ctx,
+@@ -9830,6 +10255,28 @@ mod tests {
+             })
+             .collect::<Vec<_>>();
+         malformed_schedule[0].start = 1;
++        let error = reject(&ctx, |encoder| {
++            encode_packed_grouped_mapped_bank_iq3_xxs_f32(
++                &ctx,
++                encoder,
++                &gate_bank,
++                &up_bank,
++                &input,
++                &source_rows,
++                &destination_slots,
++                &malformed_schedule,
++                &arena,
++                H,
++                F,
++                E,
++                K,
++                N,
++                N,
++                K,
++            )
++        });
++        assert!(error.contains("invalid bucket geometry"), "{error}");
++
+         let error = reject(&ctx, |encoder| {
+             encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                 &ctx,
+@@ -9904,6 +10351,630 @@ mod tests {
+         assert!(error.contains("invalid geometry or storage"), "{error}");
+     }
+ 
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "frozen bank-axis all-IQ3 profiler; run release once with --nocapture"]
++    fn profile_packed_grouped_bank_axis_all_iq3_production_routes() {
++        #[derive(Debug)]
++        enum GateVerdict {
++            Authorize,
++            Hold(String),
++            Kill(String),
++        }
++
++        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let Ok(ctx) = MetalContext::new() else {
++                return GateVerdict::Hold("metal_context_unavailable".into());
++            };
++            assert_eq!(
++                ctx.device.name().to_string(),
++                PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
++            );
++            assert!(
++                packed_grouped_iq3_bank_candidate_supported(&ctx),
++                "bank-axis all-IQ3 pipeline is not qualified"
++            );
++
++            const H: usize = 4_096;
++            const F: usize = 2_048;
++            const E: usize = MOE_EXPERT_COUNT;
++            const K: usize = MOE_TOP_K;
++            const N: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
++            const ROUTES: usize = N * K;
++            const CLAMP: f32 = 7.0;
++            const LAYERS: usize = 16;
++            const SAMPLES_PER_ARM: usize = 12;
++            const ABSOLUTE_GATE_MS: f64 = 158.3;
++            const RELATIVE_GATE: f64 = 0.15;
++
++            #[derive(Clone, Copy, Debug, Eq, PartialEq)]
++            enum Arm {
++                Control,
++                Candidate,
++            }
++
++            struct LayerRoute {
++                layer: usize,
++                rows: MetalTensor,
++                slots: MetalTensor,
++                schedule: Vec<ExpertBucket>,
++            }
++
++            fn timing_bank(ctx: &MetalContext, n_in: usize, n_out: usize, fill: u8) -> MetalTensor {
++                let (block_elements, block_bytes) = ggml_type_layout(GgmlType::IQ3_XXS).unwrap();
++                let elements = n_in * n_out * E;
++                assert!(elements.is_multiple_of(block_elements as usize));
++                let bytes = elements / block_elements as usize * block_bytes as usize;
++                let buffer = ctx.buffer_uninit(bytes).unwrap();
++                unsafe {
++                    std::ptr::write_bytes(buffer.contents().as_ptr().cast::<u8>(), fill, bytes);
++                }
++                MetalTensor {
++                    buffer,
++                    offset: 0,
++                    shape: vec![n_in as u64, n_out as u64, E as u64],
++                    dtype: GgmlType::IQ3_XXS,
++                    provenance: MetalTensorProvenance::OwnedWritable,
++                }
++            }
++
++            fn upper_median(values: &[f64]) -> f64 {
++                assert_eq!(values.len(), SAMPLES_PER_ARM);
++                let mut sorted = values.to_vec();
++                sorted.sort_by(f64::total_cmp);
++                sorted[SAMPLES_PER_ARM / 2]
++            }
++
++            fn range(values: &[f64]) -> f64 {
++                let min = values.iter().copied().min_by(f64::total_cmp).unwrap();
++                let max = values.iter().copied().max_by(f64::total_cmp).unwrap();
++                max - min
++            }
++
++            fn maximum(values: &[f64]) -> f64 {
++                values.iter().copied().max_by(f64::total_cmp).unwrap()
++            }
++
++            fn payload_sha256(tensor: &MetalTensor) -> String {
++                let payload = unsafe {
++                    std::slice::from_raw_parts(
++                        tensor
++                            .buffer
++                            .contents()
++                            .as_ptr()
++                            .cast::<u8>()
++                            .add(tensor.offset as usize),
++                        tensor.n_bytes() as usize,
++                    )
++                };
++                format!("{:x}", Sha256::digest(payload))
++            }
++
++            fn update_tensor_digest(hasher: &mut Sha256, tensor: &MetalTensor) {
++                hasher.update(tensor.shape.len().to_le_bytes());
++                for &dimension in &tensor.shape {
++                    hasher.update(dimension.to_le_bytes());
++                }
++                hasher.update(format!("{:?}", tensor.dtype).as_bytes());
++                let payload = unsafe {
++                    std::slice::from_raw_parts(
++                        tensor
++                            .buffer
++                            .contents()
++                            .as_ptr()
++                            .cast::<u8>()
++                            .add(tensor.offset as usize),
++                        tensor.n_bytes() as usize,
++                    )
++                };
++                hasher.update(payload);
++            }
++
++            let fixture = packed_all_iq3_route_census_fixture();
++            assert_eq!(fixture.schema_version, 1);
++            assert_eq!(fixture.n_tokens, N);
++            assert_eq!(fixture.top_k, K);
++            assert_eq!(fixture.expert_count, E);
++            assert_eq!(fixture.layer_count, LAYERS);
++            assert_eq!(fixture.route_count, ROUTES);
++            assert_eq!(fixture.layers.len(), LAYERS);
++            assert_eq!(fixture.total_active_experts, 1_036);
++            assert_eq!(
++                fixture.model_content_id,
++                "ae11d1ea13ccfd98509d248705a589384412cd67c502450158f84a8bd143b5e2"
++            );
++            assert_eq!(
++                fixture.route_payload_sha256,
++                "ee106712f42aed80cc559414140327537dd9f256110b6acffee6a1b893319582"
++            );
++
++            let routes = fixture
++                .layers
++                .iter()
++                .map(|layer| {
++                    let (_expert_ids, rows, slots, schedule) =
++                        packed_grouped_schedule_from_route_ids(N, &layer.route_expert_ids);
++                    assert_eq!(schedule.len(), layer.active_experts);
++                    assert_eq!(
++                        packed_grouped_expert_tiles(N, &schedule).unwrap().len(),
++                        layer.t32
++                    );
++                    LayerRoute {
++                        layer: layer.layer,
++                        rows: MetalTensor::from_bytes(
++                            &ctx,
++                            bytemuck::cast_slice(&rows),
++                            vec![ROUTES as u64],
++                            GgmlType::I32,
++                        )
++                        .unwrap(),
++                        slots: MetalTensor::from_bytes(
++                            &ctx,
++                            bytemuck::cast_slice(&slots),
++                            vec![ROUTES as u64],
++                            GgmlType::I32,
++                        )
++                        .unwrap(),
++                        schedule,
++                    }
++                })
++                .collect::<Vec<_>>();
++            assert_eq!(
++                routes
++                    .iter()
++                    .map(|route| route.schedule.len())
++                    .sum::<usize>(),
++                fixture.total_active_experts
++            );
++
++            let gate_bank = timing_bank(&ctx, H, F, 0x20);
++            let up_bank = timing_bank(&ctx, H, F, 0x24);
++            let down_bank = timing_bank(&ctx, F, H, 0x28);
++            let input_values = (0..H * N)
++                .map(|index| ((index * 43 + index / 17 + 11) % 521) as f32 * 0.0005 - 0.13)
++                .collect::<Vec<_>>();
++            let input = MetalTensor::from_bytes(
++                &ctx,
++                bytemuck::cast_slice(&input_values),
++                vec![H as u64, N as u64],
++                GgmlType::F32,
++            )
++            .unwrap();
++
++            let expert_input = MetalTensor::zeros_f32(&ctx, vec![H as u64, N as u64]).unwrap();
++            let gate = MetalTensor::zeros_f32(&ctx, vec![F as u64, N as u64]).unwrap();
++            let up = MetalTensor::zeros_f32(&ctx, vec![F as u64, N as u64]).unwrap();
++            let control_inner_scratch =
++                MetalTensor::zeros_f32(&ctx, vec![F as u64, N as u64]).unwrap();
++            let bucket_output = MetalTensor::zeros_f32(&ctx, vec![H as u64, N as u64]).unwrap();
++            let control_arena =
++                grouped_guarded_f32(&ctx, vec![H as u64, (ROUTES * LAYERS) as u64], 67.0);
++            let candidate_arena =
++                grouped_guarded_f32(&ctx, vec![H as u64, (ROUTES * LAYERS) as u64], 71.0);
++            let candidate_inner =
++                grouped_guarded_f32(&ctx, vec![F as u64, (ROUTES * LAYERS) as u64], 73.0);
++
++            let layer_output = |arena: &MetalTensor, index: usize| {
++                arena.view_subrange((index * H * ROUTES) as u64, vec![H as u64, ROUTES as u64])
++            };
++            let layer_inner = |index: usize| {
++                candidate_inner
++                    .view_subrange((index * F * ROUTES) as u64, vec![F as u64, ROUTES as u64])
++            };
++
++            let readonly_sha256 = || {
++                let mut hasher = Sha256::new();
++                hasher.update(b"qwen-llm:dsv4:bank-axis-all-iq3-readonly:v1\0");
++                hasher.update(PACKED_ALL_IQ3_ROUTE_CENSUS_FIXTURE.as_bytes());
++                for tensor in [&gate_bank, &up_bank, &down_bank, &input] {
++                    update_tensor_digest(&mut hasher, tensor);
++                }
++                for route in &routes {
++                    hasher.update(route.layer.to_le_bytes());
++                    update_tensor_digest(&mut hasher, &route.rows);
++                    update_tensor_digest(&mut hasher, &route.slots);
++                    hasher.update(route.schedule.len().to_le_bytes());
++                    for bucket in &route.schedule {
++                        hasher.update(bucket.expert.to_le_bytes());
++                        hasher.update(bucket.start.to_le_bytes());
++                        hasher.update(bucket.len.to_le_bytes());
++                    }
++                }
++                format!("{:x}", hasher.finalize())
++            };
++            let readonly_before = readonly_sha256();
++
++            let sample = |arm: Arm| -> Result<(f64, f64), String> {
++                let started = std::time::Instant::now();
++                let command = ctx.queue.commandBuffer().unwrap();
++                let encoder = KernelEncoder::begin(&command);
++                let result = (|| -> Result<(), DeepSeekV4MetalError> {
++                    for (index, route) in routes.iter().enumerate() {
++                        let output = match arm {
++                            Arm::Control => layer_output(&control_arena, index),
++                            Arm::Candidate => layer_output(&candidate_arena, index),
++                        };
++                        match arm {
++                            Arm::Control => {
++                                for bucket in &route.schedule {
++                                    let row_view = i32_slice(
++                                        &route.rows,
++                                        bucket.start,
++                                        bucket.len,
++                                        "bank-axis packet control rows",
++                                    )?;
++                                    let slot_view = i32_slice(
++                                        &route.slots,
++                                        bucket.start,
++                                        bucket.len,
++                                        "bank-axis packet control slots",
++                                    )?;
++                                    let input_view = f32_prefix(
++                                        &expert_input,
++                                        vec![H as u64, bucket.len as u64],
++                                        "bank-axis packet control input",
++                                    )?;
++                                    let gate_view = f32_prefix(
++                                        &gate,
++                                        vec![F as u64, bucket.len as u64],
++                                        "bank-axis packet control gate",
++                                    )?;
++                                    let up_view = f32_prefix(
++                                        &up,
++                                        vec![F as u64, bucket.len as u64],
++                                        "bank-axis packet control up",
++                                    )?;
++                                    let inner_view = f32_prefix(
++                                        &control_inner_scratch,
++                                        vec![F as u64, bucket.len as u64],
++                                        "bank-axis packet control inner",
++                                    )?;
++                                    let output_view = f32_prefix(
++                                        &bucket_output,
++                                        vec![H as u64, bucket.len as u64],
++                                        "bank-axis packet control output",
++                                    )?;
++                                    encode_get_rows_f32(
++                                        &ctx,
++                                        &encoder,
++                                        &input,
++                                        &row_view,
++                                        &input_view,
++                                        bucket.len,
++                                        H,
++                                    )?;
++                                    let gate_weight = expert_weight_view(
++                                        &gate_bank,
++                                        H,
++                                        F,
++                                        bucket.expert,
++                                        "bank-axis packet control gate weight",
++                                    )?;
++                                    let up_weight = expert_weight_view(
++                                        &up_bank,
++                                        H,
++                                        F,
++                                        bucket.expert,
++                                        "bank-axis packet control up weight",
++                                    )?;
++                                    let down_weight = expert_weight_view(
++                                        &down_bank,
++                                        F,
++                                        H,
++                                        bucket.expert,
++                                        "bank-axis packet control down weight",
++                                    )?;
++                                    encode_batch_projection(
++                                        &ctx,
++                                        &encoder,
++                                        &gate_weight,
++                                        &input_view,
++                                        &gate_view,
++                                        H,
++                                        F,
++                                        bucket.len,
++                                        "bank-axis packet control gate",
++                                    )?;
++                                    encode_batch_projection(
++                                        &ctx,
++                                        &encoder,
++                                        &up_weight,
++                                        &input_view,
++                                        &up_view,
++                                        H,
++                                        F,
++                                        bucket.len,
++                                        "bank-axis packet control up",
++                                    )?;
++                                    let inner_len = F * bucket.len;
++                                    encode_ds4_clamped_swiglu(
++                                        &ctx,
++                                        &encoder,
++                                        &gate_view.view_subrange(0, vec![inner_len as u64]),
++                                        &up_view.view_subrange(0, vec![inner_len as u64]),
++                                        &inner_view.view_subrange(0, vec![inner_len as u64]),
++                                        CLAMP,
++                                    )?;
++                                    encode_batch_projection(
++                                        &ctx,
++                                        &encoder,
++                                        &down_weight,
++                                        &inner_view,
++                                        &output_view,
++                                        F,
++                                        H,
++                                        bucket.len,
++                                        "bank-axis packet control down",
++                                    )?;
++                                    crate::metal::encode_scatter_rows_f32_unique(
++                                        &ctx,
++                                        &encoder,
++                                        &output_view,
++                                        &slot_view,
++                                        &output,
++                                        H,
++                                        bucket.len,
++                                    )?;
++                                }
++                            }
++                            Arm::Candidate => {
++                                let inner = layer_inner(index);
++                                encode_packed_grouped_mapped_bank_iq3_xxs_f32(
++                                    &ctx,
++                                    &encoder,
++                                    &gate_bank,
++                                    &up_bank,
++                                    &input,
++                                    &route.rows,
++                                    &route.slots,
++                                    &route.schedule,
++                                    &output,
++                                    H,
++                                    F,
++                                    E,
++                                    K,
++                                    N,
++                                    N,
++                                    ROUTES,
++                                )?;
++                                let (candidate_gate, candidate_up) =
++                                    packed_grouped_iq3_gate_up_views(&output, H, F, ROUTES)?;
++                                encode_ds4_clamped_swiglu(
++                                    &ctx,
++                                    &encoder,
++                                    &candidate_gate.view_subrange(0, vec![(F * ROUTES) as u64]),
++                                    &candidate_up.view_subrange(0, vec![(F * ROUTES) as u64]),
++                                    &inner.view_subrange(0, vec![(F * ROUTES) as u64]),
++                                    CLAMP,
++                                )?;
++                                encode_packed_grouped_mapped_iq3_xxs_f32(
++                                    &ctx,
++                                    &encoder,
++                                    &down_bank,
++                                    &inner,
++                                    &route.slots,
++                                    &route.slots,
++                                    &route.schedule,
++                                    &output,
++                                    F,
++                                    H,
++                                    E,
++                                    K,
++                                    N,
++                                    ROUTES,
++                                    ROUTES,
++                                )?;
++                            }
++                        }
++                    }
++                    Ok(())
++                })();
++                encoder.end();
++                if let Err(error) = result {
++                    return Err(format!("{arm:?}_encode_failed:{error}"));
++                }
++                command.commit();
++                command.waitUntilCompleted();
++                let wall_ms = started.elapsed().as_secs_f64() * 1e3;
++                if let Some(error) = command.error() {
++                    return Err(format!("{arm:?}_command_failed:{error:?}"));
++                }
++                let gpu_start = command.GPUStartTime();
++                let gpu_end = command.GPUEndTime();
++                if !gpu_start.is_finite()
++                    || !gpu_end.is_finite()
++                    || gpu_end <= gpu_start
++                    || !wall_ms.is_finite()
++                    || wall_ms <= 0.0
++                {
++                    return Err(format!(
++                        "{arm:?}_invalid_timing_interval:gpu_start={gpu_start} gpu_end={gpu_end} wall_ms={wall_ms}"
++                    ));
++                }
++                let gpu_ms = (gpu_end - gpu_start) * 1e3;
++                if !gpu_ms.is_finite() || gpu_ms <= 0.0 {
++                    return Err(format!("{arm:?}_invalid_gpu_duration:{gpu_ms}"));
++                }
++                Ok((gpu_ms, wall_ms))
++            };
++
++            eprintln!(
++                "deepseek_v4 bank_axis_all_iq3_fixture allocated_bytes={} bank_bytes={} layers={:?} active_buckets={} tiles={} padding={}",
++                ctx.current_allocated_size(),
++                gate_bank.n_bytes() + up_bank.n_bytes() + down_bank.n_bytes(),
++                routes.iter().map(|route| route.layer).collect::<Vec<_>>(),
++                fixture.total_active_experts,
++                fixture.total_t32,
++                fixture.total_padding,
++            );
++
++            macro_rules! run_sample {
++                ($arm:expr) => {
++                    match sample($arm) {
++                        Ok(sample) => sample,
++                        Err(reason) => return GateVerdict::Hold(reason),
++                    }
++                };
++            }
++
++            let _ = run_sample!(Arm::Control);
++            let _ = run_sample!(Arm::Candidate);
++            let control_before = payload_sha256(&control_arena);
++            let candidate_before = payload_sha256(&candidate_arena);
++            if candidate_before != control_before {
++                return GateVerdict::Hold("pre_timing_output_identity_mismatch".into());
++            }
++
++            const BLOCK: [Arm; 8] = [
++                Arm::Control,
++                Arm::Candidate,
++                Arm::Candidate,
++                Arm::Control,
++                Arm::Candidate,
++                Arm::Control,
++                Arm::Control,
++                Arm::Candidate,
++            ];
++            for arm in BLOCK {
++                let _ = run_sample!(arm);
++            }
++
++            let mut control_gpu = Vec::with_capacity(SAMPLES_PER_ARM);
++            let mut control_wall = Vec::with_capacity(SAMPLES_PER_ARM);
++            let mut candidate_gpu = Vec::with_capacity(SAMPLES_PER_ARM);
++            let mut candidate_wall = Vec::with_capacity(SAMPLES_PER_ARM);
++            for _ in 0..3 {
++                for arm in BLOCK {
++                    let (gpu, wall) = run_sample!(arm);
++                    match arm {
++                        Arm::Control => {
++                            control_gpu.push(gpu);
++                            control_wall.push(wall);
++                        }
++                        Arm::Candidate => {
++                            candidate_gpu.push(gpu);
++                            candidate_wall.push(wall);
++                        }
++                    }
++                }
++            }
++            assert_eq!(control_gpu.len(), SAMPLES_PER_ARM);
++            assert_eq!(candidate_gpu.len(), SAMPLES_PER_ARM);
++
++            let control_retained = payload_sha256(&control_arena);
++            let candidate_retained = payload_sha256(&candidate_arena);
++            if control_retained != control_before
++                || candidate_retained != candidate_before
++                || candidate_retained != control_retained
++            {
++                return GateVerdict::Hold("post_retained_timing_output_identity_mismatch".into());
++            }
++
++            let control_gpu_range = range(&control_gpu);
++            let candidate_gpu_range = range(&candidate_gpu);
++            let control_wall_range = range(&control_wall);
++            let candidate_wall_range = range(&candidate_wall);
++            let gpu_control_drift = control_gpu_range / maximum(&control_gpu);
++            let gpu_candidate_drift = candidate_gpu_range / maximum(&candidate_gpu);
++            let wall_control_drift = control_wall_range / maximum(&control_wall);
++            let wall_candidate_drift = candidate_wall_range / maximum(&candidate_wall);
++            let gpu_q = 5.0 * control_gpu_range.max(candidate_gpu_range);
++            let wall_q = 5.0 * control_wall_range.max(candidate_wall_range);
++            let gpu_control_median = upper_median(&control_gpu);
++            let gpu_candidate_median = upper_median(&candidate_gpu);
++            let wall_control_median = upper_median(&control_wall);
++            let wall_candidate_median = upper_median(&candidate_wall);
++            let gpu_control_p95 = maximum(&control_gpu);
++            let gpu_candidate_p95 = maximum(&candidate_gpu);
++            let wall_control_p95 = maximum(&control_wall);
++            let wall_candidate_p95 = maximum(&candidate_wall);
++            let gpu_median_lower_saving = gpu_control_median - gpu_candidate_median - gpu_q;
++            let gpu_p95_lower_saving = gpu_control_p95 - gpu_candidate_p95 - gpu_q;
++            let wall_median_lower_saving = wall_control_median - wall_candidate_median - wall_q;
++            let wall_p95_lower_saving = wall_control_p95 - wall_candidate_p95 - wall_q;
++
++            let (control_trace, candidate_trace) = {
++                let _trace = crate::metal::kernel_trace_begin();
++                let _ = run_sample!(Arm::Control);
++                let control_trace = crate::metal::kernel_trace_take_delta();
++                let _ = run_sample!(Arm::Candidate);
++                let candidate_trace = crate::metal::kernel_trace_take_delta();
++                (control_trace, candidate_trace)
++            };
++            if control_trace.encoders != 1
++                || control_trace.concurrent_encoders != 0
++                || control_trace.dispatches != (fixture.total_active_experts * 6) as u64
++                || candidate_trace.encoders != 1
++                || candidate_trace.concurrent_encoders != 0
++                || candidate_trace.dispatches != (LAYERS * 3) as u64
++            {
++                return GateVerdict::Hold("dispatch_topology_mismatch".into());
++            }
++
++            for (label, tensor) in [
++                ("bank-axis packet control arena", &control_arena),
++                ("bank-axis packet candidate arena", &candidate_arena),
++                ("bank-axis packet candidate inner", &candidate_inner),
++            ] {
++                assert_grouped_guards(label, tensor);
++            }
++
++            let control_after = payload_sha256(&control_arena);
++            let candidate_after = payload_sha256(&candidate_arena);
++            if control_after != control_before
++                || candidate_after != candidate_before
++                || candidate_after != control_after
++            {
++                return GateVerdict::Hold("post_trace_output_identity_mismatch".into());
++            }
++            let readonly_after = readonly_sha256();
++            if readonly_after != readonly_before {
++                return GateVerdict::Hold("readonly_payload_identity_mismatch".into());
++            }
++
++            eprintln!(
++                "deepseek_v4 bank_axis_all_iq3_packet control_gpu_ms={control_gpu:?} control_wall_ms={control_wall:?} candidate_gpu_ms={candidate_gpu:?} candidate_wall_ms={candidate_wall:?} control_gpu_range_ms={control_gpu_range:.6} candidate_gpu_range_ms={candidate_gpu_range:.6} control_wall_range_ms={control_wall_range:.6} candidate_wall_range_ms={candidate_wall_range:.6} gpu_control_drift={gpu_control_drift:.6} gpu_candidate_drift={gpu_candidate_drift:.6} wall_control_drift={wall_control_drift:.6} wall_candidate_drift={wall_candidate_drift:.6} gpu_q_ms={gpu_q:.6} wall_q_ms={wall_q:.6} gpu_control_upper_median_ms={gpu_control_median:.6} gpu_candidate_upper_median_ms={gpu_candidate_median:.6} gpu_control_p95_ms={gpu_control_p95:.6} gpu_candidate_p95_ms={gpu_candidate_p95:.6} gpu_median_lower_saving_ms={gpu_median_lower_saving:.6} gpu_p95_lower_saving_ms={gpu_p95_lower_saving:.6} wall_median_lower_saving_ms={wall_median_lower_saving:.6} wall_p95_lower_saving_ms={wall_p95_lower_saving:.6} control_dispatches={} candidate_dispatches={} output_sha256={control_after} readonly_sha256={readonly_after} wall_is_diagnostic=true",
++                control_trace.dispatches, candidate_trace.dispatches,
++            );
++
++            if gpu_control_drift > 0.05 || gpu_candidate_drift > 0.05 {
++                GateVerdict::Hold("gpu_timing_range_drift_exceeds_five_percent".into())
++            } else if gpu_median_lower_saving < ABSOLUTE_GATE_MS
++                || gpu_p95_lower_saving < ABSOLUTE_GATE_MS
++                || gpu_median_lower_saving / gpu_control_median < RELATIVE_GATE
++                || gpu_p95_lower_saving / gpu_control_p95 < RELATIVE_GATE
++            {
++                GateVerdict::Kill("stable_economic_gate_miss".into())
++            } else {
++                GateVerdict::Authorize
++            }
++        }));
++
++        match outcome {
++            Ok(GateVerdict::Authorize) => eprintln!(
++                "deepseek_v4 bank_axis_all_iq3 final_decision=AUTHORIZE_SEPARATELY_FROZEN_CURRENT_ASSET_AB_FOR_REVIEWED_BANK_AXIS_ONLY"
++            ),
++            Ok(GateVerdict::Hold(reason)) => {
++                eprintln!(
++                    "deepseek_v4 bank_axis_all_iq3 final_decision=INCONCLUSIVE_HOLD reason={reason}"
++                );
++                panic!("bank-axis all-IQ3 packet held: {reason}");
++            }
++            Ok(GateVerdict::Kill(reason)) => {
++                eprintln!(
++                    "deepseek_v4 bank_axis_all_iq3 final_decision=KILL_BANK_AXIS_MAPPED_ALL_IQ3 reason={reason}"
++                );
++                panic!("bank-axis all-IQ3 packet killed: {reason}");
++            }
++            Err(payload) => {
++                eprintln!(
++                    "deepseek_v4 bank_axis_all_iq3 final_decision=INCONCLUSIVE_HOLD reason=unexpected_panic"
++                );
++                std::panic::resume_unwind(payload);
++            }
++        }
++    }
++
+     #[test]
+     #[ignore = "sealed KILL; do not rerun without material implementation or device drift"]
+     fn profile_packed_grouped_fused_all_iq3_production_shape() {
+diff --git a/kernels/mat_mat_iq3.metal b/kernels/mat_mat_iq3.metal
+index 89f62dd..5f16e0f 100644
+--- a/kernels/mat_mat_iq3.metal
++++ b/kernels/mat_mat_iq3.metal
+@@ -658,6 +658,156 @@ kernel void kernel_deepseek_v4_packed_grouped_mapped_iq3_xxs_f32_mm(
+     }
+ }
+ 
++[[max_total_threads_per_threadgroup(128)]]
++kernel void kernel_deepseek_v4_packed_grouped_mapped_bank_iq3_xxs_f32_mm(
++        constant ds4_packed_grouped_projection_args & args [[buffer(0)]],
++        device const uchar * gateA [[buffer(1)]],
++        device const uchar * upA [[buffer(2)]],
++        device const float * srcB [[buffer(3)]],
++        device const int * source_rows [[buffer(4)]],
++        device const int * destination_slots [[buffer(5)]],
++        constant ds4_packed_expert_tile * tiles [[buffer(6)]],
++        device float * gate_dst [[buffer(7)]],
++        device float * up_dst [[buffer(8)]],
++        threadgroup uchar * shmem [[threadgroup(0)]],
++        uint3 tgpig [[threadgroup_position_in_grid]],
++        ushort tiitg [[thread_index_in_threadgroup]],
++        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
++    threadgroup half * sa = (threadgroup half *)(shmem);
++    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
++
++    const ds4_packed_expert_tile tile = tiles[tgpig.x];
++    if (tgpig.z >= 2u || tile.expert >= args.n_expert || tile.count == 0u
++            || tile.count > 32u || tile.start + tile.count > args.map_count) return;
++
++    threadgroup uint * map_valid = (threadgroup uint *)shmem;
++    if (tiitg == 0) {
++        uint valid = 1u;
++        for (uint j = 0; j < tile.count; ++j) {
++            const int source = source_rows[tile.start + j];
++            const int destination = destination_slots[tile.start + j];
++            if (source < 0 || uint(source) >= args.source_count
++                    || destination < 0 || uint(destination) >= args.destination_count) {
++                valid = 0u;
++            }
++        }
++        *map_valid = valid;
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    if (*map_valid == 0u) return;
++
++    device const uchar * srcA = tgpig.z == 0u ? gateA : upA;
++    device float * dst = tgpig.z == 0u ? gate_dst : up_dst;
++    const int r0 = tgpig.y * NR0_IQ3;
++    const int nr0 = min((int)NR0_IQ3, (int)args.M - r0);
++    const short nr1 = (short)tile.count;
++
++    const short lr0 = ((short)tiitg / NL0_IQ3) < nr0
++                        ? ((short)tiitg / NL0_IQ3)
++                        : (short)nr0 - 1;
++    const short il0 = tiitg % NL0_IQ3;
++    short il = il0;
++
++    const short lr1 = ((short)tiitg / NL1_IQ3) < nr1
++                        ? ((short)tiitg / NL1_IQ3)
++                        : nr1 - 1;
++    const short iy = 8 * (tiitg % NL1_IQ3);
++    const int input_row = source_rows[tile.start + uint(lr1)];
++
++    const ulong expert_stride = (ulong)args.nb01 * args.M;
++    device const uchar * x_ptr = srcA + (ulong)tile.expert * expert_stride
++        + (ulong)args.nb01 * (r0 + lr0);
++    device const float * y_ptr = srcB + (ulong)args.stride_b * input_row
++        + (ulong)iy;
++
++    simdgroup_half8x8 ma[4];
++    simdgroup_half8x8 mb[2];
++    simdgroup_float8x8 mc[8];
++
++    FOR_UNROLL (short i = 0; i < 8; ++i) {
++        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
++    }
++
++    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_IQ3) {
++        {
++            half4x4 temp_a;
++            dequantize_iq3_xxs_half(x_ptr, il, temp_a);
++
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++
++            FOR_UNROLL (short i = 0; i < 16; ++i) {
++                const short sx = 2 * il0 + i / 8;
++                const short sy = (tiitg / NL0_IQ3) / 8;
++                const short lx = (tiitg / NL0_IQ3) % 8;
++                const short ly = i % 8;
++                const short ib = 8 * sx + sy;
++                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
++            }
++        }
++
++        {
++            const short sx = tiitg % NL1_IQ3;
++            const short sy = (tiitg / NL1_IQ3) / 8;
++            const short ly = (tiitg / NL1_IQ3) % 8;
++            const short ib = 4 * sx + sy;
++            *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
++                (half2x4)(*((device const float2x4 *)y_ptr));
++        }
++
++        il = (il + 2 < IQ3_NL) ? il + 2 : il % 2;
++        x_ptr = (il < 2) ? x_ptr + 98 : x_ptr;
++        y_ptr += NK_IQ3;
++
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++
++        threadgroup const half * lsma = sa + 4 * 64 * (sgitg % 2);
++        threadgroup const half * lsmb = sb + 2 * 64 * (sgitg / 2);
++
++        FOR_UNROLL (short ik = 0; ik < NK_IQ3 / 8; ++ik) {
++            simdgroup_barrier(mem_flags::mem_none);
++
++            FOR_UNROLL (short i = 0; i < 4; ++i) {
++                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
++            }
++
++            simdgroup_barrier(mem_flags::mem_none);
++            FOR_UNROLL (short i = 0; i < 2; ++i) {
++                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
++            }
++
++            simdgroup_barrier(mem_flags::mem_none);
++            FOR_UNROLL (short i = 0; i < 8; ++i) {
++                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
++            }
++
++            lsma += 8 * 64;
++            lsmb += 4 * 64;
++        }
++    }
++
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    threadgroup float * temp_str = ((threadgroup float *)shmem)
++                                   + 32 * (sgitg & 1)
++                                   + (16 * (sgitg >> 1)) * NR0_IQ3;
++    FOR_UNROLL (short i = 0; i < 8; ++i) {
++        simdgroup_store(mc[i], temp_str + 8 * (i % 4) + 8 * NR0_IQ3 * (i / 4),
++                        NR0_IQ3, 0, false);
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    if (sgitg == 0) {
++        threadgroup float * tile_output = (threadgroup float *)shmem;
++        for (int j = tiitg; j < nr1; j += NR1_IQ3) {
++            const int output_slot = destination_slots[tile.start + uint(j)];
++            device float * D = dst + (ulong)output_slot * args.M + r0;
++            threadgroup float * C = tile_output + j * NR0_IQ3;
++            for (int i = 0; i < nr0; ++i) {
++                D[i] = C[i];
++            }
++        }
++    }
++}
++
+ kernel void kernel_deepseek_v4_packed_grouped_mapped_swiglu_iq3_xxs_f32_mm(
+         constant ds4_packed_grouped_swiglu_iq3_args & args [[buffer(0)]],
+         device const uchar * gateA [[buffer(1)]],

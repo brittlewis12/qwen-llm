@@ -2193,7 +2193,18 @@ noise without reducing technical risk. Revisit after S5.
    hot GPU/wall medians regress 0.5713%/0.7625% and sparse medians regress
    1.8763%/1.8684%. Keep its test-only kernel and sealed harness as negative
    evidence; do not run the current asset, sweep the same accumulator geometry,
-   or reinterpret it as the spent four-stage gate. The subsequent
+   or reinterpret it as the spent four-stage gate. The subsequent current-route
+   bank-axis packet directly replays all 16 captured all-IQ3 schedules against
+   the actual per-bucket production chain. One depth-two gate/up dispatch, exact
+   SwiGLU, and mapped down reduce 6,216 dispatches to 48 while preserving all
+   output/read-only bits and guards. GPU upper median/p95 fall from
+   348.206875/353.384000 to 144.260875/144.285083 ms with stable
+   2.7158%/0.0624% drift. The frozen five-range uncertainty charge leaves a
+   155.959125 ms median lower saving, 2.340875 ms below the 158.3 ms absolute
+   gate, so the exact bank-axis design is `KILL` and removed. Preserve the
+   58.57% raw cohort reduction as landscape evidence: further launch-axis
+   retuning is closed, while a genuinely matrix-friendly low-bit work unit or
+   larger effective token superchunk remains open. The later
    precision-recovering packed Q8 output design clears model-free and fails its
    sole canonical asset gate. One fixed F32 `R2C4K64` matrix removes both half
    operand conversions, reducing synthetic A+B relative RMS from 0.001230151 to

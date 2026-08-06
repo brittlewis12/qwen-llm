@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Bank-Axis All-IQ3 KILL
+
+Status: `KILL_BANK_AXIS_MAPPED_ALL_IQ3`. The exact candidate is removed and no
+current-asset A/B is authorized.
+
+- The current-asset route fixture reconstructs all 16 all-IQ3 layers: 12,288
+  routes, 1,036 active buckets, and 1,187 panels. The direct production control
+  executes 6,216 gather/projection/SwiGLU/scatter dispatches; the candidate uses
+  one bank-axis gate/up, one exact SwiGLU, and one mapped down per layer, 48
+  dispatches total.
+- Focused geometry/contract tests and the frozen packet preserve every
+  gate/up/inner/final bit, output and immutable-input digest, guard, exact route,
+  and dispatch topology.
+- GPU upper medians move from 348.206875 to 144.260875 ms, a raw 203.946 ms /
+  58.57% saving. P95 moves from 353.384000 to 144.285083 ms. Both arms are
+  stable at 2.7158%/0.0624% drift.
+- The frozen five-range charge is 47.986875 ms. It leaves a 155.959125 ms
+  median lower saving, 2.340875 ms below the 158.3 ms absolute floor; p95 and
+  both relative gates pass. Stable-miss precedence therefore records KILL.
+
+Decision: preserve the large directional phase result without moving the
+precommitted gate. Do not rerun or retune the launch axis. The 144 ms residual
+points next to a materially new matrix/data work unit or larger effective token
+batch, not more dispatch-only fusion. Evidence:
+`docs/bench/2026-08-06-dsv4-packed-bank-axis-all-iq3/README.md`. CX:
+`019fd685-acb3-7890-83c9-192cbea48c6e`.
+
 ## 2026-08-06 - DeepSeek V4 Exact R2 Scorer Rejected
 
 Status: formal packet result `INCONCLUSIVE_HOLD`; the reviewed exact-R2

@@ -1,0 +1,21 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::prefill::tests::profile_packed_grouped_bank_axis_all_iq3_production_routes ... deepseek_v4 bank_axis_all_iq3_fixture allocated_bytes=2979528704 bank_bytes=2466250752 layers=[1, 4, 5, 8, 9, 20, 24, 27, 28, 29, 30, 31, 32, 33, 34, 40] active_buckets=1036 tiles=1187 padding=25696
+deepseek_v4 bank_axis_all_iq3_packet control_gpu_ms=[351.7702082172036, 351.2536250054836, 343.7866249587387, 346.4145832695067, 347.19849983230233, 353.3840000163764, 347.40074980072677, 350.91937496326864, 349.534000037238, 347.09766670130193, 344.64279166422784, 348.206875147298] control_wall_ms=[355.378375, 354.876417, 347.415625, 350.062333, 350.87075, 357.106334, 350.94795899999997, 354.47774999999996, 353.17758399999997, 350.79862499999996, 348.427041, 352.03725000000003] candidate_gpu_ms=[144.28508328273892, 144.19500017538667, 144.26699979230762, 144.2486250307411, 144.24166665412486, 144.24225012771785, 144.27275001071393, 144.28337500430644, 144.24779172986746, 144.25387512892485, 144.2696249578148, 144.26087494939566] candidate_wall_ms=[144.60362500000002, 144.465917, 144.54625, 144.51049999999998, 144.49141600000002, 144.46158300000002, 144.54975000000002, 144.543125, 144.496, 144.642875, 144.518833, 144.508667] control_gpu_range_ms=9.597375 candidate_gpu_range_ms=0.090083 control_wall_range_ms=9.690709 candidate_wall_range_ms=0.181292 gpu_control_drift=0.027158 gpu_candidate_drift=0.000624 wall_control_drift=0.027137 wall_candidate_drift=0.001253 gpu_q_ms=47.986875 wall_q_ms=48.453545 gpu_control_upper_median_ms=348.206875 gpu_candidate_upper_median_ms=144.260875 gpu_control_p95_ms=353.384000 gpu_candidate_p95_ms=144.285083 gpu_median_lower_saving_ms=155.959125 gpu_p95_lower_saving_ms=161.112041 wall_median_lower_saving_ms=159.064872 wall_p95_lower_saving_ms=164.009914 control_dispatches=6216 candidate_dispatches=48 output_sha256=2919195b47f880923fa37c041bde287c7e237e046e5047d542b45b80a81a90eb readonly_sha256=17b744cecf85e940601c2cb6a37fcb29fc2be511e718e959be4ca959b60eeab6 wall_is_diagnostic=true
+deepseek_v4 bank_axis_all_iq3 final_decision=KILL_BANK_AXIS_MAPPED_ALL_IQ3 reason=stable_economic_gate_miss
+
+thread 'deepseek_v4_metal::prefill::tests::profile_packed_grouped_bank_axis_all_iq3_production_routes' (259872291) panicked at crates/qwen-llm/src/deepseek_v4_metal/prefill.rs:10967:17:
+bank-axis all-IQ3 packet killed: stable_economic_gate_miss
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::prefill::tests::profile_packed_grouped_bank_axis_all_iq3_production_routes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 680 filtered out; finished in 19.48s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`

@@ -3890,8 +3890,8 @@ fn packed_post_route_expert_ids(
     let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed route-ID coverage")?;
     let mut reconstructed = vec![u16::MAX; route_count];
     for bucket in schedule {
-        for index in bucket.start..bucket.start + bucket.len {
-            let slot = usize::try_from(bucket_slots[index]).map_err(|_| {
+        for &stored_slot in &bucket_slots[bucket.start..bucket.start + bucket.len] {
+            let slot = usize::try_from(stored_slot).map_err(|_| {
                 DeepSeekV4MetalError::Invalid("packed route-ID slot is negative".into())
             })?;
             if slot >= route_count || reconstructed[slot] != u16::MAX {
@@ -3902,7 +3902,7 @@ fn packed_post_route_expert_ids(
             })?;
         }
     }
-    if reconstructed.iter().any(|&expert| expert == u16::MAX) {
+    if reconstructed.contains(&u16::MAX) {
         return invalid("packed route-ID capture omitted a slot");
     }
     for (&reconstructed, &stored) in reconstructed.iter().zip(expert_ids) {
@@ -7923,7 +7923,7 @@ mod tests {
             }
         }
         let count_payload_digest = count_payload.finalize();
-        assert_eq!(hex(&count_payload_digest), routes.count_payload_sha256);
+        assert_eq!(hex(count_payload_digest), routes.count_payload_sha256);
 
         let mut route_payload = Sha256::new();
         route_payload.update(ROUTE_DOMAIN);

@@ -419,6 +419,19 @@ well. Do not run the current asset, retune the same 16-accumulator geometry, or
 repeat this condition. Retain the test-only path as executable negative
 evidence.
 
+The subsequent current-route bank-axis packet closes the broader mapped all-IQ3
+question under the existing economic contract. It replays all 16 captured
+current-asset schedules and compares the actual 6,216-dispatch bucket path with
+48 dispatches: depth-two mapped gate/up, exact SwiGLU, and mapped down. Every
+output/read-only bit and guard passes. GPU upper median falls from 348.206875 to
+144.260875 ms and p95 from 353.384000 to 144.285083 ms, with 2.7158%/0.0624%
+drift. The 47.986875 ms five-range charge leaves a 155.959125 ms median lower
+saving, 2.340875 ms below the frozen 158.3 ms floor, so the formal result is
+`KILL_BANK_AXIS_MAPPED_ALL_IQ3`. Remove the candidate and do not rerun the same
+launch-axis geometry. The 144 ms residual and 58.57% raw cohort reduction make
+a materially new low-bit matrix representation or larger effective prefill
+batch the next high-ceiling routed-expert hypotheses.
+
 The precision-recovering Q8 branch clears model-free and fails full-model
 promotion. A single fixed F32 `R2C4K64` geometry removes both half operand
 conversions and improves synthetic A+B relative RMS 220.7x to 0.000005573 while

@@ -2525,11 +2525,30 @@ fn validate_deepseek_v4_request_context_limit(
     Ok(())
 }
 
-fn deepseek_v4_packed_chunk_count(prompt_tokens: usize) -> usize {
+fn parse_deepseek_v4_prefill_chunk_tokens(value: Option<&str>) -> Result<usize> {
+    let Some(value) = value else {
+        return Ok(DEEPSEEK_V4_PREFILL_MAX_TOKENS);
+    };
+    let chunk_tokens = value
+        .parse::<usize>()
+        .with_context(|| format!("QWEN_DSV4_PREFILL_CHUNK_TOKENS={value:?} is not an integer"))?;
+    ensure!(
+        (1..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&chunk_tokens),
+        "QWEN_DSV4_PREFILL_CHUNK_TOKENS must be in 1..={DEEPSEEK_V4_PREFILL_MAX_TOKENS}, got {chunk_tokens}"
+    );
+    Ok(chunk_tokens)
+}
+
+fn deepseek_v4_prefill_chunk_tokens() -> Result<usize> {
+    let value = std::env::var("QWEN_DSV4_PREFILL_CHUNK_TOKENS").ok();
+    parse_deepseek_v4_prefill_chunk_tokens(value.as_deref())
+}
+
+fn deepseek_v4_packed_chunk_count(prompt_tokens: usize, chunk_tokens: usize) -> usize {
     if prompt_tokens < 2 {
         0
     } else {
-        prompt_tokens.div_ceil(DEEPSEEK_V4_PREFILL_MAX_TOKENS)
+        prompt_tokens.div_ceil(chunk_tokens)
     }
 }
 
@@ -2617,12 +2636,13 @@ fn advance_deepseek_v4_prompt_prefix(
     session: &mut DeepSeekV4Session,
     ctx: &MetalContext,
     token_ids: &[u32],
+    chunk_tokens: usize,
 ) -> Result<()> {
     ensure!(
         !token_ids.is_empty(),
         "DeepSeek V4 snapshot prefix is empty"
     );
-    for (chunk_index, chunk) in token_ids.chunks(DEEPSEEK_V4_PREFILL_MAX_TOKENS).enumerate() {
+    for (chunk_index, chunk) in token_ids.chunks(chunk_tokens).enumerate() {
         session.advance_tokens(ctx, chunk).with_context(|| {
             format!("advance DeepSeek V4 snapshot prefix chunk {chunk_index} without logits")
         })?;
@@ -2634,13 +2654,14 @@ fn execute_deepseek_v4_prompt_suffix(
     session: &mut DeepSeekV4Session,
     ctx: &MetalContext,
     token_ids: &[u32],
+    chunk_tokens: usize,
 ) -> Result<usize> {
     ensure!(
         !token_ids.is_empty(),
         "DeepSeek V4 prompt suffix requires an endpoint token"
     );
-    let chunk_count = token_ids.len().div_ceil(DEEPSEEK_V4_PREFILL_MAX_TOKENS);
-    for (chunk_index, chunk) in token_ids.chunks(DEEPSEEK_V4_PREFILL_MAX_TOKENS).enumerate() {
+    let chunk_count = token_ids.len().div_ceil(chunk_tokens);
+    for (chunk_index, chunk) in token_ids.chunks(chunk_tokens).enumerate() {
         if chunk_index + 1 == chunk_count {
             session
                 .prefill_tokens(ctx, chunk)
@@ -2688,6 +2709,7 @@ fn run_deepseek_v4_single_turn(
 ) -> Result<()> {
     validate_deepseek_v4_generation_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
+    let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
     let sampling = cli_sampling_config(args)?;
     let arrival_ms = unix_epoch_ms()?;
     let encode_options = deepseek_v4_encode_options(args)?;
@@ -2912,6 +2934,7 @@ fn run_deepseek_v4_single_turn(
                 &mut session,
                 &ctx,
                 &prompt_token_ids[*restored_prefix..],
+                prefill_chunk_tokens,
             )?;
             eprintln!(
                 "deepseek_v4: snapshot restore path={} restored_tokens={} suffix_tokens={} suffix_chunks={} payload_bytes={}",
@@ -2928,6 +2951,7 @@ fn run_deepseek_v4_single_turn(
                 &mut session,
                 &ctx,
                 &prompt_token_ids[..publish_prefix],
+                prefill_chunk_tokens,
             )?;
             let snapshot = session
                 .capture_causal_snapshot()
@@ -2952,6 +2976,7 @@ fn run_deepseek_v4_single_turn(
                 &mut session,
                 &ctx,
                 &prompt_token_ids[publish_prefix..],
+                prefill_chunk_tokens,
             )?;
             eprintln!(
                 "deepseek_v4: snapshot publish path={} outcome={} prefix_tokens={} payload_bytes={} record_bytes={}",
@@ -2967,13 +2992,19 @@ fn run_deepseek_v4_single_turn(
             "causal_snapshot_publish"
         }
     } else {
-        let packed_chunk_count = deepseek_v4_packed_chunk_count(prompt_token_ids.len());
+        let packed_chunk_count =
+            deepseek_v4_packed_chunk_count(prompt_token_ids.len(), prefill_chunk_tokens);
         if packed_chunk_count > 0 {
-            execute_deepseek_v4_prompt_suffix(&mut session, &ctx, &prompt_token_ids)?;
+            execute_deepseek_v4_prompt_suffix(
+                &mut session,
+                &ctx,
+                &prompt_token_ids,
+                prefill_chunk_tokens,
+            )?;
             if packed_chunk_count == 1 {
-                "layer_major_128"
+                "layer_major"
             } else {
-                "layer_major_128_chunks"
+                "layer_major_chunks"
             }
         } else {
             for (index, &token) in prompt_token_ids.iter().enumerate() {
@@ -3039,12 +3070,13 @@ fn run_deepseek_v4_single_turn(
     };
     eprintln!(
         concat!(
-            "deepseek_v4 stats: prompt_kind={} prefill_mode={} prompt_tokens={} generated_tokens={} transitions={} ",
+            "deepseek_v4 stats: prompt_kind={} prefill_mode={} prefill_chunk_cap={} prompt_tokens={} generated_tokens={} transitions={} ",
             "stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} ",
             "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} generated_ids={:?}"
         ),
         prompt_kind,
         prefill_mode,
+        prefill_chunk_tokens,
         prompt_ids.len(),
         generation.tokens.len(),
         generation.transitions,
@@ -3144,6 +3176,7 @@ fn run_deepseek_v4_requests_jsonl(
 ) -> Result<()> {
     validate_deepseek_v4_requests_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
+    let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
     cli_sampling_config(args)?;
     let stdin_mode = deepseek_v4_requests_reads_stdin(args)?;
     let requests_path = args
@@ -3298,14 +3331,22 @@ fn run_deepseek_v4_requests_jsonl(
                     .context("reconcile DeepSeek V4 request session allocation")?;
             }
             let prefill_t0 = Instant::now();
-            let packed_chunk_count = deepseek_v4_packed_chunk_count(request.prompt_token_ids.len());
+            let packed_chunk_count = deepseek_v4_packed_chunk_count(
+                request.prompt_token_ids.len(),
+                prefill_chunk_tokens,
+            );
             let prefill_mode = if packed_chunk_count > 0 {
-                execute_deepseek_v4_prompt_suffix(&mut session, &ctx, &request.prompt_token_ids)
-                    .with_context(|| format!("prefill request {}", request.id))?;
+                execute_deepseek_v4_prompt_suffix(
+                    &mut session,
+                    &ctx,
+                    &request.prompt_token_ids,
+                    prefill_chunk_tokens,
+                )
+                .with_context(|| format!("prefill request {}", request.id))?;
                 if packed_chunk_count == 1 {
-                    "layer_major_128"
+                    "layer_major"
                 } else {
-                    "layer_major_128_chunks"
+                    "layer_major_chunks"
                 }
             } else {
                 for (index, &token) in request.prompt_token_ids.iter().enumerate() {
@@ -3408,13 +3449,14 @@ fn run_deepseek_v4_requests_jsonl(
         }
         eprintln!(
             concat!(
-                "deepseek_v4 stats: request={} line={} prompt_kind=raw prefill_mode={} prompt_tokens={} ",
+                "deepseek_v4 stats: request={} line={} prompt_kind=raw prefill_mode={} prefill_chunk_cap={} prompt_tokens={} ",
                 "generated_tokens={} transitions={} stop_reason={} session_ms={:.1} prefill_ms={:.1} ",
                 "generation_ms={:.1} decode_tps={:.2}"
             ),
             output.id,
             request.line,
             prefill_mode,
+            prefill_chunk_tokens,
             output.prompt_tokens,
             output.generated_tokens,
             generation.transitions,
@@ -7363,19 +7405,31 @@ mod tests {
 
     #[test]
     fn deepseek_v4_prefill_chunks_every_retained_prompt_interval() {
-        assert_eq!(deepseek_v4_packed_chunk_count(0), 0);
-        assert_eq!(deepseek_v4_packed_chunk_count(1), 0);
-        assert_eq!(deepseek_v4_packed_chunk_count(2), 1);
+        assert_eq!(parse_deepseek_v4_prefill_chunk_tokens(None).unwrap(), 512);
         assert_eq!(
-            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS),
+            parse_deepseek_v4_prefill_chunk_tokens(Some("128")).unwrap(),
+            128
+        );
+        assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("0")).is_err());
+        assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("513")).is_err());
+        assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("nope")).is_err());
+        assert_eq!(deepseek_v4_packed_chunk_count(0, 512), 0);
+        assert_eq!(deepseek_v4_packed_chunk_count(1, 512), 0);
+        assert_eq!(deepseek_v4_packed_chunk_count(2, 512), 1);
+        assert_eq!(
+            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS, 512),
             1
         );
         assert_eq!(
-            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1),
+            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1, 512),
             2
         );
         assert_eq!(
-            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY),
+            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 512),
+            2_048
+        );
+        assert_eq!(
+            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 128),
             8_192
         );
     }

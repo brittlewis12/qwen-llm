@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 512-Token Packed Prefill Default GO
+
+Status: ordinary packed prefill now uses chunks of up to 512 tokens.
+`QWEN_DSV4_PREFILL_CHUNK_TOKENS=128` retains a same-binary rollback.
+
+- Raw staging retains only the final 128 rows in the physical ring while the
+  complete current chunk remains linearly addressable. A production-width
+  attention differential covers preserved-prefix reads across all four local
+  windows in a 512-token chunk.
+- Exact compressor differentials now cross 128 CSA publications and four HCA
+  publications in one call. Complete frontier state, F16 publications, and the
+  diagnostics FP4 sidecar match the ordered transition bit for bit.
+- Production-width N=512 attention checks cross into sparse CSA on the final
+  query and tiled HCA after 512 compressed rows, matching independent CPU
+  attention results at the named boundary rows.
+- Grouped expert descriptors and BM16 remain explicitly qualified through
+  N=128. Automatic execution uses the ordinary expert schedule above that
+  boundary; an explicit grouped force request fails before session mutation.
+- Shallow-session logical scratch grows from about 186 MB to 570 MB. Grouped
+  scratch remains sized for its qualified N=128 scope. The measured 2,385-token
+  request requires 105.31 GB including the reserve and is admitted on the
+  128 GB M4 Max.
+- Same-binary AB/BA runs on the 2,385-token current-asset prompt record N=128
+  at 68.729/65.132 seconds and N=512 at 52.354/52.210 seconds. Mean prefill wall
+  falls 21.9%, while throughput rises from 35.6 to 45.6 token/s. Every arm has
+  the same complete F32 prompt-logit digest `48ff8cac...20b301`, and the first
+  64 greedy token IDs match the retained N=128 battery exactly.
+
+Decision: keep 512 as the default. The larger work unit is correct and improves
+the product endpoint even while using the conservative expert path. Continue
+to 2,048, treating buffer-backed grouped descriptors and Q8 mat-mat as
+independent composing optimizations rather than blockers.
+
 ## 2026-08-06 - DeepSeek V4 Batched Compressor Default GO
 
 Status: exact packed compressor batching is default-on.

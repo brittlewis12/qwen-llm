@@ -14223,6 +14223,7 @@ mod tests {
     #[test]
     #[ignore = "requires the current 97.05 GiB DS4 asset"]
     fn current_asset_packed_gpu_route_kill_packet() {
+        const CHUNK_TOKENS: usize = 128;
         const PREFIX_TOKENS: usize = 140;
         const CONTINUATION_TOKEN: u32 = 35;
         const FORWARD_LIMIT: usize = PREFIX_TOKENS + 1;
@@ -14301,7 +14302,7 @@ mod tests {
             session
                 .execute_packed_tokens_with_route_policy_for_test(
                     ctx,
-                    &prefix[..DEEPSEEK_V4_PREFILL_MAX_TOKENS],
+                    &prefix[..CHUNK_TOKENS],
                     false,
                     gpu_route,
                     preserve_cpu_weights,
@@ -14310,7 +14311,7 @@ mod tests {
             session
                 .execute_packed_tokens_with_route_policy_for_test(
                     ctx,
-                    &prefix[DEEPSEEK_V4_PREFILL_MAX_TOKENS..],
+                    &prefix[CHUNK_TOKENS..],
                     true,
                     gpu_route,
                     preserve_cpu_weights,
@@ -16865,20 +16866,20 @@ mod tests {
             0
         };
         let packed_route_logical = if cfg!(feature = "dsv4-diagnostics") {
-            134_176
+            530_464
         } else {
             0
         };
         assert_eq!(
             requests.len(),
-            543 + diagnostics_allocations + packed_route_allocations
+            546 + diagnostics_allocations + packed_route_allocations
         );
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            185_421_028 + diagnostics_logical + packed_route_logical
+            570_079_460 + diagnostics_logical + packed_route_logical
         );
         let names = requests
             .iter()
@@ -16941,7 +16942,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            7_638_501_772 + promoted_diagnostics_logical + packed_route_logical
+            8_826_107_276 + promoted_diagnostics_logical + packed_route_logical
         );
         assert_eq!(
             promoted
@@ -19165,8 +19166,10 @@ mod tests {
             let score = offset_f32(&ctx, &score_values, vec![width as u64, total_rows as u64]);
             let ape = offset_f32(&ctx, &ape_values, vec![width as u64, ratio as u64]);
             let norm = offset_f32(&ctx, &norm_values, vec![head_dim as u64]);
-            let pooled = MetalTensor::zeros_f32(&ctx, vec![512, 32]).unwrap();
-            let normalized = MetalTensor::zeros_f32(&ctx, vec![512, 32]).unwrap();
+            let publication_rows = ((start_position % ratio + row_count) / ratio).max(1);
+            let pooled = MetalTensor::zeros_f32(&ctx, vec![512, publication_rows as u64]).unwrap();
+            let normalized =
+                MetalTensor::zeros_f32(&ctx, vec![512, publication_rows as u64]).unwrap();
             let rope = DeepSeekV4RopeParameters {
                 rotary_dim: 64,
                 theta: 10_000.0,
@@ -19270,6 +19273,13 @@ mod tests {
         };
 
         run(4, 512, DeepSeekV4CompressorPublication::Attention, 0, 128);
+        run(
+            4,
+            512,
+            DeepSeekV4CompressorPublication::Attention,
+            0,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        );
         run(4, 512, DeepSeekV4CompressorPublication::Attention, 1, 6);
         run(
             4,
@@ -19279,11 +19289,25 @@ mod tests {
             125,
         );
         run(
+            4,
+            128,
+            DeepSeekV4CompressorPublication::IndexerHadamard,
+            3,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS - 3,
+        );
+        run(
             128,
             512,
             DeepSeekV4CompressorPublication::Attention,
             127,
             128,
+        );
+        run(
+            128,
+            512,
+            DeepSeekV4CompressorPublication::Attention,
+            127,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         );
         run(128, 512, DeepSeekV4CompressorPublication::Attention, 1, 12);
     }

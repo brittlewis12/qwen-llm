@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::OnceLock;
 
-pub const DEEPSEEK_V4_PREFILL_MAX_TOKENS: usize = 128;
+pub const DEEPSEEK_V4_PREFILL_MAX_TOKENS: usize = 512;
 
 const QUERY_WIDTH: usize = 64 * 512;
 const GROUP_WIDTH: usize = QUERY_WIDTH / 8;
@@ -599,7 +599,11 @@ impl DeepSeekV4PrefillScratch {
                 final_output: MetalTensor::zeros_f32(ctx, vec![h, n])?,
                 grouped_inner: MetalTensor::zeros_f32(
                     ctx,
-                    vec![MOE_FFN_SIZE as u64, MOE_TOP_K as u64, n],
+                    vec![
+                        MOE_FFN_SIZE as u64,
+                        MOE_TOP_K as u64,
+                        PACKED_GROUPED_EXPERT_MAX_TOKENS as u64,
+                    ],
                 )?,
                 #[cfg(feature = "dsv4-diagnostics")]
                 gpu_route: PrefillGpuRouteScratch {
@@ -787,7 +791,11 @@ pub(super) fn append_session_allocation_requests(
     push(
         "moe.grouped_inner",
         checked_mul(
-            checked_mul(n, MOE_TOP_K, "packed grouped slots")?,
+            checked_mul(
+                PACKED_GROUPED_EXPERT_MAX_TOKENS,
+                MOE_TOP_K,
+                "packed grouped slots",
+            )?,
             MOE_FFN_SIZE,
             "packed grouped inner",
         )?,
@@ -3680,6 +3688,7 @@ fn packed_grouped_iq3_fused_candidate_supported(ctx: &MetalContext) -> bool {
 }
 
 const PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE: &str = "Apple M4 Max";
+const PACKED_GROUPED_EXPERT_MAX_TOKENS: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PackedGroupedExpertMode {
@@ -3703,6 +3712,21 @@ fn packed_grouped_expert_mode() -> PackedGroupedExpertMode {
         let value = std::env::var("QWEN_DSV4_PACKED_GROUPED_EXPERTS").ok();
         parse_packed_grouped_expert_mode(value.as_deref())
     })
+}
+
+fn packed_grouped_expert_scope(
+    mode: PackedGroupedExpertMode,
+    n_tokens: usize,
+) -> Result<bool, DeepSeekV4MetalError> {
+    if n_tokens <= PACKED_GROUPED_EXPERT_MAX_TOKENS {
+        return Ok(true);
+    }
+    if mode == PackedGroupedExpertMode::ForceOn {
+        return invalid(format!(
+            "packed grouped experts are qualified through {PACKED_GROUPED_EXPERT_MAX_TOKENS} tokens, got {n_tokens}"
+        ));
+    }
+    Ok(false)
 }
 
 fn packed_grouped_expert_policy(
@@ -4846,7 +4870,7 @@ impl PackedExpertPolicy {
 
     fn uses_iq2_mma16(self, n_tokens: usize) -> bool {
         matches!(self, Self::GroupedIq2XsIq3XxsMma16FullChunk)
-            && n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS
+            && n_tokens == PACKED_GROUPED_EXPERT_MAX_TOKENS
     }
 
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -6569,7 +6593,12 @@ impl DeepSeekV4Session {
         emit_logits: bool,
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
-        let expert_policy = packed_grouped_expert_policy(ctx)?;
+        let grouped_mode = packed_grouped_expert_mode();
+        let expert_policy = if packed_grouped_expert_scope(grouped_mode, token_ids.len())? {
+            packed_grouped_expert_policy(ctx)?
+        } else {
+            PackedExpertPolicy::Current
+        };
         self.execute_packed_tokens_with_progress_policy(
             ctx,
             token_ids,
@@ -6610,6 +6639,11 @@ impl DeepSeekV4Session {
             ));
         }
         let n_tokens = checked_token_count(token_ids.len())?;
+        if expert_policy.uses_iq2_target() && token_ids.len() > PACKED_GROUPED_EXPERT_MAX_TOKENS {
+            return invalid(format!(
+                "packed grouped expert policy exceeds its {PACKED_GROUPED_EXPERT_MAX_TOKENS}-token qualification"
+            ));
+        }
         let start_position = self.phase.ready_position()?;
         let end_position = start_position
             .checked_add(n_tokens)
@@ -8310,6 +8344,33 @@ mod tests {
 
     #[test]
     fn packed_grouped_expert_mode_has_an_isolated_fail_closed_rollback() {
+        assert!(DEEPSEEK_V4_PREFILL_MAX_TOKENS > PACKED_GROUPED_EXPERT_MAX_TOKENS);
+        let mma16 = PackedExpertPolicy::GroupedIq2XsIq3XxsMma16FullChunk;
+        assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_EXPERT_MAX_TOKENS));
+        assert!(!mma16.uses_iq2_mma16(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
+        assert!(
+            packed_grouped_expert_scope(
+                PackedGroupedExpertMode::Auto,
+                PACKED_GROUPED_EXPERT_MAX_TOKENS,
+            )
+            .unwrap()
+        );
+        assert!(
+            !packed_grouped_expert_scope(
+                PackedGroupedExpertMode::Auto,
+                DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            )
+            .unwrap()
+        );
+        assert!(
+            packed_grouped_expert_scope(
+                PackedGroupedExpertMode::ForceOn,
+                DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("qualified through 128 tokens")
+        );
         assert_eq!(
             parse_packed_grouped_expert_mode(None),
             PackedGroupedExpertMode::Auto
@@ -9258,7 +9319,7 @@ mod tests {
             ctx.device.name().to_string(),
             PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
         );
-        const N: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+        const N: usize = PACKED_GROUPED_EXPERT_MAX_TOKENS;
         const SAMPLES: usize = 24;
 
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -11355,7 +11416,7 @@ mod tests {
         const F: usize = 2_048;
         const E: usize = MOE_EXPERT_COUNT;
         const K: usize = MOE_TOP_K;
-        const N: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+        const N: usize = PACKED_GROUPED_EXPERT_MAX_TOKENS;
         const ROUTES: usize = N * K;
         const CLAMP: f32 = 7.0;
         const SAMPLES: usize = 24;
@@ -13417,7 +13478,13 @@ mod tests {
             }
         }
 
-        for (start_position, n_tokens) in [(0_u32, 1_usize), (123, 12), (257, 127), (511, 128)] {
+        for (start_position, n_tokens) in [
+            (0_u32, 1_usize),
+            (123, 12),
+            (257, 127),
+            (511, 128),
+            (511, DEEPSEEK_V4_PREFILL_MAX_TOKENS),
+        ] {
             let source_values = (0..n_tokens * HEAD_DIM)
                 .map(|index| ((index * 29 + index / 7 + 3) % 197) as f32 * 0.0031 - 0.29)
                 .collect::<Vec<_>>();
@@ -13923,9 +13990,9 @@ mod tests {
         };
         let config = deepseek_v4_session_attention_config();
         let dims = config.checked().unwrap();
-        let start_position = 2_048_u32;
-        let n_tokens = 5;
-        let query_offset = 3;
+        let start_position = 1_540_u32;
+        let n_tokens = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+        let query_offset = n_tokens - 1;
         let query_count = n_tokens - query_offset;
         let raw_value = |position: usize, dimension: usize| {
             let tag = (position * 31 + dimension * 17 + position / 11) % 181;
@@ -14017,9 +14084,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let selected_ids = (1..=DEEPSEEK_V4_CSA_TOP_K as i32)
-            .chain(0..DEEPSEEK_V4_CSA_TOP_K as i32)
-            .collect::<Vec<_>>();
+        let selected_ids = (1..=DEEPSEEK_V4_CSA_TOP_K as i32).collect::<Vec<_>>();
         let selected_ids = MetalTensor::from_bytes(
             &ctx,
             bytemuck::cast_slice(&selected_ids),
@@ -14156,7 +14221,7 @@ mod tests {
         );
 
         let actual = host_read_f32(&output, "packed sparse attention").unwrap();
-        for token in 0..n_tokens {
+        for token in [0, 127, 128, 255, 384, query_offset] {
             let position = start_position as usize + token;
             let raw_start = position + 1 - DEEPSEEK_V4_LOCAL_WINDOW;
             let raw_rows = (raw_start..=position)
@@ -14414,6 +14479,20 @@ mod tests {
             2_044,
             4,
             Some(&[0, 3]),
+        );
+        run_case(
+            &ctx,
+            AttentionKind::SlidingWindow,
+            129,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            Some(&[0, 127, 128, 255, 384, 511]),
+        );
+        run_case(
+            &ctx,
+            AttentionKind::HeavilyCompressed,
+            65_152,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            Some(&[0, 383, 384, 510, 511]),
         );
     }
 

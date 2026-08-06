@@ -563,13 +563,14 @@ legal intra-pass primitive or relevant device/Metal capability drift.
 
 Force-ranked queue:
 
-1. **Larger packed chunks through compressor batching.** The N=128 BM16 default
-   removes 11.68% of an 872-token product prefill, but the engine still reaches
-   only about 36.5 token/s. Linear raw-chunk staging plus batched query/KV/output
-   RoPE and raw publication are now default. Batch the remaining compressor
-   frontier loop, then raise the effective chunk through 512 toward 2,048. This
-   changes expert occupancy and amortization while local attention remains
-   window-bounded.
+1. **Raise packed chunks to 512, then 2,048.** The N=128 BM16 default removes
+   11.68% of an 872-token product prefill, but the engine still reaches only
+   about 36.5 token/s. Linear raw staging and both raw and compressed
+   publication are now batched and default-on, so no chronological dispatch
+   loop or ring overwrite blocks a larger work unit. Raise the cap to 512,
+   decouple BM16's N=128 qualification, and exercise every multi-boundary path
+   before moving toward 2,048. This changes expert occupancy and dense
+   projection amortization while local attention remains window-bounded.
 2. **Q8 packed dense mat-mat.** Replace token-axis Q8 GEMV for q_b and output
    A/B with an existing matrix-shaped lineage. The isolated output result already
    established a roughly 75% stage ceiling; use an exact or higher-precision

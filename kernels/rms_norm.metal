@@ -25,6 +25,12 @@ struct rms_norm_args {
     float eps;
 };
 
+struct rms_norm_rows_args {
+    uint  n_dim;
+    uint  row_count;
+    float eps;
+};
+
 kernel void kernel_rms_norm_mul_f32(
         constant rms_norm_args & args     [[buffer(0)]],
         device const float     * x        [[buffer(1)]],
@@ -58,6 +64,41 @@ kernel void kernel_rms_norm_mul_f32(
     // ---- pass 2: scale + weight ----
     for (uint i = tpitg; i < args.n_dim; i += ntg) {
         y[i] = (x[i] * scale) * weight[i];
+    }
+}
+
+kernel void kernel_rms_norm_mul_rows_f32(
+        constant rms_norm_rows_args & args [[buffer(0)]],
+        device const float * x             [[buffer(1)]],
+        device const float * weight        [[buffer(2)]],
+        device       float * y             [[buffer(3)]],
+        threadgroup float * shmem           [[threadgroup(0)]],
+        uint row [[threadgroup_position_in_grid]],
+        uint tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    if (row >= args.row_count) return;
+    const ulong base = ulong(row) * args.n_dim;
+    float sumsq = 0.0f;
+    for (uint i = tpitg; i < args.n_dim; i += ntg) {
+        const float v = x[base + i];
+        sumsq += v * v;
+    }
+    sumsq = simd_sum(sumsq);
+
+    if (tiisg == 0) {
+        shmem[sgitg] = sumsq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    sumsq = (tiisg < (ntg + 31) / 32) ? shmem[tiisg] : 0.0f;
+    sumsq = simd_sum(sumsq);
+
+    const float mean = sumsq / float(args.n_dim);
+    const float scale = rsqrt(mean + args.eps);
+    for (uint i = tpitg; i < args.n_dim; i += ntg) {
+        y[base + i] = (x[base + i] * scale) * weight[i];
     }
 }
 

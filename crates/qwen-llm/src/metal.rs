@@ -2808,6 +2808,87 @@ pub fn encode_rms_norm_mul_f32(
     Ok(())
 }
 
+/// RMSNorm-with-weight over compact rows. Each row uses the same reduction
+/// and arithmetic lineage as [`encode_rms_norm_mul_f32`].
+pub fn encode_rms_norm_mul_rows_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    weight: &MetalTensor,
+    y: &MetalTensor,
+    row_count: usize,
+    n_dim: usize,
+    eps: f32,
+) -> Result<(), MetalError> {
+    let want = row_count
+        .checked_mul(n_dim)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "rms_norm_rows",
+            detail: "row element count overflow".to_string(),
+        })? as u64;
+    if row_count == 0 || n_dim == 0 || x.n_elements() != want || y.n_elements() != want {
+        return Err(MetalError::BadShape {
+            kernel: "rms_norm_rows",
+            detail: format!(
+                "x/y expected {row_count} rows of {n_dim} elements, got {}/{}",
+                x.n_elements(),
+                y.n_elements()
+            ),
+        });
+    }
+    if weight.n_elements() as usize != n_dim {
+        return Err(MetalError::BadShape {
+            kernel: "rms_norm_rows",
+            detail: format!("weight expected {n_dim} elements"),
+        });
+    }
+    let row_count = u32::try_from(row_count).map_err(|_| MetalError::BadShape {
+        kernel: "rms_norm_rows",
+        detail: "row count exceeds u32".to_string(),
+    })?;
+    let n_dim = u32::try_from(n_dim).map_err(|_| MetalError::BadShape {
+        kernel: "rms_norm_rows",
+        detail: "row width exceeds u32".to_string(),
+    })?;
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_dim: u32,
+        row_count: u32,
+        eps: f32,
+    }
+    let pso = ctx.pipeline("kernel_rms_norm_mul_rows_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_dim,
+            row_count,
+            eps,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, weight);
+    enc.set_tensor(3, y);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    let n_simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (n_simdgroups * std::mem::size_of::<f32>()).max(32));
+    enc.dispatch(
+        MTLSize {
+            width: row_count as usize,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// In-place residual add followed by RMSNorm-with-weight:
 /// `x[i] += residual[i]`; `y[i] = (x[i] / sqrt(mean(x²) + eps)) * weight[i]`.
 pub fn encode_residual_rms_norm_mul_f32(

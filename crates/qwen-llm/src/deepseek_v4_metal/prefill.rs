@@ -416,6 +416,8 @@ struct PrefillCompressorScratch {
     indexer_score: MetalTensor,
     hca_kv: MetalTensor,
     hca_score: MetalTensor,
+    pooled_rows: MetalTensor,
+    normalized_rows: MetalTensor,
 }
 
 struct PrefillMoeScratch {
@@ -469,6 +471,7 @@ impl DeepSeekV4PrefillScratch {
             ));
         }
         let n = DEEPSEEK_V4_PREFILL_MAX_TOKENS as u64;
+        let compressed_rows = DEEPSEEK_V4_PREFILL_MAX_TOKENS.div_ceil(4) as u64;
         let h = DEEPSEEK_V4_HIDDEN_SIZE as u64;
         let residual = residual_len(DEEPSEEK_V4_HIDDEN_SIZE)? as u64;
         let ones = vec![1.0f32; residual as usize];
@@ -562,6 +565,8 @@ impl DeepSeekV4PrefillScratch {
                 )?,
                 hca_kv: MetalTensor::zeros_f32(ctx, vec![512, n])?,
                 hca_score: MetalTensor::zeros_f32(ctx, vec![512, n])?,
+                pooled_rows: MetalTensor::zeros_f32(ctx, vec![512, compressed_rows])?,
+                normalized_rows: MetalTensor::zeros_f32(ctx, vec![512, compressed_rows])?,
             },
             moe: PrefillMoeScratch {
                 normalized_input: MetalTensor::zeros_f32(ctx, vec![h, n])?,
@@ -753,6 +758,10 @@ pub(super) fn append_session_allocation_requests(
     }
     for name in ["compressor.hca_kv", "compressor.hca_score"] {
         push(name, checked_mul(n, 512, name)?, f32_bytes)?;
+    }
+    let compressed_rows = n.div_ceil(4);
+    for name in ["compressor.pooled_rows", "compressor.normalized_rows"] {
+        push(name, checked_mul(compressed_rows, 512, name)?, f32_bytes)?;
     }
 
     for (name, width, element_bytes) in [
@@ -2432,6 +2441,95 @@ impl PrefillCompressorScratch {
 
 impl DeepSeekV4CompressorFrontiers {
     #[allow(clippy::too_many_arguments)]
+    fn encode_layer_projected_chunk(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        residency: &DeepSeekV4MetalResidency,
+        layer: usize,
+        start_position: u32,
+        row_count: usize,
+        projected: &PackedCompressorViews,
+        scratch: &PrefillCompressorScratch,
+        rope: DeepSeekV4RopeParameters,
+        rms_eps: f32,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        let tensor = |suffix: &str| residency.require_tensor(&format!("blk.{layer}.{suffix}"));
+        let frontier = self.layers.get(layer).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "packed compressor layer {layer} is out of range"
+            ))
+        })?;
+        match (frontier, projected) {
+            (
+                DeepSeekV4LayerCompressorFrontiers::SlidingWindow,
+                PackedCompressorViews::SlidingWindow,
+            ) => Ok(()),
+            (
+                DeepSeekV4LayerCompressorFrontiers::CompressedSparse { attention, indexer },
+                PackedCompressorViews::CompressedSparse {
+                    attention_kv,
+                    attention_score,
+                    indexer_kv,
+                    indexer_score,
+                },
+            ) => {
+                attention.encode_projected_chunk(
+                    ctx,
+                    enc,
+                    attention_kv,
+                    attention_score,
+                    tensor("attn_compressor_ape.weight")?,
+                    tensor("attn_compressor_norm.weight")?,
+                    &scratch.pooled_rows,
+                    &scratch.normalized_rows,
+                    start_position,
+                    row_count,
+                    rope,
+                    rms_eps,
+                )?;
+                indexer.encode_projected_chunk(
+                    ctx,
+                    enc,
+                    indexer_kv,
+                    indexer_score,
+                    tensor("indexer_compressor_ape.weight")?,
+                    tensor("indexer_compressor_norm.weight")?,
+                    &scratch.pooled_rows,
+                    &scratch.normalized_rows,
+                    start_position,
+                    row_count,
+                    rope,
+                    rms_eps,
+                )
+            }
+            (
+                DeepSeekV4LayerCompressorFrontiers::HeavilyCompressed { attention },
+                PackedCompressorViews::HeavilyCompressed {
+                    attention_kv,
+                    attention_score,
+                },
+            ) => attention.encode_projected_chunk(
+                ctx,
+                enc,
+                attention_kv,
+                attention_score,
+                tensor("attn_compressor_ape.weight")?,
+                tensor("attn_compressor_norm.weight")?,
+                &scratch.pooled_rows,
+                &scratch.normalized_rows,
+                start_position,
+                row_count,
+                rope,
+                rms_eps,
+            ),
+            _ => invalid(format!(
+                "packed compressor projection kind differs from layer {layer}"
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn encode_layer_projected_row(
         &self,
         ctx: &MetalContext,
@@ -3546,6 +3644,11 @@ crate::env_flag!(
 crate::env_flag!(
     default_on packed_batched_rope_enabled,
     "QWEN_DSV4_BATCHED_ROPE"
+);
+
+crate::env_flag!(
+    default_on packed_batched_compressor_enabled,
+    "QWEN_DSV4_BATCHED_COMPRESSOR"
 );
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -6642,12 +6745,22 @@ impl DeepSeekV4Session {
         }
         let trace_layers = std::env::var_os("QWEN_DSV4_PREFILL_TRACE").is_some();
         let batched_rope = packed_batched_rope_enabled();
+        let batched_compressor = packed_batched_compressor_enabled();
         if !batched_rope {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "deepseek_v4: packed batched RoPE disabled; rollback=QWEN_DSV4_BATCHED_ROPE=0"
+                );
+            }
+        }
+        if !batched_compressor {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: packed batched compressor disabled; rollback=QWEN_DSV4_BATCHED_COMPRESSOR=0"
                 );
             }
         }
@@ -6786,6 +6899,7 @@ impl DeepSeekV4Session {
                         &query_heads,
                         start_position,
                         n_tokens,
+                        1,
                         rope,
                         false,
                     )?;
@@ -6795,6 +6909,7 @@ impl DeepSeekV4Session {
                         &attention.kv,
                         start_position,
                         n_tokens,
+                        1,
                         rope,
                         false,
                     )?;
@@ -6850,25 +6965,40 @@ impl DeepSeekV4Session {
                     attention_config.head_dim,
                 )?;
 
-                for row in 0..n_tokens {
-                    let position = start_position
-                        .checked_add(u32::try_from(row).map_err(|_| {
-                            DeepSeekV4MetalError::Invalid("packed row exceeds u32".into())
-                        })?)
-                        .ok_or_else(|| {
-                            DeepSeekV4MetalError::Invalid("packed position overflow".into())
-                        })?;
-                    self.compressor_frontiers.encode_layer_projected_row(
+                if batched_compressor {
+                    self.compressor_frontiers.encode_layer_projected_chunk(
                         ctx,
                         &encoder,
                         &self.residency,
                         layer,
-                        row,
-                        position,
+                        start_position,
+                        n_tokens,
                         &compressor,
+                        &self.prefill.compressor,
                         rope,
                         rms_eps,
                     )?;
+                } else {
+                    for row in 0..n_tokens {
+                        let position = start_position
+                            .checked_add(u32::try_from(row).map_err(|_| {
+                                DeepSeekV4MetalError::Invalid("packed row exceeds u32".into())
+                            })?)
+                            .ok_or_else(|| {
+                                DeepSeekV4MetalError::Invalid("packed position overflow".into())
+                            })?;
+                        self.compressor_frontiers.encode_layer_projected_row(
+                            ctx,
+                            &encoder,
+                            &self.residency,
+                            layer,
+                            row,
+                            position,
+                            &compressor,
+                            rope,
+                            rms_eps,
+                        )?;
+                    }
                 }
 
                 #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -7044,6 +7174,7 @@ impl DeepSeekV4Session {
                         &attention_heads,
                         start_position,
                         n_tokens,
+                        1,
                         rope,
                         true,
                     )?;

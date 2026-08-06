@@ -724,6 +724,7 @@ struct ds4_rope_tail_batch_args {
     uint rotary_dim;
     uint start_position;
     uint row_count;
+    uint position_stride;
     uint inverse;
     uint yarn;
     float theta;
@@ -792,6 +793,15 @@ struct ds4_copy_u16_args {
 struct ds4_compressor_frontier_args {
     uint width;
     uint row_offset;
+};
+
+struct ds4_compressor_chunk_args {
+    uint ratio;
+    uint head_dim;
+    uint width;
+    uint row_count;
+    uint start_position;
+    uint output_rows;
 };
 
 struct ds4_compressor_pool_args {
@@ -1070,7 +1080,7 @@ kernel void kernel_deepseek_v4_rope_tail_adjacent_batch_in_place(
     const uint first_index = tail + relative;
     const uint second_index = first_index + 1u;
 
-    const float extrapolated = float(args.start_position + row)
+    const float extrapolated = float(args.start_position + row * args.position_stride)
         * pow(args.theta, -float(relative) / float(args.rotary_dim));
     float angle = extrapolated;
     if (args.yarn != 0u) {
@@ -1616,6 +1626,99 @@ kernel void kernel_deepseek_v4_compressor_frontier_write(
     const uint destination = args.row_offset + index;
     kv_state[destination] = projected_kv[index];
     score_state[destination] = projected_score[index] + ape[index];
+}
+
+kernel void kernel_deepseek_v4_compressor_frontier_chunk(
+        constant ds4_compressor_chunk_args & args [[buffer(0)]],
+        device const float * projected_kv [[buffer(1)]],
+        device const float * projected_score [[buffer(2)]],
+        device const float * ape [[buffer(3)]],
+        device float * kv_state [[buffer(4)]],
+        device float * score_state [[buffer(5)]],
+        device float * pooled_rows [[buffer(6)]],
+        uint dimension [[thread_position_in_grid]]) {
+    if (dimension >= args.head_dim) return;
+    uint emitted = 0u;
+    for (uint token = 0u; token < args.row_count; ++token) {
+        const uint position = args.start_position + token;
+        const uint phase = position % args.ratio;
+        const uint source_base = token * args.width;
+        const uint ape_base = phase * args.width;
+        if (args.ratio == 4u) {
+            const uint state_base = (4u + phase) * args.width;
+            for (uint lane = 0u; lane < 2u; ++lane) {
+                const uint offset = lane * args.head_dim + dimension;
+                kv_state[state_base + offset] = projected_kv[source_base + offset];
+                score_state[state_base + offset] =
+                    projected_score[source_base + offset] + ape[ape_base + offset];
+            }
+        } else {
+            const uint state = phase * args.width + dimension;
+            kv_state[state] = projected_kv[source_base + dimension];
+            score_state[state] =
+                projected_score[source_base + dimension] + ape[ape_base + dimension];
+        }
+
+        if ((position + 1u) % args.ratio != 0u) continue;
+        float maximum = -INFINITY;
+        if (args.ratio == 4u) {
+            for (uint row = 0u; row < 4u; ++row) {
+                maximum = max(maximum, score_state[row * args.width + dimension]);
+                maximum = max(
+                    maximum,
+                    score_state[(4u + row) * args.width + args.head_dim + dimension]);
+            }
+        } else {
+            for (uint row = 0u; row < args.ratio; ++row) {
+                maximum = max(maximum, score_state[row * args.width + dimension]);
+            }
+        }
+
+        float weighted = 0.0f;
+        float denominator = 0.0f;
+        if (args.ratio == 4u) {
+            for (uint row = 0u; row < 4u; ++row) {
+                const uint previous = row * args.width + dimension;
+                const uint current =
+                    (4u + row) * args.width + args.head_dim + dimension;
+                const float previous_mass = isfinite(score_state[previous])
+                    ? exp(score_state[previous] - maximum)
+                    : 0.0f;
+                const float current_mass = isfinite(score_state[current])
+                    ? exp(score_state[current] - maximum)
+                    : 0.0f;
+                denominator += previous_mass + current_mass;
+                weighted +=
+                    kv_state[previous] * previous_mass + kv_state[current] * current_mass;
+            }
+        } else {
+            for (uint row = 0u; row < args.ratio; ++row) {
+                const uint source = row * args.width + dimension;
+                const float mass = isfinite(score_state[source])
+                    ? exp(score_state[source] - maximum)
+                    : 0.0f;
+                denominator += mass;
+                weighted += kv_state[source] * mass;
+            }
+        }
+        if (emitted < args.output_rows) {
+            pooled_rows[emitted * args.head_dim + dimension] = weighted / denominator;
+        }
+        ++emitted;
+
+        if (args.ratio == 4u) {
+            const uint group_elements = 4u * args.width;
+            for (uint row = 0u; row < 4u; ++row) {
+                const uint previous = row * args.width;
+                const uint current = group_elements + previous;
+                for (uint lane = 0u; lane < 2u; ++lane) {
+                    const uint offset = lane * args.head_dim + dimension;
+                    kv_state[previous + offset] = kv_state[current + offset];
+                    score_state[previous + offset] = score_state[current + offset];
+                }
+            }
+        }
+    }
 }
 
 kernel void kernel_deepseek_v4_compressor_pool(

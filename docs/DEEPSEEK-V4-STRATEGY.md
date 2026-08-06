@@ -2310,9 +2310,18 @@ noise without reducing technical risk. Revisit after S5.
    explicit so singleton decode keeps its original modulo addressing. The
    140-token attributed pair saves 130.5 ms of pre-expert wall while a 64-token
    greedy continuation remains unchanged; far-YaRN batched-versus-row RoPE is
-   bounded to `6.41e-7` max absolute and `1.47e-7` relative RMS. The remaining
-   per-row prerequisite is compressor frontier publication; batch it before
-   raising the cap through 512 toward 2,048.
+   bounded to `6.41e-7` max absolute and `1.47e-7` relative RMS. The final
+   chronological loop is now removed as well. One dimension-owned kernel
+   preserves ordered KV/score writes, APE, pooling, and ratio-4 rolls across
+   the chunk; exact row-batched RMSNorm, strided RoPE, indexer Hadamard/FP4,
+   and F16 publication complete each frontier in constant dispatch count.
+   Production-width differentials preserve every state and publication bit. A
+   full N=128 chunk removes 15,139 compressor dispatches, and two order-opposed
+   current-asset observations average 4,085.1 to 3,989.0 ms with complete
+   logits and a 64-token greedy continuation unchanged. Keep
+   `QWEN_DSV4_BATCHED_COMPRESSOR=0` as rollback. No chronological publication
+   work now blocks a 512-token chunk; the next step is the cap and geometry
+   crossing itself.
 7. Keep the packed before-attention and exact multi-row scorer closures
    explicit. The corrected four-encoder packet remains `HOLD`: its material
    pre-attention interval contains one unowned encoder transition, and Apple M4

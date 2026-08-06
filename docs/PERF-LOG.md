@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Batched Compressor Default GO
+
+Status: exact packed compressor batching is default-on.
+`QWEN_DSV4_BATCHED_COMPRESSOR=0` retains the ordered-row rollback.
+
+- One dimension-owned transition kernel walks the chunk chronologically,
+  writes KV/score plus APE, performs ratio-4 rolls, and emits every pooled
+  boundary row. Exact row-batched RMSNorm, strided compressor RoPE, Hadamard,
+  FP4 diagnostics, and F16 publication then each run once per frontier.
+- The durable differential covers production-width CSA attention, CSA indexer,
+  and HCA with partial starts, first publication, multiple ratio-4 boundaries,
+  a ratio-128 boundary, complete frontier state, and full publication buffers.
+  Every compared F32 and F16 bit matches the ordered path.
+- A full N=128 release chunk removes 15,139 compressor dispatches across 21
+  CSA and 20 HCA layers. The 140-token prompt removes another 1,228 dispatches
+  in its 12-token tail.
+- Two clean order-opposed product observations average 4,085.1 ms for the
+  ordered path and 3,989.0 ms for batching, a 96.1 ms / 2.35% prefill saving.
+  The stage tracer separately records pre-expert GPU at 1,256.5 versus
+  1,225.7 ms, while its perturbed complete walls overlap.
+- Both paths preserve the complete 129,280-value F32 logit digest
+  `77f74c0c...fe0f90`, token 2581, and the full 64-token greedy continuation.
+  Contended samples from a concurrent 2K battery run are excluded rather than
+  interpreted.
+
+Decision: retain the exact batch transition as the default and stop optimizing
+the N=128 chronological loop. Raw and compressed publication can now represent
+a larger chunk without overwrite or dispatch growth; raise the cap to 512 and
+measure the changed dense-projection and expert amortization regime next.
+
 ## 2026-08-06 - DeepSeek V4 Batched Raw Publication Default GO
 
 Status: `GO` for the packed-prefill raw-publication substrate. Packed query/KV

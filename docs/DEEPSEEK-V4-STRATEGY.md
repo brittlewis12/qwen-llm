@@ -2303,7 +2303,16 @@ noise without reducing technical risk. Revisit after S5.
    keep all other layers and tails on the existing path and retain
    `QWEN_DSV4_PACKED_BM16_IQ2=0` as rollback. The next prefill work changes the
    amortization regime through batched publication and larger chunks rather than
-   retuning this N=128 scalar lineage.
+   retuning this N=128 scalar lineage. The raw half of that prerequisite is now
+   default: packed attention reads a linear current-chunk F16 image, persistent
+   rings retain only the final local window, and query/KV/output RoPE plus raw
+   publication execute once per chunk. Ring versus chunk cache ownership is
+   explicit so singleton decode keeps its original modulo addressing. The
+   140-token attributed pair saves 130.5 ms of pre-expert wall while a 64-token
+   greedy continuation remains unchanged; far-YaRN batched-versus-row RoPE is
+   bounded to `6.41e-7` max absolute and `1.47e-7` relative RMS. The remaining
+   per-row prerequisite is compressor frontier publication; batch it before
+   raising the cap through 512 toward 2,048.
 7. Keep the packed before-attention and exact multi-row scorer closures
    explicit. The corrected four-encoder packet remains `HOLD`: its material
    pre-attention interval contains one unowned encoder transition, and Apple M4

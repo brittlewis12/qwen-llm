@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Batched Raw Publication Default GO
+
+Status: `GO` for the packed-prefill raw-publication substrate. Packed query/KV
+RoPE, inverse output RoPE, and F32-to-F16 raw publication now execute once per
+chunk; packed attention consumes a linear current-chunk image while singleton
+decode retains its persistent ring contract. `QWEN_DSV4_BATCHED_ROPE=0`
+restores the prior per-row RoPE lineage without disabling exact batch
+publication.
+
+- Raw chunk publication is bit-exact against ordered ring updates at boundary
+  starts and N=1/12/127/128. Packed dense, HCA, sparse CSA, retained-prefix, and
+  terminal two-query tests preserve absolute visibility and reject future-row
+  leakage.
+- Unscaled batched RoPE remains bit-identical. At the 65,531 YaRN boundary the
+  separately compiled kernel differs from ordered rows by at most `6.41e-7`
+  absolute and `1.47e-7` relative RMS.
+- A first 64-token product continuation exposed that the packed kernel ABI had
+  accidentally replaced singleton ring addressing and failed on the first
+  decode token. Ring versus linear-chunk ownership is now explicit in the host
+  and Metal ABIs; the repaired candidate reproduces all 64 baseline greedy IDs.
+- On the 140-token current-asset probe, an attributed pair moves complete
+  prefill from 4,090.1 to 3,934.6 ms. Across 86 layer/chunk records, pre-expert
+  wall moves from 2,245.0 to 2,114.5 ms, GPU work from 1,298.5 to 1,259.8 ms,
+  and host encode from 25.2 to 9.8 ms. Ordinary warm observations overlap at
+  roughly 4.0-4.1 seconds, so this is a structural/default promotion rather
+  than a large standalone product claim.
+
+Decision: retain the exact linear raw-chunk substrate and default-on batched
+RoPE. The remaining chronological loop is compressor frontier publication;
+batch that next, then raise the packed chunk cap through 512 toward 2,048.
+
 ## 2026-08-06 - DeepSeek V4 BM16 IQ2 Packed-Prefill Default GO
 
 Status: narrow default `GO` on Apple M4 Max for full N=128 packed chunks whose

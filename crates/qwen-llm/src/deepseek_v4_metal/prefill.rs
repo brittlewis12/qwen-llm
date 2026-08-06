@@ -380,6 +380,7 @@ struct PrefillHyperScratch {
 
 struct PrefillAttentionScratch {
     raw_cache_before_chunk: MetalTensor,
+    raw_chunk: MetalTensor,
     normalized_input: MetalTensor,
     q_lora_raw: MetalTensor,
     q_lora: MetalTensor,
@@ -508,6 +509,7 @@ impl DeepSeekV4PrefillScratch {
                     ctx,
                     vec![512, DEEPSEEK_V4_LOCAL_WINDOW as u64],
                 )?,
+                raw_chunk: MetalTensor::zeros_f16(ctx, vec![512, n])?,
                 normalized_input: MetalTensor::zeros_f32(ctx, vec![h, n])?,
                 q_lora_raw: MetalTensor::zeros_f32(ctx, vec![1_024, n])?,
                 q_lora: MetalTensor::zeros_f32(ctx, vec![1_024, n])?,
@@ -698,6 +700,11 @@ pub(super) fn append_session_allocation_requests(
         checked_mul(512, DEEPSEEK_V4_LOCAL_WINDOW, "prefill raw-ring snapshot")?,
         f16_bytes,
     )?;
+    push(
+        "attention.raw_chunk",
+        checked_mul(512, n, "prefill raw chunk")?,
+        f16_bytes,
+    )?;
     push("attention.head_norm_ones", 512, f32_bytes)?;
     push(
         "attention.sparse_csa.index_queries",
@@ -825,6 +832,27 @@ fn f32_prefix(
     }
     let view = tensor.view_subrange(0, shape);
     validate_f32(&view, &view.shape, tensor.is_writable(), name)?;
+    Ok(view)
+}
+
+fn f16_prefix(
+    tensor: &MetalTensor,
+    shape: Vec<u64>,
+    name: &str,
+) -> Result<MetalTensor, DeepSeekV4MetalError> {
+    let elements = shape.iter().try_fold(1_u64, |total, &dimension| {
+        total.checked_mul(dimension).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!("{name} shape element count overflow"))
+        })
+    })?;
+    if elements > tensor.n_elements() {
+        return invalid(format!(
+            "{name} prefix requires {elements} elements, backing has {}",
+            tensor.n_elements()
+        ));
+    }
+    let view = tensor.view_subrange(0, shape);
+    validate_f16(&view, &view.shape, tensor.is_writable(), name)?;
     Ok(view)
 }
 
@@ -3515,6 +3543,11 @@ crate::env_flag!(
     "QWEN_DSV4_PACKED_BM16_IQ2"
 );
 
+crate::env_flag!(
+    default_on packed_batched_rope_enabled,
+    "QWEN_DSV4_BATCHED_ROPE"
+);
+
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
 fn packed_grouped_iq3_candidate_supported(ctx: &MetalContext) -> bool {
     if !crate::metal::matmat_iq3_xxs_mm_is_enabled()
@@ -5953,6 +5986,83 @@ fn encode_copy_raw_ring_f16_bits(
     Ok(())
 }
 
+fn encode_publish_raw_chunk_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    source: &MetalTensor,
+    chunk: &MetalTensor,
+    ring: &MetalTensor,
+    start_position: u32,
+    n_tokens: usize,
+    head_dim: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, "deepseek_v4_publish_raw_chunk_f16")?;
+    checked_token_count(n_tokens)?;
+    validate_f32(
+        source,
+        &[head_dim as u64, n_tokens as u64],
+        false,
+        "packed raw chunk source",
+    )?;
+    validate_f16(
+        chunk,
+        &[head_dim as u64, n_tokens as u64],
+        true,
+        "packed raw chunk",
+    )?;
+    validate_f16(
+        ring,
+        &[head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+        true,
+        "packed raw ring",
+    )?;
+    start_position
+        .checked_add(u32::try_from(n_tokens - 1).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("packed raw chunk count exceeds u32".into())
+        })?)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("packed raw chunk position overflow".into())
+        })?;
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        head_dim: u32,
+        row_count: u32,
+        start_position: u32,
+        window: u32,
+    }
+    let pso = ctx.pipeline("kernel_deepseek_v4_publish_raw_chunk_f16")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            head_dim: u32::try_from(head_dim).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed raw chunk width exceeds u32".into())
+            })?,
+            row_count: checked_token_count(n_tokens)?,
+            start_position,
+            window: DEEPSEEK_V4_LOCAL_WINDOW as u32,
+        },
+    );
+    enc.set_tensor(1, source);
+    enc.set_tensor(2, chunk);
+    enc.set_tensor(3, ring);
+    let count = checked_mul(n_tokens, head_dim, "packed raw chunk elements")?;
+    enc.dispatch(
+        MTLSize {
+            width: count.div_ceil(256),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_packed_dense_sink_attention_f16(
     ctx: &MetalContext,
@@ -5968,6 +6078,12 @@ fn encode_packed_dense_sink_attention_f16(
     n_tokens: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
     checked_token_count(n_tokens)?;
+    let config = deepseek_v4_session_attention_config();
+    let raw_chunk = f16_prefix(
+        raw_cache,
+        vec![config.head_dim as u64, n_tokens as u64],
+        "packed dense raw chunk",
+    )?;
     let Some(query_offset) = (kind == AttentionKind::HeavilyCompressed)
         .then(|| tiled_hca_query_offset(start_position, n_tokens))
         .flatten()
@@ -5976,7 +6092,7 @@ fn encode_packed_dense_sink_attention_f16(
             ctx,
             enc,
             queries,
-            raw_cache,
+            &raw_chunk,
             raw_cache_before_chunk,
             compressed,
             sinks,
@@ -5991,7 +6107,6 @@ fn encode_packed_dense_sink_attention_f16(
             "packed tiled HCA requires a published compressed history".into(),
         )
     })?;
-    let config = deepseek_v4_session_attention_config();
     let query_width = config.checked()?.query_width;
     if query_offset > 0 {
         let prefix_queries = f32_prefix(
@@ -6004,6 +6119,11 @@ fn encode_packed_dense_sink_attention_f16(
             vec![query_width as u64, query_offset as u64],
             "packed cooperative-HCA prefix output",
         )?;
+        let prefix_raw_chunk = f16_prefix(
+            &raw_chunk,
+            vec![config.head_dim as u64, query_offset as u64],
+            "packed cooperative-HCA prefix raw chunk",
+        )?;
         let prefix_end = start_position
             .checked_add(u32::try_from(query_offset).map_err(|_| {
                 DeepSeekV4MetalError::Invalid("packed HCA prefix exceeds u32".into())
@@ -6013,7 +6133,7 @@ fn encode_packed_dense_sink_attention_f16(
             ctx,
             enc,
             &prefix_queries,
-            raw_cache,
+            &prefix_raw_chunk,
             raw_cache_before_chunk,
             Some(DeepSeekV4PublishedRows {
                 cache: rows.cache,
@@ -6031,8 +6151,9 @@ fn encode_packed_dense_sink_attention_f16(
         ctx,
         enc,
         queries,
-        raw_cache,
+        &raw_chunk,
         raw_cache_before_chunk,
+        DeepSeekV4RawCacheLayout::Chunk,
         rows,
         sinks,
         output,
@@ -6064,6 +6185,7 @@ fn encode_packed_cooperative_dense_sink_attention_f16(
         queries,
         raw_cache,
         raw_cache_before_chunk,
+        DeepSeekV4RawCacheLayout::Chunk,
         compressed,
         sinks,
         output,
@@ -6115,20 +6237,18 @@ fn encode_packed_selected_sink_attention_f16(
         false,
         "packed selected attention queries",
     )?;
-    for (tensor, name) in [
-        (raw_cache, "packed selected raw cache"),
-        (
-            raw_cache_before_chunk,
-            "packed selected preserved raw cache",
-        ),
-    ] {
-        validate_f16(
-            tensor,
-            &[config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
-            false,
-            name,
-        )?;
-    }
+    validate_f16(
+        raw_cache,
+        &[config.head_dim as u64, n_tokens as u64],
+        false,
+        "packed selected raw chunk",
+    )?;
+    validate_f16(
+        raw_cache_before_chunk,
+        &[config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+        false,
+        "packed selected preserved raw cache",
+    )?;
     validate_f16(
         rows.attention_cache,
         &[config.head_dim as u64, rows.capacity_rows as u64],
@@ -6166,6 +6286,7 @@ fn encode_packed_selected_sink_attention_f16(
         queries,
         raw_cache,
         raw_cache_before_chunk,
+        DeepSeekV4RawCacheLayout::Chunk,
         rows.attention_cache,
         rows.capacity_rows,
         sparse.cache_order_ids,
@@ -6520,6 +6641,16 @@ impl DeepSeekV4Session {
             self.fp4_score_dispatch_ledger = None;
         }
         let trace_layers = std::env::var_os("QWEN_DSV4_PREFILL_TRACE").is_some();
+        let batched_rope = packed_batched_rope_enabled();
+        if !batched_rope {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: packed batched RoPE disabled; rollback=QWEN_DSV4_BATCHED_ROPE=0"
+                );
+            }
+        }
         let mut layer_traces = Vec::with_capacity(if trace_layers {
             DEEPSEEK_V4_LAYER_COUNT
         } else {
@@ -6640,6 +6771,85 @@ impl DeepSeekV4Session {
                     n_tokens,
                 )?;
 
+                let query_heads = attention.queries.view_subrange(
+                    0,
+                    vec![
+                        attention_config.head_dim as u64,
+                        attention_config.head_count as u64,
+                        n_tokens as u64,
+                    ],
+                );
+                if batched_rope {
+                    encode_ds4_rope_tail_adjacent_batch_in_place(
+                        ctx,
+                        &encoder,
+                        &query_heads,
+                        start_position,
+                        n_tokens,
+                        rope,
+                        false,
+                    )?;
+                    encode_ds4_rope_tail_adjacent_batch_in_place(
+                        ctx,
+                        &encoder,
+                        &attention.kv,
+                        start_position,
+                        n_tokens,
+                        rope,
+                        false,
+                    )?;
+                } else {
+                    for row in 0..n_tokens {
+                        let position = start_position
+                            .checked_add(u32::try_from(row).map_err(|_| {
+                                DeepSeekV4MetalError::Invalid("packed RoPE row exceeds u32".into())
+                            })?)
+                            .ok_or_else(|| {
+                                DeepSeekV4MetalError::Invalid(
+                                    "packed RoPE position overflow".into(),
+                                )
+                            })?;
+                        let queries = f32_row(
+                            &attention.queries,
+                            row,
+                            attention_dims.query_width,
+                            vec![
+                                attention_config.head_dim as u64,
+                                attention_config.head_count as u64,
+                            ],
+                            "packed query row",
+                        )?;
+                        let kv = f32_row(
+                            &attention.kv,
+                            row,
+                            attention_config.head_dim,
+                            vec![attention_config.head_dim as u64],
+                            "packed KV row",
+                        )?;
+                        encode_ds4_rope_tail_adjacent_in_place(
+                            ctx, &encoder, &queries, position, rope, false,
+                        )?;
+                        encode_ds4_rope_tail_adjacent_in_place(
+                            ctx, &encoder, &kv, position, rope, false,
+                        )?;
+                    }
+                }
+                let raw_chunk = f16_prefix(
+                    &self.prefill.attention.raw_chunk,
+                    vec![attention_config.head_dim as u64, n_tokens as u64],
+                    "packed raw chunk",
+                )?;
+                encode_publish_raw_chunk_f16(
+                    ctx,
+                    &encoder,
+                    &attention.kv,
+                    &raw_chunk,
+                    &raw_cache,
+                    start_position,
+                    n_tokens,
+                    attention_config.head_dim,
+                )?;
+
                 for row in 0..n_tokens {
                     let position = start_position
                         .checked_add(u32::try_from(row).map_err(|_| {
@@ -6648,37 +6858,6 @@ impl DeepSeekV4Session {
                         .ok_or_else(|| {
                             DeepSeekV4MetalError::Invalid("packed position overflow".into())
                         })?;
-                    let queries = f32_row(
-                        &attention.queries,
-                        row,
-                        attention_dims.query_width,
-                        vec![
-                            attention_config.head_dim as u64,
-                            attention_config.head_count as u64,
-                        ],
-                        "packed query row",
-                    )?;
-                    let kv = f32_row(
-                        &attention.kv,
-                        row,
-                        attention_config.head_dim,
-                        vec![attention_config.head_dim as u64],
-                        "packed KV row",
-                    )?;
-                    encode_ds4_rope_tail_adjacent_in_place(
-                        ctx, &encoder, &queries, position, rope, false,
-                    )?;
-                    encode_ds4_rope_tail_adjacent_in_place(
-                        ctx, &encoder, &kv, position, rope, false,
-                    )?;
-                    encode_scatter_offset_f32_to_f16(
-                        ctx,
-                        &encoder,
-                        &kv,
-                        &raw_cache,
-                        (position as usize % DEEPSEEK_V4_LOCAL_WINDOW) * attention_config.head_dim,
-                        attention_config.head_dim,
-                    )?;
                     self.compressor_frontiers.encode_layer_projected_row(
                         ctx,
                         &encoder,
@@ -6734,7 +6913,7 @@ impl DeepSeekV4Session {
                             ctx,
                             &encoder,
                             &dense_queries,
-                            &raw_cache,
+                            &raw_chunk,
                             &self.prefill.attention.raw_cache_before_chunk,
                             Some(DeepSeekV4PublishedRows {
                                 cache: rows.attention_cache,
@@ -6826,7 +7005,7 @@ impl DeepSeekV4Session {
                         ctx,
                         &encoder,
                         &attention.queries,
-                        &raw_cache,
+                        &raw_chunk,
                         &self.prefill.attention.raw_cache_before_chunk,
                         rows,
                         selected,
@@ -6840,7 +7019,7 @@ impl DeepSeekV4Session {
                         ctx,
                         &encoder,
                         &attention.queries,
-                        &raw_cache,
+                        &raw_chunk,
                         &self.prefill.attention.raw_cache_before_chunk,
                         compressed,
                         self.layer_tensor(layer, "attn_sinks.weight")?,
@@ -6850,32 +7029,56 @@ impl DeepSeekV4Session {
                         n_tokens,
                     )?;
                 }
-                for row in 0..n_tokens {
-                    let position = start_position
-                        .checked_add(u32::try_from(row).map_err(|_| {
-                            DeepSeekV4MetalError::Invalid("packed row exceeds u32".into())
-                        })?)
-                        .ok_or_else(|| {
-                            DeepSeekV4MetalError::Invalid("packed position overflow".into())
-                        })?;
-                    let attention_row = f32_row(
-                        &attention.attention,
-                        row,
-                        attention_dims.query_width,
-                        vec![
-                            attention_config.head_dim as u64,
-                            attention_config.head_count as u64,
-                        ],
-                        "packed attention row",
-                    )?;
-                    encode_ds4_rope_tail_adjacent_in_place(
+                let attention_heads = attention.attention.view_subrange(
+                    0,
+                    vec![
+                        attention_config.head_dim as u64,
+                        attention_config.head_count as u64,
+                        n_tokens as u64,
+                    ],
+                );
+                if batched_rope {
+                    encode_ds4_rope_tail_adjacent_batch_in_place(
                         ctx,
                         &encoder,
-                        &attention_row,
-                        position,
+                        &attention_heads,
+                        start_position,
+                        n_tokens,
                         rope,
                         true,
                     )?;
+                } else {
+                    for row in 0..n_tokens {
+                        let position = start_position
+                            .checked_add(u32::try_from(row).map_err(|_| {
+                                DeepSeekV4MetalError::Invalid(
+                                    "packed inverse-RoPE row exceeds u32".into(),
+                                )
+                            })?)
+                            .ok_or_else(|| {
+                                DeepSeekV4MetalError::Invalid(
+                                    "packed inverse-RoPE position overflow".into(),
+                                )
+                            })?;
+                        let attention_row = f32_row(
+                            &attention.attention,
+                            row,
+                            attention_dims.query_width,
+                            vec![
+                                attention_config.head_dim as u64,
+                                attention_config.head_count as u64,
+                            ],
+                            "packed attention row",
+                        )?;
+                        encode_ds4_rope_tail_adjacent_in_place(
+                            ctx,
+                            &encoder,
+                            &attention_row,
+                            position,
+                            rope,
+                            true,
+                        )?;
+                    }
                 }
 
                 #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -13063,6 +13266,83 @@ mod tests {
     }
 
     #[test]
+    fn packed_raw_chunk_publication_matches_ordered_ring_updates() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        const HEAD_DIM: usize = 16;
+
+        fn read_f16_bits(tensor: &MetalTensor) -> Vec<u16> {
+            assert_eq!(tensor.dtype, GgmlType::F16);
+            unsafe {
+                let pointer = tensor
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(tensor.offset as usize)
+                    .cast::<u16>();
+                std::slice::from_raw_parts(pointer, tensor.n_elements() as usize).to_vec()
+            }
+        }
+
+        for (start_position, n_tokens) in [(0_u32, 1_usize), (123, 12), (257, 127), (511, 128)] {
+            let source_values = (0..n_tokens * HEAD_DIM)
+                .map(|index| ((index * 29 + index / 7 + 3) % 197) as f32 * 0.0031 - 0.29)
+                .collect::<Vec<_>>();
+            let initial_ring = (0..DEEPSEEK_V4_LOCAL_WINDOW * HEAD_DIM)
+                .map(|index| half::f16::from_f32((index % 113) as f32 * 0.001 - 0.04).to_bits())
+                .collect::<Vec<_>>();
+            let source = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&source_values),
+                vec![HEAD_DIM as u64, n_tokens as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let chunk =
+                MetalTensor::zeros_f16(&ctx, vec![HEAD_DIM as u64, n_tokens as u64]).unwrap();
+            let ring = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&initial_ring),
+                vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+                GgmlType::F16,
+            )
+            .unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_publish_raw_chunk_f16(
+                &ctx,
+                &encoder,
+                &source,
+                &chunk,
+                &ring,
+                start_position,
+                n_tokens,
+                HEAD_DIM,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+
+            let expected_chunk = source_values
+                .iter()
+                .map(|&value| half::f16::from_f32(value).to_bits())
+                .collect::<Vec<_>>();
+            let mut expected_ring = initial_ring;
+            for row in 0..n_tokens {
+                let slot = (start_position as usize + row) % DEEPSEEK_V4_LOCAL_WINDOW;
+                let source = &expected_chunk[row * HEAD_DIM..(row + 1) * HEAD_DIM];
+                expected_ring[slot * HEAD_DIM..(slot + 1) * HEAD_DIM].copy_from_slice(source);
+            }
+            assert_eq!(read_f16_bits(&chunk), expected_chunk);
+            assert_eq!(read_f16_bits(&ring), expected_ring);
+        }
+    }
+
+    #[test]
     fn packed_dense_attention_matches_ordered_singleton_rows_within_roundoff() {
         let Ok(ctx) = MetalContext::new() else {
             return;
@@ -13100,6 +13380,7 @@ mod tests {
             GgmlType::F16,
         )
         .unwrap();
+        let raw_chunk = raw.view_subrange(0, vec![config.head_dim as u64, n_tokens as u64]);
         let raw_before = MetalTensor::zeros_f16(
             &ctx,
             vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
@@ -13138,10 +13419,8 @@ mod tests {
             ],
         )
         .unwrap();
-        let overlapping_raw = overlapping_raw_storage.view_subrange(
-            0,
-            vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
-        );
+        let overlapping_raw =
+            overlapping_raw_storage.view_subrange(0, vec![config.head_dim as u64, n_tokens as u64]);
         let overlapping_raw_before = overlapping_raw_storage.view_subrange(
             config.head_dim as u64,
             vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
@@ -13152,8 +13431,9 @@ mod tests {
             &ctx,
             &encoder,
             &queries,
-            &raw,
+            &raw_chunk,
             &raw_before,
+            DeepSeekV4RawCacheLayout::Chunk,
             None,
             &sinks,
             &packed,
@@ -13168,8 +13448,9 @@ mod tests {
             &ctx,
             &encoder,
             &queries,
-            &raw,
+            &raw_chunk,
             &raw_before,
+            DeepSeekV4RawCacheLayout::Chunk,
             None,
             &sinks,
             &packed,
@@ -13188,8 +13469,9 @@ mod tests {
             &ctx,
             &encoder,
             &queries,
+            &raw_chunk,
             &raw,
-            &raw,
+            DeepSeekV4RawCacheLayout::Chunk,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed,
                 count: n_tokens / 4,
@@ -13214,6 +13496,7 @@ mod tests {
             &queries,
             &overlapping_raw,
             &overlapping_raw_before,
+            DeepSeekV4RawCacheLayout::Chunk,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed,
                 count: n_tokens / 4,
@@ -13236,7 +13519,7 @@ mod tests {
             &ctx,
             &encoder,
             &queries,
-            &raw,
+            &raw_chunk,
             &raw_before,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed,
@@ -13337,15 +13620,18 @@ mod tests {
                 raw_before[slot * config.head_dim + dimension] = raw_value(position, dimension);
             }
         }
-        let mut raw_current = raw_before.clone();
-        for dimension in 0..config.head_dim {
-            raw_current
-                [(START_POSITION % DEEPSEEK_V4_LOCAL_WINDOW) * config.head_dim + dimension] =
-                raw_value(START_POSITION, dimension);
-            raw_current
-                [((START_POSITION + 1) % DEEPSEEK_V4_LOCAL_WINDOW) * config.head_dim + dimension] =
-                future_row[dimension];
-        }
+        let future_row_values = &future_row;
+        let raw_current = (0..N_TOKENS)
+            .flat_map(|token| {
+                (0..config.head_dim).map(move |dimension| {
+                    if token == 1 {
+                        future_row_values[dimension]
+                    } else {
+                        raw_value(START_POSITION + token, dimension)
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
         let mut compressed_values = (0..CAPACITY * config.head_dim)
             .map(|index| {
                 let row = index / config.head_dim;
@@ -13425,7 +13711,7 @@ mod tests {
             GgmlType::F32,
         )
         .unwrap();
-        let make_raw = |values: &[f32]| {
+        let make_raw = |values: &[f32], rows: usize| {
             let bits = values
                 .iter()
                 .map(|value| half::f16::from_f32(*value).to_bits())
@@ -13433,13 +13719,13 @@ mod tests {
             MetalTensor::from_bytes(
                 &ctx,
                 bytemuck::cast_slice(&bits),
-                vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+                vec![config.head_dim as u64, rows as u64],
                 GgmlType::F16,
             )
             .unwrap()
         };
-        let raw_before = make_raw(&raw_before);
-        let raw_current = make_raw(&raw_current);
+        let raw_before = make_raw(&raw_before, DEEPSEEK_V4_LOCAL_WINDOW);
+        let raw_current = make_raw(&raw_current, N_TOKENS);
         let compressed_bits = compressed_values
             .iter()
             .map(|value| half::f16::from_f32(*value).to_bits())
@@ -13539,6 +13825,8 @@ mod tests {
             vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
         )
         .unwrap();
+        let raw_chunk =
+            MetalTensor::zeros_f16(&ctx, vec![config.head_dim as u64, n_tokens as u64]).unwrap();
         let new_raw = (start_position as usize..start_position as usize + n_tokens)
             .flat_map(|position| {
                 (0..config.head_dim).map(move |dimension| raw_value(position, dimension))
@@ -13672,26 +13960,17 @@ mod tests {
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
         encode_copy_raw_ring_f16_bits(&ctx, &encoder, &raw_cache, &raw_cache_before_chunk).unwrap();
-        for token in 0..n_tokens {
-            let source = f32_row(
-                &new_raw_tensor,
-                token,
-                config.head_dim,
-                vec![config.head_dim as u64],
-                "packed sparse raw row",
-            )
-            .unwrap();
-            let position = start_position as usize + token;
-            encode_scatter_offset_f32_to_f16(
-                &ctx,
-                &encoder,
-                &source,
-                &raw_cache,
-                (position % DEEPSEEK_V4_LOCAL_WINDOW) * config.head_dim,
-                config.head_dim,
-            )
-            .unwrap();
-        }
+        encode_publish_raw_chunk_f16(
+            &ctx,
+            &encoder,
+            &new_raw_tensor,
+            &raw_chunk,
+            &raw_cache,
+            start_position,
+            n_tokens,
+            config.head_dim,
+        )
+        .unwrap();
         let dense_queries = f32_prefix(
             &queries,
             vec![dims.query_width as u64, query_offset as u64],
@@ -13708,7 +13987,7 @@ mod tests {
             &ctx,
             &encoder,
             &dense_queries,
-            &raw_cache,
+            &raw_chunk,
             &raw_cache_before_chunk,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed,
@@ -13726,7 +14005,7 @@ mod tests {
             &ctx,
             &encoder,
             &queries,
-            &raw_cache,
+            &raw_chunk,
             &raw_cache_before_chunk,
             rows,
             sparse.selection_view(),
@@ -13842,6 +14121,8 @@ mod tests {
                 vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
             )
             .unwrap();
+            let raw_chunk =
+                MetalTensor::zeros_f16(ctx, vec![config.head_dim as u64, n_tokens as u64]).unwrap();
             let new_raw = (start_position as usize..end_position)
                 .flat_map(|position| {
                     (0..config.head_dim).map(move |dimension| raw_value(position, dimension))
@@ -13913,31 +14194,22 @@ mod tests {
             let encoder = KernelEncoder::begin(&command);
             encode_copy_raw_ring_f16_bits(ctx, &encoder, &raw_cache, &raw_cache_before_chunk)
                 .unwrap();
-            for token in 0..n_tokens {
-                let position = start_position as usize + token;
-                let source = f32_row(
-                    &new_raw,
-                    token,
-                    config.head_dim,
-                    vec![config.head_dim as u64],
-                    "retained packed raw row",
-                )
-                .unwrap();
-                encode_scatter_offset_f32_to_f16(
-                    ctx,
-                    &encoder,
-                    &source,
-                    &raw_cache,
-                    (position % DEEPSEEK_V4_LOCAL_WINDOW) * config.head_dim,
-                    config.head_dim,
-                )
-                .unwrap();
-            }
+            encode_publish_raw_chunk_f16(
+                ctx,
+                &encoder,
+                &new_raw,
+                &raw_chunk,
+                &raw_cache,
+                start_position,
+                n_tokens,
+                config.head_dim,
+            )
+            .unwrap();
             encode_packed_dense_sink_attention_f16(
                 ctx,
                 &encoder,
                 &queries,
-                &raw_cache,
+                &raw_chunk,
                 &raw_cache_before_chunk,
                 (final_compressed_count > 0).then_some(DeepSeekV4PublishedRows {
                     cache: &compressed,

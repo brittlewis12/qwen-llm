@@ -5953,13 +5953,37 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                 .view_subrange(0, vec![dims.query_width as u64, 1]);
             if self.use_online_hca() {
                 encode_online_dense_sink_attention_f16(
-                    ctx, enc, &queries, raw_cache, raw_cache, rows, sinks, &output, position, 0, 1,
-                    128, c,
+                    ctx,
+                    enc,
+                    &queries,
+                    raw_cache,
+                    raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
+                    rows,
+                    sinks,
+                    &output,
+                    position,
+                    0,
+                    1,
+                    128,
+                    c,
                 )?;
             } else {
                 encode_tiled_dense_sink_attention_f16(
-                    ctx, enc, &queries, raw_cache, raw_cache, rows, sinks, &output, position, 0, 1,
-                    128, c,
+                    ctx,
+                    enc,
+                    &queries,
+                    raw_cache,
+                    raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
+                    rows,
+                    sinks,
+                    &output,
+                    position,
+                    0,
+                    1,
+                    128,
+                    c,
                 )?;
             }
         } else if position == 0 {
@@ -5985,8 +6009,19 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                 .attention
                 .view_subrange(0, vec![dims.query_width as u64, 1]);
             encode_cooperative_dense_sink_attention_f16(
-                ctx, enc, &queries, raw_cache, raw_cache, compressed, sinks, &output, kind,
-                position, 1, c,
+                ctx,
+                enc,
+                &queries,
+                raw_cache,
+                raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
+                compressed,
+                sinks,
+                &output,
+                kind,
+                position,
+                1,
+                c,
             )?;
         }
         Ok(())
@@ -6022,6 +6057,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             &queries,
             raw_cache,
             raw_cache,
+            DeepSeekV4RawCacheLayout::Ring,
             rows.attention_cache,
             rows.capacity_rows,
             selection.cache_order_ids,
@@ -8643,6 +8679,26 @@ fn encode_position_zero_sink_attention(
     Ok(())
 }
 
+fn ds4_rope_correction_bounds(rope: DeepSeekV4RopeParameters) -> (f32, f32) {
+    let (correction_low, correction_high) = if rope.scaling_factor > 1.0 {
+        let correction = |rotations: f32| {
+            rope.rotary_dim as f32
+                * (rope.original_context_length as f32 / (rotations * 2.0 * std::f32::consts::PI))
+                    .ln()
+                / (2.0 * rope.theta.ln())
+        };
+        (
+            correction(rope.beta_fast).floor().max(0.0),
+            correction(rope.beta_slow)
+                .ceil()
+                .min((rope.rotary_dim - 1) as f32),
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    (correction_low, correction_high)
+}
+
 fn encode_ds4_rope_tail_adjacent_in_place(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -8670,22 +8726,7 @@ fn encode_ds4_rope_tail_adjacent_in_place(
         return Ok(());
     }
 
-    let (correction_low, correction_high) = if rope.scaling_factor > 1.0 {
-        let correction = |rotations: f32| {
-            rope.rotary_dim as f32
-                * (rope.original_context_length as f32 / (rotations * 2.0 * std::f32::consts::PI))
-                    .ln()
-                / (2.0 * rope.theta.ln())
-        };
-        (
-            correction(rope.beta_fast).floor().max(0.0),
-            correction(rope.beta_slow)
-                .ceil()
-                .min((rope.rotary_dim - 1) as f32),
-        )
-    } else {
-        (0.0, 0.0)
-    };
+    let (correction_low, correction_high) = ds4_rope_correction_bounds(rope);
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -8720,6 +8761,113 @@ fn encode_ds4_rope_tail_adjacent_in_place(
     );
     enc.set_tensor(1, tensor);
     let pair_count = checked_mul(head_count, rope.rotary_dim / 2, "DS4 RoPE pair count")?;
+    enc.dispatch(
+        MTLSize {
+            width: pair_count.div_ceil(256),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+fn encode_ds4_rope_tail_adjacent_batch_in_place(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    tensor: &MetalTensor,
+    start_position: u32,
+    row_count: usize,
+    rope: DeepSeekV4RopeParameters,
+    inverse: bool,
+) -> Result<(), DeepSeekV4MetalError> {
+    if row_count == 0 {
+        return invalid("DS4 batched RoPE requires at least one row");
+    }
+    let head_dim = usize::try_from(*tensor.shape.first().ok_or_else(|| {
+        DeepSeekV4MetalError::Invalid("DS4 batched RoPE tensor has no head dimension".into())
+    })?)
+    .map_err(|_| {
+        DeepSeekV4MetalError::Invalid("DS4 batched RoPE head dimension exceeds usize".into())
+    })?;
+    validate_ds4_rope(rope, head_dim, rope.rotary_dim)?;
+    validate_f32(tensor, &tensor.shape, true, "DS4 batched RoPE tensor")?;
+    let row_width = tensor
+        .n_elements()
+        .checked_div(row_count as u64)
+        .ok_or_else(|| DeepSeekV4MetalError::Invalid("DS4 batched RoPE row overflow".into()))?;
+    if head_dim == 0
+        || row_width == 0
+        || row_width * row_count as u64 != tensor.n_elements()
+        || !row_width.is_multiple_of(head_dim as u64)
+    {
+        return invalid("DS4 batched RoPE tensor is not a complete row-major head set");
+    }
+    start_position
+        .checked_add(u32::try_from(row_count - 1).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("DS4 batched RoPE row count exceeds u32".into())
+        })?)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("DS4 batched RoPE position overflow".into())
+        })?;
+    let head_count = usize::try_from(row_width / head_dim as u64).map_err(|_| {
+        DeepSeekV4MetalError::Invalid("DS4 batched RoPE head count exceeds usize".into())
+    })?;
+    let (correction_low, correction_high) = ds4_rope_correction_bounds(rope);
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        head_count: u32,
+        head_dim: u32,
+        rotary_dim: u32,
+        start_position: u32,
+        row_count: u32,
+        inverse: u32,
+        yarn: u32,
+        theta: f32,
+        frequency_scale: f32,
+        correction_low: f32,
+        correction_high: f32,
+    }
+    let pso = ctx.pipeline("kernel_deepseek_v4_rope_tail_adjacent_batch_in_place")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            head_count: u32::try_from(head_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("DS4 batched RoPE heads exceed u32".into())
+            })?,
+            head_dim: u32::try_from(head_dim).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("DS4 batched RoPE head dimension exceeds u32".into())
+            })?,
+            rotary_dim: u32::try_from(rope.rotary_dim).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(
+                    "DS4 batched RoPE rotary dimension exceeds u32".into(),
+                )
+            })?,
+            start_position,
+            row_count: u32::try_from(row_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("DS4 batched RoPE rows exceed u32".into())
+            })?,
+            inverse: u32::from(inverse),
+            yarn: u32::from(rope.scaling_factor > 1.0),
+            theta: rope.theta,
+            frequency_scale: 1.0 / rope.scaling_factor,
+            correction_low,
+            correction_high,
+        },
+    );
+    enc.set_tensor(1, tensor);
+    let pair_count = checked_mul(
+        checked_mul(row_count, head_count, "DS4 batched RoPE row heads")?,
+        rope.rotary_dim / 2,
+        "DS4 batched RoPE pair count",
+    )?;
     enc.dispatch(
         MTLSize {
             width: pair_count.div_ceil(256),
@@ -8857,6 +9005,67 @@ fn encode_dense_sink_attention_f16(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeepSeekV4RawCacheLayout {
+    Ring,
+    Chunk,
+}
+
+impl DeepSeekV4RawCacheLayout {
+    fn rows(self, token_count: usize) -> usize {
+        match self {
+            Self::Ring => DEEPSEEK_V4_LOCAL_WINDOW,
+            Self::Chunk => token_count,
+        }
+    }
+
+    fn is_chunk(self) -> u32 {
+        u32::from(self == Self::Chunk)
+    }
+}
+
+fn validate_raw_attention_caches(
+    raw_cache: &MetalTensor,
+    raw_cache_before_chunk: &MetalTensor,
+    layout: DeepSeekV4RawCacheLayout,
+    head_dim: usize,
+    token_count: usize,
+    name: &str,
+) -> Result<(), DeepSeekV4MetalError> {
+    validate_f16(
+        raw_cache,
+        &[head_dim as u64, layout.rows(token_count) as u64],
+        false,
+        &format!("{name} current raw cache"),
+    )?;
+    validate_f16(
+        raw_cache_before_chunk,
+        &[head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+        false,
+        &format!("{name} preserved raw cache"),
+    )?;
+    if layout == DeepSeekV4RawCacheLayout::Chunk
+        && Retained::as_ptr(&raw_cache.buffer) == Retained::as_ptr(&raw_cache_before_chunk.buffer)
+    {
+        let raw_end = raw_cache
+            .offset
+            .checked_add(raw_cache.n_bytes())
+            .ok_or_else(|| DeepSeekV4MetalError::Invalid("raw cache range overflow".into()))?;
+        let preserved_end = raw_cache_before_chunk
+            .offset
+            .checked_add(raw_cache_before_chunk.n_bytes())
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid("preserved raw cache range overflow".into())
+            })?;
+        if raw_cache.offset < preserved_end && raw_cache_before_chunk.offset < raw_end {
+            return invalid(format!(
+                "{name} requires disjoint current and preserved raw caches"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_cooperative_dense_sink_attention_f16(
     ctx: &MetalContext,
@@ -8864,6 +9073,7 @@ fn encode_cooperative_dense_sink_attention_f16(
     queries: &MetalTensor,
     raw_cache: &MetalTensor,
     raw_cache_before_chunk: &MetalTensor,
+    raw_cache_layout: DeepSeekV4RawCacheLayout,
     compressed: Option<DeepSeekV4PublishedRows<'_>>,
     sinks: &MetalTensor,
     output: &MetalTensor,
@@ -8891,39 +9101,14 @@ fn encode_cooperative_dense_sink_attention_f16(
         false,
         "cooperative dense attention queries",
     )?;
-    for (tensor, name) in [
-        (raw_cache, "cooperative dense current raw cache"),
-        (
-            raw_cache_before_chunk,
-            "cooperative dense preserved raw cache",
-        ),
-    ] {
-        validate_f16(
-            tensor,
-            &[config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
-            false,
-            name,
-        )?;
-    }
-    if token_count > 1
-        && Retained::as_ptr(&raw_cache.buffer) == Retained::as_ptr(&raw_cache_before_chunk.buffer)
-    {
-        let raw_end = raw_cache
-            .offset
-            .checked_add(raw_cache.n_bytes())
-            .ok_or_else(|| DeepSeekV4MetalError::Invalid("raw cache range overflow".into()))?;
-        let preserved_end = raw_cache_before_chunk
-            .offset
-            .checked_add(raw_cache_before_chunk.n_bytes())
-            .ok_or_else(|| {
-                DeepSeekV4MetalError::Invalid("preserved raw cache range overflow".into())
-            })?;
-        if raw_cache.offset < preserved_end && raw_cache_before_chunk.offset < raw_end {
-            return invalid(
-                "cooperative dense multi-token attention requires disjoint current and preserved raw caches",
-            );
-        }
-    }
+    validate_raw_attention_caches(
+        raw_cache,
+        raw_cache_before_chunk,
+        raw_cache_layout,
+        config.head_dim,
+        token_count,
+        "cooperative dense attention",
+    )?;
     validate_f32(
         sinks,
         &[config.head_count as u64],
@@ -8989,6 +9174,7 @@ fn encode_cooperative_dense_sink_attention_f16(
         compression_ratio: u32,
         start_position: u32,
         window: u32,
+        raw_cache_is_chunk: u32,
         scale: f32,
     }
     let pso = ctx.pipeline("kernel_deepseek_v4_packed_dense_sink_attention_f16")?;
@@ -9009,6 +9195,7 @@ fn encode_cooperative_dense_sink_attention_f16(
             compression_ratio: ratio as u32,
             start_position,
             window: DEEPSEEK_V4_LOCAL_WINDOW as u32,
+            raw_cache_is_chunk: raw_cache_layout.is_chunk(),
             scale: 1.0 / (config.head_dim as f32).sqrt(),
         },
     );
@@ -9088,6 +9275,7 @@ fn encode_tiled_dense_sink_attention_f16(
     queries: &MetalTensor,
     raw_cache: &MetalTensor,
     raw_cache_before_chunk: &MetalTensor,
+    raw_cache_layout: DeepSeekV4RawCacheLayout,
     compressed: DeepSeekV4PublishedRows<'_>,
     sinks: &MetalTensor,
     output: &MetalTensor,
@@ -9103,6 +9291,7 @@ fn encode_tiled_dense_sink_attention_f16(
         queries,
         raw_cache,
         raw_cache_before_chunk,
+        raw_cache_layout,
         compressed,
         sinks,
         output,
@@ -9122,6 +9311,7 @@ fn encode_online_dense_sink_attention_f16(
     queries: &MetalTensor,
     raw_cache: &MetalTensor,
     raw_cache_before_chunk: &MetalTensor,
+    raw_cache_layout: DeepSeekV4RawCacheLayout,
     compressed: DeepSeekV4PublishedRows<'_>,
     sinks: &MetalTensor,
     output: &MetalTensor,
@@ -9137,6 +9327,7 @@ fn encode_online_dense_sink_attention_f16(
         queries,
         raw_cache,
         raw_cache_before_chunk,
+        raw_cache_layout,
         compressed,
         sinks,
         output,
@@ -9156,6 +9347,7 @@ fn encode_tiled_dense_sink_attention_f16_with_mode(
     queries: &MetalTensor,
     raw_cache: &MetalTensor,
     raw_cache_before_chunk: &MetalTensor,
+    raw_cache_layout: DeepSeekV4RawCacheLayout,
     compressed: DeepSeekV4PublishedRows<'_>,
     sinks: &MetalTensor,
     output: &MetalTensor,
@@ -9206,17 +9398,14 @@ fn encode_tiled_dense_sink_attention_f16_with_mode(
         true,
         "tiled attention output",
     )?;
-    for (tensor, name) in [
-        (raw_cache, "tiled current raw cache"),
-        (raw_cache_before_chunk, "tiled preserved raw cache"),
-    ] {
-        validate_f16(
-            tensor,
-            &[config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
-            false,
-            name,
-        )?;
-    }
+    validate_raw_attention_caches(
+        raw_cache,
+        raw_cache_before_chunk,
+        raw_cache_layout,
+        config.head_dim,
+        token_count,
+        "tiled attention",
+    )?;
     validate_f16(
         compressed.cache,
         &[config.head_dim as u64, compressed.capacity_rows as u64],
@@ -9263,6 +9452,7 @@ fn encode_tiled_dense_sink_attention_f16_with_mode(
         chunk_start_position: u32,
         window: u32,
         compression_ratio: u32,
+        raw_cache_is_chunk: u32,
         scale: f32,
     }
     let args = Args {
@@ -9279,6 +9469,7 @@ fn encode_tiled_dense_sink_attention_f16_with_mode(
         chunk_start_position,
         window: DEEPSEEK_V4_LOCAL_WINDOW as u32,
         compression_ratio: compression_ratio as u32,
+        raw_cache_is_chunk: raw_cache_layout.is_chunk(),
         scale: 1.0 / (config.head_dim as f32).sqrt(),
     };
     let (kernel, threadgroup_width, threadgroup_bytes) = if online {
@@ -11458,6 +11649,7 @@ fn encode_cooperative_selected_sink_attention_f16(
     queries: &MetalTensor,
     raw_cache: &MetalTensor,
     raw_cache_before_chunk: &MetalTensor,
+    raw_cache_layout: DeepSeekV4RawCacheLayout,
     compressed_cache: &MetalTensor,
     compressed_capacity: usize,
     selected_ids: &MetalTensor,
@@ -11517,20 +11709,14 @@ fn encode_cooperative_selected_sink_attention_f16(
         false,
         "cooperative selected attention queries",
     )?;
-    for (tensor, name) in [
-        (raw_cache, "cooperative selected raw cache"),
-        (
-            raw_cache_before_chunk,
-            "cooperative selected preserved raw cache",
-        ),
-    ] {
-        validate_f16(
-            tensor,
-            &[config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
-            false,
-            name,
-        )?;
-    }
+    validate_raw_attention_caches(
+        raw_cache,
+        raw_cache_before_chunk,
+        raw_cache_layout,
+        config.head_dim,
+        token_count,
+        "cooperative selected attention",
+    )?;
     validate_f16(
         compressed_cache,
         &[config.head_dim as u64, compressed_capacity as u64],
@@ -11573,6 +11759,7 @@ fn encode_cooperative_selected_sink_attention_f16(
         window: u32,
         selected_slots: u32,
         compressed_capacity: u32,
+        raw_cache_is_chunk: u32,
         scale: f32,
     }
     let pso = ctx.pipeline("kernel_deepseek_v4_packed_selected_sink_attention_f16")?;
@@ -11600,6 +11787,7 @@ fn encode_cooperative_selected_sink_attention_f16(
             window: DEEPSEEK_V4_LOCAL_WINDOW as u32,
             selected_slots: selected_slots as u32,
             compressed_capacity: compressed_capacity as u32,
+            raw_cache_is_chunk: raw_cache_layout.is_chunk(),
             scale: 1.0 / (config.head_dim as f32).sqrt(),
         },
     );
@@ -18290,6 +18478,122 @@ mod tests {
     }
 
     #[test]
+    fn batched_rope_matches_position_ordered_rows() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 3;
+        const HEAD_DIM: usize = 128;
+        const ROWS: usize = 17;
+        let values = (0..ROWS * HEADS * HEAD_DIM)
+            .map(|index| {
+                let row = index / (HEADS * HEAD_DIM);
+                let within = index % (HEADS * HEAD_DIM);
+                let head = within / HEAD_DIM;
+                let dimension = within % HEAD_DIM;
+                (dimension as f32 - 61.0) * 0.0037 + head as f32 * 0.021 + row as f32 * 0.0043
+            })
+            .collect::<Vec<_>>();
+        for (start_position, rope) in [
+            (
+                0_u32,
+                DeepSeekV4RopeParameters {
+                    rotary_dim: 64,
+                    theta: 10_000.0,
+                    scaling_factor: 1.0,
+                    original_context_length: 0,
+                    beta_fast: 0.0,
+                    beta_slow: 0.0,
+                },
+            ),
+            (
+                65_531,
+                DeepSeekV4RopeParameters {
+                    rotary_dim: 64,
+                    theta: 160_000.0,
+                    scaling_factor: 16.0,
+                    original_context_length: 65_536,
+                    beta_fast: 32.0,
+                    beta_slow: 1.0,
+                },
+            ),
+        ] {
+            for inverse in [false, true] {
+                let batched = offset_f32(
+                    &ctx,
+                    &values,
+                    vec![HEAD_DIM as u64, HEADS as u64, ROWS as u64],
+                );
+                let ordered = offset_f32(
+                    &ctx,
+                    &values,
+                    vec![HEAD_DIM as u64, HEADS as u64, ROWS as u64],
+                );
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                encode_ds4_rope_tail_adjacent_batch_in_place(
+                    &ctx,
+                    &encoder,
+                    &batched,
+                    start_position,
+                    ROWS,
+                    rope,
+                    inverse,
+                )
+                .unwrap();
+                for row in 0..ROWS {
+                    let row_view = ordered.view_subrange(
+                        (row * HEADS * HEAD_DIM) as u64,
+                        vec![HEAD_DIM as u64, HEADS as u64],
+                    );
+                    encode_ds4_rope_tail_adjacent_in_place(
+                        &ctx,
+                        &encoder,
+                        &row_view,
+                        start_position + row as u32,
+                        rope,
+                        inverse,
+                    )
+                    .unwrap();
+                }
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(command.error().is_none());
+                let batched = read_f32(&batched);
+                let ordered = read_f32(&ordered);
+                let differing = batched
+                    .iter()
+                    .zip(&ordered)
+                    .filter(|(batched, ordered)| batched.to_bits() != ordered.to_bits())
+                    .count();
+                if start_position == 0 {
+                    assert_eq!(differing, 0, "unscaled batched RoPE changed lineage");
+                    continue;
+                }
+                let mut squared_error = 0.0_f64;
+                let mut reference_norm = 0.0_f64;
+                let mut max_abs = 0.0_f32;
+                for (&batched, &ordered) in batched.iter().zip(&ordered) {
+                    squared_error += f64::from(batched - ordered).powi(2);
+                    reference_norm += f64::from(ordered).powi(2);
+                    max_abs = max_abs.max((batched - ordered).abs());
+                }
+                let relative_rms = (squared_error / reference_norm).sqrt();
+                eprintln!(
+                    "deepseek_v4 batched_rope start={start_position} inverse={inverse} differing={differing}/{} max_abs={max_abs:.9} rel_rms={relative_rms:.9}",
+                    batched.len(),
+                );
+                assert!(max_abs <= 1.0e-6, "batched RoPE max abs {max_abs}");
+                assert!(
+                    relative_rms <= 5.0e-7,
+                    "batched RoPE relative RMS {relative_rms}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn unscaled_rope_remains_bounded_through_the_full_context_regime() {
         let Some(ctx) = metal_context() else {
             return;
@@ -20675,6 +20979,7 @@ mod tests {
             &attention_queries,
             &raw_cache,
             &raw_cache,
+            DeepSeekV4RawCacheLayout::Ring,
             DeepSeekV4PublishedRows {
                 cache: &frontier.published,
                 count: CAPACITY_ROWS,
@@ -20893,6 +21198,7 @@ mod tests {
                 &query_tensor,
                 &raw_cache,
                 &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
                 rows,
                 &sinks,
                 &tiled,
@@ -21033,6 +21339,7 @@ mod tests {
                 &query_tensor,
                 &raw_cache,
                 &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
                 DeepSeekV4PublishedRows {
                     cache: &compressed_cache,
                     count,
@@ -21240,6 +21547,7 @@ mod tests {
                 &query_tensor,
                 &current_raw,
                 &preserved_raw,
+                DeepSeekV4RawCacheLayout::Ring,
                 rows,
                 &sinks,
                 &legacy,
@@ -21257,6 +21565,7 @@ mod tests {
                     &query_tensor,
                     &current_raw,
                     &preserved_raw,
+                    DeepSeekV4RawCacheLayout::Ring,
                     rows,
                     &sinks,
                     output,
@@ -21345,13 +21654,10 @@ mod tests {
                 raw_before[slot * HEAD_DIM + dimension] = raw_value(position, dimension);
             }
         }
-        let mut raw_current = raw_before.clone();
-        for dimension in 0..HEAD_DIM {
-            raw_current[(START_POSITION % DEEPSEEK_V4_LOCAL_WINDOW) * HEAD_DIM + dimension] =
-                raw_value(START_POSITION, dimension);
-            raw_current[((START_POSITION + 1) % DEEPSEEK_V4_LOCAL_WINDOW) * HEAD_DIM + dimension] =
-                final_raw[dimension];
-        }
+        let mut raw_chunk = (0..HEAD_DIM)
+            .map(|dimension| raw_value(START_POSITION, dimension))
+            .collect::<Vec<_>>();
+        raw_chunk.extend_from_slice(&final_raw);
         let mut compressed = (0..CAPACITY * HEAD_DIM)
             .map(|index| {
                 let row = index / HEAD_DIM;
@@ -21421,7 +21727,7 @@ mod tests {
         );
 
         let queries_tensor = offset_f32(&ctx, &queries, vec![HEAD_DIM as u64, QUERY_COUNT as u64]);
-        let make_raw = |values: &[f32]| {
+        let make_raw = |values: &[f32], rows: usize| {
             let bits = values
                 .iter()
                 .map(|value| half::f16::from_f32(*value).to_bits())
@@ -21429,13 +21735,13 @@ mod tests {
             MetalTensor::from_bytes(
                 &ctx,
                 bytemuck::cast_slice(&bits),
-                vec![HEAD_DIM as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+                vec![HEAD_DIM as u64, rows as u64],
                 GgmlType::F16,
             )
             .unwrap()
         };
-        let raw_before = make_raw(&raw_before);
-        let raw_current = make_raw(&raw_current);
+        let raw_before = make_raw(&raw_before, DEEPSEEK_V4_LOCAL_WINDOW);
+        let raw_current = make_raw(&raw_chunk, QUERY_COUNT);
         let compressed_bits = compressed
             .iter()
             .map(|value| half::f16::from_f32(*value).to_bits())
@@ -21458,6 +21764,7 @@ mod tests {
             &queries_tensor,
             &raw_current,
             &raw_before,
+            DeepSeekV4RawCacheLayout::Chunk,
             DeepSeekV4PublishedRows {
                 cache: &compressed_tensor,
                 count: CAPACITY,
@@ -25151,6 +25458,7 @@ mod tests {
             &cooperative_queries,
             &raw_cache,
             &raw_cache,
+            DeepSeekV4RawCacheLayout::Ring,
             &compressed_cache,
             CAPACITY,
             &cache_order_ids,
@@ -25571,6 +25879,7 @@ mod tests {
                 &cooperative_queries,
                 &raw_cache,
                 &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
                 compressed,
                 &sinks,
                 &cooperative,
@@ -25587,6 +25896,7 @@ mod tests {
                     &cooperative_queries,
                     &raw_cache,
                     &raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
                     compressed.expect("HCA handoff has compressed rows"),
                     &sinks,
                     tiled,
@@ -25780,6 +26090,7 @@ mod tests {
                 &packed_queries,
                 &raw_cache,
                 &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
                 &compressed,
                 CAPACITY,
                 &selected_ids,
@@ -25885,6 +26196,7 @@ mod tests {
                 &queries,
                 &raw_cache,
                 &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
                 &compressed_cache,
                 CAPACITY,
                 &selected_ids,
@@ -28425,6 +28737,7 @@ mod tests {
                 &cooperative_queries,
                 &raw_cache,
                 &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
                 &compressed_rows,
                 row_count,
                 &cache_order_ids,
@@ -28653,6 +28966,7 @@ mod tests {
                                 &cooperative_queries,
                                 &raw_cache,
                                 &raw_cache,
+                                DeepSeekV4RawCacheLayout::Ring,
                                 &compressed_rows,
                                 row_count,
                                 &cache_order_ids,
@@ -28814,6 +29128,7 @@ mod tests {
                     &queries,
                     &raw_cache,
                     &preserved_raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
                     DeepSeekV4PublishedRows {
                         cache: &compressed_cache,
                         count,
@@ -28835,6 +29150,7 @@ mod tests {
                     &queries,
                     &raw_cache,
                     &preserved_raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
                     DeepSeekV4PublishedRows {
                         cache: &compressed_cache,
                         count,
@@ -29049,6 +29365,7 @@ mod tests {
             &cooperative_query,
             &raw_cache,
             &raw_cache,
+            DeepSeekV4RawCacheLayout::Ring,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed_cache,
                 count: 4,
@@ -29300,6 +29617,7 @@ mod tests {
                 &cooperative_query,
                 &raw_cache,
                 &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
                 Some(DeepSeekV4PublishedRows {
                     cache: &compressed_cache,
                     count: hca_count,
@@ -29319,6 +29637,7 @@ mod tests {
                 &cooperative_query,
                 &raw_cache,
                 &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
                 Some(DeepSeekV4PublishedRows {
                     cache: &compressed_cache,
                     count: csa_count,
@@ -29386,6 +29705,7 @@ mod tests {
             &cooperative_queries,
             &raw_cache,
             &raw_cache,
+            DeepSeekV4RawCacheLayout::Ring,
             Some(DeepSeekV4PublishedRows {
                 cache: &compressed_cache,
                 count: DEEPSEEK_V4_CSA_TOP_K + 1,

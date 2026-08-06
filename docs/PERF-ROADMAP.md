@@ -374,20 +374,24 @@ counts are adjudicated before timing. Dispatch geometry must repeat within each
 arm but need not match across deliberately different policies. Any failed gate
 ends the one authorized attempt; no same-condition retry is permitted.
 
+That attempt is now complete and closes production all-IQ3 promotion under this
+contract. All eight warm and 16 timed executions complete, and every warm arm
+passes exact output/state, topology, and invocation checks. Timed adjudication
+stops on the first sample, a control arm, after it passes exactness and topology
+but reports 18.27410241% aggregate transition ambiguity against the frozen 2.5%
+maximum. The remaining timed executions are not adjudicated, so the packet
+authorizes no wall, GPU, saving, stationarity, p95, promotion, or regression
+claim. Retain the exact diagnostics-only candidate and failing ignored harness;
+do not rerun, relax, or split the condition as a rescue.
+
 Force-ranked queue:
 
-1. **Run the one sealed all-IQ3 promotion gate.** Reuse the existing exact
-   four-dispatch candidate and the post-route observer under the frozen balanced
-   GPU-and-wall protocol above. Do not split gate/up/SwiGLU/down first; direct
-   in-encoder samples are unsupported and encoder-boundary sampling would
-   perturb thousands of interleaved bucket stages. Keep both MXFP4-down layers
-   current.
-2. **Decide bounded selector product promotion.** Keep the qualified current
+1. **Decide bounded selector product promotion.** Keep the qualified current
    policy hidden and off by default while its device/asset scope is explicit.
    A future default or user-facing switch needs a separately reviewed product
    contract; do not repeat the 5.43 GB restore campaign absent code, device, or
    asset drift.
-3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+2. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

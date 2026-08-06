@@ -2886,6 +2886,11 @@ pub(super) fn packed_grouped_expert_enabled_for_test(ctx: &MetalContext) -> bool
     packed_grouped_expert_policy(ctx).uses_iq2_target()
 }
 
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+pub(super) fn packed_grouped_iq3_candidate_supported_for_test(ctx: &MetalContext) -> bool {
+    packed_grouped_iq3_candidate_supported(ctx)
+}
+
 struct PackedLayerTrace {
     layer: usize,
     pre_expert_seconds: f64,
@@ -5423,14 +5428,20 @@ impl DeepSeekV4Session {
         token_ids: &[u32],
         emit_logits: bool,
         sampled: bool,
+        grouped_iq3: bool,
     ) -> Result<PackedPostRouteStageProfile, DeepSeekV4MetalError> {
         let mut recorder = PackedPostRouteStageRecorder::new(ctx, sampled)?;
+        let expert_policy = if grouped_iq3 {
+            PackedExpertPolicy::GroupedIq2XsIq3XxsAndIq3Xxs
+        } else {
+            PackedExpertPolicy::GroupedIq2XsIq3Xxs
+        };
         self.execute_packed_tokens_with_progress_policy(
             ctx,
             token_ids,
             emit_logits,
             PackedRoutePolicy::Cpu,
-            PackedExpertPolicy::GroupedIq2XsIq3Xxs,
+            expert_policy,
             None,
             Some(&mut recorder),
             &mut |_| {},

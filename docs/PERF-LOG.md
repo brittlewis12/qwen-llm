@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Sealed All-IQ3 Promotion Gate KILL
+
+Status: production all-IQ3 grouped promotion is `KILL` for the current asset,
+Apple M4 Max, and frozen observer contract. The exact candidate remains
+diagnostics-only; this packet authorizes no performance conclusion.
+
+- The sole authorized campaign executes one untimed `ABBA BAAB` warm block and
+  timed `(ABBA BAAB) x 2`. All eight warm and 16 timed executions complete.
+- Every warm arm preserves exact output/state, sampled topology, and the
+  expected 25/0 versus 25/16 grouped invocation counts.
+- Timed adjudication fails on its first sample, a control arm. That sample
+  passes exactness and topology, then reports 18.27410241% aggregate transition
+  ambiguity against the frozen 2.5% maximum.
+- The other 15 timed executions are not adjudicated after the first failure.
+  No wall, post-route GPU, affected-cohort GPU, stationarity, saving, p95, or
+  candidate regression claim is authorized.
+- Because the invalid sample is control, the result does not attribute the
+  ambiguity to the candidate. The packet itself is inadmissible.
+
+Decision: retain the exact candidate and ignored failing harness as executable
+negative evidence. Do not delete or replace a sample, relax the observer, split
+routed sub-operations as a rescue, or rerun the same condition. Reopen only for
+material asset, device, implementation, or measurement-capability drift. The
+next force-ranked branch is the bounded selector product-promotion decision.
+Evidence:
+`docs/bench/2026-08-05-dsv4-packed-all-iq3-sealed-gate/README.md`. CX review:
+`019fd4b0-a4d6-76f2-aee4-2172a72d8548`.
+
 ## 2026-08-05 - DeepSeek V4 Packed Post-Route Attribution GO
 
 Status: the diagnostics-only observer and bounded current-asset attribution are

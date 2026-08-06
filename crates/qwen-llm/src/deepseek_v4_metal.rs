@@ -15001,7 +15001,7 @@ mod tests {
             let started = std::time::Instant::now();
             let profile = session
                 .execute_packed_tokens_with_post_route_stage_profile_for_test(
-                    ctx, prefix, true, sampled,
+                    ctx, prefix, true, sampled, false,
                 )
                 .expect("execute packed post-route stage-profile prefix");
             let wall_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -15503,6 +15503,525 @@ mod tests {
                 .all(|delta| *delta <= 0.03),
             "post-route cohort stage share changed by more than three points"
         );
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    #[ignore = "requires the current 97.05 GiB DS4 asset"]
+    fn current_asset_packed_all_iq3_sealed_promotion_gate() {
+        const PREFIX_TOKENS: usize = 128;
+        const CONTINUATION_TOKEN: u32 = 35;
+        const ENDPOINT_COUNT: usize = 3;
+        const SAMPLED_ENCODERS: u64 = (DEEPSEEK_V4_LAYER_COUNT * 5) as u64;
+        const BLOCK: [Arm; 8] = [
+            Arm::Control,
+            Arm::Candidate,
+            Arm::Candidate,
+            Arm::Control,
+            Arm::Candidate,
+            Arm::Control,
+            Arm::Control,
+            Arm::Candidate,
+        ];
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum Arm {
+            Control,
+            Candidate,
+        }
+
+        struct Evidence {
+            logits: Vec<f32>,
+            hidden: Vec<f32>,
+            causal_digest: [u8; 32],
+            prefix_digest: [u8; 32],
+            compatibility_digest: [u8; 32],
+            continuation_logits: Vec<f32>,
+            continuation_causal_digest: [u8; 32],
+            committed_tokens: Vec<u32>,
+            grouped_iq2_invocations: u32,
+            grouped_iq3_invocations: u32,
+            profile: prefill::PackedPostRouteStageProfile,
+            counters: crate::metal::KernelTraceCounters,
+            dispatch_count: usize,
+            dispatch_digest: [u8; 32],
+            wall_ms: f64,
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        struct Metrics {
+            endpoints: [f64; ENDPOINT_COUNT],
+            aggregate_coverage_error: f64,
+            max_layer_coverage_error: f64,
+            aggregate_transition_ambiguity: f64,
+            max_layer_transition_ambiguity: f64,
+        }
+
+        struct TimedSample {
+            arm: Arm,
+            half: usize,
+            evidence: Evidence,
+            metrics: Metrics,
+        }
+
+        fn bits(values: &[f32]) -> Vec<u32> {
+            values.iter().map(|value| value.to_bits()).collect()
+        }
+
+        fn hex(digest: impl AsRef<[u8]>) -> String {
+            digest
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            residency: DeepSeekV4MetalResidency,
+            model_content_id: DeepSeekV4ModelContentId,
+            prefix: &[u32],
+            arm: Arm,
+        ) -> (DeepSeekV4MetalResidency, Evidence) {
+            let mut session =
+                DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
+                    .expect("construct sealed all-IQ3 session");
+            crate::metal::dispatch_census_begin();
+            let trace_guard = crate::metal::kernel_trace_begin();
+            let started = std::time::Instant::now();
+            let profile = session
+                .execute_packed_tokens_with_post_route_stage_profile_for_test(
+                    ctx,
+                    prefix,
+                    true,
+                    true,
+                    arm == Arm::Candidate,
+                )
+                .expect("execute sealed all-IQ3 prefix");
+            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            let counters = crate::metal::kernel_trace_snapshot();
+            let census = crate::metal::dispatch_census_take();
+            drop(trace_guard);
+            let mut dispatch_hasher = Sha256::new();
+            for row in &census {
+                dispatch_hasher.update((row.family.len() as u64).to_le_bytes());
+                dispatch_hasher.update(row.family.as_bytes());
+                dispatch_hasher.update((row.kernel.len() as u64).to_le_bytes());
+                dispatch_hasher.update(row.kernel.as_bytes());
+                for extent in [
+                    row.grid_width,
+                    row.grid_height,
+                    row.grid_depth,
+                    row.threads_width,
+                    row.threads_height,
+                    row.threads_depth,
+                ] {
+                    dispatch_hasher.update(extent.to_le_bytes());
+                }
+            }
+            let dispatch_digest = dispatch_hasher.finalize().into();
+            let logits = session
+                .copy_logits_f32()
+                .expect("copy sealed all-IQ3 logits");
+            let hidden = host_read_f32(
+                session
+                    .final_normalized_hidden()
+                    .expect("sealed all-IQ3 final hidden is visible"),
+                "sealed all-IQ3 final hidden",
+            )
+            .expect("copy sealed all-IQ3 hidden");
+            let snapshot = session
+                .capture_causal_snapshot()
+                .expect("capture sealed all-IQ3 state");
+            let causal_digest = *snapshot.causal_digest();
+            let prefix_digest = *snapshot.prefix_digest();
+            let compatibility_digest = *snapshot.compatibility_digest().as_bytes();
+            session
+                .restore_causal_snapshot(&snapshot)
+                .expect("restore sealed all-IQ3 state");
+            session
+                .forward_token(ctx, CONTINUATION_TOKEN)
+                .expect("continue sealed all-IQ3 state");
+            let continuation_logits = session
+                .copy_logits_f32()
+                .expect("copy sealed all-IQ3 continuation logits");
+            let continuation = session
+                .capture_causal_snapshot()
+                .expect("capture sealed all-IQ3 continuation state");
+            let evidence = Evidence {
+                logits,
+                hidden,
+                causal_digest,
+                prefix_digest,
+                compatibility_digest,
+                continuation_logits,
+                continuation_causal_digest: *continuation.causal_digest(),
+                committed_tokens: session.committed_tokens().to_vec(),
+                grouped_iq2_invocations: session.packed_grouped_iq2_invocations_for_test(),
+                grouped_iq3_invocations: session.packed_grouped_iq3_invocations_for_test(),
+                profile,
+                counters,
+                dispatch_count: census.len(),
+                dispatch_digest,
+                wall_ms,
+            };
+            (session.into_residency(), evidence)
+        }
+
+        fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
+            assert_eq!(
+                bits(&actual.logits),
+                bits(&expected.logits),
+                "{label} logits"
+            );
+            assert_eq!(
+                bits(&actual.hidden),
+                bits(&expected.hidden),
+                "{label} hidden"
+            );
+            assert_eq!(
+                actual.causal_digest, expected.causal_digest,
+                "{label} causal"
+            );
+            assert_eq!(
+                actual.prefix_digest, expected.prefix_digest,
+                "{label} prefix"
+            );
+            assert_eq!(
+                actual.compatibility_digest, expected.compatibility_digest,
+                "{label} compatibility"
+            );
+            assert_eq!(
+                bits(&actual.continuation_logits),
+                bits(&expected.continuation_logits),
+                "{label} continuation logits"
+            );
+            assert_eq!(
+                actual.continuation_causal_digest, expected.continuation_causal_digest,
+                "{label} continuation causal"
+            );
+            assert_eq!(
+                actual.committed_tokens, expected.committed_tokens,
+                "{label} committed tokens"
+            );
+            assert_eq!(
+                actual.profile.metadata, expected.profile.metadata,
+                "{label} metadata"
+            );
+        }
+
+        fn assert_topology(evidence: &Evidence, arm: Arm) {
+            assert!(evidence.profile.sampled);
+            assert_eq!(
+                evidence.profile.command_gpu_ms.len(),
+                DEEPSEEK_V4_LAYER_COUNT
+            );
+            assert_eq!(evidence.profile.metadata.len(), DEEPSEEK_V4_LAYER_COUNT);
+            assert_eq!(
+                evidence.profile.sampled_layers.len(),
+                DEEPSEEK_V4_LAYER_COUNT
+            );
+            assert_eq!(evidence.counters.encoders, SAMPLED_ENCODERS);
+            assert_eq!(evidence.counters.concurrent_encoders, 0);
+            assert_eq!(
+                evidence.counters.dispatches as usize,
+                evidence.dispatch_count
+            );
+            assert_eq!(evidence.grouped_iq2_invocations, 25);
+            assert_eq!(
+                evidence.grouped_iq3_invocations,
+                if arm == Arm::Candidate { 16 } else { 0 }
+            );
+        }
+
+        fn metrics(evidence: &Evidence) -> Metrics {
+            let mut post_route_gpu_ms = 0.0;
+            let mut affected_routed_gpu_ms = 0.0;
+            let mut affected_layers = 0usize;
+            let mut raw_span_ms = 0.0;
+            let mut gap_ms = 0.0;
+            let mut overlap_ms = 0.0;
+            let mut max_layer_coverage_error = 0.0f64;
+            let mut max_layer_transition_ambiguity = 0.0f64;
+            for (layer, (sampled_layer, metadata)) in evidence
+                .profile
+                .sampled_layers
+                .iter()
+                .zip(&evidence.profile.metadata)
+                .enumerate()
+            {
+                assert_eq!(sampled_layer.layer, layer);
+                assert_eq!(metadata.layer, layer);
+                assert_eq!(sampled_layer.stages.len(), 4);
+                assert_eq!(
+                    sampled_layer.stages[0].kind,
+                    prefill::PackedPostRouteStageKind::RoutedExperts
+                );
+                assert!(
+                    (sampled_layer.command_gpu_ms - evidence.profile.command_gpu_ms[layer]).abs()
+                        < 1e-9
+                );
+                let stage_ms = sampled_layer
+                    .stages
+                    .iter()
+                    .map(|stage| stage.duration_ms_scaled)
+                    .sum::<f64>();
+                assert!(
+                    (stage_ms + sampled_layer.encoder_gap_ms_scaled
+                        - sampled_layer.encoder_overlap_ms_scaled
+                        - sampled_layer.command_gpu_ms)
+                        .abs()
+                        < 1e-6
+                );
+                post_route_gpu_ms += sampled_layer.command_gpu_ms;
+                raw_span_ms += sampled_layer.raw_span_ms_assuming_ns;
+                gap_ms += sampled_layer.encoder_gap_ms_scaled;
+                overlap_ms += sampled_layer.encoder_overlap_ms_scaled;
+                max_layer_coverage_error = max_layer_coverage_error
+                    .max((sampled_layer.raw_coverage_assuming_ns - 1.0).abs());
+                max_layer_transition_ambiguity = max_layer_transition_ambiguity.max(
+                    (sampled_layer.encoder_gap_ms_scaled + sampled_layer.encoder_overlap_ms_scaled)
+                        / sampled_layer.command_gpu_ms,
+                );
+                if metadata.gate_dtype == GgmlType::IQ3_XXS
+                    && metadata.up_dtype == GgmlType::IQ3_XXS
+                    && metadata.down_dtype == GgmlType::IQ3_XXS
+                {
+                    affected_layers += 1;
+                    affected_routed_gpu_ms += sampled_layer.stages[0].duration_ms_scaled;
+                }
+            }
+            assert_eq!(affected_layers, 16);
+            Metrics {
+                endpoints: [evidence.wall_ms, post_route_gpu_ms, affected_routed_gpu_ms],
+                aggregate_coverage_error: (raw_span_ms / post_route_gpu_ms - 1.0).abs(),
+                max_layer_coverage_error,
+                aggregate_transition_ambiguity: (gap_ms + overlap_ms) / post_route_gpu_ms,
+                max_layer_transition_ambiguity,
+            }
+        }
+
+        fn assert_observer_valid(label: &str, metrics: Metrics) {
+            assert!(
+                metrics.aggregate_coverage_error <= 0.005,
+                "{label} aggregate coverage error {} exceeded 0.5%",
+                metrics.aggregate_coverage_error
+            );
+            assert!(
+                metrics.max_layer_coverage_error <= 0.02,
+                "{label} layer coverage error {} exceeded 2%",
+                metrics.max_layer_coverage_error
+            );
+            assert!(
+                metrics.aggregate_transition_ambiguity <= 0.025,
+                "{label} aggregate transition ambiguity {} exceeded 2.5%",
+                metrics.aggregate_transition_ambiguity
+            );
+            assert!(
+                metrics.max_layer_transition_ambiguity <= 0.10,
+                "{label} layer transition ambiguity {} exceeded 10%",
+                metrics.max_layer_transition_ambiguity
+            );
+        }
+
+        fn even_median_four(mut values: Vec<f64>) -> f64 {
+            assert_eq!(values.len(), 4);
+            values.sort_by(f64::total_cmp);
+            (values[1] + values[2]) * 0.5
+        }
+
+        fn endpoint_medians(samples: &[TimedSample], arm: Arm, half: usize) -> [f64; 3] {
+            std::array::from_fn(|endpoint| {
+                even_median_four(
+                    samples
+                        .iter()
+                        .filter(|sample| sample.arm == arm && sample.half == half)
+                        .map(|sample| sample.metrics.endpoints[endpoint])
+                        .collect(),
+                )
+            })
+        }
+
+        fn endpoint_p95(samples: &[TimedSample], arm: Arm) -> [f64; 3] {
+            std::array::from_fn(|endpoint| {
+                let mut values = samples
+                    .iter()
+                    .filter(|sample| sample.arm == arm)
+                    .map(|sample| sample.metrics.endpoints[endpoint])
+                    .collect::<Vec<_>>();
+                assert_eq!(values.len(), 8);
+                values.sort_by(f64::total_cmp);
+                values[7]
+            })
+        }
+
+        fn endpoint_samples(samples: &[TimedSample], arm: Arm, endpoint: usize) -> Vec<f64> {
+            samples
+                .iter()
+                .filter(|sample| sample.arm == arm)
+                .map(|sample| sample.metrics.endpoints[endpoint])
+                .collect()
+        }
+
+        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+            });
+        assert!(model_path.exists(), "missing current DS4 model");
+        let ctx = MetalContext::new().expect("create Metal context");
+        assert!(
+            prefill::packed_grouped_expert_enabled_for_test(&ctx),
+            "sealed all-IQ3 gate requires the grouped IQ2 baseline"
+        );
+        assert!(
+            prefill::packed_grouped_iq3_candidate_supported_for_test(&ctx),
+            "sealed all-IQ3 candidate is unavailable on this configuration"
+        );
+        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
+        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 129)
+            .expect("plan sealed all-IQ3 session");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit sealed all-IQ3 session");
+        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+            .expect("realize current DS4 residency");
+        let mut residency = realized.into_residency();
+        let prefix = (0..PREFIX_TOKENS)
+            .map(|index| [35, 201, 200, 34][index % 4])
+            .collect::<Vec<_>>();
+
+        let mut warm = Vec::with_capacity(BLOCK.len());
+        for arm in BLOCK {
+            let (next, evidence) = execute(&ctx, residency, model_content_id, &prefix, arm);
+            residency = next;
+            warm.push((arm, evidence));
+        }
+        let reference = &warm[0].1;
+        assert_eq!(warm[0].0, Arm::Control);
+        for (arm, evidence) in &warm {
+            assert_exact("sealed warm-up", evidence, reference);
+            assert_topology(evidence, *arm);
+        }
+
+        let mut timed = Vec::with_capacity(BLOCK.len() * 2);
+        for half in 0..2 {
+            for arm in BLOCK {
+                let (next, evidence) = execute(&ctx, residency, model_content_id, &prefix, arm);
+                residency = next;
+                let sample_metrics = metrics(&evidence);
+                timed.push(TimedSample {
+                    arm,
+                    half,
+                    evidence,
+                    metrics: sample_metrics,
+                });
+            }
+        }
+        drop(residency);
+        assert_eq!(timed.len(), 16);
+
+        let mut control_digest = None;
+        let mut candidate_digest = None;
+        let mut control_dispatches = None;
+        let mut candidate_dispatches = None;
+        for sample in &timed {
+            assert_exact("sealed timed arm", &sample.evidence, reference);
+            assert_topology(&sample.evidence, sample.arm);
+            assert_observer_valid("sealed timed arm", sample.metrics);
+            let (digest, dispatches) = match sample.arm {
+                Arm::Control => (&mut control_digest, &mut control_dispatches),
+                Arm::Candidate => (&mut candidate_digest, &mut candidate_dispatches),
+            };
+            if let Some(expected) = digest {
+                assert_eq!(*expected, sample.evidence.dispatch_digest);
+            } else {
+                *digest = Some(sample.evidence.dispatch_digest);
+            }
+            if let Some(expected) = dispatches {
+                assert_eq!(*expected, sample.evidence.dispatch_count);
+            } else {
+                *dispatches = Some(sample.evidence.dispatch_count);
+            }
+        }
+
+        let control_first = endpoint_medians(&timed, Arm::Control, 0);
+        let control_second = endpoint_medians(&timed, Arm::Control, 1);
+        let candidate_first = endpoint_medians(&timed, Arm::Candidate, 0);
+        let candidate_second = endpoint_medians(&timed, Arm::Candidate, 1);
+        let control_stationarity: [f64; ENDPOINT_COUNT] = std::array::from_fn(|endpoint| {
+            2.0 * (control_first[endpoint] - control_second[endpoint]).abs()
+                / (control_first[endpoint] + control_second[endpoint])
+        });
+        let candidate_stationarity: [f64; ENDPOINT_COUNT] = std::array::from_fn(|endpoint| {
+            2.0 * (candidate_first[endpoint] - candidate_second[endpoint]).abs()
+                / (candidate_first[endpoint] + candidate_second[endpoint])
+        });
+        let first_saving: [f64; ENDPOINT_COUNT] = std::array::from_fn(|endpoint| {
+            1.0 - candidate_first[endpoint] / control_first[endpoint]
+        });
+        let second_saving: [f64; ENDPOINT_COUNT] = std::array::from_fn(|endpoint| {
+            1.0 - candidate_second[endpoint] / control_second[endpoint]
+        });
+        let control_p95 = endpoint_p95(&timed, Arm::Control);
+        let candidate_p95 = endpoint_p95(&timed, Arm::Candidate);
+        let control_wall_ms = endpoint_samples(&timed, Arm::Control, 0);
+        let candidate_wall_ms = endpoint_samples(&timed, Arm::Candidate, 0);
+        let control_post_route_gpu_ms = endpoint_samples(&timed, Arm::Control, 1);
+        let candidate_post_route_gpu_ms = endpoint_samples(&timed, Arm::Candidate, 1);
+        let control_affected_gpu_ms = endpoint_samples(&timed, Arm::Control, 2);
+        let candidate_affected_gpu_ms = endpoint_samples(&timed, Arm::Candidate, 2);
+
+        eprintln!(
+            "deepseek_v4 packed_all_iq3_sealed_gate n={PREFIX_TOKENS} schedule=ABBA_BAAB_x2 control_wall_ms={control_wall_ms:?} candidate_wall_ms={candidate_wall_ms:?} control_post_route_gpu_ms={control_post_route_gpu_ms:?} candidate_post_route_gpu_ms={candidate_post_route_gpu_ms:?} control_affected_gpu_ms={control_affected_gpu_ms:?} candidate_affected_gpu_ms={candidate_affected_gpu_ms:?} control_first_median={control_first:?} control_second_median={control_second:?} candidate_first_median={candidate_first:?} candidate_second_median={candidate_second:?} control_stationarity={control_stationarity:?} candidate_stationarity={candidate_stationarity:?} first_saving={first_saving:?} second_saving={second_saving:?} control_p95={control_p95:?} candidate_p95={candidate_p95:?} control_dispatches={} candidate_dispatches={} control_dispatch_sha256={} candidate_dispatch_sha256={} model_content_id={} logits_sha256={} hidden_sha256={} causal_digest={} prefix_digest={} compatibility_digest={} continuation_logits_sha256={} continuation_causal_digest={} committed_tokens_sha256={}",
+            control_dispatches.unwrap(),
+            candidate_dispatches.unwrap(),
+            hex(control_digest.unwrap()),
+            hex(candidate_digest.unwrap()),
+            hex(model_content_id.as_bytes()),
+            hex(Sha256::digest(bytemuck::cast_slice(&reference.logits))),
+            hex(Sha256::digest(bytemuck::cast_slice(&reference.hidden))),
+            hex(reference.causal_digest),
+            hex(reference.prefix_digest),
+            hex(reference.compatibility_digest),
+            hex(Sha256::digest(bytemuck::cast_slice(
+                &reference.continuation_logits,
+            ))),
+            hex(reference.continuation_causal_digest),
+            hex(Sha256::digest(bytemuck::cast_slice(
+                &reference.committed_tokens,
+            ))),
+        );
+
+        const SAVING_GATES: [f64; ENDPOINT_COUNT] = [0.05, 0.10, 0.30];
+        for endpoint in 0..ENDPOINT_COUNT {
+            assert!(
+                control_stationarity[endpoint] <= 0.05,
+                "control endpoint {endpoint} stationarity {} exceeded 5%",
+                control_stationarity[endpoint]
+            );
+            assert!(
+                candidate_stationarity[endpoint] <= 0.05,
+                "candidate endpoint {endpoint} stationarity {} exceeded 5%",
+                candidate_stationarity[endpoint]
+            );
+            assert!(
+                first_saving[endpoint] >= SAVING_GATES[endpoint]
+                    && second_saving[endpoint] >= SAVING_GATES[endpoint],
+                "endpoint {endpoint} half savings {}/{} missed {}",
+                first_saving[endpoint],
+                second_saving[endpoint],
+                SAVING_GATES[endpoint]
+            );
+            assert!(
+                candidate_p95[endpoint] <= control_p95[endpoint],
+                "candidate endpoint {endpoint} p95 {} exceeded control {}",
+                candidate_p95[endpoint],
+                control_p95[endpoint]
+            );
+        }
     }
 
     #[cfg(feature = "dsv4-diagnostics")]

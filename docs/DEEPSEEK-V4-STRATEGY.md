@@ -1993,9 +1993,12 @@ Broader S6 work remains:
   post-route observer now assigns 1,015.042 ms/96.052% of the warm N=128 span
   to routed execution, including 355.062 ms in the 16 all-IQ3 layers. Three
   sampled runs preserve exact output/state and dispatch geometry with at most
-  0.199% absolute GPU perturbation. This materially changed stage-specific
-  condition authorizes one sealed all-IQ3 grouped GPU-and-wall promotion gate;
-  it does not relax the prior wall rule or promote the candidate itself.
+  0.199% absolute GPU perturbation. The one sealed all-IQ3 grouped promotion
+  gate under that materially changed condition is now complete and
+  inadmissible: its first timed sample is a control arm that passes exactness
+  and topology, then records 18.27410241% aggregate transition ambiguity
+  against the frozen 2.5% maximum. No performance result is authorized; retain
+  the exact candidate under diagnostics and do not rerun the same condition.
   Whole-token
   submission, per-layer route/selector failure records, and verified-prefix
   callbacks are promoted. An asynchronously immutable SSD-streaming ticket
@@ -2120,16 +2123,22 @@ noise without reducing technical risk. Revisit after S5.
    improve 35.91% post-route GPU and 21.64% summed packed-command GPU. One R3
    wall bracket misses at 12.2%, so this is not a per-run guarantee. Retain the
    isolated rollback, capability/dtype fallback, and 6,291,456-byte admitted
-   scratch. The separate all-IQ3 widening is exact but remains `HOLD`: a mapped
-   IQ3 projection plus exact gate/up arena aliases execute all 16 layers in four
+   scratch. The separate all-IQ3 widening is exact but production promotion is
+   now `KILL` under the current asset/device/observer contract. A mapped IQ3
+   projection plus exact gate/up arena aliases execute all 16 layers in four
    test-only dispatches without another allocation. Model-free stagewise and
    current-asset N=12/32/128 outputs and state are bit-exact. Two R5 campaigns
-   are rejected for control drift; the sealed balanced R8 stabilizes controls
-   at 0.721% but misses candidate stationarity at 6.050% against a 5% gate. A
-   separate traced bracket records 9.929% total packed GPU saving and 56.534%
-   in the affected layers with unchanged-layer time flat; it is attribution,
-   not a balanced promotion gate. Retain the implementation under diagnostics,
-   authorize no same-condition retry, and do not build fused IQ3 gate/up now.
+   are rejected for control drift; the first sealed balanced R8 stabilizes
+   controls at 0.721% but misses candidate stationarity at 6.050% against a 5%
+   gate. A separate traced bracket records 9.929% total packed GPU saving and
+   56.534% in the affected layers with unchanged-layer time flat; it is
+   attribution, not a balanced promotion gate. The final sealed stage-specific
+   gate executes all eight warm and 16 timed arms, but its first timed control
+   fails observer validity at 18.27410241% aggregate transition ambiguity versus
+   the frozen 2.5% limit. It therefore authorizes no timing or performance
+   conclusion. Retain the exact implementation and ignored failing harness
+   under diagnostics, authorize no same-condition retry, and do not build fused
+   IQ3 gate/up now.
    The first pre-expert attribution removes chronological row publication from
    the standalone queue. A three-pass all-layer packet preserves bit-exact
    logits/hidden and continuation logits plus matching causal identities,
@@ -2153,14 +2162,13 @@ noise without reducing technical risk. Revisit after S5.
    relative RMS and both packed and restored continuation route IDs change.
    Preserve the current exact output path, remove every candidate seam, and do
    not resweep the same F16-staged condition under this device/asset contract.
-   The post-route observer now resolves the next branch: routed execution owns
-   1,015.042 ms/96.052% on average, while shared expert, combine, and hyper/head
-   total only 41.654 ms. The 16 all-IQ3 routed layers account for 355.062 ms.
-   Run exactly one preregistered all-IQ3 grouped promotion gate with identical
-   sampled topology, the existing balanced wall rules, new affected-cohort and
-   total post-route GPU thresholds, and no same-condition retry. Do not first
-   split 1,036 interleaved bucket chains; direct in-encoder sampling is
-   unsupported. Keep MXFP4 down and GPU route arithmetic unchanged and do not
-   revive a monolithic FFN kernel.
+   The post-route observer assigns 1,015.042 ms/96.052% on average to routed
+   execution, while shared expert, combine, and hyper/head total only 41.654 ms.
+   Its sealed all-IQ3 follow-up is closed by the observer-invalid first timed
+   control described above, not by a candidate speed or correctness result. Do
+   not split 1,036 interleaved bucket chains as a rescue: direct in-encoder
+   sampling is unsupported. Keep MXFP4 down and GPU route arithmetic unchanged,
+   do not revive a monolithic FFN kernel, and move next to the bounded selector
+   product-promotion decision.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

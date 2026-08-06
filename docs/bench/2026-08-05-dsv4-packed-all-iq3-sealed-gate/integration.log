@@ -1,0 +1,19 @@
+   Compiling qwen-llm v0.0.1 (/Users/tito/code/qwen-llm/crates/qwen-llm)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1m 15s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::tests::current_asset_packed_all_iq3_sealed_promotion_gate ...
+thread 'deepseek_v4_metal::tests::current_asset_packed_all_iq3_sealed_promotion_gate' (257882044) panicked at crates/qwen-llm/src/deepseek_v4_metal.rs:15815:13:
+sealed timed arm aggregate transition ambiguity 0.18274102410222184 exceeded 2.5%
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::tests::current_asset_packed_all_iq3_sealed_promotion_gate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 668 filtered out; finished in 63.55s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`

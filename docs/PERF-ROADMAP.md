@@ -330,25 +330,30 @@ Packed logits, normalized hidden, and restored continuation bits remain exact;
 recorded state digests and all 47,990 dispatch geometries match. This authorizes
 output work, not a generic attention rewrite.
 
+Both tested output families are closed for the current asset on Apple M4 Max.
+Exact mapped T1 preserves bits but measures 8.997 versus 8.912 ms/layer at
+N=128; exact T4/T8 regress to 11.408/11.855 ms. The existing F16-staged Q8
+matrix schedule exposes a 75.525% model-free stage ceiling, but N=32 fails
+quality and the bounded first-chunk 128+12 packet fails the frozen continuation
+and routing gates. Despite passing performance at 27.851% first-chunk
+pre-expert GPU, 23.291% aggregate GPU, and 15.847% aggregate wall saving,
+position-140 hidden state falls to 0.997495086 cosine / 0.070735848 relative RMS
+and consumed packed plus continuation expert IDs change. Remove all candidate
+source; do not resweep the same condition under this device/asset contract or
+hide it behind an opt-in.
+
 Force-ranked queue:
 
-1. **Collapse packed Q8_0 attention output.** The current output-A path executes
-   eight pack/projection/scatter triplets before output B and rereads weights per
-   token. Test one exact mapped, token-tiled output-A dispatch plus one tiled
-   output-B dispatch at T=4/8. Preserve each token's Q8_0 block traversal and
-   reduction lineage, write disjoint low-rank slices directly, add no session
-   allocation, and retain the current 25-dispatch path as fallback. Require
-   intermediate and final bit identity before a current-asset timing gate.
-2. **Attribute unchanged packed post-route work.** The 27 layers outside the
+1. **Attribute unchanged packed post-route work.** The 27 layers outside the
    all-IQ3 candidate remain at roughly 688 ms in both traced arms. Separate
    dtype mix, expert compute, and fixed dispatch overhead before attempting
    another grouped format or fusion. Keep the two MXFP4-down layers current.
-3. **Decide bounded selector product promotion.** Keep the qualified current
+2. **Decide bounded selector product promotion.** Keep the qualified current
    policy hidden and off by default while its device/asset scope is explicit.
    A future default or user-facing switch needs a separately reviewed product
    contract; do not repeat the 5.43 GB restore campaign absent code, device, or
    asset drift.
-4. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

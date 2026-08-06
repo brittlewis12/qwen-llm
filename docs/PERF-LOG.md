@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Packed Q8 Output KILL
+
+Status: on the current asset and Apple M4 Max, the tested exact
+mapped/token-tiled Q8 output and numerical Q8 matrix output schedules are both
+`KILL`. All experimental source is removed; ordinary packed execution is
+unchanged.
+
+- The exact T1/T4/T8 family preserves every grouped singleton output bit across
+  guarded N=1/3/4/7/8/9 differentials. At production N=128, current/T1/T4/T8
+  medians are 8.912/8.997/11.408/11.855 ms per layer. Dispatch collapse and
+  shared Q8 decode provide no GPU gain in these tested mappings; reduced token
+  parallelism/register pressure is a plausible explanation, not attribution.
+- Existing F16-staged Q8 matrix output establishes a large model-free ceiling:
+  A-only/B-only/A+B save 36.795%/38.770%/75.525% of the output stage at N=128.
+  N=32 integrated A-only, B-only, and A+B all miss the 0.999/0.05 quality gate,
+  so only a first-full-chunk 128+12 falsifier proceeds.
+- The canonical current-asset packet gives matrix A+B only to position-zero
+  N=128, then uses exact current output for N=12 and a restored singleton
+  continuation. Timed A/B/A/B/A passes every performance gate: 27.851% first
+  pre-expert GPU, 23.291% aggregate pre-expert GPU, and 15.847% aggregate wall
+  saving; exact-tail GPU regresses only 0.055%.
+- Quality and decisions reject promotion. Position-140 logits/hidden reach
+  0.998832693/0.997495086 cosine and 0.048418514/0.070735848 relative RMS;
+  restored continuation reaches 0.998840549/0.998319865 and
+  0.048206680/0.057944362. Packed and continuation expert IDs change, with
+  route-weight deltas up to 0.351734340/0.134389818.
+- All argmaxes remain 305/12,122/20,332. Repeated control and candidate arms
+  preserve their own outputs, causal state, decisions, and tokens bit-for-bit;
+  invocation and snapshot metadata gates pass. The failure is accumulated
+  numerical/decision drift, not nondeterminism or policy leakage.
+
+Decision: retain the exact deployed output path and do not hide this matrix
+schedule behind an opt-in. Do not resweep the same F16-staged condition under
+the current M4 Max/current-asset contract. Reopen for materially different
+arithmetic that preserves more activation precision while retaining a credible
+whole-stage ceiling, or for relevant device/asset drift. Return the active queue
+to attribution of the unchanged packed post-route span. Evidence:
+`docs/bench/2026-08-05-dsv4-packed-q8-output-kill/README.md`. CX review:
+`019fd47f-586d-7f03-914f-252a647917fa`.
+
 ## 2026-08-05 - DeepSeek V4 Packed Attention Attribution
 
 Status: combined attention family `GO`; attention body is `KILL` as the

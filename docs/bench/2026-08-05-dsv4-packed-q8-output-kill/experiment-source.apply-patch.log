@@ -1,0 +1,4001 @@
+DeepSeek V4 packed Q8 output experiment patch transcript
+Base revision: 1911ae1
+OpenCode session: ses_04538b252ffe5REuCcP1FFYkAy
+Completed apply_patch calls: 2026-08-05 18:36-20:30 local
+Each numbered section is one chronological apply_patch invocation.
+
+===== PATCH 01 | 2026-08-05 18:36:31 | prt_fd41238c0001WQOYXfbsRcdE5D =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/kernels/mat_vec_q8_0.metal
+@@
+ struct mat_vec_q8_0_args {
+     uint n_in;
+     uint n_out;
+ };
++
++struct mat_vec_q8_0_tiled_args {
++    ulong weight_group_stride_bytes;
++    uint  n_in;
++    uint  n_out;
++    uint  n_tokens;
++    uint  x_token_stride;
++    uint  y_token_stride;
++    uint  x_group_stride;
++    uint  y_group_stride;
++    uint  _pad;
++};
+@@
+ kernel void kernel_mat_vec_q8_0_f32_lcpp_batch(
+@@
+     }
+ }
++
++template <ushort NT>
++inline void mat_vec_q8_0_f32_lcpp_token_tiled(
++        constant mat_vec_q8_0_tiled_args & args,
++        device const uchar               * weight,
++        device const float               * x,
++        device       float               * y,
++        threadgroup  float               * shmem,
++        uint3  tgpig,
++        ushort sgitg,
++        ushort tiisg) {
++    constexpr ushort NW = 32;
++    constexpr ushort NQ = NQ_Q80;
++    constexpr ushort NR0 = NR0_Q80_LCPP;
++    constexpr ushort NSG = NSG_Q80_LCPP;
++
++    const uint first_row = tgpig.x * NR0;
++    const uint first_token = tgpig.y * NT;
++    if (first_row >= args.n_out || first_token >= args.n_tokens) return;
++
++    weight += (ulong)tgpig.z * args.weight_group_stride_bytes;
++    x += (ulong)tgpig.z * args.x_group_stride;
++    y += (ulong)tgpig.z * args.y_group_stride;
++
++    const uint nb = args.n_in / QK8_0;
++    const ushort ix = tiisg / (NW / NQ);
++    const ushort il = tiisg % (NW / NQ);
++    const uint ib0 = sgitg * NQ + ix;
++    const ulong row_stride_bytes = (ulong)nb * Q8_0_BYTES;
++    device const uchar * row0 = weight + (ulong)first_row * row_stride_bytes;
++
++    float sumf[NT][NR0];
++    for (ushort token = 0; token < NT; ++token) {
++        for (ushort row = 0; row < NR0; ++row) {
++            sumf[token][row] = 0.0f;
++        }
++    }
++
++    for (uint ib = ib0; ib < nb; ib += NSG * NQ) {
++        for (ushort row = 0; row < NR0; ++row) {
++            if (first_row + row >= args.n_out) break;
++            device const uchar * blk = row0
++                + (ulong)row * row_stride_bytes
++                + (ulong)ib * Q8_0_BYTES;
++            device const half   * dh = (device const half *)blk;
++            device const int8_t * qs = (device const int8_t *)(blk + 2) + il * NQ;
++            float qv[NQ];
++            for (ushort i = 0; i < NQ; ++i) {
++                qv[i] = (float)qs[i];
++            }
++            const float scale = (float)dh[0];
++
++            for (ushort token = 0; token < NT; ++token) {
++                const uint token_index = first_token + token;
++                if (token_index >= args.n_tokens) break;
++                device const float * xb = x
++                    + (ulong)token_index * args.x_token_stride
++                    + (ulong)ib * QK8_0
++                    + (ulong)il * NQ;
++                float sumq = 0.0f;
++                for (ushort i = 0; i < NQ; ++i) {
++                    sumq += qv[i] * xb[i];
++                }
++                sumf[token][row] += sumq * scale;
++            }
++        }
++    }
++
++    for (ushort token = 0; token < NT; ++token) {
++        for (ushort row = 0; row < NR0; ++row) {
++            threadgroup float * row_shmem =
++                shmem + ((ulong)token * NR0 + row) * NW;
++            if (sgitg == 0) {
++                row_shmem[tiisg] = 0.0f;
++            }
++            sumf[token][row] = simd_sum(sumf[token][row]);
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    for (ushort token = 0; token < NT; ++token) {
++        for (ushort row = 0; row < NR0; ++row) {
++            threadgroup float * row_shmem =
++                shmem + ((ulong)token * NR0 + row) * NW;
++            if (tiisg == 0) {
++                row_shmem[sgitg] = sumf[token][row];
++            }
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    for (ushort token = 0; token < NT; ++token) {
++        const uint token_index = first_token + token;
++        if (token_index >= args.n_tokens) break;
++        for (ushort row = 0; row < NR0 && first_row + row < args.n_out; ++row) {
++            threadgroup float * row_shmem =
++                shmem + ((ulong)token * NR0 + row) * NW;
++            const float total = simd_sum(row_shmem[tiisg]);
++            if (tiisg == 0 && sgitg == 0) {
++                y[(ulong)token_index * args.y_token_stride + first_row + row] = total;
++            }
++        }
++    }
++}
++
++kernel void kernel_mat_vec_q8_0_f32_lcpp_t4(
++        constant mat_vec_q8_0_tiled_args & args   [[buffer(0)]],
++        device const uchar               * weight [[buffer(1)]],
++        device const float               * x      [[buffer(2)]],
++        device       float               * y      [[buffer(3)]],
++        threadgroup  float               * shmem  [[threadgroup(0)]],
++        uint3  tgpig [[threadgroup_position_in_grid]],
++        ushort sgitg [[simdgroup_index_in_threadgroup]],
++        ushort tiisg [[thread_index_in_simdgroup]]) {
++    mat_vec_q8_0_f32_lcpp_token_tiled<4>(
++        args, weight, x, y, shmem, tgpig, sgitg, tiisg);
++}
++
++kernel void kernel_mat_vec_q8_0_f32_lcpp_t8(
++        constant mat_vec_q8_0_tiled_args & args   [[buffer(0)]],
++        device const uchar               * weight [[buffer(1)]],
++        device const float               * x      [[buffer(2)]],
++        device       float               * y      [[buffer(3)]],
++        threadgroup  float               * shmem  [[threadgroup(0)]],
++        uint3  tgpig [[threadgroup_position_in_grid]],
++        ushort sgitg [[simdgroup_index_in_threadgroup]],
++        ushort tiisg [[thread_index_in_simdgroup]]) {
++    mat_vec_q8_0_f32_lcpp_token_tiled<8>(
++        args, weight, x, y, shmem, tgpig, sgitg, tiisg);
++}
+ 
+ kernel void kernel_shared_swiglu_q8_0_f32_lcpp(
+*** End Patch
+
+===== PATCH 02 | 2026-08-05 18:37:27 | prt_fd41310c20010jeW522gGhasPo =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/metal.rs
+@@
+ pub fn encode_mat_vec_q8_0_batch_f32(
+@@
+     Ok(())
+ }
++
++#[derive(Clone, Copy, Debug)]
++pub struct MatVecQ8TokenTiledConfig {
++    pub n_in: usize,
++    pub n_out: usize,
++    pub n_tokens: usize,
++    pub token_tile: usize,
++    pub group_count: usize,
++    pub x_token_stride: usize,
++    pub y_token_stride: usize,
++    pub x_group_stride: usize,
++    pub y_group_stride: usize,
++}
++
++pub fn encode_mat_vec_q8_0_token_tiled_f32(
++    ctx: &MetalContext,
++    enc: &KernelEncoder,
++    weight: &MetalTensor,
++    x: &MetalTensor,
++    y: &MetalTensor,
++    config: MatVecQ8TokenTiledConfig,
++) -> Result<(), MetalError> {
++    let kernel = "mat_vec_q8_0_token_tiled";
++    let MatVecQ8TokenTiledConfig {
++        n_in,
++        n_out,
++        n_tokens,
++        token_tile,
++        group_count,
++        x_token_stride,
++        y_token_stride,
++        x_group_stride,
++        y_group_stride,
++    } = config;
++    let bad_shape = |detail: String| MetalError::BadShape { kernel, detail };
++    if n_in == 0
++        || n_out == 0
++        || n_tokens == 0
++        || group_count == 0
++        || !n_in.is_multiple_of(32)
++        || !matches!(token_tile, 4 | 8)
++    {
++        return Err(bad_shape(format!(
++            "requires nonzero dimensions/groups, n_in divisible by 32, and token_tile 4 or 8; got n_in={n_in} n_out={n_out} n_tokens={n_tokens} groups={group_count} tile={token_tile}"
++        )));
++    }
++    let weight_rows = n_out
++        .checked_mul(group_count)
++        .ok_or_else(|| bad_shape("weight row count overflow".into()))?;
++    let x_group_end = (group_count - 1)
++        .checked_mul(x_group_stride)
++        .and_then(|offset| offset.checked_add(n_in))
++        .ok_or_else(|| bad_shape("input group range overflow".into()))?;
++    let y_group_end = (group_count - 1)
++        .checked_mul(y_group_stride)
++        .and_then(|offset| offset.checked_add(n_out))
++        .ok_or_else(|| bad_shape("output group range overflow".into()))?;
++    let row_bytes = (n_in / 32)
++        .checked_mul(34)
++        .ok_or_else(|| bad_shape("Q8_0 row byte count overflow".into()))?;
++    let weight_group_stride_bytes = row_bytes
++        .checked_mul(n_out)
++        .ok_or_else(|| bad_shape("Q8_0 group byte stride overflow".into()))?;
++    let fits_buffer = |tensor: &MetalTensor| {
++        tensor
++            .offset
++            .checked_add(tensor.n_bytes())
++            .is_some_and(|end| end <= tensor.buffer.length() as u64)
++    };
++    if weight.dtype != GgmlType::Q8_0
++        || x.dtype != GgmlType::F32
++        || y.dtype != GgmlType::F32
++        || !y.is_writable()
++        || weight.shape != [n_in as u64, weight_rows as u64]
++        || x.shape != [x_token_stride as u64, n_tokens as u64]
++        || y.shape != [y_token_stride as u64, n_tokens as u64]
++        || x_group_end > x_token_stride
++        || y_group_end > y_token_stride
++        || weight.offset % 2 != 0
++        || x.offset % 4 != 0
++        || y.offset % 4 != 0
++        || !fits_buffer(weight)
++        || !fits_buffer(x)
++        || !fits_buffer(y)
++        || [
++            n_in,
++            n_out,
++            n_tokens,
++            group_count,
++            x_token_stride,
++            y_token_stride,
++            x_group_stride,
++            y_group_stride,
++        ]
++        .into_iter()
++        .any(|value| u32::try_from(value).is_err())
++    {
++        return Err(bad_shape(format!(
++            "expected Q8_0 [{n_in},{}] and writable F32 [{n_tokens},{x_token_stride}] -> [{n_tokens},{y_token_stride}] with {group_count} in-bounds groups; got weight={:?}/{:?} x={:?}/{:?} y={:?}/{:?}",
++            weight_rows,
++            weight.dtype,
++            weight.shape,
++            x.dtype,
++            x.shape,
++            y.dtype,
++            y.shape
++        )));
++    }
++
++    let pso = ctx.pipeline(match token_tile {
++        4 => "kernel_mat_vec_q8_0_f32_lcpp_t4",
++        8 => "kernel_mat_vec_q8_0_f32_lcpp_t8",
++        _ => unreachable!(),
++    })?;
++    enc.set_pipeline(&pso);
++    #[repr(C)]
++    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
++    struct Args {
++        weight_group_stride_bytes: u64,
++        n_in: u32,
++        n_out: u32,
++        n_tokens: u32,
++        x_token_stride: u32,
++        y_token_stride: u32,
++        x_group_stride: u32,
++        y_group_stride: u32,
++        _pad: u32,
++    }
++    enc.set_bytes(
++        0,
++        &Args {
++            weight_group_stride_bytes: weight_group_stride_bytes as u64,
++            n_in: n_in as u32,
++            n_out: n_out as u32,
++            n_tokens: n_tokens as u32,
++            x_token_stride: x_token_stride as u32,
++            y_token_stride: y_token_stride as u32,
++            x_group_stride: x_group_stride as u32,
++            y_group_stride: y_group_stride as u32,
++            _pad: 0,
++        },
++    );
++    enc.set_tensor(1, weight);
++    enc.set_tensor(2, x);
++    enc.set_tensor(3, y);
++    const NR0: usize = 2;
++    const NSG: usize = 4;
++    enc.set_threadgroup_memory(
++        0,
++        token_tile * NR0 * 32 * std::mem::size_of::<f32>(),
++    );
++    enc.dispatch(
++        MTLSize {
++            width: n_out.div_ceil(NR0),
++            height: n_tokens.div_ceil(token_tile),
++            depth: group_count,
++        },
++        MTLSize {
++            width: NSG * 32,
++            height: 1,
++            depth: 1,
++        },
++    );
++    Ok(())
++}
+ 
+ pub fn encode_shared_swiglu_q8_0_f32(
+*** End Patch
+
+===== PATCH 03 | 2026-08-05 18:38:37 | prt_fd41424dc001sEWvBBjD0E25hZ =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+     fn q8_token_axis_gemv_is_bitwise_singleton_equivalent() {
+@@
+         );
+     }
++
++    #[test]
++    fn q8_token_tiled_gemv_preserves_grouped_singleton_bits_and_guards() {
++        let Ok(ctx) = MetalContext::new() else {
++            return;
++        };
++        const GUARD: usize = 64;
++        const N_IN: usize = 64;
++        const N_OUT: usize = 7;
++        const GROUPS: usize = 3;
++        const X_STRIDE: usize = GROUPS * N_IN + 32;
++        const Y_STRIDE: usize = GROUPS * N_OUT + 5;
++
++        let mut weight_payload = Vec::with_capacity(N_OUT * GROUPS * (N_IN / 32) * 34);
++        for row in 0..N_OUT * GROUPS {
++            for block in 0..N_IN / 32 {
++                let scale = half::f16::from_f32(0.0065 + row as f32 * 0.000_17);
++                weight_payload.extend_from_slice(&scale.to_bits().to_le_bytes());
++                for index in 0..32 {
++                    let quant = ((row * 23 + block * 17 + index * 11) % 113) as i8 - 56;
++                    weight_payload.push(quant as u8);
++                }
++            }
++        }
++        let mut guarded_weight = vec![0xa5; GUARD];
++        guarded_weight.extend_from_slice(&weight_payload);
++        guarded_weight.extend_from_slice(&[0x5a; GUARD]);
++        let weight = MetalTensor {
++            buffer: ctx.buffer_from(&guarded_weight).unwrap(),
++            offset: GUARD as u64,
++            shape: vec![N_IN as u64, (N_OUT * GROUPS) as u64],
++            dtype: GgmlType::Q8_0,
++            provenance: MetalTensorProvenance::OwnedWritable,
++        };
++
++        for n_tokens in [1, 3, 4, 7, 8, 9] {
++            let input_values = (0..n_tokens * X_STRIDE)
++                .map(|index| ((index * 29 + index / 7 + 3) % 127) as f32 * 0.009 - 0.53)
++                .collect::<Vec<_>>();
++            let mut guarded_input = vec![0x3c; GUARD];
++            guarded_input.extend_from_slice(bytemuck::cast_slice(&input_values));
++            guarded_input.extend_from_slice(&[0xc3; GUARD]);
++            let input = MetalTensor {
++                buffer: ctx.buffer_from(&guarded_input).unwrap(),
++                offset: GUARD as u64,
++                shape: vec![X_STRIDE as u64, n_tokens as u64],
++                dtype: GgmlType::F32,
++                provenance: MetalTensorProvenance::OwnedWritable,
++            };
++
++            for token_tile in [4, 8] {
++                let reference = grouped_guarded_f32(
++                    &ctx,
++                    vec![Y_STRIDE as u64, n_tokens as u64],
++                    91.0,
++                );
++                let candidate = grouped_guarded_f32(
++                    &ctx,
++                    vec![Y_STRIDE as u64, n_tokens as u64],
++                    91.0,
++                );
++                let repeat = grouped_guarded_f32(
++                    &ctx,
++                    vec![Y_STRIDE as u64, n_tokens as u64],
++                    91.0,
++                );
++                let command = ctx.queue.commandBuffer().unwrap();
++                let encoder = KernelEncoder::begin(&command);
++                let config = crate::metal::MatVecQ8TokenTiledConfig {
++                    n_in: N_IN,
++                    n_out: N_OUT,
++                    n_tokens,
++                    token_tile,
++                    group_count: GROUPS,
++                    x_token_stride: X_STRIDE,
++                    y_token_stride: Y_STRIDE,
++                    x_group_stride: N_IN,
++                    y_group_stride: N_OUT,
++                };
++                crate::metal::encode_mat_vec_q8_0_token_tiled_f32(
++                    &ctx, &encoder, &weight, &input, &candidate, config,
++                )
++                .unwrap();
++                crate::metal::encode_mat_vec_q8_0_token_tiled_f32(
++                    &ctx, &encoder, &weight, &input, &repeat, config,
++                )
++                .unwrap();
++                for token in 0..n_tokens {
++                    for group in 0..GROUPS {
++                        let weight = group_weight_view(&weight, N_IN, N_OUT, group).unwrap();
++                        let input = input.view_subrange(
++                            (token * X_STRIDE + group * N_IN) as u64,
++                            vec![N_IN as u64],
++                        );
++                        let output = reference.view_subrange(
++                            (token * Y_STRIDE + group * N_OUT) as u64,
++                            vec![N_OUT as u64],
++                        );
++                        crate::metal::encode_mat_vec_q8_0_f32(
++                            &ctx, &encoder, &weight, &input, &output, N_IN, N_OUT,
++                        )
++                        .unwrap();
++                    }
++                }
++                encoder.end();
++                command.commit();
++                command.waitUntilCompleted();
++                assert!(command.error().is_none());
++
++                let reference = host_read_f32(&reference, "tiled Q8 reference").unwrap();
++                let candidate = host_read_f32(&candidate, "tiled Q8 candidate").unwrap();
++                let repeat = host_read_f32(&repeat, "tiled Q8 repeat").unwrap();
++                assert_eq!(
++                    candidate
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .collect::<Vec<_>>(),
++                    reference
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .collect::<Vec<_>>(),
++                    "N={n_tokens} T={token_tile} candidate"
++                );
++                assert_eq!(
++                    repeat
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .collect::<Vec<_>>(),
++                    reference
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .collect::<Vec<_>>(),
++                    "N={n_tokens} T={token_tile} repeat"
++                );
++                assert_grouped_guards("tiled Q8 reference", &reference);
++                assert_grouped_guards("tiled Q8 candidate", &candidate);
++                assert_grouped_guards("tiled Q8 repeat", &repeat);
++            }
++        }
++
++        let base = weight.buffer.contents().as_ptr().cast::<u8>();
++        let prefix = unsafe { std::slice::from_raw_parts(base, GUARD) };
++        let suffix = unsafe {
++            std::slice::from_raw_parts(base.add(GUARD + weight_payload.len()), GUARD)
++        };
++        assert!(prefix.iter().all(|&byte| byte == 0xa5));
++        assert!(suffix.iter().all(|&byte| byte == 0x5a));
++    }
+ }
+*** End Patch
+
+===== PATCH 04 | 2026-08-05 18:39:13 | prt_fd414b166001F9HSJ3f4zi6p3K =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+                 command.commit();
+                 command.waitUntilCompleted();
+                 assert!(command.error().is_none());
+ 
+-                let reference = host_read_f32(&reference, "tiled Q8 reference").unwrap();
+-                let candidate = host_read_f32(&candidate, "tiled Q8 candidate").unwrap();
+-                let repeat = host_read_f32(&repeat, "tiled Q8 repeat").unwrap();
++                assert_grouped_guards("tiled Q8 reference", &reference);
++                assert_grouped_guards("tiled Q8 candidate", &candidate);
++                assert_grouped_guards("tiled Q8 repeat", &repeat);
++                let reference_values = host_read_f32(&reference, "tiled Q8 reference").unwrap();
++                let candidate_values = host_read_f32(&candidate, "tiled Q8 candidate").unwrap();
++                let repeat_values = host_read_f32(&repeat, "tiled Q8 repeat").unwrap();
+                 assert_eq!(
+-                    candidate
++                    candidate_values
+                         .iter()
+                         .map(|value| value.to_bits())
+                         .collect::<Vec<_>>(),
+-                    reference
++                    reference_values
+                         .iter()
+                         .map(|value| value.to_bits())
+                         .collect::<Vec<_>>(),
+                     "N={n_tokens} T={token_tile} candidate"
+                 );
+                 assert_eq!(
+-                    repeat
++                    repeat_values
+                         .iter()
+                         .map(|value| value.to_bits())
+                         .collect::<Vec<_>>(),
+-                    reference
++                    reference_values
+                         .iter()
+                         .map(|value| value.to_bits())
+                         .collect::<Vec<_>>(),
+                     "N={n_tokens} T={token_tile} repeat"
+                 );
+-                assert_grouped_guards("tiled Q8 reference", &reference);
+-                assert_grouped_guards("tiled Q8 candidate", &candidate);
+-                assert_grouped_guards("tiled Q8 repeat", &repeat);
+             }
+         }
+*** End Patch
+
+===== PATCH 05 | 2026-08-05 18:41:12 | prt_fd4168261001u3MFxr9F6haci8 =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+ struct PrefillAttentionScratch {
+@@
+     sparse_csa: PrefillSparseCsaScratch,
+ }
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum PackedAttentionOutputPolicy {
++    Current,
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    TokenTiledQ8 { token_tile: usize },
++}
+@@
+     fn encode_output(
+         &self,
+         ctx: &MetalContext,
+@@
+         output_b: &MetalTensor,
+         n_tokens: usize,
+     ) -> Result<MetalTensor, DeepSeekV4MetalError> {
++        self.encode_output_with_policy(
++            ctx,
++            enc,
++            attention,
++            output_a,
++            output_b,
++            n_tokens,
++            PackedAttentionOutputPolicy::Current,
++        )
++    }
++
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    fn encode_output_token_tiled_q8_for_test(
++        &self,
++        ctx: &MetalContext,
++        enc: &KernelEncoder,
++        attention: &MetalTensor,
++        output_a: &MetalTensor,
++        output_b: &MetalTensor,
++        n_tokens: usize,
++        token_tile: usize,
++    ) -> Result<MetalTensor, DeepSeekV4MetalError> {
++        self.encode_output_with_policy(
++            ctx,
++            enc,
++            attention,
++            output_a,
++            output_b,
++            n_tokens,
++            PackedAttentionOutputPolicy::TokenTiledQ8 { token_tile },
++        )
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    fn encode_output_with_policy(
++        &self,
++        ctx: &MetalContext,
++        enc: &KernelEncoder,
++        attention: &MetalTensor,
++        output_a: &MetalTensor,
++        output_b: &MetalTensor,
++        n_tokens: usize,
++        policy: PackedAttentionOutputPolicy,
++    ) -> Result<MetalTensor, DeepSeekV4MetalError> {
+         require_serial(enc, "deepseek_v4_attention_output_batch")?;
+         checked_token_count(n_tokens)?;
+@@
+             vec![config.hidden_size as u64, n_tokens as u64],
+             "packed attention output",
+         )?;
++
++        #[cfg(all(test, feature = "dsv4-diagnostics"))]
++        if let PackedAttentionOutputPolicy::TokenTiledQ8 { token_tile } = policy {
++            if output_a.dtype != GgmlType::Q8_0 || output_b.dtype != GgmlType::Q8_0 {
++                return invalid(format!(
++                    "token-tiled packed attention output requires Q8_0/Q8_0 weights, got {:?}/{:?}",
++                    output_a.dtype, output_b.dtype
++                ));
++            }
++            crate::metal::encode_mat_vec_q8_0_token_tiled_f32(
++                ctx,
++                enc,
++                output_a,
++                attention,
++                &low_rank,
++                crate::metal::MatVecQ8TokenTiledConfig {
++                    n_in: dims.group_width,
++                    n_out: config.output_rank,
++                    n_tokens,
++                    token_tile,
++                    group_count: config.group_count,
++                    x_token_stride: dims.query_width,
++                    y_token_stride: dims.low_rank_width,
++                    x_group_stride: dims.group_width,
++                    y_group_stride: config.output_rank,
++                },
++            )?;
++            crate::metal::encode_mat_vec_q8_0_token_tiled_f32(
++                ctx,
++                enc,
++                output_b,
++                &low_rank,
++                &output,
++                crate::metal::MatVecQ8TokenTiledConfig {
++                    n_in: dims.low_rank_width,
++                    n_out: config.hidden_size,
++                    n_tokens,
++                    token_tile,
++                    group_count: 1,
++                    x_token_stride: dims.low_rank_width,
++                    y_token_stride: config.hidden_size,
++                    x_group_stride: 0,
++                    y_group_stride: 0,
++                },
++            )?;
++            return Ok(output);
++        }
++
+         let group_input = f32_prefix(
+             &self.group_input,
+*** End Patch
+
+===== PATCH 06 | 2026-08-05 18:41:42 | prt_fd416f6cf001GA06HKS5eY54cB =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+         let output = f32_prefix(
+             &self.output,
+             vec![config.hidden_size as u64, n_tokens as u64],
+             "packed attention output",
+         )?;
++
++        #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
++        let _ = policy;
+ 
+         #[cfg(all(test, feature = "dsv4-diagnostics"))]
+*** End Patch
+
+===== PATCH 07 | 2026-08-05 18:44:06 | prt_fd4192a61001lVgsQJMzNFXfJd =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+     fn q8_token_tiled_gemv_preserves_grouped_singleton_bits_and_guards() {
+@@
+         assert!(prefix.iter().all(|&byte| byte == 0xa5));
+         assert!(suffix.iter().all(|&byte| byte == 0x5a));
+     }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "production-shape Q8 output differential and timing falsifier"]
++    fn q8_token_tiled_attention_output_production_shape_packet() {
++        #[derive(Clone, Copy, Debug)]
++        enum Variant {
++            Current,
++            Tiled4,
++            Tiled8,
++        }
++
++        fn q8_weight(
++            ctx: &MetalContext,
++            n_in: usize,
++            n_out: usize,
++            seed: usize,
++        ) -> MetalTensor {
++            let blocks = n_in * n_out / 32;
++            let mut payload = vec![0u8; blocks * 34];
++            for block in 0..blocks {
++                let start = block * 34;
++                let scale = half::f16::from_f32(0.003 + ((block + seed) % 19) as f32 * 0.0002);
++                payload[start..start + 2].copy_from_slice(&scale.to_bits().to_le_bytes());
++                for index in 0..32 {
++                    payload[start + 2 + index] =
++                        (((block * 13 + index * 17 + seed * 7) % 127) as i8 - 63) as u8;
++                }
++            }
++            MetalTensor::from_bytes(
++                ctx,
++                &payload,
++                vec![n_in as u64, n_out as u64],
++                GgmlType::Q8_0,
++            )
++            .unwrap()
++        }
++
++        fn execute(
++            ctx: &MetalContext,
++            scratch: &PrefillAttentionScratch,
++            attention: &MetalTensor,
++            output_a: &MetalTensor,
++            output_b: &MetalTensor,
++            n_tokens: usize,
++            variant: Variant,
++        ) -> f64 {
++            let command = ctx.queue.commandBuffer().unwrap();
++            let encoder = KernelEncoder::begin(&command);
++            match variant {
++                Variant::Current => scratch
++                    .encode_output(
++                        ctx, &encoder, attention, output_a, output_b, n_tokens,
++                    )
++                    .unwrap(),
++                Variant::Tiled4 => scratch
++                    .encode_output_token_tiled_q8_for_test(
++                        ctx, &encoder, attention, output_a, output_b, n_tokens, 4,
++                    )
++                    .unwrap(),
++                Variant::Tiled8 => scratch
++                    .encode_output_token_tiled_q8_for_test(
++                        ctx, &encoder, attention, output_a, output_b, n_tokens, 8,
++                    )
++                    .unwrap(),
++            };
++            encoder.end();
++            command.commit();
++            command.waitUntilCompleted();
++            assert!(
++                command.error().is_none(),
++                "{variant:?} command failed: {:?}",
++                command.error()
++            );
++            (command.GPUEndTime() - command.GPUStartTime()) * 1e3
++        }
++
++        fn median(values: &[f64]) -> f64 {
++            let mut values = values.to_vec();
++            values.sort_by(f64::total_cmp);
++            (values[values.len() / 2 - 1] + values[values.len() / 2]) * 0.5
++        }
++
++        fn bits(values: &[f32]) -> Vec<u32> {
++            values.iter().map(|value| value.to_bits()).collect()
++        }
++
++        let Ok(ctx) = MetalContext::new() else {
++            return;
++        };
++        let output_a = q8_weight(&ctx, GROUP_WIDTH, LOW_RANK_WIDTH, 3);
++        let output_b = q8_weight(&ctx, LOW_RANK_WIDTH, DEEPSEEK_V4_HIDDEN_SIZE, 11);
++        let attention_values = (0..QUERY_WIDTH * DEEPSEEK_V4_PREFILL_MAX_TOKENS)
++            .map(|index| ((index * 31 + index / 11 + 5) % 257) as f32 * 0.004 - 0.51)
++            .collect::<Vec<_>>();
++        let attention = MetalTensor::from_bytes(
++            &ctx,
++            bytemuck::cast_slice(&attention_values),
++            vec![
++                QUERY_WIDTH as u64,
++                DEEPSEEK_V4_PREFILL_MAX_TOKENS as u64,
++            ],
++            GgmlType::F32,
++        )
++        .unwrap();
++        let scratch = DeepSeekV4PrefillScratch::new(
++            &ctx,
++            DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS,
++        )
++        .unwrap()
++        .attention;
++
++        for n_tokens in [12, 128] {
++            let attention = f32_prefix(
++                &attention,
++                vec![QUERY_WIDTH as u64, n_tokens as u64],
++                "production-shape Q8 attention input",
++            )
++            .unwrap();
++            execute(
++                &ctx,
++                &scratch,
++                &attention,
++                &output_a,
++                &output_b,
++                n_tokens,
++                Variant::Current,
++            );
++            let low_rank = f32_prefix(
++                &scratch.low_rank,
++                vec![LOW_RANK_WIDTH as u64, n_tokens as u64],
++                "production-shape Q8 low rank",
++            )
++            .unwrap();
++            let output = f32_prefix(
++                &scratch.output,
++                vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, n_tokens as u64],
++                "production-shape Q8 output",
++            )
++            .unwrap();
++            let reference_low = bits(&host_read_f32(&low_rank, "reference low rank").unwrap());
++            let reference_output = bits(&host_read_f32(&output, "reference output").unwrap());
++            for variant in [Variant::Tiled4, Variant::Tiled8] {
++                execute(
++                    &ctx,
++                    &scratch,
++                    &attention,
++                    &output_a,
++                    &output_b,
++                    n_tokens,
++                    variant,
++                );
++                assert_eq!(
++                    bits(&host_read_f32(&low_rank, "candidate low rank").unwrap()),
++                    reference_low,
++                    "N={n_tokens} {variant:?} low rank"
++                );
++                assert_eq!(
++                    bits(&host_read_f32(&output, "candidate output").unwrap()),
++                    reference_output,
++                    "N={n_tokens} {variant:?} output"
++                );
++            }
++
++            for variant in [Variant::Current, Variant::Tiled4, Variant::Tiled8] {
++                execute(
++                    &ctx,
++                    &scratch,
++                    &attention,
++                    &output_a,
++                    &output_b,
++                    n_tokens,
++                    variant,
++                );
++            }
++            let mut current_ms = Vec::with_capacity(6);
++            let mut tiled4_ms = Vec::with_capacity(6);
++            let mut tiled8_ms = Vec::with_capacity(6);
++            for order in [
++                [Variant::Current, Variant::Tiled4, Variant::Tiled8],
++                [Variant::Tiled8, Variant::Tiled4, Variant::Current],
++            ] {
++                for _ in 0..3 {
++                    for variant in order {
++                        let elapsed = execute(
++                            &ctx,
++                            &scratch,
++                            &attention,
++                            &output_a,
++                            &output_b,
++                            n_tokens,
++                            variant,
++                        );
++                        match variant {
++                            Variant::Current => current_ms.push(elapsed),
++                            Variant::Tiled4 => tiled4_ms.push(elapsed),
++                            Variant::Tiled8 => tiled8_ms.push(elapsed),
++                        }
++                    }
++                }
++            }
++            let current_median = median(&current_ms);
++            let tiled4_median = median(&tiled4_ms);
++            let tiled8_median = median(&tiled8_ms);
++            eprintln!(
++                "deepseek_v4 q8_output_tiled n={n_tokens} current_ms={current_ms:?} tiled4_ms={tiled4_ms:?} tiled8_ms={tiled8_ms:?} current_median_ms={current_median:.3} tiled4_median_ms={tiled4_median:.3} tiled8_median_ms={tiled8_median:.3} tiled4_saving={:.6} tiled8_saving={:.6}",
++                1.0 - tiled4_median / current_median,
++                1.0 - tiled8_median / current_median,
++            );
++        }
++    }
+ }
+*** End Patch
+
+===== PATCH 08 | 2026-08-05 18:45:07 | prt_fd41a1666001ByAt1nlf4q3Kux =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+-        let scratch = DeepSeekV4PrefillScratch::new(&ctx, DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS)
++        let scratch = DeepSeekV4PrefillScratch::new(&ctx, DEEPSEEK_V4_CSA_TOP_K)
+*** End Patch
+
+===== PATCH 09 | 2026-08-05 18:47:22 | prt_fd41c2730001kQU3R94vBQ2dFG =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/kernels/mat_vec_q8_0.metal
+@@
+ kernel void kernel_mat_vec_q8_0_f32_lcpp_batch(
+@@
+     }
+ }
++
++kernel void kernel_mat_vec_q8_0_f32_lcpp_mapped_batch(
++        constant mat_vec_q8_0_tiled_args & args   [[buffer(0)]],
++        device const uchar               * weight [[buffer(1)]],
++        device const float               * x      [[buffer(2)]],
++        device       float               * y      [[buffer(3)]],
++        threadgroup  float               * shmem  [[threadgroup(0)]],
++        uint3  tgpig [[threadgroup_position_in_grid]],
++        ushort sgitg [[simdgroup_index_in_threadgroup]],
++        ushort tiisg [[thread_index_in_simdgroup]]) {
++    constexpr ushort NW = 32;
++    constexpr ushort NQ = NQ_Q80;
++    constexpr ushort NR0 = NR0_Q80_LCPP;
++    constexpr ushort NSG = NSG_Q80_LCPP;
++
++    const uint first_row = tgpig.x * NR0;
++    if (first_row >= args.n_out || tgpig.y >= args.n_tokens) return;
++    weight += (ulong)tgpig.z * args.weight_group_stride_bytes;
++    x += (ulong)tgpig.z * args.x_group_stride
++        + (ulong)tgpig.y * args.x_token_stride;
++    y += (ulong)tgpig.z * args.y_group_stride
++        + (ulong)tgpig.y * args.y_token_stride;
++
++    const uint nb = args.n_in / QK8_0;
++    const ushort ix = tiisg / (NW / NQ);
++    const ushort il = tiisg % (NW / NQ);
++    const uint ib0 = sgitg * NQ + ix;
++    const ulong row_stride_bytes = (ulong)nb * Q8_0_BYTES;
++    device const uchar * row0 = weight + (ulong)first_row * row_stride_bytes;
++    device const float * xb = x + (ulong)ib0 * QK8_0 + (ulong)il * NQ;
++
++    float sumf[NR0] = {0.0f, 0.0f};
++    float xv[NQ];
++    for (uint ib = ib0; ib < nb; ib += NSG * NQ) {
++        for (ushort i = 0; i < NQ; ++i) {
++            xv[i] = xb[i];
++        }
++        for (ushort row = 0; row < NR0; ++row) {
++            if (first_row + row >= args.n_out) break;
++            device const uchar * blk = row0
++                + (ulong)row * row_stride_bytes
++                + (ulong)ib * Q8_0_BYTES;
++            device const half   * dh = (device const half *)blk;
++            device const int8_t * qs = (device const int8_t *)(blk + 2) + il * NQ;
++            float sumq = 0.0f;
++            for (ushort i = 0; i < NQ; ++i) {
++                sumq += (float)qs[i] * xv[i];
++            }
++            sumf[row] += sumq * (float)dh[0];
++        }
++        xb += (ulong)NSG * NQ * QK8_0;
++    }
++
++    for (ushort row = 0; row < NR0; ++row) {
++        threadgroup float * row_shmem = shmem + NW * row;
++        if (sgitg == 0) {
++            row_shmem[tiisg] = 0.0f;
++        }
++        sumf[row] = simd_sum(sumf[row]);
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    for (ushort row = 0; row < NR0; ++row) {
++        threadgroup float * row_shmem = shmem + NW * row;
++        if (tiisg == 0) {
++            row_shmem[sgitg] = sumf[row];
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    for (ushort row = 0; row < NR0 && first_row + row < args.n_out; ++row) {
++        threadgroup float * row_shmem = shmem + NW * row;
++        const float total = simd_sum(row_shmem[tiisg]);
++        if (tiisg == 0 && sgitg == 0) {
++            y[first_row + row] = total;
++        }
++    }
++}
+ 
+ template <ushort NT>
+*** End Patch
+
+===== PATCH 10 | 2026-08-05 18:47:44 | prt_fd41c7df9001WtyZTYqVbIW3IF =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/metal.rs
+@@
+         || n_tokens == 0
+         || group_count == 0
+         || !n_in.is_multiple_of(32)
+-        || !matches!(token_tile, 4 | 8)
++        || !matches!(token_tile, 1 | 4 | 8)
+     {
+         return Err(bad_shape(format!(
+-            "requires nonzero dimensions/groups, n_in divisible by 32, and token_tile 4 or 8; got n_in={n_in} n_out={n_out} n_tokens={n_tokens} groups={group_count} tile={token_tile}"
++            "requires nonzero dimensions/groups, n_in divisible by 32, and token_tile 1, 4, or 8; got n_in={n_in} n_out={n_out} n_tokens={n_tokens} groups={group_count} tile={token_tile}"
+         )));
+@@
+     let pso = ctx.pipeline(match token_tile {
++        1 => "kernel_mat_vec_q8_0_f32_lcpp_mapped_batch",
+         4 => "kernel_mat_vec_q8_0_f32_lcpp_t4",
+         8 => "kernel_mat_vec_q8_0_f32_lcpp_t8",
+*** End Patch
+
+===== PATCH 11 | 2026-08-05 18:47:53 | prt_fd41c9f2f001CIyZTE4psq8vpd =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+-            for token_tile in [4, 8] {
++            for token_tile in [1, 4, 8] {
+*** End Patch
+
+===== PATCH 12 | 2026-08-05 18:48:03 | prt_fd41cc72f001SZCclNUL3Xcda4 =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+         #[derive(Clone, Copy, Debug)]
+         enum Variant {
+             Current,
++            Mapped,
+             Tiled4,
+             Tiled8,
+@@
+                 Variant::Current => scratch
+                     .encode_output(ctx, &encoder, attention, output_a, output_b, n_tokens)
+                     .unwrap(),
++                Variant::Mapped => scratch
++                    .encode_output_token_tiled_q8_for_test(
++                        ctx, &encoder, attention, output_a, output_b, n_tokens, 1,
++                    )
++                    .unwrap(),
+                 Variant::Tiled4 => scratch
+@@
+-            for variant in [Variant::Tiled4, Variant::Tiled8] {
++            for variant in [Variant::Mapped, Variant::Tiled4, Variant::Tiled8] {
+@@
+-            for variant in [Variant::Current, Variant::Tiled4, Variant::Tiled8] {
++            for variant in [
++                Variant::Current,
++                Variant::Mapped,
++                Variant::Tiled4,
++                Variant::Tiled8,
++            ] {
+@@
+             }
+             let mut current_ms = Vec::with_capacity(6);
++            let mut mapped_ms = Vec::with_capacity(6);
+             let mut tiled4_ms = Vec::with_capacity(6);
+             let mut tiled8_ms = Vec::with_capacity(6);
+             for order in [
+-                [Variant::Current, Variant::Tiled4, Variant::Tiled8],
+-                [Variant::Tiled8, Variant::Tiled4, Variant::Current],
++                [
++                    Variant::Current,
++                    Variant::Mapped,
++                    Variant::Tiled4,
++                    Variant::Tiled8,
++                ],
++                [
++                    Variant::Tiled8,
++                    Variant::Tiled4,
++                    Variant::Mapped,
++                    Variant::Current,
++                ],
+             ] {
+@@
+                         match variant {
+                             Variant::Current => current_ms.push(elapsed),
++                            Variant::Mapped => mapped_ms.push(elapsed),
+                             Variant::Tiled4 => tiled4_ms.push(elapsed),
+@@
+             }
+             let current_median = median(&current_ms);
++            let mapped_median = median(&mapped_ms);
+             let tiled4_median = median(&tiled4_ms);
+             let tiled8_median = median(&tiled8_ms);
+             eprintln!(
+-                "deepseek_v4 q8_output_tiled n={n_tokens} current_ms={current_ms:?} tiled4_ms={tiled4_ms:?} tiled8_ms={tiled8_ms:?} current_median_ms={current_median:.3} tiled4_median_ms={tiled4_median:.3} tiled8_median_ms={tiled8_median:.3} tiled4_saving={:.6} tiled8_saving={:.6}",
++                "deepseek_v4 q8_output_tiled n={n_tokens} current_ms={current_ms:?} mapped_ms={mapped_ms:?} tiled4_ms={tiled4_ms:?} tiled8_ms={tiled8_ms:?} current_median_ms={current_median:.3} mapped_median_ms={mapped_median:.3} tiled4_median_ms={tiled4_median:.3} tiled8_median_ms={tiled8_median:.3} mapped_saving={:.6} tiled4_saving={:.6} tiled8_saving={:.6}",
++                1.0 - mapped_median / current_median,
+                 1.0 - tiled4_median / current_median,
+*** End Patch
+
+===== PATCH 13 | 2026-08-05 18:50:48 | prt_fd41f4c02001akTSpq5KetrluX =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+ enum PackedAttentionOutputPolicy {
+     Current,
+     #[cfg(all(test, feature = "dsv4-diagnostics"))]
+     TokenTiledQ8 {
+         token_tile: usize,
+     },
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    MatrixQ8,
+ }
+@@
+     fn encode_output_token_tiled_q8_for_test(
+@@
+         )
+     }
++
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    fn encode_output_matrix_q8_for_test(
++        &self,
++        ctx: &MetalContext,
++        enc: &KernelEncoder,
++        attention: &MetalTensor,
++        output_a: &MetalTensor,
++        output_b: &MetalTensor,
++        n_tokens: usize,
++    ) -> Result<MetalTensor, DeepSeekV4MetalError> {
++        self.encode_output_with_policy(
++            ctx,
++            enc,
++            attention,
++            output_a,
++            output_b,
++            n_tokens,
++            PackedAttentionOutputPolicy::MatrixQ8,
++        )
++    }
+@@
+         #[cfg(all(test, feature = "dsv4-diagnostics"))]
+         if let PackedAttentionOutputPolicy::TokenTiledQ8 { token_tile } = policy {
+@@
+             return Ok(output);
+         }
++
++        #[cfg(all(test, feature = "dsv4-diagnostics"))]
++        if policy == PackedAttentionOutputPolicy::MatrixQ8
++            && (output_a.dtype != GgmlType::Q8_0 || output_b.dtype != GgmlType::Q8_0)
++        {
++            return invalid(format!(
++                "matrix packed attention output requires Q8_0/Q8_0 weights, got {:?}/{:?}",
++                output_a.dtype, output_b.dtype
++            ));
++        }
+@@
+             )?;
+             let weight = group_weight_view(output_a, dims.group_width, config.output_rank, group)?;
+-            encode_batch_projection(
+-                ctx,
+-                enc,
+-                &weight,
+-                &group_input,
+-                &group_output,
+-                dims.group_width,
+-                config.output_rank,
+-                n_tokens,
+-                "packed grouped output A",
+-            )?;
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            if policy == PackedAttentionOutputPolicy::MatrixQ8 {
++                crate::metal::encode_mat_mat_q8_0_f32(
++                    ctx,
++                    enc,
++                    &weight,
++                    &group_input,
++                    &group_output,
++                    dims.group_width,
++                    config.output_rank,
++                    n_tokens,
++                )?;
++            } else {
++                encode_batch_projection(
++                    ctx,
++                    enc,
++                    &weight,
++                    &group_input,
++                    &group_output,
++                    dims.group_width,
++                    config.output_rank,
++                    n_tokens,
++                    "packed grouped output A",
++                )?;
++            }
++            #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
++            encode_batch_projection(
++                ctx,
++                enc,
++                &weight,
++                &group_input,
++                &group_output,
++                dims.group_width,
++                config.output_rank,
++                n_tokens,
++                "packed grouped output A",
++            )?;
+@@
+-        encode_batch_projection(
+-            ctx,
+-            enc,
+-            output_b,
+-            &low_rank,
+-            &output,
+-            dims.low_rank_width,
+-            config.hidden_size,
+-            n_tokens,
+-            "packed output B",
+-        )?;
++        #[cfg(all(test, feature = "dsv4-diagnostics"))]
++        if policy == PackedAttentionOutputPolicy::MatrixQ8 {
++            crate::metal::encode_mat_mat_q8_0_f32(
++                ctx,
++                enc,
++                output_b,
++                &low_rank,
++                &output,
++                dims.low_rank_width,
++                config.hidden_size,
++                n_tokens,
++            )?;
++        } else {
++            encode_batch_projection(
++                ctx,
++                enc,
++                output_b,
++                &low_rank,
++                &output,
++                dims.low_rank_width,
++                config.hidden_size,
++                n_tokens,
++                "packed output B",
++            )?;
++        }
++        #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
++        encode_batch_projection(
++            ctx,
++            enc,
++            output_b,
++            &low_rank,
++            &output,
++            dims.low_rank_width,
++            config.hidden_size,
++            n_tokens,
++            "packed output B",
++        )?;
+*** End Patch
+
+===== PATCH 14 | 2026-08-05 18:51:22 | prt_fd41fd06e001XJXArwgg5KlGii =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+         enum Variant {
+             Current,
+             Mapped,
+             Tiled4,
+             Tiled8,
++            Matrix,
+@@
+                 Variant::Tiled8 => scratch
+                     .encode_output_token_tiled_q8_for_test(
+                         ctx, &encoder, attention, output_a, output_b, n_tokens, 8,
+                     )
+                     .unwrap(),
++                Variant::Matrix => scratch
++                    .encode_output_matrix_q8_for_test(
++                        ctx, &encoder, attention, output_a, output_b, n_tokens,
++                    )
++                    .unwrap(),
+@@
+         fn bits(values: &[f32]) -> Vec<u32> {
+             values.iter().map(|value| value.to_bits()).collect()
+         }
++
++        fn differential(actual: &[f32], expected: &[f32]) -> (f64, f64, f32) {
++            let mut dot = 0.0f64;
++            let mut actual_norm = 0.0f64;
++            let mut expected_norm = 0.0f64;
++            let mut error = 0.0f64;
++            let mut max_abs = 0.0f32;
++            for (&actual, &expected) in actual.iter().zip(expected) {
++                let actual_f64 = actual as f64;
++                let expected_f64 = expected as f64;
++                let delta = actual - expected;
++                dot += actual_f64 * expected_f64;
++                actual_norm += actual_f64 * actual_f64;
++                expected_norm += expected_f64 * expected_f64;
++                error += (delta as f64) * (delta as f64);
++                max_abs = max_abs.max(delta.abs());
++            }
++            let cosine = dot / (actual_norm * expected_norm).sqrt();
++            let relative_rms = (error / expected_norm).sqrt();
++            (cosine, relative_rms, max_abs)
++        }
+@@
+-            let reference_low = bits(&host_read_f32(&low_rank, "reference low rank").unwrap());
+-            let reference_output = bits(&host_read_f32(&output, "reference output").unwrap());
++            let reference_low_values = host_read_f32(&low_rank, "reference low rank").unwrap();
++            let reference_output_values = host_read_f32(&output, "reference output").unwrap();
++            let reference_low = bits(&reference_low_values);
++            let reference_output = bits(&reference_output_values);
+@@
+                     "N={n_tokens} {variant:?} output"
+                 );
+             }
++            execute(
++                &ctx,
++                &scratch,
++                &attention,
++                &output_a,
++                &output_b,
++                n_tokens,
++                Variant::Matrix,
++            );
++            let matrix_low = host_read_f32(&low_rank, "matrix low rank").unwrap();
++            let matrix_output = host_read_f32(&output, "matrix output").unwrap();
++            let low_diff = differential(&matrix_low, &reference_low_values);
++            let output_diff = differential(&matrix_output, &reference_output_values);
++            assert!(
++                low_diff.0 >= 0.999 && output_diff.0 >= 0.999,
++                "N={n_tokens} matrix cosine missed gate: low={low_diff:?} output={output_diff:?}"
++            );
++            eprintln!(
++                "deepseek_v4 q8_output_matrix_diff n={n_tokens} low_cosine={:.9} low_rel_rms={:.9} low_max_abs={:.9} output_cosine={:.9} output_rel_rms={:.9} output_max_abs={:.9}",
++                low_diff.0,
++                low_diff.1,
++                low_diff.2,
++                output_diff.0,
++                output_diff.1,
++                output_diff.2,
++            );
+ 
+             for variant in [
+                 Variant::Current,
+                 Variant::Mapped,
+                 Variant::Tiled4,
+                 Variant::Tiled8,
++                Variant::Matrix,
+             ] {
+@@
+             let mut mapped_ms = Vec::with_capacity(6);
+             let mut tiled4_ms = Vec::with_capacity(6);
+             let mut tiled8_ms = Vec::with_capacity(6);
++            let mut matrix_ms = Vec::with_capacity(6);
+             for order in [
+                 [
+                     Variant::Current,
+                     Variant::Mapped,
+                     Variant::Tiled4,
+                     Variant::Tiled8,
++                    Variant::Matrix,
+                 ],
+                 [
++                    Variant::Matrix,
+                     Variant::Tiled8,
+                     Variant::Tiled4,
+                     Variant::Mapped,
+@@
+                             Variant::Mapped => mapped_ms.push(elapsed),
+                             Variant::Tiled4 => tiled4_ms.push(elapsed),
+                             Variant::Tiled8 => tiled8_ms.push(elapsed),
++                            Variant::Matrix => matrix_ms.push(elapsed),
+@@
+             let tiled4_median = median(&tiled4_ms);
+             let tiled8_median = median(&tiled8_ms);
++            let matrix_median = median(&matrix_ms);
+             eprintln!(
+-                "deepseek_v4 q8_output_tiled n={n_tokens} current_ms={current_ms:?} mapped_ms={mapped_ms:?} tiled4_ms={tiled4_ms:?} tiled8_ms={tiled8_ms:?} current_median_ms={current_median:.3} mapped_median_ms={mapped_median:.3} tiled4_median_ms={tiled4_median:.3} tiled8_median_ms={tiled8_median:.3} mapped_saving={:.6} tiled4_saving={:.6} tiled8_saving={:.6}",
++                "deepseek_v4 q8_output_tiled n={n_tokens} current_ms={current_ms:?} mapped_ms={mapped_ms:?} tiled4_ms={tiled4_ms:?} tiled8_ms={tiled8_ms:?} matrix_ms={matrix_ms:?} current_median_ms={current_median:.3} mapped_median_ms={mapped_median:.3} tiled4_median_ms={tiled4_median:.3} tiled8_median_ms={tiled8_median:.3} matrix_median_ms={matrix_median:.3} mapped_saving={:.6} tiled4_saving={:.6} tiled8_saving={:.6} matrix_saving={:.6}",
+                 1.0 - mapped_median / current_median,
+                 1.0 - tiled4_median / current_median,
+                 1.0 - tiled8_median / current_median,
++                1.0 - matrix_median / current_median,
+             );
+*** End Patch
+
+===== PATCH 15 | 2026-08-05 18:53:22 | prt_fd421a3af001N4BePIjggxgt6j =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+-        for n_tokens in [12, 128] {
++        for n_tokens in [12, 16, 31, 32, 33, 64, 128] {
+*** End Patch
+
+===== PATCH 16 | 2026-08-05 18:55:01 | prt_fd423265c001VEfUC7c017QAW2 =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+-        for n_tokens in [12, 16, 31, 32, 33, 64, 128] {
++        for n_tokens in [12, 128] {
+@@
+-        for n_tokens in [12, 128] {
++        for n_tokens in [12, 16, 31, 32, 33, 64, 128] {
+             let attention = f32_prefix(
+*** End Patch
+
+===== PATCH 17 | 2026-08-05 18:56:59 | prt_fd424f436001WkseD4WubcLWUB =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+     group_input: MetalTensor,
+     group_output: MetalTensor,
+     sparse_csa: PrefillSparseCsaScratch,
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    matrix_q8_invocations: Cell<u32>,
+@@
+                 sparse_csa: PrefillSparseCsaScratch {
+@@
+                     status: MetalTensor::zeros_i32(ctx, vec![n])?,
+                 },
++                #[cfg(all(test, feature = "dsv4-diagnostics"))]
++                matrix_q8_invocations: Cell::new(0),
+             },
+@@
+         if policy == PackedAttentionOutputPolicy::MatrixQ8
+             && (output_a.dtype != GgmlType::Q8_0 || output_b.dtype != GgmlType::Q8_0)
+@@
+                 output_a.dtype, output_b.dtype
+             ));
+         }
++        #[cfg(all(test, feature = "dsv4-diagnostics"))]
++        if policy == PackedAttentionOutputPolicy::MatrixQ8 {
++            self.matrix_q8_invocations.set(
++                self.matrix_q8_invocations
++                    .get()
++                    .checked_add(1)
++                    .ok_or_else(|| {
++                        DeepSeekV4MetalError::Invalid(
++                            "matrix Q8 attention output invocation count overflow".into(),
++                        )
++                    })?,
++            );
++        }
+*** End Patch
+
+===== PATCH 18 | 2026-08-05 18:57:29 | prt_fd4256995001yVy3GPRHLlk7XD =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+             emit_logits,
+             route_policy,
+             PackedExpertPolicy::Current,
++            PackedAttentionOutputPolicy::Current,
+             None,
+             &mut |_| {},
+@@
+             emit_logits,
+             PackedRoutePolicy::Cpu,
+             expert_policy,
++            PackedAttentionOutputPolicy::Current,
+             None,
+             &mut |_| {},
+         )
+     }
++
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    pub(super) fn execute_packed_tokens_with_attention_output_policy_for_test(
++        &mut self,
++        ctx: &MetalContext,
++        token_ids: &[u32],
++        emit_logits: bool,
++        matrix_q8: bool,
++    ) -> Result<(), DeepSeekV4MetalError> {
++        let attention_output_policy = if matrix_q8 && token_ids.len() >= 32 {
++            PackedAttentionOutputPolicy::MatrixQ8
++        } else {
++            PackedAttentionOutputPolicy::Current
++        };
++        self.execute_packed_tokens_with_progress_policy(
++            ctx,
++            token_ids,
++            emit_logits,
++            PackedRoutePolicy::Cpu,
++            PackedExpertPolicy::GroupedIq2XsIq3Xxs,
++            attention_output_policy,
++            None,
++            &mut |_| {},
++        )
++    }
+@@
+             emit_logits,
+             PackedRoutePolicy::Cpu,
+             PackedExpertPolicy::GroupedIq2XsIq3Xxs,
++            PackedAttentionOutputPolicy::Current,
+             Some(&mut recorder),
+             &mut |_| {},
+@@
+     pub(super) fn packed_grouped_iq3_invocations_for_test(&self) -> u32 {
+         self.prefill.moe.grouped_iq3_invocations.get()
+     }
++
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    pub(super) fn packed_matrix_q8_output_invocations_for_test(&self) -> u32 {
++        self.prefill.attention.matrix_q8_invocations.get()
++    }
+@@
+             PackedRoutePolicy::Cpu,
+             expert_policy,
+             #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            PackedAttentionOutputPolicy::Current,
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+             None,
+             layer_completed,
+@@
+         route_policy: PackedRoutePolicy,
+         expert_policy: PackedExpertPolicy,
++        #[cfg(all(test, feature = "dsv4-diagnostics"))] attention_output_policy: PackedAttentionOutputPolicy,
+         #[cfg(all(test, feature = "dsv4-diagnostics"))] stage_recorder: Option<
+             &mut PackedPrefillStageRecorder,
+@@
+             route_policy,
+             expert_policy,
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            attention_output_policy,
+             #[cfg(all(test, feature = "dsv4-diagnostics"))]
+             stage_recorder,
+@@
+         route_policy: PackedRoutePolicy,
+         expert_policy: PackedExpertPolicy,
++        #[cfg(all(test, feature = "dsv4-diagnostics"))] attention_output_policy: PackedAttentionOutputPolicy,
+         #[cfg(all(test, feature = "dsv4-diagnostics"))] mut stage_recorder: Option<
+*** End Patch
+
+===== PATCH 19 | 2026-08-05 18:58:00 | prt_fd425e0f90016weyBZeZDlEV59 =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+-                let attention_output = self.prefill.attention.encode_output(
++                #[cfg(all(test, feature = "dsv4-diagnostics"))]
++                let attention_output = self.prefill.attention.encode_output_with_policy(
++                    ctx,
++                    &encoder,
++                    &attention.attention,
++                    self.layer_tensor(layer, "attn_output_a.weight")?,
++                    self.layer_tensor(layer, "attn_output_b.weight")?,
++                    n_tokens,
++                    attention_output_policy,
++                )?;
++                #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
++                let attention_output = self.prefill.attention.encode_output(
+                     ctx,
+                     &encoder,
+*** End Patch
+
+===== PATCH 20 | 2026-08-05 18:58:32 | prt_fd4265e88001ridNLeN2MhyKjE =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+-    pub(super) fn execute_packed_tokens_with_attention_output_policy_for_test(
++    pub(super) fn execute_packed_tokens_with_attention_output_profile_for_test(
+         &mut self,
+         ctx: &MetalContext,
+         token_ids: &[u32],
+         emit_logits: bool,
+         matrix_q8: bool,
+-    ) -> Result<(), DeepSeekV4MetalError> {
++    ) -> Result<PackedPrefillStageProfile, DeepSeekV4MetalError> {
+         let attention_output_policy = if matrix_q8 && token_ids.len() >= 32 {
+             PackedAttentionOutputPolicy::MatrixQ8
+         } else {
+             PackedAttentionOutputPolicy::Current
+         };
++        let mut recorder = PackedPrefillStageRecorder::new(ctx, false)?;
+         self.execute_packed_tokens_with_progress_policy(
+             ctx,
+             token_ids,
+@@
+             PackedRoutePolicy::Cpu,
+             PackedExpertPolicy::GroupedIq2XsIq3Xxs,
+             attention_output_policy,
+-            None,
++            Some(&mut recorder),
+             &mut |_| {},
+-        )
++        )?;
++        recorder.resolve(ctx)
+     }
+*** End Patch
+
+===== PATCH 21 | 2026-08-05 18:58:51 | prt_fd426aa7400178MSs2O2Bn8XZD =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+     fn current_asset_packed_attention_split_attribution_packet() {
+@@
+         );
+     }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "requires the current 97.05 GiB DS4 asset"]
++    fn current_asset_packed_matrix_q8_output_probe() {
++        const CONTINUATION_TOKEN: u32 = 35;
++
++        struct Evidence {
++            logits: Vec<f32>,
++            hidden: Vec<f32>,
++            causal_digest: [u8; 32],
++            prefix_digest: [u8; 32],
++            compatibility_digest: [u8; 32],
++            continuation_logits: Vec<f32>,
++            continuation_causal_digest: [u8; 32],
++            committed_tokens: Vec<u32>,
++            matrix_invocations: u32,
++            pre_expert_gpu_ms: f64,
++            wall_ms: f64,
++        }
++
++        fn bits(values: &[f32]) -> Vec<u32> {
++            values.iter().map(|value| value.to_bits()).collect()
++        }
++
++        fn digest_hex(digest: impl AsRef<[u8]>) -> String {
++            digest
++                .as_ref()
++                .iter()
++                .map(|byte| format!("{byte:02x}"))
++                .collect()
++        }
++
++        fn argmax(values: &[f32]) -> usize {
++            values
++                .iter()
++                .enumerate()
++                .max_by(|(left_index, left), (right_index, right)| {
++                    left.total_cmp(right)
++                        .then_with(|| right_index.cmp(left_index))
++                })
++                .unwrap()
++                .0
++        }
++
++        fn differential(actual: &[f32], expected: &[f32]) -> (f64, f64, f32) {
++            assert_eq!(actual.len(), expected.len());
++            let mut dot = 0.0f64;
++            let mut actual_norm = 0.0f64;
++            let mut expected_norm = 0.0f64;
++            let mut error = 0.0f64;
++            let mut max_abs = 0.0f32;
++            for (&actual, &expected) in actual.iter().zip(expected) {
++                let actual_f64 = actual as f64;
++                let expected_f64 = expected as f64;
++                let delta = actual - expected;
++                dot += actual_f64 * expected_f64;
++                actual_norm += actual_f64 * actual_f64;
++                expected_norm += expected_f64 * expected_f64;
++                error += (delta as f64) * (delta as f64);
++                max_abs = max_abs.max(delta.abs());
++            }
++            (
++                dot / (actual_norm * expected_norm).sqrt(),
++                (error / expected_norm).sqrt(),
++                max_abs,
++            )
++        }
++
++        fn drift(left: f64, right: f64) -> f64 {
++            2.0 * (left - right).abs() / (left + right)
++        }
++
++        fn execute(
++            ctx: &MetalContext,
++            residency: DeepSeekV4MetalResidency,
++            model_content_id: DeepSeekV4ModelContentId,
++            prefix: &[u32],
++            matrix_q8: bool,
++        ) -> (DeepSeekV4MetalResidency, Evidence) {
++            let mut session =
++                DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
++                    .expect("construct packed matrix-output session");
++            let started = std::time::Instant::now();
++            let profile = session
++                .execute_packed_tokens_with_attention_output_profile_for_test(
++                    ctx, prefix, true, matrix_q8,
++                )
++                .expect("execute packed matrix-output prefix");
++            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
++            assert!(!profile.sampled);
++            assert_eq!(profile.command_gpu_ms.len(), DEEPSEEK_V4_LAYER_COUNT);
++            let pre_expert_gpu_ms = profile.command_gpu_ms.iter().sum();
++            let logits = session
++                .copy_logits_f32()
++                .expect("copy packed matrix-output logits");
++            let hidden = host_read_f32(
++                session
++                    .final_normalized_hidden()
++                    .expect("packed matrix-output final hidden is visible"),
++                "packed matrix-output final hidden",
++            )
++            .expect("copy packed matrix-output hidden");
++            let snapshot = session
++                .capture_causal_snapshot()
++                .expect("capture packed matrix-output state");
++            let causal_digest = *snapshot.causal_digest();
++            let prefix_digest = *snapshot.prefix_digest();
++            let compatibility_digest = *snapshot.compatibility_digest().as_bytes();
++            session
++                .restore_causal_snapshot(&snapshot)
++                .expect("restore packed matrix-output state");
++            session
++                .forward_token(ctx, CONTINUATION_TOKEN)
++                .expect("continue packed matrix-output state");
++            let continuation_logits = session
++                .copy_logits_f32()
++                .expect("copy packed matrix-output continuation logits");
++            let continuation = session
++                .capture_causal_snapshot()
++                .expect("capture packed matrix-output continuation state");
++            let evidence = Evidence {
++                logits,
++                hidden,
++                causal_digest,
++                prefix_digest,
++                compatibility_digest,
++                continuation_logits,
++                continuation_causal_digest: *continuation.causal_digest(),
++                committed_tokens: session.committed_tokens().to_vec(),
++                matrix_invocations: session.packed_matrix_q8_output_invocations_for_test(),
++                pre_expert_gpu_ms,
++                wall_ms,
++            };
++            (session.into_residency(), evidence)
++        }
++
++        fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
++            assert_eq!(bits(&actual.logits), bits(&expected.logits), "{label} logits");
++            assert_eq!(bits(&actual.hidden), bits(&expected.hidden), "{label} hidden");
++            assert_eq!(actual.causal_digest, expected.causal_digest, "{label} causal");
++            assert_eq!(actual.prefix_digest, expected.prefix_digest, "{label} prefix");
++            assert_eq!(
++                actual.compatibility_digest, expected.compatibility_digest,
++                "{label} compatibility"
++            );
++            assert_eq!(
++                bits(&actual.continuation_logits),
++                bits(&expected.continuation_logits),
++                "{label} continuation logits"
++            );
++            assert_eq!(
++                actual.continuation_causal_digest, expected.continuation_causal_digest,
++                "{label} continuation causal"
++            );
++            assert_eq!(
++                actual.committed_tokens, expected.committed_tokens,
++                "{label} committed tokens"
++            );
++        }
++
++        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
++            .map(PathBuf::from)
++            .unwrap_or_else(|| {
++                PathBuf::from(
++                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
++                )
++            });
++        assert!(model_path.exists(), "missing current DS4 model");
++        let ctx = MetalContext::new().expect("create Metal context");
++        assert!(
++            prefill::packed_grouped_expert_enabled_for_test(&ctx),
++            "matrix-output probe requires the qualified grouped IQ2 default"
++        );
++        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
++        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 129)
++            .expect("plan packed matrix-output session");
++        let admitted = plan
++            .admit(ctx.memory_signals())
++            .expect("admit packed matrix-output session");
++        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
++            .expect("realize current DS4 residency");
++        let mut residency = realized.into_residency();
++
++        for n_tokens in [12usize, 32, 128] {
++            let prefix = (0..n_tokens)
++                .map(|index| [35, 201, 200, 34][index % 4])
++                .collect::<Vec<_>>();
++            let (next, control_before) =
++                execute(&ctx, residency, model_content_id, &prefix, false);
++            let (next, candidate_first) =
++                execute(&ctx, next, model_content_id, &prefix, true);
++            let (next, candidate_second) =
++                execute(&ctx, next, model_content_id, &prefix, true);
++            let (next, control_after) =
++                execute(&ctx, next, model_content_id, &prefix, false);
++            residency = next;
++
++            assert_exact("matrix-output controls", &control_after, &control_before);
++            assert_exact(
++                "matrix-output candidate repeat",
++                &candidate_second,
++                &candidate_first,
++            );
++            let expected_invocations = if n_tokens >= 32 {
++                DEEPSEEK_V4_LAYER_COUNT as u32
++            } else {
++                0
++            };
++            assert_eq!(control_before.matrix_invocations, 0);
++            assert_eq!(control_after.matrix_invocations, 0);
++            assert_eq!(candidate_first.matrix_invocations, expected_invocations);
++            assert_eq!(candidate_second.matrix_invocations, expected_invocations);
++
++            if n_tokens < 32 {
++                assert_exact("matrix-output threshold fallback", &candidate_first, &control_before);
++            } else {
++                assert_eq!(candidate_first.prefix_digest, control_before.prefix_digest);
++                assert_eq!(
++                    candidate_first.compatibility_digest,
++                    control_before.compatibility_digest
++                );
++                assert_eq!(candidate_first.committed_tokens, control_before.committed_tokens);
++                assert_ne!(bits(&candidate_first.logits), bits(&control_before.logits));
++            }
++
++            let logits_diff = differential(&candidate_first.logits, &control_before.logits);
++            let hidden_diff = differential(&candidate_first.hidden, &control_before.hidden);
++            let continuation_diff = differential(
++                &candidate_first.continuation_logits,
++                &control_before.continuation_logits,
++            );
++            let packed_argmax = argmax(&control_before.logits);
++            let candidate_packed_argmax = argmax(&candidate_first.logits);
++            let continuation_argmax = argmax(&control_before.continuation_logits);
++            let candidate_continuation_argmax = argmax(&candidate_first.continuation_logits);
++            let control_gpu_drift = drift(
++                control_before.pre_expert_gpu_ms,
++                control_after.pre_expert_gpu_ms,
++            );
++            let candidate_gpu_drift = drift(
++                candidate_first.pre_expert_gpu_ms,
++                candidate_second.pre_expert_gpu_ms,
++            );
++            let control_wall_drift = drift(control_before.wall_ms, control_after.wall_ms);
++            let candidate_wall_drift = drift(candidate_first.wall_ms, candidate_second.wall_ms);
++            let faster_control_gpu = control_before
++                .pre_expert_gpu_ms
++                .min(control_after.pre_expert_gpu_ms);
++            let candidate_gpu =
++                (candidate_first.pre_expert_gpu_ms + candidate_second.pre_expert_gpu_ms) * 0.5;
++            let faster_control_wall = control_before.wall_ms.min(control_after.wall_ms);
++            let candidate_wall = (candidate_first.wall_ms + candidate_second.wall_ms) * 0.5;
++            let gpu_saving = 1.0 - candidate_gpu / faster_control_gpu;
++            let wall_saving = 1.0 - candidate_wall / faster_control_wall;
++
++            eprintln!(
++                "deepseek_v4 packed_matrix_q8_output n={n_tokens} control_gpu_ms={:?} candidate_gpu_ms={:?} control_wall_ms={:?} candidate_wall_ms={:?} control_gpu_drift={control_gpu_drift:.6} candidate_gpu_drift={candidate_gpu_drift:.6} control_wall_drift={control_wall_drift:.6} candidate_wall_drift={candidate_wall_drift:.6} gpu_saving={gpu_saving:.6} wall_saving={wall_saving:.6} matrix_invocations={expected_invocations} packed_argmax={packed_argmax} candidate_packed_argmax={candidate_packed_argmax} continuation_argmax={continuation_argmax} candidate_continuation_argmax={candidate_continuation_argmax} logits_diff={logits_diff:?} hidden_diff={hidden_diff:?} continuation_diff={continuation_diff:?} control_logits_sha256={} candidate_logits_sha256={} control_causal={} candidate_causal={} control_continuation_causal={} candidate_continuation_causal={}",
++                [
++                    control_before.pre_expert_gpu_ms,
++                    control_after.pre_expert_gpu_ms
++                ],
++                [
++                    candidate_first.pre_expert_gpu_ms,
++                    candidate_second.pre_expert_gpu_ms
++                ],
++                [control_before.wall_ms, control_after.wall_ms],
++                [candidate_first.wall_ms, candidate_second.wall_ms],
++                digest_hex(Sha256::digest(bytemuck::cast_slice(&control_before.logits))),
++                digest_hex(Sha256::digest(bytemuck::cast_slice(&candidate_first.logits))),
++                digest_hex(control_before.causal_digest),
++                digest_hex(candidate_first.causal_digest),
++                digest_hex(control_before.continuation_causal_digest),
++                digest_hex(candidate_first.continuation_causal_digest),
++            );
++
++            assert_eq!(candidate_packed_argmax, packed_argmax);
++            assert_eq!(candidate_continuation_argmax, continuation_argmax);
++            for (label, diff) in [
++                ("logits", logits_diff),
++                ("hidden", hidden_diff),
++                ("continuation", continuation_diff),
++            ] {
++                assert!(
++                    diff.0 >= 0.999 && diff.1 <= 0.05,
++                    "N={n_tokens} {label} matrix-output differential exceeded probe envelope: {diff:?}"
++                );
++            }
++            if n_tokens == 128 {
++                assert!(control_gpu_drift <= 0.05);
++                assert!(candidate_gpu_drift <= 0.05);
++                assert!(control_wall_drift <= 0.05);
++                assert!(candidate_wall_drift <= 0.05);
++                assert!(gpu_saving >= 0.15);
++                assert!(wall_saving >= 0.05);
++            }
++        }
++        drop(residency);
++    }
+ 
+     #[cfg(feature = "dsv4-diagnostics")]
+*** End Patch
+
+===== PATCH 22 | 2026-08-05 19:02:41 | prt_fd42a2c40001JyjDnKbwso5BEO =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+     sparse_csa: PrefillSparseCsaScratch,
+     #[cfg(all(test, feature = "dsv4-diagnostics"))]
+-    matrix_q8_invocations: Cell<u32>,
++    matrix_q8_a_invocations: Cell<u32>,
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    matrix_q8_b_invocations: Cell<u32>,
+@@
+     TokenTiledQ8 {
+         token_tile: usize,
+     },
+     #[cfg(all(test, feature = "dsv4-diagnostics"))]
+-    MatrixQ8,
++    MatrixQ8 { output_a: bool, output_b: bool },
+@@
+                 },
+                 #[cfg(all(test, feature = "dsv4-diagnostics"))]
+-                matrix_q8_invocations: Cell::new(0),
++                matrix_q8_a_invocations: Cell::new(0),
++                #[cfg(all(test, feature = "dsv4-diagnostics"))]
++                matrix_q8_b_invocations: Cell::new(0),
+*** End Patch
+
+===== PATCH 23 | 2026-08-05 19:02:50 | prt_fd42a4ef2001XPXN8Lr9MQT22n =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+     fn encode_output_matrix_q8_for_test(
+@@
+         output_b: &MetalTensor,
+         n_tokens: usize,
++        matrix_a: bool,
++        matrix_b: bool,
+     ) -> Result<MetalTensor, DeepSeekV4MetalError> {
++        if !matrix_a && !matrix_b {
++            return invalid("matrix packed attention output requires at least one matrix stage");
++        }
+         self.encode_output_with_policy(
+@@
+             output_b,
+             n_tokens,
+-            PackedAttentionOutputPolicy::MatrixQ8,
++            PackedAttentionOutputPolicy::MatrixQ8 {
++                output_a: matrix_a,
++                output_b: matrix_b,
++            },
+         )
+@@
+-        #[cfg(all(test, feature = "dsv4-diagnostics"))]
+-        if policy == PackedAttentionOutputPolicy::MatrixQ8
+-            && (output_a.dtype != GgmlType::Q8_0 || output_b.dtype != GgmlType::Q8_0)
+-        {
++        #[cfg(all(test, feature = "dsv4-diagnostics"))]
++        let (matrix_a, matrix_b) = match policy {
++            PackedAttentionOutputPolicy::MatrixQ8 { output_a, output_b } => (output_a, output_b),
++            _ => (false, false),
++        };
++        #[cfg(all(test, feature = "dsv4-diagnostics"))]
++        if (matrix_a || matrix_b)
++            && (output_a.dtype != GgmlType::Q8_0 || output_b.dtype != GgmlType::Q8_0)
++        {
+             return invalid(format!(
+                 "matrix packed attention output requires Q8_0/Q8_0 weights, got {:?}/{:?}",
+                 output_a.dtype, output_b.dtype
+             ));
+         }
+         #[cfg(all(test, feature = "dsv4-diagnostics"))]
+-        if policy == PackedAttentionOutputPolicy::MatrixQ8 {
+-            self.matrix_q8_invocations.set(
+-                self.matrix_q8_invocations
+-                    .get()
+-                    .checked_add(1)
+-                    .ok_or_else(|| {
+-                        DeepSeekV4MetalError::Invalid(
+-                            "matrix Q8 attention output invocation count overflow".into(),
+-                        )
+-                    })?,
+-            );
++        for (enabled, counter, name) in [
++            (matrix_a, &self.matrix_q8_a_invocations, "output A"),
++            (matrix_b, &self.matrix_q8_b_invocations, "output B"),
++        ] {
++            if enabled {
++                counter.set(counter.get().checked_add(1).ok_or_else(|| {
++                    DeepSeekV4MetalError::Invalid(format!(
++                        "matrix Q8 attention {name} invocation count overflow"
++                    ))
++                })?);
++            }
+         }
+@@
+-            if policy == PackedAttentionOutputPolicy::MatrixQ8 {
++            if matrix_a {
+@@
+-        if policy == PackedAttentionOutputPolicy::MatrixQ8 {
++        if matrix_b {
+*** End Patch
+
+===== PATCH 24 | 2026-08-05 19:03:08 | prt_fd42a9547001jV0D6x24326V9w =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+         token_ids: &[u32],
+         emit_logits: bool,
+-        matrix_q8: bool,
++        matrix_q8_a: bool,
++        matrix_q8_b: bool,
+     ) -> Result<PackedPrefillStageProfile, DeepSeekV4MetalError> {
+-        let attention_output_policy = if matrix_q8 && token_ids.len() >= 32 {
+-            PackedAttentionOutputPolicy::MatrixQ8
++        let attention_output_policy = if (matrix_q8_a || matrix_q8_b) && token_ids.len() >= 32 {
++            PackedAttentionOutputPolicy::MatrixQ8 {
++                output_a: matrix_q8_a,
++                output_b: matrix_q8_b,
++            }
+         } else {
+@@
+-    pub(super) fn packed_matrix_q8_output_invocations_for_test(&self) -> u32 {
+-        self.prefill.attention.matrix_q8_invocations.get()
++    pub(super) fn packed_matrix_q8_output_invocations_for_test(&self) -> (u32, u32) {
++        (
++            self.prefill.attention.matrix_q8_a_invocations.get(),
++            self.prefill.attention.matrix_q8_b_invocations.get(),
++        )
+*** End Patch
+
+===== PATCH 25 | 2026-08-05 19:03:29 | prt_fd42ae8d70011iQBc77VOpSX9B =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+             Mapped,
+             Tiled4,
+             Tiled8,
+-            Matrix,
++            MatrixA,
++            MatrixB,
++            MatrixBoth,
+@@
+-                Variant::Matrix => scratch
++                Variant::MatrixA => scratch
+                     .encode_output_matrix_q8_for_test(
+-                        ctx, &encoder, attention, output_a, output_b, n_tokens,
++                        ctx, &encoder, attention, output_a, output_b, n_tokens, true, false,
++                    )
++                    .unwrap(),
++                Variant::MatrixB => scratch
++                    .encode_output_matrix_q8_for_test(
++                        ctx, &encoder, attention, output_a, output_b, n_tokens, false, true,
++                    )
++                    .unwrap(),
++                Variant::MatrixBoth => scratch
++                    .encode_output_matrix_q8_for_test(
++                        ctx, &encoder, attention, output_a, output_b, n_tokens, true, true,
+                     )
+                     .unwrap(),
+@@
+-            execute(
+-                &ctx,
+-                &scratch,
+-                &attention,
+-                &output_a,
+-                &output_b,
+-                n_tokens,
+-                Variant::Matrix,
+-            );
+-            let matrix_low = host_read_f32(&low_rank, "matrix low rank").unwrap();
+-            let matrix_output = host_read_f32(&output, "matrix output").unwrap();
+-            let low_diff = differential(&matrix_low, &reference_low_values);
+-            let output_diff = differential(&matrix_output, &reference_output_values);
+-            assert!(
+-                low_diff.0 >= 0.999 && output_diff.0 >= 0.999,
+-                "N={n_tokens} matrix cosine missed gate: low={low_diff:?} output={output_diff:?}"
+-            );
+-            eprintln!(
+-                "deepseek_v4 q8_output_matrix_diff n={n_tokens} low_cosine={:.9} low_rel_rms={:.9} low_max_abs={:.9} output_cosine={:.9} output_rel_rms={:.9} output_max_abs={:.9}",
+-                low_diff.0, low_diff.1, low_diff.2, output_diff.0, output_diff.1, output_diff.2,
+-            );
++            for variant in [Variant::MatrixA, Variant::MatrixB, Variant::MatrixBoth] {
++                execute(
++                    &ctx, &scratch, &attention, &output_a, &output_b, n_tokens, variant,
++                );
++                let matrix_low = host_read_f32(&low_rank, "matrix low rank").unwrap();
++                let matrix_output = host_read_f32(&output, "matrix output").unwrap();
++                let low_diff = differential(&matrix_low, &reference_low_values);
++                let output_diff = differential(&matrix_output, &reference_output_values);
++                assert!(
++                    low_diff.0 >= 0.999 && output_diff.0 >= 0.999,
++                    "N={n_tokens} {variant:?} cosine missed gate: low={low_diff:?} output={output_diff:?}"
++                );
++                eprintln!(
++                    "deepseek_v4 q8_output_matrix_diff n={n_tokens} variant={variant:?} low_cosine={:.9} low_rel_rms={:.9} low_max_abs={:.9} output_cosine={:.9} output_rel_rms={:.9} output_max_abs={:.9}",
++                    low_diff.0,
++                    low_diff.1,
++                    low_diff.2,
++                    output_diff.0,
++                    output_diff.1,
++                    output_diff.2,
++                );
++            }
+@@
+                 Variant::Mapped,
+                 Variant::Tiled4,
+                 Variant::Tiled8,
+-                Variant::Matrix,
++                Variant::MatrixA,
++                Variant::MatrixB,
++                Variant::MatrixBoth,
+@@
+             let mut tiled4_ms = Vec::with_capacity(6);
+             let mut tiled8_ms = Vec::with_capacity(6);
+-            let mut matrix_ms = Vec::with_capacity(6);
++            let mut matrix_a_ms = Vec::with_capacity(6);
++            let mut matrix_b_ms = Vec::with_capacity(6);
++            let mut matrix_both_ms = Vec::with_capacity(6);
+             for order in [
+                 [
+                     Variant::Current,
+                     Variant::Mapped,
+                     Variant::Tiled4,
+                     Variant::Tiled8,
+-                    Variant::Matrix,
++                    Variant::MatrixA,
++                    Variant::MatrixB,
++                    Variant::MatrixBoth,
+                 ],
+                 [
+-                    Variant::Matrix,
++                    Variant::MatrixBoth,
++                    Variant::MatrixB,
++                    Variant::MatrixA,
+                     Variant::Tiled8,
+                     Variant::Tiled4,
+@@
+                             Variant::Mapped => mapped_ms.push(elapsed),
+                             Variant::Tiled4 => tiled4_ms.push(elapsed),
+                             Variant::Tiled8 => tiled8_ms.push(elapsed),
+-                            Variant::Matrix => matrix_ms.push(elapsed),
++                            Variant::MatrixA => matrix_a_ms.push(elapsed),
++                            Variant::MatrixB => matrix_b_ms.push(elapsed),
++                            Variant::MatrixBoth => matrix_both_ms.push(elapsed),
+@@
+             let mapped_median = median(&mapped_ms);
+             let tiled4_median = median(&tiled4_ms);
+             let tiled8_median = median(&tiled8_ms);
+-            let matrix_median = median(&matrix_ms);
++            let matrix_a_median = median(&matrix_a_ms);
++            let matrix_b_median = median(&matrix_b_ms);
++            let matrix_both_median = median(&matrix_both_ms);
+             eprintln!(
+-                "deepseek_v4 q8_output_tiled n={n_tokens} current_ms={current_ms:?} mapped_ms={mapped_ms:?} tiled4_ms={tiled4_ms:?} tiled8_ms={tiled8_ms:?} matrix_ms={matrix_ms:?} current_median_ms={current_median:.3} mapped_median_ms={mapped_median:.3} tiled4_median_ms={tiled4_median:.3} tiled8_median_ms={tiled8_median:.3} matrix_median_ms={matrix_median:.3} mapped_saving={:.6} tiled4_saving={:.6} tiled8_saving={:.6} matrix_saving={:.6}",
++                "deepseek_v4 q8_output_tiled n={n_tokens} current_ms={current_ms:?} mapped_ms={mapped_ms:?} tiled4_ms={tiled4_ms:?} tiled8_ms={tiled8_ms:?} matrix_a_ms={matrix_a_ms:?} matrix_b_ms={matrix_b_ms:?} matrix_both_ms={matrix_both_ms:?} current_median_ms={current_median:.3} mapped_median_ms={mapped_median:.3} tiled4_median_ms={tiled4_median:.3} tiled8_median_ms={tiled8_median:.3} matrix_a_median_ms={matrix_a_median:.3} matrix_b_median_ms={matrix_b_median:.3} matrix_both_median_ms={matrix_both_median:.3} mapped_saving={:.6} tiled4_saving={:.6} tiled8_saving={:.6} matrix_a_saving={:.6} matrix_b_saving={:.6} matrix_both_saving={:.6}",
+                 1.0 - mapped_median / current_median,
+                 1.0 - tiled4_median / current_median,
+                 1.0 - tiled8_median / current_median,
+-                1.0 - matrix_median / current_median,
++                1.0 - matrix_a_median / current_median,
++                1.0 - matrix_b_median / current_median,
++                1.0 - matrix_both_median / current_median,
+             );
+*** End Patch
+
+===== PATCH 26 | 2026-08-05 19:04:15 | prt_fd42b9b65001qlBAySGcQUz0gU =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+-            matrix_invocations: u32,
++            matrix_invocations: (u32, u32),
+@@
+             model_content_id: DeepSeekV4ModelContentId,
+             prefix: &[u32],
+             matrix_q8: bool,
+@@
+                 .execute_packed_tokens_with_attention_output_profile_for_test(
+-                    ctx, prefix, true, matrix_q8,
++                    ctx, prefix, true, matrix_q8, matrix_q8,
+@@
+-            let expected_invocations = if n_tokens >= 32 {
+-                DEEPSEEK_V4_LAYER_COUNT as u32
++            let expected_invocations = if n_tokens >= 32 {
++                (
++                    DEEPSEEK_V4_LAYER_COUNT as u32,
++                    DEEPSEEK_V4_LAYER_COUNT as u32,
++                )
+             } else {
+-                0
++                (0, 0)
+             };
+-            assert_eq!(control_before.matrix_invocations, 0);
+-            assert_eq!(control_after.matrix_invocations, 0);
++            assert_eq!(control_before.matrix_invocations, (0, 0));
++            assert_eq!(control_after.matrix_invocations, (0, 0));
+*** End Patch
+
+===== PATCH 27 | 2026-08-05 19:04:29 | prt_fd42bd131001nBUFlb9ysTJh2I =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+-                "deepseek_v4 packed_matrix_q8_output n={n_tokens} control_gpu_ms={:?} candidate_gpu_ms={:?} control_wall_ms={:?} candidate_wall_ms={:?} control_gpu_drift={control_gpu_drift:.6} candidate_gpu_drift={candidate_gpu_drift:.6} control_wall_drift={control_wall_drift:.6} candidate_wall_drift={candidate_wall_drift:.6} gpu_saving={gpu_saving:.6} wall_saving={wall_saving:.6} matrix_invocations={expected_invocations} packed_argmax={packed_argmax} candidate_packed_argmax={candidate_packed_argmax} continuation_argmax={continuation_argmax} candidate_continuation_argmax={candidate_continuation_argmax} logits_diff={logits_diff:?} hidden_diff={hidden_diff:?} continuation_diff={continuation_diff:?} control_logits_sha256={} candidate_logits_sha256={} control_causal={} candidate_causal={} control_continuation_causal={} candidate_continuation_causal={}",
++                "deepseek_v4 packed_matrix_q8_output n={n_tokens} control_gpu_ms={:?} candidate_gpu_ms={:?} control_wall_ms={:?} candidate_wall_ms={:?} control_gpu_drift={control_gpu_drift:.6} candidate_gpu_drift={candidate_gpu_drift:.6} control_wall_drift={control_wall_drift:.6} candidate_wall_drift={candidate_wall_drift:.6} gpu_saving={gpu_saving:.6} wall_saving={wall_saving:.6} matrix_invocations={expected_invocations:?} packed_argmax={packed_argmax} candidate_packed_argmax={candidate_packed_argmax} continuation_argmax={continuation_argmax} candidate_continuation_argmax={candidate_continuation_argmax} logits_diff={logits_diff:?} hidden_diff={hidden_diff:?} continuation_diff={continuation_diff:?} control_logits_sha256={} candidate_logits_sha256={} control_causal={} candidate_causal={} control_continuation_causal={} candidate_continuation_causal={}",
+*** End Patch
+
+===== PATCH 28 | 2026-08-05 19:06:28 | prt_fd42da407001sXbGTnFeY4aXwN =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+     fn current_asset_packed_matrix_q8_output_probe() {
+         const CONTINUATION_TOKEN: u32 = 35;
++
++        #[derive(Clone, Copy, Debug)]
++        enum MatrixArm {
++            OutputA,
++            OutputB,
++            Both,
++        }
++
++        impl MatrixArm {
++            fn flags(self) -> (bool, bool) {
++                match self {
++                    Self::OutputA => (true, false),
++                    Self::OutputB => (false, true),
++                    Self::Both => (true, true),
++                }
++            }
++        }
+@@
+             residency: DeepSeekV4MetalResidency,
+             model_content_id: DeepSeekV4ModelContentId,
+             prefix: &[u32],
+-            matrix_q8: bool,
++            matrix_arm: Option<MatrixArm>,
+         ) -> (DeepSeekV4MetalResidency, Evidence) {
+@@
+             let started = std::time::Instant::now();
++            let (matrix_q8_a, matrix_q8_b) = matrix_arm.map_or((false, false), MatrixArm::flags);
+             let profile = session
+                 .execute_packed_tokens_with_attention_output_profile_for_test(
+-                    ctx, prefix, true, matrix_q8, matrix_q8,
++                    ctx,
++                    prefix,
++                    true,
++                    matrix_q8_a,
++                    matrix_q8_b,
+                 )
+@@
+-        for n_tokens in [12usize, 32, 128] {
++        {
++            let n_tokens = 12usize;
+             let prefix = (0..n_tokens)
+                 .map(|index| [35, 201, 200, 34][index % 4])
+                 .collect::<Vec<_>>();
+-            let (next, control_before) = execute(&ctx, residency, model_content_id, &prefix, false);
+-            let (next, candidate_first) = execute(&ctx, next, model_content_id, &prefix, true);
+-            let (next, candidate_second) = execute(&ctx, next, model_content_id, &prefix, true);
+-            let (next, control_after) = execute(&ctx, next, model_content_id, &prefix, false);
++            let (next, control_before) =
++                execute(&ctx, residency, model_content_id, &prefix, None);
++            let (next, candidate) = execute(
++                &ctx,
++                next,
++                model_content_id,
++                &prefix,
++                Some(MatrixArm::Both),
++            );
++            let (next, control_after) = execute(&ctx, next, model_content_id, &prefix, None);
+             residency = next;
+-
+             assert_exact("matrix-output controls", &control_after, &control_before);
+-            assert_exact(
+-                "matrix-output candidate repeat",
+-                &candidate_second,
+-                &candidate_first,
+-            );
+-            let expected_invocations = if n_tokens >= 32 {
+-                (
+-                    DEEPSEEK_V4_LAYER_COUNT as u32,
+-                    DEEPSEEK_V4_LAYER_COUNT as u32,
+-                )
+-            } else {
+-                (0, 0)
+-            };
++            assert_exact("matrix-output threshold fallback", &candidate, &control_before);
+             assert_eq!(control_before.matrix_invocations, (0, 0));
+             assert_eq!(control_after.matrix_invocations, (0, 0));
+-            assert_eq!(candidate_first.matrix_invocations, expected_invocations);
+-            assert_eq!(candidate_second.matrix_invocations, expected_invocations);
+-
+-            if n_tokens < 32 {
+-                assert_exact(
+-                    "matrix-output threshold fallback",
+-                    &candidate_first,
+-                    &control_before,
+-                );
+-            } else {
+-                assert_eq!(candidate_first.prefix_digest, control_before.prefix_digest);
+-                assert_eq!(
+-                    candidate_first.compatibility_digest,
+-                    control_before.compatibility_digest
+-                );
+-                assert_eq!(
+-                    candidate_first.committed_tokens,
+-                    control_before.committed_tokens
+-                );
+-                assert_ne!(bits(&candidate_first.logits), bits(&control_before.logits));
+-            }
+-
+-            let logits_diff = differential(&candidate_first.logits, &control_before.logits);
+-            let hidden_diff = differential(&candidate_first.hidden, &control_before.hidden);
+-            let continuation_diff = differential(
+-                &candidate_first.continuation_logits,
+-                &control_before.continuation_logits,
+-            );
+-            let packed_argmax = argmax(&control_before.logits);
+-            let candidate_packed_argmax = argmax(&candidate_first.logits);
+-            let continuation_argmax = argmax(&control_before.continuation_logits);
+-            let candidate_continuation_argmax = argmax(&candidate_first.continuation_logits);
+-            let control_gpu_drift = drift(
+-                control_before.pre_expert_gpu_ms,
+-                control_after.pre_expert_gpu_ms,
+-            );
+-            let candidate_gpu_drift = drift(
+-                candidate_first.pre_expert_gpu_ms,
+-                candidate_second.pre_expert_gpu_ms,
+-            );
+-            let control_wall_drift = drift(control_before.wall_ms, control_after.wall_ms);
+-            let candidate_wall_drift = drift(candidate_first.wall_ms, candidate_second.wall_ms);
+-            let faster_control_gpu = control_before
+-                .pre_expert_gpu_ms
+-                .min(control_after.pre_expert_gpu_ms);
+-            let candidate_gpu =
+-                (candidate_first.pre_expert_gpu_ms + candidate_second.pre_expert_gpu_ms) * 0.5;
+-            let faster_control_wall = control_before.wall_ms.min(control_after.wall_ms);
+-            let candidate_wall = (candidate_first.wall_ms + candidate_second.wall_ms) * 0.5;
+-            let gpu_saving = 1.0 - candidate_gpu / faster_control_gpu;
+-            let wall_saving = 1.0 - candidate_wall / faster_control_wall;
+-
++            assert_eq!(candidate.matrix_invocations, (0, 0));
+             eprintln!(
+-                "deepseek_v4 packed_matrix_q8_output n={n_tokens} control_gpu_ms={:?} candidate_gpu_ms={:?} control_wall_ms={:?} candidate_wall_ms={:?} control_gpu_drift={control_gpu_drift:.6} candidate_gpu_drift={candidate_gpu_drift:.6} control_wall_drift={control_wall_drift:.6} candidate_wall_drift={candidate_wall_drift:.6} gpu_saving={gpu_saving:.6} wall_saving={wall_saving:.6} matrix_invocations={expected_invocations:?} packed_argmax={packed_argmax} candidate_packed_argmax={candidate_packed_argmax} continuation_argmax={continuation_argmax} candidate_continuation_argmax={candidate_continuation_argmax} logits_diff={logits_diff:?} hidden_diff={hidden_diff:?} continuation_diff={continuation_diff:?} control_logits_sha256={} candidate_logits_sha256={} control_causal={} candidate_causal={} control_continuation_causal={} candidate_continuation_causal={}",
+-                [
+-                    control_before.pre_expert_gpu_ms,
+-                    control_after.pre_expert_gpu_ms
+-                ],
+-                [
+-                    candidate_first.pre_expert_gpu_ms,
+-                    candidate_second.pre_expert_gpu_ms
+-                ],
++                "deepseek_v4 packed_matrix_q8_output_fallback n={n_tokens} control_gpu_ms={:?} candidate_gpu_ms={:.3} control_wall_ms={:?} candidate_wall_ms={:.3} logits_sha256={} causal={} continuation_causal={}",
++                [control_before.pre_expert_gpu_ms, control_after.pre_expert_gpu_ms],
++                candidate.pre_expert_gpu_ms,
+                 [control_before.wall_ms, control_after.wall_ms],
+-                [candidate_first.wall_ms, candidate_second.wall_ms],
++                candidate.wall_ms,
+                 digest_hex(Sha256::digest(bytemuck::cast_slice(&control_before.logits))),
+-                digest_hex(Sha256::digest(bytemuck::cast_slice(
+-                    &candidate_first.logits
+-                ))),
+                 digest_hex(control_before.causal_digest),
+-                digest_hex(candidate_first.causal_digest),
+                 digest_hex(control_before.continuation_causal_digest),
+-                digest_hex(candidate_first.continuation_causal_digest),
+             );
++        }
+ 
+-            assert_eq!(candidate_packed_argmax, packed_argmax);
+-            assert_eq!(candidate_continuation_argmax, continuation_argmax);
+-            for (label, diff) in [
+-                ("logits", logits_diff),
+-                ("hidden", hidden_diff),
+-                ("continuation", continuation_diff),
+-            ] {
+-                assert!(
+-                    diff.0 >= 0.999 && diff.1 <= 0.05,
+-                    "N={n_tokens} {label} matrix-output differential exceeded probe envelope: {diff:?}"
+-                );
++        for n_tokens in [32usize, 128] {
++            let prefix = (0..n_tokens)
++                .map(|index| [35, 201, 200, 34][index % 4])
++                .collect::<Vec<_>>();
++            let (next, control_before) =
++                execute(&ctx, residency, model_content_id, &prefix, None);
++            let (next, output_a_first) = execute(
++                &ctx,
++                next,
++                model_content_id,
++                &prefix,
++                Some(MatrixArm::OutputA),
++            );
++            let (next, output_b_first) = execute(
++                &ctx,
++                next,
++                model_content_id,
++                &prefix,
++                Some(MatrixArm::OutputB),
++            );
++            let (next, both_first) = execute(
++                &ctx,
++                next,
++                model_content_id,
++                &prefix,
++                Some(MatrixArm::Both),
++            );
++            let (next, both_second) = execute(
++                &ctx,
++                next,
++                model_content_id,
++                &prefix,
++                Some(MatrixArm::Both),
++            );
++            let (next, output_b_second) = execute(
++                &ctx,
++                next,
++                model_content_id,
++                &prefix,
++                Some(MatrixArm::OutputB),
++            );
++            let (next, output_a_second) = execute(
++                &ctx,
++                next,
++                model_content_id,
++                &prefix,
++                Some(MatrixArm::OutputA),
++            );
++            let (next, control_after) = execute(&ctx, next, model_content_id, &prefix, None);
++            residency = next;
++
++            assert_exact("matrix-output controls", &control_after, &control_before);
++            assert_eq!(control_before.matrix_invocations, (0, 0));
++            assert_eq!(control_after.matrix_invocations, (0, 0));
++            let control_gpu_drift = drift(
++                control_before.pre_expert_gpu_ms,
++                control_after.pre_expert_gpu_ms,
++            );
++            let control_wall_drift = drift(control_before.wall_ms, control_after.wall_ms);
++            let faster_control_gpu = control_before
++                .pre_expert_gpu_ms
++                .min(control_after.pre_expert_gpu_ms);
++            let faster_control_wall = control_before.wall_ms.min(control_after.wall_ms);
++
++            for (arm, first, second) in [
++                (MatrixArm::OutputA, &output_a_first, &output_a_second),
++                (MatrixArm::OutputB, &output_b_first, &output_b_second),
++                (MatrixArm::Both, &both_first, &both_second),
++            ] {
++                assert_exact("matrix-output candidate repeat", second, first);
++                let flags = arm.flags();
++                let expected_invocations = (
++                    u32::from(flags.0) * DEEPSEEK_V4_LAYER_COUNT as u32,
++                    u32::from(flags.1) * DEEPSEEK_V4_LAYER_COUNT as u32,
++                );
++                assert_eq!(first.matrix_invocations, expected_invocations);
++                assert_eq!(second.matrix_invocations, expected_invocations);
++                assert_eq!(first.prefix_digest, control_before.prefix_digest);
++                assert_eq!(first.compatibility_digest, control_before.compatibility_digest);
++                assert_eq!(first.committed_tokens, control_before.committed_tokens);
++                assert_ne!(bits(&first.logits), bits(&control_before.logits));
++
++                let logits_diff = differential(&first.logits, &control_before.logits);
++                let hidden_diff = differential(&first.hidden, &control_before.hidden);
++                let continuation_diff = differential(
++                    &first.continuation_logits,
++                    &control_before.continuation_logits,
++                );
++                let packed_argmax = argmax(&control_before.logits);
++                let candidate_packed_argmax = argmax(&first.logits);
++                let continuation_argmax = argmax(&control_before.continuation_logits);
++                let candidate_continuation_argmax = argmax(&first.continuation_logits);
++                let candidate_gpu_drift =
++                    drift(first.pre_expert_gpu_ms, second.pre_expert_gpu_ms);
++                let candidate_wall_drift = drift(first.wall_ms, second.wall_ms);
++                let candidate_gpu =
++                    (first.pre_expert_gpu_ms + second.pre_expert_gpu_ms) * 0.5;
++                let candidate_wall = (first.wall_ms + second.wall_ms) * 0.5;
++                let gpu_saving = 1.0 - candidate_gpu / faster_control_gpu;
++                let wall_saving = 1.0 - candidate_wall / faster_control_wall;
++                let quality_authorized = candidate_packed_argmax == packed_argmax
++                    && candidate_continuation_argmax == continuation_argmax
++                    && [logits_diff, hidden_diff, continuation_diff]
++                        .into_iter()
++                        .all(|diff| diff.0 >= 0.999 && diff.1 <= 0.05);
++
++                eprintln!(
++                    "deepseek_v4 packed_matrix_q8_output n={n_tokens} arm={arm:?} control_gpu_ms={:?} candidate_gpu_ms={:?} control_wall_ms={:?} candidate_wall_ms={:?} control_gpu_drift={control_gpu_drift:.6} candidate_gpu_drift={candidate_gpu_drift:.6} control_wall_drift={control_wall_drift:.6} candidate_wall_drift={candidate_wall_drift:.6} gpu_saving={gpu_saving:.6} wall_saving={wall_saving:.6} matrix_invocations={expected_invocations:?} packed_argmax={packed_argmax} candidate_packed_argmax={candidate_packed_argmax} continuation_argmax={continuation_argmax} candidate_continuation_argmax={candidate_continuation_argmax} logits_diff={logits_diff:?} hidden_diff={hidden_diff:?} continuation_diff={continuation_diff:?} quality_authorized={quality_authorized} control_logits_sha256={} candidate_logits_sha256={} control_causal={} candidate_causal={} control_continuation_causal={} candidate_continuation_causal={}",
++                    [control_before.pre_expert_gpu_ms, control_after.pre_expert_gpu_ms],
++                    [first.pre_expert_gpu_ms, second.pre_expert_gpu_ms],
++                    [control_before.wall_ms, control_after.wall_ms],
++                    [first.wall_ms, second.wall_ms],
++                    digest_hex(Sha256::digest(bytemuck::cast_slice(&control_before.logits))),
++                    digest_hex(Sha256::digest(bytemuck::cast_slice(&first.logits))),
++                    digest_hex(control_before.causal_digest),
++                    digest_hex(first.causal_digest),
++                    digest_hex(control_before.continuation_causal_digest),
++                    digest_hex(first.continuation_causal_digest),
++                );
++
++                for (label, diff) in [
++                    ("logits", logits_diff),
++                    ("hidden", hidden_diff),
++                    ("continuation", continuation_diff),
++                ] {
++                    assert!(
++                        diff.0 >= 0.95 && diff.1 <= 0.30,
++                        "N={n_tokens} {arm:?} {label} differential exceeded broad probe envelope: {diff:?}"
++                    );
++                }
+             }
+-            if n_tokens == 128 {
+-                assert!(control_gpu_drift <= 0.05);
+-                assert!(candidate_gpu_drift <= 0.05);
+-                assert!(control_wall_drift <= 0.05);
+-                assert!(candidate_wall_drift <= 0.05);
+-                assert!(gpu_saving >= 0.15);
+-                assert!(wall_saving >= 0.05);
+-            }
+         }
+*** End Patch
+
+===== PATCH 29 | 2026-08-05 19:14:59 | prt_fd435708e0010JuEErg7Z1eCpE =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+-    pub(super) fn execute_packed_tokens_with_attention_output_profile_for_test(
++    pub(super) fn execute_packed_tokens_with_first_chunk_matrix_output_profile_for_test(
+         &mut self,
+         ctx: &MetalContext,
+         token_ids: &[u32],
+         emit_logits: bool,
+-        matrix_q8_a: bool,
+-        matrix_q8_b: bool,
++        matrix_q8_first_chunk: bool,
+     ) -> Result<PackedPrefillStageProfile, DeepSeekV4MetalError> {
+-        let attention_output_policy = if (matrix_q8_a || matrix_q8_b) && token_ids.len() >= 32 {
++        let start_position = self.phase.ready_position()?;
++        let attention_output_policy = if matrix_q8_first_chunk
++            && start_position == 0
++            && token_ids.len() == DEEPSEEK_V4_PREFILL_MAX_TOKENS
++        {
+             PackedAttentionOutputPolicy::MatrixQ8 {
+-                output_a: matrix_q8_a,
+-                output_b: matrix_q8_b,
++                output_a: true,
++                output_b: true,
+             }
+         } else {
+*** End Patch
+
+===== PATCH 30 | 2026-08-05 20:15:34 | prt_fd46ce78d0018C22yA2K7RZ3wb =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+ struct ExpertBucket {
+     expert: usize,
+     start: usize,
+     len: usize,
+ }
++
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(super) enum PackedPrefillRouteSourceKind {
++    Hash,
++    Learned,
++}
++
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(super) struct PackedPrefillExpertBucket {
++    pub(super) expert: usize,
++    pub(super) start: usize,
++    pub(super) len: usize,
++}
++
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++#[derive(Clone, Debug, PartialEq)]
++pub(super) struct PackedPrefillDecisionLayer {
++    pub(super) chunk_start: u32,
++    pub(super) n_tokens: usize,
++    pub(super) layer: usize,
++    pub(super) attention_kind: AttentionKind,
++    pub(super) sparse_query_offset: Option<usize>,
++    pub(super) route_source: PackedPrefillRouteSourceKind,
++    pub(super) expert_ids: Vec<i32>,
++    pub(super) weights: Vec<f32>,
++    pub(super) bucket_rows: Vec<i32>,
++    pub(super) bucket_slots: Vec<i32>,
++    pub(super) buckets: Vec<PackedPrefillExpertBucket>,
++    pub(super) learned_cutoff_margins: Vec<f32>,
++}
++
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++#[derive(Clone, Debug, Default, PartialEq)]
++pub(super) struct PackedPrefillDecisionCapture {
++    pub(super) layers: Vec<PackedPrefillDecisionLayer>,
++}
++
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++impl PackedPrefillDecisionCapture {
++    pub(super) fn new() -> Self {
++        Self {
++            layers: Vec::with_capacity(DEEPSEEK_V4_LAYER_COUNT * 2),
++        }
++    }
++
++    fn push(&mut self, record: PackedPrefillDecisionLayer) -> Result<(), DeepSeekV4MetalError> {
++        if let Some(previous) = self.layers.last() {
++            let same_chunk = previous.chunk_start == record.chunk_start;
++            let ordered = if same_chunk {
++                record.n_tokens == previous.n_tokens && record.layer == previous.layer + 1
++            } else {
++                record.layer == 0
++                    && record.chunk_start
++                        == previous
++                            .chunk_start
++                            .checked_add(previous.n_tokens as u32)
++                            .ok_or_else(|| {
++                                DeepSeekV4MetalError::Invalid(
++                                    "packed decision chunk position overflow".into(),
++                                )
++                            })?
++            };
++            if !ordered {
++                return invalid("packed decision records are not in chunk/layer order");
++            }
++        } else if record.layer != 0 {
++            return invalid("packed decision capture must begin at layer zero");
++        }
++        self.layers.push(record);
++        Ok(())
++    }
++}
+*** End Patch
+
+===== PATCH 31 | 2026-08-05 20:15:38 | prt_fd46cf450001t139cK3kp80R81 =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+         host_write_i32(
+             &bucket_slots_view,
+             &bucket_slots,
+             "packed expert bucket slots",
+         )?;
+         Ok(schedule)
+     }
++
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    #[allow(clippy::too_many_arguments)]
++    fn capture_shallow_decision_layer(
++        &self,
++        views: &PackedMoeViews,
++        source: PackedRouteSource<'_>,
++        schedule: &[ExpertBucket],
++        chunk_start: u32,
++        n_tokens: usize,
++        layer: usize,
++        attention_kind: AttentionKind,
++        sparse_query_offset: Option<usize>,
++    ) -> Result<PackedPrefillDecisionLayer, DeepSeekV4MetalError> {
++        if sparse_query_offset.is_some() {
++            return invalid(
++                "shallow packed decision capture does not authorize sparse CSA selection",
++            );
++        }
++        let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed decision route count")?;
++        let mut expert_ids = host_read_i32(&self.expert_ids, "packed decision expert IDs")?;
++        let mut weights = host_read_f32(&self.weights, "packed decision weights")?;
++        let mut bucket_rows = host_read_i32(&self.bucket_rows, "packed decision bucket rows")?;
++        let mut bucket_slots = host_read_i32(&self.bucket_slots, "packed decision bucket slots")?;
++        expert_ids.truncate(route_count);
++        weights.truncate(route_count);
++        bucket_rows.truncate(route_count);
++        bucket_slots.truncate(route_count);
++        validate_packed_expert_schedule(
++            n_tokens,
++            &expert_ids,
++            &bucket_rows,
++            &bucket_slots,
++            schedule,
++        )?;
++        if weights.iter().any(|weight| !weight.is_finite()) {
++            return invalid("packed decision capture observed a nonfinite route weight");
++        }
++
++        let (route_source, learned_cutoff_margins) = match source {
++            PackedRouteSource::Hash => (PackedPrefillRouteSourceKind::Hash, Vec::new()),
++            PackedRouteSource::Learned(bias) => {
++                let logits = host_read_f32(&views.logits, "packed decision route logits")?;
++                let bias = host_read_f32(bias, "packed decision correction bias")?;
++                let expected_logits = checked_mul(
++                    n_tokens,
++                    MOE_EXPERT_COUNT,
++                    "packed decision route logits",
++                )?;
++                if logits.len() < expected_logits || bias.len() != MOE_EXPERT_COUNT {
++                    return invalid("packed decision route inputs have invalid lengths");
++                }
++                let mut margins = Vec::with_capacity(n_tokens);
++                for token in 0..n_tokens {
++                    let start = token * MOE_EXPERT_COUNT;
++                    let scores = crate::deepseek_v4_oracle::sqrt_softplus_scores(
++                        &logits[start..start + MOE_EXPERT_COUNT],
++                    )
++                    .map_err(|error| {
++                        DeepSeekV4MetalError::Invalid(format!(
++                            "packed decision scores for token {token}: {error}"
++                        ))
++                    })?;
++                    let mut ranked = (0..MOE_EXPERT_COUNT).collect::<Vec<_>>();
++                    ranked.sort_unstable_by(|&left, &right| {
++                        (scores[right] + bias[right])
++                            .total_cmp(&(scores[left] + bias[left]))
++                            .then_with(|| left.cmp(&right))
++                    });
++                    let margin = (scores[ranked[MOE_TOP_K - 1]]
++                        + bias[ranked[MOE_TOP_K - 1]])
++                        - (scores[ranked[MOE_TOP_K]] + bias[ranked[MOE_TOP_K]]);
++                    if !margin.is_finite() || margin < 0.0 {
++                        return invalid(format!(
++                            "packed decision token {token} has invalid cutoff margin {margin}"
++                        ));
++                    }
++                    margins.push(margin);
++                }
++                (PackedPrefillRouteSourceKind::Learned, margins)
++            }
++        };
++
++        Ok(PackedPrefillDecisionLayer {
++            chunk_start,
++            n_tokens,
++            layer,
++            attention_kind,
++            sparse_query_offset,
++            route_source,
++            expert_ids,
++            weights,
++            bucket_rows,
++            bucket_slots,
++            buckets: schedule
++                .iter()
++                .map(|bucket| PackedPrefillExpertBucket {
++                    expert: bucket.expert,
++                    start: bucket.start,
++                    len: bucket.len,
++                })
++                .collect(),
++            learned_cutoff_margins,
++        })
++    }
+ 
+     #[allow(clippy::too_many_arguments)]
+     fn encode_experts(
+*** End Patch
+
+===== PATCH 32 | 2026-08-05 20:16:18 | prt_fd46d91e9001rcxIS2UesyO8Ow =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+             PackedExpertPolicy::Current,
+             PackedAttentionOutputPolicy::Current,
+             None,
++            None,
+             &mut |_| {},
+         )
+@@
+             expert_policy,
+             PackedAttentionOutputPolicy::Current,
+             None,
++            None,
+             &mut |_| {},
+         )
+@@
+         token_ids: &[u32],
+         emit_logits: bool,
+         matrix_q8_first_chunk: bool,
++        decision_capture: Option<&mut PackedPrefillDecisionCapture>,
+     ) -> Result<PackedPrefillStageProfile, DeepSeekV4MetalError> {
+@@
+             attention_output_policy,
+             Some(&mut recorder),
++            decision_capture,
+             &mut |_| {},
+         )?;
+@@
+             PackedExpertPolicy::GroupedIq2XsIq3Xxs,
+             PackedAttentionOutputPolicy::Current,
+             Some(&mut recorder),
++            None,
+             &mut |_| {},
+         )?;
+@@
+             #[cfg(all(test, feature = "dsv4-diagnostics"))]
+             PackedAttentionOutputPolicy::Current,
+             #[cfg(all(test, feature = "dsv4-diagnostics"))]
+             None,
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            None,
+             layer_completed,
+         )
+@@
+         #[cfg(all(test, feature = "dsv4-diagnostics"))] stage_recorder: Option<
+             &mut PackedPrefillStageRecorder,
+         >,
++        #[cfg(all(test, feature = "dsv4-diagnostics"))] decision_capture: Option<
++            &mut PackedPrefillDecisionCapture,
++        >,
+         layer_completed: &mut impl FnMut(usize),
+@@
+             #[cfg(all(test, feature = "dsv4-diagnostics"))]
+             stage_recorder,
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            decision_capture,
+             layer_completed,
+@@
+         #[cfg(all(test, feature = "dsv4-diagnostics"))] mut stage_recorder: Option<
+             &mut PackedPrefillStageRecorder,
+         >,
++        #[cfg(all(test, feature = "dsv4-diagnostics"))] mut decision_capture: Option<
++            &mut PackedPrefillDecisionCapture,
++        >,
+         layer_completed: &mut impl FnMut(usize),
+*** End Patch
+
+===== PATCH 33 | 2026-08-05 20:16:28 | prt_fd46db91a001aj6xP2JFau0trU =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@
+             let pre_expert_post_seconds = pre_expert_seconds - pre_expert_command_seconds;
+ 
+             let route_started = trace_layers.then(std::time::Instant::now);
++            let route_source = if layer < self.residency.config().hash_layer_count as usize {
++                PackedRouteSource::Hash
++            } else {
++                PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
++            };
+             #[cfg(feature = "dsv4-diagnostics")]
+             let schedule = if let Some(generation) = gpu_route_generation {
+                 #[cfg(test)]
+-                let cpu_route = {
+-                    let source = if layer < self.residency.config().hash_layer_count as usize {
+-                        PackedRouteSource::Hash
+-                    } else {
+-                        PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
+-                    };
+-                    self.prefill.moe.audit_gpu_route_against_cpu(
+-                        &moe_views,
+-                        source,
+-                        n_tokens,
+-                        layer,
+-                        start_position,
+-                        generation,
+-                    )?
+-                };
++                let cpu_route = self.prefill.moe.audit_gpu_route_against_cpu(
++                    &moe_views,
++                    route_source,
++                    n_tokens,
++                    layer,
++                    start_position,
++                    generation,
++                )?;
+                 let schedule = self
+                     .prefill
+                     .moe
+@@
+                 }
+                 schedule
+             } else {
+-                let source = if layer < self.residency.config().hash_layer_count as usize {
+-                    PackedRouteSource::Hash
+-                } else {
+-                    PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
+-                };
+                 self.prefill.moe.route(
+                     &moe_views,
+-                    source,
++                    route_source,
+                     n_tokens,
+                     self.residency.config().expert_weights_scale,
+                 )?
+             };
+             #[cfg(not(feature = "dsv4-diagnostics"))]
+-            let schedule = {
+-                let source = if layer < self.residency.config().hash_layer_count as usize {
+-                    PackedRouteSource::Hash
+-                } else {
+-                    PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
+-                };
+-                self.prefill.moe.route(
+-                    &moe_views,
+-                    source,
+-                    n_tokens,
+-                    self.residency.config().expert_weights_scale,
+-                )?
+-            };
++            let schedule = self.prefill.moe.route(
++                &moe_views,
++                route_source,
++                n_tokens,
++                self.residency.config().expert_weights_scale,
++            )?;
++            #[cfg(all(test, feature = "dsv4-diagnostics"))]
++            if let Some(capture) = decision_capture.as_deref_mut() {
++                capture.push(self.prefill.moe.capture_shallow_decision_layer(
++                    &moe_views,
++                    route_source,
++                    &schedule,
++                    start_position,
++                    n_tokens,
++                    layer,
++                    attention_kind,
++                    sparse_query_offset,
++                )?)?;
++            }
+             let route_seconds = route_started
+*** End Patch
+
+===== PATCH 34 | 2026-08-05 20:18:38 | prt_fd46fb3af00154G62J6fe9J9w9 =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+-            let (matrix_q8_a, matrix_q8_b) = matrix_arm.map_or((false, false), MatrixArm::flags);
+             let profile = session
+-                .execute_packed_tokens_with_attention_output_profile_for_test(
++                .execute_packed_tokens_with_first_chunk_matrix_output_profile_for_test(
+                     ctx,
+                     prefix,
+                     true,
+-                    matrix_q8_a,
+-                    matrix_q8_b,
++                    matrix_arm.is_some(),
++                    None,
+                 )
+*** End Patch
+
+===== PATCH 35 | 2026-08-05 20:19:09 | prt_fd4702e4d00184x6lgLu1fcr1w =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+-        #[derive(Clone, Copy, Debug)]
+-        enum MatrixArm {
+-            OutputA,
+-            OutputB,
+-            Both,
+-        }
+-
+-        impl MatrixArm {
+-            fn flags(self) -> (bool, bool) {
+-                match self {
+-                    Self::OutputA => (true, false),
+-                    Self::OutputB => (false, true),
+-                    Self::Both => (true, true),
+-                }
+-            }
+-        }
+-
+-        struct Evidence {
++        const PREFIX_TOKENS: usize = 140;
++        const FIRST_CHUNK_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
++        const TAIL_TOKENS: usize = PREFIX_TOKENS - FIRST_CHUNK_TOKENS;
++
++        #[derive(Clone)]
++        struct Observation {
+             logits: Vec<f32>,
+             hidden: Vec<f32>,
+             causal_digest: [u8; 32],
+             prefix_digest: [u8; 32],
+             compatibility_digest: [u8; 32],
++            next_position: u32,
++            source_observation: DeepSeekV4SnapshotObservation,
++            committed_tokens: Vec<u32>,
++        }
++
++        struct Evidence {
++            first: Observation,
++            tail: Observation,
+             continuation_logits: Vec<f32>,
++            continuation_hidden: Vec<f32>,
+             continuation_causal_digest: [u8; 32],
+             committed_tokens: Vec<u32>,
+-            matrix_invocations: (u32, u32),
+-            pre_expert_gpu_ms: f64,
+-            wall_ms: f64,
++            continuation_decision: DeepSeekV4DecisionTranscript,
++            matrix_invocations_after_first: (u32, u32),
++            matrix_invocations_after_tail: (u32, u32),
++            matrix_invocations_after_continuation: (u32, u32),
++            first_pre_expert_gpu_ms: f64,
++            tail_pre_expert_gpu_ms: f64,
++            first_wall_ms: f64,
++            tail_wall_ms: f64,
++            packed_decisions: Option<prefill::PackedPrefillDecisionCapture>,
+         }
+*** End Patch
+
+===== PATCH 36 | 2026-08-05 20:19:34 | prt_fd47091a9001JhvmTawboo9rAu =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+         fn execute(
+             ctx: &MetalContext,
+             residency: DeepSeekV4MetalResidency,
+             model_content_id: DeepSeekV4ModelContentId,
+             prefix: &[u32],
+-            matrix_arm: Option<MatrixArm>,
++            matrix_candidate: bool,
++            detailed: bool,
+         ) -> (DeepSeekV4MetalResidency, Evidence) {
++            fn observe(session: &DeepSeekV4Session) -> (Observation, DeepSeekV4CausalSnapshot) {
++                let logits = session
++                    .copy_logits_f32()
++                    .expect("copy packed matrix-output logits");
++                let hidden = host_read_f32(
++                    session
++                        .final_normalized_hidden()
++                        .expect("packed matrix-output final hidden is visible"),
++                    "packed matrix-output final hidden",
++                )
++                .expect("copy packed matrix-output hidden");
++                let snapshot = session
++                    .capture_causal_snapshot()
++                    .expect("capture packed matrix-output state");
++                let observation = Observation {
++                    logits,
++                    hidden,
++                    causal_digest: *snapshot.causal_digest(),
++                    prefix_digest: *snapshot.prefix_digest(),
++                    compatibility_digest: *snapshot.compatibility_digest().as_bytes(),
++                    next_position: snapshot.next_position(),
++                    source_observation: snapshot.source_observation(),
++                    committed_tokens: session.committed_tokens().to_vec(),
++                };
++                (observation, snapshot)
++            }
++
++            assert_eq!(prefix.len(), PREFIX_TOKENS);
+             let mut session =
+                 DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
+                     .expect("construct packed matrix-output session");
+-            let started = std::time::Instant::now();
+-            let profile = session
++            let mut packed_decisions =
++                detailed.then(prefill::PackedPrefillDecisionCapture::new);
++
++            let first_started = std::time::Instant::now();
++            let first_profile = session
+                 .execute_packed_tokens_with_first_chunk_matrix_output_profile_for_test(
+                     ctx,
+-                    prefix,
++                    &prefix[..FIRST_CHUNK_TOKENS],
+                     true,
+-                    matrix_arm.is_some(),
+-                    None,
++                    matrix_candidate,
++                    packed_decisions.as_mut(),
+                 )
+-                .expect("execute packed matrix-output prefix");
+-            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+-            assert!(!profile.sampled);
+-            assert_eq!(profile.command_gpu_ms.len(), DEEPSEEK_V4_LAYER_COUNT);
+-            let pre_expert_gpu_ms = profile.command_gpu_ms.iter().sum();
+-            let logits = session
+-                .copy_logits_f32()
+-                .expect("copy packed matrix-output logits");
+-            let hidden = host_read_f32(
+-                session
+-                    .final_normalized_hidden()
+-                    .expect("packed matrix-output final hidden is visible"),
+-                "packed matrix-output final hidden",
+-            )
+-            .expect("copy packed matrix-output hidden");
+-            let snapshot = session
+-                .capture_causal_snapshot()
+-                .expect("capture packed matrix-output state");
+-            let causal_digest = *snapshot.causal_digest();
+-            let prefix_digest = *snapshot.prefix_digest();
+-            let compatibility_digest = *snapshot.compatibility_digest().as_bytes();
++                .expect("execute first packed matrix-output chunk");
++            let first_wall_ms = first_started.elapsed().as_secs_f64() * 1e3;
++            assert!(!first_profile.sampled);
++            assert_eq!(first_profile.command_gpu_ms.len(), DEEPSEEK_V4_LAYER_COUNT);
++            let first_pre_expert_gpu_ms = first_profile.command_gpu_ms.iter().sum();
++            let (first, _) = observe(&session);
++            let matrix_invocations_after_first =
++                session.packed_matrix_q8_output_invocations_for_test();
++
++            let tail_started = std::time::Instant::now();
++            let tail_profile = session
++                .execute_packed_tokens_with_first_chunk_matrix_output_profile_for_test(
++                    ctx,
++                    &prefix[FIRST_CHUNK_TOKENS..],
++                    true,
++                    matrix_candidate,
++                    packed_decisions.as_mut(),
++                )
++                .expect("execute exact packed matrix-output tail");
++            let tail_wall_ms = tail_started.elapsed().as_secs_f64() * 1e3;
++            assert!(!tail_profile.sampled);
++            assert_eq!(tail_profile.command_gpu_ms.len(), DEEPSEEK_V4_LAYER_COUNT);
++            let tail_pre_expert_gpu_ms = tail_profile.command_gpu_ms.iter().sum();
++            let (tail, tail_snapshot) = observe(&session);
++            let matrix_invocations_after_tail =
++                session.packed_matrix_q8_output_invocations_for_test();
++
+             session
+-                .restore_causal_snapshot(&snapshot)
++                .restore_causal_snapshot(&tail_snapshot)
+                 .expect("restore packed matrix-output state");
++            session
++                .arm_decision_transcript(PREFIX_TOKENS as u32)
++                .expect("arm restored matrix-output continuation decisions");
+             session
+                 .forward_token(ctx, CONTINUATION_TOKEN)
+                 .expect("continue packed matrix-output state");
++            let continuation_decision = session
++                .take_decision_transcript()
++                .expect("capture restored matrix-output continuation decisions");
+             let continuation_logits = session
+                 .copy_logits_f32()
+                 .expect("copy packed matrix-output continuation logits");
++            let continuation_hidden = host_read_f32(
++                session
++                    .final_normalized_hidden()
++                    .expect("matrix-output continuation hidden is visible"),
++                "packed matrix-output continuation hidden",
++            )
++            .expect("copy packed matrix-output continuation hidden");
+             let continuation = session
+                 .capture_causal_snapshot()
+                 .expect("capture packed matrix-output continuation state");
+             let evidence = Evidence {
+-                logits,
+-                hidden,
+-                causal_digest,
+-                prefix_digest,
+-                compatibility_digest,
++                first,
++                tail,
+                 continuation_logits,
++                continuation_hidden,
+                 continuation_causal_digest: *continuation.causal_digest(),
+                 committed_tokens: session.committed_tokens().to_vec(),
+-                matrix_invocations: session.packed_matrix_q8_output_invocations_for_test(),
+-                pre_expert_gpu_ms,
+-                wall_ms,
++                continuation_decision,
++                matrix_invocations_after_first,
++                matrix_invocations_after_tail,
++                matrix_invocations_after_continuation: session
++                    .packed_matrix_q8_output_invocations_for_test(),
++                first_pre_expert_gpu_ms,
++                tail_pre_expert_gpu_ms,
++                first_wall_ms,
++                tail_wall_ms,
++                packed_decisions,
+             };
+             (session.into_residency(), evidence)
+         }
+ 
+         fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
+-            assert_eq!(
+-                bits(&actual.logits),
+-                bits(&expected.logits),
+-                "{label} logits"
+-            );
+-            assert_eq!(
+-                bits(&actual.hidden),
+-                bits(&expected.hidden),
+-                "{label} hidden"
+-            );
+-            assert_eq!(
+-                actual.causal_digest, expected.causal_digest,
+-                "{label} causal"
+-            );
+-            assert_eq!(
+-                actual.prefix_digest, expected.prefix_digest,
+-                "{label} prefix"
+-            );
+-            assert_eq!(
+-                actual.compatibility_digest, expected.compatibility_digest,
+-                "{label} compatibility"
+-            );
++            fn assert_observation(label: &str, actual: &Observation, expected: &Observation) {
++                assert_eq!(bits(&actual.logits), bits(&expected.logits), "{label} logits");
++                assert_eq!(bits(&actual.hidden), bits(&expected.hidden), "{label} hidden");
++                assert_eq!(actual.causal_digest, expected.causal_digest, "{label} causal");
++                assert_eq!(actual.prefix_digest, expected.prefix_digest, "{label} prefix");
++                assert_eq!(
++                    actual.compatibility_digest, expected.compatibility_digest,
++                    "{label} compatibility"
++                );
++                assert_eq!(actual.next_position, expected.next_position, "{label} position");
++                assert_eq!(
++                    actual.source_observation, expected.source_observation,
++                    "{label} source observation"
++                );
++                assert_eq!(
++                    actual.committed_tokens, expected.committed_tokens,
++                    "{label} committed tokens"
++                );
++            }
++
++            assert_observation(&format!("{label} first"), &actual.first, &expected.first);
++            assert_observation(&format!("{label} tail"), &actual.tail, &expected.tail);
+             assert_eq!(
+                 bits(&actual.continuation_logits),
+                 bits(&expected.continuation_logits),
+                 "{label} continuation logits"
+             );
++            assert_eq!(
++                bits(&actual.continuation_hidden),
++                bits(&expected.continuation_hidden),
++                "{label} continuation hidden"
++            );
+             assert_eq!(
+                 actual.continuation_causal_digest, expected.continuation_causal_digest,
+                 "{label} continuation causal"
+@@
+                 actual.committed_tokens, expected.committed_tokens,
+                 "{label} committed tokens"
+             );
++            assert_eq!(
++                actual.continuation_decision, expected.continuation_decision,
++                "{label} continuation decisions"
++            );
++            assert_eq!(
++                actual.matrix_invocations_after_first,
++                expected.matrix_invocations_after_first,
++                "{label} first matrix invocations"
++            );
++            assert_eq!(
++                actual.matrix_invocations_after_tail,
++                expected.matrix_invocations_after_tail,
++                "{label} tail matrix invocations"
++            );
++            assert_eq!(
++                actual.matrix_invocations_after_continuation,
++                expected.matrix_invocations_after_continuation,
++                "{label} continuation matrix invocations"
++            );
+         }
+*** End Patch
+
+===== PATCH 37 | 2026-08-05 20:21:42 | prt_fd47285240018a9cgh1bnm748s =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+         fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
+@@
+                 "{label} continuation matrix invocations"
+             );
+         }
++
++        fn median(values: &[f64]) -> f64 {
++            let mut values = values.to_vec();
++            values.sort_by(f64::total_cmp);
++            if values.len().is_multiple_of(2) {
++                (values[values.len() / 2 - 1] + values[values.len() / 2]) * 0.5
++            } else {
++                values[values.len() / 2]
++            }
++        }
++
++        fn relative_span(values: &[f64]) -> f64 {
++            let minimum = values.iter().copied().reduce(f64::min).unwrap();
++            let maximum = values.iter().copied().reduce(f64::max).unwrap();
++            drift(minimum, maximum)
++        }
++
++        fn packed_decision_digest(capture: &prefill::PackedPrefillDecisionCapture) -> [u8; 32] {
++            let mut digest = Sha256::new();
++            for record in &capture.layers {
++                digest.update(record.chunk_start.to_le_bytes());
++                digest.update((record.n_tokens as u64).to_le_bytes());
++                digest.update((record.layer as u64).to_le_bytes());
++                digest.update([match record.attention_kind {
++                    AttentionKind::SlidingWindow => 0,
++                    AttentionKind::CompressedSparse => 1,
++                    AttentionKind::HeavilyCompressed => 2,
++                }]);
++                digest.update(
++                    record
++                        .sparse_query_offset
++                        .map_or(u64::MAX, |offset| offset as u64)
++                        .to_le_bytes(),
++                );
++                digest.update([match record.route_source {
++                    prefill::PackedPrefillRouteSourceKind::Hash => 0,
++                    prefill::PackedPrefillRouteSourceKind::Learned => 1,
++                }]);
++                digest.update(bytemuck::cast_slice(&record.expert_ids));
++                for value in &record.weights {
++                    digest.update(value.to_bits().to_le_bytes());
++                }
++                digest.update(bytemuck::cast_slice(&record.bucket_rows));
++                digest.update(bytemuck::cast_slice(&record.bucket_slots));
++                for bucket in &record.buckets {
++                    digest.update((bucket.expert as u64).to_le_bytes());
++                    digest.update((bucket.start as u64).to_le_bytes());
++                    digest.update((bucket.len as u64).to_le_bytes());
++                }
++                for margin in &record.learned_cutoff_margins {
++                    digest.update(margin.to_bits().to_le_bytes());
++                }
++            }
++            digest.finalize().into()
++        }
++
++        struct PackedDecisionAudit {
++            structure_exact: bool,
++            sparse_selector_invocations: usize,
++            maximum_weight_delta: f32,
++            minimum_control_cutoff_margin: f32,
++            minimum_candidate_cutoff_margin: f32,
++            maximum_cutoff_margin_delta: f32,
++        }
++
++        fn audit_packed_decisions(
++            control: &prefill::PackedPrefillDecisionCapture,
++            candidate: &prefill::PackedPrefillDecisionCapture,
++        ) -> PackedDecisionAudit {
++            let mut structure_exact = control.layers.len() == candidate.layers.len();
++            let mut sparse_selector_invocations = 0usize;
++            let mut maximum_weight_delta = 0.0f32;
++            let mut minimum_control_cutoff_margin = f32::INFINITY;
++            let mut minimum_candidate_cutoff_margin = f32::INFINITY;
++            let mut maximum_cutoff_margin_delta = 0.0f32;
++            for (control, candidate) in control.layers.iter().zip(&candidate.layers) {
++                sparse_selector_invocations += usize::from(control.sparse_query_offset.is_some());
++                sparse_selector_invocations += usize::from(candidate.sparse_query_offset.is_some());
++                structure_exact &= control.chunk_start == candidate.chunk_start
++                    && control.n_tokens == candidate.n_tokens
++                    && control.layer == candidate.layer
++                    && control.attention_kind == candidate.attention_kind
++                    && control.sparse_query_offset == candidate.sparse_query_offset
++                    && control.route_source == candidate.route_source
++                    && control.expert_ids == candidate.expert_ids
++                    && control.bucket_rows == candidate.bucket_rows
++                    && control.bucket_slots == candidate.bucket_slots
++                    && control.buckets == candidate.buckets
++                    && control.weights.len() == candidate.weights.len()
++                    && control.learned_cutoff_margins.len()
++                        == candidate.learned_cutoff_margins.len();
++                for (&control, &candidate) in control.weights.iter().zip(&candidate.weights) {
++                    maximum_weight_delta = maximum_weight_delta.max((candidate - control).abs());
++                }
++                for (&control, &candidate) in control
++                    .learned_cutoff_margins
++                    .iter()
++                    .zip(&candidate.learned_cutoff_margins)
++                {
++                    minimum_control_cutoff_margin = minimum_control_cutoff_margin.min(control);
++                    minimum_candidate_cutoff_margin =
++                        minimum_candidate_cutoff_margin.min(candidate);
++                    maximum_cutoff_margin_delta =
++                        maximum_cutoff_margin_delta.max((candidate - control).abs());
++                }
++            }
++            PackedDecisionAudit {
++                structure_exact,
++                sparse_selector_invocations,
++                maximum_weight_delta,
++                minimum_control_cutoff_margin,
++                minimum_candidate_cutoff_margin,
++                maximum_cutoff_margin_delta,
++            }
++        }
++
++        fn continuation_route_audit(
++            control: &DeepSeekV4DecisionTranscript,
++            candidate: &DeepSeekV4DecisionTranscript,
++        ) -> (bool, usize, f32) {
++            let mut ids_exact = control.position == candidate.position
++                && control.layers.len() == candidate.layers.len();
++            let mut sparse_decisions = 0usize;
++            let mut maximum_weight_delta = 0.0f32;
++            for (control, candidate) in control.layers.iter().zip(&candidate.layers) {
++                sparse_decisions += usize::from(control.csa.is_some());
++                sparse_decisions += usize::from(candidate.csa.is_some());
++                ids_exact &= control.layer == candidate.layer
++                    && control.route.expert_ids == candidate.route.expert_ids
++                    && control.route.normalized_scaled_weights.len()
++                        == candidate.route.normalized_scaled_weights.len();
++                for (&control, &candidate) in control
++                    .route
++                    .normalized_scaled_weights
++                    .iter()
++                    .zip(&candidate.route.normalized_scaled_weights)
++                {
++                    maximum_weight_delta = maximum_weight_delta.max((candidate - control).abs());
++                }
++            }
++            (ids_exact, sparse_decisions, maximum_weight_delta)
++        }
+*** End Patch
+
+===== PATCH 38 | 2026-08-05 20:21:46 | prt_fd47292af001WTN6EtOx2qIUxZ =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+-    fn current_asset_packed_matrix_q8_output_probe() {
++    fn current_asset_packed_matrix_q8_first_chunk_packet() {
+*** End Patch
+
+===== PATCH 39 | 2026-08-05 20:23:09 | prt_fd473d8b1001wAMmBK2U40P4aU =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+         );
+         let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
+-        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 129)
++        let tokenizer = crate::tokenizer::Tokenizer::from_gguf(&gguf)
++            .expect("load current DS4 tokenizer for matrix-output packet");
++        let prompt = "Review this Metal inference change as a careful systems engineer. The change replaces repeated single-row Q8 attention output projections with a packed matrix schedule for the first full prompt chunk. Check numerical stability, causal state ownership, deterministic expert routing, exact tail fallback, snapshot restoration, and whether measured latency savings survive realistic execution. Explain any boundary where the optimization must remain disabled. Treat prompt processing latency and token generation latency as separate product objectives. Do not infer correctness from matching argmax alone, and do not infer throughput from a synthetic kernel without an integrated model run. Compare intermediate normalized hidden vectors, full vocabulary logits, routing decisions, cutoff margins, committed token transcripts, and snapshot digests. Require repeated runs to preserve their own floating-point lineage bit for bit. The implementation must fail closed when the chunk does not begin at position zero or does not contain exactly one hundred twenty-eight tokens. A later twelve-token tail must use the existing exact projection path. Finally, restore the completed prefix and evaluate one continuation token so that any approximation carried through causal state becomes visible.";
++        let encoded = tokenizer
++            .encode(prompt, false)
++            .expect("tokenize matrix-output packet prompt");
++        assert!(
++            encoded.len() >= PREFIX_TOKENS,
++            "matrix-output packet prompt produced only {} tokens",
++            encoded.len()
++        );
++        let prefix = encoded[..PREFIX_TOKENS]
++            .iter()
++            .map(|&token| u32::try_from(token).expect("DS4 token ID is nonnegative"))
++            .collect::<Vec<_>>();
++        let prompt_sha256: [u8; 32] = Sha256::digest(bytemuck::cast_slice(&prefix)).into();
++
++        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(
++            &ctx,
++            &gguf,
++            PREFIX_TOKENS + 1,
++        )
+             .expect("plan packed matrix-output session");
+@@
+             .expect("admit packed matrix-output session");
+         let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+             .expect("realize current DS4 residency");
+         let mut residency = realized.into_residency();
++
++        let (next, detailed_control) = execute(
++            &ctx,
++            residency,
++            model_content_id,
++            &prefix,
++            false,
++            true,
++        );
++        let (next, detailed_candidate) = execute(
++            &ctx,
++            next,
++            model_content_id,
++            &prefix,
++            true,
++            true,
++        );
++        let (next, control_a) = execute(
++            &ctx,
++            next,
++            model_content_id,
++            &prefix,
++            false,
++            false,
++        );
++        let (next, candidate_a) = execute(
++            &ctx,
++            next,
++            model_content_id,
++            &prefix,
++            true,
++            false,
++        );
++        let (next, control_b) = execute(
++            &ctx,
++            next,
++            model_content_id,
++            &prefix,
++            false,
++            false,
++        );
++        let (next, candidate_b) = execute(
++            &ctx,
++            next,
++            model_content_id,
++            &prefix,
++            true,
++            false,
++        );
++        let (next, control_c) = execute(
++            &ctx,
++            next,
++            model_content_id,
++            &prefix,
++            false,
++            false,
++        );
++        residency = next;
++
++        assert_exact("matrix-output detailed/control A", &detailed_control, &control_a);
++        assert_exact("matrix-output control B/control A", &control_b, &control_a);
++        assert_exact("matrix-output control C/control A", &control_c, &control_a);
++        assert_exact(
++            "matrix-output detailed/candidate A",
++            &detailed_candidate,
++            &candidate_a,
++        );
++        assert_exact(
++            "matrix-output candidate B/candidate A",
++            &candidate_b,
++            &candidate_a,
++        );
++
++        let expected_matrix_invocations = (DEEPSEEK_V4_LAYER_COUNT as u32, DEEPSEEK_V4_LAYER_COUNT as u32);
++        let invocation_gate = [&control_a, &control_b, &control_c]
++            .into_iter()
++            .all(|evidence| {
++                evidence.matrix_invocations_after_first == (0, 0)
++                    && evidence.matrix_invocations_after_tail == (0, 0)
++                    && evidence.matrix_invocations_after_continuation == (0, 0)
++            })
++            && [&candidate_a, &candidate_b]
++                .into_iter()
++                .all(|evidence| {
++                    evidence.matrix_invocations_after_first == expected_matrix_invocations
++                        && evidence.matrix_invocations_after_tail == expected_matrix_invocations
++                        && evidence.matrix_invocations_after_continuation
++                            == expected_matrix_invocations
++                });
++
++        let metadata_gate = [&detailed_candidate, &candidate_a, &candidate_b]
++            .into_iter()
++            .all(|candidate| {
++                candidate.first.prefix_digest == control_a.first.prefix_digest
++                    && candidate.first.compatibility_digest
++                        == control_a.first.compatibility_digest
++                    && candidate.first.next_position == FIRST_CHUNK_TOKENS as u32
++                    && candidate.first.committed_tokens == prefix[..FIRST_CHUNK_TOKENS]
++                    && candidate.tail.prefix_digest == control_a.tail.prefix_digest
++                    && candidate.tail.compatibility_digest == control_a.tail.compatibility_digest
++                    && candidate.tail.next_position == PREFIX_TOKENS as u32
++                    && candidate.tail.committed_tokens == prefix
++                    && candidate.committed_tokens[..PREFIX_TOKENS] == prefix
++                    && candidate.committed_tokens[PREFIX_TOKENS] == CONTINUATION_TOKEN
++            });
++
++        let quality_differentials = [
++            (
++                "first_logits",
++                differential(&detailed_candidate.first.logits, &detailed_control.first.logits),
++            ),
++            (
++                "first_hidden",
++                differential(&detailed_candidate.first.hidden, &detailed_control.first.hidden),
++            ),
++            (
++                "tail_logits",
++                differential(&detailed_candidate.tail.logits, &detailed_control.tail.logits),
++            ),
++            (
++                "tail_hidden",
++                differential(&detailed_candidate.tail.hidden, &detailed_control.tail.hidden),
++            ),
++            (
++                "continuation_logits",
++                differential(
++                    &detailed_candidate.continuation_logits,
++                    &detailed_control.continuation_logits,
++                ),
++            ),
++            (
++                "continuation_hidden",
++                differential(
++                    &detailed_candidate.continuation_hidden,
++                    &detailed_control.continuation_hidden,
++                ),
++            ),
++        ];
++        let argmax_gate = argmax(&detailed_candidate.first.logits)
++            == argmax(&detailed_control.first.logits)
++            && argmax(&detailed_candidate.tail.logits) == argmax(&detailed_control.tail.logits)
++            && argmax(&detailed_candidate.continuation_logits)
++                == argmax(&detailed_control.continuation_logits);
++        let quality_gate = argmax_gate
++            && quality_differentials
++                .iter()
++                .all(|(_, differential)| differential.0 >= 0.999 && differential.1 <= 0.05);
++
++        let control_decisions = detailed_control
++            .packed_decisions
++            .as_ref()
++            .expect("detailed control packed decisions");
++        let candidate_decisions = detailed_candidate
++            .packed_decisions
++            .as_ref()
++            .expect("detailed candidate packed decisions");
++        let decision_audit = audit_packed_decisions(control_decisions, candidate_decisions);
++        let (continuation_ids_exact, continuation_sparse_decisions, continuation_weight_delta) =
++            continuation_route_audit(
++                &detailed_control.continuation_decision,
++                &detailed_candidate.continuation_decision,
++            );
++        let decision_gate = control_decisions.layers.len() == 2 * DEEPSEEK_V4_LAYER_COUNT
++            && candidate_decisions.layers.len() == 2 * DEEPSEEK_V4_LAYER_COUNT
++            && decision_audit.structure_exact
++            && decision_audit.sparse_selector_invocations == 0
++            && continuation_ids_exact
++            && continuation_sparse_decisions == 0
++            && decision_audit.maximum_weight_delta.is_finite()
++            && decision_audit.minimum_control_cutoff_margin.is_finite()
++            && decision_audit.minimum_candidate_cutoff_margin.is_finite()
++            && decision_audit.maximum_cutoff_margin_delta.is_finite()
++            && continuation_weight_delta.is_finite();
++
++        let controls = [&control_a, &control_b, &control_c];
++        let candidates = [&candidate_a, &candidate_b];
++        let first_control_gpu = controls
++            .iter()
++            .map(|evidence| evidence.first_pre_expert_gpu_ms)
++            .collect::<Vec<_>>();
++        let first_candidate_gpu = candidates
++            .iter()
++            .map(|evidence| evidence.first_pre_expert_gpu_ms)
++            .collect::<Vec<_>>();
++        let aggregate_control_gpu = controls
++            .iter()
++            .map(|evidence| {
++                evidence.first_pre_expert_gpu_ms + evidence.tail_pre_expert_gpu_ms
++            })
++            .collect::<Vec<_>>();
++        let aggregate_candidate_gpu = candidates
++            .iter()
++            .map(|evidence| {
++                evidence.first_pre_expert_gpu_ms + evidence.tail_pre_expert_gpu_ms
++            })
++            .collect::<Vec<_>>();
++        let first_control_wall = controls
++            .iter()
++            .map(|evidence| evidence.first_wall_ms)
++            .collect::<Vec<_>>();
++        let first_candidate_wall = candidates
++            .iter()
++            .map(|evidence| evidence.first_wall_ms)
++            .collect::<Vec<_>>();
++        let tail_control_gpu = controls
++            .iter()
++            .map(|evidence| evidence.tail_pre_expert_gpu_ms)
++            .collect::<Vec<_>>();
++        let tail_candidate_gpu = candidates
++            .iter()
++            .map(|evidence| evidence.tail_pre_expert_gpu_ms)
++            .collect::<Vec<_>>();
++        let aggregate_control_wall = controls
++            .iter()
++            .map(|evidence| evidence.first_wall_ms + evidence.tail_wall_ms)
++            .collect::<Vec<_>>();
++        let aggregate_candidate_wall = candidates
++            .iter()
++            .map(|evidence| evidence.first_wall_ms + evidence.tail_wall_ms)
++            .collect::<Vec<_>>();
++
++        let faster_first_control_gpu = first_control_gpu.iter().copied().reduce(f64::min).unwrap();
++        let faster_aggregate_control_gpu = aggregate_control_gpu
++            .iter()
++            .copied()
++            .reduce(f64::min)
++            .unwrap();
++        let faster_aggregate_control_wall = aggregate_control_wall
++            .iter()
++            .copied()
++            .reduce(f64::min)
++            .unwrap();
++        let faster_tail_control_gpu = tail_control_gpu.iter().copied().reduce(f64::min).unwrap();
++        let first_gpu_saving = 1.0 - median(&first_candidate_gpu) / faster_first_control_gpu;
++        let aggregate_gpu_saving =
++            1.0 - median(&aggregate_candidate_gpu) / faster_aggregate_control_gpu;
++        let aggregate_wall_saving =
++            1.0 - median(&aggregate_candidate_wall) / faster_aggregate_control_wall;
++        let tail_gpu_regression = median(&tail_candidate_gpu) / faster_tail_control_gpu - 1.0;
++        let control_gpu_drift = relative_span(&aggregate_control_gpu);
++        let candidate_gpu_drift = relative_span(&aggregate_candidate_gpu);
++        let control_wall_drift = relative_span(&aggregate_control_wall);
++        let candidate_wall_drift = relative_span(&aggregate_candidate_wall);
++        let performance_gate = control_gpu_drift <= 0.05
++            && candidate_gpu_drift <= 0.05
++            && control_wall_drift <= 0.05
++            && candidate_wall_drift <= 0.05
++            && first_gpu_saving >= 0.20
++            && aggregate_gpu_saving >= 0.15
++            && aggregate_wall_saving >= 0.15
++            && tail_gpu_regression <= 0.05;
++
++        eprintln!(
++            "deepseek_v4 packed_matrix_q8_first_chunk prompt_tokens={PREFIX_TOKENS} chunks={FIRST_CHUNK_TOKENS}+{TAIL_TOKENS} prompt_ids_sha256={} invocation_gate={invocation_gate} metadata_gate={metadata_gate} quality_gate={quality_gate} decision_gate={decision_gate} performance_gate={performance_gate} argmaxes_control={:?} argmaxes_candidate={:?} quality_differentials={quality_differentials:?} first_control_gpu_ms={first_control_gpu:?} first_candidate_gpu_ms={first_candidate_gpu:?} aggregate_control_gpu_ms={aggregate_control_gpu:?} aggregate_candidate_gpu_ms={aggregate_candidate_gpu:?} first_control_wall_ms={first_control_wall:?} first_candidate_wall_ms={first_candidate_wall:?} aggregate_control_wall_ms={aggregate_control_wall:?} aggregate_candidate_wall_ms={aggregate_candidate_wall:?} tail_control_gpu_ms={tail_control_gpu:?} tail_candidate_gpu_ms={tail_candidate_gpu:?} control_gpu_drift={control_gpu_drift:.6} candidate_gpu_drift={candidate_gpu_drift:.6} control_wall_drift={control_wall_drift:.6} candidate_wall_drift={candidate_wall_drift:.6} first_gpu_saving={first_gpu_saving:.6} aggregate_gpu_saving={aggregate_gpu_saving:.6} aggregate_wall_saving={aggregate_wall_saving:.6} tail_gpu_regression={tail_gpu_regression:.6} packed_route_structure_exact={} packed_sparse_selector_invocations={} packed_max_weight_delta={:.9} min_control_cutoff_margin={:.9} min_candidate_cutoff_margin={:.9} max_cutoff_margin_delta={:.9} continuation_route_ids_exact={continuation_ids_exact} continuation_sparse_decisions={continuation_sparse_decisions} continuation_max_weight_delta={continuation_weight_delta:.9} control_packed_decisions_sha256={} candidate_packed_decisions_sha256={} control_first_logits_sha256={} candidate_first_logits_sha256={} control_tail_logits_sha256={} candidate_tail_logits_sha256={} control_continuation_logits_sha256={} candidate_continuation_logits_sha256={} control_first_causal={} candidate_first_causal={} control_tail_causal={} candidate_tail_causal={} control_continuation_causal={} candidate_continuation_causal={}",
++            digest_hex(prompt_sha256),
++            [
++                argmax(&detailed_control.first.logits),
++                argmax(&detailed_control.tail.logits),
++                argmax(&detailed_control.continuation_logits),
++            ],
++            [
++                argmax(&detailed_candidate.first.logits),
++                argmax(&detailed_candidate.tail.logits),
++                argmax(&detailed_candidate.continuation_logits),
++            ],
++            decision_audit.structure_exact,
++            decision_audit.sparse_selector_invocations,
++            decision_audit.maximum_weight_delta,
++            decision_audit.minimum_control_cutoff_margin,
++            decision_audit.minimum_candidate_cutoff_margin,
++            decision_audit.maximum_cutoff_margin_delta,
++            digest_hex(packed_decision_digest(control_decisions)),
++            digest_hex(packed_decision_digest(candidate_decisions)),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(&detailed_control.first.logits))),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(&detailed_candidate.first.logits))),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(&detailed_control.tail.logits))),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(&detailed_candidate.tail.logits))),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(&detailed_control.continuation_logits))),
++            digest_hex(Sha256::digest(bytemuck::cast_slice(&detailed_candidate.continuation_logits))),
++            digest_hex(detailed_control.first.causal_digest),
++            digest_hex(detailed_candidate.first.causal_digest),
++            digest_hex(detailed_control.tail.causal_digest),
++            digest_hex(detailed_candidate.tail.causal_digest),
++            digest_hex(detailed_control.continuation_causal_digest),
++            digest_hex(detailed_candidate.continuation_causal_digest),
++        );
++
++        assert!(invocation_gate, "matrix Q8 invocation ownership failed");
++        assert!(metadata_gate, "matrix Q8 snapshot metadata changed");
++        assert!(quality_gate, "matrix Q8 quality envelope failed");
++        assert!(decision_gate, "matrix Q8 decision envelope failed");
++        assert!(performance_gate, "matrix Q8 performance envelope failed");
++
++        #[cfg(any())]
++        {
+*** End Patch
+
+===== PATCH 40 | 2026-08-05 20:23:13 | prt_fd473e64a001aXX291rhOfP1f8 =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+         }
+         drop(residency);
++        }
+     }
+*** End Patch
+
+===== PATCH 41 | 2026-08-05 20:23:55 | prt_fd4748d40001GkNbF1Caxzh5yz =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+-        let mut residency = realized.into_residency();
++        let residency = realized.into_residency();
+@@
+-        let (next, control_c) = execute(&ctx, next, model_content_id, &prefix, false, false);
+-        residency = next;
++        let (_residency, control_c) = execute(&ctx, next, model_content_id, &prefix, false, false);
+*** End Patch
+
+===== PATCH 42 | 2026-08-05 20:24:23 | prt_fd474f717001J6canN4zQRaiuY =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+         let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+             .expect("realize current DS4 residency");
+-        let residency = realized.into_residency();
++        let mut residency = realized.into_residency();
+@@
+         let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+             .expect("realize current DS4 residency");
+-        let mut residency = realized.into_residency();
++        let residency = realized.into_residency();
+ 
+         let (next, detailed_control) =
+*** End Patch
+
+===== PATCH 43 | 2026-08-05 20:24:38 | prt_fd47531e4001ePDEW3yiBQJ4p5 =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+         let admitted = plan
+             .admit(ctx.memory_signals())
+             .expect("admit packed grouped session");
+         let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+             .expect("realize current DS4 residency");
+-        let residency = realized.into_residency();
++        let mut residency = realized.into_residency();
+*** End Patch
+
+===== PATCH 44 | 2026-08-05 20:24:47 | prt_fd47554b0001NvJ9wVf4oadfM9 =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+         let admitted = plan
+             .admit(ctx.memory_signals())
+             .expect("admit packed GPU route session");
+         let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+             .expect("realize current DS4 residency");
+-        let mut residency = realized.into_residency();
++        let residency = realized.into_residency();
+*** End Patch
+
+===== PATCH 45 | 2026-08-05 20:28:18 | prt_fd4788f7a001AenBulWajGqGrU =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/diagnostics.rs
+@@
+ #[derive(Default)]
+ enum CaptureState {
+@@
+     Idle,
+     Armed {
+         position: u32,
++        mode: DecisionCaptureMode,
+     },
+     Capturing {
+         position: u32,
++        mode: DecisionCaptureMode,
+         layers: Vec<DeepSeekV4DecisionLayer>,
+     },
+@@
+     Taken,
+ }
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++enum DecisionCaptureMode {
++    SparseDecisions,
++    RoutesOnly,
++}
+@@
+     pub(crate) fn arm(&mut self, position: u32) -> Result<(), DeepSeekV4DiagnosticsError> {
+         self.validate_arm(position)?;
+-        self.state = CaptureState::Armed { position };
++        self.state = CaptureState::Armed {
++            position,
++            mode: DecisionCaptureMode::SparseDecisions,
++        };
++        Ok(())
++    }
++
++    pub(crate) fn arm_routes_only(
++        &mut self,
++        position: u32,
++    ) -> Result<(), DeepSeekV4DiagnosticsError> {
++        if !matches!(self.state, CaptureState::Idle) {
++            return Err(DeepSeekV4DiagnosticsError::DuplicateCapture);
++        }
++        self.state = CaptureState::Armed {
++            position,
++            mode: DecisionCaptureMode::RoutesOnly,
++        };
+         Ok(())
+     }
+@@
+-        let CaptureState::Armed { position } = self.state else {
++        let CaptureState::Armed { position, mode } = self.state else {
+             return Ok(());
+         };
+@@
+         self.state = CaptureState::Capturing {
+             position,
++            mode,
+             layers: Vec::with_capacity(LAYER_COUNT),
+         };
+@@
+-        let CaptureState::Capturing { layers, .. } = &mut self.state else {
++        let CaptureState::Capturing { mode, layers, .. } = &mut self.state else {
+             return Ok(());
+         };
+@@
+-        if csa.is_some() != is_csa_layer(layer) {
++        let expects_csa = *mode == DecisionCaptureMode::SparseDecisions && is_csa_layer(layer);
++        if csa.is_some() != expects_csa {
+             return Err(DeepSeekV4DiagnosticsError::Shape(format!(
+-                "layer {layer} CSA decision presence does not match Flash-0731 geometry"
++                "layer {layer} CSA decision presence does not match {mode:?} capture geometry"
+             )));
+@@
+-        let CaptureState::Capturing { position, layers } =
++        let CaptureState::Capturing {
++            position,
++            mode,
++            layers,
++        } =
+             std::mem::replace(&mut self.state, CaptureState::Taken)
+         else {
+@@
+         };
+         if layers.len() != LAYER_COUNT {
+-            self.state = CaptureState::Capturing { position, layers };
++            self.state = CaptureState::Capturing {
++                position,
++                mode,
++                layers,
++            };
+             return Err(self.incomplete_error());
+         }
+         let csa_count = layers.iter().filter(|layer| layer.csa.is_some()).count();
+-        if csa_count != CSA_LAYER_COUNT {
+-            self.state = CaptureState::Capturing { position, layers };
++        let expected_csa_count = match mode {
++            DecisionCaptureMode::SparseDecisions => CSA_LAYER_COUNT,
++            DecisionCaptureMode::RoutesOnly => 0,
++        };
++        if csa_count != expected_csa_count {
++            self.state = CaptureState::Capturing {
++                position,
++                mode,
++                layers,
++            };
+             return Err(DeepSeekV4DiagnosticsError::Shape(format!(
+-                "captured {csa_count} CSA layers, expected {CSA_LAYER_COUNT}"
++                "captured {csa_count} CSA layers, expected {expected_csa_count}"
+             )));
+@@
+             schema_version: SCHEMA_VERSION,
+             position,
+             layer_count: LAYER_COUNT as u32,
+-            csa_layer_count: CSA_LAYER_COUNT as u32,
++            csa_layer_count: expected_csa_count as u32,
+             layers,
+*** End Patch
+
+===== PATCH 46 | 2026-08-05 20:28:41 | prt_fd478e6ac001WRO0F9r142hvIy =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+     pub fn arm_decision_transcript(&mut self, position: u32) -> Result<(), DeepSeekV4MetalError> {
+@@
+         self.decision_diagnostics.arm(position)?;
+         Ok(())
+     }
++
++    #[cfg(all(test, feature = "dsv4-diagnostics"))]
++    fn arm_route_transcript_for_test(
++        &mut self,
++        position: u32,
++    ) -> Result<(), DeepSeekV4MetalError> {
++        self.capacity.validate_position(position)?;
++        if position != self.phase.ready_position()? {
++            return Err(DeepSeekV4DiagnosticsError::WrongPosition {
++                expected: position,
++                actual: self.phase.next_position(),
++            }
++            .into());
++        }
++        self.decision_diagnostics.arm_routes_only(position)?;
++        Ok(())
++    }
+ 
+     /// Takes a complete owned transcript. Partial or duplicate takes fail closed.
+*** End Patch
+
+===== PATCH 47 | 2026-08-05 20:28:52 | prt_fd47914bc001t2azNtyl4FbnE0 =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@
+             session
+-                .arm_decision_transcript(PREFIX_TOKENS as u32)
++                .arm_route_transcript_for_test(PREFIX_TOKENS as u32)
+                 .expect("arm restored matrix-output continuation decisions");
+*** End Patch
+
+===== PATCH 48 | 2026-08-05 20:29:13 | prt_fd47965930015N9z76C0UPwZga =====
+*** Begin Patch
+*** Update File: /Users/tito/code/qwen-llm/crates/qwen-llm/src/deepseek_v4_metal/diagnostics.rs
+@@
+     fn schema_geometry_is_serializable_and_requires_all_layers() {
+@@
+         assert_eq!(
+             capture.take().unwrap_err(),
+             DeepSeekV4DiagnosticsError::DuplicateCapture
+         );
+     }
++
++    #[test]
++    fn route_only_capture_is_complete_without_sparse_selection() {
++        let mut capture = DeepSeekV4DecisionCapture::default();
++        capture.arm_routes_only(140).unwrap();
++        capture.begin_forward(140).unwrap();
++        for layer in 0..LAYER_COUNT {
++            capture.capture_layer(layer, None, route()).unwrap();
++        }
++        capture.finish().unwrap();
++        let transcript = capture.take().unwrap();
++        assert_eq!(transcript.position, 140);
++        assert_eq!(transcript.layer_count, LAYER_COUNT as u32);
++        assert_eq!(transcript.csa_layer_count, 0);
++        assert!(transcript.layers.iter().all(|layer| layer.csa.is_none()));
++    }
+ 
+     #[test]
+*** End Patch

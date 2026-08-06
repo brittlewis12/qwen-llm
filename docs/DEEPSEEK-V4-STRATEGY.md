@@ -1984,10 +1984,14 @@ Broader S6 work remains:
   packet authorizes attention body plus output at a 500.011 ms/46.420% lower
   estimate. Its four-pass split then kills attention body alone at
   113.488 ms/10.641% and authorizes `encode_output` at
-  377.528 ms/35.397%. First test an exact mapped, token-tiled Q8_0 output-A and
-  output-B pair; preserve per-token reduction lineage and keep the current
-  pack/project/scatter chain as fallback. Then split the unchanged roughly
-  688 ms post-route span before widening another grouped format. Whole-token
+  377.528 ms/35.397%. That authorization is now closed for the tested current
+  asset/Apple M4 Max schedules. Exact mapped T1 is neutral at 8.997 versus
+  8.912 ms/layer; exact T4/T8 regress. F16-staged Q8 matrix output clears the
+  bounded 128+12 speed gate but fails position-140 and restored-continuation
+  quality plus exact packed/continuation route IDs. All candidate source is
+  removed; do not resweep the same condition under this contract. Split the
+  unchanged roughly 688 ms post-route span before widening another grouped
+  format. Whole-token
   submission, per-layer route/selector failure records, and verified-prefix
   callbacks are promoted. An asynchronously immutable SSD-streaming ticket
   remains a separate product contract.
@@ -2136,9 +2140,16 @@ noise without reducing technical risk. Revisit after S5.
    113.488 ms/10.641%, while the output pipeline clears at
    377.528 ms/35.397%. All arms retain exact outputs, matching
    causal/prefix/compatibility digests, tokens, and the same 47,990 dispatch
-   geometries. Next test an exact mapped,
-   token-tiled Q8_0 output pair, then attribute the unchanged roughly 688 ms
-   post-route span. Keep MXFP4 down and GPU route arithmetic unchanged and do
-   not revive a monolithic FFN kernel.
+   geometries. The tested output follow-up is now `KILL` for the current asset
+   on Apple M4 Max: mapped T1 is neutral and T4/T8 regress at N=128. Numerical
+   Q8 matrix A+B passes the bounded speed gate with 27.851% first-chunk
+   pre-expert GPU, 23.291% aggregate GPU, and 15.847% aggregate wall savings,
+   but position-140 hidden state falls to 0.997495086 cosine / 0.070735848
+   relative RMS and both packed and restored continuation route IDs change.
+   Preserve the current exact output path, remove every candidate seam, and do
+   not resweep the same F16-staged condition under this device/asset contract.
+   Next attribute the unchanged roughly 688 ms post-route span. Keep MXFP4
+   down and GPU route arithmetic unchanged and do not revive a monolithic FFN
+   kernel.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

@@ -1,0 +1,38 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::tests::current_asset_packed_matrix_q8_output_probe ... deepseek_v4 packed_matrix_q8_output n=12 control_gpu_ms=[227.81804180704057, 206.65512420237064] candidate_gpu_ms=[202.91858399286866, 204.97341640293598] control_wall_ms=[36408.829709000005, 623.9672499999999] candidate_wall_ms=[619.663958, 623.155625] control_gpu_drift=0.097419 candidate_gpu_drift=0.010075 control_wall_drift=1.932604 candidate_wall_drift=0.005619 gpu_saving=0.013109 wall_saving=0.004099 matrix_invocations=0 packed_argmax=35 candidate_packed_argmax=35 continuation_argmax=201 candidate_continuation_argmax=201 logits_diff=(1.0, 0.0, 0.0) hidden_diff=(1.0, 0.0, 0.0) continuation_diff=(1.0, 0.0, 0.0) control_logits_sha256=6c5dbb88a1767fb98fd3e5eb976b310c6f97a9732f1ffabedfb2a9e82a673ed2 candidate_logits_sha256=6c5dbb88a1767fb98fd3e5eb976b310c6f97a9732f1ffabedfb2a9e82a673ed2 control_causal=37dcd04a641cb0cd3763adc7b2267e1423b0ec6ec39cc965c30fddbf16888a9b candidate_causal=37dcd04a641cb0cd3763adc7b2267e1423b0ec6ec39cc965c30fddbf16888a9b control_continuation_causal=42c56a22e6887a4818cbc9bfa0a74e5593211922a6a096c84c96037ea5a49b5c candidate_continuation_causal=42c56a22e6887a4818cbc9bfa0a74e5593211922a6a096c84c96037ea5a49b5c
+deepseek_v4 packed_matrix_q8_output n=32 control_gpu_ms=[352.1932503208518, 357.77033236809075] candidate_gpu_ms=[305.1933746319264, 308.0760417506099] control_wall_ms=[950.164875, 955.488416] candidate_wall_ms=[901.113917, 903.768875] control_gpu_drift=0.015711 candidate_gpu_drift=0.009401 control_wall_drift=0.005587 candidate_wall_drift=0.002942 gpu_saving=0.129357 wall_saving=0.050227 matrix_invocations=43 packed_argmax=35 candidate_packed_argmax=35 continuation_argmax=201 candidate_continuation_argmax=201 logits_diff=(0.9977985086091071, 0.06723185242915422, 1.6488543) hidden_diff=(0.997359627445574, 0.07304033385350643, 0.26579237) continuation_diff=(0.9993831674850757, 0.03514188729671054, 0.870615) control_logits_sha256=7c072707db22b5202757a8fffd3d8cf056564b62620d6b793db916258074a7bb candidate_logits_sha256=30871abc2fb7e4d270f18f91ffb2c41d6d29f82aabbd19aee5b76c6405926dce control_causal=ef14d3f12c306e2a154f48fcb9d10e8b26d0b3e0be904f5a6bb09f43895da532 candidate_causal=5f08cd6dfd2e98f72430e3334d37c45cd66d7f3f13824c73ded020a315cf82d3 control_continuation_causal=a857a160e70ffe0a9b54505dd021d7a2658da1c80e2ebfd662042c76fdf072b4 candidate_continuation_causal=96d28bedb18cd69c9186a7d12c319235e254e836030a8c479051d0c077a797d0
+
+thread 'deepseek_v4_metal::tests::current_asset_packed_matrix_q8_output_probe' (257554895) panicked at crates/qwen-llm/src/deepseek_v4_metal.rs:15210:17:
+N=32 logits matrix-output differential exceeded probe envelope: (0.9977985086091071, 0.06723185242915422, 1.6488543)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::tests::current_asset_packed_matrix_q8_output_probe
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 668 filtered out; finished in 44.09s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`
+       44.18 real         1.45 user         2.95 sys
+           306331648  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              -55746  page reclaims
+              104596  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+                 340  voluntary context switches
+              110364  involuntary context switches
+          1244585784  instructions retired
+           360496823  cycles elapsed
+            46203480  peak memory footprint

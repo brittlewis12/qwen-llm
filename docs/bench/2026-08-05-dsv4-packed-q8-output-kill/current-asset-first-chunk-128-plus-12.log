@@ -1,0 +1,37 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::tests::current_asset_packed_matrix_q8_first_chunk_packet ... deepseek_v4 packed_matrix_q8_first_chunk prompt_tokens=140 chunks=128+12 prompt_ids_sha256=8dc3a3091bc13e6f8e982e25e251e3995565d26b89e70a1f7cc8da36060de2f7 invocation_gate=true metadata_gate=true quality_gate=false decision_gate=false performance_gate=true argmaxes_control=[305, 12122, 20332] argmaxes_candidate=[305, 12122, 20332] quality_differentials=[("first_logits", (0.999512352535901, 0.031261980087553716, 1.3372498)), ("first_hidden", (0.9990107276359598, 0.04447221610427697, 0.05649446)), ("tail_logits", (0.9988326928910578, 0.048418514258489836, 1.3888664)), ("tail_hidden", (0.9974950859592717, 0.07073584802980344, 0.0979833)), ("continuation_logits", (0.9988405494947027, 0.048206679992150635, 1.232913)), ("continuation_hidden", (0.9983198652244044, 0.057944361966592896, 0.2627585))] first_control_gpu_ms=[1090.1317920070142, 1109.6092492807657, 1084.1585826128721] first_candidate_gpu_ms=[782.6605837326497, 781.750290421769] aggregate_control_gpu_ms=[1312.9975008778274, 1333.6290824227035, 1310.4008324444294] aggregate_candidate_gpu_ms=[1005.959375295788, 1004.4259990099818] first_control_wall_ms=[3656.220958, 3767.9662089999997, 3785.878083] first_candidate_wall_ms=[2957.346667, 2951.8832079999997] aggregate_control_wall_ms=[4395.729291, 4510.796334, 4529.333666] aggregate_candidate_wall_ms=[3701.9897089999995, 3696.2660419999997] tail_control_gpu_ms=[222.86570887081325, 224.01983314193785, 226.24224983155727] tail_candidate_gpu_ms=[223.29879156313837, 222.67570858821273] control_gpu_drift=0.017570 candidate_gpu_drift=0.001525 control_wall_drift=0.029939 candidate_wall_drift=0.001547 first_gpu_saving=0.278514 aggregate_gpu_saving=0.232912 aggregate_wall_saving=0.158472 tail_gpu_regression=0.000545 packed_route_structure_exact=false packed_sparse_selector_invocations=0 packed_max_weight_delta=0.351734340 min_control_cutoff_margin=0.000021935 min_candidate_cutoff_margin=0.000006676 max_cutoff_margin_delta=0.272183418 continuation_route_ids_exact=false continuation_sparse_decisions=0 continuation_max_weight_delta=0.134389818 control_packed_decisions_sha256=b1b98be5d50863ac6d4fc8bca538e5cb494e8695c17b09afd8eefbec911e74a7 candidate_packed_decisions_sha256=6ff6d03aea66b5812eb90298257fc825dd85ed6d5f4b157f0696606f2c69fb73 control_first_logits_sha256=71d31fe3b1fa19f32a94633d58f48865b798a5b7861c289f75efa6f32d214ea7 candidate_first_logits_sha256=33df3bc12432b5ab77b70f49bd551e406f302c10896ecb5e3a74d9cdb0937d7a control_tail_logits_sha256=25bffc0109fd4846ad2391bcd2f43bec4fe9acfdb36b2e9c93a2845ec64f1415 candidate_tail_logits_sha256=5c5d7ac12abeda88477c6d019b0f7537566de9567575a1c2bae0425e08608cc8 control_continuation_logits_sha256=3e494d8e8740a5f4a4bb7e4a118ea8436a40a657f4b187936e086f54ed611390 candidate_continuation_logits_sha256=6d2000f02eed2e4f3eed6a9ebf4cea35f168bbc7d8e2b8ec7f228ac098e159d4 control_first_causal=eda614bab4142f90062eeb129c77671efe52aed6dd66cb24d041cd8423a61b23 candidate_first_causal=5ebf1cb664687addd9eed9da33f609924fe9f11552a047698a5bba7e8aa1ad7d control_tail_causal=9c0df3e04c4072e5d00b3ffe7e6a7f3452010d2b078fade09c50b6ba38ea1c06 candidate_tail_causal=7c0cf52c2a4ed1e99dee241f615591646430b97d013c168c56889df5fb3bd629 control_continuation_causal=cc7fd554e8ebae0a13b6d65691305b33c4875084b83d0d78bd1c103d1b9306d6 candidate_continuation_causal=5835b448bd83d111982f453d050e073063b17308776060a0c6043d9ac0eb9bb7
+
+thread 'deepseek_v4_metal::tests::current_asset_packed_matrix_q8_first_chunk_packet' (257772679) panicked at crates/qwen-llm/src/deepseek_v4_metal.rs:15659:9:
+matrix Q8 quality envelope failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::tests::current_asset_packed_matrix_q8_first_chunk_packet
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 669 filtered out; finished in 33.75s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`
+       33.84 real         3.07 user         4.33 sys
+           391561216  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               50860  page reclaims
+                2230  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+                  24  voluntary context switches
+               10151  involuntary context switches
+          1235364841  instructions retired
+           355755167  cycles elapsed
+            46940688  peak memory footprint

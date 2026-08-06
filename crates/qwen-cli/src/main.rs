@@ -8,6 +8,7 @@ use messages::{
     DeepSeekV4EncodeOptions, DeepSeekV4Reasoning, load_deepseek_v4_0731_messages_prompt,
     load_messages_prompt_with_policy, messages_thinking_mode,
 };
+use objc2_metal::MTLDevice;
 use qwen_llm::checkpoint_identity::{
     CheckpointIdentityCache, IdentityCacheOutcome, checkpoint_content_identity,
 };
@@ -15,9 +16,12 @@ use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedI
 use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
 use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
 use qwen_llm::deepseek_v4_metal::{
-    DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples,
-    DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4Session,
-    DeepSeekV4SessionCapacity, DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotFileOutcome,
+    DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS,
+    DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS, DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+    DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples, DeepSeekV4MetalResidency,
+    DeepSeekV4ModelContentId, DeepSeekV4MultigroupSelectorGeometry,
+    DeepSeekV4MultigroupSelectorTelemetry, DeepSeekV4Session, DeepSeekV4SessionCapacity,
+    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotFileOutcome,
     causal_snapshot_record_bytes, load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
@@ -61,6 +65,7 @@ const CHECKPOINT_STAGED_INTEGRITY_ENV: &str = "QWEN_CHECKPOINT_STAGED_INTEGRITY"
 const GREEDY_GPU_ARGMAX_ENV: &str = "QWEN_GREEDY_GPU_ARGMAX";
 const DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES: u64 = 1024 * 1024 * 1024;
 const DEEPSEEK_V4_SNAPSHOT_IDENTITY_CACHE_DIR: &str = ".qwen-dsv4-model-identity-v2";
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GreedyGpuArgmaxMode {
@@ -73,6 +78,22 @@ enum GreedyGpuArgmaxMode {
 struct GreedyGpuDecision {
     enabled: bool,
     reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+enum DeepSeekV4MultigroupSelectorArg {
+    #[default]
+    Off,
+    QualifiedExperimental,
+}
+
+impl DeepSeekV4MultigroupSelectorArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::QualifiedExperimental => "qualified_experimental",
+        }
+    }
 }
 
 fn parse_greedy_gpu_argmax_mode(value: Option<&OsStr>) -> GreedyGpuArgmaxMode {
@@ -232,6 +253,16 @@ struct Args {
     #[arg(long)]
     max_context_tokens: Option<usize>,
 
+    /// Select the M4 Max-qualified experimental DeepSeek V4 far-context selector.
+    #[arg(
+        long,
+        value_enum,
+        default_value = "off",
+        requires = "model",
+        conflicts_with_all = ["info", "deepseek_census_json"]
+    )]
+    deepseek_v4_multigroup_selector: DeepSeekV4MultigroupSelectorArg,
+
     /// Prefix-cache byte budget in MiB; oversized snapshots are retained alone.
     #[arg(long, default_value_t = 16 * 1024)]
     prefix_cache_max_mib: u64,
@@ -343,6 +374,177 @@ impl ExplicitCliOptions {
             durable_prefix_cache_max_entry_mib: command_line("durable_prefix_cache_max_entry_mib"),
             durable_prefix_cache_min_tokens: command_line("durable_prefix_cache_min_tokens"),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DeepSeekV4MultigroupSelectorPlan {
+    requested: DeepSeekV4MultigroupSelectorArg,
+    device_name: String,
+    device_qualified: bool,
+    capacity: DeepSeekV4SessionCapacity,
+    geometry: Option<DeepSeekV4MultigroupSelectorGeometry>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeepSeekV4MultigroupSelectorSessionRecord<'a> {
+    schema_version: u32,
+    kind: &'static str,
+    scope: &'a str,
+    requested: &'static str,
+    sealed: bool,
+    device_name: &'a str,
+    device_qualified: bool,
+    forward_limit: usize,
+    physical_capacity_rows: usize,
+    max_reachable_visible_rows: usize,
+    frozen_min_visible_rows: usize,
+    frozen_max_capacity_rows: usize,
+    frozen_min_capacity_occupancy: &'static str,
+    fallback: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct DeepSeekV4MultigroupSelectorCompletionRecord<'a> {
+    schema_version: u32,
+    kind: &'static str,
+    scope: &'a str,
+    requested: &'static str,
+    sealed: bool,
+    multigroup_invocations: u64,
+    ineligible_singleton_radix4_invocations: u64,
+}
+
+impl DeepSeekV4MultigroupSelectorPlan {
+    fn new(
+        requested: DeepSeekV4MultigroupSelectorArg,
+        device_name: impl Into<String>,
+        capacity: DeepSeekV4SessionCapacity,
+    ) -> Result<Self> {
+        let device_name = device_name.into();
+        let device_qualified = device_name == DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE;
+        let geometry = match requested {
+            DeepSeekV4MultigroupSelectorArg::Off => None,
+            DeepSeekV4MultigroupSelectorArg::QualifiedExperimental => {
+                ensure!(
+                    device_qualified,
+                    "--deepseek-v4-multigroup-selector=qualified-experimental requires {}, got {}",
+                    DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE,
+                    device_name,
+                );
+                Some(
+                    capacity
+                        .qualify_multigroup_selector_experiment()
+                        .context("qualify DeepSeek V4 multi-group selector request geometry")?,
+                )
+            }
+        };
+        Ok(Self {
+            requested,
+            device_name,
+            device_qualified,
+            capacity,
+            geometry,
+        })
+    }
+
+    fn sealed(&self) -> bool {
+        self.geometry.is_some()
+    }
+
+    fn session_record<'a>(
+        &'a self,
+        scope: &'a str,
+    ) -> DeepSeekV4MultigroupSelectorSessionRecord<'a> {
+        DeepSeekV4MultigroupSelectorSessionRecord {
+            schema_version: 1,
+            kind: "session_policy",
+            scope,
+            requested: self.requested.as_str(),
+            sealed: self.sealed(),
+            device_name: &self.device_name,
+            device_qualified: self.device_qualified,
+            forward_limit: self.capacity.forward_limit(),
+            physical_capacity_rows: self.capacity.csa_physical_rows(),
+            max_reachable_visible_rows: self.capacity.forward_limit() / 4,
+            frozen_min_visible_rows: DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS,
+            frozen_max_capacity_rows: DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS,
+            frozen_min_capacity_occupancy: "3/4",
+            fallback: "radix4_for_packed_and_ineligible_singleton",
+        }
+    }
+
+    fn seal_session(&self, session: &mut DeepSeekV4Session, scope: &str) -> Result<()> {
+        if self.sealed() {
+            session
+                .enable_multigroup_selector_experiment()
+                .context("seal qualified experimental DeepSeek V4 multi-group selector")?;
+        }
+        let telemetry = session.multigroup_selector_telemetry();
+        ensure!(
+            telemetry.sealed() == self.sealed(),
+            "DeepSeek V4 multi-group selector sealing did not match the request"
+        );
+        eprintln!(
+            "deepseek_v4 selector: {}",
+            serde_json::to_string(&self.session_record(scope))
+                .context("serialize DeepSeek V4 selector session policy")?
+        );
+        Ok(())
+    }
+
+    fn completion_record<'a>(
+        &'a self,
+        scope: &'a str,
+        telemetry: DeepSeekV4MultigroupSelectorTelemetry,
+    ) -> Result<DeepSeekV4MultigroupSelectorCompletionRecord<'a>> {
+        self.completion_record_from_values(
+            scope,
+            telemetry.sealed(),
+            telemetry.multigroup_invocations(),
+            telemetry.ineligible_radix4_invocations(),
+        )
+    }
+
+    fn completion_record_from_values<'a>(
+        &'a self,
+        scope: &'a str,
+        sealed: bool,
+        multigroup_invocations: u64,
+        ineligible_radix4_invocations: u64,
+    ) -> Result<DeepSeekV4MultigroupSelectorCompletionRecord<'a>> {
+        ensure!(
+            sealed == self.sealed(),
+            "DeepSeek V4 multi-group selector completion changed sealed policy"
+        );
+        if !self.sealed() {
+            ensure!(
+                multigroup_invocations == 0 && ineligible_radix4_invocations == 0,
+                "disabled DeepSeek V4 multi-group selector recorded invocations"
+            );
+        }
+        Ok(DeepSeekV4MultigroupSelectorCompletionRecord {
+            schema_version: 1,
+            kind: "session_completion",
+            scope,
+            requested: self.requested.as_str(),
+            sealed,
+            multigroup_invocations,
+            ineligible_singleton_radix4_invocations: ineligible_radix4_invocations,
+        })
+    }
+
+    fn emit_completion(
+        &self,
+        scope: &str,
+        telemetry: DeepSeekV4MultigroupSelectorTelemetry,
+    ) -> Result<()> {
+        eprintln!(
+            "deepseek_v4 selector: {}",
+            serde_json::to_string(&self.completion_record(scope, telemetry)?)
+                .context("serialize DeepSeek V4 selector completion")?
+        );
+        Ok(())
     }
 }
 
@@ -1884,6 +2086,7 @@ fn main() -> Result<()> {
             "--deepseek-v4-snapshot requires --prompt, --prompt-file, or --messages"
         );
     }
+    validate_deepseek_v4_multigroup_selector_scope(&args)?;
 
     if args.prompt.is_none()
         && args.prompt_file.is_none()
@@ -1901,7 +2104,12 @@ fn main() -> Result<()> {
     validate_request_before_model_open(&args)?;
     let gguf = GgufFile::open(model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
-    if ModelFamily::detect(&gguf) == Some(ModelFamily::DeepSeek4) {
+    let model_family = ModelFamily::detect(&gguf);
+    validate_deepseek_v4_multigroup_selector_family(
+        args.deepseek_v4_multigroup_selector,
+        model_family,
+    )?;
+    if model_family == Some(ModelFamily::DeepSeek4) {
         return if args.requests_jsonl.is_some() {
             run_deepseek_v4_requests_jsonl(model_path, gguf, &args, explicit_options)
         } else {
@@ -2091,6 +2299,32 @@ fn validate_request_before_model_open(args: &Args) -> Result<()> {
     if args.requests_jsonl.is_none() {
         validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
     }
+    Ok(())
+}
+
+fn validate_deepseek_v4_multigroup_selector_scope(args: &Args) -> Result<()> {
+    if args.deepseek_v4_multigroup_selector == DeepSeekV4MultigroupSelectorArg::Off {
+        return Ok(());
+    }
+    ensure!(
+        args.prompt.is_some()
+            || args.prompt_file.is_some()
+            || args.messages.is_some()
+            || args.requests_jsonl.is_some(),
+        "--deepseek-v4-multigroup-selector requires a generation request"
+    );
+    Ok(())
+}
+
+fn validate_deepseek_v4_multigroup_selector_family(
+    requested: DeepSeekV4MultigroupSelectorArg,
+    model_family: Option<ModelFamily>,
+) -> Result<()> {
+    ensure!(
+        requested == DeepSeekV4MultigroupSelectorArg::Off
+            || model_family == Some(ModelFamily::DeepSeek4),
+        "--deepseek-v4-multigroup-selector requires a DeepSeek V4 model"
+    );
     Ok(())
 }
 
@@ -2568,6 +2802,11 @@ fn run_deepseek_v4_single_turn(
         session_capacity.csa_physical_rows(),
         session_capacity.hca_physical_rows(),
     );
+    let selector_plan = DeepSeekV4MultigroupSelectorPlan::new(
+        args.deepseek_v4_multigroup_selector,
+        ctx.device.name().to_string(),
+        session_capacity,
+    )?;
     let restored_snapshot = if snapshot_file_exists {
         let snapshot_path = args
             .deepseek_v4_snapshot
@@ -2641,6 +2880,7 @@ fn run_deepseek_v4_single_turn(
         None => DeepSeekV4Session::new(&ctx, residency),
     }
     .context("create DeepSeek V4 session")?;
+    selector_plan.seal_session(&mut session, "single_turn")?;
     let after_session_bytes = ctx.current_allocated_size();
     memory_plan
         .reconcile_session(
@@ -2784,6 +3024,7 @@ fn run_deepseek_v4_single_turn(
         },
     )?;
     drop(stdout);
+    selector_plan.emit_completion("single_turn", session.multigroup_selector_telemetry())?;
 
     let decode_tps = if generation.wall_ms > 0.0 {
         generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
@@ -2971,6 +3212,11 @@ fn run_deepseek_v4_requests_jsonl(
         session_capacity.csa_physical_rows(),
         session_capacity.hca_physical_rows(),
     );
+    let selector_plan = DeepSeekV4MultigroupSelectorPlan::new(
+        args.deepseek_v4_multigroup_selector,
+        ctx.device.name().to_string(),
+        session_capacity,
+    )?;
     let memory_plan = load_plan.memory_plan().clone();
     let initial_memory_signals = ctx.memory_signals();
     eprintln!("deepseek_v4: memory plan; {memory_plan}");
@@ -3035,6 +3281,7 @@ fn run_deepseek_v4_requests_jsonl(
         let session_t0 = Instant::now();
         let mut session = DeepSeekV4Session::new(&ctx, residency)
             .with_context(|| format!("create DeepSeek V4 session for request {}", request.id))?;
+        selector_plan.seal_session(&mut session, &request.id)?;
         let first_memory_sample =
             reconcile_first_session
                 .take()
@@ -3128,9 +3375,11 @@ fn run_deepseek_v4_requests_jsonl(
             )?;
             Ok((generation, generated_bytes, prefill_mode, prefill_ms))
         })();
+        let selector_telemetry = session.multigroup_selector_telemetry();
         residency_slot = Some(session.into_residency());
         let (generation, generated_bytes, prefill_mode, prefill_ms) = request_execution
             .with_context(|| format!("execute request {} at line {}", request.id, request.line))?;
+        selector_plan.emit_completion(&request.id, selector_telemetry)?;
 
         let decode_tps = if generation.wall_ms > 0.0 {
             generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
@@ -6940,6 +7189,162 @@ mod tests {
         assert!(deepseek_v4_required_forwards(0, 1).is_err());
         assert!(deepseek_v4_required_forwards(1, 0).is_err());
         assert!(deepseek_v4_required_forwards(usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn deepseek_v4_multigroup_selector_cli_contract_is_explicit_and_bounded() {
+        let default =
+            Args::try_parse_from(["qwen", "--model", "model.gguf", "--prompt", "hello"]).unwrap();
+        assert_eq!(
+            default.deepseek_v4_multigroup_selector,
+            DeepSeekV4MultigroupSelectorArg::Off
+        );
+
+        let explicit = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--deepseek-v4-multigroup-selector",
+            "qualified-experimental",
+        ])
+        .unwrap();
+        assert_eq!(
+            explicit.deepseek_v4_multigroup_selector,
+            DeepSeekV4MultigroupSelectorArg::QualifiedExperimental
+        );
+        validate_deepseek_v4_multigroup_selector_scope(&explicit).unwrap();
+        validate_deepseek_v4_multigroup_selector_family(
+            explicit.deepseek_v4_multigroup_selector,
+            Some(ModelFamily::DeepSeek4),
+        )
+        .unwrap();
+        assert!(
+            validate_deepseek_v4_multigroup_selector_family(
+                explicit.deepseek_v4_multigroup_selector,
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("requires a DeepSeek V4 model")
+        );
+
+        let jsonl = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--deepseek-v4-multigroup-selector=qualified-experimental",
+        ])
+        .unwrap();
+        validate_deepseek_v4_multigroup_selector_scope(&jsonl).unwrap();
+        validate_deepseek_v4_requests_mode(&jsonl, ExplicitCliOptions::default()).unwrap();
+
+        let no_request = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--deepseek-v4-multigroup-selector=qualified-experimental",
+        ])
+        .unwrap();
+        assert!(
+            validate_deepseek_v4_multigroup_selector_scope(&no_request)
+                .unwrap_err()
+                .to_string()
+                .contains("requires a generation request")
+        );
+        assert!(
+            Args::try_parse_from([
+                "qwen",
+                "--model",
+                "model.gguf",
+                "--prompt",
+                "hello",
+                "--deepseek-v4-multigroup-selector=force",
+            ])
+            .is_err()
+        );
+
+        let shallow = DeepSeekV4SessionCapacity::for_forward_limit(4_096, 1_048_576).unwrap();
+        let off = DeepSeekV4MultigroupSelectorPlan::new(
+            DeepSeekV4MultigroupSelectorArg::Off,
+            "Apple M4 Pro",
+            shallow,
+        )
+        .unwrap();
+        assert!(!off.sealed());
+        assert!(
+            DeepSeekV4MultigroupSelectorPlan::new(
+                DeepSeekV4MultigroupSelectorArg::QualifiedExperimental,
+                "Apple M4 Pro",
+                DeepSeekV4SessionCapacity::for_forward_limit(786_432, 1_048_576).unwrap(),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("requires Apple M4 Max")
+        );
+        let unreachable_error = DeepSeekV4MultigroupSelectorPlan::new(
+            DeepSeekV4MultigroupSelectorArg::QualifiedExperimental,
+            "Apple M4 Max",
+            DeepSeekV4SessionCapacity::for_forward_limit(786_431, 1_048_576).unwrap(),
+        )
+        .unwrap_err();
+        assert!(format!("{unreachable_error:#}").contains("max_visible_rows=196607"));
+
+        let qualified = DeepSeekV4MultigroupSelectorPlan::new(
+            DeepSeekV4MultigroupSelectorArg::QualifiedExperimental,
+            "Apple M4 Max",
+            DeepSeekV4SessionCapacity::for_forward_limit(786_432, 1_048_576).unwrap(),
+        )
+        .unwrap();
+        assert!(qualified.sealed());
+        assert_eq!(
+            serde_json::to_value(qualified.session_record("single_turn")).unwrap(),
+            serde_json::json!({
+                "schema_version": 1,
+                "kind": "session_policy",
+                "scope": "single_turn",
+                "requested": "qualified_experimental",
+                "sealed": true,
+                "device_name": "Apple M4 Max",
+                "device_qualified": true,
+                "forward_limit": 786432,
+                "physical_capacity_rows": 196608,
+                "max_reachable_visible_rows": 196608,
+                "frozen_min_visible_rows": 196608,
+                "frozen_max_capacity_rows": 262144,
+                "frozen_min_capacity_occupancy": "3/4",
+                "fallback": "radix4_for_packed_and_ineligible_singleton",
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(
+                qualified
+                    .completion_record_from_values("single_turn", true, 21, 3)
+                    .unwrap()
+            )
+            .unwrap(),
+            serde_json::json!({
+                "schema_version": 1,
+                "kind": "session_completion",
+                "scope": "single_turn",
+                "requested": "qualified_experimental",
+                "sealed": true,
+                "multigroup_invocations": 21,
+                "ineligible_singleton_radix4_invocations": 3,
+            })
+        );
+        assert!(
+            qualified
+                .completion_record_from_values("single_turn", false, 0, 0)
+                .is_err()
+        );
+        assert!(
+            off.completion_record_from_values("single_turn", false, 1, 0)
+                .is_err()
+        );
     }
 
     #[test]

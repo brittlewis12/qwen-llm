@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Bounded Multi-Group Product Opt-In GO
+
+Status: the exact 32-group selector is `GO` as an explicit, off-by-default
+M4 Max CLI policy. Radix4 remains default and every unsupported or ineligible
+path fails closed or retains its existing selector.
+
+- Add `--deepseek-v4-multigroup-selector=off|qualified-experimental`; the policy
+  is process-wide for single-turn and resident JSONL DeepSeek V4 execution.
+- Reject the experimental value on non-DeepSeek models and devices other than
+  exact `Apple M4 Max`. There is no force mode and the doc-hidden Rust mutator
+  remains a research seam rather than a general public policy.
+- Qualify geometry before snapshot loading, admission, or residency realization.
+  In addition to the 196,608..=262,144 physical band, `forward_limit / 4` must
+  reach 196,608 rows and at least three quarters of physical capacity. A rounded
+  786,431-forward session therefore rejects; 786,432 is the first accepted
+  budget.
+- Seal immediately after each session is constructed and before restore or
+  prefill. Packed and dynamically ineligible singleton paths remain radix4;
+  snapshots remain policy-neutral and memory planning is unchanged.
+- Emit versioned session/completion JSON distinguishing requested, sealed,
+  device-qualified, reachable, and actually invoked state. Engine-owned counts
+  separate multi-group from ineligible-singleton radix4 invocations.
+
+Decision: promote the qualified operator switch, not default routing. Reuse the
+existing exact crossover and synthetic real-weight integration packets; do not
+repeat the 5.43 GB restore campaign. This source-only product slice authorizes no
+new speed, quality, real-prefix, packed, wider-device, or wider-capacity claim.
+With this lane closed, prioritize warm packed prefill through a materially new
+model-free two-dispatch all-IQ3 grouped falsifier; do not rerun the spent
+four-stage gate or reopen deferred HCA while it remains below CSA.
+Evidence:
+`docs/bench/2026-08-05-dsv4-multigroup-product-opt-in/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Sealed All-IQ3 Promotion Gate KILL
 
 Status: production all-IQ3 grouped promotion is `KILL` for the current asset,

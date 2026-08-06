@@ -269,11 +269,24 @@ nonzero invocation owner fails before generation reuse. Integrated model-free
 current/candidate/current gates preserve every output and save at least
 0.624/0.627 ms GPU/wall per layer in the frozen band. On the current asset at
 position 786,431, all 21 candidate layers execute from a real-weight synthetic
-zero-causal-state fixture restored through snapshot-v1, with exact logits,
-hidden state, causal state, committed tokens, and a separate untimed decision
-transcript. Whole-token GPU/wall saving is 13.867/17.573 ms against the faster
-control. This is not real-prompt continuation evidence and qualifies only the
-bounded hidden opt-in, not default-on or wider-device routing.
+zero-causal-state fixture restored through snapshot-v1, with bit-identical
+logits and final normalized hidden values, matching causal, prefix, and
+compatibility digests plus committed tokens, and a separate untimed exact
+decision transcript. Whole-token GPU/wall saving is 13.867/17.573 ms against
+the faster control. This is not real-prompt continuation evidence and qualifies
+only the bounded hidden opt-in, not default-on or wider-device routing.
+
+That hidden opt-in now has a bounded product contract. The CLI exposes only
+`off|qualified-experimental`, defaults to radix4, and accepts the experimental
+value only for native DeepSeek V4 on exact Apple M4 Max. It validates both
+physical capacity and `forward_limit / 4` reachable visibility before snapshot
+loading, admission, or residency realization; the rounded-but-unreachable
+786,431-forward case rejects and 786,432 is the first accepted budget. Every
+single-turn or JSONL request session seals before restore/prefill, emits
+requested/sealed/actual-invocation telemetry, and retains radix4 for packed or
+dynamically ineligible positions. Snapshots and memory planning are unchanged.
+This promotes an operator opt-in, not default-on or broader evidence, and does
+not repeat the 5.43 GB restore campaign.
 
 The packed GPU route/schedule integration does not clear. Across all 86
 layer/chunk records, same-input GPU and Rust route IDs are exact, but small route
@@ -307,7 +320,7 @@ controls at 0.721% drift and observes 10.224%/16.103% half savings, but candidat
 drift is 6.050%, above the frozen 5% gate. A separate traced bracket saves 9.929%
 total packed GPU and 56.534% in the 16 affected layers while unchanged-layer GPU
 time is flat. Retain the exact test-only implementation and negative evidence;
-do not retry the same condition or build fused IQ3 gate/up.
+do not retry the same condition or build fused IQ3 gate/up from that checkpoint.
 
 The first pre-expert subphase now closes. M4 stage-boundary pass intervals can
 overlap, so an eight-stage all-layer profiler fails its frozen ambiguity gate
@@ -384,14 +397,28 @@ authorizes no wall, GPU, saving, stationarity, p95, promotion, or regression
 claim. Retain the exact diagnostics-only candidate and failing ignored harness;
 do not rerun, relax, or split the condition as a rescue.
 
+Closing the selector product lane and prioritizing warm packed throughput changes
+the next implementation question, not the failed gate above. A fused
+two-dispatch all-IQ3 path would be material implementation drift: one kernel
+must preserve both existing mapped IQ3 accumulations and apply the exact clamp
+and SwiGLU only after both complete, then the existing mapped down/scatter runs
+unchanged. Its first gate is model-free production geometry against the retained
+four-stage candidate, with bit-exact intermediate/final outputs and isolated
+command-GPU timing. Do not open another current-asset campaign unless that new
+implementation first establishes a material incremental ceiling. This is not a
+retry, threshold change, or reinterpretation of the spent four-stage packet.
+
 Force-ranked queue:
 
-1. **Decide bounded selector product promotion.** Keep the qualified current
-   policy hidden and off by default while its device/asset scope is explicit.
-   A future default or user-facing switch needs a separately reviewed product
-   contract; do not repeat the 5.43 GB restore campaign absent code, device, or
-   asset drift.
-2. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+1. **Packed all-IQ3 two-dispatch falsifier.** Test only the materially new fused
+   gate/up/SwiGLU implementation model-free before changing production policy or
+   paying another current-asset run. Preserve each mapped IQ3 reduction lineage,
+   arena proof, clamp order, output bits, and fallback.
+2. **Precision-recovering packed Q8 output.** Open only if the all-IQ3 fusion
+   closes. A split-activation matrix schedule must materially repair the prior
+   position-140 error while retaining a credible output-stage ceiling; never
+   rerun the killed one-pass F16-staged arithmetic.
+3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

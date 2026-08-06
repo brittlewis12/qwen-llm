@@ -84,6 +84,50 @@ pub struct DeepSeekV4SessionCapacity {
     hca_physical_rows: usize,
 }
 
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeepSeekV4MultigroupSelectorGeometry {
+    forward_limit: usize,
+    physical_capacity_rows: usize,
+    max_visible_rows: usize,
+}
+
+impl DeepSeekV4MultigroupSelectorGeometry {
+    pub fn forward_limit(self) -> usize {
+        self.forward_limit
+    }
+
+    pub fn physical_capacity_rows(self) -> usize {
+        self.physical_capacity_rows
+    }
+
+    pub fn max_visible_rows(self) -> usize {
+        self.max_visible_rows
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeepSeekV4MultigroupSelectorTelemetry {
+    sealed: bool,
+    multigroup_invocations: u64,
+    ineligible_radix4_invocations: u64,
+}
+
+impl DeepSeekV4MultigroupSelectorTelemetry {
+    pub fn sealed(self) -> bool {
+        self.sealed
+    }
+
+    pub fn multigroup_invocations(self) -> u64 {
+        self.multigroup_invocations
+    }
+
+    pub fn ineligible_radix4_invocations(self) -> u64 {
+        self.ineligible_radix4_invocations
+    }
+}
+
 impl DeepSeekV4SessionCapacity {
     pub fn for_forward_limit(
         forward_limit: usize,
@@ -132,6 +176,29 @@ impl DeepSeekV4SessionCapacity {
 
     pub fn hca_physical_rows(self) -> usize {
         self.hca_physical_rows
+    }
+
+    #[doc(hidden)]
+    pub fn qualify_multigroup_selector_experiment(
+        self,
+    ) -> Result<DeepSeekV4MultigroupSelectorGeometry, DeepSeekV4MetalError> {
+        let max_visible_rows = self.forward_limit() / 4;
+        if !deepseek_v4_multigroup_selector_eligible(self.csa_physical_rows(), max_visible_rows) {
+            return invalid(format!(
+                "DeepSeek V4 session cannot reach the qualified multi-group selector band: forwards={} physical_capacity_rows={} max_visible_rows={} requires capacity={}..={} visible>={} and visible>=capacity-capacity/4",
+                self.forward_limit(),
+                self.csa_physical_rows(),
+                max_visible_rows,
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS,
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS,
+                DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS,
+            ));
+        }
+        Ok(DeepSeekV4MultigroupSelectorGeometry {
+            forward_limit: self.forward_limit(),
+            physical_capacity_rows: self.csa_physical_rows(),
+            max_visible_rows,
+        })
     }
 
     fn validate_position(self, position: u32) -> Result<(), DeepSeekV4MetalError> {
@@ -1642,6 +1709,11 @@ impl DeepSeekV4Session {
 
     pub fn capacity(&self) -> DeepSeekV4SessionCapacity {
         self.capacity
+    }
+
+    #[doc(hidden)]
+    pub fn multigroup_selector_telemetry(&self) -> DeepSeekV4MultigroupSelectorTelemetry {
+        self.sparse_csa.multigroup_selector_telemetry()
     }
 
     /// Enables the exact multi-group sparse selector for its measured
@@ -4846,8 +4918,10 @@ const DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS: usize = 10;
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_DIGITS: usize = 8;
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS: usize = 5;
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS: usize = 32;
-const DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS: usize = 196_608;
-const DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS: usize = 262_144;
+#[doc(hidden)]
+pub const DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS: usize = 196_608;
+#[doc(hidden)]
+pub const DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS: usize = 262_144;
 
 fn deepseek_v4_multigroup_selector_capacity_supported(capacity_rows: usize) -> bool {
     (DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS
@@ -4866,6 +4940,46 @@ fn deepseek_v4_multigroup_selector_eligible(capacity_rows: usize, visible_rows: 
 enum DeepSeekV4SparseSelectorMode {
     Radix4,
     MultigroupExperimental,
+}
+
+#[derive(Debug, Default)]
+struct DeepSeekV4MultigroupSelectorInvocationCounters {
+    multigroup: Cell<u64>,
+    ineligible_radix4: Cell<u64>,
+}
+
+impl DeepSeekV4MultigroupSelectorInvocationCounters {
+    fn next_multigroup(&self) -> Result<u64, DeepSeekV4MetalError> {
+        self.multigroup.get().checked_add(1).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "DeepSeek V4 multi-group selector invocation count overflowed".into(),
+            )
+        })
+    }
+
+    fn commit_multigroup(&self, next: u64) {
+        self.multigroup.set(next);
+    }
+
+    fn next_ineligible_radix4(&self) -> Result<u64, DeepSeekV4MetalError> {
+        self.ineligible_radix4.get().checked_add(1).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "DeepSeek V4 ineligible radix4 selector invocation count overflowed".into(),
+            )
+        })
+    }
+
+    fn commit_ineligible_radix4(&self, next: u64) {
+        self.ineligible_radix4.set(next);
+    }
+
+    fn telemetry(&self, sealed: bool) -> DeepSeekV4MultigroupSelectorTelemetry {
+        DeepSeekV4MultigroupSelectorTelemetry {
+            sealed,
+            multigroup_invocations: self.multigroup.get(),
+            ineligible_radix4_invocations: self.ineligible_radix4.get(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -4989,6 +5103,7 @@ struct DeepSeekV4SparseCsaScratch {
     status: MetalTensor,
     selector_mode: DeepSeekV4SparseSelectorMode,
     multigroup: Option<DeepSeekV4MultigroupSelectorScratch>,
+    multigroup_invocations: DeepSeekV4MultigroupSelectorInvocationCounters,
     #[cfg(test)]
     score_test_policy: DeepSeekV4IndexerScoreTestPolicy,
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -5032,6 +5147,7 @@ impl DeepSeekV4SparseCsaScratch {
             multigroup: deepseek_v4_multigroup_selector_capacity_supported(capacity_rows)
                 .then(|| DeepSeekV4MultigroupSelectorScratch::new(ctx, capacity_rows))
                 .transpose()?,
+            multigroup_invocations: DeepSeekV4MultigroupSelectorInvocationCounters::default(),
             #[cfg(test)]
             score_test_policy: DeepSeekV4IndexerScoreTestPolicy::Production,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -5051,6 +5167,11 @@ impl DeepSeekV4SparseCsaScratch {
         }
         self.selector_mode = DeepSeekV4SparseSelectorMode::MultigroupExperimental;
         Ok(())
+    }
+
+    fn multigroup_selector_telemetry(&self) -> DeepSeekV4MultigroupSelectorTelemetry {
+        self.multigroup_invocations
+            .telemetry(self.selector_mode == DeepSeekV4SparseSelectorMode::MultigroupExperimental)
     }
 
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -5237,8 +5358,8 @@ impl DeepSeekV4SparseCsaScratch {
         if self.selector_mode == DeepSeekV4SparseSelectorMode::MultigroupExperimental
             && deepseek_v4_multigroup_selector_eligible(capacity_rows, visible_rows)
         {
-            return self
-                .multigroup
+            let next_invocations = self.multigroup_invocations.next_multigroup()?;
+            self.multigroup
                 .as_ref()
                 .ok_or_else(|| {
                     DeepSeekV4MetalError::Invalid(
@@ -5255,8 +5376,15 @@ impl DeepSeekV4SparseCsaScratch {
                     &record.selected_count,
                     &record.status,
                     capacity_rows,
-                );
+                )?;
+            self.multigroup_invocations
+                .commit_multigroup(next_invocations);
+            return Ok(());
         }
+        let next_ineligible = (self.selector_mode
+            == DeepSeekV4SparseSelectorMode::MultigroupExperimental)
+            .then(|| self.multigroup_invocations.next_ineligible_radix4())
+            .transpose()?;
         encode_select_top_k_f32_with_policy(
             ctx,
             enc,
@@ -5273,7 +5401,11 @@ impl DeepSeekV4SparseCsaScratch {
             1,
             DeepSeekV4SelectorDispatchPolicy::Production,
             self.use_radix4_selector(),
-        )
+        )?;
+        if let Some(next) = next_ineligible {
+            self.multigroup_invocations.commit_ineligible_radix4(next);
+        }
+        Ok(())
     }
 
     fn default_record(&self) -> DeepSeekV4SelectionRecord {
@@ -13401,6 +13533,63 @@ mod tests {
     }
 
     #[test]
+    fn multigroup_selector_product_geometry_requires_reachable_visibility() {
+        let rounded_but_unreachable =
+            DeepSeekV4SessionCapacity::for_forward_limit(786_431, 1_048_576).unwrap();
+        assert_eq!(rounded_but_unreachable.csa_physical_rows(), 196_608);
+        assert_eq!(rounded_but_unreachable.forward_limit() / 4, 196_607);
+        assert!(
+            rounded_but_unreachable
+                .qualify_multigroup_selector_experiment()
+                .unwrap_err()
+                .to_string()
+                .contains("max_visible_rows=196607")
+        );
+
+        for (forwards, capacity, max_visible) in [
+            (786_432, 196_608, 196_608),
+            (1_000_000, 250_112, 250_000),
+            (1_048_576, 262_144, 262_144),
+        ] {
+            let session =
+                DeepSeekV4SessionCapacity::for_forward_limit(forwards, 1_048_576).unwrap();
+            let geometry = session.qualify_multigroup_selector_experiment().unwrap();
+            assert_eq!(geometry.forward_limit(), forwards);
+            assert_eq!(geometry.physical_capacity_rows(), capacity);
+            assert_eq!(geometry.max_visible_rows(), max_visible);
+        }
+    }
+
+    #[test]
+    fn multigroup_selector_invocation_telemetry_distinguishes_fallback() {
+        let counters = DeepSeekV4MultigroupSelectorInvocationCounters::default();
+        assert_eq!(
+            counters.telemetry(false),
+            DeepSeekV4MultigroupSelectorTelemetry {
+                sealed: false,
+                multigroup_invocations: 0,
+                ineligible_radix4_invocations: 0,
+            }
+        );
+
+        let next = counters.next_ineligible_radix4().unwrap();
+        counters.commit_ineligible_radix4(next);
+        let next = counters.next_multigroup().unwrap();
+        counters.commit_multigroup(next);
+        let next = counters.next_multigroup().unwrap();
+        counters.commit_multigroup(next);
+
+        assert_eq!(
+            counters.telemetry(true),
+            DeepSeekV4MultigroupSelectorTelemetry {
+                sealed: true,
+                multigroup_invocations: 2,
+                ineligible_radix4_invocations: 1,
+            }
+        );
+    }
+
+    #[test]
     fn multigroup_selector_generation_fails_before_reuse() {
         let generation = DeepSeekV4MultigroupSelectorGeneration::from_next(
             NonZeroU32::new(u32::MAX - 1).unwrap(),
@@ -13424,16 +13613,19 @@ mod tests {
         let mut shallow = DeepSeekV4SparseCsaScratch::new(&ctx, 768).unwrap();
         assert_eq!(shallow.selector_mode, DeepSeekV4SparseSelectorMode::Radix4);
         assert!(shallow.multigroup.is_none());
+        assert!(!shallow.multigroup_selector_telemetry().sealed());
         assert!(shallow.enable_multigroup_selector_experiment().is_err());
 
         let mut terminal = DeepSeekV4SparseCsaScratch::new(&ctx, 262_144).unwrap();
         assert_eq!(terminal.selector_mode, DeepSeekV4SparseSelectorMode::Radix4);
         assert!(terminal.multigroup.is_some());
+        assert!(!terminal.multigroup_selector_telemetry().sealed());
         terminal.enable_multigroup_selector_experiment().unwrap();
         assert_eq!(
             terminal.selector_mode,
             DeepSeekV4SparseSelectorMode::MultigroupExperimental
         );
+        assert!(terminal.multigroup_selector_telemetry().sealed());
         assert!(terminal.enable_multigroup_selector_experiment().is_err());
     }
 

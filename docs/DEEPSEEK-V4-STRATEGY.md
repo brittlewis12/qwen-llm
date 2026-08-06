@@ -1973,8 +1973,14 @@ Broader S6 work remains:
   `visible >= capacity - capacity / 4`. At the boundary, all-tied GPU/wall
   savings remain 0.627/0.638 ms for max capacity and 0.641/0.635 ms for the
   decimal-million capacity. The bounded singleton integration owns admitted
-  scratch and non-reusing generation state behind that seam. Preserve F16
-  scoring and keep packed, shallow, and ranked-output routing current.
+  scratch and non-reusing generation state behind that seam. Its product
+  surface is now an explicit `off|qualified-experimental` CLI policy, still off
+  by default and accepted only for native DeepSeek V4 on exact Apple M4 Max.
+  The CLI rejects physical or reachable-visibility geometry outside the frozen
+  band before residency, seals every single-turn or JSONL request session before
+  restore/prefill, and reports actual multi-group versus ineligible radix4 use.
+  Preserve F16 scoring and keep packed, shallow, and ranked-output routing
+  current.
   The diagnostics-only collapsed FP4 implementation remains negative evidence.
 - Fuse mHC split/Sinkhorn/collapse, compressor projection/store, and shared-KV
   sparse attention only after packed attribution identifies one of those seams.
@@ -2093,18 +2099,24 @@ noise without reducing technical risk. Revisit after S5.
    executable differentials. Direct FP4-Q/K replacement is closed by the
    position-3,070 quality and speed KILL; keep its diagnostics and packed matrix
    shadow as negative evidence without migrating paged K or snapshot v2. The
-    exact multi-group full selector now clears at 32 groups with exact masks,
-    cache-order IDs, status fallback, and more than 1.11 ms/layer terminal GPU
-    and wall saving. Its crossover freezes an experimental boundary at 196,608
-    visible rows, at least three-quarters of no more than 262,144 physical rows.
-    The bounded singleton integration now owns admitted session scratch and
-    non-reusing generation state behind a hidden opt-in. A current-asset,
-    real-weight synthetic zero-causal-state fixture at position 786,431 restores
-    through snapshot-v1 and preserves exact fixture output/state plus a separate
-    untimed 21-layer decision trace while saving 13.867/17.573 ms GPU/wall
-    against the faster control. This is not real-prompt continuation evidence.
-    Keep default, packed, and wider-device routing unchanged; do not repeat the
-    5.43 GB restore campaign without implementation, asset, or device drift.
+   exact multi-group full selector now clears at 32 groups with exact masks,
+   cache-order IDs, status fallback, and more than 1.11 ms/layer terminal GPU
+   and wall saving. Its crossover freezes an experimental boundary at 196,608
+   visible rows, at least three-quarters of no more than 262,144 physical rows.
+   The bounded singleton integration now owns admitted session scratch and
+   non-reusing generation state behind a qualified experimental CLI opt-in. The
+   default remains radix4. Exact Apple M4 Max, DeepSeek family, physical
+   capacity, and reachable-visibility checks run before residency; every
+   single-turn or resident JSONL request seals before restore/prefill and
+   reports actual selector/fallback invocations. A current-asset, real-weight
+   synthetic zero-causal-state fixture at position 786,431 restores through
+   snapshot-v1 and preserves bit-identical logits and final normalized hidden
+   values, matching causal, prefix, and compatibility digests plus committed
+   tokens, and a separate untimed exact 21-layer decision trace while saving
+   13.867/17.573 ms GPU/wall against the faster control. This is not real-prompt
+   continuation evidence. Keep default, packed, and wider-device routing
+   unchanged; do not repeat the 5.43 GB restore campaign without implementation,
+   asset, or device drift.
 6. Keep the external depth bracket and packed-prompt optimization as independent
    lanes. `llama-bench --n-depth` performs the full cold prefix at each new
    depth, so do not pay that loop until a reusable state or gating cross-engine
@@ -2137,8 +2149,14 @@ noise without reducing technical risk. Revisit after S5.
    fails observer validity at 18.27410241% aggregate transition ambiguity versus
    the frozen 2.5% limit. It therefore authorizes no timing or performance
    conclusion. Retain the exact implementation and ignored failing harness
-   under diagnostics, authorize no same-condition retry, and do not build fused
-   IQ3 gate/up now.
+   under diagnostics and authorize no same-condition retry. At that checkpoint,
+   no fused IQ3 work was authorized. With the selector product lane complete and
+   warm packed throughput now prioritized, only material implementation drift
+   may reopen the family: first test a two-dispatch fused gate/up/SwiGLU plus
+   existing mapped down path against the retained four-stage candidate at
+   model-free production geometry. Preserve both IQ3 reduction lineages and all
+   intermediate/final bits; do not pay another current-asset campaign unless the
+   new implementation establishes a material isolated ceiling.
    The first pre-expert attribution removes chronological row publication from
    the standalone queue. A three-pass all-layer packet preserves bit-exact
    logits/hidden and continuation logits plus matching causal identities,
@@ -2168,7 +2186,8 @@ noise without reducing technical risk. Revisit after S5.
    control described above, not by a candidate speed or correctness result. Do
    not split 1,036 interleaved bucket chains as a rescue: direct in-encoder
    sampling is unsupported. Keep MXFP4 down and GPU route arithmetic unchanged,
-   do not revive a monolithic FFN kernel, and move next to the bounded selector
-   product-promotion decision.
+   and do not revive a monolithic FFN kernel. The bounded selector product
+   decision is now complete. Move next to the model-free two-dispatch all-IQ3
+   falsifier, not another run of the spent four-stage observer condition.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

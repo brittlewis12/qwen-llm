@@ -1,8 +1,8 @@
 # qwen-llm
 
-A from-scratch inference engine for the **Qwen 3.5 / 3.6 hybrid Gated DeltaNet**
-family on Apple Silicon. Single goal: maximum tok/sec for prompt processing
-and token generation, single-stream and batched.
+A from-scratch Apple Silicon inference engine for **Qwen 3.5 / 3.6 hybrid Gated
+DeltaNet** models and **DeepSeek V4 Flash-0731**. Single goal: maximum tok/sec
+for prompt processing and token generation, single-stream and batched.
 
 Architecture decisions live in [`docs/PLAN.md`](docs/PLAN.md).
 
@@ -12,7 +12,20 @@ v0 — active bring-up. Numerical-oracle target: byte-for-byte logits match vs
 `llama-cli` on `~/models/Qwen3.5-0.8B.F32.gguf`. Throughput target: beat the
 clean-box `llama.cpp` baseline on `Qwen3.6-27B-Q4_K_M.gguf` on M4 Max; the
 maintained benchmark table lives in `docs/PLAN.md`, and adaptive DFlash notes
-live in `docs/H5-DFLASH.md`.
+live in `docs/H5-DFLASH.md`. Native DeepSeek V4 status and evidence live in
+`docs/DEEPSEEK-V4-STRATEGY.md`.
+
+DeepSeek V4 keeps radix4 sparse selection by default. On an Apple M4 Max, a
+request budget that can reach at least 196,608 compressed rows may explicitly
+select the qualified far-context policy with:
+
+```sh
+--deepseek-v4-multigroup-selector=qualified-experimental
+```
+
+The CLI rejects unsupported devices and unreachable request geometry before
+model residency. Packed and ineligible singleton positions continue to use
+radix4; this option is not a default-on or wider-device claim.
 
 ## Layout
 

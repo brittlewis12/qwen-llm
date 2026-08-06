@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 2,048-Token Exact Grouped Experts Default GO
+
+Status: exact grouped IQ2_XS/IQ2_XS/IQ3_XXS experts now cover every packed
+chunk through N=2,048 on Apple M4 Max. Set
+`QWEN_DSV4_PACKED_GROUPED_EXPERTS=0` to restore the expert-bucket loop.
+
+- Preserve the stable CPU expert/token/slot schedule and existing arithmetic.
+  Each eligible layer now executes one fused IQ2 gate/up/SwiGLU grid and one
+  grouped IQ3 down/scatter grid instead of six dispatches per active expert.
+- Plans through 341 descriptors retain the inline Metal ABI. Larger plans use
+  a retained 7,584-byte descriptor buffer; the exact N=2,048 bound is 632
+  32-assignment tiles. BM16 remains independently qualified only at N=128.
+- The model-free differential is bit-identical to the bucket path through
+  N=2,048, repeats bit-identically, and preserves output guards. Product runs
+  preserve prompt-logit digest `48ff8cac...20b301` and all 64 generated IDs.
+- Same-binary A/B/B/A on the 2,385-token prompt records the bucket path at
+  47.692/44.468 seconds and grouped experts at 39.947/39.055 seconds. Mean
+  prefill wall falls 14.3%, while throughput rises from 51.8 to 60.4 token/s.
+- A retained trace prices the full-chunk post-route phase at 10.530 seconds:
+  the 25 grouped IQ2 layers still consume 7.825 seconds, versus 2.036 seconds
+  for sixteen all-IQ3 layers and 0.669 seconds for two MXFP4-down layers.
+  Session scratch grows by 94.38 MB to 2.202 GB; admission requires 106.946 GB.
+
+Decision: default the exact grouped path through N=2,048. The remaining IQ2
+cohort is still the largest exact post-route target, so widen the existing
+bit-exact BM16 work unit next rather than retuning scalar panels or routing.
+
 ## 2026-08-06 - DeepSeek V4 F32 Q8 Q-B Opt-In HOLD
 
 Status: the full-N=2,048 F32 Q8 Q-B matrix is a retained approximate opt-in.

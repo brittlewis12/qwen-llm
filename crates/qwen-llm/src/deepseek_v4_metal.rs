@@ -16872,14 +16872,14 @@ mod tests {
         };
         assert_eq!(
             requests.len(),
-            546 + diagnostics_allocations + packed_route_allocations
+            547 + diagnostics_allocations + packed_route_allocations
         );
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            2_107_664_612 + diagnostics_logical + packed_route_logical
+            2_202_044_036 + diagnostics_logical + packed_route_logical
         );
         let names = requests
             .iter()
@@ -16919,7 +16919,14 @@ mod tests {
                 .iter()
                 .find(|request| request.name == "prefill.moe.grouped_inner")
                 .map(|request| request.logical_bytes),
-            Some(6_291_456)
+            Some(100_663_296)
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .find(|request| request.name == "prefill.moe.grouped_tiles")
+                .map(|request| request.logical_bytes),
+            Some(7_584)
         );
 
         let promoted_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
@@ -16954,7 +16961,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            13_575_480_716 + promoted_diagnostics_logical + packed_route_logical
+            13_669_860_140 + promoted_diagnostics_logical + packed_route_logical
         );
         assert_eq!(
             promoted

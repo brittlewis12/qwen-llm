@@ -568,19 +568,30 @@ prompt-logit digest. Stop cap growth here; reopen a larger work unit only if
 longer-prompt attribution prices the remaining chunk boundary above the matrix
 work below.
 
+Exact grouped IQ2/IQ3 experts now cover all packed chunks through N=2,048.
+Buffer-backed 32-assignment descriptors remove the old 4 KiB inline ceiling
+without changing the stable expert/token/slot schedule or arithmetic. A/B/B/A
+moves the 2,385-token exact request from 46.08 to 39.50 seconds, raises prefill
+from 51.8 to 60.4 token/s, and preserves the complete prompt-logit digest plus
+all 64 generated IDs. The full-chunk trace still assigns 7.825 of 10.530
+post-route seconds to the 25 IQ2 layers, making wider BM16 execution the next
+largest exact post-route hypothesis.
+
 Force-ranked queue:
 
-1. **Q-B approximate-quality decision.** The F32 `R2C4K64` candidate applies
+1. **Widen exact BM16 IQ2 execution.** The exact scalar grouped path now covers
+   N=2,048 and removes 14.3% of product prefill wall, but the eligible 25-layer
+   cohort still costs 7.825 seconds per full chunk. Generalize the existing
+   bit-exact BM16 work unit with buffer-backed descriptors, retain the stable
+   CPU schedule, and compare it directly with the new grouped default. Do not
+   reopen scalar row/panel/shuffle retuning.
+2. **Q-B approximate-quality decision.** The F32 `R2C4K64` candidate applies
    only to Q-B on complete N=2,048 chunks and cuts the 2,385-token prefill by
    10.3%. It preserves one 64-token greedy continuation and passes a four-key
    5,255-token structured retrieval probe, but a coherent 6,642-token summary
    diverges from exact. Keep it opt-in until a small diverse task battery finds
    no retrieval, constraint, EOS, or aggregate quality regression. Output A/B
    remain closed by their prior full-model KILL.
-2. **Widen matrix-shaped expert execution.** BM16 proves the expert-major matrix
-   work unit and is now the N=128 IQ2 default. Re-measure and generalize grouped
-   IQ2/IQ3 execution at N=2,048 occupancy; do not reopen the exhausted scalar
-   row/panel/shuffle lane.
 3. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
    pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
    proof, not a binding floor.

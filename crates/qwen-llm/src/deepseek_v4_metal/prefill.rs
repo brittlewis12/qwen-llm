@@ -438,6 +438,7 @@ struct PrefillMoeScratch {
     shared_output: MetalTensor,
     final_output: MetalTensor,
     grouped_tiles: MetalTensor,
+    grouped_iq2_mma16_tiles: MetalTensor,
     grouped_inner: MetalTensor,
     #[cfg(feature = "dsv4-diagnostics")]
     gpu_route: PrefillGpuRouteScratch,
@@ -601,6 +602,10 @@ impl DeepSeekV4PrefillScratch {
                 grouped_tiles: MetalTensor::zeros_i32(
                     ctx,
                     vec![PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS as u64],
+                )?,
+                grouped_iq2_mma16_tiles: MetalTensor::zeros_i32(
+                    ctx,
+                    vec![PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS as u64],
                 )?,
                 grouped_inner: MetalTensor::zeros_f32(
                     ctx,
@@ -805,6 +810,11 @@ pub(super) fn append_session_allocation_requests(
     push(
         "moe.grouped_tiles",
         PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS,
+        i32_bytes,
+    )?;
+    push(
+        "moe.grouped_iq2_mma16_tiles",
+        PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS,
         i32_bytes,
     )?;
     push(
@@ -2741,8 +2751,15 @@ const PACKED_GROUPED_EXPERT_MAX_TILES: usize = MOE_EXPERT_COUNT
         / PACKED_GROUPED_EXPERT_TILE_ROWS;
 const PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS: usize = PACKED_GROUPED_EXPERT_MAX_TILES * 3;
 const PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES: usize = 4_096;
+const PACKED_GROUPED_EXPERT_INLINE_MAX_TILES: usize = PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES / 12;
 const PACKED_GROUPED_IQ2_MMA16_TILE_ROWS: usize = 16;
-const PACKED_GROUPED_IQ2_MMA16_MAX_TILES: usize = 341;
+const PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS: usize = 128;
+const PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS: usize = 2_048;
+const PACKED_GROUPED_IQ2_MMA16_MAX_TILES: usize = MOE_EXPERT_COUNT
+    + (PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS * MOE_TOP_K - MOE_EXPERT_COUNT)
+        / PACKED_GROUPED_IQ2_MMA16_TILE_ROWS;
+const PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS: usize = PACKED_GROUPED_IQ2_MMA16_MAX_TILES * 3;
+const _: () = assert!(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS <= DEEPSEEK_V4_PREFILL_MAX_TOKENS);
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -2754,11 +2771,19 @@ struct PackedGroupedExpertTile {
 
 const _: () = assert!(std::mem::size_of::<PackedGroupedExpertTile>() == 12);
 const _: () = assert!(
-    std::mem::size_of::<PackedGroupedExpertTile>() * PACKED_GROUPED_IQ2_MMA16_MAX_TILES
+    std::mem::size_of::<PackedGroupedExpertTile>() * PACKED_GROUPED_EXPERT_INLINE_MAX_TILES
         <= PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES
 );
 const _: () = assert!(
+    std::mem::size_of::<PackedGroupedExpertTile>() * (PACKED_GROUPED_EXPERT_INLINE_MAX_TILES + 1)
+        > PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES
+);
+const _: () = assert!(
     std::mem::size_of::<PackedGroupedExpertTile>() * PACKED_GROUPED_EXPERT_MAX_TILES
+        > PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES
+);
+const _: () = assert!(
+    std::mem::size_of::<PackedGroupedExpertTile>() * PACKED_GROUPED_IQ2_MMA16_MAX_TILES
         > PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES
 );
 
@@ -2875,7 +2900,27 @@ impl PackedGroupedExpertPlan {
         schedule: &[ExpertBucket],
         tile_buffer: Option<&MetalTensor>,
     ) -> Result<Self, DeepSeekV4MetalError> {
-        let tiles = packed_grouped_expert_tiles(n_tokens, schedule)?;
+        Self::from_tiles(
+            packed_grouped_expert_tiles(n_tokens, schedule)?,
+            tile_buffer,
+        )
+    }
+
+    fn new_iq2_mma16(
+        n_tokens: usize,
+        schedule: &[ExpertBucket],
+        tile_buffer: Option<&MetalTensor>,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        Self::from_tiles(
+            packed_grouped_iq2_mma16_tiles(n_tokens, schedule)?,
+            tile_buffer,
+        )
+    }
+
+    fn from_tiles(
+        tiles: Vec<PackedGroupedExpertTile>,
+        tile_buffer: Option<&MetalTensor>,
+    ) -> Result<Self, DeepSeekV4MetalError> {
         let bytes = std::mem::size_of_val(tiles.as_slice());
         let buffer = if bytes > PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES {
             let tile_buffer = tile_buffer.ok_or_else(|| {
@@ -3182,7 +3227,7 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_mma16(
     input: &MetalTensor,
     source_rows: &MetalTensor,
     destination_slots: &MetalTensor,
-    schedule: &[ExpertBucket],
+    plan: &PackedGroupedExpertPlan,
     output: &MetalTensor,
     n_in: usize,
     n_out: usize,
@@ -3235,8 +3280,7 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_mma16(
         true,
         "packed grouped mapped IQ2_XS F32 MMA output",
     )?;
-    let tiles = packed_grouped_iq2_mma16_tiles(n_tokens, schedule)?;
-    let tile_count = tiles.len();
+    let tile_count = plan.tiles.len();
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -3288,7 +3332,7 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_mma16(
     enc.set_tensor(2, input);
     enc.set_tensor(3, source_rows);
     enc.set_tensor(4, destination_slots);
-    enc.set_bytes_slice(5, &tiles);
+    plan.bind(enc, 5);
     enc.set_tensor(6, output);
     enc.set_threadgroup_memory(0, 4_096);
     enc.dispatch(
@@ -3315,7 +3359,7 @@ fn encode_packed_grouped_mapped_iq2_xs_swiglu_f32_mma16(
     input: &MetalTensor,
     source_rows: &MetalTensor,
     destination_slots: &MetalTensor,
-    schedule: &[ExpertBucket],
+    plan: &PackedGroupedExpertPlan,
     gate: &MetalTensor,
     up: &MetalTensor,
     output: &MetalTensor,
@@ -3336,7 +3380,7 @@ fn encode_packed_grouped_mapped_iq2_xs_swiglu_f32_mma16(
             input,
             source_rows,
             destination_slots,
-            schedule,
+            plan,
             projection,
             n_in,
             n_out,
@@ -3796,7 +3840,6 @@ fn packed_grouped_iq3_fused_candidate_supported(ctx: &MetalContext) -> bool {
 
 const PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_GROUPED_EXPERT_MAX_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
-const PACKED_GROUPED_IQ2_MMA16_MAX_TOKENS: usize = 128;
 #[cfg(any(test, feature = "dsv4-diagnostics"))]
 const PACKED_GPU_ROUTE_MAX_TOKENS: usize = 128;
 
@@ -3822,6 +3865,13 @@ fn packed_grouped_expert_mode() -> PackedGroupedExpertMode {
         let value = std::env::var("QWEN_DSV4_PACKED_GROUPED_EXPERTS").ok();
         parse_packed_grouped_expert_mode(value.as_deref())
     })
+}
+
+fn packed_grouped_iq2_mma16_qualified(n_tokens: usize) -> bool {
+    matches!(
+        n_tokens,
+        PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS | PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS
+    )
 }
 
 fn packed_grouped_expert_scope(
@@ -3852,11 +3902,11 @@ fn packed_grouped_expert_policy(
     } && packed_grouped_expert_kernels_supported(ctx);
     if packed_grouped_iq2_mma16_enabled()
         && enabled
-        && n_tokens == PACKED_GROUPED_IQ2_MMA16_MAX_TOKENS
+        && packed_grouped_iq2_mma16_qualified(n_tokens)
         && ctx.device.name().to_string() == PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
         && packed_grouped_iq2_mma16_candidate_supported(ctx)
     {
-        return Ok(PackedExpertPolicy::GroupedIq2XsIq3XxsMma16FullChunk);
+        return Ok(PackedExpertPolicy::GroupedIq2XsIq3XxsMma16QualifiedChunk);
     }
     Ok(if enabled {
         PackedExpertPolicy::GroupedIq2XsIq3Xxs
@@ -3867,7 +3917,7 @@ fn packed_grouped_expert_policy(
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
 pub(super) fn packed_grouped_expert_enabled_for_test(ctx: &MetalContext) -> bool {
-    packed_grouped_expert_policy(ctx, PACKED_GROUPED_IQ2_MMA16_MAX_TOKENS)
+    packed_grouped_expert_policy(ctx, PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS)
         .expect("valid packed grouped expert policy")
         .uses_iq2_target()
 }
@@ -4977,7 +5027,7 @@ fn validate_packed_route_policy_scope(
 enum PackedExpertPolicy {
     Current,
     GroupedIq2XsIq3Xxs,
-    GroupedIq2XsIq3XxsMma16FullChunk,
+    GroupedIq2XsIq3XxsMma16QualifiedChunk,
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
     GroupedIq2XsIq3XxsAndIq3Xxs,
 }
@@ -4987,15 +5037,15 @@ impl PackedExpertPolicy {
         match self {
             Self::Current => false,
             Self::GroupedIq2XsIq3Xxs => true,
-            Self::GroupedIq2XsIq3XxsMma16FullChunk => true,
+            Self::GroupedIq2XsIq3XxsMma16QualifiedChunk => true,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
             Self::GroupedIq2XsIq3XxsAndIq3Xxs => true,
         }
     }
 
     fn uses_iq2_mma16(self, n_tokens: usize) -> bool {
-        matches!(self, Self::GroupedIq2XsIq3XxsMma16FullChunk)
-            && n_tokens == PACKED_GROUPED_IQ2_MMA16_MAX_TOKENS
+        matches!(self, Self::GroupedIq2XsIq3XxsMma16QualifiedChunk)
+            && packed_grouped_iq2_mma16_qualified(n_tokens)
     }
 
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -5691,6 +5741,11 @@ impl PrefillMoeScratch {
             let grouped_plan =
                 PackedGroupedExpertPlan::new(n_tokens, schedule, Some(&self.grouped_tiles))?;
             let used_iq2_mma16 = if expert_policy.uses_iq2_mma16(n_tokens) {
+                let mma16_plan = PackedGroupedExpertPlan::new_iq2_mma16(
+                    n_tokens,
+                    schedule,
+                    Some(&self.grouped_iq2_mma16_tiles),
+                )?;
                 let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed BM16 IQ2 routes")?;
                 let rows = i32_prefix(
                     &self.bucket_rows,
@@ -5713,7 +5768,7 @@ impl PrefillMoeScratch {
                     normalized_input,
                     &rows,
                     &slots,
-                    schedule,
+                    &mma16_plan,
                     &gate,
                     &up,
                     &grouped_inner,
@@ -8490,9 +8545,13 @@ mod tests {
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
             PACKED_GROUPED_EXPERT_MAX_TOKENS
         );
-        let mma16 = PackedExpertPolicy::GroupedIq2XsIq3XxsMma16FullChunk;
-        assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_MAX_TOKENS));
-        assert!(!mma16.uses_iq2_mma16(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
+        let mma16 = PackedExpertPolicy::GroupedIq2XsIq3XxsMma16QualifiedChunk;
+        assert!(!mma16.uses_iq2_mma16(127));
+        assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS));
+        assert!(!mma16.uses_iq2_mma16(129));
+        assert!(!mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS - 1));
+        assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS));
+        assert!(!mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS + 1));
         assert!(
             packed_grouped_expert_scope(
                 PackedGroupedExpertMode::Auto,
@@ -8610,6 +8669,10 @@ mod tests {
             packed_grouped_expert_tiles(128, &maximum).unwrap().len(),
             272
         );
+        assert_eq!(
+            packed_grouped_iq2_mma16_tiles(128, &maximum).unwrap().len(),
+            288
+        );
 
         let mut cursor = 0usize;
         let maximum = (0..MOE_EXPERT_COUNT)
@@ -8635,6 +8698,33 @@ mod tests {
                 .len(),
             PACKED_GROUPED_EXPERT_MAX_TILES
         );
+
+        let mut cursor = 0usize;
+        let mma16_maximum = (0..MOE_EXPERT_COUNT)
+            .map(|expert| {
+                let len = match expert {
+                    0..5 => 2_033,
+                    5 => 1_873,
+                    _ => 1,
+                };
+                let bucket = ExpertBucket {
+                    expert,
+                    start: cursor,
+                    len,
+                };
+                cursor += len;
+                bucket
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cursor, PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS * MOE_TOP_K);
+        assert_eq!(
+            packed_grouped_iq2_mma16_tiles(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS, &mma16_maximum,)
+                .unwrap()
+                .len(),
+            PACKED_GROUPED_IQ2_MMA16_MAX_TILES
+        );
+        assert_eq!(PACKED_GROUPED_IQ2_MMA16_MAX_TILES, 1_008);
+        assert_eq!(PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS, 3_024);
     }
 
     #[cfg(feature = "dsv4-diagnostics")]
@@ -10155,10 +10245,24 @@ mod tests {
 
         let gate_bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, H, F, E, 71);
         let up_bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, H, F, E, 73);
-        for n_tokens in [1, 12, 15, 16, 17, 31, 32, 33, 64, 128] {
+        let grouped_tile_buffer =
+            MetalTensor::zeros_i32(&ctx, vec![PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS as u64])
+                .unwrap();
+        let mma16_tile_buffer =
+            MetalTensor::zeros_i32(&ctx, vec![PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS as u64])
+                .unwrap();
+        for n_tokens in [1, 12, 15, 16, 17, 31, 32, 33, 64, 128, 2_048] {
             let route_count = n_tokens * K;
             let (_expert_ids, rows, slots, schedule) = grouped_test_schedule(n_tokens);
-            let grouped_plan = PackedGroupedExpertPlan::new(n_tokens, &schedule, None).unwrap();
+            let grouped_plan =
+                PackedGroupedExpertPlan::new(n_tokens, &schedule, Some(&grouped_tile_buffer))
+                    .unwrap();
+            let mma16_plan = PackedGroupedExpertPlan::new_iq2_mma16(
+                n_tokens,
+                &schedule,
+                Some(&mma16_tile_buffer),
+            )
+            .unwrap();
             let input_values = (0..n_tokens * H)
                 .map(|index| ((index * 37 + index / 11 + 5) % 251) as f32 * 0.001 - 0.125)
                 .collect::<Vec<_>>();
@@ -10311,7 +10415,7 @@ mod tests {
                     &input,
                     &source_rows,
                     &destination_slots,
-                    &schedule,
+                    &mma16_plan,
                     gate,
                     up,
                     inner,
@@ -10477,10 +10581,24 @@ mod tests {
 
         let gate_bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, H, F, E, 109);
         let up_bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, H, F, E, 113);
-        for n_tokens in [1, 15, 16, 17, 128] {
+        let grouped_tile_buffer =
+            MetalTensor::zeros_i32(&ctx, vec![PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS as u64])
+                .unwrap();
+        let mma16_tile_buffer =
+            MetalTensor::zeros_i32(&ctx, vec![PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS as u64])
+                .unwrap();
+        for n_tokens in [1, 15, 16, 17, 128, 2_048] {
             let route_count = n_tokens * K;
             let (_expert_ids, rows, slots, schedule) = grouped_test_schedule(n_tokens);
-            let grouped_plan = PackedGroupedExpertPlan::new(n_tokens, &schedule, None).unwrap();
+            let grouped_plan =
+                PackedGroupedExpertPlan::new(n_tokens, &schedule, Some(&grouped_tile_buffer))
+                    .unwrap();
+            let mma16_plan = PackedGroupedExpertPlan::new_iq2_mma16(
+                n_tokens,
+                &schedule,
+                Some(&mma16_tile_buffer),
+            )
+            .unwrap();
             let input_values = (0..n_tokens * H)
                 .map(|index| {
                     ((index * 41 + index / 17 + index / H * 13 + 7) % 509) as f32 * 0.0005 - 0.127
@@ -10634,7 +10752,7 @@ mod tests {
                     &input,
                     &source_rows,
                     &destination_slots,
-                    &schedule,
+                    &mma16_plan,
                     gate,
                     up,
                     inner,

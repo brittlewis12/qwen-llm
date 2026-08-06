@@ -1,8 +1,8 @@
-// Diagnostics-only mapped IQ2_XS matrix projection.
+// Exact mapped IQ2_XS matrix projection.
 //
 // One SIMD group computes 16 output rows by up to 16 expert-major routed rows
-// with F32 matrix operands and accumulators. This changes only reduction order:
-// IQ2_XS dequantized values and source activations enter the MMA as F32.
+// with F32 matrix operands and accumulators. Promoted shapes retain the scalar
+// IQ2_XS gate, up, and SwiGLU results bit for bit.
 
 #include <metal_stdlib>
 using namespace metal;

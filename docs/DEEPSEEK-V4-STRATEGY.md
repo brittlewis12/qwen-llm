@@ -2321,7 +2321,16 @@ noise without reducing technical risk. Revisit after S5.
    logits and a 64-token greedy continuation unchanged. Keep
    `QWEN_DSV4_BATCHED_COMPRESSOR=0` as rollback. No chronological publication
    work now blocks a 512-token chunk; the next step is the cap and geometry
-   crossing itself.
+   crossing itself. That crossing is now complete through N=2,048. Exact
+   buffer-backed 32-route grouped execution first moved the 2,385-token prompt
+   from 46.080 to 39.501 seconds, then a disjoint 16-route descriptor image
+   extended BM16 to the full N=2,048 work unit and moved it again to 36.309
+   seconds. Both promotions preserve the complete prompt-logit digest and all
+   64 generated IDs; intermediate tails stay on scalar grouped execution.
+   Full-chunk post-route work is now 7.218 seconds versus 20.368 seconds before
+   routing. Continue through pre-expert matrix work rather than another packed
+   cap increase, retaining `QWEN_DSV4_PACKED_GROUPED_EXPERTS=0` and
+   `QWEN_DSV4_PACKED_BM16_IQ2=0` as exact rollbacks.
 7. Keep the packed before-attention and exact multi-row scorer closures
    explicit. The corrected four-encoder packet remains `HOLD`: its material
    pre-attention interval contains one unowned encoder transition, and Apple M4

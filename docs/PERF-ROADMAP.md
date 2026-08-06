@@ -577,21 +577,29 @@ all 64 generated IDs. The full-chunk trace still assigns 7.825 of 10.530
 post-route seconds to the 25 IQ2 layers, making wider BM16 execution the next
 largest exact post-route hypothesis.
 
+BM16 now consumes the same stable schedule at the two measured full work units,
+N=128 and N=2,048. A dedicated buffer-backed 16-route plan preserves every
+gate/up/SwiGLU bit and keeps the simultaneous 32-route down plan disjoint.
+A/B/B/A moves N=2,048 prefill from 40.43 to 36.31 seconds, or 59.0 to 65.7
+token/s, with identical prompt logits and 64-token output. The full-chunk trace
+moves post-route from 10.530 to 7.218 seconds and the IQ2 cohort from 7.825 to
+4.542 seconds. Pre-expert work now leads at 20.368 seconds.
+
 Force-ranked queue:
 
-1. **Widen exact BM16 IQ2 execution.** The exact scalar grouped path now covers
-   N=2,048 and removes 14.3% of product prefill wall, but the eligible 25-layer
-   cohort still costs 7.825 seconds per full chunk. Generalize the existing
-   bit-exact BM16 work unit with buffer-backed descriptors, retain the stable
-   CPU schedule, and compare it directly with the new grouped default. Do not
-   reopen scalar row/panel/shuffle retuning.
-2. **Q-B approximate-quality decision.** The F32 `R2C4K64` candidate applies
+1. **Q-B approximate-quality decision.** The F32 `R2C4K64` candidate applies
    only to Q-B on complete N=2,048 chunks and cuts the 2,385-token prefill by
    10.3%. It preserves one 64-token greedy continuation and passes a four-key
    5,255-token structured retrieval probe, but a coherent 6,642-token summary
    diverges from exact. Keep it opt-in until a small diverse task battery finds
    no retrieval, constraint, EOS, or aggregate quality regression. Output A/B
    remain closed by their prior full-model KILL.
+2. **Attribute the remaining BM16 cohort.** BM16 cuts the 25 IQ2 layers from
+   7.825 to 4.542 seconds, but pre-expert work is now 20.368 seconds. Use the
+   retained post-route stage instrument to separate gate/up, SwiGLU, down, and
+   shared/combine before pricing a 32-route matrix tile that reuses each weight
+   dequantization across two route panels. Keep intermediate token counts on
+   scalar grouped execution until a crossover is measured.
 3. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
    pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
    proof, not a binding floor.

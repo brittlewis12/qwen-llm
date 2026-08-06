@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 2,048-Token BM16 Default GO
+
+Status: exact BM16 IQ2 gate/up execution now covers full N=2,048 chunks on
+Apple M4 Max, in addition to its existing N=128 scope. Intermediate tails use
+the exact scalar grouped path. `QWEN_DSV4_PACKED_BM16_IQ2=0` is rollback.
+
+- Retain the stable CPU expert/token/slot schedule. A dedicated 16-route plan
+  holds at most 1,008 descriptors in a separate 12,096-byte buffer, so its two
+  IQ2 matrix projections cannot alias the simultaneous 32-route IQ3 down plan.
+- Existing gate/up arena and grouped inner scratch already cover all 12,288
+  routes. Reduced-K and production-K differentials now cross N=2,048 and keep
+  every gate, up, and SwiGLU F32 bit exact, including repeat execution.
+- Same-binary A/B/B/A records scalar grouped prefill at 41.770/39.093 seconds
+  and BM16 at 36.593/36.025 seconds. Mean wall falls another 10.2%, while
+  throughput rises from 59.0 to 65.7 token/s. All arms preserve prompt-logit
+  digest `48ff8cac...20b301` and the same 64 generated IDs.
+- Relative to the preceding bucket-loop checkpoint, the two exact grouped
+  promotions cumulatively reduce mean prefill wall from 46.080 to 36.309
+  seconds, or 21.2%, and raise throughput from 51.8 to 65.7 token/s.
+- The full-chunk trace moves post-route from 10.530 to 7.218 seconds. IQ2 falls
+  from 7.825 to 4.542 seconds, while all-IQ3/MXFP4 remain 2.021/0.655 seconds.
+  Pre-expert work is now the dominant 20.368-second phase. The dedicated plan
+  adds 12,096 logical bytes; admission remains 106.946 GB.
+
+Decision: default BM16 at the two measured exact work units, N=128 and N=2,048,
+without guessing an intermediate crossover. Move primary attention to the
+pre-expert matrix frontier; first attribute any further BM16 tile widening
+against its remaining 4.542-second cohort rather than retuning blindly.
+
 ## 2026-08-06 - DeepSeek V4 2,048-Token Exact Grouped Experts Default GO
 
 Status: exact grouped IQ2_XS/IQ2_XS/IQ3_XXS experts now cover every packed

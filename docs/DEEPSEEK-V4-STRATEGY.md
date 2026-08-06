@@ -2214,8 +2214,18 @@ noise without reducing technical risk. Revisit after S5.
    warm drift. Preserve both as `HOLD - closed inconclusive`, remove the live
    profiler, and implement no kernels. Reopen only for materially better GPU
    instrumentation, an independently corrected timing cause, or relevant
-   device/compiler drift under a new reviewed protocol. Move the active packed-
-   prefill queue to a direct production-shape grouped MXFP4-down ceiling for the
-   two outlier layers; keep HCA tiling deferred.
+   device/compiler drift under a new reviewed protocol. The grouped-MXFP4
+   follow-up then closes analytically before another profiler: the complete
+   routed stages for layers 26 and 42 measure only
+   63.101/62.246/63.273 ms. Even deleting the largest sample reaches 39.97% of
+   the 158.3 ms floor, while a real grouped down/scatter kernel changes only a
+   subset and retains nonzero work. Host encoding is not directly measured;
+   reopen only if stable telemetry exposes more than the remaining 95.027 ms,
+   the work composes with a larger family, or the asset/device premise changes.
+   Move the active packed-prefill queue to exact count-vector capture and
+   grouped gate/up versus down phase attribution for the 597.107 ms mean routed-
+   stage envelope of the 25-layer grouped-IQ2 cohort. Require a conservative
+   >=158.3 ms removable ceiling before kernel implementation; keep HCA tiling
+   deferred.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

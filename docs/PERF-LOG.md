@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Packed MXFP4 Economic KILL
+
+Status: standalone grouped MXFP4-down work is `KILL` before profiler or kernel
+implementation. The accepted current-asset post-route observer already gives a
+strictly stronger complete-stage ceiling than a model-free down-only screen.
+
+- Layers 26 and 42 execute 1,536 row-wise MXFP4 down matvecs and 117 scatters
+  at N=128. A grouped candidate changes only a subset of their complete routed
+  stages and retains nonzero arithmetic, publication, and encoding work.
+- Accepted complete-cohort GPU samples are 63.101/62.246/63.273 ms, with a
+  62.874 ms mean. Even deleting the largest sample reaches only 39.97% of the
+  established 158.3 ms packed-prefill floor.
+- The GPU packet does not directly measure host encoding. Bridging the remaining
+  95.027 ms with zero replacement cost would require an average of more than
+  57.49 us of removable host work per affected dispatch; no stable telemetry
+  supports that premise.
+
+Decision: do not build another profiler or grouped MXFP4 kernel. Reopen for
+direct host evidence above the stated gap, composition with a larger measured
+family, material asset census drift, or relevant device/compiler drift. Move
+next to exact count-vector capture and phase attribution for the 597.107 ms
+mean routed-stage envelope of the 25-layer grouped-IQ2 cohort. Evidence:
+`docs/bench/2026-08-06-dsv4-packed-mxfp4-economic-closure/README.md`. CX review:
+`019fd588-96b0-7033-afd1-66d7e354e523`.
+
 ## 2026-08-06 - DeepSeek V4 Joint Packed Ceiling HOLD
 
 Status: the exact joint RoPE/raw-publication/inverse-RoPE candidate is

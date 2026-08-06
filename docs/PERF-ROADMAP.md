@@ -434,11 +434,27 @@ and implement no kernels. Reopen only for materially better instrumentation, an
 independently corrected timing cause, or relevant device/compiler drift under a
 new protocol.
 
+The grouped-MXFP4 follow-up is closed analytically before another profiler. At
+N=128, layers 26 and 42 execute 1,536 row-wise down matvecs and 117 scatters,
+but their accepted complete routed-stage samples are only
+63.101/62.246/63.273 ms. Even impossible deletion of the largest complete stage
+reaches 39.97% of the existing 158.3 ms floor; a grouped down/scatter kernel
+changes a strict subset and has nonzero replacement cost. The GPU packet does
+not measure host encoding, but closing the 95.027 ms gap would require an
+average of more than 57.49 us of removable host work per affected dispatch
+before replacement encoding. Reopen only with stable direct evidence for that
+premise, composition with a larger measured family, material asset census
+drift, or relevant device/compiler drift.
+
 Force-ranked queue:
 
-1. **Grouped MXFP4-down cleanup.** Keep the two current outlier layers bounded
-   behind a direct production-shape ceiling. Their 62.874 ms routed subtotal is
-   not by itself authorization for a broad expert rewrite.
+1. **Grouped-IQ2 count census and phase ceiling.** The 25 production-grouped
+   layers own a measured 597.107 ms mean routed-stage envelope, enough to clear
+   the floor only if a coherent candidate can remove at least 26.51%. Capture
+   the exact current per-expert count vectors, derive tile/padding classes, and
+   time the grouped gate/up/SwiGLU and down/scatter phases separately at
+   production shape. Implement no replacement kernel until a conservative
+   removable ceiling clears 158.3 ms.
 2. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.

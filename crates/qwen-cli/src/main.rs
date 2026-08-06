@@ -7405,28 +7405,40 @@ mod tests {
 
     #[test]
     fn deepseek_v4_prefill_chunks_every_retained_prompt_interval() {
-        assert_eq!(parse_deepseek_v4_prefill_chunk_tokens(None).unwrap(), 512);
+        assert_eq!(parse_deepseek_v4_prefill_chunk_tokens(None).unwrap(), 2_048);
         assert_eq!(
             parse_deepseek_v4_prefill_chunk_tokens(Some("128")).unwrap(),
             128
         );
+        assert_eq!(
+            parse_deepseek_v4_prefill_chunk_tokens(Some("512")).unwrap(),
+            512
+        );
         assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("0")).is_err());
-        assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("513")).is_err());
+        assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("2049")).is_err());
         assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("nope")).is_err());
         assert_eq!(deepseek_v4_packed_chunk_count(0, 512), 0);
         assert_eq!(deepseek_v4_packed_chunk_count(1, 512), 0);
         assert_eq!(deepseek_v4_packed_chunk_count(2, 512), 1);
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS, 512),
-            1
+            4
         );
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1, 512),
-            2
+            5
         );
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 512),
             2_048
+        );
+        assert_eq!(
+            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS, 2_048),
+            1
+        );
+        assert_eq!(
+            deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 2_048),
+            512
         );
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 128),

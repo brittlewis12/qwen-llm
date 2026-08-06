@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 2,048-Token Packed Prefill Default GO
+
+Status: ordinary packed prefill now uses chunks of up to 2,048 tokens.
+`QWEN_DSV4_PREFILL_CHUNK_TOKENS=512` retains the prior default.
+
+- Exact raw publication retains the final 128-row ring after a complete
+  2,048-row write. CSA attention and indexer compressors cross 512 publication
+  boundaries, while HCA crosses sixteen; complete ordered and batched frontier
+  state, F16 history, and diagnostics FP4 sidecars remain bit-identical.
+- Shallow-session logical scratch is 2.108 GB and the measured 2,385-token
+  request prices at 106.85 GB including reserve. The promoted 1M-capacity
+  inventory remains representable at 13.575 GB of logical session storage.
+- Same-binary AB/BA runs record N=512 at 55.185/52.556 seconds and N=2,048 at
+  45.382/44.783 seconds. Mean prefill wall falls 16.3%, while throughput rises
+  from 44.3 to 52.9 token/s. Every arm preserves F32 prompt-logit digest
+  `48ff8cac...20b301`; the N=2,048 path also reproduces all 64 retained greedy
+  continuation IDs.
+- Wider diagnostics testing exposed that the already-killed experimental GPU
+  router diverges at N=511. Production packed prefill routes on CPU. Pin the
+  experimental router and its scratch to the proven N<=128 scope and reject a
+  wider diagnostics request before observation or mutation.
+
+Decision: keep 2,048 as the default and stop cap growth without new product
+attribution. The next large known work reduction is Q8 packed dense mat-mat,
+followed by remeasuring matrix-shaped experts at the N=2,048 occupancy regime.
+
 ## 2026-08-06 - DeepSeek V4 512-Token Packed Prefill Default GO
 
 Status: ordinary packed prefill now uses chunks of up to 512 tokens.

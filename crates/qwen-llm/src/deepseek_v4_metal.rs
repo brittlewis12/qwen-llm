@@ -16866,7 +16866,7 @@ mod tests {
             0
         };
         let packed_route_logical = if cfg!(feature = "dsv4-diagnostics") {
-            530_464
+            134_176
         } else {
             0
         };
@@ -16879,7 +16879,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            570_079_460 + diagnostics_logical + packed_route_logical
+            2_107_664_612 + diagnostics_logical + packed_route_logical
         );
         let names = requests
             .iter()
@@ -16930,6 +16930,18 @@ mod tests {
         let promoted =
             deepseek_v4_session_allocation_requests_for_kinds(&kinds, promoted_capacity).unwrap();
         assert_eq!(promoted.len(), requests.len() + 5);
+        for name in [
+            "prefill.attention.sparse_csa.scores",
+            "prefill.attention.sparse_csa.selected_mask",
+        ] {
+            assert_eq!(
+                promoted
+                    .iter()
+                    .find(|request| request.name == name)
+                    .map(|request| request.logical_bytes),
+                Some(2_147_483_648)
+            );
+        }
         let promoted_diagnostics_logical = if cfg!(feature = "dsv4-diagnostics") {
             csa_layer_count as u64 * promoted_capacity.csa_physical_rows() as u64 * 72
                 + 112_160
@@ -16942,7 +16954,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            8_826_107_276 + promoted_diagnostics_logical + packed_route_logical
+            13_575_480_716 + promoted_diagnostics_logical + packed_route_logical
         );
         assert_eq!(
             promoted

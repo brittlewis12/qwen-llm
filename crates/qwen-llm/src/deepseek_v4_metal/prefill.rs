@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::OnceLock;
 
-pub const DEEPSEEK_V4_PREFILL_MAX_TOKENS: usize = 512;
+pub const DEEPSEEK_V4_PREFILL_MAX_TOKENS: usize = 2_048;
 
 const QUERY_WIDTH: usize = 64 * 512;
 const GROUP_WIDTH: usize = QUERY_WIDTH / 8;
@@ -607,10 +607,19 @@ impl DeepSeekV4PrefillScratch {
                 )?,
                 #[cfg(feature = "dsv4-diagnostics")]
                 gpu_route: PrefillGpuRouteScratch {
-                    route_generations: MetalTensor::zeros_i32(ctx, vec![n])?,
-                    route_status: MetalTensor::zeros_i32(ctx, vec![n])?,
+                    route_generations: MetalTensor::zeros_i32(
+                        ctx,
+                        vec![PACKED_GPU_ROUTE_MAX_TOKENS as u64],
+                    )?,
+                    route_status: MetalTensor::zeros_i32(
+                        ctx,
+                        vec![PACKED_GPU_ROUTE_MAX_TOKENS as u64],
+                    )?,
                     counts: MetalTensor::zeros_i32(ctx, vec![MOE_EXPERT_COUNT as u64])?,
-                    slot_ids: MetalTensor::zeros_i32(ctx, vec![n, MOE_EXPERT_COUNT as u64])?,
+                    slot_ids: MetalTensor::zeros_i32(
+                        ctx,
+                        vec![PACKED_GPU_ROUTE_MAX_TOKENS as u64, MOE_EXPERT_COUNT as u64],
+                    )?,
                     schedule_generations: MetalTensor::zeros_i32(
                         ctx,
                         vec![MOE_EXPERT_COUNT as u64],
@@ -804,12 +813,19 @@ pub(super) fn append_session_allocation_requests(
     #[cfg(feature = "dsv4-diagnostics")]
     {
         for (name, elements) in [
-            ("moe.gpu_route.route_generations", n),
-            ("moe.gpu_route.route_status", n),
+            (
+                "moe.gpu_route.route_generations",
+                PACKED_GPU_ROUTE_MAX_TOKENS,
+            ),
+            ("moe.gpu_route.route_status", PACKED_GPU_ROUTE_MAX_TOKENS),
             ("moe.gpu_route.counts", MOE_EXPERT_COUNT),
             (
                 "moe.gpu_route.slot_ids",
-                checked_mul(n, MOE_EXPERT_COUNT, "packed GPU route slots")?,
+                checked_mul(
+                    PACKED_GPU_ROUTE_MAX_TOKENS,
+                    MOE_EXPERT_COUNT,
+                    "packed GPU route slots",
+                )?,
             ),
             ("moe.gpu_route.schedule_generations", MOE_EXPERT_COUNT),
             ("moe.gpu_route.aggregate", PACKED_ROUTE_RECORD_WIDTH),
@@ -3689,6 +3705,8 @@ fn packed_grouped_iq3_fused_candidate_supported(ctx: &MetalContext) -> bool {
 
 const PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_GROUPED_EXPERT_MAX_TOKENS: usize = 128;
+#[cfg(any(test, feature = "dsv4-diagnostics"))]
+const PACKED_GPU_ROUTE_MAX_TOKENS: usize = 128;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PackedGroupedExpertMode {
@@ -4846,6 +4864,19 @@ impl PackedRoutePolicy {
             Self::GpuExperimentalCpuWeights => true,
         }
     }
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+fn validate_packed_route_policy_scope(
+    policy: PackedRoutePolicy,
+    n_tokens: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    if policy.uses_gpu() && n_tokens > PACKED_GPU_ROUTE_MAX_TOKENS {
+        return invalid(format!(
+            "experimental packed GPU routing is qualified through {PACKED_GPU_ROUTE_MAX_TOKENS} tokens"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6639,6 +6670,8 @@ impl DeepSeekV4Session {
             ));
         }
         let n_tokens = checked_token_count(token_ids.len())?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        validate_packed_route_policy_scope(route_policy, token_ids.len())?;
         if expert_policy.uses_iq2_target() && token_ids.len() > PACKED_GROUPED_EXPERT_MAX_TOKENS {
             return invalid(format!(
                 "packed grouped expert policy exceeds its {PACKED_GROUPED_EXPERT_MAX_TOKENS}-token qualification"
@@ -11867,7 +11900,7 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     enum PackedRouteMicroproofSource {
         Learned,
         Hash,
@@ -11902,8 +11935,8 @@ mod tests {
 
     impl PackedRouteMicroproofScratch {
         fn new(ctx: &MetalContext) -> Result<Self, DeepSeekV4MetalError> {
-            let n = DEEPSEEK_V4_PREFILL_MAX_TOKENS as u64;
-            let slot_elements = DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_EXPERT_COUNT;
+            let n = PACKED_GPU_ROUTE_MAX_TOKENS as u64;
+            let slot_elements = PACKED_GPU_ROUTE_MAX_TOKENS * MOE_EXPERT_COUNT;
             let mut guarded_slots = vec![
                 PACKED_ROUTE_SLOT_PREFIX;
                 PACKED_ROUTE_SLOT_GUARD_BYTES
@@ -12122,9 +12155,9 @@ mod tests {
 
     impl PackedRouteFixture {
         fn new(ctx: &MetalContext) -> Self {
-            const VOCAB_SIZE: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1;
+            const VOCAB_SIZE: usize = PACKED_GPU_ROUTE_MAX_TOKENS + 1;
             let scratch = PackedRouteMicroproofScratch::new(ctx).unwrap();
-            let logits = (0..DEEPSEEK_V4_PREFILL_MAX_TOKENS)
+            let logits = (0..PACKED_GPU_ROUTE_MAX_TOKENS)
                 .flat_map(|token| {
                     (0..MOE_EXPERT_COUNT).map(move |expert| {
                         if token.is_multiple_of(29) {
@@ -12140,7 +12173,7 @@ mod tests {
             let bias_values = (0..MOE_EXPERT_COUNT)
                 .map(|expert| ((expert * 193 + 7) % 257) as f32 * 0.0002 - 0.0256)
                 .collect::<Vec<_>>();
-            let token_ids = (0..DEEPSEEK_V4_PREFILL_MAX_TOKENS as i32).collect::<Vec<_>>();
+            let token_ids = (0..PACKED_GPU_ROUTE_MAX_TOKENS as i32).collect::<Vec<_>>();
             let hash_map = (0..VOCAB_SIZE)
                 .flat_map(|token| {
                     (0..MOE_TOP_K).map(move |slot| ((token * 17 + slot * 37) % 256) as i32)
@@ -12301,7 +12334,17 @@ mod tests {
         capture: &PackedRouteCapture,
     ) {
         let (expected_ids, expected_weights) = fixture.expected_routes(source, n_tokens);
-        assert_eq!(capture.expert_ids, expected_ids);
+        if let Some(index) = capture
+            .expert_ids
+            .iter()
+            .zip(&expected_ids)
+            .position(|(actual, expected)| actual != expected)
+        {
+            panic!(
+                "packed {source:?} route ID differs at N={n_tokens} slot {index}: {} vs {}",
+                capture.expert_ids[index], expected_ids[index]
+            );
+        }
         for (index, (&actual, &expected)) in
             capture.weights.iter().zip(&expected_weights).enumerate()
         {
@@ -12381,12 +12424,12 @@ mod tests {
     }
 
     #[test]
-    fn packed_gpu_routes_and_schedules_match_cpu_for_every_chunk_width() {
+    fn packed_gpu_routes_and_schedules_match_cpu_for_every_qualified_width() {
         let Ok(ctx) = MetalContext::new() else {
             return;
         };
         let fixture = PackedRouteFixture::new(&ctx);
-        for n_tokens in 1..=DEEPSEEK_V4_PREFILL_MAX_TOKENS {
+        for n_tokens in 1..=PACKED_GPU_ROUTE_MAX_TOKENS {
             for source in [
                 PackedRouteMicroproofSource::Learned,
                 PackedRouteMicroproofSource::Hash,
@@ -12395,6 +12438,25 @@ mod tests {
                 assert_packed_route_capture(&fixture, source, n_tokens, &capture);
             }
         }
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn packed_gpu_route_policy_rejects_unqualified_widths() {
+        validate_packed_route_policy_scope(
+            PackedRoutePolicy::GpuExperimental,
+            PACKED_GPU_ROUTE_MAX_TOKENS,
+        )
+        .unwrap();
+        assert!(
+            validate_packed_route_policy_scope(
+                PackedRoutePolicy::GpuExperimental,
+                PACKED_GPU_ROUTE_MAX_TOKENS + 1,
+            )
+            .is_err()
+        );
+        validate_packed_route_policy_scope(PackedRoutePolicy::Cpu, DEEPSEEK_V4_PREFILL_MAX_TOKENS)
+            .unwrap();
     }
 
     #[test]
@@ -12450,7 +12512,7 @@ mod tests {
         .unwrap();
         host_write_i32(
             &packed.token_ids,
-            &vec![0; DEEPSEEK_V4_PREFILL_MAX_TOKENS],
+            &vec![0; PACKED_GPU_ROUTE_MAX_TOKENS],
             "singleton-equivalent packed token IDs",
         )
         .unwrap();
@@ -12462,7 +12524,7 @@ mod tests {
                 "singleton-equivalent singleton logits",
             )
             .unwrap();
-            let mut packed_logits = vec![0.0; MOE_EXPERT_COUNT * DEEPSEEK_V4_PREFILL_MAX_TOKENS];
+            let mut packed_logits = vec![0.0; MOE_EXPERT_COUNT * PACKED_GPU_ROUTE_MAX_TOKENS];
             packed_logits[..MOE_EXPERT_COUNT].copy_from_slice(&logits);
             host_write_f32(
                 &packed.logits,
@@ -13075,14 +13137,14 @@ mod tests {
 
         let write_route_state =
             |generation: NonZeroU32, n_tokens: usize, expert_ids: &[i32], weights: &[f32]| {
-                let mut full_ids = vec![-1; DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_TOP_K];
+                let mut full_ids = vec![-1; PACKED_GPU_ROUTE_MAX_TOKENS * MOE_TOP_K];
                 full_ids[..expert_ids.len()].copy_from_slice(expert_ids);
                 host_write_i32(&fixture.scratch.expert_ids, &full_ids, "prepared route IDs")
                     .unwrap();
-                let mut full_weights = vec![0.0; DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_TOP_K];
+                let mut full_weights = vec![0.0; PACKED_GPU_ROUTE_MAX_TOKENS * MOE_TOP_K];
                 full_weights[..weights.len()].copy_from_slice(weights);
                 write_raw_f32(&fixture.scratch.weights, &full_weights);
-                let mut generations = vec![0; DEEPSEEK_V4_PREFILL_MAX_TOKENS];
+                let mut generations = vec![0; PACKED_GPU_ROUTE_MAX_TOKENS];
                 generations[..n_tokens].fill(generation.get() as i32);
                 host_write_i32(
                     &fixture.scratch.route_generations,
@@ -13090,7 +13152,7 @@ mod tests {
                     "prepared route generations",
                 )
                 .unwrap();
-                let mut statuses = vec![0; DEEPSEEK_V4_PREFILL_MAX_TOKENS];
+                let mut statuses = vec![0; PACKED_GPU_ROUTE_MAX_TOKENS];
                 statuses[..n_tokens].fill(DEEPSEEK_V4_ROUTE_STATUS_READY);
                 host_write_i32(
                     &fixture.scratch.route_status,
@@ -13166,7 +13228,7 @@ mod tests {
                 let generation = fixture.generations.take().unwrap();
                 write_route_state(generation, n_tokens, &valid.expert_ids, &valid.weights);
                 host_write_i32(&fixture.scratch.counts, counts, "corrupt schedule counts").unwrap();
-                let mut full_slots = vec![-1; DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_EXPERT_COUNT];
+                let mut full_slots = vec![-1; PACKED_GPU_ROUTE_MAX_TOKENS * MOE_EXPERT_COUNT];
                 full_slots[..slot_ids.len()].copy_from_slice(slot_ids);
                 host_write_i32(
                     &fixture.scratch.slot_ids,
@@ -13230,25 +13292,25 @@ mod tests {
         let terminal = fixture.run(
             &ctx,
             PackedRouteMicroproofSource::Learned,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            PACKED_GPU_ROUTE_MAX_TOKENS,
+            PACKED_GPU_ROUTE_MAX_TOKENS,
             MOE_EXPERT_COUNT,
         );
-        let terminal_ids = vec![255; DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_TOP_K];
+        let terminal_ids = vec![255; PACKED_GPU_ROUTE_MAX_TOKENS * MOE_TOP_K];
         let failed = run_route_state(
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            PACKED_GPU_ROUTE_MAX_TOKENS,
             &terminal_ids,
             &terminal.weights,
         );
         assert_packed_route_failure(
             &failed,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            PACKED_GPU_ROUTE_MAX_TOKENS,
             PACKED_ROUTE_INVALID_COUNT,
             0,
         );
         assert_eq!(
             failed.counts[255],
-            (DEEPSEEK_V4_PREFILL_MAX_TOKENS * MOE_TOP_K) as i32
+            (PACKED_GPU_ROUTE_MAX_TOKENS * MOE_TOP_K) as i32
         );
         fixture.scratch.assert_slot_guards();
     }
@@ -13991,7 +14053,7 @@ mod tests {
         let config = deepseek_v4_session_attention_config();
         let dims = config.checked().unwrap();
         let start_position = 1_540_u32;
-        let n_tokens = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+        let n_tokens = 512;
         let query_offset = n_tokens - 1;
         let query_count = n_tokens - query_offset;
         let raw_value = |position: usize, dimension: usize| {
@@ -14465,6 +14527,8 @@ mod tests {
         run_case(&ctx, AttentionKind::SlidingWindow, 127, 4, None);
         run_case(&ctx, AttentionKind::CompressedSparse, 125, 8, None);
         run_case(&ctx, AttentionKind::HeavilyCompressed, 125, 8, None);
+        const WIDE_CHUNK_TOKENS: usize = 512;
+
         run_case(
             &ctx,
             AttentionKind::CompressedSparse,
@@ -14484,14 +14548,14 @@ mod tests {
             &ctx,
             AttentionKind::SlidingWindow,
             129,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            WIDE_CHUNK_TOKENS,
             Some(&[0, 127, 128, 255, 384, 511]),
         );
         run_case(
             &ctx,
             AttentionKind::HeavilyCompressed,
             65_152,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            WIDE_CHUNK_TOKENS,
             Some(&[0, 383, 384, 510, 511]),
         );
     }

@@ -561,38 +561,36 @@ samples. Rotating encoder boundaries retains the same unowned transition and
 is not a replacement. The rejected observer is removed; reopen only for a new
 legal intra-pass primitive or relevant device/Metal capability drift.
 
+The N=2,048 default is exact through 512 CSA and sixteen HCA publications and
+the retained 64-token continuation. Same-binary AB/BA moves the 2,385-token
+prompt from 53.87 to 45.08 seconds versus N=512, with an identical complete F32
+prompt-logit digest. Stop cap growth here; reopen a larger work unit only if
+longer-prompt attribution prices the remaining chunk boundary above the matrix
+work below.
+
 Force-ranked queue:
 
-1. **Raise packed chunks from 512 to 2,048.** The 512-token default is exact
-   through four local windows, 128 CSA publications, four HCA publications,
-   diagnostics FP4 publication, and the retained 64-token greedy product
-   continuation. Same-binary AB/BA runs on the 2,385-token current-asset prompt
-   move mean prefill from 66.93 to 52.28 seconds with an identical complete F32
-   prompt-logit digest. Grouped descriptors and BM16 remain correctly pinned to
-   N=128; larger chunks already win through the ordinary expert path. Cross
-   directly to 2,048 and measure the new occupancy/projection regime rather
-   than interposing another position ladder.
-2. **Q8 packed dense mat-mat.** Replace token-axis Q8 GEMV for q_b and output
+1. **Q8 packed dense mat-mat.** Replace token-axis Q8 GEMV for q_b and output
    A/B with an existing matrix-shaped lineage. The isolated output result already
    established a roughly 75% stage ceiling; use an exact or higher-precision
    comparative contract rather than incumbent-vector proximity.
-3. **Widen matrix-shaped expert execution.** BM16 proves the expert-major matrix
+2. **Widen matrix-shaped expert execution.** BM16 proves the expert-major matrix
    work unit and is now the N=128 IQ2 default. Re-measure and generalize grouped
-   IQ2/IQ3 execution only after larger chunks change occupancy; do not reopen the
-   exhausted scalar row/panel/shuffle lane.
-4. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
+   IQ2/IQ3 execution at N=2,048 occupancy; do not reopen the exhausted scalar
+   row/panel/shuffle lane.
+3. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
    pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
    proof, not a binding floor.
-5. **Far-context scoring and selection.** Keep the deployed cooperative scorer
+4. **Far-context scoring and selection.** Keep the deployed cooperative scorer
    and radix4 selector while prefill is the larger product deficit. Reopen exact
    Lightning scheduling only for a structurally new design with a credible
    >=0.50 ms terminal saving and <=0.05 ms shallow regression; do not auto-sweep
    R4 or repeat the held R2 packet.
-6. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+5. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-7. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+6. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

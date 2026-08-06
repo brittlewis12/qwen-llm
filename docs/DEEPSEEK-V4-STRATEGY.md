@@ -2277,5 +2277,25 @@ noise without reducing technical risk. Revisit after S5.
    dispatches, intermediates, and materializations inside `BeforeAttentionBody`;
    require the candidate-touched subset, not merely its containing interval, to
    clear the existing 158.3 ms floor before implementation.
-7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
+7. Keep the packed before-attention and exact multi-row scorer closures
+   explicit. The corrected four-encoder packet remains `HOLD`: its material
+   pre-attention interval contains one unowned encoder transition, and Apple M4
+   Max does not support dispatch-boundary counter sampling. Stage-boundary
+   samples cannot legally observe the middle of one pass, while rotating
+   encoder boundaries preserves the original ambiguity. Remove that observer
+   and reopen packed attribution only for a new legal intra-pass primitive,
+   relevant device/Metal capability drift, or an independently bounded
+   candidate above the existing 158.3 ms floor.
+   The first exact Lightning query-reuse design is also closed. Its R2 kernel
+   preserves every scalar/deployed score bit, selector result, input, guard, and
+   tail canary, but the stable 16,384-row cell regresses from 0.658250 to
+   1.127167 ms median and every candidate sample is slower. The packet formally
+   returns `INCONCLUSIVE_HOLD` because both 65,536-row arms exceed 13.8% drift;
+   preserve that deeper cell as direction only and do not execute 262,144.
+   Reject and remove this exact design on the mandatory stable shallow miss.
+   Do not rerun it or infer R4 authority. Before another exact scorer kernel,
+   require compiler/occupancy evidence for a specific avoidable pathology or a
+   structurally new schedule that explains how it avoids the measured
+   0.468917 ms shallow penalty.
+8. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Exact R2 Scorer Rejected
+
+Status: formal packet result `INCONCLUSIVE_HOLD`; the reviewed exact-R2
+candidate is nevertheless rejected and removed on its independently stable
+mandatory shallow cell. No rerun, R4 rescue, or current-asset A/B is authorized.
+
+- R2 keeps the deployed 64x128 F32/F16 arithmetic and reduction lineage but
+  makes each simdgroup process two rows so one query load can feed both. Exact
+  scalar/deployed/R2 score bits, repeats, selector outputs, inputs, guards, and
+  tail canaries pass before and after timing.
+- The 16,384-row cell is stable at 0.9038%/0.1811% half drift. Baseline
+  median/p95 is 0.658250/0.669750 ms; R2 is 1.127167/1.134417 ms. Every R2
+  sample exceeds every baseline sample, a 0.468917 ms median regression.
+- At 65,536 rows every R2 sample is again slower, but 13.8713%/13.8560% drift
+  exceeds the frozen 5% limit. Preserve only the raw direction; its medians are
+  not classification-grade and the 262,144-row cell does not run.
+
+Decision: archive the exact diff, hashes, sole log, and formal HOLD, then remove
+the candidate. Reopen exact multi-row scoring only with compiler/occupancy
+evidence for a specific avoidable pathology or a structurally new schedule
+that explains how it avoids the measured shallow penalty. Evidence:
+`docs/bench/2026-08-06-dsv4-exact-r2-lightning-scorer/README.md`. CX:
+`019fd685-acb3-7890-83c9-192cbea48c6e`.
+
 ## 2026-08-06 - DeepSeek V4 Pre-Expert Residual Attribution
 
 Status: retained `BeforeAttentionBody` evidence is `GO` for decomposition only;

@@ -141,6 +141,17 @@ bit and cuts the operation from 0.701/2.0-2.2/8.3-8.4 ms to
 position-65,663 bracket saves 10.8-11.6 ms in both command-GPU and wall time
 across two fresh processes with exact decisions, logits, and causal state.
 
+The first exact query-reuse follow-up is closed. A reviewed R2 candidate keeps
+the F32-query/F16-key arithmetic and reduction order but serializes two rows per
+simdgroup. All exactness and safety checks pass. Its stable 16,384-row cell
+regresses from 0.658250/0.669750 to 1.127167/1.134417 ms median/p95, and every
+candidate sample is slower. The packet formally HOLDs when both 65,536-row arms
+exceed 13.8% half drift, so that deeper cell is directional only and 262,144 is
+not run. The mandatory stable shallow miss still rejects this exact design. It
+is removed with no rerun or automatic R4 rescue. Reopen only for a materially
+new schedule or specific compiler/occupancy attribution that explains how the
+0.468917 ms shallow penalty is avoided.
+
 Four-bit radix selection is also promoted. It replaces 32 full-history bit
 scans with eight nibble scans while preserving the exact threshold and stable
 tie contract. Mixed terminal selection falls from about 4.58 to 1.88 ms/layer;
@@ -513,23 +524,37 @@ CSA/HCA shares are 47.6961%/43.4194%. It is `GO` for decomposition only.
 5.9380%/6.5423% CSA/HCA shares, so it is `KILL` as a standalone current-asset
 N=128 target.
 
+The proposed one-encoder before-attention observer is also closed on the
+current device/API contract. Apple M4 Max reports no dispatch-boundary counter
+sampling support, and stage-boundary sampling cannot expose legal mid-pass
+samples. Rotating encoder boundaries retains the same unowned transition and
+is not a replacement. The rejected observer is removed; reopen only for a new
+legal intra-pass primitive or relevant device/Metal capability drift.
+
 Force-ranked queue:
 
-1. **Before-attention materialization census.** Enumerate the exact operations,
-   dispatches, intermediate buffers, writes, and rereads between raw-ring copy,
-   attention mHC pre, Q/KV preparation, compressor projections, and the already-
-   closed chronological loop. Identify one producer-to-consumer fusion without
-   reordering any projection reduction. Give impossible zero-work credit to the
-   exact touched subset and require a conservative >=158.3 ms ceiling.
-2. **Minimal before-attention split, only if needed.** If the static census
-   cannot bound one candidate, use the existing supported recorder to split only
-   the 477.570 ms residual. Do not rerun a broad profiler, add disjoint phases,
-   or write candidate code first. Stop if all exact subsets miss the floor.
-3. **Down/scatter attribution.** Keep `HOLD - INCONCLUSIVE`; do not filter or
+1. **Exact Lightning schedule attribution.** Keep the deployed cooperative
+   scorer as the differential and inspect compiler shape, register pressure,
+   occupancy, and query-load behavior before another kernel. R2 row
+   serialization is rejected. Require a structurally new exact schedule with a
+   credible >=0.50 ms terminal saving and <=0.05 ms shallow regression before
+   implementation; do not auto-sweep R4 or repeat the held packet.
+2. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+   exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
+   through 262,144 reachable visible rows. Do not pay a 786K real-prefix replay
+   merely to replace the accepted zero-causal-state snapshot packet. Reopen
+   default-on only for reusable real continuation evidence or material
+   implementation/device drift.
+3. **Packed-prefill attribution.** The before-attention split is closed because
+   dispatch-boundary counters are unsupported and encoder rotation retains an
+   unowned transition. Keep grouped IQ2 and down/scatter closures intact. Reopen
+   only for a new legal intra-pass observer, a materially new representation,
+   or a candidate with an independent conservative ceiling above 158.3 ms.
+4. **Down/scatter attribution.** Keep `HOLD - INCONCLUSIVE`; do not filter or
    rerun V2. Reopen only for a materially new representation or arithmetic
    contract, a new accepted observer, or relevant device/toolchain drift under
    a new protocol. The gate-only authorization is consumed and closed.
-4. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+5. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

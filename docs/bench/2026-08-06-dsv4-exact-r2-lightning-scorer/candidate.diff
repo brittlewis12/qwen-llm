@@ -1,0 +1,1051 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal.rs b/crates/qwen-llm/src/deepseek_v4_metal.rs
+index 5034f43..f1764db 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@ -9782,6 +9782,115 @@ fn encode_lightning_indexer_scores_f16_with_policy(
+     Ok(())
+ }
+ 
++#[cfg(test)]
++#[allow(clippy::too_many_arguments)]
++fn encode_lightning_indexer_scores_f16_cooperative_r2(
++    ctx: &MetalContext,
++    enc: &KernelEncoder,
++    queries: &MetalTensor,
++    head_weights: &MetalTensor,
++    keys: &MetalTensor,
++    visible_counts: &MetalTensor,
++    scores: &MetalTensor,
++    head_count: usize,
++    head_dim: usize,
++    row_capacity: usize,
++    query_count: usize,
++) -> Result<(), DeepSeekV4MetalError> {
++    const KERNEL: &str = "kernel_deepseek_v4_lightning_indexer_scores_f16_cooperative_r2";
++    if head_count != 64 || head_dim != 128 {
++        return invalid(format!(
++            "{KERNEL} requires 64 heads of width 128, got {head_count}x{head_dim}"
++        ));
++    }
++    for (name, value) in [
++        ("indexer row capacity", row_capacity),
++        ("indexer query count", query_count),
++    ] {
++        if value == 0 || u32::try_from(value).is_err() {
++            return invalid(format!("{name} must be nonzero and fit u32"));
++        }
++    }
++    validate_lightning_indexer_score_offsets(head_count, head_dim, row_capacity, query_count)?;
++    validate_f32(
++        queries,
++        &[head_dim as u64, head_count as u64, query_count as u64],
++        false,
++        "R2 indexer queries",
++    )?;
++    validate_f32(
++        head_weights,
++        &[head_count as u64, query_count as u64],
++        false,
++        "R2 indexer head weights",
++    )?;
++    validate_f16(
++        keys,
++        &[head_dim as u64, row_capacity as u64],
++        false,
++        "R2 indexer keys",
++    )?;
++    validate_i32(
++        visible_counts,
++        &[query_count as u64],
++        false,
++        "R2 indexer visible counts",
++    )?;
++    validate_f32(
++        scores,
++        &[row_capacity as u64, query_count as u64],
++        true,
++        "R2 indexer scores",
++    )?;
++
++    #[repr(C)]
++    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
++    struct Args {
++        head_count: u32,
++        head_dim: u32,
++        row_capacity: u32,
++        query_count: u32,
++    }
++
++    let pso = ctx.pipeline(KERNEL)?;
++    validate_cooperative_lightning_score_r2_geometry(
++        KERNEL,
++        pso.threadExecutionWidth(),
++        pso.maxTotalThreadsPerThreadgroup(),
++        ctx.device.maxThreadgroupMemoryLength(),
++    )?;
++    enc.set_pipeline(&pso);
++    enc.set_bytes(
++        0,
++        &Args {
++            head_count: head_count as u32,
++            head_dim: head_dim as u32,
++            row_capacity: row_capacity as u32,
++            query_count: query_count as u32,
++        },
++    );
++    enc.set_tensor(1, queries);
++    enc.set_tensor(2, head_weights);
++    enc.set_tensor(3, keys);
++    enc.set_tensor(4, visible_counts);
++    enc.set_tensor(5, scores);
++    enc.set_threadgroup_memory(0, 8 * 2 * 128 * std::mem::size_of::<u16>());
++    enc.set_threadgroup_memory(1, 8 * 2 * 64 * std::mem::size_of::<f32>());
++    enc.dispatch(
++        MTLSize {
++            width: row_capacity.div_ceil(16),
++            height: query_count,
++            depth: 1,
++        },
++        MTLSize {
++            width: 256,
++            height: 1,
++            depth: 1,
++        },
++    );
++    Ok(())
++}
++
+ #[cfg(test)]
+ #[allow(clippy::too_many_arguments)]
+ fn encode_lightning_indexer_scores_f16_matrix_ceiling(
+@@ -10594,6 +10703,31 @@ fn validate_cooperative_lightning_score_geometry(
+     Ok(())
+ }
+ 
++#[cfg(test)]
++fn validate_cooperative_lightning_score_r2_geometry(
++    kernel: &str,
++    thread_execution_width: usize,
++    max_threads_per_group: usize,
++    max_threadgroup_bytes: usize,
++) -> Result<(), DeepSeekV4MetalError> {
++    const THREADS: usize = 256;
++    const KEY_BYTES: usize = 8 * 2 * 128 * std::mem::size_of::<u16>();
++    const DOT_BYTES: usize = 8 * 2 * 64 * std::mem::size_of::<f32>();
++    const THREADGROUP_BYTES: usize = KEY_BYTES + DOT_BYTES;
++
++    if thread_execution_width != 32 || max_threads_per_group < THREADS {
++        return invalid(format!(
++            "{kernel} requires SIMD width 32 and {THREADS} threads, got width {thread_execution_width} max {max_threads_per_group}"
++        ));
++    }
++    if max_threadgroup_bytes < THREADGROUP_BYTES {
++        return invalid(format!(
++            "{kernel} requires {THREADGROUP_BYTES} threadgroup bytes, device allows {max_threadgroup_bytes}"
++        ));
++    }
++    Ok(())
++}
++
+ #[allow(clippy::too_many_arguments)]
+ fn encode_select_top_k_f32(
+     ctx: &MetalContext,
+@@ -13190,6 +13324,30 @@ mod tests {
+         }
+     }
+ 
++    fn offset_f32_guards_intact(tensor: &MetalTensor) -> bool {
++        if tensor.dtype != GgmlType::F32 || tensor.offset != 16 {
++            return false;
++        }
++        let payload_end = tensor.offset as usize + tensor.n_bytes() as usize;
++        if tensor.buffer.length() != payload_end + 20 {
++            return false;
++        }
++        unsafe {
++            let bytes = std::slice::from_raw_parts(
++                tensor.buffer.contents().as_ptr().cast::<u8>(),
++                tensor.buffer.length(),
++            );
++            bytes[..tensor.offset as usize]
++                .iter()
++                .all(|&byte| byte == 0xA5)
++                && bytes[payload_end..].iter().all(|&byte| byte == 0x5A)
++        }
++    }
++
++    fn assert_offset_f32_guards(tensor: &MetalTensor) {
++        assert!(offset_f32_guards_intact(tensor));
++    }
++
+     fn read_u8(tensor: &MetalTensor) -> Vec<u8> {
+         assert_eq!(tensor.dtype, GgmlType::I8);
+         unsafe {
+@@ -25936,15 +26094,16 @@ mod tests {
+         const HEADS: usize = 64;
+         const DIM: usize = 128;
+         const ROWS: usize = 19;
+-        const QUERIES: usize = 4;
++        const QUERIES: usize = 5;
+         const TOP_K: usize = 8;
+ 
+-        let query_values = (0..QUERIES * HEADS * DIM)
++        let mut query_values = (0..QUERIES * HEADS * DIM)
+             .map(|index| {
+                 let tag = (index * 17 + index / DIM * 11 + 3) % 251;
+                 (tag as f32 - 125.0) * 0.0007
+             })
+             .collect::<Vec<_>>();
++        query_values[4 * HEADS * DIM..].fill(0.0);
+         let mut weight_values = (0..QUERIES * HEADS)
+             .map(|index| 0.003 + (index * 13 % 29) as f32 * 0.0004)
+             .collect::<Vec<_>>();
+@@ -25970,13 +26129,23 @@ mod tests {
+         .unwrap();
+         let visible_counts = offset_i32(
+             &ctx,
+-            &[ROWS as i32, 9, -1, ROWS as i32],
++            &[ROWS as i32, 9, -1, ROWS as i32, ROWS as i32],
+             vec![QUERIES as u64],
+         );
+         let scalar_scores =
+             MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+         let cooperative_scores =
+             MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
++        let r2_scores = offset_f32(
++            &ctx,
++            &vec![123.0; ROWS * QUERIES],
++            vec![ROWS as u64, QUERIES as u64],
++        );
++        let r2_repeat_scores = offset_f32(
++            &ctx,
++            &vec![-456.0; ROWS * QUERIES],
++            vec![ROWS as u64, QUERIES as u64],
++        );
+         let make_selection = || {
+             (
+                 MetalTensor::zeros_i32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap(),
+@@ -25988,6 +26157,17 @@ mod tests {
+         let (scalar_mask, scalar_ids, scalar_counts, scalar_status) = make_selection();
+         let (cooperative_mask, cooperative_ids, cooperative_counts, cooperative_status) =
+             make_selection();
++        let (r2_mask, r2_ids, r2_counts, r2_status) = make_selection();
++        let query_bits_before = query_values
++            .iter()
++            .map(|value| value.to_bits())
++            .collect::<Vec<_>>();
++        let weight_bits_before = weight_values
++            .iter()
++            .map(|value| value.to_bits())
++            .collect::<Vec<_>>();
++        let key_bits_before = key_bits.clone();
++        let visible_before = read_i32(&visible_counts);
+ 
+         let command = ctx.queue.commandBuffer().unwrap();
+         let encoder = KernelEncoder::begin(&command);
+@@ -26020,6 +26200,22 @@ mod tests {
+             QUERIES,
+         )
+         .unwrap();
++        for output in [&r2_scores, &r2_repeat_scores] {
++            encode_lightning_indexer_scores_f16_cooperative_r2(
++                &ctx,
++                &encoder,
++                &queries,
++                &head_weights,
++                &keys,
++                &visible_counts,
++                output,
++                HEADS,
++                DIM,
++                ROWS,
++                QUERIES,
++            )
++            .unwrap();
++        }
+         encode_select_top_k_f32(
+             &ctx,
+             &encoder,
+@@ -26052,6 +26248,22 @@ mod tests {
+             QUERIES,
+         )
+         .unwrap();
++        encode_select_top_k_f32(
++            &ctx,
++            &encoder,
++            &r2_scores,
++            &visible_counts,
++            &r2_mask,
++            None,
++            &r2_ids,
++            &r2_counts,
++            &r2_status,
++            ROWS,
++            ROWS,
++            TOP_K,
++            QUERIES,
++        )
++        .unwrap();
+         encoder.end();
+         command.commit();
+         command.waitUntilCompleted();
+@@ -26063,15 +26275,29 @@ mod tests {
+ 
+         let scalar = read_f32(&scalar_scores);
+         let cooperative = read_f32(&cooperative_scores);
++        let r2 = read_f32(&r2_scores);
++        let r2_repeat = read_f32(&r2_repeat_scores);
++        let scalar_bits = scalar
++            .iter()
++            .map(|value| value.to_bits())
++            .collect::<Vec<_>>();
+         assert_eq!(
+             cooperative
+                 .iter()
+                 .map(|value| value.to_bits())
+                 .collect::<Vec<_>>(),
+-            scalar
++            scalar_bits
++        );
++        assert_eq!(
++            r2.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
++            scalar_bits
++        );
++        assert_eq!(
++            r2_repeat
+                 .iter()
+                 .map(|value| value.to_bits())
+-                .collect::<Vec<_>>()
++                .collect::<Vec<_>>(),
++            scalar_bits
+         );
+         assert!(cooperative[..ROWS].iter().any(|value| *value != 0.0));
+         assert!(
+@@ -26085,23 +26311,182 @@ mod tests {
+                 .all(|value| *value == f32::NEG_INFINITY)
+         );
+         assert!(
+-            cooperative[3 * ROWS..]
++            cooperative[3 * ROWS..][..ROWS]
+                 .iter()
+                 .all(|value| !value.is_finite())
+         );
++        assert!(cooperative[4 * ROWS..].iter().all(|value| *value == 0.0));
+         assert_eq!(read_i32(&cooperative_mask), read_i32(&scalar_mask));
+         assert_eq!(read_i32(&cooperative_ids), read_i32(&scalar_ids));
+         assert_eq!(read_i32(&cooperative_counts), read_i32(&scalar_counts));
+         assert_eq!(read_i32(&cooperative_status), read_i32(&scalar_status));
++        assert_eq!(read_i32(&r2_mask), read_i32(&scalar_mask));
++        assert_eq!(read_i32(&r2_ids), read_i32(&scalar_ids));
++        assert_eq!(read_i32(&r2_counts), read_i32(&scalar_counts));
++        assert_eq!(read_i32(&r2_status), read_i32(&scalar_status));
+         assert_eq!(
+             read_i32(&cooperative_counts),
+-            vec![TOP_K as i32, TOP_K as i32, 0, TOP_K as i32]
++            vec![TOP_K as i32, TOP_K as i32, 0, TOP_K as i32, TOP_K as i32]
+         );
+-        assert_eq!(read_i32(&cooperative_status), vec![0, 0, 1, 2]);
++        assert_eq!(read_i32(&cooperative_status), vec![0, 0, 1, 2, 0]);
+         assert_eq!(
+             &read_i32(&cooperative_ids)[3 * TOP_K..],
+-            &(0..TOP_K as i32).collect::<Vec<_>>()
++            &[0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7]
++        );
++        assert_eq!(
++            read_f32(&queries)
++                .iter()
++                .map(|value| value.to_bits())
++                .collect::<Vec<_>>(),
++            query_bits_before
+         );
++        assert_eq!(
++            read_f32(&head_weights)
++                .iter()
++                .map(|value| value.to_bits())
++                .collect::<Vec<_>>(),
++            weight_bits_before
++        );
++        assert_eq!(read_f16_bits(&keys), key_bits_before);
++        assert_eq!(read_i32(&visible_counts), visible_before);
++        assert_offset_f32_guards(&r2_scores);
++        assert_offset_f32_guards(&r2_repeat_scores);
++    }
++
++    #[test]
++    fn cooperative_r2_lightning_scores_cover_capacity_and_visibility_seams() {
++        let Some(ctx) = metal_context() else {
++            return;
++        };
++        const HEADS: usize = 64;
++        const DIM: usize = 128;
++        const QUERIES: usize = 7;
++
++        for rows in [1usize, 2, 3, 7, 8, 9, 15, 16, 17] {
++            let query_values = (0..QUERIES * HEADS * DIM)
++                .map(|index| {
++                    let tag = (index * 17 + index / DIM * 11 + 3) % 251;
++                    (tag as f32 - 125.0) * 0.0007
++                })
++                .collect::<Vec<_>>();
++            let weight_values = (0..QUERIES * HEADS)
++                .map(|index| 0.003 + (index * 13 % 29) as f32 * 0.0004)
++                .collect::<Vec<_>>();
++            let key_values = (0..rows * DIM)
++                .map(|index| {
++                    let tag = (index * 23 + index / DIM * 19 + 7) % 257;
++                    (tag as f32 - 128.0) * 0.0009
++                })
++                .collect::<Vec<_>>();
++            let visible = [
++                -1,
++                0,
++                1,
++                (rows / 2) as i32,
++                rows.saturating_sub(1) as i32,
++                rows as i32,
++                rows as i32 + 1,
++            ];
++            let queries = offset_f32(
++                &ctx,
++                &query_values,
++                vec![DIM as u64, HEADS as u64, QUERIES as u64],
++            );
++            let head_weights = offset_f32(&ctx, &weight_values, vec![HEADS as u64, QUERIES as u64]);
++            let keys = offset_f16(&ctx, &key_values, vec![DIM as u64, rows as u64]);
++            let visible_counts = offset_i32(&ctx, &visible, vec![QUERIES as u64]);
++            let shape = vec![rows as u64, QUERIES as u64];
++            let scalar = offset_f32(&ctx, &vec![31_125.0; rows * QUERIES], shape.clone());
++            let cooperative = offset_f32(&ctx, &vec![-31_125.0; rows * QUERIES], shape.clone());
++            let r2 = offset_f32(&ctx, &vec![15_625.0; rows * QUERIES], shape.clone());
++            let r2_repeat = offset_f32(&ctx, &vec![-15_625.0; rows * QUERIES], shape);
++
++            let command = ctx.queue.commandBuffer().unwrap();
++            let encoder = KernelEncoder::begin(&command);
++            encode_lightning_indexer_scores_f16_with_policy(
++                &ctx,
++                &encoder,
++                &queries,
++                &head_weights,
++                &keys,
++                &visible_counts,
++                &scalar,
++                HEADS,
++                DIM,
++                rows,
++                QUERIES,
++                true,
++            )
++            .unwrap();
++            encode_lightning_indexer_scores_f16(
++                &ctx,
++                &encoder,
++                &queries,
++                &head_weights,
++                &keys,
++                &visible_counts,
++                &cooperative,
++                HEADS,
++                DIM,
++                rows,
++                QUERIES,
++            )
++            .unwrap();
++            for output in [&r2, &r2_repeat] {
++                encode_lightning_indexer_scores_f16_cooperative_r2(
++                    &ctx,
++                    &encoder,
++                    &queries,
++                    &head_weights,
++                    &keys,
++                    &visible_counts,
++                    output,
++                    HEADS,
++                    DIM,
++                    rows,
++                    QUERIES,
++                )
++                .unwrap();
++            }
++            encoder.end();
++            command.commit();
++            command.waitUntilCompleted();
++            assert!(
++                command.error().is_none(),
++                "R2 seam command failed at {rows} rows: {:?}",
++                command.error()
++            );
++
++            let scalar_bits = read_f32(&scalar)
++                .iter()
++                .map(|value| value.to_bits())
++                .collect::<Vec<_>>();
++            for (name, output) in [
++                ("cooperative", &cooperative),
++                ("R2", &r2),
++                ("R2 repeat", &r2_repeat),
++            ] {
++                assert_eq!(
++                    read_f32(output)
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .collect::<Vec<_>>(),
++                    scalar_bits,
++                    "{name} differs from scalar at {rows} rows"
++                );
++                assert_offset_f32_guards(output);
++            }
++            assert_offset_f32_guards(&scalar);
++            assert!(read_f32(&r2).iter().all(|value| *value != 15_625.0));
++        }
++    }
++
++    #[test]
++    fn cooperative_r2_lightning_score_geometry_is_fail_closed() {
++        assert!(validate_cooperative_lightning_score_r2_geometry("R2", 32, 256, 8_192).is_ok());
++        assert!(validate_cooperative_lightning_score_r2_geometry("R2", 16, 256, 8_192).is_err());
++        assert!(validate_cooperative_lightning_score_r2_geometry("R2", 32, 255, 8_192).is_err());
++        assert!(validate_cooperative_lightning_score_r2_geometry("R2", 32, 256, 8_191).is_err());
+     }
+ 
+     #[cfg(feature = "dsv4-diagnostics")]
+@@ -27736,6 +28121,450 @@ mod tests {
+         assert!(max_abs <= 2.0e-5, "batched-query max abs {max_abs}");
+     }
+ 
++    #[test]
++    #[ignore = "frozen exact R2 far-context scorer gate; run explicitly once with --nocapture"]
++    fn profile_lightning_exact_r2_at_far_context() {
++        const HEADS: usize = 64;
++        const DIM: usize = 128;
++        const TOP_K: usize = 512;
++        const MAX_ROWS: usize = 262_144;
++        const SCALAR_CANARY: f32 = 31_125.0;
++        const BASELINE_CANARY: f32 = -31_125.0;
++        const CANDIDATE_CANARY: f32 = 15_625.0;
++        const REPEAT_CANARY: f32 = -15_625.0;
++
++        #[derive(Clone, Copy)]
++        enum GateVerdict {
++            Hold(&'static str),
++            Kill(&'static str),
++            Authorize,
++        }
++
++        #[derive(Clone, Copy)]
++        struct TimedSample {
++            gpu_ms: f64,
++            wall_ms: f64,
++            timestamp_valid: bool,
++        }
++
++        fn timed_gpu_wall<F>(ctx: &MetalContext, encode: F) -> TimedSample
++        where
++            F: FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
++        {
++            let started = std::time::Instant::now();
++            let command = ctx
++                .queue
++                .commandBuffer()
++                .expect("R2 profile command buffer");
++            let encoder = KernelEncoder::begin(&command);
++            encode(&encoder).expect("encode R2 profiled scorer");
++            encoder.end();
++            command.commit();
++            command.waitUntilCompleted();
++            assert!(
++                command.error().is_none(),
++                "R2 profile command failed: {:?}",
++                command.error()
++            );
++            let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
++            TimedSample {
++                gpu_ms,
++                wall_ms: started.elapsed().as_secs_f64() * 1e3,
++                timestamp_valid: gpu_ms.is_finite() && gpu_ms > 0.0,
++            }
++        }
++
++        fn upper_median(samples: &[f64]) -> f64 {
++            let mut sorted = samples.to_vec();
++            sorted.sort_by(f64::total_cmp);
++            sorted[sorted.len() / 2]
++        }
++
++        fn median_and_p95(samples: &[f64]) -> (f64, f64) {
++            assert_eq!(samples.len(), 12);
++            let mut sorted = samples.to_vec();
++            sorted.sort_by(f64::total_cmp);
++            (sorted[6], sorted[11])
++        }
++
++        fn half_drift(samples: &[f64]) -> f64 {
++            assert_eq!(samples.len(), 12);
++            let first = upper_median(&samples[..6]);
++            let last = upper_median(&samples[6..]);
++            (first - last).abs() / first.max(last)
++        }
++
++        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let Some(ctx) = metal_context() else {
++                return GateVerdict::Hold("no_metal_device");
++            };
++            let query_values = (0..HEADS * DIM)
++                .map(|index| ((index * 17 + 3) % 113) as f32 * 0.0007 - 0.037)
++                .collect::<Vec<_>>();
++            let scale = 1.0 / ((HEADS * DIM) as f32).sqrt();
++            let weight_values = vec![scale; HEADS];
++            let key_bits = (0..MAX_ROWS * DIM)
++                .map(|index| {
++                    let row = index / DIM;
++                    let dimension = index % DIM;
++                    let tag = (row * 13 + dimension * 7 + row / 251) % 257;
++                    half::f16::from_f32((tag as f32 - 128.0) * 0.0002).to_bits()
++                })
++                .collect::<Vec<_>>();
++            let queries = offset_f32(&ctx, &query_values, vec![DIM as u64, HEADS as u64, 1]);
++            let head_weights = offset_f32(&ctx, &weight_values, vec![HEADS as u64, 1]);
++            let keys = MetalTensor::from_bytes(
++                &ctx,
++                bytemuck::cast_slice(&key_bits),
++                vec![DIM as u64, MAX_ROWS as u64],
++                GgmlType::F16,
++            )
++            .expect("allocate R2 profile keys");
++            let score_shape = vec![MAX_ROWS as u64, 1];
++            let scalar_scores =
++                offset_f32(&ctx, &vec![SCALAR_CANARY; MAX_ROWS], score_shape.clone());
++            let baseline_scores =
++                offset_f32(&ctx, &vec![BASELINE_CANARY; MAX_ROWS], score_shape.clone());
++            let candidate_scores =
++                offset_f32(&ctx, &vec![CANDIDATE_CANARY; MAX_ROWS], score_shape.clone());
++            let repeat_scores = offset_f32(&ctx, &vec![REPEAT_CANARY; MAX_ROWS], score_shape);
++            let query_bits_before = query_values
++                .iter()
++                .map(|value| value.to_bits())
++                .collect::<Vec<_>>();
++            let weight_bits_before = weight_values
++                .iter()
++                .map(|value| value.to_bits())
++                .collect::<Vec<_>>();
++            let mut hold_reason = None;
++            let mut any_kill = false;
++
++            for row_count in [16_384usize, 65_536, MAX_ROWS] {
++                let visible_counts = offset_i32(&ctx, &[row_count as i32], vec![1]);
++                let key_rows = keys.view_subrange(0, vec![DIM as u64, row_count as u64]);
++                let scalar_score_rows = scalar_scores.view_subrange(0, vec![row_count as u64, 1]);
++                let baseline_score_rows =
++                    baseline_scores.view_subrange(0, vec![row_count as u64, 1]);
++                let candidate_score_rows =
++                    candidate_scores.view_subrange(0, vec![row_count as u64, 1]);
++                let repeat_score_rows = repeat_scores.view_subrange(0, vec![row_count as u64, 1]);
++
++                let encode_baseline = |encoder: &KernelEncoder| {
++                    encode_lightning_indexer_scores_f16(
++                        &ctx,
++                        encoder,
++                        &queries,
++                        &head_weights,
++                        &key_rows,
++                        &visible_counts,
++                        &baseline_score_rows,
++                        HEADS,
++                        DIM,
++                        row_count,
++                        1,
++                    )
++                };
++                let encode_candidate = |encoder: &KernelEncoder| {
++                    encode_lightning_indexer_scores_f16_cooperative_r2(
++                        &ctx,
++                        encoder,
++                        &queries,
++                        &head_weights,
++                        &key_rows,
++                        &visible_counts,
++                        &candidate_score_rows,
++                        HEADS,
++                        DIM,
++                        row_count,
++                        1,
++                    )
++                };
++
++                let correctness_command = ctx.queue.commandBuffer().unwrap();
++                let correctness_encoder = KernelEncoder::begin(&correctness_command);
++                encode_lightning_indexer_scores_f16_with_policy(
++                    &ctx,
++                    &correctness_encoder,
++                    &queries,
++                    &head_weights,
++                    &key_rows,
++                    &visible_counts,
++                    &scalar_score_rows,
++                    HEADS,
++                    DIM,
++                    row_count,
++                    1,
++                    true,
++                )
++                .unwrap();
++                encode_baseline(&correctness_encoder).unwrap();
++                encode_candidate(&correctness_encoder).unwrap();
++                encode_lightning_indexer_scores_f16_cooperative_r2(
++                    &ctx,
++                    &correctness_encoder,
++                    &queries,
++                    &head_weights,
++                    &key_rows,
++                    &visible_counts,
++                    &repeat_score_rows,
++                    HEADS,
++                    DIM,
++                    row_count,
++                    1,
++                )
++                .unwrap();
++                correctness_encoder.end();
++                correctness_command.commit();
++                correctness_command.waitUntilCompleted();
++                assert!(
++                    correctness_command.error().is_none(),
++                    "R2 correctness command failed: {:?}",
++                    correctness_command.error()
++                );
++
++                let scalar_bits = read_f32(&scalar_score_rows)
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .collect::<Vec<_>>();
++                let score_identity = [
++                    &baseline_score_rows,
++                    &candidate_score_rows,
++                    &repeat_score_rows,
++                ]
++                .iter()
++                .all(|scores| {
++                    read_f32(scores)
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .eq(scalar_bits.iter().copied())
++                });
++
++                let select = |scores: &MetalTensor| {
++                    let selected_mask =
++                        MetalTensor::zeros_i32(&ctx, vec![row_count as u64, 1]).unwrap();
++                    let selected_ids = MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, 1]).unwrap();
++                    let selected_count = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
++                    let status = MetalTensor::zeros_i32(&ctx, vec![1]).unwrap();
++                    let command = ctx.queue.commandBuffer().unwrap();
++                    let encoder = KernelEncoder::begin(&command);
++                    encode_select_top_k_f32(
++                        &ctx,
++                        &encoder,
++                        scores,
++                        &visible_counts,
++                        &selected_mask,
++                        None,
++                        &selected_ids,
++                        &selected_count,
++                        &status,
++                        row_count,
++                        row_count,
++                        TOP_K,
++                        1,
++                    )
++                    .unwrap();
++                    encoder.end();
++                    command.commit();
++                    command.waitUntilCompleted();
++                    assert!(command.error().is_none());
++                    (
++                        read_i32(&selected_mask),
++                        read_i32(&selected_ids),
++                        read_i32(&selected_count),
++                        read_i32(&status),
++                    )
++                };
++                let scalar_selection = select(&scalar_score_rows);
++                let baseline_selection = select(&baseline_score_rows);
++                let candidate_selection = select(&candidate_score_rows);
++                let selector_preflight_exact = baseline_selection == scalar_selection
++                    && candidate_selection == scalar_selection;
++                let inputs_unchanged = read_f32(&queries)
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .eq(query_bits_before.iter().copied())
++                    && read_f32(&head_weights)
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .eq(weight_bits_before.iter().copied())
++                    && read_f16_bits(&keys) == key_bits
++                    && read_i32(&visible_counts) == [row_count as i32]
++                    && offset_f32_guards_intact(&queries)
++                    && offset_f32_guards_intact(&head_weights);
++                if !score_identity || !selector_preflight_exact || !inputs_unchanged {
++                    eprintln!(
++                        "deepseek_v4 exact_r2 rows={row_count} preflight_status=IDENTITY_OR_SAFETY_MISMATCH score_identity={score_identity} selector_preflight_exact={selector_preflight_exact} inputs_unchanged={inputs_unchanged}"
++                    );
++                    hold_reason = Some("preflight_identity_or_safety_mismatch");
++                    break;
++                }
++
++                for candidate_arm in [false, true, true, false] {
++                    if candidate_arm {
++                        timed_gpu_wall(&ctx, encode_candidate);
++                    } else {
++                        timed_gpu_wall(&ctx, encode_baseline);
++                    }
++                }
++
++                let mut baseline_samples = Vec::with_capacity(12);
++                let mut candidate_samples = Vec::with_capacity(12);
++                for _ in 0..3 {
++                    for candidate_arm in [false, true, true, false, true, false, false, true] {
++                        let sample = if candidate_arm {
++                            timed_gpu_wall(&ctx, encode_candidate)
++                        } else {
++                            timed_gpu_wall(&ctx, encode_baseline)
++                        };
++                        if candidate_arm {
++                            candidate_samples.push(sample);
++                        } else {
++                            baseline_samples.push(sample);
++                        }
++                    }
++                }
++                let timestamps_valid = baseline_samples
++                    .iter()
++                    .chain(&candidate_samples)
++                    .all(|sample| sample.timestamp_valid);
++                if !timestamps_valid {
++                    eprintln!(
++                        "deepseek_v4 exact_r2 rows={row_count} timing_status=INVALID_GPU_TIMESTAMP"
++                    );
++                    hold_reason = Some("invalid_gpu_timestamp");
++                    break;
++                }
++
++                let post_score_identity =
++                    [&baseline_score_rows, &candidate_score_rows]
++                        .iter()
++                        .all(|scores| {
++                            read_f32(scores)
++                                .iter()
++                                .map(|value| value.to_bits())
++                                .eq(scalar_bits.iter().copied())
++                        });
++                let post_inputs_unchanged = read_f32(&queries)
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .eq(query_bits_before.iter().copied())
++                    && read_f32(&head_weights)
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .eq(weight_bits_before.iter().copied())
++                    && read_f16_bits(&keys) == key_bits
++                    && read_i32(&visible_counts) == [row_count as i32]
++                    && offset_f32_guards_intact(&queries)
++                    && offset_f32_guards_intact(&head_weights);
++                let score_guards_intact = offset_f32_guards_intact(&baseline_scores)
++                    && offset_f32_guards_intact(&candidate_scores);
++                let baseline_all = read_f32(&baseline_scores);
++                let candidate_all = read_f32(&candidate_scores);
++                let score_tail_canaries_intact = baseline_all[row_count..]
++                    .iter()
++                    .all(|value| value.to_bits() == BASELINE_CANARY.to_bits())
++                    && candidate_all[row_count..]
++                        .iter()
++                        .all(|value| value.to_bits() == CANDIDATE_CANARY.to_bits());
++                if !post_score_identity
++                    || !post_inputs_unchanged
++                    || !score_guards_intact
++                    || !score_tail_canaries_intact
++                {
++                    eprintln!(
++                        "deepseek_v4 exact_r2 rows={row_count} post_timing_status=IDENTITY_OR_SAFETY_MISMATCH score_identity={post_score_identity} inputs_unchanged={post_inputs_unchanged} score_guards_intact={score_guards_intact} score_tail_canaries_intact={score_tail_canaries_intact}"
++                    );
++                    hold_reason = Some("post_timing_identity_or_safety_mismatch");
++                    break;
++                }
++
++                let baseline_gpu = baseline_samples
++                    .iter()
++                    .map(|sample| sample.gpu_ms)
++                    .collect::<Vec<_>>();
++                let candidate_gpu = candidate_samples
++                    .iter()
++                    .map(|sample| sample.gpu_ms)
++                    .collect::<Vec<_>>();
++                let baseline_wall = baseline_samples
++                    .iter()
++                    .map(|sample| sample.wall_ms)
++                    .collect::<Vec<_>>();
++                let candidate_wall = candidate_samples
++                    .iter()
++                    .map(|sample| sample.wall_ms)
++                    .collect::<Vec<_>>();
++                let (baseline_median, baseline_p95) = median_and_p95(&baseline_gpu);
++                let (candidate_median, candidate_p95) = median_and_p95(&candidate_gpu);
++                let (baseline_wall_median, baseline_wall_p95) = median_and_p95(&baseline_wall);
++                let (candidate_wall_median, candidate_wall_p95) = median_and_p95(&candidate_wall);
++                let baseline_drift = half_drift(&baseline_gpu);
++                let candidate_drift = half_drift(&candidate_gpu);
++                let stable = baseline_drift <= 0.05 && candidate_drift <= 0.05;
++                let saving_ms = baseline_median - candidate_median;
++                let performance_pass = match row_count {
++                    16_384 => {
++                        candidate_median - baseline_median <= 0.05
++                            && candidate_p95 - baseline_p95 <= 0.05
++                    }
++                    65_536 => saving_ms >= 0.15 && candidate_p95 < baseline_median,
++                    MAX_ROWS => {
++                        saving_ms >= 0.50
++                            && candidate_median <= 1.60
++                            && candidate_p95 < baseline_median
++                    }
++                    _ => unreachable!(),
++                };
++                let depth_status = if !stable {
++                    "UNSTABLE_TIMING"
++                } else if !performance_pass {
++                    any_kill = true;
++                    "STABLE_PERFORMANCE_MISS"
++                } else {
++                    "PASS"
++                };
++                eprintln!(
++                    "deepseek_v4 exact_r2 rows={row_count} token_equivalent={} schedule=BCCB_warm_then_BCCB_CBBC_x3 median=sorted_index_6 p95=maximum drift_denominator=max baseline_gpu_ms={baseline_gpu:?} candidate_gpu_ms={candidate_gpu:?} baseline_wall_ms={baseline_wall:?} candidate_wall_ms={candidate_wall:?} baseline_median_ms={baseline_median:.6} baseline_p95_ms={baseline_p95:.6} candidate_median_ms={candidate_median:.6} candidate_p95_ms={candidate_p95:.6} saving_ms={saving_ms:.6} baseline_wall_median_ms={baseline_wall_median:.6} baseline_wall_p95_ms={baseline_wall_p95:.6} candidate_wall_median_ms={candidate_wall_median:.6} candidate_wall_p95_ms={candidate_wall_p95:.6} baseline_half_drift={baseline_drift:.6} candidate_half_drift={candidate_drift:.6} post_timing_score_bits_exact={post_score_identity} selector_preflight_exact={selector_preflight_exact} post_timing_inputs_unchanged={post_inputs_unchanged} score_guards_intact={score_guards_intact} score_tail_canaries_intact={score_tail_canaries_intact} status={depth_status}",
++                    row_count * 4,
++                );
++                if !stable {
++                    hold_reason = Some("gpu_timing_half_drift_exceeds_five_percent");
++                    break;
++                }
++            }
++
++            if let Some(reason) = hold_reason {
++                GateVerdict::Hold(reason)
++            } else if any_kill {
++                GateVerdict::Kill("stable_performance_gate_miss")
++            } else {
++                GateVerdict::Authorize
++            }
++        }));
++
++        match outcome {
++            Ok(GateVerdict::Authorize) => eprintln!(
++                "deepseek_v4 exact_r2 final_decision=AUTHORIZE_SEPARATELY_FROZEN_CURRENT_ASSET_AB_FOR_REVIEWED_R2_ONLY"
++            ),
++            Ok(GateVerdict::Hold(reason)) => {
++                eprintln!("deepseek_v4 exact_r2 final_decision=INCONCLUSIVE_HOLD reason={reason}");
++                panic!("exact R2 scorer gate held: {reason}");
++            }
++            Ok(GateVerdict::Kill(reason)) => {
++                eprintln!(
++                    "deepseek_v4 exact_r2 final_decision=KILL_R2_EXACT_ROW_GROUPING reason={reason}"
++                );
++                panic!("exact R2 scorer gate killed: {reason}");
++            }
++            Err(payload) => {
++                eprintln!(
++                    "deepseek_v4 exact_r2 final_decision=INCONCLUSIVE_HOLD reason=unexpected_panic"
++                );
++                std::panic::resume_unwind(payload);
++            }
++        }
++    }
++
+     #[test]
+     #[ignore = "focused production-shape matrix-ceiling profiler; run explicitly with --nocapture"]
+     fn profile_lightning_matrix_ceiling_at_far_context() {
+diff --git a/kernels/deepseek_v4.metal b/kernels/deepseek_v4.metal
+index b833e18..5703638 100644
+--- a/kernels/deepseek_v4.metal
++++ b/kernels/deepseek_v4.metal
+@@ -1911,6 +1911,85 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_cooperative(
+     }
+ }
+ 
++// Exact diagnostics candidate: each simdgroup reuses one query load across two
++// independent rows while preserving dimension and head reduction order.
++[[max_total_threads_per_threadgroup(256)]]
++kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_cooperative_r2(
++        constant ds4_indexer_score_args & args [[buffer(0)]],
++        device const float * queries [[buffer(1)]],
++        device const float * head_weights [[buffer(2)]],
++        device const half * keys [[buffer(3)]],
++        device const int * visible_counts [[buffer(4)]],
++        device float * scores [[buffer(5)]],
++        threadgroup half * staged_keys [[threadgroup(0)]],
++        threadgroup float * head_dots [[threadgroup(1)]],
++        uint2 group [[threadgroup_position_in_grid]],
++        ushort lane [[thread_index_in_simdgroup]],
++        ushort simdgroup [[simdgroup_index_in_threadgroup]]) {
++    const uint rows_per_simdgroup = 2u;
++    const uint rows_per_group = 8u * rows_per_simdgroup;
++    const uint row0 = group.x * rows_per_group
++            + uint(simdgroup) * rows_per_simdgroup;
++    const uint row1 = row0 + 1u;
++    const uint query = group.y;
++    if (query >= args.query_count || row0 >= args.row_capacity) return;
++
++    const int visible = visible_counts[query];
++    const bool exists1 = row1 < args.row_capacity;
++    const bool active0 = visible >= 0 && row0 < uint(visible);
++    const bool active1 = exists1 && visible >= 0 && row1 < uint(visible);
++    const uint score_base = query * args.row_capacity;
++    if (lane == 0) {
++        if (!active0) scores[score_base + row0] = -INFINITY;
++        if (exists1 && !active1) scores[score_base + row1] = -INFINITY;
++    }
++    if (!active0 && !active1) return;
++
++    threadgroup half * key_rows = staged_keys
++            + uint(simdgroup) * rows_per_simdgroup * 128u;
++    for (uint dimension = uint(lane); dimension < 128u; dimension += 32u) {
++        if (active0) key_rows[dimension] = keys[row0 * 128u + dimension];
++        if (active1) key_rows[128u + dimension] = keys[row1 * 128u + dimension];
++    }
++    simdgroup_barrier(mem_flags::mem_threadgroup);
++
++    const uint query_base = query * 64u * 128u;
++    threadgroup float * dots = head_dots
++            + uint(simdgroup) * rows_per_simdgroup * 64u;
++    for (uint head_group = 0u; head_group < 2u; ++head_group) {
++        const uint head = uint(lane) + head_group * 32u;
++        const uint head_base = query_base + head * 128u;
++        float dot0 = 0.0f;
++        float dot1 = 0.0f;
++        for (uint dimension = 0u; dimension < 128u; ++dimension) {
++            const float query_value = queries[head_base + dimension];
++            if (active0) dot0 += query_value * float(key_rows[dimension]);
++            if (active1) dot1 += query_value * float(key_rows[128u + dimension]);
++        }
++        if (active0) dots[head] = dot0;
++        if (active1) dots[64u + head] = dot1;
++    }
++    simdgroup_barrier(mem_flags::mem_threadgroup);
++
++    if (lane == 0) {
++        const uint weight_base = query * 64u;
++        if (active0) {
++            float score = 0.0f;
++            for (uint head = 0u; head < 64u; ++head) {
++                score += max(dots[head], 0.0f) * head_weights[weight_base + head];
++            }
++            scores[score_base + row0] = score;
++        }
++        if (active1) {
++            float score = 0.0f;
++            for (uint head = 0u; head < 64u; ++head) {
++                score += max(dots[64u + head], 0.0f) * head_weights[weight_base + head];
++            }
++            scores[score_base + row1] = score;
++        }
++    }
++}
++
+ // Optimistic schedule-ceiling probe for the packed-indexer lane. Queries are
+ // rounded to F16 once outside this kernel; eight simdgroups compute the 64x8
+ // head/row dot tile with matrix instructions. This is not the official FP4

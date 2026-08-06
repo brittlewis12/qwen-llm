@@ -1,0 +1,21 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-31f5cb53565adb87)
+
+running 1 test
+test deepseek_v4_metal::tests::profile_lightning_exact_r2_at_far_context ... deepseek_v4 exact_r2 rows=16384 token_equivalent=65536 schedule=BCCB_warm_then_BCCB_CBBC_x3 median=sorted_index_6 p95=maximum drift_denominator=max baseline_gpu_ms=[0.6598334293812513, 0.6578750908374786, 0.6582499481737614, 0.650833360850811, 0.6563332863152027, 0.6490000523626804, 0.6575416773557663, 0.669750152155757, 0.6517500150948763, 0.6671249866485596, 0.6587083917111158, 0.6638751365244389] candidate_gpu_ms=[1.1147500481456518, 1.1313750874251127, 1.127166673541069, 1.1344165541231632, 1.1006249114871025, 1.127166673541069, 1.1033748742192984, 1.1251249816268682, 1.111333491280675, 1.103041460737586, 1.13062490709126, 1.129291718825698] baseline_wall_ms=[0.972167, 1.086292, 0.8736250000000001, 1.0390830000000002, 0.9870420000000001, 0.827667, 0.950583, 0.949208, 0.884208, 0.8687910000000001, 0.783583, 0.822375] candidate_wall_ms=[1.382084, 1.3432089999999999, 1.405042, 1.3961659999999998, 1.373792, 1.42075, 1.348625, 1.376208, 1.3499160000000001, 1.345667, 1.3159580000000002, 1.3706250000000002] baseline_median_ms=0.658250 baseline_p95_ms=0.669750 candidate_median_ms=1.127167 candidate_p95_ms=1.134417 saving_ms=-0.468917 baseline_wall_median_ms=0.949208 baseline_wall_p95_ms=1.086292 candidate_wall_median_ms=1.373792 candidate_wall_p95_ms=1.420750 baseline_half_drift=0.009038 candidate_half_drift=0.001811 post_timing_score_bits_exact=true selector_preflight_exact=true post_timing_inputs_unchanged=true score_guards_intact=true score_tail_canaries_intact=true status=STABLE_PERFORMANCE_MISS
+deepseek_v4 exact_r2 rows=65536 token_equivalent=262144 schedule=BCCB_warm_then_BCCB_CBBC_x3 median=sorted_index_6 p95=maximum drift_denominator=max baseline_gpu_ms=[1.365333329886198, 1.2797501403838396, 1.0514999739825726, 1.0600415989756584, 1.0565000120550394, 1.0572499595582485, 1.0235414374619722, 1.055374974384904, 0.9129168465733528, 0.9129999671131372, 0.9075000416487455, 0.9110001847147942] candidate_gpu_ms=[2.1118749864399433, 1.7344581428915262, 2.1128749940544367, 1.736916834488511, 1.7366250976920128, 1.7327500972896814, 1.5581250190734863, 1.677416730672121, 1.4939999673515558, 1.4961666893213987, 1.4933750499039888, 1.4962500426918268] baseline_wall_ms=[1.5440420000000001, 1.5135420000000002, 1.217, 1.264667, 1.260916, 1.317458, 1.282667, 1.386375, 1.120334, 1.076458, 1.0807499999999999, 1.116875] candidate_wall_ms=[2.3410420000000003, 2.034334, 2.339791, 1.9801250000000001, 1.9740410000000002, 1.995458, 1.8254160000000001, 1.9132909999999999, 1.693875, 1.7281250000000001, 1.656042, 1.669042] baseline_median_ms=1.055375 baseline_p95_ms=1.365333 candidate_median_ms=1.732750 candidate_p95_ms=2.112875 saving_ms=-0.677375 baseline_wall_median_ms=1.264667 baseline_wall_p95_ms=1.544042 candidate_wall_median_ms=1.974041 candidate_wall_p95_ms=2.341042 baseline_half_drift=0.138713 candidate_half_drift=0.138560 post_timing_score_bits_exact=true selector_preflight_exact=true post_timing_inputs_unchanged=true score_guards_intact=true score_tail_canaries_intact=true status=UNSTABLE_TIMING
+deepseek_v4 exact_r2 final_decision=INCONCLUSIVE_HOLD reason=gpu_timing_half_drift_exceeds_five_percent
+
+thread 'deepseek_v4_metal::tests::profile_lightning_exact_r2_at_far_context' (259645025) panicked at crates/qwen-llm/src/deepseek_v4_metal.rs:28551:17:
+exact R2 scorer gate held: gpu_timing_half_drift_exceeds_five_percent
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::tests::profile_lightning_exact_r2_at_far_context
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 653 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`

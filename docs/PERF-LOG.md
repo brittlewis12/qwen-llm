@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Fused All-IQ3 Falsifier KILL
+
+Status: the materially new two-dispatch all-IQ3 grouped path is exact but
+`KILL` model-free. No current-asset run or production policy change is
+authorized.
+
+- Fuse mapped IQ3 gate and up reductions plus exact clamped SwiGLU, then retain
+  the existing mapped IQ3 down/scatter. The Rust route is test-only; the Metal
+  entry point remains compiled but unreachable in ordinary execution.
+- Reduced-shape N=1/12/31/32/33/64/128 differentials preserve every gate, up,
+  inner, final output, repeat, staged/one-command, clamp, and guard bit.
+  Malformed storage, map dtype/shape, schedule, overlap, and clamp contracts
+  reject before submission.
+- The sole production-shape packet uses 2.30 GiB of synthetic IQ3 banks at
+  H=4096/F=2048/E=256/K=6/N=128. It times 24-sample A/B/A blocks after five
+  alternating untimed warms per arm for both hot and sparse schedules.
+- Hot GPU/wall medians regress 0.5713%/0.7625%; sparse medians regress
+  1.8763%/1.8684%. All control and candidate-half drifts are at most 0.1760%,
+  and p95 also regresses on both schedules.
+- Production-shape final output and inner remain exact, guards hold, and the
+  sparse census verifies one serial encoder with four versus two dispatches.
+
+Decision: retain the exact kernel and sealed failing harness as negative
+evidence. Do not rerun, retune the same 16-accumulator geometry, or pay a 104 GB
+asset campaign. Move next to a newly preregistered precision-recovering packed
+Q8 output design, not the killed one-pass F16-staged arithmetic. Evidence:
+`docs/bench/2026-08-05-dsv4-packed-fused-all-iq3-kill/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Bounded Multi-Group Product Opt-In GO
 
 Status: the exact 32-group selector is `GO` as an explicit, off-by-default

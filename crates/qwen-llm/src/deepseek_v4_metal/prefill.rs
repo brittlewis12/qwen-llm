@@ -2770,6 +2770,194 @@ fn encode_packed_grouped_mapped_iq3_xxs_f32(
 }
 
 #[cfg(test)]
+fn packed_grouped_tensor_ranges_overlap(left: &MetalTensor, right: &MetalTensor) -> bool {
+    if Retained::as_ptr(&left.buffer) != Retained::as_ptr(&right.buffer) {
+        return false;
+    }
+    let left_end = left.offset + left.n_bytes();
+    let right_end = right.offset + right.n_bytes();
+    left.offset < right_end && right.offset < left_end
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    input: &MetalTensor,
+    source_rows: &MetalTensor,
+    destination_slots: &MetalTensor,
+    schedule: &[ExpertBucket],
+    gate_up_arena: &MetalTensor,
+    inner: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    expert_count: usize,
+    top_k: usize,
+    n_tokens: usize,
+    source_count: usize,
+    destination_count: usize,
+    clamp: f32,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, "packed grouped mapped IQ3_XXS gate/up/SwiGLU")?;
+    if !crate::metal::matmat_iq3_xxs_mm_is_enabled() {
+        return invalid("packed grouped mapped IQ3_XXS SwiGLU requires the SIMD-matrix policy");
+    }
+    if !n_in.is_multiple_of(256)
+        || !n_out.is_multiple_of(64)
+        || n_in != 2 * n_out
+        || expert_count != MOE_EXPERT_COUNT
+        || top_k != MOE_TOP_K
+        || source_count == 0
+        || destination_count == 0
+        || gate_bank.dtype != GgmlType::IQ3_XXS
+        || up_bank.dtype != GgmlType::IQ3_XXS
+        || !clamp.is_finite()
+        || clamp <= 0.0
+    {
+        return invalid("packed grouped mapped IQ3_XXS SwiGLU has invalid geometry or storage");
+    }
+    validate_expert_bank(
+        gate_bank,
+        n_in,
+        n_out,
+        expert_count,
+        "packed grouped mapped IQ3_XXS gate bank",
+    )?;
+    validate_expert_bank(
+        up_bank,
+        n_in,
+        n_out,
+        expert_count,
+        "packed grouped mapped IQ3_XXS up bank",
+    )?;
+    validate_f32(
+        input,
+        &[n_in as u64, source_count as u64],
+        false,
+        "packed grouped mapped IQ3_XXS SwiGLU input",
+    )?;
+    let map_count = checked_mul(n_tokens, top_k, "packed grouped mapped SwiGLU row count")?;
+    validate_i32(
+        source_rows,
+        &[map_count as u64],
+        false,
+        "packed grouped mapped IQ3_XXS SwiGLU source rows",
+    )?;
+    validate_i32(
+        destination_slots,
+        &[map_count as u64],
+        false,
+        "packed grouped mapped IQ3_XXS SwiGLU destination slots",
+    )?;
+    let (gate, up) =
+        packed_grouped_iq3_gate_up_views(gate_up_arena, n_in, n_out, destination_count)?;
+    validate_f32(
+        inner,
+        &[n_out as u64, destination_count as u64],
+        true,
+        "packed grouped mapped IQ3_XXS SwiGLU inner",
+    )?;
+    if packed_grouped_tensor_ranges_overlap(&gate, inner)
+        || packed_grouped_tensor_ranges_overlap(&up, inner)
+    {
+        return invalid("packed grouped mapped IQ3_XXS SwiGLU inner overlaps gate/up arena");
+    }
+    let tiles = packed_grouped_expert_tiles(n_tokens, schedule)?;
+    let tile_count = tiles.len();
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+        n_expert: u32,
+        map_count: u32,
+        source_count: u32,
+        destination_count: u32,
+        clamp: f32,
+    }
+    let row_bytes = checked_mul(n_in / 256, 98, "packed grouped mapped IQ3_XXS SwiGLU row")?;
+    let pso = ctx.pipeline("kernel_deepseek_v4_packed_grouped_mapped_swiglu_iq3_xxs_f32_mm")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
+        return invalid("packed grouped mapped IQ3_XXS SwiGLU requires four SIMD groups");
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: u32::try_from(n_out).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed grouped mapped SwiGLU output exceeds u32".into(),
+                )
+            })?,
+            k: u32::try_from(n_in).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed grouped mapped SwiGLU input exceeds u32".into(),
+                )
+            })?,
+            nb01: u32::try_from(row_bytes).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed grouped mapped SwiGLU row bytes exceed u32".into(),
+                )
+            })?,
+            stride_b: u32::try_from(n_in).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed grouped mapped SwiGLU stride exceeds u32".into(),
+                )
+            })?,
+            n_expert: u32::try_from(expert_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed grouped mapped SwiGLU experts exceed u32".into(),
+                )
+            })?,
+            map_count: u32::try_from(map_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed grouped mapped SwiGLU count exceeds u32".into(),
+                )
+            })?,
+            source_count: u32::try_from(source_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed grouped mapped SwiGLU source count exceeds u32".into(),
+                )
+            })?,
+            destination_count: u32::try_from(destination_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed grouped mapped SwiGLU destination count exceeds u32".into(),
+                )
+            })?,
+            clamp,
+        },
+    );
+    enc.set_tensor(1, gate_bank);
+    enc.set_tensor(2, up_bank);
+    enc.set_tensor(3, input);
+    enc.set_tensor(4, source_rows);
+    enc.set_tensor(5, destination_slots);
+    enc.set_bytes_slice(6, &tiles);
+    enc.set_tensor(7, &gate);
+    enc.set_tensor(8, &up);
+    enc.set_tensor(9, inner);
+    enc.set_threadgroup_memory(0, 8_192);
+    enc.dispatch(
+        MTLSize {
+            width: tile_count,
+            height: n_out / 64,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[cfg(test)]
 fn packed_grouped_iq3_gate_up_views(
     arena: &MetalTensor,
     hidden: usize,
@@ -2838,6 +3026,20 @@ fn packed_grouped_iq3_candidate_supported(ctx: &MetalContext) -> bool {
         return false;
     };
     projection.threadExecutionWidth() == 32 && projection.maxTotalThreadsPerThreadgroup() >= 128
+}
+
+#[cfg(test)]
+fn packed_grouped_iq3_fused_candidate_supported(ctx: &MetalContext) -> bool {
+    if !crate::metal::matmat_iq3_xxs_mm_is_enabled()
+        || ctx.device.maxThreadgroupMemoryLength() < 8_192
+    {
+        return false;
+    }
+    let Ok(fused) = ctx.pipeline("kernel_deepseek_v4_packed_grouped_mapped_swiglu_iq3_xxs_f32_mm")
+    else {
+        return false;
+    };
+    fused.threadExecutionWidth() == 32 && fused.maxTotalThreadsPerThreadgroup() >= 128
 }
 
 const PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE: &str = "Apple M4 Max";
@@ -7274,6 +7476,10 @@ mod tests {
         let Ok(ctx) = MetalContext::new() else {
             return;
         };
+        assert!(
+            packed_grouped_iq3_fused_candidate_supported(&ctx),
+            "fused all-IQ3 pipeline is not qualified"
+        );
         const H: usize = 512;
         const F: usize = 256;
         const E: usize = MOE_EXPERT_COUNT;
@@ -7467,6 +7673,25 @@ mod tests {
                 Ok(())
             });
 
+            if n_tokens == 128 {
+                let gate_values = host_read_f32(&control_gate, "all-IQ3 clamp gate").unwrap();
+                let up_values = host_read_f32(&control_up, "all-IQ3 clamp up").unwrap();
+                let gate_max = gate_values
+                    .iter()
+                    .copied()
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let up_min = up_values.iter().copied().fold(f32::INFINITY, f32::min);
+                let up_max = up_values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                assert!(
+                    gate_max > CLAMP,
+                    "synthetic gate never crosses upper clamp: {gate_max}"
+                );
+                assert!(
+                    up_min < -CLAMP && up_max > CLAMP,
+                    "synthetic up misses clamp sides: [{up_min}, {up_max}]"
+                );
+            }
+
             let bits = |tensor: &MetalTensor| {
                 host_read_f32(tensor, "all-IQ3 grouped differential")
                     .unwrap()
@@ -7595,6 +7820,209 @@ mod tests {
                 "N={n_tokens} inner after down"
             );
 
+            let fused_arena =
+                grouped_guarded_f32(&ctx, vec![H as u64, K as u64, n_tokens as u64], 23.0);
+            let fused_output = fused_arena.view_subrange(0, vec![H as u64, route_count as u64]);
+            let (fused_gate, fused_up) =
+                packed_grouped_iq3_gate_up_views(&fused_output, H, F, route_count).unwrap();
+            let fused_inner = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 29.0);
+            submit(&ctx, "all-IQ3 fused gate/up/SwiGLU", |encoder| {
+                encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                    &ctx,
+                    encoder,
+                    &gate_bank,
+                    &up_bank,
+                    &input,
+                    &bucket_rows,
+                    &bucket_slots,
+                    &schedule,
+                    &fused_output,
+                    &fused_inner,
+                    H,
+                    F,
+                    E,
+                    K,
+                    n_tokens,
+                    n_tokens,
+                    route_count,
+                    CLAMP,
+                )
+            });
+            assert_eq!(
+                bits(&fused_gate),
+                bits(&control_gate),
+                "N={n_tokens} fused gate"
+            );
+            assert_eq!(bits(&fused_up), bits(&control_up), "N={n_tokens} fused up");
+            assert_eq!(
+                bits(&fused_inner),
+                bits(&control_inner),
+                "N={n_tokens} fused inner"
+            );
+            let fused_gate_after = bits(&fused_gate);
+            let fused_up_after = bits(&fused_up);
+            let fused_inner_after = bits(&fused_inner);
+            submit(&ctx, "all-IQ3 fused mapped down", |encoder| {
+                encode_packed_grouped_mapped_iq3_xxs_f32(
+                    &ctx,
+                    encoder,
+                    &down_bank,
+                    &fused_inner,
+                    &bucket_slots,
+                    &bucket_slots,
+                    &schedule,
+                    &fused_output,
+                    F,
+                    H,
+                    E,
+                    K,
+                    n_tokens,
+                    route_count,
+                    route_count,
+                )
+            });
+            assert_eq!(
+                bits(&fused_arena),
+                bits(&control_output),
+                "N={n_tokens} fused output"
+            );
+            assert_eq!(
+                bits(&fused_inner),
+                fused_inner_after,
+                "N={n_tokens} fused inner stable"
+            );
+
+            let fused_repeat_arena =
+                grouped_guarded_f32(&ctx, vec![H as u64, K as u64, n_tokens as u64], 31.0);
+            let fused_repeat_output =
+                fused_repeat_arena.view_subrange(0, vec![H as u64, route_count as u64]);
+            let (fused_repeat_gate, fused_repeat_up) =
+                packed_grouped_iq3_gate_up_views(&fused_repeat_output, H, F, route_count).unwrap();
+            let fused_repeat_inner =
+                grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 37.0);
+            submit(&ctx, "all-IQ3 fused repeat gate/up/SwiGLU", |encoder| {
+                encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                    &ctx,
+                    encoder,
+                    &gate_bank,
+                    &up_bank,
+                    &input,
+                    &bucket_rows,
+                    &bucket_slots,
+                    &schedule,
+                    &fused_repeat_output,
+                    &fused_repeat_inner,
+                    H,
+                    F,
+                    E,
+                    K,
+                    n_tokens,
+                    n_tokens,
+                    route_count,
+                    CLAMP,
+                )
+            });
+            assert_eq!(
+                bits(&fused_repeat_gate),
+                fused_gate_after,
+                "N={n_tokens} fused repeat gate"
+            );
+            assert_eq!(
+                bits(&fused_repeat_up),
+                fused_up_after,
+                "N={n_tokens} fused repeat up"
+            );
+            assert_eq!(
+                bits(&fused_repeat_inner),
+                fused_inner_after,
+                "N={n_tokens} fused repeat inner"
+            );
+            submit(&ctx, "all-IQ3 fused repeat down", |encoder| {
+                encode_packed_grouped_mapped_iq3_xxs_f32(
+                    &ctx,
+                    encoder,
+                    &down_bank,
+                    &fused_repeat_inner,
+                    &bucket_slots,
+                    &bucket_slots,
+                    &schedule,
+                    &fused_repeat_output,
+                    F,
+                    H,
+                    E,
+                    K,
+                    n_tokens,
+                    route_count,
+                    route_count,
+                )
+            });
+            assert_eq!(
+                bits(&fused_repeat_inner),
+                fused_inner_after,
+                "N={n_tokens} fused repeat inner"
+            );
+            assert_eq!(
+                bits(&fused_repeat_arena),
+                bits(&control_output),
+                "N={n_tokens} fused repeat output"
+            );
+
+            let fused_chain_arena =
+                grouped_guarded_f32(&ctx, vec![H as u64, K as u64, n_tokens as u64], 41.0);
+            let fused_chain_output =
+                fused_chain_arena.view_subrange(0, vec![H as u64, route_count as u64]);
+            let fused_chain_inner =
+                grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 43.0);
+            submit(&ctx, "all-IQ3 fused one-command chain", |encoder| {
+                encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                    &ctx,
+                    encoder,
+                    &gate_bank,
+                    &up_bank,
+                    &input,
+                    &bucket_rows,
+                    &bucket_slots,
+                    &schedule,
+                    &fused_chain_output,
+                    &fused_chain_inner,
+                    H,
+                    F,
+                    E,
+                    K,
+                    n_tokens,
+                    n_tokens,
+                    route_count,
+                    CLAMP,
+                )?;
+                encode_packed_grouped_mapped_iq3_xxs_f32(
+                    &ctx,
+                    encoder,
+                    &down_bank,
+                    &fused_chain_inner,
+                    &bucket_slots,
+                    &bucket_slots,
+                    &schedule,
+                    &fused_chain_output,
+                    F,
+                    H,
+                    E,
+                    K,
+                    n_tokens,
+                    route_count,
+                    route_count,
+                )
+            });
+            assert_eq!(
+                bits(&fused_chain_arena),
+                bits(&control_output),
+                "N={n_tokens} fused one-command output"
+            );
+            assert_eq!(
+                bits(&fused_chain_inner),
+                bits(&control_inner),
+                "N={n_tokens} fused one-command inner"
+            );
+
             let repeat_arena =
                 grouped_guarded_f32(&ctx, vec![H as u64, K as u64, n_tokens as u64], 17.0);
             let repeat_output = repeat_arena.view_subrange(0, vec![H as u64, route_count as u64]);
@@ -7680,11 +8108,634 @@ mod tests {
                 ("all-IQ3 control output", &control_output),
                 ("all-IQ3 candidate arena", &candidate_arena),
                 ("all-IQ3 candidate inner", &candidate_inner),
+                ("all-IQ3 fused arena", &fused_arena),
+                ("all-IQ3 fused inner", &fused_inner),
+                ("all-IQ3 fused repeat arena", &fused_repeat_arena),
+                ("all-IQ3 fused repeat inner", &fused_repeat_inner),
+                ("all-IQ3 fused chain arena", &fused_chain_arena),
+                ("all-IQ3 fused chain inner", &fused_chain_inner),
                 ("all-IQ3 repeat arena", &repeat_arena),
                 ("all-IQ3 repeat inner", &repeat_inner),
             ] {
                 assert_grouped_guards(label, tensor);
             }
+        }
+    }
+
+    #[test]
+    fn packed_grouped_fused_all_iq3_rejects_invalid_contracts_before_dispatch() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        const H: usize = 512;
+        const F: usize = 256;
+        const E: usize = MOE_EXPERT_COUNT;
+        const K: usize = MOE_TOP_K;
+        const N: usize = 1;
+
+        fn reject(
+            ctx: &MetalContext,
+            encode: impl FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        ) -> String {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let result = encode(&encoder);
+            encoder.end();
+            result.unwrap_err().to_string()
+        }
+
+        let gate_bank = grouped_test_bank(&ctx, GgmlType::IQ3_XXS, H, F, E, 47);
+        let up_bank = grouped_test_bank(&ctx, GgmlType::IQ3_XXS, H, F, E, 53);
+        let wrong_dtype_bank = grouped_test_bank(&ctx, GgmlType::IQ3_S, H, F, E, 59);
+        let input = MetalTensor::zeros_f32(&ctx, vec![H as u64, N as u64]).unwrap();
+        let (_expert_ids, rows, slots, schedule) = grouped_test_schedule(N);
+        let source_rows = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&rows),
+            vec![K as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let destination_slots = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&slots),
+            vec![K as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let malformed_rows = MetalTensor::zeros_f32(&ctx, vec![K as u64]).unwrap();
+        let arena = MetalTensor::zeros_f32(&ctx, vec![H as u64, K as u64]).unwrap();
+        let inner = MetalTensor::zeros_f32(&ctx, vec![F as u64, K as u64]).unwrap();
+
+        let error = reject(&ctx, |encoder| {
+            encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                &ctx,
+                encoder,
+                &gate_bank,
+                &wrong_dtype_bank,
+                &input,
+                &source_rows,
+                &destination_slots,
+                &schedule,
+                &arena,
+                &inner,
+                H,
+                F,
+                E,
+                K,
+                N,
+                N,
+                K,
+                0.25,
+            )
+        });
+        assert!(error.contains("invalid geometry or storage"), "{error}");
+
+        let error = reject(&ctx, |encoder| {
+            encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                &ctx,
+                encoder,
+                &gate_bank,
+                &up_bank,
+                &input,
+                &malformed_rows,
+                &destination_slots,
+                &schedule,
+                &arena,
+                &inner,
+                H,
+                F,
+                E,
+                K,
+                N,
+                N,
+                K,
+                0.25,
+            )
+        });
+        assert!(error.contains("source rows"), "{error}");
+
+        let mut malformed_schedule = schedule
+            .iter()
+            .map(|bucket| ExpertBucket {
+                expert: bucket.expert,
+                start: bucket.start,
+                len: bucket.len,
+            })
+            .collect::<Vec<_>>();
+        malformed_schedule[0].start = 1;
+        let error = reject(&ctx, |encoder| {
+            encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                &ctx,
+                encoder,
+                &gate_bank,
+                &up_bank,
+                &input,
+                &source_rows,
+                &destination_slots,
+                &malformed_schedule,
+                &arena,
+                &inner,
+                H,
+                F,
+                E,
+                K,
+                N,
+                N,
+                K,
+                0.25,
+            )
+        });
+        assert!(error.contains("invalid bucket geometry"), "{error}");
+
+        let overlapping_inner = arena.view_subrange(0, vec![F as u64, K as u64]);
+        let error = reject(&ctx, |encoder| {
+            encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                &ctx,
+                encoder,
+                &gate_bank,
+                &up_bank,
+                &input,
+                &source_rows,
+                &destination_slots,
+                &schedule,
+                &arena,
+                &overlapping_inner,
+                H,
+                F,
+                E,
+                K,
+                N,
+                N,
+                K,
+                0.25,
+            )
+        });
+        assert!(error.contains("inner overlaps gate/up arena"), "{error}");
+
+        let error = reject(&ctx, |encoder| {
+            encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                &ctx,
+                encoder,
+                &gate_bank,
+                &up_bank,
+                &input,
+                &source_rows,
+                &destination_slots,
+                &schedule,
+                &arena,
+                &inner,
+                H,
+                F,
+                E,
+                K,
+                N,
+                N,
+                K,
+                0.0,
+            )
+        });
+        assert!(error.contains("invalid geometry or storage"), "{error}");
+    }
+
+    #[test]
+    #[ignore = "sealed KILL; do not rerun without material implementation or device drift"]
+    fn profile_packed_grouped_fused_all_iq3_production_shape() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        assert_eq!(
+            ctx.device.name().to_string(),
+            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
+        );
+        assert!(
+            packed_grouped_iq3_fused_candidate_supported(&ctx),
+            "fused all-IQ3 pipeline is not qualified"
+        );
+
+        const H: usize = 4_096;
+        const F: usize = 2_048;
+        const E: usize = MOE_EXPERT_COUNT;
+        const K: usize = MOE_TOP_K;
+        const N: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+        const ROUTES: usize = N * K;
+        const CLAMP: f32 = 7.0;
+        const SAMPLES: usize = 24;
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum Arm {
+            Control,
+            Candidate,
+        }
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum ScheduleShape {
+            Hot,
+            Sparse,
+        }
+
+        #[derive(Debug)]
+        struct GateResult {
+            schedule: &'static str,
+            gpu_control_drift: f64,
+            wall_control_drift: f64,
+            gpu_candidate_drift: f64,
+            wall_candidate_drift: f64,
+            gpu_median_saving: f64,
+            wall_median_saving: f64,
+            gpu_p95_saving: f64,
+            wall_p95_saving: f64,
+        }
+
+        fn timing_bank(ctx: &MetalContext, n_in: usize, n_out: usize, fill: u8) -> MetalTensor {
+            let (block_elements, block_bytes) = ggml_type_layout(GgmlType::IQ3_XXS).unwrap();
+            let elements = n_in * n_out * E;
+            assert!(elements.is_multiple_of(block_elements as usize));
+            let bytes = elements / block_elements as usize * block_bytes as usize;
+            let buffer = ctx.buffer_uninit(bytes).unwrap();
+            unsafe {
+                std::ptr::write_bytes(buffer.contents().as_ptr().cast::<u8>(), fill, bytes);
+            }
+            MetalTensor {
+                buffer,
+                offset: 0,
+                shape: vec![n_in as u64, n_out as u64, E as u64],
+                dtype: GgmlType::IQ3_XXS,
+                provenance: MetalTensorProvenance::OwnedWritable,
+            }
+        }
+
+        fn timing_schedule(shape: ScheduleShape) -> (Vec<i32>, Vec<i32>, Vec<ExpertBucket>) {
+            let mut assignments = (0..E)
+                .map(|_| Vec::<(usize, usize)>::new())
+                .collect::<Vec<_>>();
+            for token in 0..N {
+                for slot in 0..K {
+                    let route_slot = token * K + slot;
+                    let expert = match shape {
+                        ScheduleShape::Hot => slot,
+                        ScheduleShape::Sparse => route_slot % E,
+                    };
+                    assignments[expert].push((token, route_slot));
+                }
+            }
+            let mut rows = Vec::with_capacity(ROUTES);
+            let mut slots = Vec::with_capacity(ROUTES);
+            let mut schedule = Vec::new();
+            for (expert, assignments) in assignments.into_iter().enumerate() {
+                if assignments.is_empty() {
+                    continue;
+                }
+                let start = rows.len();
+                for (row, slot) in assignments {
+                    rows.push(row as i32);
+                    slots.push(slot as i32);
+                }
+                schedule.push(ExpertBucket {
+                    expert,
+                    start,
+                    len: rows.len() - start,
+                });
+            }
+            assert_eq!(rows.len(), ROUTES);
+            assert_eq!(slots.len(), ROUTES);
+            assert!(packed_grouped_expert_tiles(N, &schedule).is_ok());
+            (rows, slots, schedule)
+        }
+
+        let gate_bank = timing_bank(&ctx, H, F, 0x20);
+        let up_bank = timing_bank(&ctx, H, F, 0x24);
+        let down_bank = timing_bank(&ctx, F, H, 0x28);
+        let input_values = (0..H * N)
+            .map(|index| ((index * 43 + index / 17 + 11) % 521) as f32 * 0.0005 - 0.13)
+            .collect::<Vec<_>>();
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&input_values),
+            vec![H as u64, N as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        eprintln!(
+            "deepseek_v4 fused_all_iq3_fixture allocated_bytes={} bank_bytes={}",
+            ctx.current_allocated_size(),
+            gate_bank.n_bytes() + up_bank.n_bytes() + down_bank.n_bytes(),
+        );
+
+        let mut results = Vec::new();
+        for schedule_shape in [ScheduleShape::Hot, ScheduleShape::Sparse] {
+            let schedule_name = match schedule_shape {
+                ScheduleShape::Hot => "hot",
+                ScheduleShape::Sparse => "sparse",
+            };
+            let (rows, slots, schedule) = timing_schedule(schedule_shape);
+            let source_rows = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&rows),
+                vec![ROUTES as u64],
+                GgmlType::I32,
+            )
+            .unwrap();
+            let destination_slots = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&slots),
+                vec![ROUTES as u64],
+                GgmlType::I32,
+            )
+            .unwrap();
+            let control_arena = grouped_guarded_f32(&ctx, vec![H as u64, ROUTES as u64], 47.0);
+            let control_output = control_arena.view_subrange(0, vec![H as u64, ROUTES as u64]);
+            let (control_gate, control_up) =
+                packed_grouped_iq3_gate_up_views(&control_output, H, F, ROUTES).unwrap();
+            let control_inner = grouped_guarded_f32(&ctx, vec![F as u64, ROUTES as u64], 53.0);
+            let candidate_arena = grouped_guarded_f32(&ctx, vec![H as u64, ROUTES as u64], 59.0);
+            let candidate_output = candidate_arena.view_subrange(0, vec![H as u64, ROUTES as u64]);
+            let candidate_inner = grouped_guarded_f32(&ctx, vec![F as u64, ROUTES as u64], 61.0);
+
+            let sample = |arm: Arm| -> (f64, f64) {
+                let started = std::time::Instant::now();
+                let command = ctx.queue.commandBuffer().unwrap();
+                let encoder = KernelEncoder::begin(&command);
+                let result = match arm {
+                    Arm::Control => (|| {
+                        encode_packed_grouped_mapped_iq3_xxs_f32(
+                            &ctx,
+                            &encoder,
+                            &gate_bank,
+                            &input,
+                            &source_rows,
+                            &destination_slots,
+                            &schedule,
+                            &control_gate,
+                            H,
+                            F,
+                            E,
+                            K,
+                            N,
+                            N,
+                            ROUTES,
+                        )?;
+                        encode_packed_grouped_mapped_iq3_xxs_f32(
+                            &ctx,
+                            &encoder,
+                            &up_bank,
+                            &input,
+                            &source_rows,
+                            &destination_slots,
+                            &schedule,
+                            &control_up,
+                            H,
+                            F,
+                            E,
+                            K,
+                            N,
+                            N,
+                            ROUTES,
+                        )?;
+                        encode_ds4_clamped_swiglu(
+                            &ctx,
+                            &encoder,
+                            &control_gate.view_subrange(0, vec![(F * ROUTES) as u64]),
+                            &control_up.view_subrange(0, vec![(F * ROUTES) as u64]),
+                            &control_inner.view_subrange(0, vec![(F * ROUTES) as u64]),
+                            CLAMP,
+                        )?;
+                        encode_packed_grouped_mapped_iq3_xxs_f32(
+                            &ctx,
+                            &encoder,
+                            &down_bank,
+                            &control_inner,
+                            &destination_slots,
+                            &destination_slots,
+                            &schedule,
+                            &control_output,
+                            F,
+                            H,
+                            E,
+                            K,
+                            N,
+                            ROUTES,
+                            ROUTES,
+                        )
+                    })(),
+                    Arm::Candidate => (|| {
+                        encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
+                            &ctx,
+                            &encoder,
+                            &gate_bank,
+                            &up_bank,
+                            &input,
+                            &source_rows,
+                            &destination_slots,
+                            &schedule,
+                            &candidate_output,
+                            &candidate_inner,
+                            H,
+                            F,
+                            E,
+                            K,
+                            N,
+                            N,
+                            ROUTES,
+                            CLAMP,
+                        )?;
+                        encode_packed_grouped_mapped_iq3_xxs_f32(
+                            &ctx,
+                            &encoder,
+                            &down_bank,
+                            &candidate_inner,
+                            &destination_slots,
+                            &destination_slots,
+                            &schedule,
+                            &candidate_output,
+                            F,
+                            H,
+                            E,
+                            K,
+                            N,
+                            ROUTES,
+                            ROUTES,
+                        )
+                    })(),
+                };
+                encoder.end();
+                result.unwrap();
+                command.commit();
+                command.waitUntilCompleted();
+                let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+                assert!(
+                    command.error().is_none(),
+                    "{schedule_name} {arm:?}: {:?}",
+                    command.error()
+                );
+                let gpu_ms = (command.GPUEndTime() - command.GPUStartTime()) * 1e3;
+                (gpu_ms, wall_ms)
+            };
+
+            let bits = |tensor: &MetalTensor, label: &str| {
+                host_read_f32(tensor, label)
+                    .unwrap()
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>()
+            };
+            let assert_exact = || {
+                assert_eq!(
+                    bits(&candidate_arena, "fused all-IQ3 candidate output"),
+                    bits(&control_arena, "fused all-IQ3 control output"),
+                    "{schedule_name} output"
+                );
+                assert_eq!(
+                    bits(&candidate_inner, "fused all-IQ3 candidate inner"),
+                    bits(&control_inner, "fused all-IQ3 control inner"),
+                    "{schedule_name} inner"
+                );
+            };
+
+            sample(Arm::Control);
+            sample(Arm::Candidate);
+            assert_exact();
+            for index in 0usize..5 {
+                if index.is_multiple_of(2) {
+                    sample(Arm::Control);
+                    sample(Arm::Candidate);
+                } else {
+                    sample(Arm::Candidate);
+                    sample(Arm::Control);
+                }
+            }
+
+            let collect = |arm| (0..SAMPLES).map(|_| sample(arm)).collect::<Vec<_>>();
+            let control_before = collect(Arm::Control);
+            let candidate = collect(Arm::Candidate);
+            let control_after = collect(Arm::Control);
+            assert_exact();
+
+            let split = |samples: &[(f64, f64)]| {
+                (
+                    samples.iter().map(|sample| sample.0).collect::<Vec<_>>(),
+                    samples.iter().map(|sample| sample.1).collect::<Vec<_>>(),
+                )
+            };
+            let (control_before_gpu, control_before_wall) = split(&control_before);
+            let (candidate_gpu, candidate_wall) = split(&candidate);
+            let (control_after_gpu, control_after_wall) = split(&control_after);
+            let gpu_control_drift = relative_drift(
+                median_ms(&control_before_gpu),
+                median_ms(&control_after_gpu),
+            );
+            let wall_control_drift = relative_drift(
+                median_ms(&control_before_wall),
+                median_ms(&control_after_wall),
+            );
+            let gpu_candidate_drift = relative_drift(
+                median_ms(&candidate_gpu[..SAMPLES / 2]),
+                median_ms(&candidate_gpu[SAMPLES / 2..]),
+            );
+            let wall_candidate_drift = relative_drift(
+                median_ms(&candidate_wall[..SAMPLES / 2]),
+                median_ms(&candidate_wall[SAMPLES / 2..]),
+            );
+            let gpu_control_median =
+                median_ms(&control_before_gpu).min(median_ms(&control_after_gpu));
+            let wall_control_median =
+                median_ms(&control_before_wall).min(median_ms(&control_after_wall));
+            let gpu_control_p95 = percentile_ms(&control_before_gpu, 0.95)
+                .min(percentile_ms(&control_after_gpu, 0.95));
+            let wall_control_p95 = percentile_ms(&control_before_wall, 0.95)
+                .min(percentile_ms(&control_after_wall, 0.95));
+            let gpu_median_saving = 1.0 - median_ms(&candidate_gpu) / gpu_control_median;
+            let wall_median_saving = 1.0 - median_ms(&candidate_wall) / wall_control_median;
+            let gpu_p95_saving = 1.0 - percentile_ms(&candidate_gpu, 0.95) / gpu_control_p95;
+            let wall_p95_saving = 1.0 - percentile_ms(&candidate_wall, 0.95) / wall_control_p95;
+
+            eprintln!(
+                "deepseek_v4 fused_all_iq3_packet schedule={schedule_name} control_before_gpu_ms={control_before_gpu:?} control_before_wall_ms={control_before_wall:?} candidate_gpu_ms={candidate_gpu:?} candidate_wall_ms={candidate_wall:?} control_after_gpu_ms={control_after_gpu:?} control_after_wall_ms={control_after_wall:?} gpu_control_drift={gpu_control_drift:.6} wall_control_drift={wall_control_drift:.6} gpu_candidate_drift={gpu_candidate_drift:.6} wall_candidate_drift={wall_candidate_drift:.6} gpu_median_saving={gpu_median_saving:.6} wall_median_saving={wall_median_saving:.6} gpu_p95_saving={gpu_p95_saving:.6} wall_p95_saving={wall_p95_saving:.6}"
+            );
+
+            if schedule_shape == ScheduleShape::Sparse {
+                let _trace = crate::metal::kernel_trace_begin();
+                sample(Arm::Control);
+                let control_trace = crate::metal::kernel_trace_take_delta();
+                sample(Arm::Candidate);
+                let candidate_trace = crate::metal::kernel_trace_take_delta();
+                assert_eq!(control_trace.encoders, 1);
+                assert_eq!(control_trace.concurrent_encoders, 0);
+                assert_eq!(control_trace.dispatches, 4);
+                assert_eq!(candidate_trace.encoders, 1);
+                assert_eq!(candidate_trace.concurrent_encoders, 0);
+                assert_eq!(candidate_trace.dispatches, 2);
+            }
+            for (label, tensor) in [
+                ("fused all-IQ3 control arena", &control_arena),
+                ("fused all-IQ3 control inner", &control_inner),
+                ("fused all-IQ3 candidate arena", &candidate_arena),
+                ("fused all-IQ3 candidate inner", &candidate_inner),
+            ] {
+                assert_grouped_guards(label, tensor);
+            }
+            results.push(GateResult {
+                schedule: schedule_name,
+                gpu_control_drift,
+                wall_control_drift,
+                gpu_candidate_drift,
+                wall_candidate_drift,
+                gpu_median_saving,
+                wall_median_saving,
+                gpu_p95_saving,
+                wall_p95_saving,
+            });
+        }
+
+        for result in results {
+            assert!(
+                result.gpu_control_drift <= 0.05,
+                "{} GPU control drift {:.3} exceeded 5%",
+                result.schedule,
+                result.gpu_control_drift
+            );
+            assert!(
+                result.wall_control_drift <= 0.05,
+                "{} wall control drift {:.3} exceeded 5%",
+                result.schedule,
+                result.wall_control_drift
+            );
+            assert!(
+                result.gpu_candidate_drift <= 0.05,
+                "{} GPU candidate drift {:.3} exceeded 5%",
+                result.schedule,
+                result.gpu_candidate_drift
+            );
+            assert!(
+                result.wall_candidate_drift <= 0.05,
+                "{} wall candidate drift {:.3} exceeded 5%",
+                result.schedule,
+                result.wall_candidate_drift
+            );
+            assert!(
+                result.gpu_median_saving >= 0.15,
+                "{} GPU median saving {:.3} missed 15%",
+                result.schedule,
+                result.gpu_median_saving
+            );
+            assert!(
+                result.wall_median_saving >= 0.10,
+                "{} wall median saving {:.3} missed 10%",
+                result.schedule,
+                result.wall_median_saving
+            );
+            assert!(
+                result.gpu_p95_saving >= 0.10,
+                "{} GPU p95 saving {:.3} missed 10%",
+                result.schedule,
+                result.gpu_p95_saving
+            );
+            assert!(
+                result.wall_p95_saving >= 0.10,
+                "{} wall p95 saving {:.3} missed 10%",
+                result.schedule,
+                result.wall_p95_saving
+            );
         }
     }
 

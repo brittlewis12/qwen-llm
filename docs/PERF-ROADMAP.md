@@ -397,28 +397,33 @@ authorizes no wall, GPU, saving, stationarity, p95, promotion, or regression
 claim. Retain the exact diagnostics-only candidate and failing ignored harness;
 do not rerun, relax, or split the condition as a rescue.
 
-Closing the selector product lane and prioritizing warm packed throughput changes
-the next implementation question, not the failed gate above. A fused
-two-dispatch all-IQ3 path would be material implementation drift: one kernel
-must preserve both existing mapped IQ3 accumulations and apply the exact clamp
-and SwiGLU only after both complete, then the existing mapped down/scatter runs
-unchanged. Its first gate is model-free production geometry against the retained
-four-stage candidate, with bit-exact intermediate/final outputs and isolated
-command-GPU timing. Do not open another current-asset campaign unless that new
-implementation first establishes a material incremental ceiling. This is not a
-retry, threshold change, or reinterpretation of the spent four-stage packet.
+The materially new two-dispatch all-IQ3 falsifier is now complete and `KILL`.
+Its fused gate/up/SwiGLU kernel preserves both mapped IQ3 accumulation lineages
+and exact reduced-shape gate/up/inner/final bits, while production-shape final
+output, inner, guards, and the four-to-two dispatch census also pass. The sole
+24-sample A/B/A packet is unusually stationary: every control/candidate drift
+is at most 0.1760%. Nevertheless hot GPU/wall medians regress
+0.5713%/0.7625%, and sparse medians regress 1.8763%/1.8684%; p95 regresses as
+well. Do not run the current asset, retune the same 16-accumulator geometry, or
+repeat this condition. Retain the test-only path as executable negative
+evidence.
 
 Force-ranked queue:
 
-1. **Packed all-IQ3 two-dispatch falsifier.** Test only the materially new fused
-   gate/up/SwiGLU implementation model-free before changing production policy or
-   paying another current-asset run. Preserve each mapped IQ3 reduction lineage,
-   arena proof, clamp order, output bits, and fallback.
-2. **Precision-recovering packed Q8 output.** Open only if the all-IQ3 fusion
-   closes. A split-activation matrix schedule must materially repair the prior
-   position-140 error while retaining a credible output-stage ceiling; never
-   rerun the killed one-pass F16-staged arithmetic.
-3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+1. **Precision-recovering packed Q8 output.** Preregister a materially different
+   split-activation or mixed-precision model-free design. It must preserve more
+   activation information than the killed one-pass F16-staged matrix schedule,
+   materially repair the prior position-140 error mechanism, and retain a
+   credible output-stage ceiling before another asset run.
+2. **Joint chronological/attention-body rewrite.** If Q8 precision recovery
+   closes, combine only the already-attributed memory boundaries shared by the
+   individually sub-threshold chronological and attention-body regions. Require
+   a new model-free ceiling; do not add their old sampled estimates as if they
+   were independent dispatch costs.
+3. **Grouped MXFP4-down cleanup.** Keep the two current outlier layers bounded
+   behind a direct production-shape ceiling. Their 62.874 ms routed subtotal is
+   not by itself authorization for a broad expert rewrite.
+4. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

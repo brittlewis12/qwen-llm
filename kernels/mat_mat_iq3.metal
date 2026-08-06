@@ -166,6 +166,18 @@ struct ds4_packed_grouped_projection_args {
     uint destination_count;
 };
 
+struct ds4_packed_grouped_swiglu_iq3_args {
+    uint M;
+    uint K;
+    uint nb01;
+    uint stride_b;
+    uint n_expert;
+    uint map_count;
+    uint source_count;
+    uint destination_count;
+    float clamp;
+};
+
 struct ds4_packed_expert_tile {
     uint expert;
     uint start;
@@ -641,6 +653,242 @@ kernel void kernel_deepseek_v4_packed_grouped_mapped_iq3_xxs_f32_mm(
             threadgroup float * C = tile_output + j * NR0_IQ3;
             for (int i = 0; i < nr0; ++i) {
                 D[i] = C[i];
+            }
+        }
+    }
+}
+
+kernel void kernel_deepseek_v4_packed_grouped_mapped_swiglu_iq3_xxs_f32_mm(
+        constant ds4_packed_grouped_swiglu_iq3_args & args [[buffer(0)]],
+        device const uchar * gateA [[buffer(1)]],
+        device const uchar * upA [[buffer(2)]],
+        device const float * srcB [[buffer(3)]],
+        device const int * source_rows [[buffer(4)]],
+        device const int * destination_slots [[buffer(5)]],
+        constant ds4_packed_expert_tile * tiles [[buffer(6)]],
+        device float * gate_dst [[buffer(7)]],
+        device float * up_dst [[buffer(8)]],
+        device float * inner_dst [[buffer(9)]],
+        threadgroup uchar * shmem [[threadgroup(0)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    const ds4_packed_expert_tile tile = tiles[tgpig.x];
+    if (tile.expert >= args.n_expert || tile.count == 0u || tile.count > 32u
+            || tile.start + tile.count > args.map_count) return;
+
+    threadgroup uint * map_valid = (threadgroup uint *)shmem;
+    if (tiitg == 0) {
+        uint valid = 1u;
+        for (uint j = 0; j < tile.count; ++j) {
+            const int source = source_rows[tile.start + j];
+            const int destination = destination_slots[tile.start + j];
+            if (source < 0 || uint(source) >= args.source_count
+                    || destination < 0 || uint(destination) >= args.destination_count) {
+                valid = 0u;
+            }
+        }
+        *map_valid = valid;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (*map_valid == 0u) return;
+
+    const int r0 = tgpig.y * NR0_IQ3;
+    const int nr0 = min((int)NR0_IQ3, (int)args.M - r0);
+    const short nr1 = (short)tile.count;
+
+    const short lr0 = ((short)tiitg / NL0_IQ3) < nr0
+                        ? ((short)tiitg / NL0_IQ3)
+                        : (short)nr0 - 1;
+    const short il0 = tiitg % NL0_IQ3;
+    short gate_il = il0;
+    short up_il = il0;
+
+    const short lr1 = ((short)tiitg / NL1_IQ3) < nr1
+                        ? ((short)tiitg / NL1_IQ3)
+                        : nr1 - 1;
+    const short iy = 8 * (tiitg % NL1_IQ3);
+    const int input_row = source_rows[tile.start + uint(lr1)];
+
+    const ulong expert_stride = (ulong)args.nb01 * args.M;
+    device const uchar * gate_ptr = gateA + (ulong)tile.expert * expert_stride
+        + (ulong)args.nb01 * (r0 + lr0);
+    device const uchar * up_ptr = upA + (ulong)tile.expert * expert_stride
+        + (ulong)args.nb01 * (r0 + lr0);
+    device const float * y_ptr = srcB + (ulong)args.stride_b * input_row
+        + (ulong)iy;
+
+    simdgroup_half8x8 ma[4];
+    simdgroup_half8x8 mb[2];
+    simdgroup_float8x8 gate_mc[8];
+    simdgroup_float8x8 up_mc[8];
+
+    FOR_UNROLL (short i = 0; i < 8; ++i) {
+        gate_mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+        up_mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.K; loop_k += NK_IQ3) {
+        {
+            half4x4 temp_a;
+            dequantize_iq3_xxs_half(gate_ptr, gate_il, temp_a);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            FOR_UNROLL (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / NL0_IQ3) / 8;
+                const short lx = (tiitg / NL0_IQ3) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
+            }
+        }
+
+        {
+            const short sx = tiitg % NL1_IQ3;
+            const short sy = (tiitg / NL1_IQ3) / 8;
+            const short ly = (tiitg / NL1_IQ3) % 8;
+            const short ib = 4 * sx + sy;
+            *(threadgroup half2x4 *)(sb + 64 * ib + 8 * ly) =
+                (half2x4)(*((device const float2x4 *)y_ptr));
+        }
+
+        gate_il = (gate_il + 2 < IQ3_NL) ? gate_il + 2 : gate_il % 2;
+        gate_ptr = (gate_il < 2) ? gate_ptr + 98 : gate_ptr;
+        y_ptr += NK_IQ3;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma = sa + 4 * 64 * (sgitg % 2);
+        threadgroup const half * lsmb = sb + 2 * 64 * (sgitg / 2);
+
+        FOR_UNROLL (short ik = 0; ik < NK_IQ3 / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+            FOR_UNROLL (short i = 0; i < 2; ++i) {
+                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+            FOR_UNROLL (short i = 0; i < 8; ++i) {
+                simdgroup_multiply_accumulate(
+                    gate_mc[i], mb[i / 4], ma[i % 4], gate_mc[i]);
+            }
+
+            lsma += 8 * 64;
+            lsmb += 4 * 64;
+        }
+
+        {
+            half4x4 temp_a;
+            dequantize_iq3_xxs_half(up_ptr, up_il, temp_a);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            FOR_UNROLL (short i = 0; i < 16; ++i) {
+                const short sx = 2 * il0 + i / 8;
+                const short sy = (tiitg / NL0_IQ3) / 8;
+                const short lx = (tiitg / NL0_IQ3) % 8;
+                const short ly = i % 8;
+                const short ib = 8 * sx + sy;
+                *(sa + 64 * ib + 8 * ly + lx) = temp_a[i / 4][i % 4];
+            }
+        }
+
+        up_il = (up_il + 2 < IQ3_NL) ? up_il + 2 : up_il % 2;
+        up_ptr = (up_il < 2) ? up_ptr + 98 : up_ptr;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        lsma = sa + 4 * 64 * (sgitg % 2);
+        lsmb = sb + 2 * 64 * (sgitg / 2);
+
+        FOR_UNROLL (short ik = 0; ik < NK_IQ3 / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+
+            FOR_UNROLL (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+            FOR_UNROLL (short i = 0; i < 2; ++i) {
+                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
+            }
+
+            simdgroup_barrier(mem_flags::mem_none);
+            FOR_UNROLL (short i = 0; i < 8; ++i) {
+                simdgroup_multiply_accumulate(
+                    up_mc[i], mb[i / 4], ma[i % 4], up_mc[i]);
+            }
+
+            lsma += 8 * 64;
+            lsmb += 4 * 64;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float * temp_str = ((threadgroup float *)shmem)
+                                   + 32 * (sgitg & 1)
+                                   + (16 * (sgitg >> 1)) * NR0_IQ3;
+    FOR_UNROLL (short i = 0; i < 8; ++i) {
+        simdgroup_store(gate_mc[i],
+                        temp_str + 8 * (i % 4) + 8 * NR0_IQ3 * (i / 4),
+                        NR0_IQ3, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0) {
+        threadgroup float * tile_output = (threadgroup float *)shmem;
+        for (int j = tiitg; j < nr1; j += NR1_IQ3) {
+            const int output_slot = destination_slots[tile.start + uint(j)];
+            device float * D = gate_dst + (ulong)output_slot * args.M + r0;
+            threadgroup float * C = tile_output + j * NR0_IQ3;
+            for (int i = 0; i < nr0; ++i) {
+                D[i] = C[i];
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+
+    FOR_UNROLL (short i = 0; i < 8; ++i) {
+        simdgroup_store(up_mc[i],
+                        temp_str + 8 * (i % 4) + 8 * NR0_IQ3 * (i / 4),
+                        NR0_IQ3, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sgitg == 0) {
+        threadgroup float * tile_output = (threadgroup float *)shmem;
+        for (int j = tiitg; j < nr1; j += NR1_IQ3) {
+            const int output_slot = destination_slots[tile.start + uint(j)];
+            device float * D = up_dst + (ulong)output_slot * args.M + r0;
+            threadgroup float * C = tile_output + j * NR0_IQ3;
+            for (int i = 0; i < nr0; ++i) {
+                D[i] = C[i];
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+
+    if (sgitg == 0) {
+        for (int j = tiitg; j < nr1; j += NR1_IQ3) {
+            const int output_slot = destination_slots[tile.start + uint(j)];
+            device const float * G = gate_dst + (ulong)output_slot * args.M + r0;
+            device const float * U = up_dst + (ulong)output_slot * args.M + r0;
+            device float * D = inner_dst + (ulong)output_slot * args.M + r0;
+            for (int i = 0; i < nr0; ++i) {
+                const float clamped_gate = min(G[i], args.clamp);
+                const float clamped_up = clamp(U[i], -args.clamp, args.clamp);
+                D[i] = clamped_gate / (1.0f + exp(-clamped_gate)) * clamped_up;
             }
         }
     }

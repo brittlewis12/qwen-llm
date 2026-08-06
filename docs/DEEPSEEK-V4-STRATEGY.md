@@ -2187,7 +2187,14 @@ noise without reducing technical risk. Revisit after S5.
    not split 1,036 interleaved bucket chains as a rescue: direct in-encoder
    sampling is unsupported. Keep MXFP4 down and GPU route arithmetic unchanged,
    and do not revive a monolithic FFN kernel. The bounded selector product
-   decision is now complete. Move next to the model-free two-dispatch all-IQ3
-   falsifier, not another run of the spent four-stage observer condition.
+   decision is now complete. The model-free two-dispatch all-IQ3 falsifier is
+   also complete and `KILL`: fused gate/up/SwiGLU preserves every reduced-shape
+   intermediate/final bit and production-shape final/inner bit, but stationary
+   hot GPU/wall medians regress 0.5713%/0.7625% and sparse medians regress
+   1.8763%/1.8684%. Keep its test-only kernel and sealed harness as negative
+   evidence; do not run the current asset, sweep the same accumulator geometry,
+   or reinterpret it as the spent four-stage gate. Move next to a newly
+   preregistered precision-recovering packed Q8 output design, not the killed
+   one-pass F16-staged schedule.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

@@ -342,12 +342,46 @@ and consumed packed plus continuation expert IDs change. Remove all candidate
 source; do not resweep the same condition under this device/asset contract or
 hide it behind an opt-in.
 
+The post-route decomposition now closes the remaining broad attribution gap.
+Three accepted sampled runs preserve exact outputs/state and all 47,990 dispatch
+geometries with 0.275% GPU drift, no more than 0.199% absolute perturbation,
+1.000000 six-decimal raw coverage, and at most 0.0066% aggregate transition
+ambiguity. Routed execution owns 1,015.042 ms/96.052% of the 1.055-second warm
+N=128 post-route span. The shared expert, combine, and hyper/head account for
+only 33.733/1.998/5.923 ms. Routed cohort means are 597.107 ms for the 25
+grouped IQ2 layers, 355.062 ms for the 16 per-bucket all-IQ3 layers, and
+62.874 ms for the two MXFP4-down outliers. The old 688 ms unchanged-cohort
+trace is not a transferable warm budget.
+
+This observer is a materially changed condition for the held all-IQ3 candidate:
+it isolates the exact affected stage without reordering 1,036 bucket chains.
+The single authorized promotion packet defines A as the current grouped-IQ2
+policy and B as grouped IQ2 plus the existing all-IQ3 candidate. Both use the
+same four-stage sampled encoder topology. Run one untimed `ABBA BAAB` warm block,
+then time `(ABBA BAAB) x 2`: eight samples per arm, four per arm in each half.
+For each arm/half/endpoint, the conventional even median is the mean of the two
+middle sorted samples. For each arm and endpoint, half-to-half stationarity is
+`2 * abs(median_1 - median_2) / (median_1 + median_2)` and must be at most 5%.
+
+Endpoints are complete packed wall, total post-route command GPU, and the
+16-layer affected-cohort routed GPU subtotal. In each matched half, saving is
+`1 - candidate_median / control_median` and must reach 5%, 10%, and 30%,
+respectively. Overall p95 uses nearest rank over all eight samples, so p95 is the
+maximum; candidate p95 must not exceed control p95 at any endpoint. Every timed
+sample must pass timestamp coverage/ambiguity validity; no sample may be deleted
+or replaced. Exact output/state evidence and 25/0 versus 25/16 grouped invocation
+counts are adjudicated before timing. Dispatch geometry must repeat within each
+arm but need not match across deliberately different policies. Any failed gate
+ends the one authorized attempt; no same-condition retry is permitted.
+
 Force-ranked queue:
 
-1. **Attribute unchanged packed post-route work.** The 27 layers outside the
-   all-IQ3 candidate remain at roughly 688 ms in both traced arms. Separate
-   dtype mix, expert compute, and fixed dispatch overhead before attempting
-   another grouped format or fusion. Keep the two MXFP4-down layers current.
+1. **Run the one sealed all-IQ3 promotion gate.** Reuse the existing exact
+   four-dispatch candidate and the post-route observer under the frozen balanced
+   GPU-and-wall protocol above. Do not split gate/up/SwiGLU/down first; direct
+   in-encoder samples are unsupported and encoder-boundary sampling would
+   perturb thousands of interleaved bucket stages. Keep both MXFP4-down layers
+   current.
 2. **Decide bounded selector product promotion.** Keep the qualified current
    policy hidden and off by default while its device/asset scope is explicit.
    A future default or user-facing switch needs a separately reviewed product

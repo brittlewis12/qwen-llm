@@ -1989,9 +1989,14 @@ Broader S6 work remains:
   8.912 ms/layer; exact T4/T8 regress. F16-staged Q8 matrix output clears the
   bounded 128+12 speed gate but fails position-140 and restored-continuation
   quality plus exact packed/continuation route IDs. All candidate source is
-  removed; do not resweep the same condition under this contract. Split the
-  unchanged roughly 688 ms post-route span before widening another grouped
-  format. Whole-token
+  removed; do not resweep the same condition under this contract. The bounded
+  post-route observer now assigns 1,015.042 ms/96.052% of the warm N=128 span
+  to routed execution, including 355.062 ms in the 16 all-IQ3 layers. Three
+  sampled runs preserve exact output/state and dispatch geometry with at most
+  0.199% absolute GPU perturbation. This materially changed stage-specific
+  condition authorizes one sealed all-IQ3 grouped GPU-and-wall promotion gate;
+  it does not relax the prior wall rule or promote the candidate itself.
+  Whole-token
   submission, per-layer route/selector failure records, and verified-prefix
   callbacks are promoted. An asynchronously immutable SSD-streaming ticket
   remains a separate product contract.
@@ -2148,8 +2153,14 @@ noise without reducing technical risk. Revisit after S5.
    relative RMS and both packed and restored continuation route IDs change.
    Preserve the current exact output path, remove every candidate seam, and do
    not resweep the same F16-staged condition under this device/asset contract.
-   Next attribute the unchanged roughly 688 ms post-route span. Keep MXFP4
-   down and GPU route arithmetic unchanged and do not revive a monolithic FFN
-   kernel.
+   The post-route observer now resolves the next branch: routed execution owns
+   1,015.042 ms/96.052% on average, while shared expert, combine, and hyper/head
+   total only 41.654 ms. The 16 all-IQ3 routed layers account for 355.062 ms.
+   Run exactly one preregistered all-IQ3 grouped promotion gate with identical
+   sampled topology, the existing balanced wall rules, new affected-cohort and
+   total post-route GPU thresholds, and no same-condition retry. Do not first
+   split 1,036 interleaved bucket chains; direct in-encoder sampling is
+   unsupported. Keep MXFP4 down and GPU route arithmetic unchanged and do not
+   revive a monolithic FFN kernel.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

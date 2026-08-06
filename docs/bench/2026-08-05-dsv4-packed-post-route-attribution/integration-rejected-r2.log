@@ -1,0 +1,18 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::tests::current_asset_packed_post_route_stage_attribution_packet ...
+thread 'deepseek_v4_metal::tests::current_asset_packed_post_route_stage_attribution_packet' (257849863) panicked at crates/qwen-llm/src/deepseek_v4_metal.rs:15335:9:
+post-route profiler retained fewer than two stable samples: [false, true]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::tests::current_asset_packed_post_route_stage_attribution_packet
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 667 filtered out; finished in 21.28s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`

@@ -14908,6 +14908,605 @@ mod tests {
 
     #[cfg(feature = "dsv4-diagnostics")]
     #[test]
+    #[ignore = "requires the current 97.05 GiB DS4 asset"]
+    fn current_asset_packed_post_route_stage_attribution_packet() {
+        const PREFIX_TOKENS: usize = 128;
+        const CONTINUATION_TOKEN: u32 = 35;
+        const STAGE_COUNT: usize = 4;
+        const COHORT_COUNT: usize = 3;
+        const ORDINARY_ENCODERS: u64 = (DEEPSEEK_V4_LAYER_COUNT * 2) as u64;
+        const SAMPLED_ENCODERS: u64 = (DEEPSEEK_V4_LAYER_COUNT * 5) as u64;
+
+        struct Evidence {
+            logits: Vec<f32>,
+            hidden: Vec<f32>,
+            causal_digest: [u8; 32],
+            prefix_digest: [u8; 32],
+            compatibility_digest: [u8; 32],
+            continuation_logits: Vec<f32>,
+            continuation_causal_digest: [u8; 32],
+            committed_tokens: Vec<u32>,
+            profile: prefill::PackedPostRouteStageProfile,
+            counters: crate::metal::KernelTraceCounters,
+            dispatch_count: usize,
+            dispatch_digest: [u8; 32],
+            wall_ms: f64,
+        }
+
+        #[derive(Clone, Debug)]
+        struct Summary {
+            stage_ms: [f64; STAGE_COUNT],
+            cohort_stage_ms: [[f64; STAGE_COUNT]; COHORT_COUNT],
+            cohort_command_ms: [f64; COHORT_COUNT],
+            cohort_bucket_count: [usize; COHORT_COUNT],
+            cohort_layer_count: [usize; COHORT_COUNT],
+            command_gpu_ms: f64,
+            raw_span_ms: f64,
+            gap_ms: f64,
+            overlap_ms: f64,
+            max_layer_coverage_error: f64,
+            max_layer_transition_ambiguity: f64,
+        }
+
+        fn bits(values: &[f32]) -> Vec<u32> {
+            values.iter().map(|value| value.to_bits()).collect()
+        }
+
+        fn hex(digest: impl AsRef<[u8]>) -> String {
+            digest
+                .as_ref()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect()
+        }
+
+        fn stage_index(kind: prefill::PackedPostRouteStageKind) -> usize {
+            match kind {
+                prefill::PackedPostRouteStageKind::RoutedExperts => 0,
+                prefill::PackedPostRouteStageKind::SharedExpert => 1,
+                prefill::PackedPostRouteStageKind::ExpertCombine => 2,
+                prefill::PackedPostRouteStageKind::HyperPostAndHead => 3,
+            }
+        }
+
+        fn cohort(metadata: &prefill::PackedPostRouteLayerMetadata) -> usize {
+            if metadata.grouped_iq2 {
+                assert_eq!(metadata.gate_dtype, GgmlType::IQ2_XS);
+                assert_eq!(metadata.up_dtype, GgmlType::IQ2_XS);
+                assert_eq!(metadata.down_dtype, GgmlType::IQ3_XXS);
+                0
+            } else if metadata.gate_dtype == GgmlType::IQ3_XXS
+                && metadata.up_dtype == GgmlType::IQ3_XXS
+                && metadata.down_dtype == GgmlType::IQ3_XXS
+            {
+                1
+            } else {
+                assert_eq!(metadata.down_dtype, GgmlType::MXFP4);
+                2
+            }
+        }
+
+        fn execute(
+            ctx: &MetalContext,
+            residency: DeepSeekV4MetalResidency,
+            model_content_id: DeepSeekV4ModelContentId,
+            prefix: &[u32],
+            sampled: bool,
+        ) -> (DeepSeekV4MetalResidency, Evidence) {
+            let mut session =
+                DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
+                    .expect("construct packed post-route stage-profile session");
+            crate::metal::dispatch_census_begin();
+            let trace_guard = crate::metal::kernel_trace_begin();
+            let started = std::time::Instant::now();
+            let profile = session
+                .execute_packed_tokens_with_post_route_stage_profile_for_test(
+                    ctx, prefix, true, sampled,
+                )
+                .expect("execute packed post-route stage-profile prefix");
+            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            let counters = crate::metal::kernel_trace_snapshot();
+            let census = crate::metal::dispatch_census_take();
+            drop(trace_guard);
+            let mut dispatch_hasher = Sha256::new();
+            for row in &census {
+                dispatch_hasher.update((row.family.len() as u64).to_le_bytes());
+                dispatch_hasher.update(row.family.as_bytes());
+                dispatch_hasher.update((row.kernel.len() as u64).to_le_bytes());
+                dispatch_hasher.update(row.kernel.as_bytes());
+                for extent in [
+                    row.grid_width,
+                    row.grid_height,
+                    row.grid_depth,
+                    row.threads_width,
+                    row.threads_height,
+                    row.threads_depth,
+                ] {
+                    dispatch_hasher.update(extent.to_le_bytes());
+                }
+            }
+            let dispatch_digest = dispatch_hasher.finalize().into();
+            let logits = session
+                .copy_logits_f32()
+                .expect("copy packed post-route stage-profile logits");
+            let hidden = host_read_f32(
+                session
+                    .final_normalized_hidden()
+                    .expect("packed post-route stage-profile final hidden is visible"),
+                "packed post-route stage-profile final hidden",
+            )
+            .expect("copy packed post-route stage-profile hidden");
+            let snapshot = session
+                .capture_causal_snapshot()
+                .expect("capture packed post-route stage-profile state");
+            let causal_digest = *snapshot.causal_digest();
+            let prefix_digest = *snapshot.prefix_digest();
+            let compatibility_digest = *snapshot.compatibility_digest().as_bytes();
+            session
+                .restore_causal_snapshot(&snapshot)
+                .expect("restore packed post-route stage-profile state");
+            session
+                .forward_token(ctx, CONTINUATION_TOKEN)
+                .expect("continue packed post-route stage-profile state");
+            let continuation_logits = session
+                .copy_logits_f32()
+                .expect("copy packed post-route continuation logits");
+            let continuation = session
+                .capture_causal_snapshot()
+                .expect("capture packed post-route continuation state");
+            let evidence = Evidence {
+                logits,
+                hidden,
+                causal_digest,
+                prefix_digest,
+                compatibility_digest,
+                continuation_logits,
+                continuation_causal_digest: *continuation.causal_digest(),
+                committed_tokens: session.committed_tokens().to_vec(),
+                profile,
+                counters,
+                dispatch_count: census.len(),
+                dispatch_digest,
+                wall_ms,
+            };
+            (session.into_residency(), evidence)
+        }
+
+        fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
+            assert_eq!(
+                bits(&actual.logits),
+                bits(&expected.logits),
+                "{label} logits"
+            );
+            assert_eq!(
+                bits(&actual.hidden),
+                bits(&expected.hidden),
+                "{label} hidden"
+            );
+            assert_eq!(
+                actual.causal_digest, expected.causal_digest,
+                "{label} causal"
+            );
+            assert_eq!(
+                actual.prefix_digest, expected.prefix_digest,
+                "{label} prefix"
+            );
+            assert_eq!(
+                actual.compatibility_digest, expected.compatibility_digest,
+                "{label} compatibility"
+            );
+            assert_eq!(
+                bits(&actual.continuation_logits),
+                bits(&expected.continuation_logits),
+                "{label} continuation logits"
+            );
+            assert_eq!(
+                actual.continuation_causal_digest, expected.continuation_causal_digest,
+                "{label} continuation causal"
+            );
+            assert_eq!(
+                actual.committed_tokens, expected.committed_tokens,
+                "{label} committed tokens"
+            );
+            assert_eq!(
+                actual.profile.metadata, expected.profile.metadata,
+                "{label} metadata"
+            );
+            assert_eq!(
+                actual.counters.dispatches, expected.counters.dispatches,
+                "{label} dispatch count"
+            );
+            assert_eq!(
+                actual.dispatch_count, expected.dispatch_count,
+                "{label} dispatch census count"
+            );
+            assert_eq!(
+                actual.dispatch_digest, expected.dispatch_digest,
+                "{label} dispatch order/shape digest"
+            );
+        }
+
+        fn assert_topology(evidence: &Evidence, sampled: bool) {
+            assert_eq!(evidence.profile.sampled, sampled);
+            assert_eq!(
+                evidence.profile.command_gpu_ms.len(),
+                DEEPSEEK_V4_LAYER_COUNT
+            );
+            assert_eq!(evidence.profile.metadata.len(), DEEPSEEK_V4_LAYER_COUNT);
+            assert_eq!(evidence.counters.concurrent_encoders, 0);
+            assert_eq!(
+                evidence.counters.encoders,
+                if sampled {
+                    SAMPLED_ENCODERS
+                } else {
+                    ORDINARY_ENCODERS
+                }
+            );
+            assert_eq!(
+                evidence.counters.dispatches as usize,
+                evidence.dispatch_count
+            );
+            assert_eq!(
+                evidence.profile.sampled_layers.len(),
+                if sampled { DEEPSEEK_V4_LAYER_COUNT } else { 0 }
+            );
+        }
+
+        fn summarize(profile: &prefill::PackedPostRouteStageProfile) -> Summary {
+            assert!(profile.sampled);
+            let mut stage_ms = [0.0; STAGE_COUNT];
+            let mut cohort_stage_ms = [[0.0; STAGE_COUNT]; COHORT_COUNT];
+            let mut cohort_command_ms = [0.0; COHORT_COUNT];
+            let mut cohort_bucket_count = [0usize; COHORT_COUNT];
+            let mut cohort_layer_count = [0usize; COHORT_COUNT];
+            let mut raw_span_ms = 0.0;
+            let mut gap_ms = 0.0;
+            let mut overlap_ms = 0.0;
+            let mut max_layer_coverage_error = 0.0f64;
+            let mut max_layer_transition_ambiguity = 0.0f64;
+            for (layer, (sampled_layer, metadata)) in profile
+                .sampled_layers
+                .iter()
+                .zip(&profile.metadata)
+                .enumerate()
+            {
+                assert_eq!(sampled_layer.layer, layer);
+                assert_eq!(metadata.layer, layer);
+                assert_eq!(sampled_layer.stages.len(), STAGE_COUNT);
+                assert!(
+                    (sampled_layer.command_gpu_ms - profile.command_gpu_ms[layer]).abs() < 1e-9
+                );
+                let cohort = cohort(metadata);
+                cohort_command_ms[cohort] += sampled_layer.command_gpu_ms;
+                cohort_bucket_count[cohort] += metadata.bucket_count;
+                cohort_layer_count[cohort] += 1;
+                max_layer_coverage_error = max_layer_coverage_error
+                    .max((sampled_layer.raw_coverage_assuming_ns - 1.0).abs());
+                max_layer_transition_ambiguity = max_layer_transition_ambiguity.max(
+                    (sampled_layer.encoder_gap_ms_scaled + sampled_layer.encoder_overlap_ms_scaled)
+                        / sampled_layer.command_gpu_ms,
+                );
+                let mut layer_stage_ms = 0.0;
+                for (expected_index, stage) in sampled_layer.stages.iter().enumerate() {
+                    let index = stage_index(stage.kind);
+                    assert_eq!(index, expected_index);
+                    assert!(stage.start_timestamp <= stage.end_timestamp);
+                    assert_eq!(
+                        stage.duration_ticks,
+                        stage.end_timestamp - stage.start_timestamp
+                    );
+                    stage_ms[index] += stage.duration_ms_scaled;
+                    cohort_stage_ms[cohort][index] += stage.duration_ms_scaled;
+                    layer_stage_ms += stage.duration_ms_scaled;
+                }
+                assert!(
+                    (layer_stage_ms + sampled_layer.encoder_gap_ms_scaled
+                        - sampled_layer.encoder_overlap_ms_scaled
+                        - sampled_layer.command_gpu_ms)
+                        .abs()
+                        < 1e-6
+                );
+                raw_span_ms += sampled_layer.raw_span_ms_assuming_ns;
+                gap_ms += sampled_layer.encoder_gap_ms_scaled;
+                overlap_ms += sampled_layer.encoder_overlap_ms_scaled;
+            }
+            let command_gpu_ms = profile.command_gpu_ms.iter().sum::<f64>();
+            assert!(
+                (stage_ms.iter().sum::<f64>() + gap_ms - overlap_ms - command_gpu_ms).abs() < 1e-6
+            );
+            Summary {
+                stage_ms,
+                cohort_stage_ms,
+                cohort_command_ms,
+                cohort_bucket_count,
+                cohort_layer_count,
+                command_gpu_ms,
+                raw_span_ms,
+                gap_ms,
+                overlap_ms,
+                max_layer_coverage_error,
+                max_layer_transition_ambiguity,
+            }
+        }
+
+        fn drift(values: &[f64]) -> f64 {
+            let minimum = values.iter().copied().reduce(f64::min).unwrap();
+            let maximum = values.iter().copied().reduce(f64::max).unwrap();
+            2.0 * (maximum - minimum) / (maximum + minimum)
+        }
+
+        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                )
+            });
+        assert!(model_path.exists(), "missing current DS4 model");
+        let ctx = MetalContext::new().expect("create Metal context");
+        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
+        assert!(
+            prefill::packed_grouped_expert_enabled_for_test(&ctx),
+            "post-route attribution requires the qualified grouped IQ2 default"
+        );
+        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, 129)
+            .expect("plan packed post-route stage-profile session");
+        let admitted = plan
+            .admit(ctx.memory_signals())
+            .expect("admit packed post-route stage-profile session");
+        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+            .expect("realize current DS4 residency");
+        let mut residency = realized.into_residency();
+        let prefix = (0..PREFIX_TOKENS)
+            .map(|index| [35, 201, 200, 34][index % 4])
+            .collect::<Vec<_>>();
+
+        let (next, warm_control) = execute(&ctx, residency, model_content_id, &prefix, false);
+        let (next, warm_sampled) = execute(&ctx, next, model_content_id, &prefix, true);
+        residency = next;
+        assert_exact("sampled warm-up", &warm_sampled, &warm_control);
+        assert_topology(&warm_control, false);
+        assert_topology(&warm_sampled, true);
+
+        let mut controls = Vec::with_capacity(4);
+        let mut sampled_runs = Vec::with_capacity(3);
+        for sampled in [false, true, false, true, false, true, false] {
+            let (next, evidence) = execute(&ctx, residency, model_content_id, &prefix, sampled);
+            residency = next;
+            assert_exact(
+                "timed post-route stage-profile arm",
+                &evidence,
+                &warm_control,
+            );
+            assert_topology(&evidence, sampled);
+            if sampled {
+                sampled_runs.push(evidence);
+            } else {
+                controls.push(evidence);
+            }
+        }
+        drop(residency);
+
+        let control_gpu_ms = controls
+            .iter()
+            .map(|evidence| evidence.profile.command_gpu_ms.iter().sum::<f64>())
+            .collect::<Vec<_>>();
+        let sampled_gpu_ms = sampled_runs
+            .iter()
+            .map(|evidence| evidence.profile.command_gpu_ms.iter().sum::<f64>())
+            .collect::<Vec<_>>();
+        let control_wall_ms = controls
+            .iter()
+            .map(|evidence| evidence.wall_ms)
+            .collect::<Vec<_>>();
+        let sampled_wall_ms = sampled_runs
+            .iter()
+            .map(|evidence| evidence.wall_ms)
+            .collect::<Vec<_>>();
+        let interpolated_control_gpu_ms = control_gpu_ms
+            .windows(2)
+            .map(|pair| (pair[0] + pair[1]) * 0.5)
+            .collect::<Vec<_>>();
+        let perturbation = sampled_gpu_ms
+            .iter()
+            .zip(&interpolated_control_gpu_ms)
+            .map(|(sampled, control)| sampled / control - 1.0)
+            .collect::<Vec<_>>();
+        let summaries = sampled_runs
+            .iter()
+            .map(|evidence| summarize(&evidence.profile))
+            .collect::<Vec<_>>();
+        let sample_is_valid = summaries
+            .iter()
+            .zip(&perturbation)
+            .map(|(summary, perturbation)| {
+                summary.max_layer_coverage_error <= 0.02
+                    && (summary.raw_span_ms / summary.command_gpu_ms - 1.0).abs() <= 0.005
+                    && summary.max_layer_transition_ambiguity <= 0.10
+                    && (summary.gap_ms + summary.overlap_ms) / summary.command_gpu_ms <= 0.025
+                    && perturbation.abs() <= 0.10
+            })
+            .collect::<Vec<_>>();
+        let accepted_indices = sample_is_valid
+            .iter()
+            .enumerate()
+            .filter_map(|(index, accepted)| accepted.then_some(index))
+            .collect::<Vec<_>>();
+        assert!(
+            accepted_indices.len() >= 2 && accepted_indices.len() + 1 >= summaries.len(),
+            "post-route profiler retained fewer than two stable samples: {sample_is_valid:?}"
+        );
+        let accepted_gpu_ms = accepted_indices
+            .iter()
+            .map(|&index| sampled_gpu_ms[index])
+            .collect::<Vec<_>>();
+        let stage_shares = summaries
+            .iter()
+            .map(|summary| {
+                std::array::from_fn::<_, STAGE_COUNT, _>(|stage| {
+                    summary.stage_ms[stage] / summary.command_gpu_ms
+                })
+            })
+            .collect::<Vec<_>>();
+        let stage_repeat_delta: [f64; STAGE_COUNT] = std::array::from_fn(|stage| {
+            let values = accepted_indices
+                .iter()
+                .map(|&index| stage_shares[index][stage]);
+            let minimum = values.clone().reduce(f64::min).unwrap();
+            let maximum = values.reduce(f64::max).unwrap();
+            maximum - minimum
+        });
+        let cohort_stage_shares = summaries
+            .iter()
+            .map(|summary| {
+                std::array::from_fn(|cohort| {
+                    std::array::from_fn(|stage| {
+                        summary.cohort_stage_ms[cohort][stage] / summary.cohort_command_ms[cohort]
+                    })
+                })
+            })
+            .collect::<Vec<[[f64; STAGE_COUNT]; COHORT_COUNT]>>();
+        let cohort_stage_repeat_delta: [[f64; STAGE_COUNT]; COHORT_COUNT] =
+            std::array::from_fn(|cohort| {
+                std::array::from_fn(|stage| {
+                    let values = accepted_indices
+                        .iter()
+                        .map(|&index| cohort_stage_shares[index][cohort][stage]);
+                    let minimum = values.clone().reduce(f64::min).unwrap();
+                    let maximum = values.reduce(f64::max).unwrap();
+                    maximum - minimum
+                })
+            });
+        let transition_uncertainty = accepted_indices
+            .iter()
+            .map(|&index| {
+                let summary = &summaries[index];
+                (summary.gap_ms + summary.overlap_ms) / summary.command_gpu_ms
+            })
+            .reduce(f64::max)
+            .unwrap();
+        let coverage_uncertainty = accepted_indices
+            .iter()
+            .map(|&index| {
+                let summary = &summaries[index];
+                (summary.raw_span_ms / summary.command_gpu_ms - 1.0).abs()
+            })
+            .reduce(f64::max)
+            .unwrap();
+
+        eprintln!(
+            "deepseek_v4 packed_post_route_stage_profile n={PREFIX_TOKENS} control_gpu_ms={control_gpu_ms:?} interpolated_control_gpu_ms={interpolated_control_gpu_ms:?} sampled_gpu_ms={sampled_gpu_ms:?} accepted_sample_indices={accepted_indices:?} accepted_gpu_ms={accepted_gpu_ms:?} sample_is_valid={sample_is_valid:?} control_wall_ms={control_wall_ms:?} sampled_wall_ms={sampled_wall_ms:?} control_drift={:.6} accepted_sampled_drift={:.6} sampled_perturbation={perturbation:?} stage_shares={stage_shares:?} stage_repeat_delta={stage_repeat_delta:?} cohort_stage_shares={cohort_stage_shares:?} cohort_stage_repeat_delta={cohort_stage_repeat_delta:?} transition_uncertainty={transition_uncertainty:.6} coverage_uncertainty={coverage_uncertainty:.6} dispatches={} ordinary_encoders={ORDINARY_ENCODERS} sampled_encoders={SAMPLED_ENCODERS} dispatch_sha256={} model_content_id={} logits_sha256={} hidden_sha256={} causal_digest={} prefix_digest={} compatibility_digest={} continuation_logits_sha256={} continuation_causal_digest={} committed_tokens_sha256={}",
+            drift(&control_gpu_ms),
+            drift(&accepted_gpu_ms),
+            warm_control.dispatch_count,
+            hex(warm_control.dispatch_digest),
+            hex(model_content_id.as_bytes()),
+            hex(Sha256::digest(bytemuck::cast_slice(&warm_control.logits))),
+            hex(Sha256::digest(bytemuck::cast_slice(&warm_control.hidden))),
+            hex(warm_control.causal_digest),
+            hex(warm_control.prefix_digest),
+            hex(warm_control.compatibility_digest),
+            hex(Sha256::digest(bytemuck::cast_slice(
+                &warm_control.continuation_logits,
+            ))),
+            hex(warm_control.continuation_causal_digest),
+            hex(Sha256::digest(bytemuck::cast_slice(
+                &warm_control.committed_tokens,
+            ))),
+        );
+        for (index, summary) in summaries.iter().enumerate() {
+            eprintln!(
+                "deepseek_v4 packed_post_route_stage_profile_sample index={index} accepted={} perturbation={:.6} command_gpu_ms={:.3} raw_span_ms={:.3} raw_coverage={:.6} gap_ms={:.3} overlap_ms={:.3} transition_ambiguity={:.6} max_layer_coverage_error={:.6} max_layer_transition_ambiguity={:.6} stage_ms={:?} cohort_stage_ms={:?} cohort_command_ms={:?} cohort_bucket_count={:?} cohort_layer_count={:?}",
+                sample_is_valid[index],
+                perturbation[index],
+                summary.command_gpu_ms,
+                summary.raw_span_ms,
+                summary.raw_span_ms / summary.command_gpu_ms,
+                summary.gap_ms,
+                summary.overlap_ms,
+                (summary.gap_ms + summary.overlap_ms) / summary.command_gpu_ms,
+                summary.max_layer_coverage_error,
+                summary.max_layer_transition_ambiguity,
+                summary.stage_ms,
+                summary.cohort_stage_ms,
+                summary.cohort_command_ms,
+                summary.cohort_bucket_count,
+                summary.cohort_layer_count,
+            );
+            for (layer, metadata) in sampled_runs[index].profile.metadata.iter().enumerate() {
+                let sampled_layer = &sampled_runs[index].profile.sampled_layers[layer];
+                let stage_ms: [f64; STAGE_COUNT] =
+                    std::array::from_fn(|stage| sampled_layer.stages[stage].duration_ms_scaled);
+                eprintln!(
+                    "deepseek_v4 packed_post_route_stage_profile_layer sample={index} layer={layer} cohort={} gate={:?} up={:?} down={:?} grouped_iq2={} buckets={} command_gpu_ms={:.6} raw_coverage={:.9} gap_ms={:.6} overlap_ms={:.6} stage_ms={stage_ms:?}",
+                    cohort(metadata),
+                    metadata.gate_dtype,
+                    metadata.up_dtype,
+                    metadata.down_dtype,
+                    metadata.grouped_iq2,
+                    metadata.bucket_count,
+                    sampled_layer.command_gpu_ms,
+                    sampled_layer.raw_coverage_assuming_ns,
+                    sampled_layer.encoder_gap_ms_scaled,
+                    sampled_layer.encoder_overlap_ms_scaled,
+                );
+            }
+        }
+
+        assert!(
+            summaries
+                .iter()
+                .all(|summary| summary.cohort_layer_count == [25, 16, 2])
+        );
+        assert!(
+            drift(&control_gpu_ms) <= 0.05,
+            "control GPU drift exceeded 5%"
+        );
+        assert!(
+            drift(&accepted_gpu_ms) <= 0.05,
+            "accepted sampled GPU drift exceeded 5%"
+        );
+        assert!(
+            accepted_indices
+                .iter()
+                .all(|&index| perturbation[index].abs() <= 0.10),
+            "accepted sampled GPU perturbation exceeded 10%: {perturbation:?}"
+        );
+        assert!(
+            accepted_indices
+                .iter()
+                .all(|&index| summaries[index].max_layer_coverage_error <= 0.02),
+            "per-layer raw timestamp coverage exceeded 2%"
+        );
+        assert!(
+            coverage_uncertainty <= 0.005,
+            "aggregate raw timestamp coverage exceeded 0.5%"
+        );
+        assert!(
+            accepted_indices
+                .iter()
+                .all(|&index| summaries[index].max_layer_transition_ambiguity <= 0.10),
+            "per-layer combined transition ambiguity exceeded 10%"
+        );
+        assert!(
+            transition_uncertainty <= 0.025,
+            "aggregate transition ambiguity exceeded 2.5%"
+        );
+        assert!(
+            stage_repeat_delta.iter().all(|delta| *delta <= 0.02),
+            "post-route stage share changed by more than two points"
+        );
+        assert!(
+            cohort_stage_repeat_delta
+                .iter()
+                .flatten()
+                .all(|delta| *delta <= 0.03),
+            "post-route cohort stage share changed by more than three points"
+        );
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
     fn fp4_score_plans_are_exhaustive_and_dispatch_ledgers_fail_closed() {
         let cases = [
             (

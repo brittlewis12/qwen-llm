@@ -3368,6 +3368,468 @@ impl std::ops::Deref for PackedPrefillLayerEncoder<'_, '_> {
     }
 }
 
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PackedPostRouteStageKind {
+    RoutedExperts,
+    SharedExpert,
+    ExpertCombine,
+    HyperPostAndHead,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+pub(super) const PACKED_POST_ROUTE_STAGE_KINDS: [PackedPostRouteStageKind; 4] = [
+    PackedPostRouteStageKind::RoutedExperts,
+    PackedPostRouteStageKind::SharedExpert,
+    PackedPostRouteStageKind::ExpertCombine,
+    PackedPostRouteStageKind::HyperPostAndHead,
+];
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PackedPostRouteLayerMetadata {
+    pub(super) layer: usize,
+    pub(super) gate_dtype: GgmlType,
+    pub(super) up_dtype: GgmlType,
+    pub(super) down_dtype: GgmlType,
+    pub(super) bucket_count: usize,
+    pub(super) grouped_iq2: bool,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Debug)]
+pub(super) struct PackedPostRouteStageTiming {
+    pub(super) kind: PackedPostRouteStageKind,
+    pub(super) start_timestamp: u64,
+    pub(super) end_timestamp: u64,
+    pub(super) duration_ticks: u64,
+    pub(super) duration_ms_scaled: f64,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Debug)]
+pub(super) struct PackedPostRouteSampledLayerProfile {
+    pub(super) layer: usize,
+    pub(super) command_gpu_ms: f64,
+    pub(super) sampled_span_ticks: u64,
+    pub(super) raw_span_ms_assuming_ns: f64,
+    pub(super) raw_coverage_assuming_ns: f64,
+    pub(super) encoder_gap_ms_scaled: f64,
+    pub(super) encoder_overlap_ms_scaled: f64,
+    pub(super) stages: Vec<PackedPostRouteStageTiming>,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Debug)]
+pub(super) struct PackedPostRouteStageProfile {
+    pub(super) sampled: bool,
+    pub(super) command_gpu_ms: Vec<f64>,
+    pub(super) metadata: Vec<PackedPostRouteLayerMetadata>,
+    pub(super) sampled_layers: Vec<PackedPostRouteSampledLayerProfile>,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[derive(Clone, Copy, Debug)]
+struct PackedPostRoutePendingStageSample {
+    layer: usize,
+    kind: PackedPostRouteStageKind,
+    start_sample: usize,
+    end_sample: usize,
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+fn resolve_packed_post_route_layer_stage_samples(
+    layer: usize,
+    records: &[PackedPostRoutePendingStageSample],
+    timestamps: &[u64],
+    command_gpu_ms: f64,
+) -> Result<PackedPostRouteSampledLayerProfile, DeepSeekV4MetalError> {
+    if records.len() != PACKED_POST_ROUTE_STAGE_KINDS.len() {
+        return invalid(format!(
+            "packed post-route sampled layer {layer} produced {} stages, expected {}",
+            records.len(),
+            PACKED_POST_ROUTE_STAGE_KINDS.len()
+        ));
+    }
+    if !command_gpu_ms.is_finite() || command_gpu_ms <= 0.0 {
+        return invalid(format!(
+            "packed post-route sampled layer {layer} has invalid command GPU duration {command_gpu_ms}"
+        ));
+    }
+    for (record, expected) in records.iter().zip(PACKED_POST_ROUTE_STAGE_KINDS) {
+        if record.layer != layer || record.kind != expected {
+            return invalid(format!(
+                "packed post-route sampled layer {layer} recorded {:?} for layer {}, expected {expected:?}",
+                record.kind, record.layer
+            ));
+        }
+        if record.start_sample >= timestamps.len() || record.end_sample >= timestamps.len() {
+            return invalid(format!(
+                "packed post-route sampled layer {layer} stage {:?} indexes samples {}..{} from {} timestamps",
+                record.kind,
+                record.start_sample,
+                record.end_sample,
+                timestamps.len()
+            ));
+        }
+    }
+
+    let first_timestamp = timestamps[records[0].start_sample];
+    let last_timestamp = timestamps[records[records.len() - 1].end_sample];
+    let sampled_span_ticks = last_timestamp.checked_sub(first_timestamp).ok_or_else(|| {
+        DeepSeekV4MetalError::Invalid(format!(
+            "packed post-route sampled layer {layer} returned non-monotonic span timestamps"
+        ))
+    })?;
+    if sampled_span_ticks == 0 {
+        return invalid(format!(
+            "packed post-route sampled layer {layer} returned a zero timestamp span"
+        ));
+    }
+
+    let scale_ms_per_tick = command_gpu_ms / sampled_span_ticks as f64;
+    let mut stage_ticks = 0u64;
+    let mut gap_ticks = 0u64;
+    let mut overlap_ticks = 0u64;
+    let mut previous_start = None;
+    let mut previous_end = None;
+    let mut stages = Vec::with_capacity(records.len());
+    for record in records {
+        let start_timestamp = timestamps[record.start_sample];
+        let end_timestamp = timestamps[record.end_sample];
+        let duration_ticks = end_timestamp.checked_sub(start_timestamp).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "packed post-route sampled layer {layer} stage {:?} returned inverted timestamps",
+                record.kind
+            ))
+        })?;
+        if previous_start.is_some_and(|previous| start_timestamp < previous)
+            || previous_end.is_some_and(|previous| end_timestamp < previous)
+        {
+            return invalid(format!(
+                "packed post-route sampled layer {layer} stage {:?} reverses physical start/end order",
+                record.kind
+            ));
+        }
+        if let Some(previous_end) = previous_end {
+            if start_timestamp >= previous_end {
+                gap_ticks = gap_ticks
+                    .checked_add(start_timestamp - previous_end)
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(
+                            "packed post-route encoder-gap tick total overflow".into(),
+                        )
+                    })?;
+            } else {
+                overlap_ticks = overlap_ticks
+                    .checked_add(previous_end - start_timestamp)
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(
+                            "packed post-route encoder-overlap tick total overflow".into(),
+                        )
+                    })?;
+            }
+        }
+        previous_start = Some(start_timestamp);
+        previous_end = Some(end_timestamp);
+        stage_ticks = stage_ticks.checked_add(duration_ticks).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "packed post-route sampled stage tick total overflow".into(),
+            )
+        })?;
+        stages.push(PackedPostRouteStageTiming {
+            kind: record.kind,
+            start_timestamp,
+            end_timestamp,
+            duration_ticks,
+            duration_ms_scaled: duration_ticks as f64 * scale_ms_per_tick,
+        });
+    }
+    let accounted_ticks = stage_ticks as i128 + gap_ticks as i128 - overlap_ticks as i128;
+    if accounted_ticks != sampled_span_ticks as i128 {
+        return invalid(format!(
+            "packed post-route sampled layer {layer} stage/gap/overlap ticks {accounted_ticks} do not close span {sampled_span_ticks}"
+        ));
+    }
+    let raw_span_ms_assuming_ns = sampled_span_ticks as f64 * 1e-6;
+    Ok(PackedPostRouteSampledLayerProfile {
+        layer,
+        command_gpu_ms,
+        sampled_span_ticks,
+        raw_span_ms_assuming_ns,
+        raw_coverage_assuming_ns: raw_span_ms_assuming_ns / command_gpu_ms,
+        encoder_gap_ms_scaled: gap_ticks as f64 * scale_ms_per_tick,
+        encoder_overlap_ms_scaled: overlap_ticks as f64 * scale_ms_per_tick,
+        stages,
+    })
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+struct PackedPostRouteStageRecorder {
+    sampled: bool,
+    samples: Option<MetalTimestampSampleBuffer>,
+    next_sample: usize,
+    records: Vec<PackedPostRoutePendingStageSample>,
+    command_gpu_ms: [Option<f64>; DEEPSEEK_V4_LAYER_COUNT],
+    metadata: [Option<PackedPostRouteLayerMetadata>; DEEPSEEK_V4_LAYER_COUNT],
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+impl PackedPostRouteStageRecorder {
+    fn new(ctx: &MetalContext, sampled: bool) -> Result<Self, DeepSeekV4MetalError> {
+        let record_count = DEEPSEEK_V4_LAYER_COUNT
+            .checked_mul(PACKED_POST_ROUTE_STAGE_KINDS.len())
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed post-route timestamp record count overflow".into(),
+                )
+            })?;
+        let sample_count = record_count.checked_mul(2).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "packed post-route timestamp sample count overflow".into(),
+            )
+        })?;
+        Ok(Self {
+            sampled,
+            samples: if sampled {
+                Some(ctx.timestamp_sample_buffer(sample_count)?)
+            } else {
+                None
+            },
+            next_sample: 0,
+            records: Vec::with_capacity(if sampled { record_count } else { 0 }),
+            command_gpu_ms: [None; DEEPSEEK_V4_LAYER_COUNT],
+            metadata: [None; DEEPSEEK_V4_LAYER_COUNT],
+        })
+    }
+
+    fn begin_encoder(
+        &mut self,
+        command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        layer: usize,
+        kind: PackedPostRouteStageKind,
+    ) -> Result<KernelEncoder, DeepSeekV4MetalError> {
+        if !self.sampled || layer >= DEEPSEEK_V4_LAYER_COUNT {
+            return invalid("packed post-route stage recorder received an invalid sampled layer");
+        }
+        let start_sample = self.next_sample;
+        let end_sample = start_sample.checked_add(1).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("packed post-route sample index overflow".into())
+        })?;
+        let samples = self.samples.as_ref().ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("packed post-route timestamp buffer is absent".into())
+        })?;
+        if end_sample >= samples.sample_count() {
+            return invalid(format!(
+                "packed post-route timestamp buffer exhausted at sample {end_sample}"
+            ));
+        }
+        self.next_sample = end_sample + 1;
+        self.records.push(PackedPostRoutePendingStageSample {
+            layer,
+            kind,
+            start_sample,
+            end_sample,
+        });
+        Ok(KernelEncoder::try_begin_sampled(
+            command,
+            samples,
+            start_sample,
+            end_sample,
+            false,
+        )?)
+    }
+
+    fn record_layer(
+        &mut self,
+        metadata: PackedPostRouteLayerMetadata,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if metadata.layer >= DEEPSEEK_V4_LAYER_COUNT
+            || self.metadata[metadata.layer].replace(metadata).is_some()
+        {
+            return invalid(format!(
+                "packed post-route layer {} has invalid or duplicate metadata",
+                metadata.layer
+            ));
+        }
+        Ok(())
+    }
+
+    fn record_command_gpu_seconds(
+        &mut self,
+        layer: usize,
+        command_gpu_seconds: f64,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if layer >= DEEPSEEK_V4_LAYER_COUNT
+            || !command_gpu_seconds.is_finite()
+            || command_gpu_seconds <= 0.0
+            || self.command_gpu_ms[layer].is_some()
+        {
+            return invalid(format!(
+                "packed post-route layer {layer} has invalid or duplicate GPU duration {command_gpu_seconds}"
+            ));
+        }
+        self.command_gpu_ms[layer] = Some(command_gpu_seconds * 1e3);
+        Ok(())
+    }
+
+    fn resolve(
+        self,
+        ctx: &MetalContext,
+    ) -> Result<PackedPostRouteStageProfile, DeepSeekV4MetalError> {
+        let command_gpu_ms = self
+            .command_gpu_ms
+            .into_iter()
+            .enumerate()
+            .map(|(layer, duration)| {
+                duration.ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "packed post-route layer {layer} has no GPU duration"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let metadata = self
+            .metadata
+            .into_iter()
+            .enumerate()
+            .map(|(layer, metadata)| {
+                metadata.ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "packed post-route layer {layer} has no metadata"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !self.sampled {
+            if self.samples.is_some() || self.next_sample != 0 || !self.records.is_empty() {
+                return invalid("ordinary packed post-route profile retained sampled state");
+            }
+            return Ok(PackedPostRouteStageProfile {
+                sampled: false,
+                command_gpu_ms,
+                metadata,
+                sampled_layers: Vec::new(),
+            });
+        }
+        let expected_records = DEEPSEEK_V4_LAYER_COUNT * PACKED_POST_ROUTE_STAGE_KINDS.len();
+        let expected_samples = expected_records * 2;
+        if self.records.len() != expected_records || self.next_sample != expected_samples {
+            return invalid(format!(
+                "packed post-route stage recorder produced {} records/{} samples, expected {expected_records}/{expected_samples}",
+                self.records.len(),
+                self.next_sample
+            ));
+        }
+        let samples = self.samples.as_ref().ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("packed post-route timestamp buffer is absent".into())
+        })?;
+        let timestamps = ctx.resolve_timestamp_samples(samples, self.next_sample)?;
+        let mut sampled_layers = Vec::with_capacity(DEEPSEEK_V4_LAYER_COUNT);
+        for (layer, &duration) in command_gpu_ms.iter().enumerate() {
+            let records = &self.records[layer * PACKED_POST_ROUTE_STAGE_KINDS.len()
+                ..(layer + 1) * PACKED_POST_ROUTE_STAGE_KINDS.len()];
+            sampled_layers.push(resolve_packed_post_route_layer_stage_samples(
+                layer,
+                records,
+                &timestamps,
+                duration,
+            )?);
+        }
+        Ok(PackedPostRouteStageProfile {
+            sampled: true,
+            command_gpu_ms,
+            metadata,
+            sampled_layers,
+        })
+    }
+}
+
+struct PackedPostRouteLayerEncoder<'a> {
+    _command: &'a Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    layer: usize,
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    sampled: bool,
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    recorder: Option<&'a mut PackedPostRouteStageRecorder>,
+    encoder: Option<KernelEncoder>,
+}
+
+impl<'a> PackedPostRouteLayerEncoder<'a> {
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    fn begin(
+        command: &'a Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        layer: usize,
+        mut recorder: Option<&'a mut PackedPostRouteStageRecorder>,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        let sampled = recorder.as_deref().is_some_and(|recorder| recorder.sampled);
+        let encoder = if sampled {
+            recorder.as_deref_mut().unwrap().begin_encoder(
+                command,
+                layer,
+                PackedPostRouteStageKind::RoutedExperts,
+            )?
+        } else {
+            KernelEncoder::begin(command)
+        };
+        Ok(Self {
+            _command: command,
+            layer,
+            sampled,
+            recorder,
+            encoder: Some(encoder),
+        })
+    }
+
+    #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
+    fn begin(
+        command: &'a Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        Ok(Self {
+            _command: command,
+            encoder: Some(KernelEncoder::begin(command)),
+        })
+    }
+
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    fn boundary(&mut self, next: PackedPostRouteStageKind) -> Result<(), DeepSeekV4MetalError> {
+        if !self.sampled {
+            return Ok(());
+        }
+        if let Some(encoder) = self.encoder.take() {
+            encoder.end();
+        }
+        self.encoder = Some(
+            self.recorder
+                .as_deref_mut()
+                .ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(
+                        "sampled packed post-route encoder lost its recorder".into(),
+                    )
+                })?
+                .begin_encoder(self._command, self.layer, next)?,
+        );
+        Ok(())
+    }
+
+    fn end(mut self) {
+        if let Some(encoder) = self.encoder.take() {
+            encoder.end();
+        }
+    }
+}
+
+impl std::ops::Deref for PackedPostRouteLayerEncoder<'_> {
+    type Target = KernelEncoder;
+
+    fn deref(&self) -> &Self::Target {
+        self.encoder
+            .as_ref()
+            .expect("packed post-route layer encoder ended before stage completion")
+    }
+}
+
 #[derive(Clone, Copy)]
 enum PackedRouteSource<'a> {
     Hash,
@@ -4036,7 +4498,7 @@ impl PrefillMoeScratch {
     fn encode_experts(
         &self,
         ctx: &MetalContext,
-        enc: &KernelEncoder,
+        enc: &mut PackedPostRouteLayerEncoder<'_>,
         normalized_input: &MetalTensor,
         schedule: &[ExpertBucket],
         gate_bank: &MetalTensor,
@@ -4416,6 +4878,9 @@ impl PrefillMoeScratch {
             }
         }
 
+        #[cfg(all(test, feature = "dsv4-diagnostics"))]
+        enc.boundary(PackedPostRouteStageKind::SharedExpert)?;
+
         let gate = f32_prefix(
             &self.gate,
             vec![MOE_FFN_SIZE as u64, n_tokens as u64],
@@ -4478,6 +4943,9 @@ impl PrefillMoeScratch {
             n_tokens,
             "packed shared down",
         )?;
+
+        #[cfg(all(test, feature = "dsv4-diagnostics"))]
+        enc.boundary(PackedPostRouteStageKind::ExpertCombine)?;
         let weights = f32_prefix(
             &self.weights,
             vec![MOE_TOP_K as u64, n_tokens as u64],
@@ -4504,6 +4972,9 @@ impl PrefillMoeScratch {
             n_tokens,
         )?;
         crate::metal::encode_add_f32(ctx, enc, &routed_output, &shared_output, &final_output)?;
+
+        #[cfg(all(test, feature = "dsv4-diagnostics"))]
+        enc.boundary(PackedPostRouteStageKind::HyperPostAndHead)?;
         Ok(final_output)
     }
 }
@@ -4889,6 +5360,7 @@ impl DeepSeekV4Session {
             route_policy,
             PackedExpertPolicy::Current,
             None,
+            None,
             &mut |_| {},
         )
     }
@@ -4917,6 +5389,7 @@ impl DeepSeekV4Session {
             PackedRoutePolicy::Cpu,
             expert_policy,
             None,
+            None,
             &mut |_| {},
         )
     }
@@ -4936,6 +5409,29 @@ impl DeepSeekV4Session {
             emit_logits,
             PackedRoutePolicy::Cpu,
             PackedExpertPolicy::GroupedIq2XsIq3Xxs,
+            Some(&mut recorder),
+            None,
+            &mut |_| {},
+        )?;
+        recorder.resolve(ctx)
+    }
+
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    pub(super) fn execute_packed_tokens_with_post_route_stage_profile_for_test(
+        &mut self,
+        ctx: &MetalContext,
+        token_ids: &[u32],
+        emit_logits: bool,
+        sampled: bool,
+    ) -> Result<PackedPostRouteStageProfile, DeepSeekV4MetalError> {
+        let mut recorder = PackedPostRouteStageRecorder::new(ctx, sampled)?;
+        self.execute_packed_tokens_with_progress_policy(
+            ctx,
+            token_ids,
+            emit_logits,
+            PackedRoutePolicy::Cpu,
+            PackedExpertPolicy::GroupedIq2XsIq3Xxs,
+            None,
             Some(&mut recorder),
             &mut |_| {},
         )?;
@@ -4973,6 +5469,8 @@ impl DeepSeekV4Session {
             expert_policy,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
             None,
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            None,
             layer_completed,
         )
     }
@@ -4986,6 +5484,9 @@ impl DeepSeekV4Session {
         expert_policy: PackedExpertPolicy,
         #[cfg(all(test, feature = "dsv4-diagnostics"))] stage_recorder: Option<
             &mut PackedPrefillStageRecorder,
+        >,
+        #[cfg(all(test, feature = "dsv4-diagnostics"))] post_route_stage_recorder: Option<
+            &mut PackedPostRouteStageRecorder,
         >,
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
@@ -5056,6 +5557,8 @@ impl DeepSeekV4Session {
             expert_policy,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
             stage_recorder,
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            post_route_stage_recorder,
             layer_completed,
         );
         match result {
@@ -5080,6 +5583,9 @@ impl DeepSeekV4Session {
         expert_policy: PackedExpertPolicy,
         #[cfg(all(test, feature = "dsv4-diagnostics"))] mut stage_recorder: Option<
             &mut PackedPrefillStageRecorder,
+        >,
+        #[cfg(all(test, feature = "dsv4-diagnostics"))] mut post_route_stage_recorder: Option<
+            &mut PackedPostRouteStageRecorder,
         >,
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
@@ -5711,24 +6217,53 @@ impl DeepSeekV4Session {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
 
             let post_route_started = trace_layers.then(std::time::Instant::now);
+            let routed_gate = self.layer_tensor(layer, "ffn_gate_exps.weight")?;
+            let routed_up = self.layer_tensor(layer, "ffn_up_exps.weight")?;
+            let routed_down = self.layer_tensor(layer, "ffn_down_exps.weight")?;
+            let shared_gate = self.layer_tensor(layer, "ffn_gate_shexp.weight")?;
+            let shared_up = self.layer_tensor(layer, "ffn_up_shexp.weight")?;
+            let shared_down = self.layer_tensor(layer, "ffn_down_shexp.weight")?;
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            if let Some(recorder) = post_route_stage_recorder.as_deref_mut() {
+                recorder.record_layer(PackedPostRouteLayerMetadata {
+                    layer,
+                    gate_dtype: routed_gate.dtype,
+                    up_dtype: routed_up.dtype,
+                    down_dtype: routed_down.dtype,
+                    bucket_count: schedule.len(),
+                    grouped_iq2: expert_policy.uses_iq2_target()
+                        && routed_gate.dtype == GgmlType::IQ2_XS
+                        && routed_up.dtype == GgmlType::IQ2_XS
+                        && routed_down.dtype == GgmlType::IQ3_XXS
+                        && packed_grouped_expert_kernels_supported(ctx),
+                })?;
+            }
+
             let command = ctx.queue.commandBuffer().ok_or_else(|| {
                 DeepSeekV4MetalError::Invalid(format!(
                     "failed to allocate packed layer {layer} expert command buffer"
                 ))
             })?;
-            let encoder = KernelEncoder::begin(&command);
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            let mut encoder = PackedPostRouteLayerEncoder::begin(
+                &command,
+                layer,
+                post_route_stage_recorder.as_deref_mut(),
+            )?;
+            #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
+            let mut encoder = PackedPostRouteLayerEncoder::begin(&command)?;
             let expert_result = (|| {
                 let moe_output = self.prefill.moe.encode_experts(
                     ctx,
-                    &encoder,
+                    &mut encoder,
                     &moe_views.normalized_input,
                     &schedule,
-                    self.layer_tensor(layer, "ffn_gate_exps.weight")?,
-                    self.layer_tensor(layer, "ffn_up_exps.weight")?,
-                    self.layer_tensor(layer, "ffn_down_exps.weight")?,
-                    self.layer_tensor(layer, "ffn_gate_shexp.weight")?,
-                    self.layer_tensor(layer, "ffn_up_shexp.weight")?,
-                    self.layer_tensor(layer, "ffn_down_shexp.weight")?,
+                    routed_gate,
+                    routed_up,
+                    routed_down,
+                    shared_gate,
+                    shared_up,
+                    shared_down,
                     expert_policy,
                     self.residency.config().swiglu_clamp_experts[layer],
                     self.residency.config().swiglu_clamp_shared[layer],
@@ -5796,17 +6331,38 @@ impl DeepSeekV4Session {
             let post_route_wait_seconds = post_route_wait_started
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
-            let post_route_gpu_seconds = if trace_layers {
-                command.GPUEndTime() - command.GPUStartTime()
-            } else {
-                0.0
-            };
-            let post_route_wait_residual_seconds = post_route_wait_seconds - post_route_gpu_seconds;
             if let Some(error) = command.error() {
                 return invalid(format!(
                     "packed layer {layer} expert command failed: {error:?}"
                 ));
             }
+            let measure_post_route_gpu = trace_layers;
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            let measure_post_route_gpu =
+                measure_post_route_gpu || post_route_stage_recorder.is_some();
+            let measured_post_route_gpu_seconds =
+                measure_post_route_gpu.then(|| command.GPUEndTime() - command.GPUStartTime());
+            let post_route_gpu_seconds = if trace_layers {
+                measured_post_route_gpu_seconds.ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(
+                        "packed post-route trace omitted command GPU duration".into(),
+                    )
+                })?
+            } else {
+                0.0
+            };
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            if let Some(recorder) = post_route_stage_recorder.as_deref_mut() {
+                recorder.record_command_gpu_seconds(
+                    layer,
+                    measured_post_route_gpu_seconds.ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(
+                            "packed post-route profile omitted command GPU duration".into(),
+                        )
+                    })?,
+                )?;
+            }
+            let post_route_wait_residual_seconds = post_route_wait_seconds - post_route_gpu_seconds;
             let post_route_seconds = post_route_started
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
@@ -5987,6 +6543,59 @@ mod tests {
             .sum::<f64>();
         assert!(
             (stage_ms + profile.encoder_gap_ms_scaled - profile.encoder_overlap_ms_scaled - 2.0)
+                .abs()
+                < 1e-12
+        );
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn packed_post_route_stage_resolver_closes_signed_overlaps() {
+        let mut records = Vec::new();
+        let mut timestamps = Vec::new();
+        let mut cursor = 100u64;
+        for (index, kind) in PACKED_POST_ROUTE_STAGE_KINDS.into_iter().enumerate() {
+            let start_sample = timestamps.len();
+            let start_timestamp = if index == 2 { cursor - 4 } else { cursor };
+            timestamps.push(start_timestamp);
+            cursor = start_timestamp + 20 + index as u64;
+            let end_sample = timestamps.len();
+            timestamps.push(cursor);
+            records.push(PackedPostRoutePendingStageSample {
+                layer: 0,
+                kind,
+                start_sample,
+                end_sample,
+            });
+            cursor += 3;
+        }
+        let profile =
+            resolve_packed_post_route_layer_stage_samples(0, &records, &timestamps, 2.0).unwrap();
+        assert_eq!(profile.layer, 0);
+        assert_eq!(profile.command_gpu_ms, 2.0);
+        assert_eq!(profile.stages.len(), PACKED_POST_ROUTE_STAGE_KINDS.len());
+        assert!(profile.sampled_span_ticks > 0);
+        assert!(profile.raw_span_ms_assuming_ns > 0.0);
+        assert!(profile.raw_coverage_assuming_ns > 0.0);
+        assert!(profile.encoder_gap_ms_scaled > 0.0);
+        assert!(profile.encoder_overlap_ms_scaled > 0.0);
+        let stage_ms = profile
+            .stages
+            .iter()
+            .zip(PACKED_POST_ROUTE_STAGE_KINDS)
+            .map(|(stage, expected)| {
+                assert_eq!(stage.kind, expected);
+                assert_eq!(
+                    stage.duration_ticks,
+                    stage.end_timestamp - stage.start_timestamp
+                );
+                stage.duration_ms_scaled
+            })
+            .sum::<f64>();
+        assert!(
+            (stage_ms + profile.encoder_gap_ms_scaled
+                - profile.encoder_overlap_ms_scaled
+                - profile.command_gpu_ms)
                 .abs()
                 < 1e-12
         );

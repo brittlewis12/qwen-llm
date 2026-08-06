@@ -1,0 +1,5 @@
+device	Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+sampling	stage=true	dispatch=false	blit=false
+counter_sets	1
+set	timestamp	counters=1	sample_buffer=ok
+counter	timestamp	GPUTimestamp

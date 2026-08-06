@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-05 - DeepSeek V4 Packed Post-Route Attribution GO
+
+Status: the diagnostics-only observer and bounded current-asset attribution are
+`GO`; ordinary execution and expert policy are unchanged.
+
+- The M4 Max exposes stage-boundary but not dispatch-boundary samples. A direct
+  in-encoder probe traps and is removed. Four descriptor-backed post-route
+  passes instead isolate routed experts, shared expert, combine, and hyper/head
+  inside each existing command; signed pass gaps/overlaps remain explicit.
+- Final N=128 ordinary post-route GPU totals are
+  1055.730/1057.236/1055.774/1056.495 ms with 0.143% drift. Three sampled totals
+  are 1056.725/1055.336/1058.238 ms with 0.275% drift and
+  +0.023%/-0.111%/+0.199% interpolated perturbation.
+- Raw coverage rounds to 1.000000; aggregate transition ambiguity is at most
+  0.0066%. Every arm preserves packed logits/hidden, snapshot identity digests,
+  bit-exact restored continuation, tokens, and the same 47,990 dispatch
+  family/kernel/order/grid/thread geometries.
+- Routed execution owns 1,015.042 ms or 96.052% on average. The shared expert is
+  33.733 ms/3.192%, combine is 1.998 ms/0.189%, and hyper/head is
+  5.923 ms/0.561%.
+- Routed cohort means are 597.107 ms for 25 grouped IQ2 layers, 355.062 ms for
+  16 per-bucket all-IQ3 layers, and 62.874 ms for two MXFP4-down outliers. The
+  routed stage includes gather, projections, SwiGLU, down, and scatter; this is
+  not a pure GEMM attribution.
+- Audit-inclusive wall controls are not stable enough for a wall claim. The
+  packet measures only the current CPU-routed N=128 asset/device contract and
+  does not test the all-IQ3 candidate.
+
+Decision: do not split 1,036 interleaved all-IQ3 bucket chains with thousands of
+observer boundaries. This stable stage-specific GPU condition authorizes one
+preregistered all-IQ3 grouped promotion gate with identical sampled topology,
+affected-cohort and total post-route GPU thresholds, the existing balanced wall
+stationarity/p95 rules, exact state/output checks, and no same-condition retry.
+Evidence:
+`docs/bench/2026-08-05-dsv4-packed-post-route-attribution/README.md`. CX review:
+`019fd4b0-a4d6-76f2-aee4-2172a72d8548`.
+
 ## 2026-08-05 - DeepSeek V4 Packed Q8 Output KILL
 
 Status: on the current asset and Apple M4 Max, the tested exact

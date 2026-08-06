@@ -2994,6 +2994,7 @@ fn run_deepseek_v4_single_turn(
         .context("reconcile admitted DeepSeek V4 Metal memory")?;
     eprintln!("deepseek_v4: memory reconciliation; {reconciliation}");
     let logits = copy_deepseek_v4_logits(&session, vocab_size, "prompt")?;
+    deepseek_v4_debug_dump_logits_sha256("single_turn", &logits);
     deepseek_v4_debug_dump_top_logits("single_turn", &logits, &tokenizer);
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
@@ -3327,6 +3328,7 @@ fn run_deepseek_v4_requests_jsonl(
             }
             let logits = copy_deepseek_v4_logits(&session, vocab_size, "prompt")
                 .with_context(|| format!("copy request {} prompt logits", request.id))?;
+            deepseek_v4_debug_dump_logits_sha256(&request.id, &logits);
             deepseek_v4_debug_dump_top_logits(&request.id, &logits, &tokenizer);
             let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
@@ -3466,6 +3468,18 @@ fn deepseek_v4_debug_dump_prompt_ids(scope: &str, prompt_ids: &[i32]) {
             "deepseek_v4 prompt_ids: scope={scope:?} count={} ids={:?}",
             prompt_ids.len(),
             prompt_ids
+        );
+    }
+}
+
+/// Debug observability: `QWEN_DSV4_LOGITS_SHA256=1` emits a compact exact
+/// identity for the complete first-token F32 logit vector.
+fn deepseek_v4_debug_dump_logits_sha256(scope: &str, logits: &[f32]) {
+    if std::env::var_os("QWEN_DSV4_LOGITS_SHA256").is_some() {
+        eprintln!(
+            "deepseek_v4 logits: scope={scope:?} count={} sha256_f32le={:x}",
+            logits.len(),
+            Sha256::digest(bytemuck::cast_slice(logits))
         );
     }
 }

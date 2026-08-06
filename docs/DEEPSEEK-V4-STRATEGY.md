@@ -2287,7 +2287,23 @@ noise without reducing technical risk. Revisit after S5.
    is `KILL` standalone. No new GPU run is needed. Census the exact operations,
    dispatches, intermediates, and materializations inside `BeforeAttentionBody`;
    require the candidate-touched subset, not merely its containing interval, to
-   clear the existing 158.3 ms floor before implementation.
+   clear the existing 158.3 ms floor before implementation. A materially new
+   matrix work unit then reopens and resolves the grouped-IQ2 gate/up lane.
+   BM16 computes 16 FFN rows by up to 16 expert-major assignments and remains
+   bit-exact against scalar gate/up/SwiGLU at reduced and production K. Across
+   both the concentrated and representative route schedules, it removes
+   239.9-535.5 ms per N=128 chunk; the representative cells move
+   889.6-900.7 to 357.4-364.5 ms. The first integrated wiring is a valid narrow
+   KILL before execution because rank-two views violate the flat SwiGLU
+   contract. The changed successor centralizes projection plus flattened
+   SwiGLU, preserves the complete 129,280-value current-asset logit hash, and
+   moves an ordinary 872-token product prefill from a 27,082.1 ms mean to
+   23,919.7 ms, or 32.20 to 36.46 token/s. Promote BM16 by structural profile:
+   Apple M4 Max, full N=128 chunk, and IQ2_XS/IQ2_XS/IQ3_XXS routed storage;
+   keep all other layers and tails on the existing path and retain
+   `QWEN_DSV4_PACKED_BM16_IQ2=0` as rollback. The next prefill work changes the
+   amortization regime through batched publication and larger chunks rather than
+   retuning this N=128 scalar lineage.
 7. Keep the packed before-attention and exact multi-row scorer closures
    explicit. The corrected four-encoder packet remains `HOLD`: its material
    pre-attention interval contains one unowned encoder transition, and Apple M4

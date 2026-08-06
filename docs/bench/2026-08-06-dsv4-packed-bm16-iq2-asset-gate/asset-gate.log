@@ -1,0 +1,19 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::tests::bm16_asset_gate::current_asset_bm16_iq2_exact_first_integration_gate ... deepseek_v4 bm16_asset_gate decision=KILL_BM16_CURRENT_ASSET_INTEGRATION candidate_failure="first BM16 packed chunk: invalid DeepSeek V4 Metal residency: DS4 SwiGLU gate must be F32 with shape [1572864], got F32 [2048, 768]"
+
+thread 'deepseek_v4_metal::tests::bm16_asset_gate::current_asset_bm16_iq2_exact_first_integration_gate' (260440587) panicked at crates/qwen-llm/src/deepseek_v4_metal/bm16_asset_gate.rs:924:30:
+BM16 asset gate recorded integration KILL
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::tests::bm16_asset_gate::current_asset_bm16_iq2_exact_first_integration_gate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 685 filtered out; finished in 40.71s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`

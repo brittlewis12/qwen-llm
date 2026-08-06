@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 BM16 IQ2 Packed-Prefill Default GO
+
+Status: narrow default `GO` on Apple M4 Max for full N=128 packed chunks whose
+routed gate/up/down banks are IQ2_XS/IQ2_XS/IQ3_XXS. Other layers, tail chunks,
+and devices retain the prior path. `QWEN_DSV4_PACKED_BM16_IQ2=0` is rollback.
+
+- One simdgroup computes 16 FFN rows by up to 16 expert-major assignments using
+  F32 simdgroup matrix arithmetic. Reduced and production-K differentials keep
+  gate, up, and clamped-SwiGLU bits exact across boundary token counts.
+- The realistic route fixture exposes 3,154 active layer/expert buckets and
+  33.73% BM16 occupancy versus 1,542/53.72% for the old repeated prompt. Both
+  disjoint and warm cells pass on both schedules. Representative medians move
+  from 889.6-900.7 to 357.4-364.5 ms per N=128 chunk.
+- The first asset wiring records a valid narrow KILL before candidate execution:
+  rank-two gate/up views violated the existing flat SwiGLU contract. The changed
+  successor centralizes both projections and the flattened SwiGLU call; the
+  frozen failed gate is not retried.
+- Two ordinary current-asset 872-token CLI pairs move mean prefill wall from
+  27,082.1 to 23,919.7 ms, an 11.68% wall saving and 32.20 to 36.46 token/s.
+  The 527.1 ms saving per full chunk reproduces the model-free mechanism.
+- Baseline and BM16 produce the same complete 129,280-value F32 logit digest
+  `c62a3f1f...7ffe3` and greedy token 87339. A separate default/rollback check
+  also preserves complete logits and demonstrates the expected policy paths.
+
+Decision: promote the structurally qualified exact path rather than bind it to
+one learned-weight identity. Retain focused primitive tests, one representative
+route fixture, concise result JSON, and ordinary CLI observability. Remove the
+candidate-specific profiler, asset-gate program, copied source diffs, checksum
+chains, and duplicate census payload. Evidence:
+`docs/bench/2026-08-06-dsv4-packed-bm16-iq2-matrix-gate/README.md`.
+
 ## 2026-08-06 - DeepSeek V4 Bank-Axis All-IQ3 KILL
 
 Status: `KILL_BANK_AXIS_MAPPED_ALL_IQ3`. The exact candidate is removed and no

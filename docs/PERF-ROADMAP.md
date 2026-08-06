@@ -109,6 +109,23 @@ Decision rules:
 - Keep process-global environment variants in separate processes.
 - Until an enforceable GPU lease exists, only the coordinating session may run
   timed GPU work; research subagents must remain read-only.
+- Stop at the cheapest evidence level that can decide the current question.
+  Arithmetic, model-free differentials, isolated phases, force-path pilots, and
+  default-policy changes carry different authority and need not share one packet.
+- Put reusable execution, correctness, timing, and JSON instruments in code;
+  keep experiment-specific gates, authority, and interpretation in concise
+  preregistration and result prose. Do not compile a bespoke disposition engine
+  for each candidate.
+- Promotion-grade timing should use a clean committed source identity. Exploratory
+  dirty-tree probes are allowed when clearly non-authoritative. Reference cached
+  model/fixture identities rather than rescanning weights or self-hashing source,
+  binaries, logs, and result files inside candidate code.
+- Sole-attempt acquisition is reserved for genuinely expensive, noisy, unsafe,
+  or policy-changing packets. Otherwise retain every attempt and disclose rerun
+  reasons instead of forbidding learning from a repaired observer.
+- Track raw acquisition under `target/profiles`; commit packet directories only
+  for decision-changing results. A focused regression and ordinary endpoint
+  check are preferable to replaying unrelated historical gates.
 
 ## DeepSeek V4 Optimization Lane — 2026-08-04
 
@@ -546,28 +563,32 @@ legal intra-pass primitive or relevant device/Metal capability drift.
 
 Force-ranked queue:
 
-1. **Exact Lightning schedule attribution.** Keep the deployed cooperative
-   scorer as the differential and inspect compiler shape, register pressure,
-   occupancy, and query-load behavior before another kernel. R2 row
-   serialization is rejected. Require a structurally new exact schedule with a
-   credible >=0.50 ms terminal saving and <=0.05 ms shallow regression before
-   implementation; do not auto-sweep R4 or repeat the held packet.
-2. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+1. **Larger packed chunks through batched publication.** The N=128 BM16 default
+   removes 11.68% of an 872-token product prefill, but the engine still reaches
+   only about 36.5 token/s. Batch the chronological RoPE/raw-KV/publication loop,
+   then raise the effective chunk through 512 toward 2,048. This changes expert
+   occupancy and amortization while local attention remains window-bounded.
+2. **Q8 packed dense mat-mat.** Replace token-axis Q8 GEMV for q_b and output
+   A/B with an existing matrix-shaped lineage. The isolated output result already
+   established a roughly 75% stage ceiling; use an exact or higher-precision
+   comparative contract rather than incumbent-vector proximity.
+3. **Widen matrix-shaped expert execution.** BM16 proves the expert-major matrix
+   work unit and is now the N=128 IQ2 default. Re-measure and generalize grouped
+   IQ2/IQ3 execution only after larger chunks change occupancy; do not reopen the
+   exhausted scalar row/panel/shuffle lane.
+4. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
+   pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
+   proof, not a binding floor.
+5. **Far-context scoring and selection.** Keep the deployed cooperative scorer
+   and radix4 selector while prefill is the larger product deficit. Reopen exact
+   Lightning scheduling only for a structurally new design with a credible
+   >=0.50 ms terminal saving and <=0.05 ms shallow regression; do not auto-sweep
+   R4 or repeat the held R2 packet.
+6. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
-   through 262,144 reachable visible rows. Do not pay a 786K real-prefix replay
-   merely to replace the accepted zero-causal-state snapshot packet. Reopen
-   default-on only for reusable real continuation evidence or material
-   implementation/device drift.
-3. **Packed-prefill attribution.** The before-attention split is closed because
-   dispatch-boundary counters are unsupported and encoder rotation retains an
-   unowned transition. Keep grouped IQ2 and down/scatter closures intact. Reopen
-   only for a new legal intra-pass observer, a materially new representation,
-   or a candidate with an independent conservative ceiling above 158.3 ms.
-4. **Down/scatter attribution.** Keep `HOLD - INCONCLUSIVE`; do not filter or
-   rerun V2. Reopen only for a materially new representation or arithmetic
-   contract, a new accepted observer, or relevant device/toolchain drift under
-   a new protocol. The gate-only authorization is consumed and closed.
-5. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+   through 262,144 reachable visible rows. Reopen default-on only for reusable
+   real continuation evidence or material implementation/device drift.
+7. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

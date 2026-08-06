@@ -1,0 +1,245 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+index ee1cd28..f3b4d9b 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@ -3846,0 +3847,34 @@ pub(super) const PACKED_POST_ROUTE_STAGE_KINDS: [PackedPostRouteStageKind; 4] =
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++fn packed_post_route_expert_counts(
++    n_tokens: usize,
++    schedule: &[ExpertBucket],
++) -> Result<[u16; MOE_EXPERT_COUNT], DeepSeekV4MetalError> {
++    checked_token_count(n_tokens)?;
++    let expected = checked_mul(n_tokens, MOE_TOP_K, "packed expert-count coverage")?;
++    let mut counts = [0u16; MOE_EXPERT_COUNT];
++    let mut covered = 0usize;
++    let mut previous_expert = None;
++    for bucket in schedule {
++        if bucket.expert >= MOE_EXPERT_COUNT
++            || bucket.len == 0
++            || bucket.len > n_tokens
++            || bucket.start != covered
++            || previous_expert.is_some_and(|previous| bucket.expert <= previous)
++        {
++            return invalid("packed expert-count schedule is not canonical");
++        }
++        counts[bucket.expert] = u16::try_from(bucket.len)
++            .map_err(|_| DeepSeekV4MetalError::Invalid("packed expert count exceeds u16".into()))?;
++        covered = covered
++            .checked_add(bucket.len)
++            .ok_or_else(|| DeepSeekV4MetalError::Invalid("packed expert count overflow".into()))?;
++        previous_expert = Some(bucket.expert);
++    }
++    if covered != expected {
++        return invalid(format!(
++            "packed expert-count coverage {covered} does not match {expected}"
++        ));
++    }
++    Ok(counts)
++}
++
+@@ -3854,0 +3889 @@ pub(super) struct PackedPostRouteLayerMetadata {
++    pub(super) expert_counts: [u16; MOE_EXPERT_COUNT],
+@@ -6698,0 +6734 @@ impl DeepSeekV4Session {
++                    expert_counts: packed_post_route_expert_counts(n_tokens, &schedule)?,
+@@ -6948,0 +6985,3 @@ mod tests {
++    #[cfg(feature = "dsv4-diagnostics")]
++    use sha2::{Digest, Sha256};
++
+@@ -6962,0 +7002,42 @@ mod tests {
++    #[cfg(feature = "dsv4-diagnostics")]
++    const PACKED_GROUPED_IQ2_COUNT_CENSUS_FIXTURE: &str =
++        include_str!("../../tests/fixtures/deepseek_v4_packed_grouped_iq2_count_census_v1.json");
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[derive(serde::Deserialize)]
++    #[serde(deny_unknown_fields)]
++    struct PackedGroupedIq2CountCensusFixture {
++        schema_version: usize,
++        count_payload_domain_hex: String,
++        count_payload_sha256: String,
++        model_content_id: String,
++        prompt_token_ids_sha256: String,
++        n_tokens: usize,
++        top_k: usize,
++        expert_count: usize,
++        grouped_layer_ids: Vec<usize>,
++        total_active_experts: usize,
++        inactive_experts: usize,
++        total_t32: usize,
++        total_padding: usize,
++        active_count_histogram_1_to_128: Vec<usize>,
++        tile_histogram_1_to_4: Vec<usize>,
++        layers: Vec<PackedGroupedIq2CountLayerFixture>,
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[derive(serde::Deserialize)]
++    #[serde(deny_unknown_fields)]
++    struct PackedGroupedIq2CountLayerFixture {
++        layer: usize,
++        active_experts: usize,
++        t32: usize,
++        padding: usize,
++        counts: Vec<u16>,
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    fn packed_grouped_iq2_count_census_fixture() -> PackedGroupedIq2CountCensusFixture {
++        serde_json::from_str(PACKED_GROUPED_IQ2_COUNT_CENSUS_FIXTURE)
++            .expect("valid grouped-IQ2 count census fixture")
++    }
+@@ -7397,0 +7479,154 @@ mod tests {
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    fn packed_post_route_expert_counts_pin_panel_boundaries() {
++        let lengths = [31usize, 32, 33, 128, 128, 128, 128, 128, 32];
++        let mut cursor = 0usize;
++        let schedule = lengths
++            .into_iter()
++            .enumerate()
++            .map(|(expert, len)| {
++                let bucket = ExpertBucket {
++                    expert,
++                    start: cursor,
++                    len,
++                };
++                cursor += len;
++                bucket
++            })
++            .collect::<Vec<_>>();
++        assert_eq!(cursor, 128 * MOE_TOP_K);
++
++        let counts = packed_post_route_expert_counts(128, &schedule).unwrap();
++        assert_eq!(&counts[..lengths.len()], &lengths.map(|len| len as u16));
++        assert!(counts[lengths.len()..].iter().all(|&count| count == 0));
++        assert_eq!(
++            counts
++                .iter()
++                .map(|&count| usize::from(count).div_ceil(32))
++                .sum::<usize>(),
++            25
++        );
++
++        let copy_schedule = || {
++            schedule
++                .iter()
++                .map(|bucket| ExpertBucket {
++                    expert: bucket.expert,
++                    start: bucket.start,
++                    len: bucket.len,
++                })
++                .collect::<Vec<_>>()
++        };
++        let mut duplicate = copy_schedule();
++        duplicate[1].expert = duplicate[0].expert;
++        assert!(packed_post_route_expert_counts(128, &duplicate).is_err());
++
++        let mut oversized = copy_schedule();
++        oversized[0].len = 129;
++        assert!(packed_post_route_expert_counts(128, &oversized).is_err());
++        assert!(packed_post_route_expert_counts(128, &schedule[..8]).is_err());
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    fn packed_grouped_iq2_count_census_fixture_is_canonical() {
++        const DOMAIN: &[u8] = b"qwen-llm:dsv4:packed-grouped-iq2-counts:v1\0";
++        const GROUPED_LAYERS: [usize; 25] = [
++            0, 2, 3, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 35, 36, 37, 38,
++            39, 41,
++        ];
++
++        fn hex(digest: impl AsRef<[u8]>) -> String {
++            digest
++                .as_ref()
++                .iter()
++                .map(|byte| format!("{byte:02x}"))
++                .collect()
++        }
++
++        let fixture = packed_grouped_iq2_count_census_fixture();
++        assert_eq!(fixture.schema_version, 1);
++        assert_eq!(
++            fixture.count_payload_domain_hex,
++            "7177656e2d6c6c6d3a647376343a7061636b65642d67726f757065642d6971322d636f756e74733a763100"
++        );
++        assert_eq!(
++            fixture.count_payload_sha256,
++            "0ab9925350288116288794f3d7f5081595dfad4ffdb9671a9a146f27568358a6"
++        );
++        assert_eq!(
++            fixture.model_content_id,
++            "ae11d1ea13ccfd98509d248705a589384412cd67c502450158f84a8bd143b5e2"
++        );
++        assert_eq!(
++            fixture.prompt_token_ids_sha256,
++            "b57816bcb0d5fdf5a8e2ddc7a0afe9e57fb0ca6ffc2b849285e1635d04772843"
++        );
++        assert_eq!(fixture.n_tokens, 128);
++        assert_eq!(fixture.top_k, MOE_TOP_K);
++        assert_eq!(fixture.expert_count, MOE_EXPERT_COUNT);
++        assert_eq!(fixture.grouped_layer_ids, GROUPED_LAYERS);
++        assert_eq!(fixture.layers.len(), GROUPED_LAYERS.len());
++
++        let mut payload = Sha256::new();
++        payload.update(DOMAIN);
++        let mut active_count_histogram = vec![0usize; fixture.n_tokens];
++        let mut tile_histogram = vec![0usize; 4];
++        let mut total_active_experts = 0usize;
++        let mut total_t32 = 0usize;
++        let mut total_padding = 0usize;
++        for (&expected_layer, layer) in GROUPED_LAYERS.iter().zip(&fixture.layers) {
++            assert_eq!(layer.layer, expected_layer);
++            assert_eq!(layer.counts.len(), MOE_EXPERT_COUNT);
++            assert!(
++                layer
++                    .counts
++                    .iter()
++                    .all(|&count| usize::from(count) <= fixture.n_tokens)
++            );
++            assert_eq!(
++                layer
++                    .counts
++                    .iter()
++                    .map(|&count| usize::from(count))
++                    .sum::<usize>(),
++                fixture.n_tokens * fixture.top_k
++            );
++            let active_experts = layer.counts.iter().filter(|&&count| count > 0).count();
++            let t32 = layer
++                .counts
++                .iter()
++                .map(|&count| usize::from(count).div_ceil(32))
++                .sum::<usize>();
++            let padding = 32 * t32 - fixture.n_tokens * fixture.top_k;
++            assert_eq!(layer.active_experts, active_experts);
++            assert_eq!(layer.t32, t32);
++            assert_eq!(layer.padding, padding);
++            total_active_experts += active_experts;
++            total_t32 += t32;
++            total_padding += padding;
++            payload.update((layer.layer as u32).to_le_bytes());
++            for &count in &layer.counts {
++                payload.update(count.to_le_bytes());
++                if count > 0 {
++                    active_count_histogram[usize::from(count) - 1] += 1;
++                    tile_histogram[usize::from(count).div_ceil(32) - 1] += 1;
++                }
++            }
++        }
++        assert_eq!(fixture.total_active_experts, total_active_experts);
++        assert_eq!(fixture.inactive_experts, 25 * 256 - total_active_experts);
++        assert_eq!(fixture.total_t32, total_t32);
++        assert_eq!(fixture.total_padding, total_padding);
++        assert_eq!(
++            fixture.active_count_histogram_1_to_128,
++            active_count_histogram
++        );
++        assert_eq!(fixture.tile_histogram_1_to_4, tile_histogram);
++        assert_eq!(total_active_experts, 1_542);
++        assert_eq!(total_t32, 1_748);
++        assert_eq!(total_padding, 36_736);
++        assert_eq!(fixture.tile_histogram_1_to_4, [1_395, 100, 35, 12]);
++        assert_eq!(hex(payload.finalize()), fixture.count_payload_sha256);
++    }
++

@@ -446,15 +446,35 @@ before replacement encoding. Reopen only with stable direct evidence for that
 premise, composition with a larger measured family, material asset census
 drift, or relevant device/compiler drift.
 
+The grouped-IQ2 count census now closes the schedule premise. One exact
+current-asset N=128 execution binds accepted output/state identity and captures
+25x256 expert populations with canonical payload SHA-256
+`0ab99253...58a6`. The 25 layers contain 1,542 active experts and 1,748 width-32
+tiles: 19,200 useful assignments occupy only 34.325% of 55,936 down columns,
+leaving 36,736 padded columns. Exactly 1,395/100/35/12 experts require one/two/
+three/four panels. The 206 continuation panels are only 11.78% of tile work;
+uniformly scaling the entire 597.107 ms envelope by that ratio yields 70.368 ms,
+but phase attribution has not established uniform per-tile latency. Keep it as
+an operation-count ranking signal, not a timing ceiling or KILL. Close only
+dispatch aggregation, which is already one dispatch per phase and layer.
+
+The count census does not assign time between the two production dispatches.
+Width-16/32 and width-8/16/32 down plans have 36.10% and 50.92% column-work
+ceilings, while gate/up masks inactive accumulation but retains shared tile
+dequantization. Preserve these as operation counts, not latency projections.
+
 Force-ranked queue:
 
-1. **Grouped-IQ2 count census and phase ceiling.** The 25 production-grouped
-   layers own a measured 597.107 ms mean routed-stage envelope, enough to clear
-   the floor only if a coherent candidate can remove at least 26.51%. Capture
-   the exact current per-expert count vectors, derive tile/padding classes, and
-   time the grouped gate/up/SwiGLU and down/scatter phases separately at
-   production shape. Implement no replacement kernel until a conservative
-   removable ceiling clears 158.3 ms.
+1. **Grouped-IQ2 phase ceiling.** Use the exact captured counts and unchanged
+   production kernels to time grouped gate/up/SwiGLU and down/scatter
+   independently at H=4096/F=2048/E=256/K=6/N=128. Aggregate all 25 phase
+   dispatches per sample. Preregister deterministic legal source-row/destination-
+   slot permutations because the fixture binds counts, not slots. Require
+   disjoint and warm controls, validated output mutation and guards, balanced
+   direct GPU brackets, no sample deletion, <=5% drift, and
+   `U_phase = max(disjoint_p95, warm_p95) + max(5 * max(disjoint_range,
+   warm_range), empty_gpu_ms)`. Implement no replacement kernel unless one
+   stable phase clears 158.3 ms.
 2. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.

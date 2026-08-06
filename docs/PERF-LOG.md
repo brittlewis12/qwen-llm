@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Count Census GO
+
+Status: the exact current-asset count census is `GO` for one bounded model-free
+gate/up-versus-down phase ceiling. It authorizes no replacement kernel or new
+current-asset candidate.
+
+- One ordinary unsampled N=128 execution binds the pinned current asset, exact
+  token pattern, accepted logits/hidden/state identities, committed prefix,
+  qualified grouped policy, 25 exact layer IDs, and 1,542 active experts before
+  emitting any census.
+- The canonical 25x256 count payload hashes to `0ab99253...58a6`. It records
+  1,748 width-32 tiles for 19,200 useful assignments: 55,936 launched columns,
+  36,736 padding, 34.325% occupancy, and 65.675% padded down-column work.
+- Tile classes are `[1,395,100,35,12]`. Only 206 continuation panels exist; a
+  uniform per-tile extrapolation would be 70.368 ms, but phase attribution has
+  not established uniform latency. Preserve this as a ranking signal, not a
+  timing ceiling or KILL. Dispatch aggregation is already exhausted.
+- Width-16/32 and width-8/16/32 down plans reduce executed column counts by
+  36.10% and 50.92%. These are operation-count ceilings, not timing claims;
+  gate/up masks inactive accumulations and must be measured independently.
+
+Decision: retain diagnostics-only count metadata and the canonical fixture;
+remove the one-shot asset harness. Next aggregate all 25 unchanged grouped
+gate/up/SwiGLU or down/scatter dispatches per sample over deterministic legal
+slot permutations and disjoint/warm controls. Require a stable conservative
+phase ceiling of at least 158.3 ms before kernel design. Evidence:
+`docs/bench/2026-08-06-dsv4-packed-grouped-iq2-count-census/README.md`. CX:
+`019fd588-96b0-7033-afd1-66d7e354e523`.
+
 ## 2026-08-06 - DeepSeek V4 Packed MXFP4 Economic KILL
 
 Status: standalone grouped MXFP4-down work is `KILL` before profiler or kernel

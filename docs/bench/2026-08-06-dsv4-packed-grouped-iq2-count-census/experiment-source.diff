@@ -1,0 +1,309 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal.rs b/crates/qwen-llm/src/deepseek_v4_metal.rs
+index 5034f43..fb8dbed 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@ -15098,0 +15099,209 @@ mod tests {
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "one-shot current-asset grouped-IQ2 count census"]
++    fn current_asset_packed_grouped_iq2_count_census() {
++        const PREFIX_TOKENS: usize = 128;
++        const TOP_K: usize = 6;
++        const EXPERT_COUNT: usize = 256;
++        const COUNT_PAYLOAD_DOMAIN: &[u8] = b"qwen-llm:dsv4:packed-grouped-iq2-counts:v1\0";
++        const GROUPED_LAYERS: [usize; 25] = [
++            0, 2, 3, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 23, 25, 35, 36, 37, 38,
++            39, 41,
++        ];
++
++        fn hex(digest: impl AsRef<[u8]>) -> String {
++            digest
++                .as_ref()
++                .iter()
++                .map(|byte| format!("{byte:02x}"))
++                .collect()
++        }
++
++        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
++            .map(PathBuf::from)
++            .unwrap_or_else(|| {
++                PathBuf::from(
++                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
++                )
++            });
++        assert!(model_path.exists(), "missing current DS4 model");
++        let ctx = MetalContext::new().expect("create Metal context");
++        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
++        assert_eq!(
++            hex(model_content_id.as_bytes()),
++            "ae11d1ea13ccfd98509d248705a589384412cd67c502450158f84a8bd143b5e2"
++        );
++        assert!(
++            prefill::packed_grouped_expert_enabled_for_test(&ctx),
++            "count census requires the qualified grouped IQ2 default"
++        );
++        let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, PREFIX_TOKENS)
++            .expect("plan grouped-IQ2 count-census session");
++        let admitted = plan
++            .admit(ctx.memory_signals())
++            .expect("admit grouped-IQ2 count-census session");
++        let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
++            .expect("realize current DS4 residency");
++        let mut session = DeepSeekV4Session::new_with_model_content_id(
++            &ctx,
++            realized.into_residency(),
++            model_content_id,
++        )
++        .expect("construct grouped-IQ2 count-census session");
++        let prefix = (0..PREFIX_TOKENS)
++            .map(|index| [35, 201, 200, 34][index % 4])
++            .collect::<Vec<_>>();
++        let prompt_sha256 = hex(Sha256::digest(bytemuck::cast_slice(&prefix)));
++        assert_eq!(
++            prompt_sha256,
++            "b57816bcb0d5fdf5a8e2ddc7a0afe9e57fb0ca6ffc2b849285e1635d04772843"
++        );
++
++        let profile = session
++            .execute_packed_tokens_with_post_route_stage_profile_for_test(
++                &ctx, &prefix, true, false, false,
++            )
++            .expect("execute grouped-IQ2 count-census prefix");
++        assert!(!profile.sampled);
++        assert_eq!(profile.metadata.len(), DEEPSEEK_V4_LAYER_COUNT);
++        assert_eq!(session.packed_grouped_iq2_invocations_for_test(), 25);
++
++        let logits = session
++            .copy_logits_f32()
++            .expect("copy grouped-IQ2 count-census logits");
++        let hidden = host_read_f32(
++            session
++                .final_normalized_hidden()
++                .expect("grouped-IQ2 count-census hidden is visible"),
++            "grouped-IQ2 count-census hidden",
++        )
++        .expect("copy grouped-IQ2 count-census hidden");
++        let snapshot = session
++            .capture_causal_snapshot()
++            .expect("capture grouped-IQ2 count-census state");
++        assert_eq!(
++            hex(Sha256::digest(bytemuck::cast_slice(&logits))),
++            "45c414408cdc688eeeb4f40166013b2ac7261e5a2c2655cdf9f51e818941f2d5"
++        );
++        assert_eq!(
++            hex(Sha256::digest(bytemuck::cast_slice(&hidden))),
++            "8a9106b6c70c9069461ce1ef05d9dfb1349b6da7c4123b3e2e7b896c9d5278af"
++        );
++        assert_eq!(
++            hex(snapshot.causal_digest()),
++            "3de61f2054ff7e540be5beb113c5c3884875b7018de800696aa58a0393535035"
++        );
++        assert_eq!(
++            hex(snapshot.prefix_digest()),
++            "42428fa6efe61408f76b1ebc342f75cfa333af202b801c3031f34a7551cb870a"
++        );
++        assert_eq!(
++            hex(snapshot.compatibility_digest().as_bytes()),
++            "e7fb64be2f9fd96c52c9d5aa9384e09652e899650558dd50c4ba998e834bf076"
++        );
++        assert_eq!(session.committed_tokens(), prefix.as_slice());
++        assert_eq!(
++            hex(Sha256::digest(bytemuck::cast_slice(
++                session.committed_tokens()
++            ))),
++            prompt_sha256
++        );
++
++        let grouped = profile
++            .metadata
++            .iter()
++            .filter(|metadata| metadata.grouped_iq2)
++            .collect::<Vec<_>>();
++        let grouped_layers = grouped
++            .iter()
++            .map(|metadata| metadata.layer)
++            .collect::<Vec<_>>();
++        assert_eq!(grouped_layers, GROUPED_LAYERS);
++        assert_eq!(
++            grouped
++                .iter()
++                .map(|metadata| metadata.bucket_count)
++                .sum::<usize>(),
++            1_542
++        );
++
++        let mut payload = Sha256::new();
++        payload.update(COUNT_PAYLOAD_DOMAIN);
++        let mut active_count_histogram = [0usize; PREFIX_TOKENS];
++        let mut tile_histogram = [0usize; 4];
++        let mut total_active_experts = 0usize;
++        let mut total_t32 = 0usize;
++        let mut total_padding = 0usize;
++        let mut layers = Vec::with_capacity(grouped.len());
++        for metadata in grouped {
++            let counts = &metadata.expert_counts;
++            assert!(
++                counts
++                    .iter()
++                    .all(|&count| usize::from(count) <= PREFIX_TOKENS)
++            );
++            assert_eq!(
++                counts
++                    .iter()
++                    .map(|&count| usize::from(count))
++                    .sum::<usize>(),
++                PREFIX_TOKENS * TOP_K
++            );
++            let active_experts = counts.iter().filter(|&&count| count > 0).count();
++            assert_eq!(active_experts, metadata.bucket_count);
++            let t32 = counts
++                .iter()
++                .map(|&count| usize::from(count).div_ceil(32))
++                .sum::<usize>();
++            let padding = 32 * t32 - PREFIX_TOKENS * TOP_K;
++            total_active_experts += active_experts;
++            total_t32 += t32;
++            total_padding += padding;
++            payload.update((metadata.layer as u32).to_le_bytes());
++            for &count in counts {
++                payload.update(count.to_le_bytes());
++                if count > 0 {
++                    active_count_histogram[usize::from(count) - 1] += 1;
++                    tile_histogram[usize::from(count).div_ceil(32) - 1] += 1;
++                }
++            }
++            layers.push(serde_json::json!({
++                "layer": metadata.layer,
++                "active_experts": active_experts,
++                "t32": t32,
++                "padding": padding,
++                "counts": counts.to_vec(),
++            }));
++        }
++        assert_eq!(total_active_experts, 1_542);
++        assert_eq!(
++            active_count_histogram.iter().sum::<usize>(),
++            total_active_experts
++        );
++        assert_eq!(tile_histogram.iter().sum::<usize>(), total_active_experts);
++        let inactive_experts = GROUPED_LAYERS.len() * EXPERT_COUNT - total_active_experts;
++        let count_payload_sha256 = hex(payload.finalize());
++        let census = serde_json::json!({
++            "schema_version": 1,
++            "count_payload_domain_hex": hex(COUNT_PAYLOAD_DOMAIN),
++            "count_payload_sha256": count_payload_sha256,
++            "model_content_id": hex(model_content_id.as_bytes()),
++            "prompt_token_ids_sha256": prompt_sha256,
++            "n_tokens": PREFIX_TOKENS,
++            "top_k": TOP_K,
++            "expert_count": EXPERT_COUNT,
++            "grouped_layer_ids": GROUPED_LAYERS,
++            "total_active_experts": total_active_experts,
++            "inactive_experts": inactive_experts,
++            "total_t32": total_t32,
++            "total_padding": total_padding,
++            "active_count_histogram_1_to_128": active_count_histogram.to_vec(),
++            "tile_histogram_1_to_4": tile_histogram.to_vec(),
++            "layers": layers,
++        });
++        eprintln!(
++            "deepseek_v4 packed_grouped_iq2_count_census {}",
++            serde_json::to_string(&census).expect("serialize grouped-IQ2 count census")
++        );
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+index ee1cd28..1a095a5 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@ -3846,0 +3847,34 @@ pub(super) const PACKED_POST_ROUTE_STAGE_KINDS: [PackedPostRouteStageKind; 4] =
++#[cfg(all(test, feature = "dsv4-diagnostics"))]
++fn packed_post_route_expert_counts(
++    n_tokens: usize,
++    schedule: &[ExpertBucket],
++) -> Result<[u16; MOE_EXPERT_COUNT], DeepSeekV4MetalError> {
++    checked_token_count(n_tokens)?;
++    let expected = checked_mul(n_tokens, MOE_TOP_K, "packed expert-count coverage")?;
++    let mut counts = [0u16; MOE_EXPERT_COUNT];
++    let mut covered = 0usize;
++    let mut previous_expert = None;
++    for bucket in schedule {
++        if bucket.expert >= MOE_EXPERT_COUNT
++            || bucket.len == 0
++            || bucket.len > n_tokens
++            || bucket.start != covered
++            || previous_expert.is_some_and(|previous| bucket.expert <= previous)
++        {
++            return invalid("packed expert-count schedule is not canonical");
++        }
++        counts[bucket.expert] = u16::try_from(bucket.len)
++            .map_err(|_| DeepSeekV4MetalError::Invalid("packed expert count exceeds u16".into()))?;
++        covered = covered
++            .checked_add(bucket.len)
++            .ok_or_else(|| DeepSeekV4MetalError::Invalid("packed expert count overflow".into()))?;
++        previous_expert = Some(bucket.expert);
++    }
++    if covered != expected {
++        return invalid(format!(
++            "packed expert-count coverage {covered} does not match {expected}"
++        ));
++    }
++    Ok(counts)
++}
++
+@@ -3854,0 +3889 @@ pub(super) struct PackedPostRouteLayerMetadata {
++    pub(super) expert_counts: [u16; MOE_EXPERT_COUNT],
+@@ -6698,0 +6734 @@ impl DeepSeekV4Session {
++                    expert_counts: packed_post_route_expert_counts(n_tokens, &schedule)?,
+@@ -7397,0 +7434,51 @@ mod tests {
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    fn packed_post_route_expert_counts_pin_panel_boundaries() {
++        let lengths = [31usize, 32, 33, 128, 128, 128, 128, 128, 32];
++        let mut cursor = 0usize;
++        let schedule = lengths
++            .into_iter()
++            .enumerate()
++            .map(|(expert, len)| {
++                let bucket = ExpertBucket {
++                    expert,
++                    start: cursor,
++                    len,
++                };
++                cursor += len;
++                bucket
++            })
++            .collect::<Vec<_>>();
++        assert_eq!(cursor, 128 * MOE_TOP_K);
++
++        let counts = packed_post_route_expert_counts(128, &schedule).unwrap();
++        assert_eq!(&counts[..lengths.len()], &lengths.map(|len| len as u16));
++        assert!(counts[lengths.len()..].iter().all(|&count| count == 0));
++        assert_eq!(
++            counts
++                .iter()
++                .map(|&count| usize::from(count).div_ceil(32))
++                .sum::<usize>(),
++            25
++        );
++
++        let copy_schedule = || {
++            schedule
++                .iter()
++                .map(|bucket| ExpertBucket {
++                    expert: bucket.expert,
++                    start: bucket.start,
++                    len: bucket.len,
++                })
++                .collect::<Vec<_>>()
++        };
++        let mut duplicate = copy_schedule();
++        duplicate[1].expert = duplicate[0].expert;
++        assert!(packed_post_route_expert_counts(128, &duplicate).is_err());
++
++        let mut oversized = copy_schedule();
++        oversized[0].len = 129;
++        assert!(packed_post_route_expert_counts(128, &oversized).is_err());
++        assert!(packed_post_route_expert_counts(128, &schedule[..8]).is_err());
++    }
++

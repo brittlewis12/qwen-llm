@@ -1,0 +1,18 @@
+$ shasum -a 256 experiment-source.diff current-asset-count-census.log count-census.json retained-source.diff
+2de52f475519c38e57f7a1e38f5d6ab5698ab0758ef72749bfbc83fdec67ecc2  experiment-source.diff
+28c3edca24e0a6255859aef965e000064ac46e940f5c0d47bc6b2c3ada1b2682  current-asset-count-census.log
+c6a7519f047cc2c4fd14b7c97db60edcbcf7d3b268b388eaab33c50cd2327654  count-census.json
+61b15af6c5f20607600eeb472521482061ddd0e98e1b967d5c5e538cdafe4629  retained-source.diff
+
+$ shasum -a 256 target/release/deps/qwen_llm-246719edcad9c805
+4e113a075073e0b20c9520f4a69cadcbc7e23fb156bdc7335c34bc4a14130dc9  target/release/deps/qwen_llm-246719edcad9c805
+
+The binary hash above was recorded after release compilation and immediately
+before the sole current-asset execution. The same path was later rebuilt after
+the one-shot harness was removed and active fixture validation was added.
+
+$ shasum -a 256 target/release/deps/qwen_llm-246719edcad9c805
+c415cf2fd4a123cf1d0a75f4377f371372191cce52a70f695b58ac6487e4f3f9  target/release/deps/qwen_llm-246719edcad9c805
+
+The final binary hash was rechecked after both focused release tests and strict
+release diagnostics Clippy passed.

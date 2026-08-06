@@ -2222,10 +2222,18 @@ noise without reducing technical risk. Revisit after S5.
    subset and retains nonzero work. Host encoding is not directly measured;
    reopen only if stable telemetry exposes more than the remaining 95.027 ms,
    the work composes with a larger family, or the asset/device premise changes.
-   Move the active packed-prefill queue to exact count-vector capture and
-   grouped gate/up versus down phase attribution for the 597.107 ms mean routed-
-   stage envelope of the 25-layer grouped-IQ2 cohort. Require a conservative
-   >=158.3 ms removable ceiling before kernel implementation; keep HCA tiling
-   deferred.
+   The exact grouped-IQ2 count capture then binds the accepted N=128 output/state
+   identity and records 1,542 active experts, 1,748 width-32 tiles, and 36,736
+   padded columns across the 25 production-grouped layers. Useful assignments
+   occupy only 34.325% of down-column capacity. Tile classes are
+   1,395/100/35/12 for one through four panels; continuation panels are 11.78%
+   of tile count, but that is a ranking signal rather than a latency ceiling.
+   Retain the canonical fixture and diagnostics metadata, remove the one-shot
+   asset harness, and move the queue to a model-free gate/up/SwiGLU versus
+   down/scatter phase ceiling over the exact counts. Aggregate all 25 dispatches
+   per phase and preregister deterministic legal slot permutations because the
+   fixture does not bind slots. Preserve padding as an operation-count result,
+   not a timing claim. Require a stable conservative >=158.3 ms phase ceiling
+   before kernel implementation; keep HCA tiling deferred.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

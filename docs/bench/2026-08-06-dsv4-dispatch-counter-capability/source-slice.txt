@@ -1,0 +1,174 @@
+// counter capability and allocation; crates/qwen-llm/src/metal.rs lines 1058..1132
+01058:         MetalCounterCapabilities {
+01059:             supports_stage_boundary: self
+01060:                 .device
+01061:                 .supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary),
+01062:             supports_dispatch_boundary: self
+01063:                 .device
+01064:                 .supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary),
+01065:             supports_blit_boundary: self
+01066:                 .device
+01067:                 .supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary),
+01068:             sets,
+01069:         }
+01070:     }
+01071: 
+01072:     fn timestamp_counter_set(
+01073:         &self,
+01074:     ) -> Result<Retained<ProtocolObject<dyn MTLCounterSet>>, MetalError> {
+01075:         let counter_sets = self
+01076:             .device
+01077:             .counterSets()
+01078:             .ok_or_else(|| MetalError::Counter("device exposes no counter sets".to_string()))?;
+01079:         for i in 0..counter_sets.len() {
+01080:             let set = counter_sets.objectAtIndex(i);
+01081:             let set_name = set.name().to_string();
+01082:             if set_name.eq_ignore_ascii_case("timestamp") {
+01083:                 return Ok(set);
+01084:             }
+01085:             let counters = set.counters();
+01086:             for j in 0..counters.len() {
+01087:                 let counter_name = counters.objectAtIndex(j).name().to_string();
+01088:                 if counter_name.eq_ignore_ascii_case("timestamp") {
+01089:                     return Ok(set);
+01090:                 }
+01091:             }
+01092:         }
+01093:         Err(MetalError::Counter(
+01094:             "device exposes no timestamp counter set".to_string(),
+01095:         ))
+01096:     }
+01097: 
+01098:     pub fn timestamp_sample_buffer(
+01099:         &self,
+01100:         sample_count: usize,
+01101:     ) -> Result<MetalTimestampSampleBuffer, MetalError> {
+01102:         self.timestamp_sample_buffer_at(sample_count, MTLCounterSamplingPoint::AtStageBoundary)
+01103:     }
+01104: 
+01105:     pub fn timestamp_dispatch_sample_buffer(
+01106:         &self,
+01107:         sample_count: usize,
+01108:     ) -> Result<MetalTimestampSampleBuffer, MetalError> {
+01109:         self.timestamp_sample_buffer_at(sample_count, MTLCounterSamplingPoint::AtDispatchBoundary)
+01110:     }
+01111: 
+01112:     fn timestamp_sample_buffer_at(
+01113:         &self,
+01114:         sample_count: usize,
+01115:         sampling_point: MTLCounterSamplingPoint,
+01116:     ) -> Result<MetalTimestampSampleBuffer, MetalError> {
+01117:         if sample_count == 0 {
+01118:             return Err(MetalError::Counter(
+01119:                 "timestamp sample count must be non-zero".to_string(),
+01120:             ));
+01121:         }
+01122:         if !self.device.supportsCounterSampling(sampling_point) {
+01123:             let label = match sampling_point {
+01124:                 MTLCounterSamplingPoint::AtStageBoundary => "stage-boundary",
+01125:                 MTLCounterSamplingPoint::AtDispatchBoundary => "dispatch-boundary",
+01126:                 MTLCounterSamplingPoint::AtBlitBoundary => "blit-boundary",
+01127:                 _ => "requested",
+01128:             };
+01129:             return Err(MetalError::Counter(format!(
+01130:                 "device does not support {label} counter sampling"
+01131:             )));
+01132:         }
+
+// compute-encoder sample API; crates/qwen-llm/src/metal.rs lines 2502..2523
+02502:     pub fn set_label(&self, label: &str) {
+02503:         self.raw.setLabel(Some(&NSString::from_str(label)));
+02504:     }
+02505: 
+02506:     pub fn insert_debug_signpost(&self, label: &str) {
+02507:         self.raw.insertDebugSignpost(&NSString::from_str(label));
+02508:     }
+02509: 
+02510:     pub fn sample_counters(
+02511:         &self,
+02512:         samples: &MetalTimestampSampleBuffer,
+02513:         sample_index: usize,
+02514:         barrier: bool,
+02515:     ) {
+02516:         unsafe {
+02517:             self.raw.sampleCountersInBuffer_atSampleIndex_withBarrier(
+02518:                 &samples.raw,
+02519:                 sample_index,
+02520:                 barrier,
+02521:             );
+02522:         }
+02523:     }
+
+// target-aware capability probe; crates/qwen-llm/src/deepseek_v4_metal/prefill.rs lines 7338..7408
+07338:             &records,
+07339:             &[100, 110, 110, 126, 139],
+07340:             1.0,
+07341:         )
+07342:         .expect_err("physical timestamp intervals must be nonempty");
+07343:         assert!(
+07344:             error.to_string().contains("empty timestamp interval"),
+07345:             "unexpected error: {error}"
+07346:         );
+07347:     }
+07348: 
+07349:     #[cfg(feature = "dsv4-diagnostics")]
+07350:     #[test]
+07351:     fn dispatch_boundary_samples_are_strict_inside_one_encoder() {
+07352:         let Ok(ctx) = MetalContext::new() else {
+07353:             return;
+07354:         };
+07355:         let device = ctx.device.name().to_string();
+07356:         if device != "Apple M4 Max" {
+07357:             return;
+07358:         }
+07359:         let samples = ctx
+07360:             .timestamp_dispatch_sample_buffer(5)
+07361:             .expect("Apple M4 Max must support dispatch-boundary timestamps");
+07362:         let values = vec![1.0f32; 1 << 20];
+07363:         let values = MetalTensor::from_bytes(
+07364:             &ctx,
+07365:             bytemuck::cast_slice(&values),
+07366:             vec![1 << 20],
+07367:             GgmlType::F32,
+07368:         )
+07369:         .unwrap();
+07370:         let trace_guard = crate::metal::kernel_trace_begin();
+07371:         let command = ctx.queue.commandBuffer().unwrap();
+07372:         let encoder = KernelEncoder::begin(&command);
+07373:         encoder.sample_counters(&samples, 0, false);
+07374:         for stage in 0..4 {
+07375:             for dispatch in 0..8 {
+07376:                 encode_scale_f32_in_place(
+07377:                     &ctx,
+07378:                     &encoder,
+07379:                     &values,
+07380:                     1.0,
+07381:                     &format!("dispatch sample stage {stage} dispatch {dispatch}"),
+07382:                 )
+07383:                 .unwrap();
+07384:             }
+07385:             encoder.sample_counters(&samples, stage + 1, true);
+07386:         }
+07387:         encoder.end();
+07388:         command.commit();
+07389:         command.waitUntilCompleted();
+07390:         let counters = crate::metal::kernel_trace_snapshot();
+07391:         drop(trace_guard);
+07392:         assert!(
+07393:             command.error().is_none(),
+07394:             "dispatch-boundary sample command failed: {:?}",
+07395:             command.error()
+07396:         );
+07397:         assert_eq!(counters.encoders, 1);
+07398:         assert_eq!(counters.concurrent_encoders, 0);
+07399:         assert_eq!(counters.dispatches, 32);
+07400:         let timestamps = ctx.resolve_timestamp_samples(&samples, 5).unwrap();
+07401:         assert_eq!(timestamps.len(), 5);
+07402:         for interval in timestamps.windows(2) {
+07403:             assert!(
+07404:                 interval[0] < interval[1],
+07405:                 "dispatch-boundary timestamp interval is empty: {timestamps:?}"
+07406:             );
+07407:         }
+07408:         assert!(
+

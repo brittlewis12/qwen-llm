@@ -1,0 +1,5 @@
+c8cd4e4b3b6ae5e4086877980f3b56c41049ef97a686cce1054114d29444c590  target/release/deps/qwen_llm-246719edcad9c805
+c16f1b707b4ecbdbe07529e85226d1a915389bc5f6122870d52684646750e0c8  crates/qwen-llm/src/deepseek_v4_metal.rs
+0efa55a6003fea7562ca1987e28d9b689f2c17e8882d49bb1cf3a60028ab5a29  crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+2cf5ad71c36c3da64ae34de46da99f130d38321b329718a0d1cc3012444d3199  docs/bench/2026-08-06-dsv4-dispatch-counter-capability/rejected-observer.diff
+6daf0eb3cf5fa755e9f48121a0d75d17d3452e3a16efb2b7ac216c0bad98c9a7  docs/bench/2026-08-06-dsv4-dispatch-counter-capability/source-slice.txt

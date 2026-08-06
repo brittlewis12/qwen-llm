@@ -488,15 +488,21 @@ at 0.344817%/0.059705%; `P=527.963833 ms`, `R=9.086871 ms`, and
 authorizes gate/up/SwiGLU candidate design only. Down warm drift reaches
 5.483643%, so down remains `HOLD - INCONCLUSIVE` with no timing decision.
 
+The first gate-only candidate, exact multi-bin FFN-row packing, is
+`HOLD - INCONCLUSIVE` and removed. It is bit-exact and cuts nominal lane-MAC
+capacity by 59.039%, but every stable GPU candidate sample regresses by roughly
+24-25%. Wall cells miss stationarity, so preserve this as raw negative evidence,
+not a contractual KILL. Do not rerun, tune widths, or spend an asset gate.
+
 Force-ranked queue:
 
-1. **Grouped-IQ2 gate/up/SwiGLU design.** Inspect the deployed IQ2 kernel and
-   exact 1,542-bucket/1,748-tile geometry. Draft one bounded candidate that
-   changes only the authorized gate/up/SwiGLU phase, preserves exact route and
-   destination-slot order plus deployed clamp/reduction semantics, and has a
-   credible structural reduction before coding. Require separate design GO,
-   model-free exactness, a stable production-shape candidate gate, and current-
-   asset packed A/B before product promotion. Down/scatter is out of scope.
+1. **Dispatch-neutral IQ2 weight broadcast.** Keep one FFN row per threadgroup
+   and all 25 production dispatches. Replace TGM publication plus both barriers
+   in each 32-wide K chunk with exact-bit SIMD broadcast from the lane that
+   performs the unchanged scalar gate/up dequantization. Preserve every route,
+   active-lane accumulator order, clamp/SwiGLU expression, and store. Require a
+   separately reviewed exact active differential and one new model-free gate;
+   do not reuse or tune row-packing geometry. Down/scatter remains out of scope.
 2. **Down/scatter attribution.** Keep `HOLD - INCONCLUSIVE`; do not filter or
    rerun V2. Reopen only for a materially new candidate composed with the gate
    design, a new accepted observer, or relevant device/toolchain drift under a

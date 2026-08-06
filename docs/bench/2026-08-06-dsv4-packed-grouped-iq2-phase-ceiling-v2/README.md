@@ -147,6 +147,12 @@ provenance and cleanup facts only.
 Remove the live V2 profiler after archival. The retained source returns exactly
 to the base revision. The one V2 execution authorization is consumed.
 
+The first authorized gate-only design, exact multi-bin FFN-row packing, is
+bit-exact but closes `HOLD - INCONCLUSIVE`: all GPU cells are stable and regress,
+while two wall cells fail stationarity. Remove it without asset work or width
+tuning. The active handoff is a materially different dispatch-neutral SIMD
+weight-broadcast design; down remains excluded.
+
 ## Validation
 
 - The exact executed source and binary receive static CX `GO`.

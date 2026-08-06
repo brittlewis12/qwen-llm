@@ -1,0 +1,37 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::prefill::tests::profile_grouped_iq2_row_pack_production_shape ... deepseek_v4 grouped_iq2_row_pack_packet route_payload_sha256=505cb93ff9c3e1557bbad8f27a773e08b0e8c3475fbb4d7096069667c1fbafdd planner_payload_sha256=58fecd77889f76bfc2e6690c80ce08d09f59de9b0b2c5e7f01fe26a9ff9a3cf3 clamp=10 samples_per_cell=12 economic_floor_ms=158.3 fractional_floor=0.25 v2_empty_bound_ms=0.49279 regime=Disjoint stable=false cell_drifts=[0.03851978938894521, 0.02962458810250404, 0.04194150423883286, 0.2692617698413552] gpu={baseline=[526.7800416331738, 526.8010424915701, 526.7932915594429, 526.844167150557, 526.9865419249982, 526.6658747568727, 526.7054999712855, 526.7664163839072, 531.5599585883319, 537.0366671122611, 547.3513330798596, 547.2579170018435],candidate=[658.8998336810619, 660.5248756241053, 658.174125244841, 659.2418749351054, 658.6226662620902, 659.7842501942068, 658.338041510433, 659.8831666633487, 659.8419162910432, 660.313917323947, 677.9654170386493, 659.6605414524674],baseline_drift=0.038519789,candidate_drift=0.029624588,baseline_median=526.801042492,candidate_median=659.660541452,baseline_p95=547.351333080,candidate_p95=677.965417039,q=103.427291615,median_lower=-236.286790576,p95_lower=-234.041375574,median_threshold=158.300000000,p95_threshold=158.300000000,pass=false} wall={baseline=[531.507167, 536.773708, 531.888459, 535.599375, 531.667542, 533.983375, 531.5854169999999, 534.321167, 536.323708, 553.273625, 552.4292079999999, 554.276875],candidate=[665.311875, 870.497375, 666.565083, 868.854917, 666.3340410000001, 868.448542, 666.396833, 869.7859169999999, 667.1265830000001, 872.325333, 685.8478329999999, 850.37675],baseline_drift=0.041941504,candidate_drift=0.269261770,baseline_median=534.321167000,candidate_median=685.847833000,baseline_p95=554.276875000,candidate_p95=872.325333000,q=1035.067290000,median_lower=-1186.593956000,p95_lower=-1353.115748000,median_threshold=158.300000000,p95_threshold=158.300000000,pass=false} regime=Warm stable=false cell_drifts=[0.04265119463873197, 0.037580161155461006, 0.15339521517653093, 0.03789823486845956] gpu={baseline=[526.7274165526032, 526.7597916536033, 526.8500838428736, 526.9862087443471, 526.7853753175586, 526.780167594552, 526.7731656786054, 526.8916669301689, 531.2868333421648, 541.0175418946892, 536.4547087810934, 549.6825010050088],candidate=[658.8081680238247, 657.9491663724184, 658.4211669396609, 658.4303742274642, 658.3229163661599, 658.6072074715048, 658.6662083864212, 658.7779172696173, 661.3728755619377, 671.7779587488621, 676.325875101611, 683.1484995782375],baseline_drift=0.042651195,candidate_drift=0.037580161,baseline_median=526.850083843,candidate_median=658.666208386,baseline_p95=549.682501005,candidate_p95=683.148499578,q=125.996666029,median_lower=-257.812790573,p95_lower=-259.462664602,median_threshold=158.300000000,p95_threshold=158.300000000,pass=false} wall={baseline=[610.092, 531.379166, 612.3949170000001, 531.7185, 597.472917, 531.5615, 618.885042, 531.7498750000001, 616.412083, 545.4249159999999, 619.661209, 554.48],candidate=[673.996375, 664.869292, 671.87025, 664.749, 672.388291, 667.113959, 672.130417, 665.858208, 676.258584, 678.382959, 690.4284160000001, 690.1045409999999],baseline_drift=0.153395215,candidate_drift=0.037898235,baseline_median=554.480000000,candidate_median=672.130417000,baseline_p95=619.661209000,candidate_p95=690.428416000,q=441.410215000,median_lower=-559.060632000,p95_lower=-512.177422000,median_threshold=158.300000000,p95_threshold=158.300000000,pass=false} decision=INCONCLUSIVE_HOLD baseline_dispatches=25 candidate_dispatches=117 logical_bank_bytes=32279363584 touched_weight_bytes=8719695872 allocated_bytes=32648069120 weight_digest=369a03db349ed82ba7dbce98115d54e09406d600ae5506ab734ba3647b7549c6 disjoint_baseline_digest=bbf43456479d05e4097794dba99132df46588f25282f904917caf5ab68ad4cb2 disjoint_candidate_digest=bbf43456479d05e4097794dba99132df46588f25282f904917caf5ab68ad4cb2 warm_baseline_digest=850ccf1105481a836ef0425e005c96257d8878a84d6719c5189a2740f98f5211 warm_candidate_digest=850ccf1105481a836ef0425e005c96257d8878a84d6719c5189a2740f98f5211
+
+thread 'deepseek_v4_metal::prefill::tests::profile_grouped_iq2_row_pack_production_shape' (259059751) panicked at crates/qwen-llm/src/deepseek_v4_metal/prefill.rs:10124:9:
+row-pack packet is INCONCLUSIVE
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::prefill::tests::profile_grouped_iq2_row_pack_production_shape
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 682 filtered out; finished in 82.94s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`
+       83.05 real        34.09 user         3.49 sys
+          9192767488  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              594339  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+                  13  voluntary context switches
+                8959  involuntary context switches
+          1242854408  instructions retired
+           367390832  cycles elapsed
+            50348632  peak memory footprint

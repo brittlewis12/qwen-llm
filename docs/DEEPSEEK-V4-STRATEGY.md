@@ -2255,6 +2255,12 @@ noise without reducing technical risk. Revisit after S5.
    exact-route grouped-IQ2 gate/up/SwiGLU candidate across the 25 grouped
    layers. Down warm drift reaches 5.483643%, so down remains
    `HOLD - INCONCLUSIVE` and cannot be bundled. Remove the consumed V2 profiler
-   and preserve no product or savings claim.
+   and preserve no product or savings claim. The first gate-only design packs
+   multiple FFN rows into narrow assignment panels and remains bit-exact, but
+   every stable GPU candidate sample regresses by roughly 24-25%. Wall cells
+   fail stationarity, so record `HOLD - INCONCLUSIVE`, remove the entire
+   candidate/profiler, and do not rerun or tune widths. Move next to a materially
+   different dispatch-neutral SIMD weight-broadcast design that preserves one
+   FFN row per threadgroup and removes only TGM/barrier overhead.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

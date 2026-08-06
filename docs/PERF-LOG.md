@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Row Packing Inconclusive
+
+Status: exact multi-bin FFN-row packing is `HOLD - INCONCLUSIVE` and removed
+from live source. It authorizes no asset run or product change.
+
+- The bit-exact candidate raises useful assignment-lane occupancy from 34.325%
+  to 83.799% and cuts nominal threadgroups/lane-MAC capacity by 59.039%, while
+  preserving routes, reductions, clamp/SwiGLU, guards, and repeat digests.
+- All four GPU cells are stable, but every candidate sample regresses. Median /
+  p95 moves from 526.801/547.351 to 659.661/677.965 ms disjoint and from
+  526.850/549.683 to 658.666/683.148 ms warm.
+- The frozen whole-packet classifier remains inconclusive because disjoint
+  candidate and warm baseline wall drift reach 26.926177% and 15.339522%.
+  Retain every sample; publish no contractual KILL or transferable timing claim.
+- The one-shot packet takes 82.94 seconds, reaches 9,192,767,488 bytes maximum
+  RSS, and records zero swaps. These are provenance only.
+
+Decision: no rerun, width tuning, or asset gate. Remove the full candidate and
+profiler; archive exact source/log/hashes. Move to a materially different,
+dispatch-neutral SIMD weight-broadcast candidate that preserves one FFN row per
+threadgroup and targets TGM/barrier overhead only. Evidence:
+`docs/bench/2026-08-06-dsv4-packed-grouped-iq2-row-pack-gate/README.md`. CX:
+`019fd588-96b0-7033-afd1-66d7e354e523`.
+
 ## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Phase Ceiling V2
 
 Status: gate/up/SwiGLU is `GO - AUTHORIZE_CANDIDATE_DESIGN_ONLY`;

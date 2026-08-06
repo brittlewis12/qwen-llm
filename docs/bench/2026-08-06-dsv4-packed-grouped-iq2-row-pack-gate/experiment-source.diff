@@ -1,0 +1,1464 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+index 7f60264..021442c 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@ -2546 +2546 @@ const PACKED_GROUPED_EXPERT_MAX_TILES: usize = 272;
+-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
++#[derive(Clone, Copy, Debug, Eq, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+@@ -2552,0 +2553,8 @@ struct PackedGroupedExpertTile {
++#[cfg(test)]
++#[derive(Debug, Eq, PartialEq)]
++struct PackedGroupedRowPackBin {
++    width: u32,
++    rows_per_threadgroup: u32,
++    tiles: Vec<PackedGroupedExpertTile>,
++}
++
+@@ -2659,0 +2668,50 @@ fn packed_grouped_expert_tiles(
++#[cfg(test)]
++fn packed_grouped_row_pack_bins(
++    n_tokens: usize,
++    schedule: &[ExpertBucket],
++) -> Result<Vec<PackedGroupedRowPackBin>, DeepSeekV4MetalError> {
++    const WIDTHS: [u32; 5] = [2, 4, 8, 16, 32];
++    let tiles = packed_grouped_expert_tiles(n_tokens, schedule)?;
++    let mut bins = WIDTHS
++        .map(|width| PackedGroupedRowPackBin {
++            width,
++            rows_per_threadgroup: 32 / width,
++            tiles: Vec::new(),
++        })
++        .into_iter()
++        .collect::<Vec<_>>();
++    for tile in tiles {
++        let width = tile.count.max(2).next_power_of_two();
++        let Some(bin) = bins.iter_mut().find(|bin| bin.width == width) else {
++            return invalid("packed grouped row-pack tile has unsupported width");
++        };
++        bin.tiles.push(tile);
++    }
++    bins.retain(|bin| !bin.tiles.is_empty());
++    for bin in &bins {
++        if !bin.width.is_power_of_two()
++            || !(2..=32).contains(&bin.width)
++            || bin.rows_per_threadgroup * bin.width != 32
++            || bin.tiles.iter().any(|tile| {
++                tile.count == 0
++                    || tile.count > bin.width
++                    || (bin.width > 2 && tile.count <= bin.width / 2)
++            })
++        {
++            return invalid("packed grouped row-pack bin is not canonical");
++        }
++    }
++    Ok(bins)
++}
++
++#[repr(C)]
++#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
++struct PackedGroupedSwiGluArgs {
++    hidden: u32,
++    ffn: u32,
++    n_expert: u32,
++    top_k: u32,
++    n_tokens: u32,
++    clamp: f32,
++}
++
+@@ -2661,2 +2719 @@ fn packed_grouped_expert_tiles(
+-fn encode_packed_grouped_swiglu_iq2_xs_f32(
+-    ctx: &MetalContext,
++fn validate_packed_grouped_swiglu_iq2_xs_f32(
+@@ -2668 +2724,0 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
+-    schedule: &[ExpertBucket],
+@@ -2714,11 +2770,28 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
+-    let tiles = packed_grouped_expert_tiles(n_tokens, schedule)?;
+-    let tile_count = tiles.len();
+-    #[repr(C)]
+-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+-    struct Args {
+-        hidden: u32,
+-        ffn: u32,
+-        n_expert: u32,
+-        top_k: u32,
+-        n_tokens: u32,
+-        clamp: f32,
++    Ok(())
++}
++
++#[allow(clippy::too_many_arguments)]
++fn encode_packed_grouped_swiglu_iq2_xs_f32_tiles(
++    ctx: &MetalContext,
++    enc: &KernelEncoder,
++    gate_bank: &MetalTensor,
++    up_bank: &MetalTensor,
++    normalized_input: &MetalTensor,
++    bucket_slots: &MetalTensor,
++    tiles: &[PackedGroupedExpertTile],
++    inner: &MetalTensor,
++    hidden: usize,
++    ffn: usize,
++    expert_count: usize,
++    top_k: usize,
++    n_tokens: usize,
++    clamp: f32,
++    rows_per_threadgroup: usize,
++    pipeline: &str,
++) -> Result<(), DeepSeekV4MetalError> {
++    if tiles.is_empty()
++        || !rows_per_threadgroup.is_power_of_two()
++        || !(1..=16).contains(&rows_per_threadgroup)
++        || !ffn.is_multiple_of(rows_per_threadgroup)
++    {
++        return invalid("packed grouped gate/up tile dispatch has invalid geometry");
+@@ -2726 +2799 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
+-    let pso = ctx.pipeline("kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_f32")?;
++    let pso = ctx.pipeline(pipeline)?;
+@@ -2729,0 +2803,12 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
++    let threadgroup_bytes = checked_mul(
++        checked_mul(
++            checked_mul(2, rows_per_threadgroup, "packed grouped row-pack banks")?,
++            32,
++            "packed grouped row-pack lanes",
++        )?,
++        std::mem::size_of::<f32>(),
++        "packed grouped row-pack threadgroup bytes",
++    )?;
++    if threadgroup_bytes > ctx.device.maxThreadgroupMemoryLength() {
++        return invalid("packed grouped row-pack threadgroup memory exceeds device limit");
++    }
+@@ -2733 +2818 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
+-        &Args {
++        &PackedGroupedSwiGluArgs {
+@@ -2754 +2839 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
+-    enc.set_bytes_slice(5, &tiles);
++    enc.set_bytes_slice(5, tiles);
+@@ -2756 +2841 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
+-    enc.set_threadgroup_memory(0, 64 * std::mem::size_of::<f32>());
++    enc.set_threadgroup_memory(0, threadgroup_bytes);
+@@ -2759,2 +2844,2 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
+-            width: ffn,
+-            height: tile_count,
++            width: ffn / rows_per_threadgroup,
++            height: tiles.len(),
+@@ -2771,0 +2857,115 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
++#[allow(clippy::too_many_arguments)]
++fn encode_packed_grouped_swiglu_iq2_xs_f32(
++    ctx: &MetalContext,
++    enc: &KernelEncoder,
++    gate_bank: &MetalTensor,
++    up_bank: &MetalTensor,
++    normalized_input: &MetalTensor,
++    bucket_slots: &MetalTensor,
++    schedule: &[ExpertBucket],
++    inner: &MetalTensor,
++    hidden: usize,
++    ffn: usize,
++    expert_count: usize,
++    top_k: usize,
++    n_tokens: usize,
++    clamp: f32,
++) -> Result<(), DeepSeekV4MetalError> {
++    validate_packed_grouped_swiglu_iq2_xs_f32(
++        enc,
++        gate_bank,
++        up_bank,
++        normalized_input,
++        bucket_slots,
++        inner,
++        hidden,
++        ffn,
++        expert_count,
++        top_k,
++        n_tokens,
++        clamp,
++    )?;
++    let tiles = packed_grouped_expert_tiles(n_tokens, schedule)?;
++    encode_packed_grouped_swiglu_iq2_xs_f32_tiles(
++        ctx,
++        enc,
++        gate_bank,
++        up_bank,
++        normalized_input,
++        bucket_slots,
++        &tiles,
++        inner,
++        hidden,
++        ffn,
++        expert_count,
++        top_k,
++        n_tokens,
++        clamp,
++        1,
++        "kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_f32",
++    )
++}
++
++#[cfg(test)]
++#[allow(clippy::too_many_arguments)]
++fn encode_packed_grouped_swiglu_iq2_xs_row_packed_f32(
++    ctx: &MetalContext,
++    enc: &KernelEncoder,
++    gate_bank: &MetalTensor,
++    up_bank: &MetalTensor,
++    normalized_input: &MetalTensor,
++    bucket_slots: &MetalTensor,
++    schedule: &[ExpertBucket],
++    inner: &MetalTensor,
++    hidden: usize,
++    ffn: usize,
++    expert_count: usize,
++    top_k: usize,
++    n_tokens: usize,
++    clamp: f32,
++) -> Result<(), DeepSeekV4MetalError> {
++    validate_packed_grouped_swiglu_iq2_xs_f32(
++        enc,
++        gate_bank,
++        up_bank,
++        normalized_input,
++        bucket_slots,
++        inner,
++        hidden,
++        ffn,
++        expert_count,
++        top_k,
++        n_tokens,
++        clamp,
++    )?;
++    for bin in packed_grouped_row_pack_bins(n_tokens, schedule)? {
++        let pipeline = match bin.width {
++            2 => "kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_rows16",
++            4 => "kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_rows8",
++            8 => "kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_rows4",
++            16 => "kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_rows2",
++            32 => "kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_f32",
++            _ => return invalid("packed grouped row-pack bin width is unsupported"),
++        };
++        encode_packed_grouped_swiglu_iq2_xs_f32_tiles(
++            ctx,
++            enc,
++            gate_bank,
++            up_bank,
++            normalized_input,
++            bucket_slots,
++            &bin.tiles,
++            inner,
++            hidden,
++            ffn,
++            expert_count,
++            top_k,
++            n_tokens,
++            clamp,
++            bin.rows_per_threadgroup as usize,
++            pipeline,
++        )?;
++    }
++    Ok(())
++}
++
+@@ -7672,0 +7873,99 @@ mod tests {
++    #[test]
++    fn packed_grouped_row_pack_planner_pins_width_boundaries() {
++        const COUNTS: [usize; 19] = [
++            1, 2, 3, 4, 5, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 96, 97, 127, 128,
++        ];
++        for n_tokens in COUNTS {
++            let schedule = (0..MOE_TOP_K)
++                .map(|expert| ExpertBucket {
++                    expert,
++                    start: expert * n_tokens,
++                    len: n_tokens,
++                })
++                .collect::<Vec<_>>();
++            let original = packed_grouped_expert_tiles(n_tokens, &schedule).unwrap();
++            let bins = packed_grouped_row_pack_bins(n_tokens, &schedule).unwrap();
++            assert!(
++                bins.windows(2)
++                    .all(|window| window[0].width < window[1].width)
++            );
++            let mut reconstructed = bins
++                .iter()
++                .flat_map(|bin| {
++                    assert_eq!(bin.width * bin.rows_per_threadgroup, 32);
++                    bin.tiles.iter().map(|tile| {
++                        assert!(tile.count <= bin.width);
++                        if bin.width > 2 {
++                            assert!(tile.count > bin.width / 2);
++                        }
++                        *tile
++                    })
++                })
++                .collect::<Vec<_>>();
++            reconstructed.sort_by_key(|tile| (tile.start, tile.expert));
++            assert_eq!(reconstructed, original, "N={n_tokens}");
++            assert_eq!(
++                reconstructed
++                    .iter()
++                    .map(|tile| tile.count as usize)
++                    .sum::<usize>(),
++                n_tokens * MOE_TOP_K
++            );
++        }
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    fn packed_grouped_row_pack_route_fixture_is_canonical() {
++        const DOMAIN: &[u8] = b"qwen-llm:dsv4:packed-grouped-iq2-row-pack:v1\0";
++        const WIDTHS: [u32; 5] = [2, 4, 8, 16, 32];
++
++        fn hex(digest: impl AsRef<[u8]>) -> String {
++            digest
++                .as_ref()
++                .iter()
++                .map(|byte| format!("{byte:02x}"))
++                .collect()
++        }
++
++        let fixture = packed_grouped_iq2_route_census_fixture();
++        let mut width_histogram = [0usize; WIDTHS.len()];
++        let mut capacity = 0usize;
++        let mut threadgroups = 0usize;
++        let mut digest = Sha256::new();
++        digest.update(DOMAIN);
++        for layer in &fixture.layers {
++            let (_expert_ids, _rows, _slots, schedule) =
++                packed_grouped_schedule_from_route_ids(fixture.n_tokens, &layer.route_expert_ids);
++            let original = packed_grouped_expert_tiles(fixture.n_tokens, &schedule).unwrap();
++            let bins = packed_grouped_row_pack_bins(fixture.n_tokens, &schedule).unwrap();
++            digest.update((layer.layer as u32).to_le_bytes());
++            digest.update((bins.len() as u32).to_le_bytes());
++            let mut reconstructed = Vec::with_capacity(original.len());
++            for bin in &bins {
++                let width_index = WIDTHS.iter().position(|&width| width == bin.width).unwrap();
++                width_histogram[width_index] += bin.tiles.len();
++                capacity += bin.tiles.len() * bin.width as usize;
++                threadgroups += bin.tiles.len() * 2_048 / bin.rows_per_threadgroup as usize;
++                digest.update(bin.width.to_le_bytes());
++                digest.update(bin.rows_per_threadgroup.to_le_bytes());
++                digest.update((bin.tiles.len() as u32).to_le_bytes());
++                for tile in &bin.tiles {
++                    digest.update(tile.expert.to_le_bytes());
++                    digest.update(tile.start.to_le_bytes());
++                    digest.update(tile.count.to_le_bytes());
++                    reconstructed.push(*tile);
++                }
++            }
++            reconstructed.sort_by_key(|tile| (tile.start, tile.expert));
++            assert_eq!(reconstructed, original, "layer {}", layer.layer);
++        }
++        assert_eq!(width_histogram, [614, 215, 207, 226, 486]);
++        assert_eq!(capacity, 22_912);
++        assert_eq!(threadgroups, 1_466_368);
++        assert_eq!(
++            hex(digest.finalize()),
++            "58fecd77889f76bfc2e6690c80ce08d09f59de9b0b2c5e7f01fe26a9ff9a3cf3"
++        );
++    }
++
+@@ -8656,0 +8956,4 @@ mod tests {
++            let row_packed_inner =
++                grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 19.0);
++            let row_packed_repeat_inner =
++                grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 23.0);
+@@ -8823,0 +9127,19 @@ mod tests {
++            for inner in [&row_packed_inner, &row_packed_repeat_inner] {
++                encode_packed_grouped_swiglu_iq2_xs_row_packed_f32(
++                    &ctx,
++                    &encoder,
++                    &gate_bank,
++                    &up_bank,
++                    &input,
++                    &bucket_slots,
++                    &schedule,
++                    inner,
++                    H,
++                    F,
++                    E,
++                    K,
++                    n_tokens,
++                    CLAMP,
++                )
++                .unwrap();
++            }
+@@ -8859,0 +9182,10 @@ mod tests {
++            assert_eq!(
++                bits(&row_packed_inner),
++                bits(&candidate_inner),
++                "N={n_tokens} row-packed inner"
++            );
++            assert_eq!(
++                bits(&row_packed_repeat_inner),
++                bits(&row_packed_inner),
++                "N={n_tokens} row-packed repeat inner"
++            );
+@@ -8866,0 +9199,2 @@ mod tests {
++                ("row-packed inner", &row_packed_inner),
++                ("row-packed repeat inner", &row_packed_repeat_inner),
+@@ -8872,0 +9207,921 @@ mod tests {
++    #[test]
++    fn packed_grouped_iq2_row_pack_matches_deployed_at_all_width_boundaries() {
++        let Ok(ctx) = MetalContext::new() else {
++            return;
++        };
++        const H: usize = 256;
++        const F: usize = 256;
++        const E: usize = MOE_EXPERT_COUNT;
++        const K: usize = MOE_TOP_K;
++        const CLAMP: f32 = 0.25;
++        const COUNTS: [usize; 19] = [
++            1, 2, 3, 4, 5, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 96, 97, 127, 128,
++        ];
++
++        fn tensor_bytes(tensor: &MetalTensor) -> Vec<u8> {
++            unsafe {
++                std::slice::from_raw_parts(
++                    tensor
++                        .buffer
++                        .contents()
++                        .as_ptr()
++                        .cast::<u8>()
++                        .add(tensor.offset as usize),
++                    tensor.n_bytes() as usize,
++                )
++                .to_vec()
++            }
++        }
++
++        let gate_bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, H, F, E, 101);
++        let up_bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, H, F, E, 211);
++        let gate_before = tensor_bytes(&gate_bank);
++        let up_before = tensor_bytes(&up_bank);
++
++        for n_tokens in COUNTS {
++            let expert_ids = (0..n_tokens)
++                .flat_map(|_| (0..K).map(|expert| expert as i32))
++                .collect::<Vec<_>>();
++            let mut rows = Vec::with_capacity(n_tokens * K);
++            let mut slots = Vec::with_capacity(n_tokens * K);
++            let mut schedule = Vec::with_capacity(K);
++            for expert in 0..K {
++                let start = slots.len();
++                for token in 0..n_tokens {
++                    rows.push(token as i32);
++                    slots.push((token * K + expert) as i32);
++                }
++                schedule.push(ExpertBucket {
++                    expert,
++                    start,
++                    len: n_tokens,
++                });
++            }
++            validate_packed_expert_schedule(n_tokens, &expert_ids, &rows, &slots, &schedule)
++                .unwrap();
++            let slot_tensor = MetalTensor::from_bytes(
++                &ctx,
++                bytemuck::cast_slice(&slots),
++                vec![(n_tokens * K) as u64],
++                GgmlType::I32,
++            )
++            .unwrap();
++            let input = grouped_guarded_f32(&ctx, vec![H as u64, n_tokens as u64], 29.0);
++            let input_values = (0..H * n_tokens)
++                .map(|index| {
++                    let magnitude = 0.000_125 * (1 + (index * 37 + n_tokens * 101) % 1_009) as f32;
++                    if (index + n_tokens).is_multiple_of(2) {
++                        magnitude
++                    } else {
++                        -magnitude
++                    }
++                })
++                .collect::<Vec<_>>();
++            host_write_f32(&input, &input_values, "row-pack boundary input").unwrap();
++            let deployed =
++                grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 31.0);
++            let candidate =
++                grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 37.0);
++            let repeat = grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 41.0);
++
++            let command = ctx.queue.commandBuffer().unwrap();
++            let encoder = KernelEncoder::begin(&command);
++            let result = (|| {
++                encode_packed_grouped_swiglu_iq2_xs_f32(
++                    &ctx,
++                    &encoder,
++                    &gate_bank,
++                    &up_bank,
++                    &input,
++                    &slot_tensor,
++                    &schedule,
++                    &deployed,
++                    H,
++                    F,
++                    E,
++                    K,
++                    n_tokens,
++                    CLAMP,
++                )?;
++                encode_packed_grouped_swiglu_iq2_xs_row_packed_f32(
++                    &ctx,
++                    &encoder,
++                    &gate_bank,
++                    &up_bank,
++                    &input,
++                    &slot_tensor,
++                    &schedule,
++                    &candidate,
++                    H,
++                    F,
++                    E,
++                    K,
++                    n_tokens,
++                    CLAMP,
++                )?;
++                encode_packed_grouped_swiglu_iq2_xs_row_packed_f32(
++                    &ctx,
++                    &encoder,
++                    &gate_bank,
++                    &up_bank,
++                    &input,
++                    &slot_tensor,
++                    &schedule,
++                    &repeat,
++                    H,
++                    F,
++                    E,
++                    K,
++                    n_tokens,
++                    CLAMP,
++                )
++            })();
++            encoder.end();
++            result.unwrap();
++            command.commit();
++            command.waitUntilCompleted();
++            assert!(
++                command.error().is_none(),
++                "N={n_tokens}: {:?}",
++                command.error()
++            );
++
++            let deployed_values = host_read_f32(&deployed, "row-pack deployed").unwrap();
++            let candidate_values = host_read_f32(&candidate, "row-pack candidate").unwrap();
++            let repeat_values = host_read_f32(&repeat, "row-pack repeat").unwrap();
++            assert_eq!(
++                candidate_values
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .collect::<Vec<_>>(),
++                deployed_values
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .collect::<Vec<_>>(),
++                "N={n_tokens} candidate"
++            );
++            assert_eq!(
++                repeat_values
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .collect::<Vec<_>>(),
++                candidate_values
++                    .iter()
++                    .map(|value| value.to_bits())
++                    .collect::<Vec<_>>(),
++                "N={n_tokens} repeat"
++            );
++            assert_eq!(
++                host_read_f32(&input, "row-pack immutable input").unwrap(),
++                input_values
++            );
++            assert_eq!(
++                host_read_i32(&slot_tensor, "row-pack immutable slots").unwrap(),
++                slots
++            );
++            for (label, tensor) in [
++                ("row-pack input", &input),
++                ("row-pack deployed", &deployed),
++                ("row-pack candidate", &candidate),
++                ("row-pack repeat", &repeat),
++            ] {
++                assert_grouped_guards(label, tensor);
++            }
++        }
++        assert_eq!(tensor_bytes(&gate_bank), gate_before);
++        assert_eq!(tensor_bytes(&up_bank), up_before);
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "frozen grouped-IQ2 row-pack production-shape gate; release only"]
++    fn profile_grouped_iq2_row_pack_production_shape() {
++        assert!(
++            !cfg!(debug_assertions),
++            "row-pack production-shape gate requires a release test binary"
++        );
++        const H: usize = 4_096;
++        const F: usize = 2_048;
++        const E: usize = MOE_EXPERT_COUNT;
++        const K: usize = MOE_TOP_K;
++        const N: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
++        const CLAMP: f32 = 10.0;
++        const SAMPLES: usize = 12;
++        const ECONOMIC_FLOOR_MS: f64 = 158.3;
++        const V2_EMPTY_BOUND_MS: f64 = 0.492_790;
++        const OUTPUT_POISON: f32 = f32::from_bits(0x7141_2345);
++        const ROUTE_PAYLOAD_SHA256: &str =
++            "505cb93ff9c3e1557bbad8f27a773e08b0e8c3475fbb4d7096069667c1fbafdd";
++
++        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
++        enum Arm {
++            Baseline,
++            Candidate,
++        }
++
++        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
++        enum Regime {
++            Disjoint,
++            Warm,
++        }
++
++        #[derive(Clone, Copy, Debug)]
++        struct Sample {
++            gpu_ms: f64,
++            wall_ms: f64,
++        }
++
++        struct ProfileBank {
++            tensor: MetalTensor,
++            expert_bytes: usize,
++            initialized_experts: Vec<usize>,
++            original_digest: [u8; 32],
++        }
++
++        impl ProfileBank {
++            fn digest(&self) -> [u8; 32] {
++                let mut digest = Sha256::new();
++                for &expert in &self.initialized_experts {
++                    digest.update((expert as u32).to_le_bytes());
++                    let start = self.tensor.offset as usize + expert * self.expert_bytes;
++                    let bytes = unsafe {
++                        std::slice::from_raw_parts(
++                            self.tensor
++                                .buffer
++                                .contents()
++                                .as_ptr()
++                                .cast::<u8>()
++                                .add(start),
++                            self.expert_bytes,
++                        )
++                    };
++                    digest.update(bytes);
++                }
++                digest.finalize().into()
++            }
++
++            fn assert_unchanged(&self, label: &str) {
++                assert_eq!(
++                    self.digest(),
++                    self.original_digest,
++                    "{label} initialized weight bytes changed"
++                );
++            }
++
++            fn touched_bytes(&self) -> usize {
++                self.expert_bytes * self.initialized_experts.len()
++            }
++        }
++
++        struct ProfileLayer {
++            layer: usize,
++            schedule: Vec<ExpertBucket>,
++            slot_values: Vec<i32>,
++            slots: MetalTensor,
++            input: MetalTensor,
++            baseline: MetalTensor,
++            candidate: MetalTensor,
++        }
++
++        fn hex(digest: impl AsRef<[u8]>) -> String {
++            digest
++                .as_ref()
++                .iter()
++                .map(|byte| format!("{byte:02x}"))
++                .collect()
++        }
++
++        fn mix64(mut value: u64) -> u64 {
++            value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
++            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
++            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
++            value ^ (value >> 31)
++        }
++
++        fn expert_template() -> (Vec<u8>, usize, usize) {
++            let (block_elements, block_bytes) = ggml_type_layout(GgmlType::IQ2_XS).unwrap();
++            let block_elements = block_elements as usize;
++            let block_bytes = block_bytes as usize;
++            let elements = H * F;
++            assert!(elements.is_multiple_of(block_elements));
++            let blocks = elements / block_elements;
++            let mut payload = vec![0u8; blocks * block_bytes];
++            for block in 0..blocks {
++                let start = block * block_bytes;
++                payload[start..start + 2].copy_from_slice(
++                    &half::f16::from_f32(0.00390625 * (1 + block % 7) as f32)
++                        .to_bits()
++                        .to_le_bytes(),
++                );
++                for byte in 2..block_bytes {
++                    payload[start + byte] =
++                        (block.wrapping_mul(31) + byte.wrapping_mul(13) + 5) as u8;
++                }
++            }
++            (payload, blocks, block_bytes)
++        }
++
++        fn profile_bank(
++            ctx: &MetalContext,
++            initialized_experts: Vec<usize>,
++            seed: u64,
++            template: &[u8],
++            blocks_per_expert: usize,
++            block_bytes: usize,
++        ) -> ProfileBank {
++            assert!(!initialized_experts.is_empty());
++            assert!(
++                initialized_experts
++                    .windows(2)
++                    .all(|window| window[0] < window[1])
++            );
++            assert!(initialized_experts.iter().all(|&expert| expert < E));
++            let expert_bytes = template.len();
++            assert_eq!(expert_bytes, blocks_per_expert * block_bytes);
++            let bank_bytes = expert_bytes * E;
++            assert_eq!(bank_bytes, 620_756_992);
++            assert!(bank_bytes <= ctx.max_buffer_length());
++            let buffer = ctx.buffer_uninit(bank_bytes).unwrap();
++            let tensor = MetalTensor {
++                buffer,
++                offset: 0,
++                shape: vec![H as u64, F as u64, E as u64],
++                dtype: GgmlType::IQ2_XS,
++                provenance: MetalTensorProvenance::OwnedWritable,
++            };
++            let base = tensor.buffer.contents().as_ptr().cast::<u8>();
++            for &expert in &initialized_experts {
++                let destination = unsafe { base.add(expert * expert_bytes) };
++                unsafe {
++                    std::ptr::copy_nonoverlapping(template.as_ptr(), destination, expert_bytes);
++                }
++                for block in (0..blocks_per_expert).step_by(16) {
++                    let value = mix64(seed ^ ((expert as u64) << 32) ^ block as u64);
++                    unsafe {
++                        std::ptr::copy_nonoverlapping(
++                            value.to_le_bytes().as_ptr(),
++                            destination.add(block * block_bytes + 2),
++                            8,
++                        );
++                    }
++                }
++            }
++            let mut bank = ProfileBank {
++                tensor,
++                expert_bytes,
++                initialized_experts,
++                original_digest: [0; 32],
++            };
++            bank.original_digest = bank.digest();
++            bank
++        }
++
++        fn logical_values(tensor: &MetalTensor) -> &[f32] {
++            unsafe {
++                std::slice::from_raw_parts(
++                    tensor
++                        .buffer
++                        .contents()
++                        .as_ptr()
++                        .cast::<u8>()
++                        .add(tensor.offset as usize)
++                        .cast::<f32>(),
++                    tensor.n_elements() as usize,
++                )
++            }
++        }
++
++        fn poison(tensor: &MetalTensor) {
++            let values = unsafe {
++                std::slice::from_raw_parts_mut(
++                    tensor
++                        .buffer
++                        .contents()
++                        .as_ptr()
++                        .cast::<u8>()
++                        .add(tensor.offset as usize)
++                        .cast::<f32>(),
++                    tensor.n_elements() as usize,
++                )
++            };
++            values.fill(OUTPUT_POISON);
++        }
++
++        fn profile_layers(ctx: &MetalContext) -> Vec<ProfileLayer> {
++            let fixture = packed_grouped_iq2_route_census_fixture();
++            assert_eq!(fixture.route_payload_sha256, ROUTE_PAYLOAD_SHA256);
++            assert_eq!(fixture.n_tokens, N);
++            assert_eq!(fixture.top_k, K);
++            assert_eq!(fixture.expert_count, E);
++            assert_eq!(fixture.layers.len(), 25);
++            fixture
++                .layers
++                .into_iter()
++                .zip(fixture.grouped_layer_ids)
++                .map(|(route_layer, expected_layer)| {
++                    assert_eq!(route_layer.layer, expected_layer);
++                    let (expert_ids, rows, slots, schedule) =
++                        packed_grouped_schedule_from_route_ids(N, &route_layer.route_expert_ids);
++                    assert_eq!(
++                        packed_post_route_expert_ids(N, &expert_ids, &rows, &slots, &schedule,)
++                            .unwrap(),
++                        route_layer.route_expert_ids
++                    );
++                    let slots_tensor = MetalTensor::from_bytes(
++                        ctx,
++                        bytemuck::cast_slice(&slots),
++                        vec![(N * K) as u64],
++                        GgmlType::I32,
++                    )
++                    .unwrap();
++                    let input = grouped_guarded_f32(ctx, vec![H as u64, N as u64], 17.0);
++                    let input_values = unsafe {
++                        std::slice::from_raw_parts_mut(
++                            input
++                                .buffer
++                                .contents()
++                                .as_ptr()
++                                .cast::<u8>()
++                                .add(input.offset as usize)
++                                .cast::<f32>(),
++                            H * N,
++                        )
++                    };
++                    for (index, value) in input_values.iter_mut().enumerate() {
++                        let magnitude = 0.000_125
++                            * (1 + (index.wrapping_mul(37) + expected_layer.wrapping_mul(101))
++                                % 997) as f32;
++                        *value = if (index + expected_layer).is_multiple_of(2) {
++                            magnitude
++                        } else {
++                            -magnitude
++                        };
++                    }
++                    ProfileLayer {
++                        layer: expected_layer,
++                        schedule,
++                        slot_values: slots,
++                        slots: slots_tensor,
++                        input,
++                        baseline: grouped_guarded_f32(
++                            ctx,
++                            vec![F as u64, K as u64, N as u64],
++                            OUTPUT_POISON,
++                        ),
++                        candidate: grouped_guarded_f32(
++                            ctx,
++                            vec![F as u64, K as u64, N as u64],
++                            OUTPUT_POISON,
++                        ),
++                    }
++                })
++                .collect()
++        }
++
++        fn input_digest(layers: &[ProfileLayer]) -> [u8; 32] {
++            let mut digest = Sha256::new();
++            for layer in layers {
++                digest.update((layer.layer as u32).to_le_bytes());
++                digest.update(bytemuck::cast_slice(logical_values(&layer.input)));
++            }
++            digest.finalize().into()
++        }
++
++        fn output_digest(layers: &[ProfileLayer], arm: Arm) -> String {
++            let mut digest = Sha256::new();
++            for layer in layers {
++                digest.update((layer.layer as u32).to_le_bytes());
++                let output = match arm {
++                    Arm::Baseline => &layer.baseline,
++                    Arm::Candidate => &layer.candidate,
++                };
++                digest.update(bytemuck::cast_slice(logical_values(output)));
++            }
++            hex(digest.finalize())
++        }
++
++        fn assert_output_contract(layers: &[ProfileLayer], arm: Arm) {
++            for layer in layers {
++                let output = match arm {
++                    Arm::Baseline => &layer.baseline,
++                    Arm::Candidate => &layer.candidate,
++                };
++                let values = logical_values(output);
++                assert!(values.iter().all(|value| value.is_finite()));
++                assert!(
++                    values
++                        .iter()
++                        .all(|value| value.to_bits() != OUTPUT_POISON.to_bits()),
++                    "layer {} {arm:?} did not overwrite every output",
++                    layer.layer
++                );
++                assert_grouped_guards("row-pack profile input", &layer.input);
++                assert_grouped_guards("row-pack profile baseline", &layer.baseline);
++                assert_grouped_guards("row-pack profile candidate", &layer.candidate);
++                assert_eq!(
++                    host_read_i32(&layer.slots, "row-pack profile slots").unwrap(),
++                    layer.slot_values
++                );
++            }
++        }
++
++        fn assert_exact(layers: &[ProfileLayer]) {
++            for layer in layers {
++                assert_eq!(
++                    logical_values(&layer.candidate)
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .collect::<Vec<_>>(),
++                    logical_values(&layer.baseline)
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .collect::<Vec<_>>(),
++                    "layer {} row-pack candidate differs",
++                    layer.layer
++                );
++            }
++        }
++
++        fn sample(
++            ctx: &MetalContext,
++            layers: &[ProfileLayer],
++            disjoint: &[(ProfileBank, ProfileBank)],
++            warm: &(ProfileBank, ProfileBank),
++            arm: Arm,
++            regime: Regime,
++        ) -> Sample {
++            assert_eq!(layers.len(), disjoint.len());
++            let mut commands = Vec::with_capacity(layers.len());
++            let started = std::time::Instant::now();
++            let mut wall_ms = None;
++            for (index, (layer, pair)) in layers.iter().zip(disjoint).enumerate() {
++                let pair = match regime {
++                    Regime::Disjoint => pair,
++                    Regime::Warm => warm,
++                };
++                let command = ctx.queue.commandBuffer().unwrap();
++                let encoder = KernelEncoder::begin(&command);
++                let output = match arm {
++                    Arm::Baseline => &layer.baseline,
++                    Arm::Candidate => &layer.candidate,
++                };
++                let result = match arm {
++                    Arm::Baseline => encode_packed_grouped_swiglu_iq2_xs_f32(
++                        ctx,
++                        &encoder,
++                        &pair.0.tensor,
++                        &pair.1.tensor,
++                        &layer.input,
++                        &layer.slots,
++                        &layer.schedule,
++                        output,
++                        H,
++                        F,
++                        E,
++                        K,
++                        N,
++                        CLAMP,
++                    ),
++                    Arm::Candidate => encode_packed_grouped_swiglu_iq2_xs_row_packed_f32(
++                        ctx,
++                        &encoder,
++                        &pair.0.tensor,
++                        &pair.1.tensor,
++                        &layer.input,
++                        &layer.slots,
++                        &layer.schedule,
++                        output,
++                        H,
++                        F,
++                        E,
++                        K,
++                        N,
++                        CLAMP,
++                    ),
++                };
++                encoder.end();
++                result.unwrap();
++                command.commit();
++                command.waitUntilCompleted();
++                if index + 1 == layers.len() {
++                    wall_ms = Some(started.elapsed().as_secs_f64() * 1e3);
++                }
++                commands.push(command);
++            }
++            let wall_ms = wall_ms.unwrap();
++            let gpu_ms = commands
++                .iter()
++                .zip(layers)
++                .map(|(command, layer)| {
++                    assert!(
++                        command.error().is_none(),
++                        "layer {} {arm:?}: {:?}",
++                        layer.layer,
++                        command.error()
++                    );
++                    let start = command.GPUStartTime();
++                    let end = command.GPUEndTime();
++                    let gpu_ms = (end - start) * 1e3;
++                    assert!(
++                        start.is_finite()
++                            && end.is_finite()
++                            && end > start
++                            && gpu_ms.is_finite()
++                            && gpu_ms > 0.0
++                    );
++                    gpu_ms
++                })
++                .sum::<f64>();
++            assert!(gpu_ms.is_finite() && gpu_ms > 0.0);
++            assert!(wall_ms.is_finite() && wall_ms > 0.0);
++            Sample { gpu_ms, wall_ms }
++        }
++
++        fn validate_regime(
++            ctx: &MetalContext,
++            layers: &[ProfileLayer],
++            disjoint: &[(ProfileBank, ProfileBank)],
++            warm: &(ProfileBank, ProfileBank),
++            regime: Regime,
++        ) -> (String, String) {
++            for layer in layers {
++                poison(&layer.baseline);
++                poison(&layer.candidate);
++            }
++            let _ = sample(ctx, layers, disjoint, warm, Arm::Baseline, regime);
++            let _ = sample(ctx, layers, disjoint, warm, Arm::Candidate, regime);
++            assert_output_contract(layers, Arm::Baseline);
++            assert_output_contract(layers, Arm::Candidate);
++            assert_exact(layers);
++            let baseline_digest = output_digest(layers, Arm::Baseline);
++            let candidate_digest = output_digest(layers, Arm::Candidate);
++            assert_eq!(baseline_digest, candidate_digest);
++            let _ = sample(ctx, layers, disjoint, warm, Arm::Baseline, regime);
++            let _ = sample(ctx, layers, disjoint, warm, Arm::Candidate, regime);
++            assert_eq!(output_digest(layers, Arm::Baseline), baseline_digest);
++            assert_eq!(output_digest(layers, Arm::Candidate), candidate_digest);
++            assert_exact(layers);
++            (baseline_digest, candidate_digest)
++        }
++
++        fn drift(values: &[f64]) -> f64 {
++            let minimum = values.iter().copied().reduce(f64::min).unwrap();
++            let maximum = values.iter().copied().reduce(f64::max).unwrap();
++            assert!(minimum.is_finite() && minimum > 0.0 && maximum.is_finite());
++            2.0 * (maximum - minimum) / (maximum + minimum)
++        }
++
++        fn value_range(values: &[f64]) -> f64 {
++            values.iter().copied().reduce(f64::max).unwrap()
++                - values.iter().copied().reduce(f64::min).unwrap()
++        }
++
++        fn regime_transcript(
++            regime: Regime,
++            baseline: &[Sample],
++            candidate: &[Sample],
++        ) -> (bool, bool, String) {
++            let baseline_gpu = baseline
++                .iter()
++                .map(|sample| sample.gpu_ms)
++                .collect::<Vec<_>>();
++            let candidate_gpu = candidate
++                .iter()
++                .map(|sample| sample.gpu_ms)
++                .collect::<Vec<_>>();
++            let baseline_wall = baseline
++                .iter()
++                .map(|sample| sample.wall_ms)
++                .collect::<Vec<_>>();
++            let candidate_wall = candidate
++                .iter()
++                .map(|sample| sample.wall_ms)
++                .collect::<Vec<_>>();
++            let cell_drifts = [
++                drift(&baseline_gpu),
++                drift(&candidate_gpu),
++                drift(&baseline_wall),
++                drift(&candidate_wall),
++            ];
++            let stable = cell_drifts.iter().all(|&value| value <= 0.05);
++            let metric = |name: &str, baseline: &[f64], candidate: &[f64], empty_bound: f64| {
++                let baseline_median = percentile_ms(baseline, 0.5);
++                let candidate_median = percentile_ms(candidate, 0.5);
++                let baseline_p95 = percentile_ms(baseline, 0.95);
++                let candidate_p95 = percentile_ms(candidate, 0.95);
++                let q = (5.0 * value_range(baseline).max(value_range(candidate))).max(empty_bound);
++                let median_lower = baseline_median - candidate_median - q;
++                let p95_lower = baseline_p95 - candidate_p95 - q;
++                let median_threshold = ECONOMIC_FLOOR_MS.max(0.25 * baseline_median);
++                let p95_threshold = ECONOMIC_FLOOR_MS.max(0.25 * baseline_p95);
++                let pass = median_lower >= median_threshold && p95_lower >= p95_threshold;
++                (
++                    pass,
++                    format!(
++                        "{name}={{baseline={baseline:?},candidate={candidate:?},baseline_drift={:.9},candidate_drift={:.9},baseline_median={baseline_median:.9},candidate_median={candidate_median:.9},baseline_p95={baseline_p95:.9},candidate_p95={candidate_p95:.9},q={q:.9},median_lower={median_lower:.9},p95_lower={p95_lower:.9},median_threshold={median_threshold:.9},p95_threshold={p95_threshold:.9},pass={pass}}}",
++                        drift(baseline),
++                        drift(candidate),
++                    ),
++                )
++            };
++            let (gpu_pass, gpu) = metric("gpu", &baseline_gpu, &candidate_gpu, V2_EMPTY_BOUND_MS);
++            let (wall_pass, wall) = metric("wall", &baseline_wall, &candidate_wall, 0.0);
++            (
++                stable,
++                gpu_pass && wall_pass,
++                format!(
++                    "regime={regime:?} stable={stable} cell_drifts={cell_drifts:?} {gpu} {wall}"
++                ),
++            )
++        }
++
++        let ctx = MetalContext::new().expect("row-pack production-shape gate requires Metal");
++        assert_eq!(
++            ctx.device.name().to_string(),
++            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
++        );
++        assert!(packed_grouped_expert_enabled_for_test(&ctx));
++        let layers = profile_layers(&ctx);
++        let input_before = input_digest(&layers);
++        let (template, blocks, block_bytes) = expert_template();
++        let mut disjoint = Vec::with_capacity(layers.len());
++        for layer in &layers {
++            let experts = layer
++                .schedule
++                .iter()
++                .map(|bucket| bucket.expert)
++                .collect::<Vec<_>>();
++            disjoint.push((
++                profile_bank(
++                    &ctx,
++                    experts.clone(),
++                    0x1000_0000 ^ layer.layer as u64,
++                    &template,
++                    blocks,
++                    block_bytes,
++                ),
++                profile_bank(
++                    &ctx,
++                    experts,
++                    0x2000_0000 ^ layer.layer as u64,
++                    &template,
++                    blocks,
++                    block_bytes,
++                ),
++            ));
++        }
++        let all_experts = (0..E).collect::<Vec<_>>();
++        let warm = (
++            profile_bank(
++                &ctx,
++                all_experts.clone(),
++                0x3000_0000,
++                &template,
++                blocks,
++                block_bytes,
++            ),
++            profile_bank(
++                &ctx,
++                all_experts,
++                0x4000_0000,
++                &template,
++                blocks,
++                block_bytes,
++            ),
++        );
++        let logical_bank_bytes = disjoint
++            .iter()
++            .map(|pair| pair.0.tensor.n_bytes() + pair.1.tensor.n_bytes())
++            .sum::<u64>()
++            .checked_add(warm.0.tensor.n_bytes() + warm.1.tensor.n_bytes())
++            .unwrap();
++        assert_eq!(logical_bank_bytes, 32_279_363_584);
++        let mut bank_refs = Vec::with_capacity(52);
++        for pair in &disjoint {
++            bank_refs.extend([&pair.0, &pair.1]);
++        }
++        bank_refs.extend([&warm.0, &warm.1]);
++        let touched_weight_bytes = bank_refs
++            .iter()
++            .map(|bank| bank.touched_bytes())
++            .sum::<usize>();
++        let mut weight_digest = Sha256::new();
++        for (index, bank) in bank_refs.iter().enumerate() {
++            weight_digest.update((index as u32).to_le_bytes());
++            weight_digest.update(bank.original_digest);
++        }
++        let weight_digest = hex(weight_digest.finalize());
++        let allocated_bytes = ctx.current_allocated_size();
++
++        let (disjoint_baseline_digest, disjoint_candidate_digest) =
++            validate_regime(&ctx, &layers, &disjoint, &warm, Regime::Disjoint);
++        let (warm_baseline_digest, warm_candidate_digest) =
++            validate_regime(&ctx, &layers, &disjoint, &warm, Regime::Warm);
++
++        let _trace = crate::metal::kernel_trace_begin();
++        let _ = sample(
++            &ctx,
++            &layers,
++            &disjoint,
++            &warm,
++            Arm::Baseline,
++            Regime::Disjoint,
++        );
++        let baseline_trace = crate::metal::kernel_trace_take_delta();
++        let _ = sample(
++            &ctx,
++            &layers,
++            &disjoint,
++            &warm,
++            Arm::Candidate,
++            Regime::Disjoint,
++        );
++        let candidate_trace = crate::metal::kernel_trace_take_delta();
++        assert_eq!(baseline_trace.encoders, 25);
++        assert_eq!(baseline_trace.concurrent_encoders, 0);
++        assert_eq!(baseline_trace.dispatches, 25);
++        assert_eq!(candidate_trace.encoders, 25);
++        assert_eq!(candidate_trace.concurrent_encoders, 0);
++        assert_eq!(candidate_trace.dispatches, 117);
++
++        const BLOCK: [(Arm, Regime); 8] = [
++            (Arm::Baseline, Regime::Disjoint),
++            (Arm::Candidate, Regime::Disjoint),
++            (Arm::Candidate, Regime::Warm),
++            (Arm::Baseline, Regime::Warm),
++            (Arm::Baseline, Regime::Warm),
++            (Arm::Candidate, Regime::Warm),
++            (Arm::Candidate, Regime::Disjoint),
++            (Arm::Baseline, Regime::Disjoint),
++        ];
++        for (arm, regime) in BLOCK {
++            let _ = sample(&ctx, &layers, &disjoint, &warm, arm, regime);
++        }
++
++        let mut baseline_disjoint = Vec::with_capacity(SAMPLES);
++        let mut candidate_disjoint = Vec::with_capacity(SAMPLES);
++        let mut baseline_warm = Vec::with_capacity(SAMPLES);
++        let mut candidate_warm = Vec::with_capacity(SAMPLES);
++        for _ in 0..SAMPLES / 2 {
++            for (arm, regime) in BLOCK {
++                let result = sample(&ctx, &layers, &disjoint, &warm, arm, regime);
++                match (arm, regime) {
++                    (Arm::Baseline, Regime::Disjoint) => baseline_disjoint.push(result),
++                    (Arm::Candidate, Regime::Disjoint) => candidate_disjoint.push(result),
++                    (Arm::Baseline, Regime::Warm) => baseline_warm.push(result),
++                    (Arm::Candidate, Regime::Warm) => candidate_warm.push(result),
++                }
++            }
++        }
++        for samples in [
++            &baseline_disjoint,
++            &candidate_disjoint,
++            &baseline_warm,
++            &candidate_warm,
++        ] {
++            assert_eq!(samples.len(), SAMPLES);
++        }
++
++        let (disjoint_stable, disjoint_pass, disjoint_transcript) =
++            regime_transcript(Regime::Disjoint, &baseline_disjoint, &candidate_disjoint);
++        let (warm_stable, warm_pass, warm_transcript) =
++            regime_transcript(Regime::Warm, &baseline_warm, &candidate_warm);
++
++        assert_eq!(
++            validate_regime(&ctx, &layers, &disjoint, &warm, Regime::Disjoint),
++            (
++                disjoint_baseline_digest.clone(),
++                disjoint_candidate_digest.clone()
++            )
++        );
++        assert_eq!(
++            validate_regime(&ctx, &layers, &disjoint, &warm, Regime::Warm),
++            (warm_baseline_digest.clone(), warm_candidate_digest.clone())
++        );
++        assert_eq!(input_digest(&layers), input_before);
++        for (index, pair) in disjoint.iter().enumerate() {
++            pair.0
++                .assert_unchanged(&format!("row-pack gate layer {index}"));
++            pair.1
++                .assert_unchanged(&format!("row-pack up layer {index}"));
++        }
++        warm.0.assert_unchanged("row-pack warm gate");
++        warm.1.assert_unchanged("row-pack warm up");
++
++        let stable = disjoint_stable && warm_stable;
++        let pass = disjoint_pass && warm_pass;
++        let decision = if !stable {
++            "INCONCLUSIVE_HOLD"
++        } else if pass {
++            "AUTHORIZE_GATE_ONLY_ASSET_AB"
++        } else {
++            "KILL_ROW_PACK_FAMILY"
++        };
++        eprintln!(
++            "deepseek_v4 grouped_iq2_row_pack_packet route_payload_sha256={ROUTE_PAYLOAD_SHA256} planner_payload_sha256=58fecd77889f76bfc2e6690c80ce08d09f59de9b0b2c5e7f01fe26a9ff9a3cf3 clamp={CLAMP} samples_per_cell={SAMPLES} economic_floor_ms={ECONOMIC_FLOOR_MS} fractional_floor=0.25 v2_empty_bound_ms={V2_EMPTY_BOUND_MS} {disjoint_transcript} {warm_transcript} decision={decision} baseline_dispatches={} candidate_dispatches={} logical_bank_bytes={logical_bank_bytes} touched_weight_bytes={touched_weight_bytes} allocated_bytes={allocated_bytes} weight_digest={weight_digest} disjoint_baseline_digest={disjoint_baseline_digest} disjoint_candidate_digest={disjoint_candidate_digest} warm_baseline_digest={warm_baseline_digest} warm_candidate_digest={warm_candidate_digest}",
++            baseline_trace.dispatches, candidate_trace.dispatches,
++        );
++        assert!(stable, "row-pack packet is INCONCLUSIVE");
++        assert!(pass, "row-pack family misses the frozen economic gate");
++    }
++
+diff --git a/kernels/mat_vec.metal b/kernels/mat_vec.metal
+index 111aa6d..a1a35b1 100644
+--- a/kernels/mat_vec.metal
++++ b/kernels/mat_vec.metal
+@@ -3234,0 +3235,139 @@ kernel void kernel_mat_mat_iq2_xs_f32(
++template <ushort WIDTH>
++__attribute__((always_inline)) inline void ds4_packed_grouped_swiglu_iq2_xs_row_pack_impl(
++        constant ds4_packed_grouped_expert_args & args,
++        device const uchar * gate_weight,
++        device const uchar * up_weight,
++        device const float * x,
++        device const int * slots,
++        constant ds4_packed_expert_tile * tiles,
++        device float * inner,
++        threadgroup float * wtile,
++        uint2 tgpig,
++        ushort tiisg) {
++    constexpr ushort ROWS = 32u / WIDTH;
++    const uint first_ffn_row = tgpig.x * uint(ROWS);
++    if (first_ffn_row + uint(ROWS) > args.ffn) return;
++
++    const ds4_packed_expert_tile tile = tiles[tgpig.y];
++    if (tile.expert >= args.n_expert || tile.count == 0u || tile.count > uint(WIDTH)
++            || tile.start + tile.count > args.n_tokens * args.top_k) return;
++
++    const uint lane = uint(tiisg);
++    const uint local_row = lane / uint(WIDTH);
++    const uint local_q = lane % uint(WIDTH);
++    int source_slot = -1;
++    if (local_row == 0u && local_q < tile.count) {
++        source_slot = slots[tile.start + local_q];
++    }
++    const int slot = simd_shuffle(source_slot, local_q);
++    const bool active = local_q < tile.count
++        && slot >= 0 && uint(slot) < args.n_tokens * args.top_k;
++    const uint token = active ? uint(slot) / args.top_k : 0u;
++
++    const uint nb = args.hidden / 256u;
++    const ulong row_stride = (ulong)nb * 74u;
++    const ulong expert_stride = (ulong)args.ffn * row_stride;
++    const ulong expert_base = (ulong)tile.expert * expert_stride;
++    float gate_acc = 0.0f;
++    float up_acc = 0.0f;
++
++    for (uint bidx = 0; bidx < nb; ++bidx) {
++        const uint base = bidx * 256u;
++        for (uint k0 = 0; k0 < 256u; k0 += 32u) {
++            for (ushort packed_row = 0; packed_row < ROWS; ++packed_row) {
++                const uint ffn_row = first_ffn_row + uint(packed_row);
++                const ulong block_offset = expert_base + (ulong)ffn_row * row_stride
++                    + (ulong)bidx * 74u;
++                device const uchar * gate_block = gate_weight + block_offset;
++                device const uchar * up_block = up_weight + block_offset;
++                const uint row_base = uint(packed_row) * 32u;
++                wtile[row_base + lane] = deq_iq2_xs_bytes(gate_block, k0 + lane);
++                wtile[uint(ROWS) * 32u + row_base + lane] =
++                    deq_iq2_xs_bytes(up_block, k0 + lane);
++            }
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++            for (uint j = 0; j < 32u; ++j) {
++                uint x_bits = 0u;
++                if (local_row == 0u && active) {
++                    x_bits = as_type<uint>(x[(ulong)token * args.hidden + base + k0 + j]);
++                }
++                const float x_value = as_type<float>(simd_shuffle(x_bits, local_q));
++                if (active) {
++                    const uint row_base = local_row * 32u;
++                    gate_acc += x_value * wtile[row_base + j];
++                    up_acc += x_value * wtile[uint(ROWS) * 32u + row_base + j];
++                }
++            }
++            threadgroup_barrier(mem_flags::mem_threadgroup);
++        }
++    }
++
++    if (active) {
++        const uint ffn_row = first_ffn_row + local_row;
++        const float clamped_gate = min(gate_acc, args.clamp);
++        const float clamped_up = clamp(up_acc, -args.clamp, args.clamp);
++        inner[(ulong)slot * args.ffn + ffn_row] =
++            clamped_gate / (1.0f + exp(-clamped_gate)) * clamped_up;
++    }
++}
++
++kernel void kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_rows16(
++        constant ds4_packed_grouped_expert_args & args [[buffer(0)]],
++        device const uchar * gate_weight [[buffer(1)]],
++        device const uchar * up_weight [[buffer(2)]],
++        device const float * x [[buffer(3)]],
++        device const int * slots [[buffer(4)]],
++        constant ds4_packed_expert_tile * tiles [[buffer(5)]],
++        device float * inner [[buffer(6)]],
++        threadgroup float * wtile [[threadgroup(0)]],
++        uint2 tgpig [[threadgroup_position_in_grid]],
++        ushort tiisg [[thread_index_in_simdgroup]]) {
++    ds4_packed_grouped_swiglu_iq2_xs_row_pack_impl<2>(
++        args, gate_weight, up_weight, x, slots, tiles, inner, wtile, tgpig, tiisg);
++}
++
++kernel void kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_rows8(
++        constant ds4_packed_grouped_expert_args & args [[buffer(0)]],
++        device const uchar * gate_weight [[buffer(1)]],
++        device const uchar * up_weight [[buffer(2)]],
++        device const float * x [[buffer(3)]],
++        device const int * slots [[buffer(4)]],
++        constant ds4_packed_expert_tile * tiles [[buffer(5)]],
++        device float * inner [[buffer(6)]],
++        threadgroup float * wtile [[threadgroup(0)]],
++        uint2 tgpig [[threadgroup_position_in_grid]],
++        ushort tiisg [[thread_index_in_simdgroup]]) {
++    ds4_packed_grouped_swiglu_iq2_xs_row_pack_impl<4>(
++        args, gate_weight, up_weight, x, slots, tiles, inner, wtile, tgpig, tiisg);
++}
++
++kernel void kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_rows4(
++        constant ds4_packed_grouped_expert_args & args [[buffer(0)]],
++        device const uchar * gate_weight [[buffer(1)]],
++        device const uchar * up_weight [[buffer(2)]],
++        device const float * x [[buffer(3)]],
++        device const int * slots [[buffer(4)]],
++        constant ds4_packed_expert_tile * tiles [[buffer(5)]],
++        device float * inner [[buffer(6)]],
++        threadgroup float * wtile [[threadgroup(0)]],
++        uint2 tgpig [[threadgroup_position_in_grid]],
++        ushort tiisg [[thread_index_in_simdgroup]]) {
++    ds4_packed_grouped_swiglu_iq2_xs_row_pack_impl<8>(
++        args, gate_weight, up_weight, x, slots, tiles, inner, wtile, tgpig, tiisg);
++}
++
++kernel void kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_rows2(
++        constant ds4_packed_grouped_expert_args & args [[buffer(0)]],
++        device const uchar * gate_weight [[buffer(1)]],
++        device const uchar * up_weight [[buffer(2)]],
++        device const float * x [[buffer(3)]],
++        device const int * slots [[buffer(4)]],
++        constant ds4_packed_expert_tile * tiles [[buffer(5)]],
++        device float * inner [[buffer(6)]],
++        threadgroup float * wtile [[threadgroup(0)]],
++        uint2 tgpig [[threadgroup_position_in_grid]],
++        ushort tiisg [[thread_index_in_simdgroup]]) {
++    ds4_packed_grouped_swiglu_iq2_xs_row_pack_impl<16>(
++        args, gate_weight, up_weight, x, slots, tiles, inner, wtile, tgpig, tiisg);
++}
++

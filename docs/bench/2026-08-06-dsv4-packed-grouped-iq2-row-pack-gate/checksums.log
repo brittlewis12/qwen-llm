@@ -1,0 +1,19 @@
+$ pwd
+/Users/tito/code/qwen-llm
+
+$ shasum -a 256 docs/bench/2026-08-06-dsv4-packed-grouped-iq2-row-pack-gate/experiment-source.diff docs/bench/2026-08-06-dsv4-packed-grouped-iq2-row-pack-gate/row-pack-gate.log docs/bench/2026-08-06-dsv4-packed-grouped-iq2-row-pack-gate/retained-source.diff
+5745ff77e3b479101e46031b5406ee38ccbcdf9329585e0c2aabc28c65f83598  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-row-pack-gate/experiment-source.diff
+9cfba4b90af8f0ed155c27e31adf3f407a28f14274f96025f5281f924c857343  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-row-pack-gate/row-pack-gate.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-row-pack-gate/retained-source.diff
+
+$ shasum -a 256 target/release/deps/qwen_llm-246719edcad9c805
+cc946d5e09e1716d0d0909d09aa5020aa84be551af5259faa0751cdb3668f1c7  target/release/deps/qwen_llm-246719edcad9c805
+
+The first binary hash was recorded immediately before the sole campaign and
+contains the exact source archived by experiment-source.diff.
+
+$ shasum -a 256 target/release/deps/qwen_llm-246719edcad9c805
+0cba2a97cdc83345cce88ee2ddd053a69e484e317ae7021bfdb45c9b7f7301dc  target/release/deps/qwen_llm-246719edcad9c805
+
+The final hash was recorded after complete candidate/profiler removal, both
+retained focused tests, and strict release diagnostics Clippy.

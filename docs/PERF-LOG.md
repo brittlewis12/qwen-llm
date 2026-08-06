@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 F32 Q8 Q-B Opt-In HOLD
+
+Status: the full-N=2,048 F32 Q8 Q-B matrix is a retained approximate opt-in.
+Exact Q8 GEMV remains the default; set `QWEN_DSV4_PACKED_Q8_QB=f32_matrix` to
+exercise the candidate and `exact` to force the default.
+
+- Reuse the model-free-qualified F32 `R2C4K64` matrix only for Q-B on complete
+  2,048-token chunks. Activations and reconstructed Q8 weights remain F32;
+  output A/B and every partial tail retain exact GEMV. The prior output-family
+  KILL therefore remains closed.
+- Same-binary AB/BA runs on the 2,385-token prompt record exact at
+  46.075/45.004 seconds and the candidate at 41.066/40.670 seconds. Mean
+  prefill wall falls 10.3%, while throughput rises from 52.4 to 58.4 token/s.
+- Prompt logits change, but the top token and leading distribution remain
+  stable and all 64 retained greedy continuation IDs match exactly. Across
+  three full chunks in the 6,642-token prompt, the greedy summary diverges at
+  token 29 but remains coherent, faithful, and reaches EOS normally.
+- A separate 5,255-token deterministic probe places four unrelated keys across
+  the context and requires reverse-order minified JSON. The candidate retrieves
+  every exact value, obeys the output schema with no extra text, and reaches
+  EOS after 34 tokens.
+- Current DwarfStar and llama.cpp validate matrix-shaped Q8 prefill as the
+  ecosystem work unit. Their half-weight or half/half arithmetic is not a
+  quality escape hatch: this higher-precision candidate must qualify first.
+
+Decision: retain the candidate as a promising approximate option, not a
+default and not a KILL. Default promotion requires a small diverse long-prompt
+task battery with no retrieval, constraint, structured-output, EOS, or aggregate
+quality regression. Continue exact optimization through N=2,048 expert-major
+matrix work rather than reopening output A/B or porting a lower-precision Q8
+kernel first.
+
 ## 2026-08-06 - DeepSeek V4 2,048-Token Packed Prefill Default GO
 
 Status: ordinary packed prefill now uses chunks of up to 2,048 tokens.

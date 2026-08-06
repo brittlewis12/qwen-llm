@@ -977,7 +977,6 @@ fn encode_batch_projection(
     })
 }
 
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn encode_q8_f32_mma_r2c4k64(
     ctx: &MetalContext,
@@ -1425,12 +1424,35 @@ struct PackedAttentionViews {
     attention: MetalTensor,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Q8PrecisionProjection {
     Exact,
+    #[cfg(test)]
     HalfMatrix,
     F32Matrix,
+}
+
+fn parse_packed_q8_qb_projection(
+    value: Option<&str>,
+) -> Result<Q8PrecisionProjection, DeepSeekV4MetalError> {
+    match value {
+        None | Some("exact") => Ok(Q8PrecisionProjection::Exact),
+        Some("f32_matrix") => Ok(Q8PrecisionProjection::F32Matrix),
+        Some(value) => invalid(format!(
+            "QWEN_DSV4_PACKED_Q8_QB must be exact or f32_matrix, got {value:?}"
+        )),
+    }
+}
+
+fn packed_q8_qb_projection() -> Result<Q8PrecisionProjection, DeepSeekV4MetalError> {
+    let value = std::env::var("QWEN_DSV4_PACKED_Q8_QB").ok();
+    parse_packed_q8_qb_projection(value.as_deref())
+}
+
+impl Q8PrecisionProjection {
+    fn uses_full_chunk_qb_f32(self, n_tokens: usize) -> bool {
+        self == Self::F32Matrix && n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS
+    }
 }
 
 #[derive(Clone)]
@@ -1856,6 +1878,7 @@ impl PrefillAttentionScratch {
         kv_norm: &MetalTensor,
         n_tokens: usize,
         rms_eps: f32,
+        q_b_projection: Q8PrecisionProjection,
     ) -> Result<PackedAttentionViews, DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_attention_prepare_batch")?;
         checked_token_count(n_tokens)?;
@@ -1958,17 +1981,30 @@ impl PrefillAttentionScratch {
             config.q_lora_rank,
             rms_eps,
         )?;
-        encode_batch_projection(
-            ctx,
-            enc,
-            q_b,
-            &q_lora,
-            &queries_raw,
-            config.q_lora_rank,
-            dims.query_width,
-            n_tokens,
-            "packed Q B",
-        )?;
+        if q_b_projection.uses_full_chunk_qb_f32(n_tokens) {
+            encode_q8_f32_mma_r2c4k64(
+                ctx,
+                enc,
+                q_b,
+                &q_lora,
+                &queries_raw,
+                config.q_lora_rank,
+                dims.query_width,
+                n_tokens,
+            )?;
+        } else {
+            encode_batch_projection(
+                ctx,
+                enc,
+                q_b,
+                &q_lora,
+                &queries_raw,
+                config.q_lora_rank,
+                dims.query_width,
+                n_tokens,
+                "packed Q B",
+            )?;
+        }
         encode_rms_norm_batched_f32(
             ctx,
             enc,
@@ -3406,7 +3442,6 @@ fn encode_packed_grouped_mapped_iq3_xxs_f32(
     Ok(())
 }
 
-#[cfg(test)]
 fn packed_grouped_tensor_ranges_overlap(left: &MetalTensor, right: &MetalTensor) -> bool {
     if Retained::as_ptr(&left.buffer) != Retained::as_ptr(&right.buffer) {
         return false;
@@ -6670,6 +6705,7 @@ impl DeepSeekV4Session {
             ));
         }
         let n_tokens = checked_token_count(token_ids.len())?;
+        let q_b_projection = packed_q8_qb_projection()?;
         #[cfg(feature = "dsv4-diagnostics")]
         validate_packed_route_policy_scope(route_policy, token_ids.len())?;
         if expert_policy.uses_iq2_target() && token_ids.len() > PACKED_GROUPED_EXPERT_MAX_TOKENS {
@@ -6731,6 +6767,7 @@ impl DeepSeekV4Session {
             emit_logits,
             route_policy,
             expert_policy,
+            q_b_projection,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
             stage_recorder,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -6757,6 +6794,7 @@ impl DeepSeekV4Session {
         emit_logits: bool,
         route_policy: PackedRoutePolicy,
         expert_policy: PackedExpertPolicy,
+        q_b_projection: Q8PrecisionProjection,
         #[cfg(all(test, feature = "dsv4-diagnostics"))] mut stage_recorder: Option<
             &mut PackedPrefillStageRecorder,
         >,
@@ -6766,6 +6804,15 @@ impl DeepSeekV4Session {
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
         let n_tokens = token_ids.len();
+        if q_b_projection.uses_full_chunk_qb_f32(n_tokens) {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: F32 Q8 Q-B matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB=exact"
+                );
+            }
+        }
         if expert_policy.uses_iq2_mma16(n_tokens) {
             let mut eligible_layers = 0usize;
             for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
@@ -6940,6 +6987,7 @@ impl DeepSeekV4Session {
                     self.layer_tensor(layer, "attn_kv_a_norm.weight")?,
                     n_tokens,
                     rms_eps,
+                    q_b_projection,
                 )?;
 
                 let compressor = self.prefill.compressor.encode_layer_projections(
@@ -8426,6 +8474,23 @@ mod tests {
                 PackedGroupedExpertMode::Auto
             );
         }
+    }
+
+    #[test]
+    fn packed_q8_qb_matrix_policy_is_explicit_and_full_chunk_only() {
+        assert_eq!(
+            parse_packed_q8_qb_projection(None).unwrap(),
+            Q8PrecisionProjection::Exact
+        );
+        assert_eq!(
+            parse_packed_q8_qb_projection(Some("exact")).unwrap(),
+            Q8PrecisionProjection::Exact
+        );
+        let matrix = parse_packed_q8_qb_projection(Some("f32_matrix")).unwrap();
+        assert_eq!(matrix, Q8PrecisionProjection::F32Matrix);
+        assert!(!matrix.uses_full_chunk_qb_f32(512));
+        assert!(matrix.uses_full_chunk_qb_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
+        assert!(parse_packed_q8_qb_projection(Some("half_matrix")).is_err());
     }
 
     #[test]

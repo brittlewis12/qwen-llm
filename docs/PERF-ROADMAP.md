@@ -570,10 +570,13 @@ work below.
 
 Force-ranked queue:
 
-1. **Q8 packed dense mat-mat.** Replace token-axis Q8 GEMV for q_b and output
-   A/B with an existing matrix-shaped lineage. The isolated output result already
-   established a roughly 75% stage ceiling; use an exact or higher-precision
-   comparative contract rather than incumbent-vector proximity.
+1. **Q-B approximate-quality decision.** The F32 `R2C4K64` candidate applies
+   only to Q-B on complete N=2,048 chunks and cuts the 2,385-token prefill by
+   10.3%. It preserves one 64-token greedy continuation and passes a four-key
+   5,255-token structured retrieval probe, but a coherent 6,642-token summary
+   diverges from exact. Keep it opt-in until a small diverse task battery finds
+   no retrieval, constraint, EOS, or aggregate quality regression. Output A/B
+   remain closed by their prior full-model KILL.
 2. **Widen matrix-shaped expert execution.** BM16 proves the expert-major matrix
    work unit and is now the N=128 IQ2 default. Re-measure and generalize grouped
    IQ2/IQ3 execution at N=2,048 occupancy; do not reopen the exhausted scalar

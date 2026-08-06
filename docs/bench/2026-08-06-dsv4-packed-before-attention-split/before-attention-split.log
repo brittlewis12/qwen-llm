@@ -1,0 +1,39 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::tests::current_asset_packed_before_attention_split_attribution_packet ... 
+thread 'deepseek_v4_metal::tests::current_asset_packed_before_attention_split_attribution_packet' (259390575) panicked at crates/qwen-llm/src/deepseek_v4_metal.rs:14782:13:
+assertion `left == right` failed
+  left: "7c7d71da5df3b70e9d6f0555d949f7476acd5a68173331a228537c9e46dc728e"
+ right: "7c7d71da5dfb70e9d6f0555d949f7476acd5a68173331a228537c9e46dc728e"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+deepseek_v4 packed_before_attention_split_profile decision=INCONCLUSIVE_HOLD invalid_reason="assertion `left == right` failed\n  left: \"7c7d71da5df3b70e9d6f0555d949f7476acd5a68173331a228537c9e46dc728e\"\n right: \"7c7d71da5dfb70e9d6f0555d949f7476acd5a68173331a228537c9e46dc728e\""
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::tests::current_asset_packed_before_attention_split_attribution_packet
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 679 filtered out; finished in 28.57s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`
+       28.69 real         0.68 user         2.77 sys
+           305086464  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              -20723  page reclaims
+               61403  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+                 191  voluntary context switches
+               67290  involuntary context switches
+          1238657570  instructions retired
+           370604214  cycles elapsed
+            46416448  peak memory footprint

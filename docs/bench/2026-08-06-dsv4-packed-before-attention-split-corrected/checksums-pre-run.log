@@ -1,0 +1,5 @@
+2a523c42079aab2c23a01631d955fbd9c894bf291785434784e6dcc0939e9e55  target/release/deps/qwen_llm-246719edcad9c805
+e5f57e363beb2b1c7244dd4fbbf1cdcd56bdb57728a4500edbda40192fa56578  crates/qwen-llm/src/deepseek_v4_metal.rs
+308ff01bd47822bdb1990c7d0e17f7691f71fad984a051758ec62a55ff231c82  crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+a6090a656f58d26066aba6ca5d062600dc16e5bcb0f219f971eda991c331e725  docs/bench/2026-08-06-dsv4-packed-before-attention-split-corrected/experiment-source-pre-run.diff
+5714dae28a0806a297cdb4fb969be7fa49719efb806c8fbccfa1837900d52c13  docs/bench/2026-08-06-dsv4-packed-before-attention-split-corrected/boundary-source.txt

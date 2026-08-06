@@ -1,0 +1,726 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal.rs b/crates/qwen-llm/src/deepseek_v4_metal.rs
+index 5034f43..c914295 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal.rs
+@@ -14471,15 +14471,62 @@ mod tests {
+     }
+ 
+     #[cfg(feature = "dsv4-diagnostics")]
+-    #[test]
+-    #[ignore = "requires the current 97.05 GiB DS4 asset"]
+-    fn current_asset_packed_attention_split_attribution_packet() {
++    fn run_current_asset_packed_before_attention_split_attribution_packet() -> bool {
+         const PREFIX_TOKENS: usize = 128;
+         const CONTINUATION_TOKEN: u32 = 35;
+-        const ACCEPTED_COMBINED_LOG_SHA256: &str =
+-            "e735c536b742bb4f24c7dc89eaa7ceb40cbfa5ffdf65cf3e852130bf8be87cc0";
+-        const ACCEPTED_COMBINED_SHARES: [f64; 2] =
+-            [0.468_973_667_511_767_6, 0.472_380_181_289_259_2];
++        const ECONOMIC_FLOOR_MS: f64 = 158.3;
++        const MIN_STAGE_SHARE: f64 = 0.15;
++        const MIN_COHORT_SHARE: f64 = 0.10;
++        const MAX_DRIFT: f64 = 0.05;
++        const MAX_PERTURBATION: f64 = 0.10;
++        const MAX_LAYER_COVERAGE_ERROR: f64 = 0.02;
++        const MAX_AGGREGATE_COVERAGE_ERROR: f64 = 0.005;
++        const MAX_SINGLE_TRANSITION_AMBIGUITY: f64 = 0.05;
++        const MAX_LAYER_TRANSITION_AMBIGUITY: f64 = 0.10;
++        const MAX_AGGREGATE_TRANSITION_AMBIGUITY: f64 = 0.025;
++        const MAX_STAGE_REPEAT_DELTA: f64 = 0.02;
++        const MAX_COHORT_STAGE_REPEAT_DELTA: f64 = 0.03;
++        const MAX_PARENT_REPRODUCTION_DELTA: f64 = 0.02;
++        const MAX_PARENT_REPEAT_DELTA: f64 = 0.02;
++        const MAX_PARENT_COHORT_REPRODUCTION_DELTA: f64 = 0.03;
++        const MAX_PARENT_COHORT_REPEAT_DELTA: f64 = 0.03;
++        const ACCEPTED_PARENT_LOG_SHA256: &str =
++            "3fd96776530bd90903513aa790488cf314a81ce5a1ccfe96158b9d18a589278b";
++        const ACCEPTED_PARENT_SHARES: [f64; 2] =
++            [0.453_879_482_002_826_96, 0.466_213_557_045_876_2];
++        const ACCEPTED_PARENT_COHORT_SHARES: [[f64; 3]; 2] = [
++            [
++                0.508_539_766_070_025,
++                0.475_915_496_386_580_7,
++                0.421_417_271_245_838_83,
++            ],
++            [
++                0.517_449_953_352_172_5,
++                0.478_007_256_321_250_35,
++                0.446_970_125_502_633_3,
++            ],
++        ];
++        const EXPECTED_DISPATCHES: usize = 47_990;
++        const EXPECTED_MODEL_CONTENT_ID: &str =
++            "ae11d1ea13ccfd98509d248705a589384412cd67c502450158f84a8bd143b5e2";
++        const EXPECTED_DISPATCH_SHA256: &str =
++            "c87a6e9272f731016bd3f77a4d15f66c121ac557b60b0fbecddaa093801cc175";
++        const EXPECTED_LOGITS_SHA256: &str =
++            "45c414408cdc688eeeb4f40166013b2ac7261e5a2c2655cdf9f51e818941f2d5";
++        const EXPECTED_HIDDEN_SHA256: &str =
++            "8a9106b6c70c9069461ce1ef05d9dfb1349b6da7c4123b3e2e7b896c9d5278af";
++        const EXPECTED_CAUSAL_DIGEST: &str =
++            "3de61f2054ff7e540be5beb113c5c3884875b7018de800696aa58a0393535035";
++        const EXPECTED_PREFIX_DIGEST: &str =
++            "42428fa6efe61408f76b1ebc342f75cfa333af202b801c3031f34a7551cb870a";
++        const EXPECTED_COMPATIBILITY_DIGEST: &str =
++            "e7fb64be2f9fd96c52c9d5aa9384e09652e899650558dd50c4ba998e834bf076";
++        const EXPECTED_CONTINUATION_LOGITS_SHA256: &str =
++            "6c76cacc8242ec015421d7885efd1e9b6df5c1b075f2143cfee701181f3ade44";
++        const EXPECTED_CONTINUATION_CAUSAL_DIGEST: &str =
++            "7bc950b04b735a172ccb3c5b467488f548407b8b38f497b304d5d4bef7ae0dd8";
++        const EXPECTED_COMMITTED_TOKENS_SHA256: &str =
++            "7c7d71da5dfb70e9d6f0555d949f7476acd5a68173331a228537c9e46dc728e";
+         const ORDINARY_ENCODERS: u64 = (DEEPSEEK_V4_LAYER_COUNT * 2) as u64;
+         const SAMPLED_ENCODERS: u64 =
+             (DEEPSEEK_V4_LAYER_COUNT * (prefill::PACKED_PREFILL_STAGE_KINDS.len() + 1)) as u64;
+@@ -14530,10 +14577,10 @@ mod tests {
+ 
+         fn stage_index(kind: prefill::PackedPrefillStageKind) -> usize {
+             match kind {
+-                prefill::PackedPrefillStageKind::BeforeAttentionBody => 0,
+-                prefill::PackedPrefillStageKind::AttentionBody => 1,
+-                prefill::PackedPrefillStageKind::AttentionOutputProjections => 2,
+-                prefill::PackedPrefillStageKind::AfterAttentionOutput => 3,
++                prefill::PackedPrefillStageKind::RawSetupAndHyperPre => 0,
++                prefill::PackedPrefillStageKind::AttentionAndCompressorPrepare => 1,
++                prefill::PackedPrefillStageKind::ChronologicalRows => 2,
++                prefill::PackedPrefillStageKind::AfterChronological => 3,
+             }
+         }
+ 
+@@ -14696,6 +14743,50 @@ mod tests {
+             );
+         }
+ 
++        fn assert_expected_identity(evidence: &Evidence) {
++            assert_eq!(evidence.dispatch_count, EXPECTED_DISPATCHES);
++            assert_eq!(
++                profile_digest_hex(evidence.dispatch_digest),
++                EXPECTED_DISPATCH_SHA256
++            );
++            assert_eq!(
++                profile_digest_hex(Sha256::digest(bytemuck::cast_slice(&evidence.logits))),
++                EXPECTED_LOGITS_SHA256
++            );
++            assert_eq!(
++                profile_digest_hex(Sha256::digest(bytemuck::cast_slice(&evidence.hidden))),
++                EXPECTED_HIDDEN_SHA256
++            );
++            assert_eq!(
++                profile_digest_hex(evidence.causal_digest),
++                EXPECTED_CAUSAL_DIGEST
++            );
++            assert_eq!(
++                profile_digest_hex(evidence.prefix_digest),
++                EXPECTED_PREFIX_DIGEST
++            );
++            assert_eq!(
++                profile_digest_hex(evidence.compatibility_digest),
++                EXPECTED_COMPATIBILITY_DIGEST
++            );
++            assert_eq!(
++                profile_digest_hex(Sha256::digest(bytemuck::cast_slice(
++                    &evidence.continuation_logits,
++                ))),
++                EXPECTED_CONTINUATION_LOGITS_SHA256
++            );
++            assert_eq!(
++                profile_digest_hex(evidence.continuation_causal_digest),
++                EXPECTED_CONTINUATION_CAUSAL_DIGEST
++            );
++            assert_eq!(
++                profile_digest_hex(Sha256::digest(bytemuck::cast_slice(
++                    &evidence.committed_tokens,
++                ))),
++                EXPECTED_COMMITTED_TOKENS_SHA256
++            );
++        }
++
+         fn summarize(profile: &prefill::PackedPrefillStageProfile) -> Summary {
+             assert!(profile.sampled);
+             let config = crate::deepseek_v4::flash_0731_config_fixture();
+@@ -14731,7 +14822,7 @@ mod tests {
+                     assert_eq!(index, expected_index);
+                     match (stage.start_timestamp, stage.end_timestamp) {
+                         (Some(start), Some(end)) => {
+-                            assert!(start <= end);
++                            assert!(start < end);
+                             assert_eq!(stage.duration_ticks, end - start);
+                         }
+                         _ => panic!("layer {layer} stage {:?} is not physical", stage.kind),
+@@ -14808,12 +14899,10 @@ mod tests {
+             summary.stage_ms[stage] / summary.command_gpu_ms
+         }
+ 
+-        fn cohort_stage_shares(summary: &Summary, stage: usize) -> [f64; 3] {
+-            std::array::from_fn(|cohort| {
+-                summary.cohort_stage_ms[cohort][stage] / summary.cohort_command_ms[cohort]
+-            })
+-        }
+-
++        assert!(
++            !cfg!(debug_assertions),
++            "packed before-attention split requires a release test binary"
++        );
+         let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
+             .map(PathBuf::from)
+             .unwrap_or_else(|| {
+@@ -14823,7 +14912,13 @@ mod tests {
+             });
+         assert!(model_path.exists(), "missing current DS4 model");
+         let ctx = MetalContext::new().expect("create Metal context");
++        assert_eq!(ctx.device.name().to_string(), "Apple M4 Max");
+         let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
++        assert_eq!(
++            profile_digest_hex(model_content_id.as_bytes()),
++            EXPECTED_MODEL_CONTENT_ID,
++            "current DS4 model content ID"
++        );
+         let grouped_default = prefill::packed_grouped_expert_enabled_for_test(&ctx);
+         assert!(
+             grouped_default,
+@@ -14847,6 +14942,7 @@ mod tests {
+         assert_exact("sampled warm-up", &warm_sampled, &warm_control);
+         assert_topology(&warm_control, false);
+         assert_topology(&warm_sampled, true);
++        assert_expected_identity(&warm_control);
+ 
+         let mut controls = Vec::with_capacity(3);
+         let mut sampled_runs = Vec::with_capacity(2);
+@@ -14892,29 +14988,45 @@ mod tests {
+             .iter()
+             .map(|evidence| summarize(&evidence.profile))
+             .collect::<Vec<_>>();
+-        let body_shares = [stage_share(&summaries[0], 1), stage_share(&summaries[1], 1)];
+-        let output_shares = [stage_share(&summaries[0], 2), stage_share(&summaries[1], 2)];
+-        let combined_shares: [f64; 2] =
+-            std::array::from_fn(|index| body_shares[index] + output_shares[index]);
+-        let body_repeat_delta = (body_shares[0] - body_shares[1]).abs();
+-        let output_repeat_delta = (output_shares[0] - output_shares[1]).abs();
+-        let combined_repeat_delta = (combined_shares[0] - combined_shares[1]).abs();
+-        let combined_reproduction_delta: [f64; 2] = std::array::from_fn(|index| {
+-            (combined_shares[index] - ACCEPTED_COMBINED_SHARES[index]).abs()
++        let stage_shares: [[f64; 4]; 2] = std::array::from_fn(|sample| {
++            std::array::from_fn(|stage| stage_share(&summaries[sample], stage))
+         });
+-        let cohort_body_shares = [
+-            cohort_stage_shares(&summaries[0], 1),
+-            cohort_stage_shares(&summaries[1], 1),
+-        ];
+-        let cohort_output_shares = [
+-            cohort_stage_shares(&summaries[0], 2),
+-            cohort_stage_shares(&summaries[1], 2),
+-        ];
+-        let cohort_body_share_delta: [f64; 3] = std::array::from_fn(|cohort| {
+-            (cohort_body_shares[0][cohort] - cohort_body_shares[1][cohort]).abs()
++        let stage_repeat_delta: [f64; 4] =
++            std::array::from_fn(|stage| (stage_shares[0][stage] - stage_shares[1][stage]).abs());
++        let cohort_stage_shares: [[[f64; 4]; 3]; 2] = std::array::from_fn(|sample| {
++            std::array::from_fn(|cohort| {
++                std::array::from_fn(|stage| {
++                    summaries[sample].cohort_stage_ms[cohort][stage]
++                        / summaries[sample].cohort_command_ms[cohort]
++                })
++            })
++        });
++        let cohort_stage_repeat_delta: [[f64; 4]; 3] = std::array::from_fn(|cohort| {
++            std::array::from_fn(|stage| {
++                (cohort_stage_shares[0][cohort][stage] - cohort_stage_shares[1][cohort][stage])
++                    .abs()
++            })
++        });
++        let parent_shares: [f64; 2] =
++            std::array::from_fn(|sample| stage_shares[sample][..3].iter().sum::<f64>());
++        let parent_reproduction_delta: [f64; 2] = std::array::from_fn(|sample| {
++            (parent_shares[sample] - ACCEPTED_PARENT_SHARES[sample]).abs()
+         });
+-        let cohort_output_share_delta: [f64; 3] = std::array::from_fn(|cohort| {
+-            (cohort_output_shares[0][cohort] - cohort_output_shares[1][cohort]).abs()
++        let parent_repeat_delta = (parent_shares[0] - parent_shares[1]).abs();
++        let parent_cohort_shares: [[f64; 3]; 2] = std::array::from_fn(|sample| {
++            std::array::from_fn(|cohort| {
++                cohort_stage_shares[sample][cohort][..3].iter().sum::<f64>()
++            })
++        });
++        let parent_cohort_reproduction_delta: [[f64; 3]; 2] = std::array::from_fn(|sample| {
++            std::array::from_fn(|cohort| {
++                (parent_cohort_shares[sample][cohort]
++                    - ACCEPTED_PARENT_COHORT_SHARES[sample][cohort])
++                    .abs()
++            })
++        });
++        let parent_cohort_repeat_delta: [f64; 3] = std::array::from_fn(|cohort| {
++            (parent_cohort_shares[0][cohort] - parent_cohort_shares[1][cohort]).abs()
+         });
+         let transition_uncertainty = summaries
+             .iter()
+@@ -14932,45 +15044,119 @@ mod tests {
+             .reduce(f64::max)
+             .unwrap();
+         let common_uncertainty = transition_uncertainty.max(topology_uncertainty);
+-        let body_observer_uncertainty = common_uncertainty.max(body_repeat_delta);
+-        let output_observer_uncertainty = common_uncertainty.max(output_repeat_delta);
+-        let mean_body_share = (body_shares[0] + body_shares[1]) * 0.5;
+-        let mean_output_share = (output_shares[0] + output_shares[1]) * 0.5;
+-        let lower_body_share = (mean_body_share - body_observer_uncertainty).max(0.0);
+-        let lower_output_share = (mean_output_share - output_observer_uncertainty).max(0.0);
+-        let normalized_body_ms = [
+-            body_shares[0] * interpolated_control_gpu_ms[0],
+-            body_shares[1] * interpolated_control_gpu_ms[1],
+-        ];
+-        let normalized_output_ms = [
+-            output_shares[0] * interpolated_control_gpu_ms[0],
+-            output_shares[1] * interpolated_control_gpu_ms[1],
+-        ];
++        let stage_observer_uncertainty: [f64; 4] =
++            std::array::from_fn(|stage| common_uncertainty.max(stage_repeat_delta[stage]));
++        let mean_stage_share: [f64; 4] =
++            std::array::from_fn(|stage| (stage_shares[0][stage] + stage_shares[1][stage]) * 0.5);
++        let lower_stage_share: [f64; 4] = std::array::from_fn(|stage| {
++            (mean_stage_share[stage] - stage_observer_uncertainty[stage]).max(0.0)
++        });
++        let normalized_stage_ms: [[f64; 4]; 2] = std::array::from_fn(|sample| {
++            std::array::from_fn(|stage| {
++                stage_shares[sample][stage] * interpolated_control_gpu_ms[sample]
++            })
++        });
+         let ordinary_gpu_median = median(&control_gpu_ms);
+-        let normalized_body_median_ms = median(&normalized_body_ms);
+-        let normalized_output_median_ms = median(&normalized_output_ms);
+-        let lower_body_ms =
+-            (normalized_body_median_ms - body_observer_uncertainty * ordinary_gpu_median).max(0.0);
+-        let lower_output_ms = (normalized_output_median_ms
+-            - output_observer_uncertainty * ordinary_gpu_median)
+-            .max(0.0);
+-        let mean_cohort_body_share: [f64; 3] = std::array::from_fn(|cohort| {
+-            (cohort_body_shares[0][cohort] + cohort_body_shares[1][cohort]) * 0.5
++        let normalized_stage_median_ms: [f64; 4] = std::array::from_fn(|stage| {
++            median(&[normalized_stage_ms[0][stage], normalized_stage_ms[1][stage]])
++        });
++        let lower_stage_ms: [f64; 4] = std::array::from_fn(|stage| {
++            (normalized_stage_median_ms[stage]
++                - stage_observer_uncertainty[stage] * ordinary_gpu_median)
++                .max(0.0)
++        });
++        let mean_cohort_stage_share: [[f64; 4]; 3] = std::array::from_fn(|cohort| {
++            std::array::from_fn(|stage| {
++                (cohort_stage_shares[0][cohort][stage] + cohort_stage_shares[1][cohort][stage])
++                    * 0.5
++            })
++        });
++
++        let packet_valid = control_drift <= MAX_DRIFT
++            && sampled_drift <= MAX_DRIFT
++            && perturbation
++                .iter()
++                .all(|value| value.abs() <= MAX_PERTURBATION)
++            && summaries
++                .iter()
++                .all(|summary| summary.max_layer_coverage_error <= MAX_LAYER_COVERAGE_ERROR)
++            && coverage_uncertainty <= MAX_AGGREGATE_COVERAGE_ERROR
++            && summaries.iter().all(|summary| {
++                summary.max_single_transition_ambiguity <= MAX_SINGLE_TRANSITION_AMBIGUITY
++            })
++            && summaries.iter().all(|summary| {
++                summary.max_layer_transition_ambiguity <= MAX_LAYER_TRANSITION_AMBIGUITY
++            })
++            && transition_uncertainty <= MAX_AGGREGATE_TRANSITION_AMBIGUITY
++            && stage_repeat_delta
++                .iter()
++                .all(|&delta| delta <= MAX_STAGE_REPEAT_DELTA)
++            && [1usize, 2].into_iter().all(|cohort| {
++                cohort_stage_repeat_delta[cohort]
++                    .iter()
++                    .all(|&delta| delta <= MAX_COHORT_STAGE_REPEAT_DELTA)
++            })
++            && parent_reproduction_delta
++                .iter()
++                .all(|&delta| delta <= MAX_PARENT_REPRODUCTION_DELTA)
++            && parent_repeat_delta <= MAX_PARENT_REPEAT_DELTA
++            && parent_cohort_reproduction_delta.iter().all(|sample| {
++                sample[1..]
++                    .iter()
++                    .all(|&delta| delta <= MAX_PARENT_COHORT_REPRODUCTION_DELTA)
++            })
++            && parent_cohort_repeat_delta[1..]
++                .iter()
++                .all(|&delta| delta <= MAX_PARENT_COHORT_REPEAT_DELTA);
++        let stage_clears_economic_gate: [bool; 4] = std::array::from_fn(|stage| {
++            stage < 2
++                && lower_stage_share[stage] >= MIN_STAGE_SHARE
++                && lower_stage_ms[stage] >= ECONOMIC_FLOOR_MS
++                && mean_cohort_stage_share[1][stage] >= MIN_COHORT_SHARE
++                && mean_cohort_stage_share[2][stage] >= MIN_COHORT_SHARE
+         });
+-        let mean_cohort_output_share: [f64; 3] = std::array::from_fn(|cohort| {
+-            (cohort_output_shares[0][cohort] + cohort_output_shares[1][cohort]) * 0.5
++        let stage_authorized: [bool; 4] =
++            std::array::from_fn(|stage| packet_valid && stage_clears_economic_gate[stage]);
++        let selected_stage = match (stage_authorized[0], stage_authorized[1]) {
++            (true, false) => Some(0),
++            (false, true) => Some(1),
++            (false, false) => None,
++            (true, true) => match lower_stage_ms[0].total_cmp(&lower_stage_ms[1]) {
++                std::cmp::Ordering::Greater => Some(0),
++                std::cmp::Ordering::Less => Some(1),
++                std::cmp::Ordering::Equal => {
++                    match lower_stage_share[0].total_cmp(&lower_stage_share[1]) {
++                        std::cmp::Ordering::Greater => Some(0),
++                        std::cmp::Ordering::Less => Some(1),
++                        std::cmp::Ordering::Equal => Some(0),
++                    }
++                }
++            },
++        };
++        let selected_stage_name = selected_stage.map(|stage| {
++            [
++                "RawSetupAndHyperPre",
++                "AttentionAndCompressorPrepare",
++                "ChronologicalRows",
++                "AfterChronological",
++            ][stage]
+         });
+-        let body_authorized = lower_body_share >= 0.15
+-            && lower_body_ms >= 150.0
+-            && mean_cohort_body_share[1] >= 0.10
+-            && mean_cohort_body_share[2] >= 0.10;
+-        let output_authorized = lower_output_share >= 0.15
+-            && lower_output_ms >= 150.0
+-            && mean_cohort_output_share[1] >= 0.10
+-            && mean_cohort_output_share[2] >= 0.10;
++        let decision = if !packet_valid {
++            "INCONCLUSIVE_HOLD"
++        } else {
++            match selected_stage {
++                Some(0) => "AUTHORIZE_RAW_SETUP_AND_HYPER_PRE_CENSUS_ONLY",
++                Some(1) => "AUTHORIZE_ATTENTION_AND_COMPRESSOR_PREPARE_CENSUS_ONLY",
++                Some(_) => unreachable!("only the first two stages can receive authority"),
++                None => "CLOSE_BEFORE_ATTENTION_DECOMPOSITION",
++            }
++        };
+ 
+         eprintln!(
+-            "deepseek_v4 packed_attention_split_profile n={PREFIX_TOKENS} grouped_default={grouped_default} control_gpu_ms={control_gpu_ms:?} interpolated_control_gpu_ms={interpolated_control_gpu_ms:?} sampled_gpu_ms={sampled_gpu_ms:?} audit_inclusive_control_wall_ms={control_wall_ms:?} audit_inclusive_sampled_wall_ms={sampled_wall_ms:?} control_drift={control_drift:.6} sampled_drift={sampled_drift:.6} sampled_perturbation={perturbation:?} body_shares={body_shares:?} output_shares={output_shares:?} combined_shares={combined_shares:?} accepted_combined_log_sha256={ACCEPTED_COMBINED_LOG_SHA256} accepted_combined_shares={ACCEPTED_COMBINED_SHARES:?} combined_reproduction_delta={combined_reproduction_delta:?} body_repeat_delta={body_repeat_delta:.6} output_repeat_delta={output_repeat_delta:.6} combined_repeat_delta={combined_repeat_delta:.6} cohort_body_shares={cohort_body_shares:?} cohort_output_shares={cohort_output_shares:?} cohort_body_share_delta={cohort_body_share_delta:?} cohort_output_share_delta={cohort_output_share_delta:?} normalized_body_ms={normalized_body_ms:?} normalized_output_ms={normalized_output_ms:?} normalized_body_median_ms={normalized_body_median_ms:.3} normalized_output_median_ms={normalized_output_median_ms:.3} lower_body_share={lower_body_share:.6} lower_output_share={lower_output_share:.6} lower_body_ms={lower_body_ms:.3} lower_output_ms={lower_output_ms:.3} transition_uncertainty={transition_uncertainty:.6} topology_uncertainty={topology_uncertainty:.6} coverage_uncertainty={coverage_uncertainty:.6} body_observer_uncertainty={body_observer_uncertainty:.6} output_observer_uncertainty={output_observer_uncertainty:.6} body_authorized={body_authorized} output_authorized={output_authorized} dispatches={} ordinary_encoders={ORDINARY_ENCODERS} sampled_encoders={SAMPLED_ENCODERS} dispatch_sha256={} model_content_id={} logits_sha256={} hidden_sha256={} causal_digest={} prefix_digest={} compatibility_digest={} continuation_logits_sha256={} continuation_causal_digest={} committed_tokens_sha256={}",
++            "deepseek_v4 packed_before_attention_split_profile_contract wall_is_diagnostic=true economic_floor_ms={ECONOMIC_FLOOR_MS} min_stage_share={MIN_STAGE_SHARE} min_csa_hca_share={MIN_COHORT_SHARE} max_control_or_sampled_drift={MAX_DRIFT} max_sampled_perturbation={MAX_PERTURBATION} max_layer_coverage_error={MAX_LAYER_COVERAGE_ERROR} max_aggregate_coverage_error={MAX_AGGREGATE_COVERAGE_ERROR} max_single_transition_ambiguity={MAX_SINGLE_TRANSITION_AMBIGUITY} max_layer_transition_ambiguity={MAX_LAYER_TRANSITION_AMBIGUITY} max_aggregate_transition_ambiguity={MAX_AGGREGATE_TRANSITION_AMBIGUITY} max_stage_repeat_delta={MAX_STAGE_REPEAT_DELTA} max_csa_hca_stage_repeat_delta={MAX_COHORT_STAGE_REPEAT_DELTA} max_parent_reproduction_delta={MAX_PARENT_REPRODUCTION_DELTA} max_parent_repeat_delta={MAX_PARENT_REPEAT_DELTA} max_parent_csa_hca_reproduction_delta={MAX_PARENT_COHORT_REPRODUCTION_DELTA} max_parent_csa_hca_repeat_delta={MAX_PARENT_COHORT_REPEAT_DELTA}"
++        );
++        eprintln!(
++            "deepseek_v4 packed_before_attention_split_profile n={PREFIX_TOKENS} grouped_default={grouped_default} control_gpu_ms={control_gpu_ms:?} interpolated_control_gpu_ms={interpolated_control_gpu_ms:?} sampled_gpu_ms={sampled_gpu_ms:?} audit_inclusive_control_wall_ms={control_wall_ms:?} audit_inclusive_sampled_wall_ms={sampled_wall_ms:?} control_drift={control_drift:.9} sampled_drift={sampled_drift:.9} sampled_perturbation={perturbation:?} stage_shares={stage_shares:?} stage_repeat_delta={stage_repeat_delta:?} cohort_stage_shares={cohort_stage_shares:?} cohort_stage_repeat_delta={cohort_stage_repeat_delta:?} accepted_parent_log_sha256={ACCEPTED_PARENT_LOG_SHA256} accepted_parent_shares={ACCEPTED_PARENT_SHARES:?} parent_shares={parent_shares:?} parent_reproduction_delta={parent_reproduction_delta:?} parent_repeat_delta={parent_repeat_delta:.9} accepted_parent_cohort_shares={ACCEPTED_PARENT_COHORT_SHARES:?} parent_cohort_shares={parent_cohort_shares:?} parent_cohort_reproduction_delta={parent_cohort_reproduction_delta:?} parent_cohort_repeat_delta={parent_cohort_repeat_delta:?} normalized_stage_ms={normalized_stage_ms:?} normalized_stage_median_ms={normalized_stage_median_ms:?} ordinary_gpu_median_ms={ordinary_gpu_median:.3} lower_stage_share={lower_stage_share:?} lower_stage_ms={lower_stage_ms:?} transition_uncertainty={transition_uncertainty:.9} topology_uncertainty={topology_uncertainty:.9} coverage_uncertainty={coverage_uncertainty:.9} stage_observer_uncertainty={stage_observer_uncertainty:?} mean_cohort_stage_share={mean_cohort_stage_share:?} stage_clears_economic_gate={stage_clears_economic_gate:?} stage_authorized={stage_authorized:?} selected_stage={selected_stage_name:?} packet_valid={packet_valid} decision={decision} dispatches={} ordinary_encoders={ORDINARY_ENCODERS} sampled_encoders={SAMPLED_ENCODERS} dispatch_sha256={} model_content_id={} logits_sha256={} hidden_sha256={} causal_digest={} prefix_digest={} compatibility_digest={} continuation_logits_sha256={} continuation_causal_digest={} committed_tokens_sha256={}",
+             warm_control.dispatch_count,
+             profile_digest_hex(warm_control.dispatch_digest),
+             profile_digest_hex(model_content_id.as_bytes()),
+@@ -14989,13 +15175,13 @@ mod tests {
+         );
+         for (index, control) in controls.iter().enumerate() {
+             eprintln!(
+-                "deepseek_v4 packed_attention_split_profile_control index={index} layer_command_gpu_ms={:?}",
++                "deepseek_v4 packed_before_attention_split_profile_control index={index} layer_command_gpu_ms={:?}",
+                 control.profile.command_gpu_ms
+             );
+         }
+         for (index, summary) in summaries.iter().enumerate() {
+             eprintln!(
+-                "deepseek_v4 packed_attention_split_profile_sample index={index} command_gpu_ms={:.3} raw_span_ms={:.3} raw_coverage={:.6} gap_ms={:.3} overlap_ms={:.3} transition_ambiguity={:.6} max_layer_coverage_error={:.6} max_layer_transition_ambiguity={:.6} max_single_transition_ambiguity={:.6} stage_ms={:?} body_share={:.6} output_share={:.6} combined_share={:.6} cohort_stage_ms={:?} cohort_command_ms={:?} cohort_body_share={:?} cohort_output_share={:?} cohort_gap_ms={:?} cohort_overlap_ms={:?}",
++                "deepseek_v4 packed_before_attention_split_profile_sample index={index} command_gpu_ms={:.3} raw_span_ms={:.3} raw_coverage={:.9} gap_ms={:.3} overlap_ms={:.3} transition_ambiguity={:.9} max_layer_coverage_error={:.9} max_layer_transition_ambiguity={:.9} max_single_transition_ambiguity={:.9} stage_ms={:?} stage_shares={:?} parent_share={:.9} cohort_stage_ms={:?} cohort_command_ms={:?} cohort_stage_shares={:?} parent_cohort_shares={:?} cohort_gap_ms={:?} cohort_overlap_ms={:?}",
+                 summary.command_gpu_ms,
+                 summary.raw_span_ms,
+                 summary.raw_span_ms / summary.command_gpu_ms,
+@@ -15006,13 +15192,12 @@ mod tests {
+                 summary.max_layer_transition_ambiguity,
+                 summary.max_single_transition_ambiguity,
+                 summary.stage_ms,
+-                body_shares[index],
+-                output_shares[index],
+-                combined_shares[index],
++                stage_shares[index],
++                parent_shares[index],
+                 summary.cohort_stage_ms,
+                 summary.cohort_command_ms,
+-                cohort_body_shares[index],
+-                cohort_output_shares[index],
++                cohort_stage_shares[index],
++                parent_cohort_shares[index],
+                 summary.cohort_gap_ms,
+                 summary.cohort_overlap_ms,
+             );
+@@ -15022,8 +15207,10 @@ mod tests {
+                     std::array::from_fn(|stage| layer.stages[stage].duration_ticks);
+                 let stage_ms: [f64; 4] =
+                     std::array::from_fn(|stage| layer.stages[stage].duration_ms_scaled);
++                let layer_stage_shares: [f64; 4] =
++                    std::array::from_fn(|stage| stage_ms[stage] / layer.command_gpu_ms);
+                 eprintln!(
+-                    "deepseek_v4 packed_attention_split_profile_layer sample={index} layer={} attention_kind={:?} command_gpu_ms={:.6} raw_span_ticks={} raw_span_ms={:.6} raw_coverage={:.9} gap_ms={:.6} overlap_ms={:.6} transition_ambiguity={:.9} body_share={:.9} output_share={:.9} combined_share={:.9} stage_ticks={stage_ticks:?} stage_ms={stage_ms:?} transitions={:?}",
++                    "deepseek_v4 packed_before_attention_split_profile_layer sample={index} layer={} attention_kind={:?} command_gpu_ms={:.6} raw_span_ticks={} raw_span_ms={:.6} raw_coverage={:.9} gap_ms={:.6} overlap_ms={:.6} transition_ambiguity={:.9} stage_ticks={stage_ticks:?} stage_ms={stage_ms:?} stage_shares={layer_stage_shares:?} transitions={:?}",
+                     layer.layer,
+                     config.attention_kinds[layer.layer],
+                     layer.command_gpu_ms,
+@@ -15034,68 +15221,35 @@ mod tests {
+                     layer.encoder_overlap_ms_scaled,
+                     (layer.encoder_gap_ms_scaled + layer.encoder_overlap_ms_scaled)
+                         / layer.command_gpu_ms,
+-                    layer.stages[1].duration_ms_scaled / layer.command_gpu_ms,
+-                    layer.stages[2].duration_ms_scaled / layer.command_gpu_ms,
+-                    (layer.stages[1].duration_ms_scaled + layer.stages[2].duration_ms_scaled)
+-                        / layer.command_gpu_ms,
+                     layer.transitions,
+                 );
+             }
+         }
++        packet_valid
++    }
+ 
+-        assert!(control_drift <= 0.05, "control GPU drift exceeded 5%");
+-        assert!(sampled_drift <= 0.05, "sampled GPU drift exceeded 5%");
+-        assert!(
+-            perturbation.iter().all(|&value| value.abs() <= 0.10),
+-            "sampled GPU perturbation exceeded 10%: {perturbation:?}"
+-        );
+-        assert!(
+-            summaries
+-                .iter()
+-                .all(|summary| summary.max_layer_coverage_error <= 0.02),
+-            "per-layer raw timestamp coverage exceeded 2%"
+-        );
+-        assert!(
+-            coverage_uncertainty <= 0.005,
+-            "aggregate raw timestamp coverage exceeded 0.5%"
+-        );
+-        assert!(
+-            summaries
+-                .iter()
+-                .all(|summary| summary.max_single_transition_ambiguity <= 0.05),
+-            "single transition ambiguity exceeded 5%"
+-        );
+-        assert!(
+-            summaries
+-                .iter()
+-                .all(|summary| summary.max_layer_transition_ambiguity <= 0.10),
+-            "per-layer combined transition ambiguity exceeded 10%"
+-        );
+-        assert!(
+-            transition_uncertainty <= 0.025,
+-            "aggregate transition ambiguity exceeded 2.5%"
+-        );
+-        assert!(
+-            body_repeat_delta <= 0.02 && output_repeat_delta <= 0.02,
+-            "body or output share changed by more than two points"
+-        );
+-        assert!(
+-            combined_repeat_delta <= 0.02,
+-            "combined attention share changed by more than two points"
+-        );
+-        assert!(
+-            combined_reproduction_delta
+-                .iter()
+-                .all(|&delta| delta <= 0.02),
+-            "split attention share did not reproduce the accepted combined envelope"
+-        );
+-        assert!(
+-            cohort_body_share_delta[1] <= 0.03
+-                && cohort_body_share_delta[2] <= 0.03
+-                && cohort_output_share_delta[1] <= 0.03
+-                && cohort_output_share_delta[2] <= 0.03,
+-            "CSA/HCA body or output shares changed by more than three points"
+-        );
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "requires the current 97.05 GiB DS4 asset"]
++    fn current_asset_packed_before_attention_split_attribution_packet() {
++        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            run_current_asset_packed_before_attention_split_attribution_packet()
++        }));
++        match outcome {
++            Ok(true) => {}
++            Ok(false) => panic!("packed before-attention split packet recorded INCONCLUSIVE_HOLD"),
++            Err(payload) => {
++                let reason = payload
++                    .downcast_ref::<&str>()
++                    .copied()
++                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
++                    .unwrap_or("non-string panic payload");
++                eprintln!(
++                    "deepseek_v4 packed_before_attention_split_profile decision=INCONCLUSIVE_HOLD invalid_reason={reason:?}"
++                );
++                std::panic::resume_unwind(payload);
++            }
++        }
+     }
+ 
+     #[cfg(feature = "dsv4-diagnostics")]
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+index 7f60264..e43dace 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@ -3365,18 +3365,18 @@ struct PackedLayerTrace {
+ #[cfg(all(test, feature = "dsv4-diagnostics"))]
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub(super) enum PackedPrefillStageKind {
+-    BeforeAttentionBody,
+-    AttentionBody,
+-    AttentionOutputProjections,
+-    AfterAttentionOutput,
++    RawSetupAndHyperPre,
++    AttentionAndCompressorPrepare,
++    ChronologicalRows,
++    AfterChronological,
+ }
+ 
+ #[cfg(all(test, feature = "dsv4-diagnostics"))]
+ pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 4] = [
+-    PackedPrefillStageKind::BeforeAttentionBody,
+-    PackedPrefillStageKind::AttentionBody,
+-    PackedPrefillStageKind::AttentionOutputProjections,
+-    PackedPrefillStageKind::AfterAttentionOutput,
++    PackedPrefillStageKind::RawSetupAndHyperPre,
++    PackedPrefillStageKind::AttentionAndCompressorPrepare,
++    PackedPrefillStageKind::ChronologicalRows,
++    PackedPrefillStageKind::AfterChronological,
+ ];
+ 
+ #[cfg(all(test, feature = "dsv4-diagnostics"))]
+@@ -3535,6 +3535,12 @@ fn resolve_packed_prefill_layer_stage_samples(
+                 record.kind
+             ))
+         })?;
++        if duration_ticks == 0 {
++            return invalid(format!(
++                "packed prefill sampled layer {layer} stage {:?} returned an empty timestamp interval",
++                record.kind
++            ));
++        }
+         if previous_start.is_some_and(|previous| start_timestamp < previous)
+             || previous_end.is_some_and(|previous| end_timestamp < previous)
+         {
+@@ -3775,7 +3781,7 @@ impl<'command, 'recorder> PackedPrefillLayerEncoder<'command, 'recorder> {
+             recorder.as_deref_mut().unwrap().begin_encoder(
+                 command,
+                 layer,
+-                PackedPrefillStageKind::BeforeAttentionBody,
++                PackedPrefillStageKind::RawSetupAndHyperPre,
+             )?
+         } else {
+             KernelEncoder::begin(command)
+@@ -6288,6 +6294,9 @@ impl DeepSeekV4Session {
+                     hc_eps,
+                 )?;
+ 
++                #[cfg(all(test, feature = "dsv4-diagnostics"))]
++                encoder.boundary(PackedPrefillStageKind::AttentionAndCompressorPrepare)?;
++
+                 let attention = self.prefill.attention.encode_prepare(
+                     ctx,
+                     &encoder,
+@@ -6311,6 +6320,9 @@ impl DeepSeekV4Session {
+                     n_tokens,
+                 )?;
+ 
++                #[cfg(all(test, feature = "dsv4-diagnostics"))]
++                encoder.boundary(PackedPrefillStageKind::ChronologicalRows)?;
++
+                 for row in 0..n_tokens {
+                     let position = start_position
+                         .checked_add(u32::try_from(row).map_err(|_| {
+@@ -6364,7 +6376,7 @@ impl DeepSeekV4Session {
+                 }
+ 
+                 #[cfg(all(test, feature = "dsv4-diagnostics"))]
+-                encoder.boundary(PackedPrefillStageKind::AttentionBody)?;
++                encoder.boundary(PackedPrefillStageKind::AfterChronological)?;
+ 
+                 let compressed = self
+                     .compressor_frontiers
+@@ -6549,9 +6561,6 @@ impl DeepSeekV4Session {
+                     )?;
+                 }
+ 
+-                #[cfg(all(test, feature = "dsv4-diagnostics"))]
+-                encoder.boundary(PackedPrefillStageKind::AttentionOutputProjections)?;
+-
+                 let attention_output = self.prefill.attention.encode_output(
+                     ctx,
+                     &encoder,
+@@ -6561,9 +6570,6 @@ impl DeepSeekV4Session {
+                     n_tokens,
+                 )?;
+ 
+-                #[cfg(all(test, feature = "dsv4-diagnostics"))]
+-                encoder.boundary(PackedPrefillStageKind::AfterAttentionOutput)?;
+-
+                 self.prefill.hyper.encode_post(
+                     ctx,
+                     &encoder,
+@@ -7339,22 +7345,22 @@ mod tests {
+         let records = [
+             PackedPrefillPendingStageSample {
+                 layer: 0,
+-                kind: PackedPrefillStageKind::BeforeAttentionBody,
++                kind: PackedPrefillStageKind::RawSetupAndHyperPre,
+                 samples: Some((0, 1)),
+             },
+             PackedPrefillPendingStageSample {
+                 layer: 0,
+-                kind: PackedPrefillStageKind::AttentionBody,
++                kind: PackedPrefillStageKind::AttentionAndCompressorPrepare,
+                 samples: None,
+             },
+             PackedPrefillPendingStageSample {
+                 layer: 0,
+-                kind: PackedPrefillStageKind::AttentionOutputProjections,
++                kind: PackedPrefillStageKind::ChronologicalRows,
+                 samples: Some((2, 3)),
+             },
+             PackedPrefillPendingStageSample {
+                 layer: 0,
+-                kind: PackedPrefillStageKind::AfterAttentionOutput,
++                kind: PackedPrefillStageKind::AfterChronological,
+                 samples: Some((4, 5)),
+             },
+         ];
+@@ -7363,7 +7369,7 @@ mod tests {
+             &records,
+             &[100, 110, 113, 130, 133, 145],
+             1.0,
+-            Some(PackedPrefillStageKind::AttentionBody),
++            Some(PackedPrefillStageKind::AttentionAndCompressorPrepare),
+         )
+         .unwrap();
+         assert_eq!(profile.stages[1].start_timestamp, None);
+@@ -7373,11 +7379,37 @@ mod tests {
+         assert_eq!(profile.transitions.len(), 2);
+         assert_eq!(
+             profile.transitions[0].from,
+-            PackedPrefillStageKind::BeforeAttentionBody
++            PackedPrefillStageKind::RawSetupAndHyperPre
+         );
+         assert_eq!(
+             profile.transitions[0].to,
+-            PackedPrefillStageKind::AttentionOutputProjections
++            PackedPrefillStageKind::ChronologicalRows
++        );
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    fn packed_prefill_stage_resolver_rejects_empty_physical_interval() {
++        let records = PACKED_PREFILL_STAGE_KINDS.map(|kind| PackedPrefillPendingStageSample {
++            layer: 0,
++            kind,
++            samples: None,
++        });
++        let mut records = records;
++        for (index, record) in records.iter_mut().enumerate() {
++            record.samples = Some((index * 2, index * 2 + 1));
++        }
++        let error = resolve_packed_prefill_layer_stage_samples(
++            0,
++            &records,
++            &[100, 110, 113, 113, 116, 126, 129, 139],
++            1.0,
++            None,
++        )
++        .expect_err("physical timestamp intervals must be nonempty");
++        assert!(
++            error.to_string().contains("empty timestamp interval"),
++            "unexpected error: {error}"
+         );
+     }
+ 

@@ -1,0 +1,763 @@
+// stage contract and resolver; source lines 3365..3613
+03365: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03366: #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+03367: pub(super) enum PackedPrefillStageKind {
+03368:     RawSetupAndHyperPre,
+03369:     AttentionAndCompressorPrepare,
+03370:     ChronologicalRows,
+03371:     AfterChronological,
+03372: }
+03373: 
+03374: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03375: pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 4] = [
+03376:     PackedPrefillStageKind::RawSetupAndHyperPre,
+03377:     PackedPrefillStageKind::AttentionAndCompressorPrepare,
+03378:     PackedPrefillStageKind::ChronologicalRows,
+03379:     PackedPrefillStageKind::AfterChronological,
+03380: ];
+03381: 
+03382: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03383: #[derive(Clone, Debug)]
+03384: pub(super) struct PackedPrefillStageTiming {
+03385:     pub(super) kind: PackedPrefillStageKind,
+03386:     pub(super) start_timestamp: Option<u64>,
+03387:     pub(super) end_timestamp: Option<u64>,
+03388:     pub(super) duration_ticks: u64,
+03389:     pub(super) duration_ms_scaled: f64,
+03390: }
+03391: 
+03392: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03393: #[derive(Clone, Debug)]
+03394: pub(super) struct PackedPrefillStageTransition {
+03395:     pub(super) from: PackedPrefillStageKind,
+03396:     pub(super) to: PackedPrefillStageKind,
+03397:     pub(super) delta_ticks: i128,
+03398:     pub(super) gap_ticks: u64,
+03399:     pub(super) overlap_ticks: u64,
+03400:     pub(super) gap_ms_scaled: f64,
+03401:     pub(super) overlap_ms_scaled: f64,
+03402: }
+03403: 
+03404: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03405: #[derive(Clone, Debug)]
+03406: pub(super) struct PackedPrefillSampledLayerProfile {
+03407:     pub(super) layer: usize,
+03408:     pub(super) command_gpu_ms: f64,
+03409:     pub(super) sampled_span_ticks: u64,
+03410:     pub(super) raw_span_ms_assuming_ns: f64,
+03411:     pub(super) raw_coverage_assuming_ns: f64,
+03412:     pub(super) encoder_gap_ms_scaled: f64,
+03413:     pub(super) encoder_overlap_ms_scaled: f64,
+03414:     pub(super) stages: Vec<PackedPrefillStageTiming>,
+03415:     pub(super) transitions: Vec<PackedPrefillStageTransition>,
+03416: }
+03417: 
+03418: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03419: #[derive(Clone, Debug)]
+03420: pub(super) struct PackedPrefillStageProfile {
+03421:     pub(super) sampled: bool,
+03422:     pub(super) command_gpu_ms: Vec<f64>,
+03423:     pub(super) sampled_layers: Vec<PackedPrefillSampledLayerProfile>,
+03424: }
+03425: 
+03426: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03427: #[derive(Clone, Copy, Debug)]
+03428: struct PackedPrefillPendingStageSample {
+03429:     layer: usize,
+03430:     kind: PackedPrefillStageKind,
+03431:     samples: Option<(usize, usize)>,
+03432: }
+03433: 
+03434: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03435: fn resolve_packed_prefill_layer_stage_samples(
+03436:     layer: usize,
+03437:     records: &[PackedPrefillPendingStageSample],
+03438:     timestamps: &[u64],
+03439:     command_gpu_ms: f64,
+03440:     allowed_empty: Option<PackedPrefillStageKind>,
+03441: ) -> Result<PackedPrefillSampledLayerProfile, DeepSeekV4MetalError> {
+03442:     if records.len() != PACKED_PREFILL_STAGE_KINDS.len() {
+03443:         return invalid(format!(
+03444:             "packed prefill sampled layer {layer} produced {} stages, expected {}",
+03445:             records.len(),
+03446:             PACKED_PREFILL_STAGE_KINDS.len()
+03447:         ));
+03448:     }
+03449:     if !command_gpu_ms.is_finite() || command_gpu_ms <= 0.0 {
+03450:         return invalid(format!(
+03451:             "packed prefill sampled layer {layer} has invalid command GPU duration {command_gpu_ms}"
+03452:         ));
+03453:     }
+03454:     for (record, expected) in records.iter().zip(PACKED_PREFILL_STAGE_KINDS) {
+03455:         if record.layer != layer || record.kind != expected {
+03456:             return invalid(format!(
+03457:                 "packed prefill sampled layer {layer} recorded {:?} for layer {}, expected {expected:?}",
+03458:                 record.kind, record.layer
+03459:             ));
+03460:         }
+03461:         match record.samples {
+03462:             Some((start_sample, end_sample)) => {
+03463:                 if start_sample >= timestamps.len() || end_sample >= timestamps.len() {
+03464:                     return invalid(format!(
+03465:                         "packed prefill sampled layer {layer} stage {:?} indexes samples {start_sample}..{end_sample} from {} timestamps",
+03466:                         record.kind,
+03467:                         timestamps.len()
+03468:                     ));
+03469:                 }
+03470:             }
+03471:             None => {
+03472:                 if Some(record.kind) != allowed_empty {
+03473:                     return invalid(format!(
+03474:                         "packed prefill sampled layer {layer} has unexpected empty stage {:?}",
+03475:                         record.kind
+03476:                     ));
+03477:                 }
+03478:             }
+03479:         }
+03480:     }
+03481: 
+03482:     let first_timestamp = records
+03483:         .iter()
+03484:         .find_map(|record| record.samples.map(|(start, _)| timestamps[start]))
+03485:         .ok_or_else(|| {
+03486:             DeepSeekV4MetalError::Invalid(format!(
+03487:                 "packed prefill sampled layer {layer} has no physical stages"
+03488:             ))
+03489:         })?;
+03490:     let last_timestamp = records
+03491:         .iter()
+03492:         .rev()
+03493:         .find_map(|record| record.samples.map(|(_, end)| timestamps[end]))
+03494:         .ok_or_else(|| {
+03495:             DeepSeekV4MetalError::Invalid(format!(
+03496:                 "packed prefill sampled layer {layer} has no physical stages"
+03497:             ))
+03498:         })?;
+03499:     let sampled_span_ticks = last_timestamp.checked_sub(first_timestamp).ok_or_else(|| {
+03500:         DeepSeekV4MetalError::Invalid(format!(
+03501:             "packed prefill sampled layer {layer} returned non-monotonic span timestamps"
+03502:         ))
+03503:     })?;
+03504:     if sampled_span_ticks == 0 {
+03505:         return invalid(format!(
+03506:             "packed prefill sampled layer {layer} returned a zero timestamp span"
+03507:         ));
+03508:     }
+03509: 
+03510:     let scale_ms_per_tick = command_gpu_ms / sampled_span_ticks as f64;
+03511:     let mut stage_ticks = 0u64;
+03512:     let mut gap_ticks = 0u64;
+03513:     let mut overlap_ticks = 0u64;
+03514:     let mut previous_start = None;
+03515:     let mut previous_end = None;
+03516:     let mut previous_kind = None;
+03517:     let mut stages = Vec::with_capacity(records.len());
+03518:     let mut transitions = Vec::with_capacity(records.len() - 1);
+03519:     for record in records {
+03520:         let Some((start_sample, end_sample)) = record.samples else {
+03521:             stages.push(PackedPrefillStageTiming {
+03522:                 kind: record.kind,
+03523:                 start_timestamp: None,
+03524:                 end_timestamp: None,
+03525:                 duration_ticks: 0,
+03526:                 duration_ms_scaled: 0.0,
+03527:             });
+03528:             continue;
+03529:         };
+03530:         let start_timestamp = timestamps[start_sample];
+03531:         let end_timestamp = timestamps[end_sample];
+03532:         let duration_ticks = end_timestamp.checked_sub(start_timestamp).ok_or_else(|| {
+03533:             DeepSeekV4MetalError::Invalid(format!(
+03534:                 "packed prefill sampled layer {layer} stage {:?} returned inverted timestamps",
+03535:                 record.kind
+03536:             ))
+03537:         })?;
+03538:         if duration_ticks == 0 {
+03539:             return invalid(format!(
+03540:                 "packed prefill sampled layer {layer} stage {:?} returned an empty timestamp interval",
+03541:                 record.kind
+03542:             ));
+03543:         }
+03544:         if previous_start.is_some_and(|previous| start_timestamp < previous)
+03545:             || previous_end.is_some_and(|previous| end_timestamp < previous)
+03546:         {
+03547:             return invalid(format!(
+03548:                 "packed prefill sampled layer {layer} stage {:?} reverses physical start/end order",
+03549:                 record.kind
+03550:             ));
+03551:         }
+03552:         if let (Some(previous_end), Some(previous_kind)) = (previous_end, previous_kind) {
+03553:             let delta_ticks = start_timestamp as i128 - previous_end as i128;
+03554:             let (transition_gap, transition_overlap) = if delta_ticks >= 0 {
+03555:                 (delta_ticks as u64, 0)
+03556:             } else {
+03557:                 (0, (-delta_ticks) as u64)
+03558:             };
+03559:             gap_ticks = gap_ticks.checked_add(transition_gap).ok_or_else(|| {
+03560:                 DeepSeekV4MetalError::Invalid(
+03561:                     "packed prefill encoder-gap tick total overflow".into(),
+03562:                 )
+03563:             })?;
+03564:             overlap_ticks = overlap_ticks
+03565:                 .checked_add(transition_overlap)
+03566:                 .ok_or_else(|| {
+03567:                     DeepSeekV4MetalError::Invalid(
+03568:                         "packed prefill encoder-overlap tick total overflow".into(),
+03569:                     )
+03570:                 })?;
+03571:             transitions.push(PackedPrefillStageTransition {
+03572:                 from: previous_kind,
+03573:                 to: record.kind,
+03574:                 delta_ticks,
+03575:                 gap_ticks: transition_gap,
+03576:                 overlap_ticks: transition_overlap,
+03577:                 gap_ms_scaled: transition_gap as f64 * scale_ms_per_tick,
+03578:                 overlap_ms_scaled: transition_overlap as f64 * scale_ms_per_tick,
+03579:             });
+03580:         }
+03581:         previous_start = Some(start_timestamp);
+03582:         previous_end = Some(end_timestamp);
+03583:         previous_kind = Some(record.kind);
+03584:         stage_ticks = stage_ticks.checked_add(duration_ticks).ok_or_else(|| {
+03585:             DeepSeekV4MetalError::Invalid("packed prefill sampled stage tick total overflow".into())
+03586:         })?;
+03587:         stages.push(PackedPrefillStageTiming {
+03588:             kind: record.kind,
+03589:             start_timestamp: Some(start_timestamp),
+03590:             end_timestamp: Some(end_timestamp),
+03591:             duration_ticks,
+03592:             duration_ms_scaled: duration_ticks as f64 * scale_ms_per_tick,
+03593:         });
+03594:     }
+03595:     let accounted_ticks = stage_ticks as i128 + gap_ticks as i128 - overlap_ticks as i128;
+03596:     if accounted_ticks != sampled_span_ticks as i128 {
+03597:         return invalid(format!(
+03598:             "packed prefill sampled layer {layer} stage/gap/overlap ticks {accounted_ticks} do not close span {sampled_span_ticks}"
+03599:         ));
+03600:     }
+03601:     let raw_span_ms_assuming_ns = sampled_span_ticks as f64 * 1e-6;
+03602:     Ok(PackedPrefillSampledLayerProfile {
+03603:         layer,
+03604:         command_gpu_ms,
+03605:         sampled_span_ticks,
+03606:         raw_span_ms_assuming_ns,
+03607:         raw_coverage_assuming_ns: raw_span_ms_assuming_ns / command_gpu_ms,
+03608:         encoder_gap_ms_scaled: gap_ticks as f64 * scale_ms_per_tick,
+03609:         encoder_overlap_ms_scaled: overlap_ticks as f64 * scale_ms_per_tick,
+03610:         stages,
+03611:         transitions,
+03612:     })
+03613: }
+
+// sampled encoder boundaries; source lines 3763..3834
+03763: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03764: struct PackedPrefillLayerEncoder<'command, 'recorder> {
+03765:     command: &'command Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+03766:     layer: usize,
+03767:     sampled: bool,
+03768:     recorder: Option<&'recorder mut PackedPrefillStageRecorder>,
+03769:     encoder: Option<KernelEncoder>,
+03770: }
+03771: 
+03772: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03773: impl<'command, 'recorder> PackedPrefillLayerEncoder<'command, 'recorder> {
+03774:     fn begin(
+03775:         command: &'command Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+03776:         layer: usize,
+03777:         mut recorder: Option<&'recorder mut PackedPrefillStageRecorder>,
+03778:     ) -> Result<Self, DeepSeekV4MetalError> {
+03779:         let sampled = recorder.as_deref().is_some_and(|recorder| recorder.sampled);
+03780:         let encoder = if sampled {
+03781:             recorder.as_deref_mut().unwrap().begin_encoder(
+03782:                 command,
+03783:                 layer,
+03784:                 PackedPrefillStageKind::RawSetupAndHyperPre,
+03785:             )?
+03786:         } else {
+03787:             KernelEncoder::begin(command)
+03788:         };
+03789:         Ok(Self {
+03790:             command,
+03791:             layer,
+03792:             sampled,
+03793:             recorder,
+03794:             encoder: Some(encoder),
+03795:         })
+03796:     }
+03797: 
+03798:     fn boundary(&mut self, next: PackedPrefillStageKind) -> Result<(), DeepSeekV4MetalError> {
+03799:         if !self.sampled {
+03800:             return Ok(());
+03801:         }
+03802:         if let Some(encoder) = self.encoder.take() {
+03803:             encoder.end();
+03804:         }
+03805:         self.encoder = Some(
+03806:             self.recorder
+03807:                 .as_deref_mut()
+03808:                 .ok_or_else(|| {
+03809:                     DeepSeekV4MetalError::Invalid(
+03810:                         "sampled packed prefill encoder lost its recorder".into(),
+03811:                     )
+03812:                 })?
+03813:                 .begin_encoder(self.command, self.layer, next)?,
+03814:         );
+03815:         Ok(())
+03816:     }
+03817: 
+03818:     fn end(mut self) {
+03819:         if let Some(encoder) = self.encoder.take() {
+03820:             encoder.end();
+03821:         }
+03822:     }
+03823: }
+03824: 
+03825: #[cfg(all(test, feature = "dsv4-diagnostics"))]
+03826: impl std::ops::Deref for PackedPrefillLayerEncoder<'_, '_> {
+03827:     type Target = KernelEncoder;
+03828: 
+03829:     fn deref(&self) -> &Self::Target {
+03830:         self.encoder
+03831:             .as_ref()
+03832:             .expect("packed prefill layer encoder ended before stage completion")
+03833:     }
+03834: }
+
+// production pre-expert stage ownership; source lines 6229..6664
+06229:         for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
+06230:             let pre_expert_started = trace_layers.then(std::time::Instant::now);
+06231:             #[cfg(feature = "dsv4-diagnostics")]
+06232:             let gpu_route_generation = if route_policy.uses_gpu() {
+06233:                 Some(self.prefill.moe.take_gpu_route_generation()?)
+06234:             } else {
+06235:                 None
+06236:             };
+06237:             #[cfg(not(feature = "dsv4-diagnostics"))]
+06238:             let _ = route_policy;
+06239:             let raw_cache = self.raw_cache_layer(layer)?;
+06240:             let rope = deepseek_v4_layer_rope(self.residency.config(), layer)?;
+06241:             let attention_kind = self.residency.config().attention_kinds[layer];
+06242:             let sparse_query_offset = (attention_kind == AttentionKind::CompressedSparse)
+06243:                 .then(|| sparse_csa_query_offset(start_position, n_tokens))
+06244:                 .flatten();
+06245:             let command = ctx.queue.commandBuffer().ok_or_else(|| {
+06246:                 DeepSeekV4MetalError::Invalid(format!(
+06247:                     "failed to allocate packed layer {layer} router command buffer"
+06248:                 ))
+06249:             })?;
+06250:             #[cfg(all(test, feature = "dsv4-diagnostics"))]
+06251:             let mut encoder =
+06252:                 PackedPrefillLayerEncoder::begin(&command, layer, stage_recorder.as_deref_mut())?;
+06253:             #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
+06254:             let encoder = KernelEncoder::begin(&command);
+06255:             let router_result = (|| {
+06256:                 #[cfg(feature = "dsv4-diagnostics")]
+06257:                 let mut captured_sparse: Option<PackedSparseCsaViews> = None;
+06258:                 #[cfg(not(feature = "dsv4-diagnostics"))]
+06259:                 let captured_sparse: Option<PackedSparseCsaViews> = None;
+06260:                 encode_copy_raw_ring_f16_bits(
+06261:                     ctx,
+06262:                     &encoder,
+06263:                     &raw_cache,
+06264:                     &self.prefill.attention.raw_cache_before_chunk,
+06265:                 )?;
+06266:                 if layer == 0 {
+06267:                     encode_get_rows_f32(
+06268:                         ctx,
+06269:                         &encoder,
+06270:                         self.residency.require_tensor("token_embd.weight")?,
+06271:                         token_view,
+06272:                         &embedding,
+06273:                         n_tokens,
+06274:                         DEEPSEEK_V4_HIDDEN_SIZE,
+06275:                     )?;
+06276:                     self.prefill.hyper.encode_initial_repeat(
+06277:                         ctx,
+06278:                         &encoder,
+06279:                         &embedding,
+06280:                         &residual_primary,
+06281:                         n_tokens,
+06282:                     )?;
+06283:                 }
+06284: 
+06285:                 let attention_input = self.prefill.hyper.encode_pre(
+06286:                     ctx,
+06287:                     &encoder,
+06288:                     &residual_primary,
+06289:                     self.layer_tensor(layer, "hc_attn_fn.weight")?,
+06290:                     self.layer_tensor(layer, "hc_attn_scale.weight")?,
+06291:                     self.layer_tensor(layer, "hc_attn_base.weight")?,
+06292:                     n_tokens,
+06293:                     rms_eps,
+06294:                     hc_eps,
+06295:                 )?;
+06296: 
+06297:                 #[cfg(all(test, feature = "dsv4-diagnostics"))]
+06298:                 encoder.boundary(PackedPrefillStageKind::AttentionAndCompressorPrepare)?;
+06299: 
+06300:                 let attention = self.prefill.attention.encode_prepare(
+06301:                     ctx,
+06302:                     &encoder,
+06303:                     &attention_input,
+06304:                     self.layer_tensor(layer, "attn_norm.weight")?,
+06305:                     self.layer_tensor(layer, "attn_q_a.weight")?,
+06306:                     self.layer_tensor(layer, "attn_q_a_norm.weight")?,
+06307:                     self.layer_tensor(layer, "attn_q_b.weight")?,
+06308:                     self.layer_tensor(layer, "attn_kv.weight")?,
+06309:                     self.layer_tensor(layer, "attn_kv_a_norm.weight")?,
+06310:                     n_tokens,
+06311:                     rms_eps,
+06312:                 )?;
+06313: 
+06314:                 let compressor = self.prefill.compressor.encode_layer_projections(
+06315:                     ctx,
+06316:                     &encoder,
+06317:                     &self.residency,
+06318:                     layer,
+06319:                     &attention.normalized_input,
+06320:                     n_tokens,
+06321:                 )?;
+06322: 
+06323:                 #[cfg(all(test, feature = "dsv4-diagnostics"))]
+06324:                 encoder.boundary(PackedPrefillStageKind::ChronologicalRows)?;
+06325: 
+06326:                 for row in 0..n_tokens {
+06327:                     let position = start_position
+06328:                         .checked_add(u32::try_from(row).map_err(|_| {
+06329:                             DeepSeekV4MetalError::Invalid("packed row exceeds u32".into())
+06330:                         })?)
+06331:                         .ok_or_else(|| {
+06332:                             DeepSeekV4MetalError::Invalid("packed position overflow".into())
+06333:                         })?;
+06334:                     let queries = f32_row(
+06335:                         &attention.queries,
+06336:                         row,
+06337:                         attention_dims.query_width,
+06338:                         vec![
+06339:                             attention_config.head_dim as u64,
+06340:                             attention_config.head_count as u64,
+06341:                         ],
+06342:                         "packed query row",
+06343:                     )?;
+06344:                     let kv = f32_row(
+06345:                         &attention.kv,
+06346:                         row,
+06347:                         attention_config.head_dim,
+06348:                         vec![attention_config.head_dim as u64],
+06349:                         "packed KV row",
+06350:                     )?;
+06351:                     encode_ds4_rope_tail_adjacent_in_place(
+06352:                         ctx, &encoder, &queries, position, rope, false,
+06353:                     )?;
+06354:                     encode_ds4_rope_tail_adjacent_in_place(
+06355:                         ctx, &encoder, &kv, position, rope, false,
+06356:                     )?;
+06357:                     encode_scatter_offset_f32_to_f16(
+06358:                         ctx,
+06359:                         &encoder,
+06360:                         &kv,
+06361:                         &raw_cache,
+06362:                         (position as usize % DEEPSEEK_V4_LOCAL_WINDOW) * attention_config.head_dim,
+06363:                         attention_config.head_dim,
+06364:                     )?;
+06365:                     self.compressor_frontiers.encode_layer_projected_row(
+06366:                         ctx,
+06367:                         &encoder,
+06368:                         &self.residency,
+06369:                         layer,
+06370:                         row,
+06371:                         position,
+06372:                         &compressor,
+06373:                         rope,
+06374:                         rms_eps,
+06375:                     )?;
+06376:                 }
+06377: 
+06378:                 #[cfg(all(test, feature = "dsv4-diagnostics"))]
+06379:                 encoder.boundary(PackedPrefillStageKind::AfterChronological)?;
+06380: 
+06381:                 let compressed = self
+06382:                     .compressor_frontiers
+06383:                     .attention_rows(layer, last_position)?;
+06384:                 if let Some(query_offset) = sparse_query_offset {
+06385:                     let rows = self
+06386:                         .compressor_frontiers
+06387:                         .csa_rows(layer, last_position)?
+06388:                         .ok_or_else(|| {
+06389:                             DeepSeekV4MetalError::Invalid(format!(
+06390:                                 "CSA layer {layer} has no rows at sparse position {last_position}"
+06391:                             ))
+06392:                         })?;
+06393:                     if query_offset > 0 {
+06394:                         let dense_queries = f32_prefix(
+06395:                             &attention.queries,
+06396:                             vec![attention_dims.query_width as u64, query_offset as u64],
+06397:                             "packed dense-prefix queries",
+06398:                         )?;
+06399:                         let dense_output = f32_prefix(
+06400:                             &attention.attention,
+06401:                             vec![attention_dims.query_width as u64, query_offset as u64],
+06402:                             "packed dense-prefix attention",
+06403:                         )?;
+06404:                         let dense_last = start_position
+06405:                             .checked_add(u32::try_from(query_offset - 1).map_err(|_| {
+06406:                                 DeepSeekV4MetalError::Invalid(
+06407:                                     "packed dense-prefix offset exceeds u32".into(),
+06408:                                 )
+06409:                             })?)
+06410:                             .ok_or_else(|| {
+06411:                                 DeepSeekV4MetalError::Invalid(
+06412:                                     "packed dense-prefix position overflow".into(),
+06413:                                 )
+06414:                             })?;
+06415:                         let dense_count = csa_visible_rows(dense_last);
+06416:                         encode_packed_dense_sink_attention_f16(
+06417:                             ctx,
+06418:                             &encoder,
+06419:                             &dense_queries,
+06420:                             &raw_cache,
+06421:                             &self.prefill.attention.raw_cache_before_chunk,
+06422:                             Some(DeepSeekV4PublishedRows {
+06423:                                 cache: rows.attention_cache,
+06424:                                 count: dense_count,
+06425:                                 capacity_rows: rows.capacity_rows,
+06426:                             }),
+06427:                             self.layer_tensor(layer, "attn_sinks.weight")?,
+06428:                             &dense_output,
+06429:                             attention_kind,
+06430:                             start_position,
+06431:                             query_offset,
+06432:                         )?;
+06433:                     }
+06434:                     #[cfg(not(feature = "dsv4-diagnostics"))]
+06435:                     let sparse = self.prefill.attention.sparse_csa.encode(
+06436:                         ctx,
+06437:                         &encoder,
+06438:                         &attention.q_lora,
+06439:                         &attention.normalized_input,
+06440:                         self.layer_tensor(layer, "indexer.attn_q_b.weight")?,
+06441:                         self.layer_tensor(layer, "indexer.proj.weight")?,
+06442:                         rows,
+06443:                         start_position,
+06444:                         query_offset,
+06445:                         n_tokens,
+06446:                         rope,
+06447:                     )?;
+06448:                     #[cfg(feature = "dsv4-diagnostics")]
+06449:                     let sparse = self.prefill.attention.sparse_csa.encode_prepare(
+06450:                         ctx,
+06451:                         &encoder,
+06452:                         &attention.q_lora,
+06453:                         &attention.normalized_input,
+06454:                         self.layer_tensor(layer, "indexer.attn_q_b.weight")?,
+06455:                         self.layer_tensor(layer, "indexer.proj.weight")?,
+06456:                         rows,
+06457:                         start_position,
+06458:                         query_offset,
+06459:                         n_tokens,
+06460:                         rope,
+06461:                     )?;
+06462:                     #[cfg(feature = "dsv4-diagnostics")]
+06463:                     fp4_score_dispatch_ledger.record_common_prepare()?;
+06464:                     #[cfg(feature = "dsv4-diagnostics")]
+06465:                     if fp4_score_plan.runs_f16() {
+06466:                         self.prefill
+06467:                             .attention
+06468:                             .sparse_csa
+06469:                             .encode_f16_score_and_select(ctx, &encoder, rows, &sparse)?;
+06470:                         fp4_score_dispatch_ledger.record_f16_score_and_selector()?;
+06471:                     }
+06472:                     #[cfg(feature = "dsv4-diagnostics")]
+06473:                     if fp4_score_plan.runs_fp4() {
+06474:                         if sparse.query_count != 1 {
+06475:                             return invalid(format!(
+06476:                                 "FP4 packed shadow expected one sparse query, got {}",
+06477:                                 sparse.query_count
+06478:                             ));
+06479:                         }
+06480:                         self.fp4_shadow.encode(
+06481:                             ctx,
+06482:                             &encoder,
+06483:                             &sparse.index_queries,
+06484:                             &sparse.head_weights,
+06485:                             rows,
+06486:                             &sparse.visible_counts,
+06487:                         )?;
+06488:                         fp4_score_dispatch_ledger.record_fp4_pipeline()?;
+06489:                     }
+06490:                     #[cfg(feature = "dsv4-diagnostics")]
+06491:                     if self.fp4_shadow_diagnostics.is_capturing() {
+06492:                         captured_sparse = Some(sparse.clone());
+06493:                     }
+06494:                     #[cfg(feature = "dsv4-diagnostics")]
+06495:                     let selected = if fp4_score_plan.consumes_fp4() {
+06496:                         PackedCsaSelectionView {
+06497:                             query_offset: sparse.query_offset,
+06498:                             query_count: sparse.query_count,
+06499:                             cache_order_ids: &self.fp4_shadow.cache_order_ids,
+06500:                             selected_counts: &self.fp4_shadow.selected_count,
+06501:                             visible_counts: &self.fp4_shadow.eligible_visible,
+06502:                         }
+06503:                     } else {
+06504:                         sparse.selection_view()
+06505:                     };
+06506:                     #[cfg(not(feature = "dsv4-diagnostics"))]
+06507:                     let selected = sparse.selection_view();
+06508:                     encode_packed_selected_sink_attention_f16(
+06509:                         ctx,
+06510:                         &encoder,
+06511:                         &attention.queries,
+06512:                         &raw_cache,
+06513:                         &self.prefill.attention.raw_cache_before_chunk,
+06514:                         rows,
+06515:                         selected,
+06516:                         self.layer_tensor(layer, "attn_sinks.weight")?,
+06517:                         &attention.attention,
+06518:                         start_position,
+06519:                         n_tokens,
+06520:                     )?;
+06521:                 } else {
+06522:                     encode_packed_dense_sink_attention_f16(
+06523:                         ctx,
+06524:                         &encoder,
+06525:                         &attention.queries,
+06526:                         &raw_cache,
+06527:                         &self.prefill.attention.raw_cache_before_chunk,
+06528:                         compressed,
+06529:                         self.layer_tensor(layer, "attn_sinks.weight")?,
+06530:                         &attention.attention,
+06531:                         attention_kind,
+06532:                         start_position,
+06533:                         n_tokens,
+06534:                     )?;
+06535:                 }
+06536:                 for row in 0..n_tokens {
+06537:                     let position = start_position
+06538:                         .checked_add(u32::try_from(row).map_err(|_| {
+06539:                             DeepSeekV4MetalError::Invalid("packed row exceeds u32".into())
+06540:                         })?)
+06541:                         .ok_or_else(|| {
+06542:                             DeepSeekV4MetalError::Invalid("packed position overflow".into())
+06543:                         })?;
+06544:                     let attention_row = f32_row(
+06545:                         &attention.attention,
+06546:                         row,
+06547:                         attention_dims.query_width,
+06548:                         vec![
+06549:                             attention_config.head_dim as u64,
+06550:                             attention_config.head_count as u64,
+06551:                         ],
+06552:                         "packed attention row",
+06553:                     )?;
+06554:                     encode_ds4_rope_tail_adjacent_in_place(
+06555:                         ctx,
+06556:                         &encoder,
+06557:                         &attention_row,
+06558:                         position,
+06559:                         rope,
+06560:                         true,
+06561:                     )?;
+06562:                 }
+06563: 
+06564:                 let attention_output = self.prefill.attention.encode_output(
+06565:                     ctx,
+06566:                     &encoder,
+06567:                     &attention.attention,
+06568:                     self.layer_tensor(layer, "attn_output_a.weight")?,
+06569:                     self.layer_tensor(layer, "attn_output_b.weight")?,
+06570:                     n_tokens,
+06571:                 )?;
+06572: 
+06573:                 self.prefill.hyper.encode_post(
+06574:                     ctx,
+06575:                     &encoder,
+06576:                     &attention_output,
+06577:                     &residual_primary,
+06578:                     &residual_secondary,
+06579:                     n_tokens,
+06580:                 )?;
+06581:                 let ffn_input = self.prefill.hyper.encode_pre(
+06582:                     ctx,
+06583:                     &encoder,
+06584:                     &residual_secondary,
+06585:                     self.layer_tensor(layer, "hc_ffn_fn.weight")?,
+06586:                     self.layer_tensor(layer, "hc_ffn_scale.weight")?,
+06587:                     self.layer_tensor(layer, "hc_ffn_base.weight")?,
+06588:                     n_tokens,
+06589:                     rms_eps,
+06590:                     hc_eps,
+06591:                 )?;
+06592: 
+06593:                 let hash_map = if layer < self.residency.config().hash_layer_count as usize {
+06594:                     Some(self.layer_tensor(layer, "ffn_gate_tid2eid.weight")?)
+06595:                 } else {
+06596:                     None
+06597:                 };
+06598:                 let moe_views = self.prefill.moe.encode_router(
+06599:                     ctx,
+06600:                     &encoder,
+06601:                     &ffn_input,
+06602:                     self.layer_tensor(layer, "ffn_norm.weight")?,
+06603:                     self.layer_tensor(layer, "ffn_gate_inp.weight")?,
+06604:                     token_view,
+06605:                     hash_map,
+06606:                     n_tokens,
+06607:                     rms_eps,
+06608:                 )?;
+06609:                 #[cfg(feature = "dsv4-diagnostics")]
+06610:                 if let Some(generation) = gpu_route_generation {
+06611:                     let source = if hash_map.is_some() {
+06612:                         PackedRouteSource::Hash
+06613:                     } else {
+06614:                         PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
+06615:                     };
+06616:                     self.prefill.moe.encode_gpu_route_schedule(
+06617:                         ctx,
+06618:                         &encoder,
+06619:                         &moe_views,
+06620:                         source,
+06621:                         token_view,
+06622:                         hash_map,
+06623:                         n_tokens,
+06624:                         self.residency.config().expert_weights_scale,
+06625:                         generation,
+06626:                     )?;
+06627:                 }
+06628:                 Ok::<_, DeepSeekV4MetalError>((moe_views, captured_sparse))
+06629:             })();
+06630:             encoder.end();
+06631:             let (moe_views, captured_sparse) = router_result?;
+06632:             #[cfg(not(feature = "dsv4-diagnostics"))]
+06633:             let _ = captured_sparse;
+06634:             let pre_expert_encode_seconds = pre_expert_started
+06635:                 .as_ref()
+06636:                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
+06637:             let pre_expert_wait_started = trace_layers.then(std::time::Instant::now);
+06638:             command.commit();
+06639:             command.waitUntilCompleted();
+06640:             let pre_expert_wait_seconds = pre_expert_wait_started
+06641:                 .as_ref()
+06642:                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
+06643:             let pre_expert_command_seconds = pre_expert_started
+06644:                 .as_ref()
+06645:                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
+06646:             #[cfg(all(test, feature = "dsv4-diagnostics"))]
+06647:             let stage_profile_active = stage_recorder.is_some();
+06648:             #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
+06649:             let stage_profile_active = false;
+06650:             let pre_expert_gpu_seconds = if trace_layers || stage_profile_active {
+06651:                 command.GPUEndTime() - command.GPUStartTime()
+06652:             } else {
+06653:                 0.0
+06654:             };
+06655:             let pre_expert_wait_residual_seconds = pre_expert_wait_seconds - pre_expert_gpu_seconds;
+06656:             if let Some(error) = command.error() {
+06657:                 return invalid(format!(
+06658:                     "packed layer {layer} router command failed: {error:?}"
+06659:                 ));
+06660:             }
+06661:             #[cfg(all(test, feature = "dsv4-diagnostics"))]
+06662:             if let Some(recorder) = stage_recorder.as_deref_mut() {
+06663:                 recorder.record_command_gpu_seconds(layer, pre_expert_gpu_seconds)?;
+06664:             }
+

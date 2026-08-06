@@ -1,0 +1,5 @@
+c0d65a20231959c0997f27c2a530708c92ba04ee5f48f16cafc491c4d9187fc6  docs/bench/2026-08-06-dsv4-packed-before-attention-split/before-attention-split.log
+d18970f9e75bdc2009aaef085379c607808841ecffe69fe3a4e8db51f6bf4398  docs/bench/2026-08-06-dsv4-packed-before-attention-split/README.md
+0a1e56741a37a6c3a350d709b3508a56496f60cb4ec5c40f7669cf6737731919  docs/bench/2026-08-06-dsv4-packed-before-attention-split/experiment-source-pre-run.diff
+5714dae28a0806a297cdb4fb969be7fa49719efb806c8fbccfa1837900d52c13  docs/bench/2026-08-06-dsv4-packed-before-attention-split/boundary-source.txt
+588d126d176003f85dd7fcaae76bdaad171fc3f2ec9b93d8c0f3d6eb0916203b  docs/bench/2026-08-06-dsv4-packed-before-attention-split/checksums-pre-run.log

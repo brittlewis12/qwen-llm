@@ -503,18 +503,28 @@ candidate sample regresses: disjoint median/p95 moves from 527.743/540.779 to
 2,406.267/2,456.642 ms. Remove it and close grouped-IQ2 scalar row, panel, width,
 TGM, barrier, and shuffle retuning under the current asset/device contract.
 
+The retained four-pass pre-expert packet now closes its two previously
+unreported residual intervals without another GPU run. Apply the packet's exact
+normalization and uncertainty method, with the current 158.3 ms floor.
+`BeforeAttentionBody` has 481.678/499.786 ms normalized samples and a
+477.570 ms/44.7712% lower bound after charging 1.233408% uncertainty; mean
+CSA/HCA shares are 47.6961%/43.4194%. It is `GO` for decomposition only.
+`AfterAttentionOutput` has a 56.583 ms/5.3057% lower bound and only
+5.9380%/6.5423% CSA/HCA shares, so it is `KILL` as a standalone current-asset
+N=128 target.
+
 Force-ranked queue:
 
-1. **Recover residual pre-expert attribution.** The accepted four-pass packet
-   already records `BeforeAttentionBody` and `AfterAttentionOutput`, but its
-   decision reported only body and output. Re-adjudicate those retained samples
-   independently before any new GPU run. Require a stable uncertainty-adjusted
-   >=158.3 ms interval, then inventory the exact candidate-touched operations,
-   buffers, and dispatches; containing-phase time alone authorizes no kernel.
-2. **Exact cross-boundary materialization census.** Only if one residual clears,
-   identify a producer-to-consumer fusion that removes measured publication,
-   readback, or dispatch work without reordering any projection reduction. Give
-   impossible zero-work credit to that exact subset before implementation.
+1. **Before-attention materialization census.** Enumerate the exact operations,
+   dispatches, intermediate buffers, writes, and rereads between raw-ring copy,
+   attention mHC pre, Q/KV preparation, compressor projections, and the already-
+   closed chronological loop. Identify one producer-to-consumer fusion without
+   reordering any projection reduction. Give impossible zero-work credit to the
+   exact touched subset and require a conservative >=158.3 ms ceiling.
+2. **Minimal before-attention split, only if needed.** If the static census
+   cannot bound one candidate, use the existing supported recorder to split only
+   the 477.570 ms residual. Do not rerun a broad profiler, add disjoint phases,
+   or write candidate code first. Stop if all exact subsets miss the floor.
 3. **Down/scatter attribution.** Keep `HOLD - INCONCLUSIVE`; do not filter or
    rerun V2. Reopen only for a materially new representation or arithmetic
    contract, a new accepted observer, or relevant device/toolchain drift under

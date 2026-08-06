@@ -1,0 +1,118 @@
+{
+  "common_uncertainty": 0.008819652974907721,
+  "control_gpu_ms": [
+    1055.3559586405754,
+    1067.138708429411,
+    1076.882291585207
+  ],
+  "gates": {
+    "csa_hca_repeat_limit": 0.03,
+    "csa_hca_share_floor": 0.1,
+    "current_floor_ms": 158.3,
+    "original_floor_ms": 150.0,
+    "share_floor": 0.15,
+    "stage_repeat_limit": 0.02
+  },
+  "interpolated_control_gpu_ms": [
+    1061.2473335349932,
+    1072.010500007309
+  ],
+  "log_sha256": "3fd96776530bd90903513aa790488cf314a81ce5a1ccfe96158b9d18a589278b",
+  "ordinary_gpu_median_ms": 1067.138708429411,
+  "sampled_gpu_ms": [
+    1051.8875003326684,
+    1077.9416249133646
+  ],
+  "stages": {
+    "AfterAttentionOutput": {
+      "authorized_for_decomposition": false,
+      "cohort_repeat_delta": {
+        "CompressedSparse": 0.0002866630373101267,
+        "HeavilyCompressed": 0.002962305028496537,
+        "SlidingWindow": 0.001086713160492296
+      },
+      "cohort_shares": {
+        "CompressedSparse": [
+          0.059523508849202766,
+          0.05923684581189264
+        ],
+        "HeavilyCompressed": [
+          0.06690399816693098,
+          0.06394169313843444
+        ],
+        "SlidingWindow": [
+          0.056878896071636285,
+          0.05579218291114399
+        ]
+      },
+      "lower_ms": 56.58330163361157,
+      "lower_share": 0.0530565837158374,
+      "mean_cohort_shares": {
+        "CompressedSparse": 0.059380177330547707,
+        "HeavilyCompressed": 0.0654228456526827,
+        "SlidingWindow": 0.05633553949139014
+      },
+      "normalized_median_ms": 65.99509471805021,
+      "normalized_ms": [
+        66.43282194346345,
+        65.55736749263696
+      ],
+      "observer_uncertainty": 0.008819652974907721,
+      "raw_ms": [
+        65.84690750777827,
+        65.9200774988434
+      ],
+      "repeat_delta": 0.0014451499136884233,
+      "shares": [
+        0.06259881164758933,
+        0.06115366173390091
+      ]
+    },
+    "BeforeAttentionBody": {
+      "authorized_for_decomposition": true,
+      "cohort_repeat_delta": {
+        "CompressedSparse": 0.002091759934669646,
+        "HeavilyCompressed": 0.02555285425679449,
+        "SlidingWindow": 0.00891018728214743
+      },
+      "cohort_shares": {
+        "CompressedSparse": [
+          0.4759154963865807,
+          0.47800725632125035
+        ],
+        "HeavilyCompressed": [
+          0.42141727124583883,
+          0.4469701255026333
+        ],
+        "SlidingWindow": [
+          0.508539766070025,
+          0.5174499533521725
+        ]
+      },
+      "lower_ms": 477.56994029922896,
+      "lower_share": 0.4477124444813024,
+      "mean_cohort_shares": {
+        "CompressedSparse": 0.47696137635391556,
+        "HeavilyCompressed": 0.43419369837423605,
+        "SlidingWindow": 0.5129948597110987
+      },
+      "normalized_median_ms": 490.73210921033996,
+      "normalized_ms": [
+        481.67839002174406,
+        499.78582839893585
+      ],
+      "observer_uncertainty": 0.01233407504304923,
+      "raw_ms": [
+        477.43015377624,
+        502.5509992386714
+      ],
+      "repeat_delta": 0.01233407504304923,
+      "shares": [
+        0.45387948200282696,
+        0.4662135570458762
+      ]
+    }
+  },
+  "topology_uncertainty": 0.008819652974907721,
+  "transition_uncertainty": 5.9e-05
+}

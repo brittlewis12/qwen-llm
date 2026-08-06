@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Pre-Expert Residual Attribution
+
+Status: retained `BeforeAttentionBody` evidence is `GO` for decomposition only;
+`AfterAttentionOutput` is `KILL` as a standalone current-asset N=128 target.
+No new GPU run or implementation is authorized.
+
+- Reuse the already accepted four-pass packed-attention packet, including exact
+  output/state/topology evidence, stable controls, complete timestamp coverage,
+  and physical timings for all four stages. Copy its accepted log unchanged.
+- Apply its original normalization and observer-uncertainty formulas to the two
+  unreported stage indices. Tighten only the time floor from 150 to 158.3 ms.
+- Before-attention normalized samples are 481.678/499.786 ms. Its 1.233408%
+  repeat delta yields a 477.570 ms/44.7712% lower bound; mean CSA/HCA shares are
+  47.6961%/43.4194%, so every decomposition gate clears.
+- After-output normalized samples are 66.433/65.557 ms. Its conservative lower
+  bound is only 56.583 ms/5.3057%, with 5.9380%/6.5423% CSA/HCA shares, so every
+  standalone gate misses independently.
+
+Decision: decompose only `BeforeAttentionBody`. First census its exact
+operations, dispatches, intermediates, and materializations; require the exact
+candidate-touched subset to retain at least 158.3 ms after uncertainty before
+coding. Evidence:
+`docs/bench/2026-08-06-dsv4-packed-pre-expert-residual-attribution/README.md`.
+CX: `019fd685-acb3-7890-83c9-192cbea48c6e`.
+
 ## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Broadcast KILL
 
 Status: the dispatch-neutral scalar SIMD weight-broadcast substitution is a

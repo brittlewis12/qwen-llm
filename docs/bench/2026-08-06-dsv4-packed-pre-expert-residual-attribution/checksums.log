@@ -1,0 +1,7 @@
+$ pwd
+/Users/tito/code/qwen-llm
+
+$ shasum -a 256 docs/bench/2026-08-06-dsv4-packed-pre-expert-residual-attribution/attention-split.log docs/bench/2026-08-06-dsv4-packed-pre-expert-residual-attribution/analyze.py docs/bench/2026-08-06-dsv4-packed-pre-expert-residual-attribution/analysis.json
+3fd96776530bd90903513aa790488cf314a81ce5a1ccfe96158b9d18a589278b  docs/bench/2026-08-06-dsv4-packed-pre-expert-residual-attribution/attention-split.log
+389d985769c1e2a2f2da7e30c94069ef2029e99f32be8ad79223d4bc8b41fbce  docs/bench/2026-08-06-dsv4-packed-pre-expert-residual-attribution/analyze.py
+a62a9ccf89cddbdcbb7343c43f99fbc35bcc27ceebe810f9fa1897b4392519bd  docs/bench/2026-08-06-dsv4-packed-pre-expert-residual-attribution/analysis.json

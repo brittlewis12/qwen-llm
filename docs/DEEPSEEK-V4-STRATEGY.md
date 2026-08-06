@@ -2270,7 +2270,12 @@ noise without reducing technical risk. Revisit after S5.
    shuffle width or revive another scalar grouped-IQ2 row/panel/TGM variant.
    Before writing another packed kernel, independently adjudicate the already
    captured `BeforeAttentionBody` and `AfterAttentionOutput` intervals from the
-   accepted four-pass packet. Require the exact candidate-touched subset, not
-   merely its containing interval, to clear the existing 158.3 ms floor.
+   accepted four-pass packet. The former has a 477.570 ms/44.7712% conservative
+   lower bound with 47.6961%/43.4194% CSA/HCA shares and is `GO` for
+   decomposition only. The latter has only a 56.583 ms/5.3057% lower bound and
+   is `KILL` standalone. No new GPU run is needed. Census the exact operations,
+   dispatches, intermediates, and materializations inside `BeforeAttentionBody`;
+   require the candidate-touched subset, not merely its containing interval, to
+   clear the existing 158.3 ms floor before implementation.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

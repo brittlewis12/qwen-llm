@@ -494,20 +494,32 @@ capacity by 59.039%, but every stable GPU candidate sample regresses by roughly
 24-25%. Wall cells miss stationarity, so preserve this as raw negative evidence,
 not a contractual KILL. Do not rerun, tune widths, or spend an asset gate.
 
+The dispatch-neutral follow-up is a decisive `KILL`. It preserves all 25
+dispatches, routes, scalar IQ2 dequantization, accumulation order, and output
+bits while replacing each 64-float TGM publication and two barriers with scalar
+exact-bit SIMD shuffles. All four GPU cells pass stationarity, but every
+candidate sample regresses: disjoint median/p95 moves from 527.743/540.779 to
+2,406.168/2,429.985 ms and warm moves from 527.151/546.902 to
+2,406.267/2,456.642 ms. Remove it and close grouped-IQ2 scalar row, panel, width,
+TGM, barrier, and shuffle retuning under the current asset/device contract.
+
 Force-ranked queue:
 
-1. **Dispatch-neutral IQ2 weight broadcast.** Keep one FFN row per threadgroup
-   and all 25 production dispatches. Replace TGM publication plus both barriers
-   in each 32-wide K chunk with exact-bit SIMD broadcast from the lane that
-   performs the unchanged scalar gate/up dequantization. Preserve every route,
-   active-lane accumulator order, clamp/SwiGLU expression, and store. Require a
-   separately reviewed exact active differential and one new model-free gate;
-   do not reuse or tune row-packing geometry. Down/scatter remains out of scope.
-2. **Down/scatter attribution.** Keep `HOLD - INCONCLUSIVE`; do not filter or
-   rerun V2. Reopen only for a materially new candidate composed with the gate
-   design, a new accepted observer, or relevant device/toolchain drift under a
-   new protocol.
-3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+1. **Recover residual pre-expert attribution.** The accepted four-pass packet
+   already records `BeforeAttentionBody` and `AfterAttentionOutput`, but its
+   decision reported only body and output. Re-adjudicate those retained samples
+   independently before any new GPU run. Require a stable uncertainty-adjusted
+   >=158.3 ms interval, then inventory the exact candidate-touched operations,
+   buffers, and dispatches; containing-phase time alone authorizes no kernel.
+2. **Exact cross-boundary materialization census.** Only if one residual clears,
+   identify a producer-to-consumer fusion that removes measured publication,
+   readback, or dispatch work without reordering any projection reduction. Give
+   impossible zero-work credit to that exact subset before implementation.
+3. **Down/scatter attribution.** Keep `HOLD - INCONCLUSIVE`; do not filter or
+   rerun V2. Reopen only for a materially new representation or arithmetic
+   contract, a new accepted observer, or relevant device/toolchain drift under
+   a new protocol. The gate-only authorization is consumed and closed.
+4. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

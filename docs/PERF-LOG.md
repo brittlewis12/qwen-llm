@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Broadcast KILL
+
+Status: the dispatch-neutral scalar SIMD weight-broadcast substitution is a
+contractual `KILL` and is removed from live source. It authorizes no asset run,
+product change, or same-family rescue tuning.
+
+- The candidate keeps all 25 dispatches and every deployed route, row, slot,
+  scalar IQ2 dequantization, accumulation, clamp/SwiGLU, and store. It replaces
+  each 64-float TGM publication and two barriers with exact-bit scalar shuffles.
+- Production-shape outputs are bit-exact in both disjoint and warm regimes.
+  Inputs, routes, guards, initialized weight bytes, repeat digests, source
+  seals, and dispatch counts also pass before and after timing.
+- All four GPU cells are stable, and every candidate sample regresses. Disjoint
+  median/p95 moves from 527.743/540.779 to 2,406.168/2,429.985 ms; warm moves
+  from 527.151/546.902 to 2,406.267/2,456.642 ms.
+- The one-shot packet takes 165.74 seconds in-test, reaches 9,179,938,816 bytes
+  maximum RSS, and records zero swaps. These are provenance only.
+
+Decision: kill exactly this scalar shuffle substitution. Remove the candidate
+and profiler; archive exact source/log/hashes and the empty retained diff. The
+grouped-IQ2 scalar-retuning lane is exhausted under the current asset/device
+contract. Next recover the two residual intervals already captured by the
+accepted four-pass pre-expert packet before writing another packed kernel.
+Evidence:
+`docs/bench/2026-08-06-dsv4-packed-grouped-iq2-broadcast-gate/README.md`. CX:
+`019fd685-acb3-7890-83c9-192cbea48c6e`.
+
 ## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Row Packing Inconclusive
 
 Status: exact multi-bin FFN-row packing is `HOLD - INCONCLUSIVE` and removed

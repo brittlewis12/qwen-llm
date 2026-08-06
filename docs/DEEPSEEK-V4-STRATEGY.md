@@ -2261,6 +2261,16 @@ noise without reducing technical risk. Revisit after S5.
    fail stationarity, so record `HOLD - INCONCLUSIVE`, remove the entire
    candidate/profiler, and do not rerun or tune widths. Move next to a materially
    different dispatch-neutral SIMD weight-broadcast design that preserves one
-   FFN row per threadgroup and removes only TGM/barrier overhead.
+   FFN row per threadgroup and removes only TGM/barrier overhead. That follow-up
+   is bit-exact and keeps all 25 dispatches, but every stable candidate sample
+   regresses by roughly 4.56x: disjoint median/p95 moves from
+   527.743/540.779 to 2,406.168/2,429.985 ms and warm moves from
+   527.151/546.902 to 2,406.267/2,456.642 ms. Record contractual
+   `KILL_BROADCAST_SUBSTITUTION`, remove the candidate/profiler, and do not tune
+   shuffle width or revive another scalar grouped-IQ2 row/panel/TGM variant.
+   Before writing another packed kernel, independently adjudicate the already
+   captured `BeforeAttentionBody` and `AfterAttentionOutput` intervals from the
+   accepted four-pass packet. Require the exact candidate-touched subset, not
+   merely its containing interval, to clear the existing 158.3 ms floor.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

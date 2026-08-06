@@ -1,0 +1,1227 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+index 7f60264..42e6db5 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@ -2771,0 +2772,122 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
++#[cfg(test)]
++#[allow(clippy::too_many_arguments)]
++fn encode_packed_grouped_swiglu_iq2_xs_broadcast_f32(
++    ctx: &MetalContext,
++    enc: &KernelEncoder,
++    gate_bank: &MetalTensor,
++    up_bank: &MetalTensor,
++    normalized_input: &MetalTensor,
++    bucket_slots: &MetalTensor,
++    schedule: &[ExpertBucket],
++    inner: &MetalTensor,
++    hidden: usize,
++    ffn: usize,
++    expert_count: usize,
++    top_k: usize,
++    n_tokens: usize,
++    clamp: f32,
++) -> Result<(), DeepSeekV4MetalError> {
++    require_serial(enc, "packed grouped IQ2_XS broadcast gate/up")?;
++    if !hidden.is_multiple_of(256)
++        || expert_count != MOE_EXPERT_COUNT
++        || top_k != MOE_TOP_K
++        || gate_bank.dtype != GgmlType::IQ2_XS
++        || up_bank.dtype != GgmlType::IQ2_XS
++        || !clamp.is_finite()
++        || clamp <= 0.0
++    {
++        return invalid(
++            "packed grouped broadcast gate/up requires aligned IQ2_XS banks and positive clamp",
++        );
++    }
++    validate_expert_bank(
++        gate_bank,
++        hidden,
++        ffn,
++        expert_count,
++        "packed grouped broadcast gate bank",
++    )?;
++    validate_expert_bank(
++        up_bank,
++        hidden,
++        ffn,
++        expert_count,
++        "packed grouped broadcast up bank",
++    )?;
++    validate_f32(
++        normalized_input,
++        &[hidden as u64, n_tokens as u64],
++        false,
++        "packed grouped broadcast normalized input",
++    )?;
++    validate_i32(
++        bucket_slots,
++        &[(n_tokens * top_k) as u64],
++        false,
++        "packed grouped broadcast slots",
++    )?;
++    validate_f32(
++        inner,
++        &[ffn as u64, top_k as u64, n_tokens as u64],
++        true,
++        "packed grouped broadcast inner",
++    )?;
++    let tiles = packed_grouped_expert_tiles(n_tokens, schedule)?;
++    #[repr(C)]
++    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
++    struct Args {
++        hidden: u32,
++        ffn: u32,
++        n_expert: u32,
++        top_k: u32,
++        n_tokens: u32,
++        clamp: f32,
++    }
++    let pso = ctx.pipeline("kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_broadcast")?;
++    if pso.threadExecutionWidth() != 32
++        || pso.maxTotalThreadsPerThreadgroup() < 32
++        || pso.staticThreadgroupMemoryLength() != 0
++    {
++        return invalid("packed grouped IQ2_XS broadcast requires one SIMD group and zero TGM");
++    }
++    enc.set_pipeline(&pso);
++    enc.set_bytes(
++        0,
++        &Args {
++            hidden: u32::try_from(hidden).map_err(|_| {
++                DeepSeekV4MetalError::Invalid("packed grouped hidden exceeds u32".into())
++            })?,
++            ffn: u32::try_from(ffn).map_err(|_| {
++                DeepSeekV4MetalError::Invalid("packed grouped FFN exceeds u32".into())
++            })?,
++            n_expert: u32::try_from(expert_count).map_err(|_| {
++                DeepSeekV4MetalError::Invalid("packed grouped experts exceed u32".into())
++            })?,
++            top_k: u32::try_from(top_k).map_err(|_| {
++                DeepSeekV4MetalError::Invalid("packed grouped top-k exceeds u32".into())
++            })?,
++            n_tokens: checked_token_count(n_tokens)?,
++            clamp,
++        },
++    );
++    enc.set_tensor(1, gate_bank);
++    enc.set_tensor(2, up_bank);
++    enc.set_tensor(3, normalized_input);
++    enc.set_tensor(4, bucket_slots);
++    enc.set_bytes_slice(5, &tiles);
++    enc.set_tensor(6, inner);
++    enc.dispatch(
++        MTLSize {
++            width: ffn,
++            height: tiles.len(),
++            depth: 1,
++        },
++        MTLSize {
++            width: 32,
++            height: 1,
++            depth: 1,
++        },
++    );
++    Ok(())
++}
++
+@@ -8656,0 +8779,4 @@ mod tests {
++            let broadcast_inner =
++                grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 19.0);
++            let broadcast_repeat_inner =
++                grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 23.0);
+@@ -8823,0 +8950,19 @@ mod tests {
++            for inner in [&broadcast_inner, &broadcast_repeat_inner] {
++                encode_packed_grouped_swiglu_iq2_xs_broadcast_f32(
++                    &ctx,
++                    &encoder,
++                    &gate_bank,
++                    &up_bank,
++                    &input,
++                    &bucket_slots,
++                    &schedule,
++                    inner,
++                    H,
++                    F,
++                    E,
++                    K,
++                    n_tokens,
++                    CLAMP,
++                )
++                .unwrap();
++            }
+@@ -8859,0 +9005,10 @@ mod tests {
++            assert_eq!(
++                bits(&broadcast_inner),
++                bits(&candidate_inner),
++                "N={n_tokens} broadcast inner"
++            );
++            assert_eq!(
++                bits(&broadcast_repeat_inner),
++                bits(&broadcast_inner),
++                "N={n_tokens} broadcast repeat inner"
++            );
+@@ -8866,0 +9022,2 @@ mod tests {
++                ("broadcast inner", &broadcast_inner),
++                ("broadcast repeat inner", &broadcast_repeat_inner),
+@@ -8872,0 +9030,991 @@ mod tests {
++    #[test]
++    fn packed_grouped_iq2_broadcast_matches_deployed_at_panel_boundaries() {
++        let Ok(ctx) = MetalContext::new() else {
++            return;
++        };
++        const H: usize = 256;
++        const F: usize = 256;
++        const E: usize = MOE_EXPERT_COUNT;
++        const K: usize = MOE_TOP_K;
++        const CLAMP: f32 = 0.25;
++        const COUNTS: [usize; 19] = [
++            1, 2, 3, 4, 5, 8, 9, 16, 17, 31, 32, 33, 63, 64, 65, 96, 97, 127, 128,
++        ];
++
++        fn tensor_bytes(tensor: &MetalTensor) -> Vec<u8> {
++            unsafe {
++                std::slice::from_raw_parts(
++                    tensor
++                        .buffer
++                        .contents()
++                        .as_ptr()
++                        .cast::<u8>()
++                        .add(tensor.offset as usize),
++                    tensor.n_bytes() as usize,
++                )
++                .to_vec()
++            }
++        }
++
++        let gate_bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, H, F, E, 101);
++        let up_bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, H, F, E, 211);
++        let gate_before = tensor_bytes(&gate_bank);
++        let up_before = tensor_bytes(&up_bank);
++
++        for n_tokens in COUNTS {
++            let expert_ids = (0..n_tokens)
++                .flat_map(|_| (0..K).map(|expert| expert as i32))
++                .collect::<Vec<_>>();
++            let mut rows = Vec::with_capacity(n_tokens * K);
++            let mut slots = Vec::with_capacity(n_tokens * K);
++            let mut schedule = Vec::with_capacity(K);
++            for expert in 0..K {
++                let start = slots.len();
++                for token in 0..n_tokens {
++                    rows.push(token as i32);
++                    slots.push((token * K + expert) as i32);
++                }
++                schedule.push(ExpertBucket {
++                    expert,
++                    start,
++                    len: n_tokens,
++                });
++            }
++            validate_packed_expert_schedule(n_tokens, &expert_ids, &rows, &slots, &schedule)
++                .unwrap();
++            let slot_tensor = MetalTensor::from_bytes(
++                &ctx,
++                bytemuck::cast_slice(&slots),
++                vec![(n_tokens * K) as u64],
++                GgmlType::I32,
++            )
++            .unwrap();
++            let input = grouped_guarded_f32(&ctx, vec![H as u64, n_tokens as u64], 29.0);
++            let input_values = (0..H * n_tokens)
++                .map(|index| {
++                    let magnitude = 0.000_125 * (1 + (index * 37 + n_tokens * 101) % 1_009) as f32;
++                    if (index + n_tokens).is_multiple_of(2) {
++                        magnitude
++                    } else {
++                        -magnitude
++                    }
++                })
++                .collect::<Vec<_>>();
++            host_write_f32(&input, &input_values, "broadcast boundary input").unwrap();
++            let deployed =
++                grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 31.0);
++            let candidate =
++                grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 37.0);
++            let repeat = grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 41.0);
++
++            let command = ctx.queue.commandBuffer().unwrap();
++            let encoder = KernelEncoder::begin(&command);
++            let result = (|| {
++                encode_packed_grouped_swiglu_iq2_xs_f32(
++                    &ctx,
++                    &encoder,
++                    &gate_bank,
++                    &up_bank,
++                    &input,
++                    &slot_tensor,
++                    &schedule,
++                    &deployed,
++                    H,
++                    F,
++                    E,
++                    K,
++                    n_tokens,
++                    CLAMP,
++                )?;
++                encode_packed_grouped_swiglu_iq2_xs_broadcast_f32(
++                    &ctx,
++                    &encoder,
++                    &gate_bank,
++                    &up_bank,
++                    &input,
++                    &slot_tensor,
++                    &schedule,
++                    &candidate,
++                    H,
++                    F,
++                    E,
++                    K,
++                    n_tokens,
++                    CLAMP,
++                )?;
++                encode_packed_grouped_swiglu_iq2_xs_broadcast_f32(
++                    &ctx,
++                    &encoder,
++                    &gate_bank,
++                    &up_bank,
++                    &input,
++                    &slot_tensor,
++                    &schedule,
++                    &repeat,
++                    H,
++                    F,
++                    E,
++                    K,
++                    n_tokens,
++                    CLAMP,
++                )
++            })();
++            encoder.end();
++            result.unwrap();
++            command.commit();
++            command.waitUntilCompleted();
++            assert!(
++                command.error().is_none(),
++                "N={n_tokens}: {:?}",
++                command.error()
++            );
++
++            let bits = |tensor: &MetalTensor, label: &str| {
++                host_read_f32(tensor, label)
++                    .unwrap()
++                    .into_iter()
++                    .map(f32::to_bits)
++                    .collect::<Vec<_>>()
++            };
++            assert_eq!(
++                bits(&candidate, "broadcast boundary candidate"),
++                bits(&deployed, "broadcast boundary deployed"),
++                "N={n_tokens} candidate"
++            );
++            assert_eq!(
++                bits(&repeat, "broadcast boundary repeat"),
++                bits(&candidate, "broadcast boundary candidate repeat"),
++                "N={n_tokens} repeat"
++            );
++            assert_eq!(
++                host_read_f32(&input, "broadcast immutable input").unwrap(),
++                input_values
++            );
++            assert_eq!(
++                host_read_i32(&slot_tensor, "broadcast immutable slots").unwrap(),
++                slots
++            );
++            for (label, tensor) in [
++                ("broadcast input", &input),
++                ("broadcast deployed", &deployed),
++                ("broadcast candidate", &candidate),
++                ("broadcast repeat", &repeat),
++            ] {
++                assert_grouped_guards(label, tensor);
++            }
++        }
++        assert_eq!(tensor_bytes(&gate_bank), gate_before);
++        assert_eq!(tensor_bytes(&up_bank), up_before);
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
++    enum GroupedIq2BroadcastGateVerdict {
++        Pass,
++        Hold,
++        Kill,
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    fn run_grouped_iq2_broadcast_production_shape() -> GroupedIq2BroadcastGateVerdict {
++        assert!(
++            !cfg!(debug_assertions),
++            "broadcast production-shape gate requires a release test binary"
++        );
++        const H: usize = 4_096;
++        const F: usize = 2_048;
++        const E: usize = MOE_EXPERT_COUNT;
++        const K: usize = MOE_TOP_K;
++        const N: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
++        const CLAMP: f32 = 10.0;
++        const SAMPLES: usize = 12;
++        const ECONOMIC_FLOOR_MS: f64 = 158.3;
++        const V2_EMPTY_BOUND_MS: f64 = 0.492_790;
++        const OUTPUT_POISON: f32 = f32::from_bits(0x7141_2345);
++        const ROUTE_PAYLOAD_SHA256: &str =
++            "505cb93ff9c3e1557bbad8f27a773e08b0e8c3475fbb4d7096069667c1fbafdd";
++        const ENCODER_SOURCE_SHA256: &str =
++            "080c35f7eb3ae08dc0c8a6c60cb8803d4d6c5bffbe67d82f3c832ffe7bc58c67";
++        const KERNEL_SOURCE_SHA256: &str =
++            "15649c66d7d6c71ab37c1f690e7257b9988034e83378ad1f194d078698a4b76e";
++
++        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
++        enum Arm {
++            Baseline,
++            Candidate,
++        }
++
++        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
++        enum Regime {
++            Disjoint,
++            Warm,
++        }
++
++        #[derive(Clone, Copy, Debug)]
++        struct Sample {
++            gpu_ms: f64,
++            wall_ms: f64,
++        }
++
++        struct ProfileBank {
++            tensor: MetalTensor,
++            expert_bytes: usize,
++            initialized_experts: Vec<usize>,
++            original_digest: [u8; 32],
++        }
++
++        impl ProfileBank {
++            fn digest(&self) -> [u8; 32] {
++                let mut digest = Sha256::new();
++                for &expert in &self.initialized_experts {
++                    digest.update((expert as u32).to_le_bytes());
++                    let start = self.tensor.offset as usize + expert * self.expert_bytes;
++                    let bytes = unsafe {
++                        std::slice::from_raw_parts(
++                            self.tensor
++                                .buffer
++                                .contents()
++                                .as_ptr()
++                                .cast::<u8>()
++                                .add(start),
++                            self.expert_bytes,
++                        )
++                    };
++                    digest.update(bytes);
++                }
++                digest.finalize().into()
++            }
++
++            fn assert_unchanged(&self, label: &str) {
++                assert_eq!(
++                    self.digest(),
++                    self.original_digest,
++                    "{label} initialized weight bytes changed"
++                );
++            }
++
++            fn touched_bytes(&self) -> usize {
++                self.expert_bytes * self.initialized_experts.len()
++            }
++        }
++
++        struct ProfileLayer {
++            layer: usize,
++            schedule: Vec<ExpertBucket>,
++            slot_values: Vec<i32>,
++            slots: MetalTensor,
++            input: MetalTensor,
++            baseline: MetalTensor,
++            candidate: MetalTensor,
++        }
++
++        fn hex(digest: impl AsRef<[u8]>) -> String {
++            digest
++                .as_ref()
++                .iter()
++                .map(|byte| format!("{byte:02x}"))
++                .collect()
++        }
++
++        fn source_contract_sha256(source: &str, start_marker: &str, end_marker: &str) -> String {
++            let start = source
++                .find(start_marker)
++                .unwrap_or_else(|| panic!("missing source-contract start marker {start_marker}"));
++            let tail = &source[start..];
++            let end = tail
++                .find(end_marker)
++                .unwrap_or_else(|| panic!("missing source-contract end marker {end_marker}"));
++            let mut digest = Sha256::new();
++            digest.update(&tail.as_bytes()[..end]);
++            hex(digest.finalize())
++        }
++
++        fn mix64(mut value: u64) -> u64 {
++            value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
++            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
++            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
++            value ^ (value >> 31)
++        }
++
++        fn expert_template() -> (Vec<u8>, usize, usize) {
++            let (block_elements, block_bytes) = ggml_type_layout(GgmlType::IQ2_XS).unwrap();
++            let block_elements = block_elements as usize;
++            let block_bytes = block_bytes as usize;
++            let elements = H * F;
++            assert!(elements.is_multiple_of(block_elements));
++            let blocks = elements / block_elements;
++            let mut payload = vec![0u8; blocks * block_bytes];
++            for block in 0..blocks {
++                let start = block * block_bytes;
++                payload[start..start + 2].copy_from_slice(
++                    &half::f16::from_f32(0.00390625 * (1 + block % 7) as f32)
++                        .to_bits()
++                        .to_le_bytes(),
++                );
++                for byte in 2..block_bytes {
++                    payload[start + byte] =
++                        (block.wrapping_mul(31) + byte.wrapping_mul(13) + 5) as u8;
++                }
++            }
++            (payload, blocks, block_bytes)
++        }
++
++        fn profile_bank(
++            ctx: &MetalContext,
++            initialized_experts: Vec<usize>,
++            seed: u64,
++            template: &[u8],
++            blocks_per_expert: usize,
++            block_bytes: usize,
++        ) -> ProfileBank {
++            assert!(!initialized_experts.is_empty());
++            assert!(
++                initialized_experts
++                    .windows(2)
++                    .all(|window| window[0] < window[1])
++            );
++            assert!(initialized_experts.iter().all(|&expert| expert < E));
++            let expert_bytes = template.len();
++            assert_eq!(expert_bytes, blocks_per_expert * block_bytes);
++            let bank_bytes = expert_bytes * E;
++            assert_eq!(bank_bytes, 620_756_992);
++            assert!(bank_bytes <= ctx.max_buffer_length());
++            let buffer = ctx.buffer_uninit(bank_bytes).unwrap();
++            let tensor = MetalTensor {
++                buffer,
++                offset: 0,
++                shape: vec![H as u64, F as u64, E as u64],
++                dtype: GgmlType::IQ2_XS,
++                provenance: MetalTensorProvenance::OwnedWritable,
++            };
++            let base = tensor.buffer.contents().as_ptr().cast::<u8>();
++            for &expert in &initialized_experts {
++                let destination = unsafe { base.add(expert * expert_bytes) };
++                unsafe {
++                    std::ptr::copy_nonoverlapping(template.as_ptr(), destination, expert_bytes);
++                }
++                for block in (0..blocks_per_expert).step_by(16) {
++                    let value = mix64(seed ^ ((expert as u64) << 32) ^ block as u64);
++                    unsafe {
++                        std::ptr::copy_nonoverlapping(
++                            value.to_le_bytes().as_ptr(),
++                            destination.add(block * block_bytes + 2),
++                            8,
++                        );
++                    }
++                }
++            }
++            let mut bank = ProfileBank {
++                tensor,
++                expert_bytes,
++                initialized_experts,
++                original_digest: [0; 32],
++            };
++            bank.original_digest = bank.digest();
++            bank
++        }
++
++        fn logical_values(tensor: &MetalTensor) -> &[f32] {
++            unsafe {
++                std::slice::from_raw_parts(
++                    tensor
++                        .buffer
++                        .contents()
++                        .as_ptr()
++                        .cast::<u8>()
++                        .add(tensor.offset as usize)
++                        .cast::<f32>(),
++                    tensor.n_elements() as usize,
++                )
++            }
++        }
++
++        fn poison(tensor: &MetalTensor) {
++            let values = unsafe {
++                std::slice::from_raw_parts_mut(
++                    tensor
++                        .buffer
++                        .contents()
++                        .as_ptr()
++                        .cast::<u8>()
++                        .add(tensor.offset as usize)
++                        .cast::<f32>(),
++                    tensor.n_elements() as usize,
++                )
++            };
++            values.fill(OUTPUT_POISON);
++        }
++
++        fn profile_layers(ctx: &MetalContext) -> Vec<ProfileLayer> {
++            let fixture = packed_grouped_iq2_route_census_fixture();
++            assert_eq!(fixture.route_payload_sha256, ROUTE_PAYLOAD_SHA256);
++            assert_eq!(fixture.n_tokens, N);
++            assert_eq!(fixture.top_k, K);
++            assert_eq!(fixture.expert_count, E);
++            assert_eq!(fixture.layers.len(), 25);
++            fixture
++                .layers
++                .into_iter()
++                .zip(fixture.grouped_layer_ids)
++                .map(|(route_layer, expected_layer)| {
++                    assert_eq!(route_layer.layer, expected_layer);
++                    let (expert_ids, rows, slots, schedule) =
++                        packed_grouped_schedule_from_route_ids(N, &route_layer.route_expert_ids);
++                    assert_eq!(
++                        packed_post_route_expert_ids(N, &expert_ids, &rows, &slots, &schedule,)
++                            .unwrap(),
++                        route_layer.route_expert_ids
++                    );
++                    let slots_tensor = MetalTensor::from_bytes(
++                        ctx,
++                        bytemuck::cast_slice(&slots),
++                        vec![(N * K) as u64],
++                        GgmlType::I32,
++                    )
++                    .unwrap();
++                    let input = grouped_guarded_f32(ctx, vec![H as u64, N as u64], 17.0);
++                    let input_values = unsafe {
++                        std::slice::from_raw_parts_mut(
++                            input
++                                .buffer
++                                .contents()
++                                .as_ptr()
++                                .cast::<u8>()
++                                .add(input.offset as usize)
++                                .cast::<f32>(),
++                            H * N,
++                        )
++                    };
++                    for (index, value) in input_values.iter_mut().enumerate() {
++                        let magnitude = 0.000_125
++                            * (1 + (index.wrapping_mul(37) + expected_layer.wrapping_mul(101))
++                                % 997) as f32;
++                        *value = if (index + expected_layer).is_multiple_of(2) {
++                            magnitude
++                        } else {
++                            -magnitude
++                        };
++                    }
++                    ProfileLayer {
++                        layer: expected_layer,
++                        schedule,
++                        slot_values: slots,
++                        slots: slots_tensor,
++                        input,
++                        baseline: grouped_guarded_f32(
++                            ctx,
++                            vec![F as u64, K as u64, N as u64],
++                            OUTPUT_POISON,
++                        ),
++                        candidate: grouped_guarded_f32(
++                            ctx,
++                            vec![F as u64, K as u64, N as u64],
++                            OUTPUT_POISON,
++                        ),
++                    }
++                })
++                .collect()
++        }
++
++        fn input_digest(layers: &[ProfileLayer]) -> [u8; 32] {
++            let mut digest = Sha256::new();
++            for layer in layers {
++                digest.update((layer.layer as u32).to_le_bytes());
++                digest.update(bytemuck::cast_slice(logical_values(&layer.input)));
++            }
++            digest.finalize().into()
++        }
++
++        fn output_digest(layers: &[ProfileLayer], arm: Arm) -> String {
++            let mut digest = Sha256::new();
++            for layer in layers {
++                digest.update((layer.layer as u32).to_le_bytes());
++                let output = match arm {
++                    Arm::Baseline => &layer.baseline,
++                    Arm::Candidate => &layer.candidate,
++                };
++                digest.update(bytemuck::cast_slice(logical_values(output)));
++            }
++            hex(digest.finalize())
++        }
++
++        fn assert_output_contract(layers: &[ProfileLayer], arm: Arm) {
++            for layer in layers {
++                let output = match arm {
++                    Arm::Baseline => &layer.baseline,
++                    Arm::Candidate => &layer.candidate,
++                };
++                let values = logical_values(output);
++                assert!(values.iter().all(|value| value.is_finite()));
++                assert!(
++                    values
++                        .iter()
++                        .all(|value| value.to_bits() != OUTPUT_POISON.to_bits()),
++                    "layer {} {arm:?} did not overwrite every output",
++                    layer.layer
++                );
++                assert_grouped_guards("broadcast profile input", &layer.input);
++                assert_grouped_guards("broadcast profile baseline", &layer.baseline);
++                assert_grouped_guards("broadcast profile candidate", &layer.candidate);
++                assert_eq!(
++                    host_read_i32(&layer.slots, "broadcast profile slots").unwrap(),
++                    layer.slot_values
++                );
++            }
++        }
++
++        fn assert_exact(layers: &[ProfileLayer]) {
++            for layer in layers {
++                assert_eq!(
++                    logical_values(&layer.candidate)
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .collect::<Vec<_>>(),
++                    logical_values(&layer.baseline)
++                        .iter()
++                        .map(|value| value.to_bits())
++                        .collect::<Vec<_>>(),
++                    "layer {} broadcast candidate differs",
++                    layer.layer
++                );
++            }
++        }
++
++        fn assert_weight_banks_unchanged(
++            disjoint: &[(ProfileBank, ProfileBank)],
++            warm: &(ProfileBank, ProfileBank),
++            phase: &str,
++        ) {
++            for (index, pair) in disjoint.iter().enumerate() {
++                pair.0
++                    .assert_unchanged(&format!("{phase} broadcast gate layer {index}"));
++                pair.1
++                    .assert_unchanged(&format!("{phase} broadcast up layer {index}"));
++            }
++            warm.0
++                .assert_unchanged(&format!("{phase} broadcast warm gate"));
++            warm.1
++                .assert_unchanged(&format!("{phase} broadcast warm up"));
++        }
++
++        fn sample(
++            ctx: &MetalContext,
++            layers: &[ProfileLayer],
++            disjoint: &[(ProfileBank, ProfileBank)],
++            warm: &(ProfileBank, ProfileBank),
++            arm: Arm,
++            regime: Regime,
++        ) -> Sample {
++            assert_eq!(layers.len(), disjoint.len());
++            let mut commands = Vec::with_capacity(layers.len());
++            let started = std::time::Instant::now();
++            let mut wall_ms = None;
++            for (index, (layer, pair)) in layers.iter().zip(disjoint).enumerate() {
++                let pair = match regime {
++                    Regime::Disjoint => pair,
++                    Regime::Warm => warm,
++                };
++                let command = ctx.queue.commandBuffer().unwrap();
++                let encoder = KernelEncoder::begin(&command);
++                let output = match arm {
++                    Arm::Baseline => &layer.baseline,
++                    Arm::Candidate => &layer.candidate,
++                };
++                let result = match arm {
++                    Arm::Baseline => encode_packed_grouped_swiglu_iq2_xs_f32(
++                        ctx,
++                        &encoder,
++                        &pair.0.tensor,
++                        &pair.1.tensor,
++                        &layer.input,
++                        &layer.slots,
++                        &layer.schedule,
++                        output,
++                        H,
++                        F,
++                        E,
++                        K,
++                        N,
++                        CLAMP,
++                    ),
++                    Arm::Candidate => encode_packed_grouped_swiglu_iq2_xs_broadcast_f32(
++                        ctx,
++                        &encoder,
++                        &pair.0.tensor,
++                        &pair.1.tensor,
++                        &layer.input,
++                        &layer.slots,
++                        &layer.schedule,
++                        output,
++                        H,
++                        F,
++                        E,
++                        K,
++                        N,
++                        CLAMP,
++                    ),
++                };
++                encoder.end();
++                result.unwrap();
++                command.commit();
++                command.waitUntilCompleted();
++                if index + 1 == layers.len() {
++                    wall_ms = Some(started.elapsed().as_secs_f64() * 1e3);
++                }
++                commands.push(command);
++            }
++            let wall_ms = wall_ms.unwrap();
++            let gpu_ms = commands
++                .iter()
++                .zip(layers)
++                .map(|(command, layer)| {
++                    assert!(
++                        command.error().is_none(),
++                        "layer {} {arm:?}: {:?}",
++                        layer.layer,
++                        command.error()
++                    );
++                    let start = command.GPUStartTime();
++                    let end = command.GPUEndTime();
++                    let gpu_ms = (end - start) * 1e3;
++                    assert!(
++                        start.is_finite()
++                            && start > 0.0
++                            && end.is_finite()
++                            && end > start
++                            && gpu_ms.is_finite()
++                            && gpu_ms > 0.0
++                    );
++                    gpu_ms
++                })
++                .sum::<f64>();
++            assert!(gpu_ms.is_finite() && gpu_ms > 0.0);
++            assert!(wall_ms.is_finite() && wall_ms > 0.0);
++            Sample { gpu_ms, wall_ms }
++        }
++
++        fn validate_regime(
++            ctx: &MetalContext,
++            layers: &[ProfileLayer],
++            disjoint: &[(ProfileBank, ProfileBank)],
++            warm: &(ProfileBank, ProfileBank),
++            regime: Regime,
++        ) -> (String, String) {
++            for layer in layers {
++                poison(&layer.baseline);
++                poison(&layer.candidate);
++            }
++            let _ = sample(ctx, layers, disjoint, warm, Arm::Baseline, regime);
++            let _ = sample(ctx, layers, disjoint, warm, Arm::Candidate, regime);
++            assert_output_contract(layers, Arm::Baseline);
++            assert_output_contract(layers, Arm::Candidate);
++            assert_exact(layers);
++            let baseline_digest = output_digest(layers, Arm::Baseline);
++            let candidate_digest = output_digest(layers, Arm::Candidate);
++            assert_eq!(baseline_digest, candidate_digest);
++            let _ = sample(ctx, layers, disjoint, warm, Arm::Baseline, regime);
++            let _ = sample(ctx, layers, disjoint, warm, Arm::Candidate, regime);
++            assert_eq!(output_digest(layers, Arm::Baseline), baseline_digest);
++            assert_eq!(output_digest(layers, Arm::Candidate), candidate_digest);
++            assert_exact(layers);
++            (baseline_digest, candidate_digest)
++        }
++
++        fn drift(values: &[f64]) -> f64 {
++            let minimum = values.iter().copied().reduce(f64::min).unwrap();
++            let maximum = values.iter().copied().reduce(f64::max).unwrap();
++            assert!(minimum.is_finite() && minimum > 0.0 && maximum.is_finite());
++            (maximum - minimum) / maximum
++        }
++
++        fn value_range(values: &[f64]) -> f64 {
++            values.iter().copied().reduce(f64::max).unwrap()
++                - values.iter().copied().reduce(f64::min).unwrap()
++        }
++
++        fn regime_transcript(
++            regime: Regime,
++            baseline: &[Sample],
++            candidate: &[Sample],
++        ) -> (bool, bool, String) {
++            let baseline_gpu = baseline
++                .iter()
++                .map(|sample| sample.gpu_ms)
++                .collect::<Vec<_>>();
++            let candidate_gpu = candidate
++                .iter()
++                .map(|sample| sample.gpu_ms)
++                .collect::<Vec<_>>();
++            let baseline_wall = baseline
++                .iter()
++                .map(|sample| sample.wall_ms)
++                .collect::<Vec<_>>();
++            let candidate_wall = candidate
++                .iter()
++                .map(|sample| sample.wall_ms)
++                .collect::<Vec<_>>();
++            let gpu_drifts = [drift(&baseline_gpu), drift(&candidate_gpu)];
++            let wall_drifts = [drift(&baseline_wall), drift(&candidate_wall)];
++            let stable = gpu_drifts.iter().all(|&value| value <= 0.05);
++            let metric = |name: &str, baseline: &[f64], candidate: &[f64], empty_bound: f64| {
++                let baseline_median = percentile_ms(baseline, 0.5);
++                let candidate_median = percentile_ms(candidate, 0.5);
++                let baseline_p95 = percentile_ms(baseline, 0.95);
++                let candidate_p95 = percentile_ms(candidate, 0.95);
++                let q = (5.0 * value_range(baseline).max(value_range(candidate))).max(empty_bound);
++                let median_lower = baseline_median - candidate_median - q;
++                let p95_lower = baseline_p95 - candidate_p95 - q;
++                let median_threshold = ECONOMIC_FLOOR_MS.max(0.25 * baseline_median);
++                let p95_threshold = ECONOMIC_FLOOR_MS.max(0.25 * baseline_p95);
++                let pass = median_lower >= median_threshold && p95_lower >= p95_threshold;
++                (
++                    pass,
++                    format!(
++                        "{name}={{baseline={baseline:?},candidate={candidate:?},baseline_drift={:.9},candidate_drift={:.9},baseline_median={baseline_median:.9},candidate_median={candidate_median:.9},baseline_p95={baseline_p95:.9},candidate_p95={candidate_p95:.9},q={q:.9},median_lower={median_lower:.9},p95_lower={p95_lower:.9},median_threshold={median_threshold:.9},p95_threshold={p95_threshold:.9},pass={pass}}}",
++                        drift(baseline),
++                        drift(candidate),
++                    ),
++                )
++            };
++            let (gpu_pass, gpu) = metric("gpu", &baseline_gpu, &candidate_gpu, V2_EMPTY_BOUND_MS);
++            let (_wall_pass, wall) =
++                metric("wall_diagnostic", &baseline_wall, &candidate_wall, 0.0);
++            (
++                stable,
++                gpu_pass,
++                format!(
++                    "regime={regime:?} gpu_stable={stable} gpu_drifts={gpu_drifts:?} wall_drifts_diagnostic={wall_drifts:?} {gpu} {wall}"
++                ),
++            )
++        }
++
++        let ctx = MetalContext::new().expect("broadcast production-shape gate requires Metal");
++        assert_eq!(
++            ctx.device.name().to_string(),
++            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
++        );
++        assert!(packed_grouped_expert_enabled_for_test(&ctx));
++        let encoder_source_sha256 = source_contract_sha256(
++            include_str!("prefill.rs"),
++            "fn encode_packed_grouped_swiglu_iq2_xs_broadcast_f32(",
++            "fn encode_packed_grouped_down_iq3_xxs_f32(",
++        );
++        let kernel_source_sha256 = source_contract_sha256(
++            include_str!("../../../../kernels/mat_vec.metal"),
++            "kernel void kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_broadcast(",
++            "kernel void kernel_mat_mat_iq2_s_f32(",
++        );
++        assert_eq!(encoder_source_sha256, ENCODER_SOURCE_SHA256);
++        assert_eq!(kernel_source_sha256, KERNEL_SOURCE_SHA256);
++        let layers = profile_layers(&ctx);
++        let input_before = input_digest(&layers);
++        let (template, blocks, block_bytes) = expert_template();
++        let mut disjoint = Vec::with_capacity(layers.len());
++        for layer in &layers {
++            let experts = layer
++                .schedule
++                .iter()
++                .map(|bucket| bucket.expert)
++                .collect::<Vec<_>>();
++            disjoint.push((
++                profile_bank(
++                    &ctx,
++                    experts.clone(),
++                    0x1000_0000 ^ layer.layer as u64,
++                    &template,
++                    blocks,
++                    block_bytes,
++                ),
++                profile_bank(
++                    &ctx,
++                    experts,
++                    0x2000_0000 ^ layer.layer as u64,
++                    &template,
++                    blocks,
++                    block_bytes,
++                ),
++            ));
++        }
++        let all_experts = (0..E).collect::<Vec<_>>();
++        let warm = (
++            profile_bank(
++                &ctx,
++                all_experts.clone(),
++                0x3000_0000,
++                &template,
++                blocks,
++                block_bytes,
++            ),
++            profile_bank(
++                &ctx,
++                all_experts,
++                0x4000_0000,
++                &template,
++                blocks,
++                block_bytes,
++            ),
++        );
++        let logical_bank_bytes = disjoint
++            .iter()
++            .map(|pair| pair.0.tensor.n_bytes() + pair.1.tensor.n_bytes())
++            .sum::<u64>()
++            .checked_add(warm.0.tensor.n_bytes() + warm.1.tensor.n_bytes())
++            .unwrap();
++        assert_eq!(logical_bank_bytes, 32_279_363_584);
++        let mut bank_refs = Vec::with_capacity(52);
++        for pair in &disjoint {
++            bank_refs.extend([&pair.0, &pair.1]);
++        }
++        bank_refs.extend([&warm.0, &warm.1]);
++        let touched_weight_bytes = bank_refs
++            .iter()
++            .map(|bank| bank.touched_bytes())
++            .sum::<usize>();
++        let mut weight_digest = Sha256::new();
++        for (index, bank) in bank_refs.iter().enumerate() {
++            weight_digest.update((index as u32).to_le_bytes());
++            weight_digest.update(bank.original_digest);
++        }
++        let weight_digest = hex(weight_digest.finalize());
++        let allocated_bytes = ctx.current_allocated_size();
++
++        let (disjoint_baseline_digest, disjoint_candidate_digest) =
++            validate_regime(&ctx, &layers, &disjoint, &warm, Regime::Disjoint);
++        let (warm_baseline_digest, warm_candidate_digest) =
++            validate_regime(&ctx, &layers, &disjoint, &warm, Regime::Warm);
++        assert_eq!(input_digest(&layers), input_before);
++        assert_weight_banks_unchanged(&disjoint, &warm, "pre-timing");
++
++        let _trace = crate::metal::kernel_trace_begin();
++        let _ = sample(
++            &ctx,
++            &layers,
++            &disjoint,
++            &warm,
++            Arm::Baseline,
++            Regime::Disjoint,
++        );
++        let baseline_trace = crate::metal::kernel_trace_take_delta();
++        let _ = sample(
++            &ctx,
++            &layers,
++            &disjoint,
++            &warm,
++            Arm::Candidate,
++            Regime::Disjoint,
++        );
++        let candidate_trace = crate::metal::kernel_trace_take_delta();
++        assert_eq!(baseline_trace.encoders, 25);
++        assert_eq!(baseline_trace.concurrent_encoders, 0);
++        assert_eq!(baseline_trace.dispatches, 25);
++        assert_eq!(candidate_trace.encoders, 25);
++        assert_eq!(candidate_trace.concurrent_encoders, 0);
++        assert_eq!(candidate_trace.dispatches, 25);
++
++        const BLOCK: [(Arm, Regime); 8] = [
++            (Arm::Baseline, Regime::Disjoint),
++            (Arm::Candidate, Regime::Disjoint),
++            (Arm::Candidate, Regime::Warm),
++            (Arm::Baseline, Regime::Warm),
++            (Arm::Baseline, Regime::Warm),
++            (Arm::Candidate, Regime::Warm),
++            (Arm::Candidate, Regime::Disjoint),
++            (Arm::Baseline, Regime::Disjoint),
++        ];
++        for (arm, regime) in BLOCK {
++            let _ = sample(&ctx, &layers, &disjoint, &warm, arm, regime);
++        }
++
++        let mut baseline_disjoint = Vec::with_capacity(SAMPLES);
++        let mut candidate_disjoint = Vec::with_capacity(SAMPLES);
++        let mut baseline_warm = Vec::with_capacity(SAMPLES);
++        let mut candidate_warm = Vec::with_capacity(SAMPLES);
++        for _ in 0..SAMPLES / 2 {
++            for (arm, regime) in BLOCK {
++                let result = sample(&ctx, &layers, &disjoint, &warm, arm, regime);
++                match (arm, regime) {
++                    (Arm::Baseline, Regime::Disjoint) => baseline_disjoint.push(result),
++                    (Arm::Candidate, Regime::Disjoint) => candidate_disjoint.push(result),
++                    (Arm::Baseline, Regime::Warm) => baseline_warm.push(result),
++                    (Arm::Candidate, Regime::Warm) => candidate_warm.push(result),
++                }
++            }
++        }
++        for samples in [
++            &baseline_disjoint,
++            &candidate_disjoint,
++            &baseline_warm,
++            &candidate_warm,
++        ] {
++            assert_eq!(samples.len(), SAMPLES);
++        }
++
++        let (disjoint_stable, disjoint_pass, disjoint_transcript) =
++            regime_transcript(Regime::Disjoint, &baseline_disjoint, &candidate_disjoint);
++        let (warm_stable, warm_pass, warm_transcript) =
++            regime_transcript(Regime::Warm, &baseline_warm, &candidate_warm);
++
++        assert_eq!(
++            validate_regime(&ctx, &layers, &disjoint, &warm, Regime::Disjoint),
++            (
++                disjoint_baseline_digest.clone(),
++                disjoint_candidate_digest.clone()
++            )
++        );
++        assert_eq!(
++            validate_regime(&ctx, &layers, &disjoint, &warm, Regime::Warm),
++            (warm_baseline_digest.clone(), warm_candidate_digest.clone())
++        );
++        assert_eq!(input_digest(&layers), input_before);
++        assert_weight_banks_unchanged(&disjoint, &warm, "post-timing");
++
++        let stable = disjoint_stable && warm_stable;
++        let pass = disjoint_pass && warm_pass;
++        let verdict = if !stable {
++            GroupedIq2BroadcastGateVerdict::Hold
++        } else if pass {
++            GroupedIq2BroadcastGateVerdict::Pass
++        } else {
++            GroupedIq2BroadcastGateVerdict::Kill
++        };
++        let decision = match verdict {
++            GroupedIq2BroadcastGateVerdict::Pass => "AUTHORIZE_REVIEWED_CURRENT_ASSET_GATE_ONLY",
++            GroupedIq2BroadcastGateVerdict::Hold => "INCONCLUSIVE_HOLD",
++            GroupedIq2BroadcastGateVerdict::Kill => "KILL_BROADCAST_SUBSTITUTION",
++        };
++        eprintln!(
++            "deepseek_v4 grouped_iq2_broadcast_packet route_payload_sha256={ROUTE_PAYLOAD_SHA256} encoder_source_sha256={encoder_source_sha256} kernel_source_sha256={kernel_source_sha256} clamp={CLAMP} samples_per_cell={SAMPLES} economic_floor_ms={ECONOMIC_FLOOR_MS} fractional_floor=0.25 v2_empty_bound_ms={V2_EMPTY_BOUND_MS} wall_is_diagnostic=true {disjoint_transcript} {warm_transcript} decision={decision} baseline_dispatches={} candidate_dispatches={} logical_bank_bytes={logical_bank_bytes} touched_weight_bytes={touched_weight_bytes} allocated_bytes={allocated_bytes} weight_digest={weight_digest} disjoint_baseline_digest={disjoint_baseline_digest} disjoint_candidate_digest={disjoint_candidate_digest} warm_baseline_digest={warm_baseline_digest} warm_candidate_digest={warm_candidate_digest}",
++            baseline_trace.dispatches, candidate_trace.dispatches,
++        );
++        verdict
++    }
++
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "frozen grouped-IQ2 broadcast production-shape gate; release only"]
++    fn profile_grouped_iq2_broadcast_production_shape() {
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
++            run_grouped_iq2_broadcast_production_shape,
++        ));
++        match result {
++            Ok(GroupedIq2BroadcastGateVerdict::Pass) => {}
++            Ok(GroupedIq2BroadcastGateVerdict::Hold) => {
++                panic!("broadcast packet recorded INCONCLUSIVE_HOLD")
++            }
++            Ok(GroupedIq2BroadcastGateVerdict::Kill) => {
++                panic!("broadcast packet recorded KILL_BROADCAST_SUBSTITUTION")
++            }
++            Err(payload) => {
++                let reason = payload
++                    .downcast_ref::<String>()
++                    .map(String::as_str)
++                    .or_else(|| payload.downcast_ref::<&str>().copied())
++                    .unwrap_or("non-string panic");
++                eprintln!(
++                    "deepseek_v4 grouped_iq2_broadcast_packet decision=INCONCLUSIVE_HOLD invalid_reason={reason:?}"
++                );
++                std::panic::resume_unwind(payload);
++            }
++        }
++    }
++
+diff --git a/kernels/mat_vec.metal b/kernels/mat_vec.metal
+index 111aa6d..6e68759 100644
+--- a/kernels/mat_vec.metal
++++ b/kernels/mat_vec.metal
+@@ -3293,0 +3294,64 @@ kernel void kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_f32(
++        const float clamped_up = clamp(up_acc, -args.clamp, args.clamp);
++        inner[(ulong)slot * args.ffn + row] =
++            clamped_gate / (1.0f + exp(-clamped_gate)) * clamped_up;
++    }
++}
++
++kernel void kernel_deepseek_v4_packed_grouped_swiglu_iq2_xs_broadcast(
++        constant ds4_packed_grouped_expert_args & args [[buffer(0)]],
++        device const uchar * gate_weight [[buffer(1)]],
++        device const uchar * up_weight [[buffer(2)]],
++        device const float * x [[buffer(3)]],
++        device const int * slots [[buffer(4)]],
++        constant ds4_packed_expert_tile * tiles [[buffer(5)]],
++        device float * inner [[buffer(6)]],
++        uint2 tgpig [[threadgroup_position_in_grid]],
++        ushort tiisg [[thread_index_in_simdgroup]]) {
++    const uint row = tgpig.x;
++    if (row >= args.ffn) return;
++
++    const ds4_packed_expert_tile tile = tiles[tgpig.y];
++    if (tile.expert >= args.n_expert || tile.count == 0u || tile.count > 32u
++            || tile.start + tile.count > args.n_tokens * args.top_k) return;
++
++    const uint local_q = uint(tiisg);
++    bool active = local_q < tile.count;
++    int slot = -1;
++    uint token = 0;
++    if (active) {
++        slot = slots[tile.start + local_q];
++        active = slot >= 0 && uint(slot) < args.n_tokens * args.top_k;
++        token = active ? uint(slot) / args.top_k : 0u;
++    }
++
++    const uint nb = args.hidden / 256u;
++    const ulong row_stride = (ulong)nb * 74u;
++    const ulong expert_stride = (ulong)args.ffn * row_stride;
++    device const uchar * gate_row = gate_weight
++        + (ulong)tile.expert * expert_stride + (ulong)row * row_stride;
++    device const uchar * up_row = up_weight
++        + (ulong)tile.expert * expert_stride + (ulong)row * row_stride;
++    float gate_acc = 0.0f;
++    float up_acc = 0.0f;
++
++    for (uint bidx = 0; bidx < nb; ++bidx) {
++        device const uchar * gate_block = gate_row + (ulong)bidx * 74u;
++        device const uchar * up_block = up_row + (ulong)bidx * 74u;
++        const uint base = bidx * 256u;
++        for (uint k0 = 0; k0 < 256u; k0 += 32u) {
++            const uint gate_bits = as_type<uint>(deq_iq2_xs_bytes(gate_block, k0 + local_q));
++            const uint up_bits = as_type<uint>(deq_iq2_xs_bytes(up_block, k0 + local_q));
++            for (uint j = 0; j < 32u; ++j) {
++                const float gate_value = as_type<float>(simd_shuffle(gate_bits, j));
++                const float up_value = as_type<float>(simd_shuffle(up_bits, j));
++                if (active) {
++                    const float x_value = x[(ulong)token * args.hidden + base + k0 + j];
++                    gate_acc += x_value * gate_value;
++                    up_acc += x_value * up_value;
++                }
++            }
++        }
++    }
++
++    if (active) {
++        const float clamped_gate = min(gate_acc, args.clamp);

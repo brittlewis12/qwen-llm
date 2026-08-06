@@ -1,0 +1,37 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.08s
+     Running unittests src/lib.rs (target/release/deps/qwen_llm-246719edcad9c805)
+
+running 1 test
+test deepseek_v4_metal::prefill::tests::profile_grouped_iq2_broadcast_production_shape ... deepseek_v4 grouped_iq2_broadcast_packet route_payload_sha256=505cb93ff9c3e1557bbad8f27a773e08b0e8c3475fbb4d7096069667c1fbafdd encoder_source_sha256=080c35f7eb3ae08dc0c8a6c60cb8803d4d6c5bffbe67d82f3c832ffe7bc58c67 kernel_source_sha256=15649c66d7d6c71ab37c1f690e7257b9988034e83378ad1f194d078698a4b76e clamp=10 samples_per_cell=12 economic_floor_ms=158.3 fractional_floor=0.25 v2_empty_bound_ms=0.49279 wall_is_diagnostic=true regime=Disjoint gpu_stable=true gpu_drifts=[0.02607085576774413, 0.010109184712885431] wall_drifts_diagnostic=[0.2450125687282934, 0.056876599881758166] gpu={baseline=[526.7538330517709, 527.7594162616879, 526.7821254674345, 527.7430412825197, 540.7794581260532, 527.8442916460335, 537.1604992542416, 527.8587078209966, 528.8546667434275, 527.3017084691674, 526.68087487109, 527.0193328615278],candidate=[2405.419791582972, 2405.645583057776, 2405.482666566968, 2406.450666487217, 2429.9849583767354, 2409.714958164841, 2421.2938339915127, 2406.1681665480137, 2412.290249718353, 2405.769124859944, 2407.155667897314, 2405.5450002197176],baseline_drift=0.026070856,candidate_drift=0.010109185,baseline_median=527.743041283,candidate_median=2406.168166548,baseline_p95=540.779458126,candidate_p95=2429.984958377,q=122.825833969,median_lower=-2001.250959234,p95_lower=-2012.031334220,median_threshold=158.300000000,p95_threshold=158.300000000,pass=false} wall_diagnostic={baseline=[531.297875, 694.320959, 531.522834, 693.5075830000001, 545.3425830000001, 703.63125, 542.556125, 680.292916, 533.541042, 699.58275, 531.23275, 693.7713749999999],candidate=[2543.053833, 2688.070917, 2619.364875, 2672.560417, 2547.6868750000003, 2675.419834, 2535.1825830000002, 2643.5944999999997, 2551.191584, 2635.358334, 2539.776459, 2669.885125],baseline_drift=0.245012569,candidate_drift=0.056876600,baseline_median=545.342583000,candidate_median=2619.364875000,baseline_p95=703.631250000,candidate_p95=2688.070917000,q=861.992500000,median_lower=-2936.014792000,p95_lower=-2846.432167000,median_threshold=158.300000000,p95_threshold=175.907812500,pass=false} regime=Warm gpu_stable=true gpu_drifts=[0.03699784323682832, 0.02092157877718595] wall_drifts_diagnostic=[0.03683198616896633, 0.024895132973662595] gpu={baseline=[526.8738332670182, 526.7015413846821, 527.1505003329366, 532.8019589651376, 543.4503324795514, 546.9023745972663, 535.2630002889782, 539.2695411574095, 526.9495411776006, 530.6547081563622, 526.6681662760675, 526.6875005327165],candidate=[2405.3671669680625, 2405.245375353843, 2405.329209053889, 2414.9272493086755, 2441.434832289815, 2456.6422088537365, 2412.626709090546, 2420.899916673079, 2405.447707977146, 2411.2725832965225, 2405.3280416410416, 2406.2670418061316],baseline_drift=0.036997843,candidate_drift=0.020921579,baseline_median=527.150500333,candidate_median=2406.267041806,baseline_p95=546.902374597,candidate_p95=2456.642208854,q=256.984167499,median_lower=-2136.100708973,p95_lower=-2166.724001756,median_threshold=158.300000000,p95_threshold=158.300000000,pass=false} wall_diagnostic={baseline=[533.549208, 531.653417, 533.827292, 537.272375, 549.5340829999999, 551.513375, 542.148708, 543.884958, 533.402458, 535.212209, 533.815208, 531.200042],candidate=[2432.084583, 2414.0685409999996, 2424.380167, 2423.654, 2475.701458, 2465.340458, 2451.750208, 2428.9645, 2431.6792920000003, 2419.811083, 2428.4796659999997, 2414.706292],baseline_drift=0.036831986,candidate_drift=0.024895133,baseline_median=533.827292000,candidate_median=2428.479666000,baseline_p95=551.513375000,candidate_p95=2475.701458000,q=308.164585000,median_lower=-2202.816959000,p95_lower=-2232.352668000,median_threshold=158.300000000,p95_threshold=158.300000000,pass=false} decision=KILL_BROADCAST_SUBSTITUTION baseline_dispatches=25 candidate_dispatches=25 logical_bank_bytes=32279363584 touched_weight_bytes=8719695872 allocated_bytes=32648069120 weight_digest=369a03db349ed82ba7dbce98115d54e09406d600ae5506ab734ba3647b7549c6 disjoint_baseline_digest=bbf43456479d05e4097794dba99132df46588f25282f904917caf5ab68ad4cb2 disjoint_candidate_digest=bbf43456479d05e4097794dba99132df46588f25282f904917caf5ab68ad4cb2 warm_baseline_digest=850ccf1105481a836ef0425e005c96257d8878a84d6719c5189a2740f98f5211 warm_candidate_digest=850ccf1105481a836ef0425e005c96257d8878a84d6719c5189a2740f98f5211
+
+thread 'deepseek_v4_metal::prefill::tests::profile_grouped_iq2_broadcast_production_shape' (259194301) panicked at crates/qwen-llm/src/deepseek_v4_metal/prefill.rs:10005:17:
+broadcast packet recorded KILL_BROADCAST_SUBSTITUTION
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    deepseek_v4_metal::prefill::tests::profile_grouped_iq2_broadcast_production_shape
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 680 filtered out; finished in 165.74s
+
+error: test failed, to rerun pass `-p qwen-llm --lib`
+      165.85 real        48.66 user         6.54 sys
+          9179938816  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              593198  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   1  signals received
+                  14  voluntary context switches
+               11957  involuntary context switches
+          1243204746  instructions retired
+           364849450  cycles elapsed
+            44614184  peak memory footprint

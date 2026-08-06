@@ -1,0 +1,27 @@
+$ pwd
+/Users/tito/code/qwen-llm
+
+$ shasum -a 256 docs/bench/2026-08-06-dsv4-packed-grouped-iq2-broadcast-gate/experiment-source.diff docs/bench/2026-08-06-dsv4-packed-grouped-iq2-broadcast-gate/experiment-source-pre-run.diff.gz docs/bench/2026-08-06-dsv4-packed-grouped-iq2-broadcast-gate/broadcast-gate.log docs/bench/2026-08-06-dsv4-packed-grouped-iq2-broadcast-gate/retained-source.diff
+67b666504a2b685b4a2c357992578b00d9a7c9968139f4d1b535c7c5da29a8c1  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-broadcast-gate/experiment-source.diff
+2680e4b3819b1793326f92a1f067a9b68b16b769c6d04dfb16f4f943669e9ec1  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-broadcast-gate/experiment-source-pre-run.diff.gz
+fa4cf4f44bdaa32a630d72e1932e22044e0f52e535bd788f90d028bef17cb668  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-broadcast-gate/broadcast-gate.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-broadcast-gate/retained-source.diff
+
+$ gzip -dc docs/bench/2026-08-06-dsv4-packed-grouped-iq2-broadcast-gate/experiment-source-pre-run.diff.gz | shasum -a 256
+46db08a4699ae0da59239706fbd2ae6b7c4de9f0586115e389cc188d28142a29  -
+
+The compressed artifact preserves the default-context source diff hashed
+immediately before execution. experiment-source.diff is the equivalent
+zero-context reconstruction used to avoid embedding context-line whitespace.
+
+$ shasum -a 256 target/release/deps/qwen_llm-246719edcad9c805
+0e498ecb541bf393e51d84f23e80bc837818edc933322db024bbe8be3b75a963  target/release/deps/qwen_llm-246719edcad9c805
+
+The first binary hash was recorded immediately before the sole campaign and
+contains the exact source archived by experiment-source.diff.
+
+$ shasum -a 256 target/release/deps/qwen_llm-246719edcad9c805
+2d3e2bc7478fefbb98890fa29bf6ce03a15404609006c2f8f40f1f8552c5a24b  target/release/deps/qwen_llm-246719edcad9c805
+
+The final hash was recorded after complete candidate/profiler removal, the
+retained focused release test, and strict release diagnostics Clippy.

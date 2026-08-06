@@ -2195,6 +2195,14 @@ noise without reducing technical risk. Revisit after S5.
    evidence; do not run the current asset, sweep the same accumulator geometry,
    or reinterpret it as the spent four-stage gate. Move next to a newly
    preregistered precision-recovering packed Q8 output design, not the killed
-   one-pass F16-staged schedule.
+   one-pass F16-staged schedule. That model-free branch is now `GO`: one fixed
+   F32 `R2C4K64` matrix removes both half operand conversions, reducing A+B
+   relative RMS from 0.001230151 to 0.000005573 while reaching a 2.485250 ms
+   GPU median and 72.2179%/70.8481% GPU/wall median savings. Every precision,
+   p95, stationarity, resource, repeat, and guard gate passes. The result is
+   synthetic output-subgraph evidence only. It authorizes drafting and static
+   review of the canonical position-zero N=128 plus exact N=12/restore/
+   continuation asset gate; it does not authorize running it or changing the
+   ordinary path.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

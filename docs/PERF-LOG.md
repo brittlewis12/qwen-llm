@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Packed Q8 F32 Matrix Model-Free GO
+
+Status: one fixed F32 `R2C4K64` packed attention-output arithmetic is
+model-free `GO` on the qualified Apple M4 Max. It authorizes drafting and static
+review of one canonical 128+12 current-asset gate, not running it or changing
+ordinary execution.
+
+- Reconstruct each Q8 weight as one F32 scale-times-quant operation and load
+  activations directly as F32. Keep one 32-thread SIMD group, 16x32 output tile,
+  K-step 64, eight F32 accumulators, and 4 KiB TGM; do not sweep geometry.
+- Active K=64/128, M=16/32, N=1/31/32/33/128 tests cover operand boundaries,
+  padded tails, exact repeated candidate bits, guards, and host rejection of
+  malformed or overlapping storage before submission.
+- On the prior synthetic production fixture, A+B relative RMS falls from
+  0.001230151 to 0.000005573 and max absolute error falls from 0.032827854 to
+  0.000164986. A-only, B-only, A+B, and A low rank all beat the frozen fourfold
+  repair gate by wide margins.
+- The sole 24-sample A/B/A packet records 2.485250 ms candidate GPU median,
+  72.2179% GPU and 70.8481% wall median savings, and 72.2189%/70.5607% p95
+  savings. Maximum control/candidate drift is 0.1676%.
+- Exact and candidate output state repeats before/after timing; all output-family
+  guards survive. Both paths retain one encoder and 25 dispatches.
+
+Decision: preserve the test-only kernel and sealed packet. Do not infer model,
+routing, causal, or product quality and do not run the 104 GB asset yet. Next
+draft the single prior-shape position-zero N=128 plus exact N=12, restore, and
+continuation gate with exact route transcripts and unchanged quality/performance
+thresholds. Evidence:
+`docs/bench/2026-08-06-dsv4-packed-q8-f32-matrix-go/README.md`. CX review:
+`019fcf7d-e9d4-7150-b496-e70a31958e80`.
+
 ## 2026-08-05 - DeepSeek V4 Fused All-IQ3 Falsifier KILL
 
 Status: the materially new two-dispatch all-IQ3 grouped path is exact but

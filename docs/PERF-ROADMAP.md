@@ -408,18 +408,28 @@ well. Do not run the current asset, retune the same 16-accumulator geometry, or
 repeat this condition. Retain the test-only path as executable negative
 evidence.
 
+The precision-recovering Q8 branch is now model-free `GO`. A single fixed F32
+`R2C4K64` geometry removes both half operand conversions while retaining the
+same 25-dispatch output topology. On the prior production-shape fixture, A+B
+relative RMS improves from 0.001230151 to 0.000005573 and max absolute error
+from 0.032827854 to 0.000164986. The sole 24-sample A/B/A packet is stationary
+within 0.1676% and records a 2.485250 ms candidate GPU median, 72.2179% GPU
+median saving, 70.8481% wall median saving, and more than 70.5% p95 saving.
+This clears the model-free precision and 57.4%-derived economic gates; it does
+not establish model quality or authorize an asset execution.
+
 Force-ranked queue:
 
-1. **Precision-recovering packed Q8 output.** Preregister a materially different
-   split-activation or mixed-precision model-free design. It must preserve more
-   activation information than the killed one-pass F16-staged matrix schedule,
-   materially repair the prior position-140 error mechanism, and retain a
-   credible output-stage ceiling before another asset run.
+1. **Canonical Q8 F32 asset-gate design.** Draft and statically review exactly
+   one position-zero N=128 candidate followed by exact N=12, position-128/140
+   checkpoints, canonical restore, and singleton continuation. Preserve the
+   prior exact route transcripts, quality gates, invocation ownership, and
+   first-chunk performance floor. Static GO is required before the 104 GB run.
 2. **Joint chronological/attention-body rewrite.** If Q8 precision recovery
-   closes, combine only the already-attributed memory boundaries shared by the
-   individually sub-threshold chronological and attention-body regions. Require
-   a new model-free ceiling; do not add their old sampled estimates as if they
-   were independent dispatch costs.
+   fails its live gate, combine only the already-attributed memory boundaries
+   shared by the individually sub-threshold chronological and attention-body
+   regions. Require a new model-free ceiling; do not add their old sampled
+   estimates as if they were independent dispatch costs.
 3. **Grouped MXFP4-down cleanup.** Keep the two current outlier layers bounded
    behind a direct production-shape ceiling. Their 62.874 ms routed subtotal is
    not by itself authorization for a broad expert rewrite.

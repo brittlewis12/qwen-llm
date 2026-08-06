@@ -916,6 +916,122 @@ fn encode_batch_projection(
     })
 }
 
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_q8_f32_mma_r2c4k64(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_tokens: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, "packed Q8 F32 R2C4K64 projection")?;
+    checked_token_count(n_tokens)?;
+    validate_matvec_weight(weight, n_in, n_out, "packed Q8 F32 R2C4K64 weight")?;
+    validate_f32(
+        input,
+        &[n_in as u64, n_tokens as u64],
+        false,
+        "packed Q8 F32 R2C4K64 input",
+    )?;
+    validate_f32(
+        output,
+        &[n_out as u64, n_tokens as u64],
+        true,
+        "packed Q8 F32 R2C4K64 output",
+    )?;
+    if weight.dtype != GgmlType::Q8_0
+        || !n_in.is_multiple_of(64)
+        || !n_out.is_multiple_of(16)
+        || !(1..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&n_tokens)
+    {
+        return invalid("packed Q8 F32 R2C4K64 projection has invalid geometry or storage");
+    }
+    let padded_tokens = n_tokens.div_ceil(32) * 32;
+    let padded_elements = checked_mul(padded_tokens, n_in, "packed Q8 F32 R2C4K64 padded input")?;
+    let padded_bytes = checked_mul(
+        padded_elements,
+        std::mem::size_of::<f32>(),
+        "packed Q8 F32 R2C4K64 padded input bytes",
+    )?;
+    let padded_end = input
+        .offset
+        .checked_add(u64::try_from(padded_bytes).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("packed Q8 F32 R2C4K64 padded input exceeds u64".into())
+        })?)
+        .ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("packed Q8 F32 R2C4K64 padded input end overflow".into())
+        })?;
+    if padded_end > input.buffer.length() as u64 || ctx.device.maxThreadgroupMemoryLength() < 4_096
+    {
+        return invalid("packed Q8 F32 R2C4K64 requires padded input backing and 4 KiB TGM");
+    }
+    let output_end = output.offset.checked_add(output.n_bytes()).ok_or_else(|| {
+        DeepSeekV4MetalError::Invalid("packed Q8 F32 R2C4K64 output end overflow".into())
+    })?;
+    let overlaps_padded_input = Retained::as_ptr(&input.buffer) == Retained::as_ptr(&output.buffer)
+        && input.offset < output_end
+        && output.offset < padded_end;
+    if overlaps_padded_input || packed_grouped_tensor_ranges_overlap(weight, output) {
+        return invalid("packed Q8 F32 R2C4K64 output overlaps an input");
+    }
+    let pso = ctx.pipeline("kernel_mat_mat_q8_0_f32_r2c4k64")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 32 {
+        return invalid("packed Q8 F32 R2C4K64 requires one 32-thread SIMD group");
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    let row_bytes = checked_mul(n_in / 32, 34, "packed Q8 F32 R2C4K64 row bytes")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: u32::try_from(n_out).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed Q8 F32 output exceeds u32".into())
+            })?,
+            n: u32::try_from(n_tokens).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed Q8 F32 token count exceeds u32".into())
+            })?,
+            k: u32::try_from(n_in).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed Q8 F32 input exceeds u32".into())
+            })?,
+            nb01: u32::try_from(row_bytes).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed Q8 F32 row bytes exceed u32".into())
+            })?,
+            stride_b: u32::try_from(n_in).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed Q8 F32 stride exceeds u32".into())
+            })?,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, output);
+    enc.set_threadgroup_memory(0, 4_096);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens.div_ceil(32),
+            height: n_out / 16,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn encode_state_batch_projection(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1246,6 +1362,14 @@ struct PackedAttentionViews {
     queries: MetalTensor,
     kv: MetalTensor,
     attention: MetalTensor,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Q8PrecisionProjection {
+    Exact,
+    HalfMatrix,
+    F32Matrix,
 }
 
 #[derive(Clone)]
@@ -1921,6 +2045,134 @@ impl PrefillAttentionScratch {
             config.hidden_size,
             n_tokens,
             "packed output B",
+        )?;
+        Ok(output)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn encode_output_q8_precision_for_test(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        attention: &MetalTensor,
+        output_a: &MetalTensor,
+        output_b: &MetalTensor,
+        n_tokens: usize,
+        output_a_projection: Q8PrecisionProjection,
+        output_b_projection: Q8PrecisionProjection,
+    ) -> Result<MetalTensor, DeepSeekV4MetalError> {
+        require_serial(enc, "deepseek_v4_Q8_precision_output_batch")?;
+        checked_token_count(n_tokens)?;
+        let config = deepseek_v4_session_attention_config();
+        let dims = config.checked()?;
+        validate_f32(
+            attention,
+            &[dims.query_width as u64, n_tokens as u64],
+            false,
+            "Q8 precision attention heads",
+        )?;
+        for (weight, n_in, n_out, name) in [
+            (
+                output_a,
+                dims.group_width,
+                dims.low_rank_width,
+                "Q8 precision output A",
+            ),
+            (
+                output_b,
+                dims.low_rank_width,
+                config.hidden_size,
+                "Q8 precision output B",
+            ),
+        ] {
+            validate_matvec_weight(weight, n_in, n_out, name)?;
+            if weight.dtype != GgmlType::Q8_0 {
+                return invalid(format!("{name} must be Q8_0, got {:?}", weight.dtype));
+            }
+        }
+        let low_rank = f32_prefix(
+            &self.low_rank,
+            vec![dims.low_rank_width as u64, n_tokens as u64],
+            "Q8 precision low rank",
+        )?;
+        let output = f32_prefix(
+            &self.output,
+            vec![config.hidden_size as u64, n_tokens as u64],
+            "Q8 precision output",
+        )?;
+        let group_input = f32_prefix(
+            &self.group_input,
+            vec![dims.group_width as u64, n_tokens as u64],
+            "Q8 precision group input",
+        )?;
+        let group_output = f32_prefix(
+            &self.group_output,
+            vec![config.output_rank as u64, n_tokens as u64],
+            "Q8 precision group output",
+        )?;
+        let encode_projection = |weight: &MetalTensor,
+                                 input: &MetalTensor,
+                                 output: &MetalTensor,
+                                 n_in: usize,
+                                 n_out: usize,
+                                 projection: Q8PrecisionProjection,
+                                 name: &str| {
+            match projection {
+                Q8PrecisionProjection::Exact => encode_batch_projection(
+                    ctx, enc, weight, input, output, n_in, n_out, n_tokens, name,
+                ),
+                Q8PrecisionProjection::HalfMatrix => crate::metal::encode_mat_mat_q8_0_f32(
+                    ctx, enc, weight, input, output, n_in, n_out, n_tokens,
+                )
+                .map_err(DeepSeekV4MetalError::Metal),
+                Q8PrecisionProjection::F32Matrix => encode_q8_f32_mma_r2c4k64(
+                    ctx, enc, weight, input, output, n_in, n_out, n_tokens,
+                ),
+            }
+        };
+        for group in 0..config.group_count {
+            encode_group_pack(
+                ctx,
+                enc,
+                attention,
+                &group_input,
+                n_tokens,
+                dims.query_width,
+                dims.group_width,
+                group,
+                false,
+            )?;
+            let weight = group_weight_view(output_a, dims.group_width, config.output_rank, group)?;
+            encode_projection(
+                &weight,
+                &group_input,
+                &group_output,
+                dims.group_width,
+                config.output_rank,
+                output_a_projection,
+                "Q8 precision grouped output A",
+            )?;
+            encode_group_pack(
+                ctx,
+                enc,
+                &group_output,
+                &low_rank,
+                n_tokens,
+                dims.low_rank_width,
+                config.output_rank,
+                group,
+                true,
+            )?;
+        }
+        encode_projection(
+            output_b,
+            &low_rank,
+            &output,
+            dims.low_rank_width,
+            config.hidden_size,
+            output_b_projection,
+            "Q8 precision output B",
         )?;
         Ok(output)
     }
@@ -6932,6 +7184,104 @@ mod tests {
         );
     }
 
+    fn q8_precision_test_weight(ctx: &MetalContext, n_in: usize, n_out: usize) -> MetalTensor {
+        const SCALE_BITS: [u16; 6] = [0x0001, 0x03ff, 0x0400, 0x1a24, 0x2e66, 0x3800];
+        const QUANTS: [i8; 12] = [-128, -127, -63, -1, 0, 1, 17, 63, 126, 127, -31, 47];
+        let blocks = n_in * n_out / 32;
+        let mut payload = vec![0u8; blocks * 34];
+        for block in 0..blocks {
+            let start = block * 34;
+            payload[start..start + 2]
+                .copy_from_slice(&SCALE_BITS[block % SCALE_BITS.len()].to_le_bytes());
+            for index in 0..32 {
+                payload[start + 2 + index] = QUANTS[(block * 7 + index * 5) % QUANTS.len()] as u8;
+            }
+        }
+        MetalTensor::from_bytes(
+            ctx,
+            &payload,
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q8_0,
+        )
+        .unwrap()
+    }
+
+    fn q8_precision_test_input(elements: usize) -> Vec<f32> {
+        const SPECIAL: [f32; 12] = [
+            0.0,
+            -0.0,
+            f32::from_bits(1),
+            -f32::from_bits(1),
+            0.000_061_005_354,
+            -0.000_061_005_354,
+            0.333_251_95,
+            -0.333_251_95,
+            1.000_488_3,
+            -1.000_488_3,
+            0.125_030_52,
+            -0.125_030_52,
+        ];
+        (0..elements)
+            .map(|index| {
+                if index % 5 == 0 {
+                    SPECIAL[(index / 5) % SPECIAL.len()]
+                } else {
+                    ((index * 37 + index / 11 + 3) % 509) as f32 * 0.001 - 0.254
+                }
+            })
+            .collect()
+    }
+
+    fn q8_output_test_weight(
+        ctx: &MetalContext,
+        n_in: usize,
+        n_out: usize,
+        seed: usize,
+    ) -> MetalTensor {
+        let blocks = n_in * n_out / 32;
+        let mut payload = vec![0u8; blocks * 34];
+        for block in 0..blocks {
+            let start = block * 34;
+            let scale = half::f16::from_f32(0.003 + ((block + seed) % 19) as f32 * 0.0002);
+            payload[start..start + 2].copy_from_slice(&scale.to_bits().to_le_bytes());
+            for index in 0..32 {
+                payload[start + 2 + index] =
+                    (((block * 13 + index * 17 + seed * 7) % 127) as i8 - 63) as u8;
+            }
+        }
+        MetalTensor::from_bytes(
+            ctx,
+            &payload,
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q8_0,
+        )
+        .unwrap()
+    }
+
+    fn q8_differential(actual: &[f32], expected: &[f32]) -> (f64, f64, f32) {
+        let mut dot = 0.0f64;
+        let mut actual_norm = 0.0f64;
+        let mut expected_norm = 0.0f64;
+        let mut error = 0.0f64;
+        let mut max_abs = 0.0f32;
+        for (&actual, &expected) in actual.iter().zip(expected) {
+            assert!(actual.is_finite() && expected.is_finite());
+            let actual_f64 = actual as f64;
+            let expected_f64 = expected as f64;
+            let delta = actual - expected;
+            dot += actual_f64 * expected_f64;
+            actual_norm += actual_f64 * actual_f64;
+            expected_norm += expected_f64 * expected_f64;
+            error += (delta as f64) * (delta as f64);
+            max_abs = max_abs.max(delta.abs());
+        }
+        (
+            dot / (actual_norm * expected_norm).sqrt(),
+            (error / expected_norm).sqrt(),
+            max_abs,
+        )
+    }
+
     fn grouped_test_schedule(n_tokens: usize) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<ExpertBucket>) {
         let mut expert_ids = Vec::with_capacity(n_tokens * MOE_TOP_K);
         for token in 0..n_tokens {
@@ -7191,6 +7541,517 @@ mod tests {
         );
         assert_grouped_guards("mapped IQ3 control", &control);
         assert_grouped_guards("mapped IQ3 candidate", &candidate);
+    }
+
+    #[test]
+    fn q8_f32_mma_r2c4k64_reduces_operand_rounding_and_preserves_guards() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+
+        fn submit(
+            ctx: &MetalContext,
+            encode: impl FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        ) {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let result = encode(&encoder);
+            encoder.end();
+            result.unwrap();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{:?}", command.error());
+        }
+
+        for (n_in, n_out) in [(64usize, 16usize), (128, 32)] {
+            let weight = q8_precision_test_weight(&ctx, n_in, n_out);
+            for n_tokens in [1usize, 31, 32, 33, 128] {
+                let padded_tokens = n_tokens.div_ceil(32) * 32;
+                let input_storage = MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&q8_precision_test_input(padded_tokens * n_in)),
+                    vec![n_in as u64, padded_tokens as u64],
+                    GgmlType::F32,
+                )
+                .unwrap();
+                let input = input_storage.view_subrange(0, vec![n_in as u64, n_tokens as u64]);
+                let exact = grouped_guarded_f32(&ctx, vec![n_out as u64, n_tokens as u64], 3.0);
+                let half = grouped_guarded_f32(&ctx, vec![n_out as u64, n_tokens as u64], 5.0);
+                let candidate = grouped_guarded_f32(&ctx, vec![n_out as u64, n_tokens as u64], 7.0);
+                let repeat = grouped_guarded_f32(&ctx, vec![n_out as u64, n_tokens as u64], 11.0);
+                submit(&ctx, |encoder| {
+                    crate::metal::encode_mat_vec_q8_0_batch_f32(
+                        &ctx, encoder, &weight, &input, &exact, n_in, n_out, n_tokens,
+                    )
+                    .map_err(DeepSeekV4MetalError::Metal)
+                });
+                submit(&ctx, |encoder| {
+                    crate::metal::encode_mat_mat_q8_0_f32(
+                        &ctx, encoder, &weight, &input, &half, n_in, n_out, n_tokens,
+                    )
+                    .map_err(DeepSeekV4MetalError::Metal)
+                });
+                for output in [&candidate, &repeat] {
+                    submit(&ctx, |encoder| {
+                        encode_q8_f32_mma_r2c4k64(
+                            &ctx, encoder, &weight, &input, output, n_in, n_out, n_tokens,
+                        )
+                    });
+                }
+
+                let exact_values = host_read_f32(&exact, "Q8 F32 exact").unwrap();
+                let half_values = host_read_f32(&half, "Q8 F32 half").unwrap();
+                let candidate_values = host_read_f32(&candidate, "Q8 F32 candidate").unwrap();
+                let repeat_values = host_read_f32(&repeat, "Q8 F32 repeat").unwrap();
+                let half_diff = q8_differential(&half_values, &exact_values);
+                let candidate_diff = q8_differential(&candidate_values, &exact_values);
+                assert!(
+                    1.0 - candidate_diff.0 <= 1.0 - half_diff.0 + 1e-15
+                        && candidate_diff.1 < half_diff.1
+                        && candidate_diff.2 < half_diff.2,
+                    "K={n_in} M={n_out} N={n_tokens} half={half_diff:?} candidate={candidate_diff:?}"
+                );
+                assert_eq!(
+                    candidate_values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    repeat_values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    "K={n_in} M={n_out} N={n_tokens} repeat"
+                );
+                for (label, tensor) in [
+                    ("Q8 F32 exact", &exact),
+                    ("Q8 F32 half", &half),
+                    ("Q8 F32 candidate", &candidate),
+                    ("Q8 F32 repeat", &repeat),
+                ] {
+                    assert_grouped_guards(label, tensor);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn q8_f32_mma_r2c4k64_rejects_unqualified_storage_before_dispatch() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        const K: usize = 64;
+        const M: usize = 16;
+        const N: usize = 33;
+
+        fn reject(
+            ctx: &MetalContext,
+            encode: impl FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        ) -> String {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let result = encode(&encoder);
+            encoder.end();
+            result.unwrap_err().to_string()
+        }
+
+        let weight = q8_precision_test_weight(&ctx, K, M);
+        let input = MetalTensor::zeros_f32(&ctx, vec![K as u64, N as u64]).unwrap();
+        let output = MetalTensor::zeros_f32(&ctx, vec![M as u64, N as u64]).unwrap();
+        let error = reject(&ctx, |encoder| {
+            encode_q8_f32_mma_r2c4k64(&ctx, encoder, &weight, &input, &output, K, M, N)
+        });
+        assert!(error.contains("padded input backing"), "{error}");
+
+        let padded = MetalTensor::zeros_f32(&ctx, vec![K as u64, 64]).unwrap();
+        let padded_input = padded.view_subrange(0, vec![K as u64, N as u64]);
+        let overlapping_output = padded.view_subrange(0, vec![M as u64, N as u64]);
+        let error = reject(&ctx, |encoder| {
+            encode_q8_f32_mma_r2c4k64(
+                &ctx,
+                encoder,
+                &weight,
+                &padded_input,
+                &overlapping_output,
+                K,
+                M,
+                N,
+            )
+        });
+        assert!(error.contains("overlaps an input"), "{error}");
+
+        let padding_output = padded.view_subrange((K * N) as u64, vec![M as u64, N as u64]);
+        let error = reject(&ctx, |encoder| {
+            encode_q8_f32_mma_r2c4k64(
+                &ctx,
+                encoder,
+                &weight,
+                &padded_input,
+                &padding_output,
+                K,
+                M,
+                N,
+            )
+        });
+        assert!(error.contains("overlaps an input"), "{error}");
+
+        let malformed_input = padded.view_subrange(0, vec![(K * N) as u64]);
+        let error = reject(&ctx, |encoder| {
+            encode_q8_f32_mma_r2c4k64(&ctx, encoder, &weight, &malformed_input, &output, K, M, N)
+        });
+        assert!(error.contains("input"), "{error}");
+
+        let wrong_weight = MetalTensor::zeros_f32(&ctx, vec![K as u64, M as u64]).unwrap();
+        let error = reject(&ctx, |encoder| {
+            encode_q8_f32_mma_r2c4k64(
+                &ctx,
+                encoder,
+                &wrong_weight,
+                &padded_input,
+                &output,
+                K,
+                M,
+                N,
+            )
+        });
+        assert!(error.contains("invalid geometry or storage"), "{error}");
+    }
+
+    #[test]
+    #[ignore = "sealed GO; do not rerun without material implementation or device drift"]
+    fn profile_q8_f32_mma_r2c4k64_attention_output_packet() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        assert_eq!(
+            ctx.device.name().to_string(),
+            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
+        );
+        const N: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+        const SAMPLES: usize = 24;
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum Variant {
+            Exact,
+            HalfA,
+            HalfB,
+            HalfBoth,
+            F32A,
+            F32B,
+            F32Both,
+        }
+
+        fn projections(variant: Variant) -> (Q8PrecisionProjection, Q8PrecisionProjection) {
+            match variant {
+                Variant::Exact => (Q8PrecisionProjection::Exact, Q8PrecisionProjection::Exact),
+                Variant::HalfA => (
+                    Q8PrecisionProjection::HalfMatrix,
+                    Q8PrecisionProjection::Exact,
+                ),
+                Variant::HalfB => (
+                    Q8PrecisionProjection::Exact,
+                    Q8PrecisionProjection::HalfMatrix,
+                ),
+                Variant::HalfBoth => (
+                    Q8PrecisionProjection::HalfMatrix,
+                    Q8PrecisionProjection::HalfMatrix,
+                ),
+                Variant::F32A => (
+                    Q8PrecisionProjection::F32Matrix,
+                    Q8PrecisionProjection::Exact,
+                ),
+                Variant::F32B => (
+                    Q8PrecisionProjection::Exact,
+                    Q8PrecisionProjection::F32Matrix,
+                ),
+                Variant::F32Both => (
+                    Q8PrecisionProjection::F32Matrix,
+                    Q8PrecisionProjection::F32Matrix,
+                ),
+            }
+        }
+
+        let output_a = q8_output_test_weight(&ctx, GROUP_WIDTH, LOW_RANK_WIDTH, 3);
+        let output_b = q8_output_test_weight(&ctx, LOW_RANK_WIDTH, DEEPSEEK_V4_HIDDEN_SIZE, 11);
+        let attention_values = (0..QUERY_WIDTH * N)
+            .map(|index| ((index * 31 + index / 11 + 5) % 257) as f32 * 0.004 - 0.51)
+            .collect::<Vec<_>>();
+        let attention = grouped_guarded_f32(&ctx, vec![QUERY_WIDTH as u64, N as u64], 13.0);
+        write_raw_f32(&attention, &attention_values);
+        let mut scratch = DeepSeekV4PrefillScratch::new(&ctx, DEEPSEEK_V4_CSA_TOP_K)
+            .unwrap()
+            .attention;
+        scratch.low_rank = grouped_guarded_f32(&ctx, vec![LOW_RANK_WIDTH as u64, N as u64], 17.0);
+        scratch.output =
+            grouped_guarded_f32(&ctx, vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, N as u64], 19.0);
+        scratch.group_input = grouped_guarded_f32(&ctx, vec![GROUP_WIDTH as u64, N as u64], 23.0);
+        scratch.group_output = grouped_guarded_f32(&ctx, vec![1_024, N as u64], 29.0);
+        let low_rank = f32_prefix(
+            &scratch.low_rank,
+            vec![LOW_RANK_WIDTH as u64, N as u64],
+            "Q8 F32 packet low rank",
+        )
+        .unwrap();
+        let output = f32_prefix(
+            &scratch.output,
+            vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, N as u64],
+            "Q8 F32 packet output",
+        )
+        .unwrap();
+
+        let execute = |variant: Variant| -> (f64, f64) {
+            let started = std::time::Instant::now();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let result = if variant == Variant::Exact {
+                scratch.encode_output(&ctx, &encoder, &attention, &output_a, &output_b, N)
+            } else {
+                let (output_a_projection, output_b_projection) = projections(variant);
+                scratch.encode_output_q8_precision_for_test(
+                    &ctx,
+                    &encoder,
+                    &attention,
+                    &output_a,
+                    &output_b,
+                    N,
+                    output_a_projection,
+                    output_b_projection,
+                )
+            };
+            encoder.end();
+            result.unwrap();
+            command.commit();
+            command.waitUntilCompleted();
+            let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+            assert!(
+                command.error().is_none(),
+                "{variant:?}: {:?}",
+                command.error()
+            );
+            (
+                (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
+                wall_ms,
+            )
+        };
+        let capture = || {
+            (
+                host_read_f32(&low_rank, "Q8 F32 packet low rank").unwrap(),
+                host_read_f32(&output, "Q8 F32 packet output").unwrap(),
+            )
+        };
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+
+        execute(Variant::Exact);
+        let (reference_low, reference_output) = capture();
+        let evaluate = |variant| {
+            execute(variant);
+            let (low, output) = capture();
+            let low_diff = q8_differential(&low, &reference_low);
+            let output_diff = q8_differential(&output, &reference_output);
+            (low, output, low_diff, output_diff)
+        };
+        let half_a = evaluate(Variant::HalfA);
+        let half_b = evaluate(Variant::HalfB);
+        let half_both = evaluate(Variant::HalfBoth);
+        let f32_a = evaluate(Variant::F32A);
+        let f32_b = evaluate(Variant::F32B);
+        let f32_both = evaluate(Variant::F32Both);
+
+        for (variant, expected_low, expected_output) in [
+            (Variant::F32A, &f32_a.0, &f32_a.1),
+            (Variant::F32B, &f32_b.0, &f32_b.1),
+            (Variant::F32Both, &f32_both.0, &f32_both.1),
+        ] {
+            execute(variant);
+            let (actual_low, actual_output) = capture();
+            assert_eq!(
+                bits(&actual_low),
+                bits(expected_low),
+                "{variant:?} low repeat"
+            );
+            assert_eq!(
+                bits(&actual_output),
+                bits(expected_output),
+                "{variant:?} output repeat"
+            );
+        }
+
+        eprintln!(
+            "deepseek_v4 q8_f32_precision half_a_low={:?} half_a_output={:?} half_b_output={:?} half_both_low={:?} half_both_output={:?} f32_a_low={:?} f32_a_output={:?} f32_b_output={:?} f32_both_low={:?} f32_both_output={:?}",
+            half_a.2,
+            half_a.3,
+            half_b.3,
+            half_both.2,
+            half_both.3,
+            f32_a.2,
+            f32_a.3,
+            f32_b.3,
+            f32_both.2,
+            f32_both.3,
+        );
+
+        for index in 0usize..5 {
+            if index.is_multiple_of(2) {
+                execute(Variant::Exact);
+                execute(Variant::F32Both);
+            } else {
+                execute(Variant::F32Both);
+                execute(Variant::Exact);
+            }
+        }
+        let collect = |variant| (0..SAMPLES).map(|_| execute(variant)).collect::<Vec<_>>();
+        let control_before = collect(Variant::Exact);
+        let candidate = collect(Variant::F32Both);
+        let control_after = collect(Variant::Exact);
+        let split = |samples: &[(f64, f64)]| {
+            (
+                samples.iter().map(|sample| sample.0).collect::<Vec<_>>(),
+                samples.iter().map(|sample| sample.1).collect::<Vec<_>>(),
+            )
+        };
+        let (control_before_gpu, control_before_wall) = split(&control_before);
+        let (candidate_gpu, candidate_wall) = split(&candidate);
+        let (control_after_gpu, control_after_wall) = split(&control_after);
+        let gpu_control_drift = relative_drift(
+            median_ms(&control_before_gpu),
+            median_ms(&control_after_gpu),
+        );
+        let wall_control_drift = relative_drift(
+            median_ms(&control_before_wall),
+            median_ms(&control_after_wall),
+        );
+        let gpu_candidate_drift = relative_drift(
+            median_ms(&candidate_gpu[..SAMPLES / 2]),
+            median_ms(&candidate_gpu[SAMPLES / 2..]),
+        );
+        let wall_candidate_drift = relative_drift(
+            median_ms(&candidate_wall[..SAMPLES / 2]),
+            median_ms(&candidate_wall[SAMPLES / 2..]),
+        );
+        let gpu_control_median = median_ms(&control_before_gpu).min(median_ms(&control_after_gpu));
+        let wall_control_median =
+            median_ms(&control_before_wall).min(median_ms(&control_after_wall));
+        let gpu_control_p95 =
+            percentile_ms(&control_before_gpu, 0.95).min(percentile_ms(&control_after_gpu, 0.95));
+        let wall_control_p95 =
+            percentile_ms(&control_before_wall, 0.95).min(percentile_ms(&control_after_wall, 0.95));
+        let candidate_gpu_median = median_ms(&candidate_gpu);
+        let gpu_median_saving = 1.0 - candidate_gpu_median / gpu_control_median;
+        let wall_median_saving = 1.0 - median_ms(&candidate_wall) / wall_control_median;
+        let gpu_p95_saving = 1.0 - percentile_ms(&candidate_gpu, 0.95) / gpu_control_p95;
+        let wall_p95_saving = 1.0 - percentile_ms(&candidate_wall, 0.95) / wall_control_p95;
+
+        execute(Variant::Exact);
+        let exact_after = capture();
+        execute(Variant::F32Both);
+        let candidate_after = capture();
+        assert_eq!(
+            bits(&exact_after.0),
+            bits(&reference_low),
+            "post-timing exact low"
+        );
+        assert_eq!(
+            bits(&exact_after.1),
+            bits(&reference_output),
+            "post-timing exact output"
+        );
+        assert_eq!(
+            bits(&candidate_after.0),
+            bits(&f32_both.0),
+            "post-timing candidate low"
+        );
+        assert_eq!(
+            bits(&candidate_after.1),
+            bits(&f32_both.1),
+            "post-timing candidate output"
+        );
+
+        let _trace = crate::metal::kernel_trace_begin();
+        execute(Variant::Exact);
+        let control_trace = crate::metal::kernel_trace_take_delta();
+        execute(Variant::F32Both);
+        let candidate_trace = crate::metal::kernel_trace_take_delta();
+        assert_eq!(control_trace.encoders, 1);
+        assert_eq!(control_trace.concurrent_encoders, 0);
+        assert_eq!(control_trace.dispatches, 25);
+        assert_eq!(candidate_trace.encoders, 1);
+        assert_eq!(candidate_trace.concurrent_encoders, 0);
+        assert_eq!(candidate_trace.dispatches, 25);
+
+        eprintln!(
+            "deepseek_v4 q8_f32_packet control_before_gpu_ms={control_before_gpu:?} control_before_wall_ms={control_before_wall:?} candidate_gpu_ms={candidate_gpu:?} candidate_wall_ms={candidate_wall:?} control_after_gpu_ms={control_after_gpu:?} control_after_wall_ms={control_after_wall:?} gpu_control_drift={gpu_control_drift:.6} wall_control_drift={wall_control_drift:.6} gpu_candidate_drift={gpu_candidate_drift:.6} wall_candidate_drift={wall_candidate_drift:.6} candidate_gpu_median_ms={candidate_gpu_median:.6} gpu_median_saving={gpu_median_saving:.6} wall_median_saving={wall_median_saving:.6} gpu_p95_saving={gpu_p95_saving:.6} wall_p95_saving={wall_p95_saving:.6}"
+        );
+
+        for (label, tensor) in [
+            ("Q8 F32 packet attention", &attention),
+            ("Q8 F32 packet low rank", &scratch.low_rank),
+            ("Q8 F32 packet output", &scratch.output),
+            ("Q8 F32 packet group input", &scratch.group_input),
+            ("Q8 F32 packet group output", &scratch.group_output),
+        ] {
+            assert_grouped_guards(label, tensor);
+        }
+
+        for (label, half, candidate) in [
+            ("A-only output", half_a.3, f32_a.3),
+            ("B-only output", half_b.3, f32_b.3),
+            ("A+B output", half_both.3, f32_both.3),
+            ("A-only low rank", half_a.2, f32_a.2),
+            ("A+B low rank", half_both.2, f32_both.2),
+        ] {
+            let half_deficit = (1.0 - half.0).max(0.0);
+            let candidate_deficit = (1.0 - candidate.0).max(0.0);
+            assert!(
+                candidate_deficit <= half_deficit * 0.25 + 1e-15
+                    && candidate.1 <= half.1 * 0.25
+                    && candidate.2 <= half.2 * 0.25,
+                "{label} did not improve fourfold: half={half:?} candidate={candidate:?}"
+            );
+        }
+        assert!(
+            f32_a.2.1 <= 0.00020 && f32_a.2.2 <= 0.001,
+            "F32 A low-rank gate failed: {:?}",
+            f32_a.2
+        );
+        assert!(
+            f32_both.3.0 >= 0.999_999_8 && f32_both.3.1 <= 0.00030 && f32_both.3.2 <= 0.008,
+            "F32 A+B output gate failed: {:?}",
+            f32_both.3
+        );
+        assert!(
+            gpu_control_drift <= 0.05,
+            "GPU control drift {gpu_control_drift}"
+        );
+        assert!(
+            wall_control_drift <= 0.05,
+            "wall control drift {wall_control_drift}"
+        );
+        assert!(
+            gpu_candidate_drift <= 0.05,
+            "GPU candidate drift {gpu_candidate_drift}"
+        );
+        assert!(
+            wall_candidate_drift <= 0.05,
+            "wall candidate drift {wall_candidate_drift}"
+        );
+        assert!(
+            gpu_median_saving >= 0.58,
+            "GPU median saving {gpu_median_saving}"
+        );
+        assert!(
+            wall_median_saving >= 0.55,
+            "wall median saving {wall_median_saving}"
+        );
+        assert!(gpu_p95_saving >= 0.55, "GPU p95 saving {gpu_p95_saving}");
+        assert!(wall_p95_saving >= 0.50, "wall p95 saving {wall_p95_saving}");
+        assert!(
+            candidate_gpu_median <= 3.75,
+            "candidate GPU {candidate_gpu_median} ms"
+        );
     }
 
     #[test]

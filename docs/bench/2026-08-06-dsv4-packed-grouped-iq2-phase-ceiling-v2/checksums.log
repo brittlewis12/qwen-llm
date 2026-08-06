@@ -1,0 +1,19 @@
+$ pwd
+/Users/tito/code/qwen-llm
+
+$ shasum -a 256 docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling-v2/experiment-source.diff docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling-v2/phase-ceiling-v2.log docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling-v2/retained-source.diff
+80d9519ab635c03ce8c223842cfbb7cf58ec93765d3aac95bc31e1a3614ec751  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling-v2/experiment-source.diff
+9fd4ad3740f056a6f7d5dc98158a3b03ddb1cbd822ff9d0976b8db36d2149b8e  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling-v2/phase-ceiling-v2.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling-v2/retained-source.diff
+
+$ shasum -a 256 target/release/deps/qwen_llm-246719edcad9c805
+a06fb42ba48b28c1fe65191b7bf6ca38710d6144d6babf7454efecb10c8317d9  target/release/deps/qwen_llm-246719edcad9c805
+
+The first binary hash was recorded immediately before the sole V2 campaign and
+contains the exact source archived by experiment-source.diff.
+
+$ shasum -a 256 target/release/deps/qwen_llm-246719edcad9c805
+7bf572a929c54c4300dd3c00458e79d1d5ccce47562310a6045ebf19b91a0d6e  target/release/deps/qwen_llm-246719edcad9c805
+
+The final hash was recorded after profiler removal, both focused release
+diagnostics tests, and strict retained release diagnostics Clippy.

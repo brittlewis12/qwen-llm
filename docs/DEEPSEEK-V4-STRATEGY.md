@@ -2247,6 +2247,14 @@ noise without reducing technical risk. Revisit after S5.
    `HOLD - closed inconclusive`, and do not retry the protocol. Reopen only after
    separate review of a conservative bound for timestamp-resolution-censored
    commands, relevant device/toolchain drift, or a new accepted observer. Keep
-   HCA tiling deferred.
+   HCA tiling deferred. A separately reviewed V2 uses full per-empty-command
+   wall time as a one-sided bound that can prevent KILL but never authorize
+   work. Gate disjoint/warm cells pass at 0.344817%/0.059705% drift with
+   `P=527.963833 ms`, `R=9.086871 ms`, and `C=U=537.050704 ms`; the
+   0.492790 ms bracket is non-dominant. Authorize design review only for one
+   exact-route grouped-IQ2 gate/up/SwiGLU candidate across the 25 grouped
+   layers. Down warm drift reaches 5.483643%, so down remains
+   `HOLD - INCONCLUSIVE` and cannot be bundled. Remove the consumed V2 profiler
+   and preserve no product or savings claim.
 7. Pursue streaming snapshots and the remaining DSML tool/developer encoder as
    independent product lanes, not blockers for inference optimization.

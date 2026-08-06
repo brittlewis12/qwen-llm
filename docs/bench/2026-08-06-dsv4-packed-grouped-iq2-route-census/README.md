@@ -126,6 +126,11 @@ survives. The profiler is removed. Reopen only under a separately reviewed
 conservative treatment of timestamp-resolution-censored empty commands or
 relevant device/toolchain/observer drift; never treat equality as zero overhead.
 
+V2 consumes that instrumentation reopen. Its gate/up/SwiGLU cells pass the 5%
+stationarity gate with `C=U=537.050704 ms`, authorizing candidate design only
+for that exact phase. Down warm drift reaches 5.483643% and remains
+`HOLD - INCONCLUSIVE`; it cannot be bundled into the gate authorization.
+
 ## Validation
 
 - The canonical route-fixture release test passes.

@@ -1,0 +1,1027 @@
+diff --git a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+index 7f60264..4ca2a18 100644
+--- a/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
++++ b/crates/qwen-llm/src/deepseek_v4_metal/prefill.rs
+@@ -7935,0 +7936,1022 @@ mod tests {
++    #[cfg(feature = "dsv4-diagnostics")]
++    #[test]
++    #[ignore = "frozen exact-route grouped-IQ2 phase profiler v2; release only"]
++    fn profile_exact_route_grouped_iq2_production_phases_v2() {
++        assert!(
++            !cfg!(debug_assertions),
++            "grouped-IQ2 phase profiler requires a release test binary"
++        );
++        const H: usize = 4_096;
++        const F: usize = 2_048;
++        const E: usize = MOE_EXPERT_COUNT;
++        const K: usize = MOE_TOP_K;
++        const N: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
++        const ROUTES: usize = N * K;
++        const CLAMP: f32 = 10.0;
++        const SAMPLES: usize = 12;
++        const ECONOMIC_FLOOR_MS: f64 = 158.3;
++        const INNER_POISON: f32 = f32::from_bits(0x7141_2345);
++        const OUTPUT_POISON: f32 = f32::from_bits(0xf101_2345);
++        const ROUTE_PAYLOAD_SHA256: &str =
++            "505cb93ff9c3e1557bbad8f27a773e08b0e8c3475fbb4d7096069667c1fbafdd";
++
++        struct ProfileBank {
++            tensor: MetalTensor,
++            expert_bytes: usize,
++            initialized_experts: Vec<usize>,
++            original_digest: [u8; 32],
++        }
++
++        impl ProfileBank {
++            fn digest(&self) -> [u8; 32] {
++                let mut digest = Sha256::new();
++                for &expert in &self.initialized_experts {
++                    digest.update((expert as u32).to_le_bytes());
++                    let start = self.tensor.offset as usize + expert * self.expert_bytes;
++                    let bytes = unsafe {
++                        std::slice::from_raw_parts(
++                            self.tensor
++                                .buffer
++                                .contents()
++                                .as_ptr()
++                                .cast::<u8>()
++                                .add(start),
++                            self.expert_bytes,
++                        )
++                    };
++                    digest.update(bytes);
++                }
++                digest.finalize().into()
++            }
++
++            fn assert_unchanged(&self, label: &str) {
++                assert_eq!(
++                    self.digest(),
++                    self.original_digest,
++                    "{label} initialized weight bytes changed"
++                );
++            }
++
++            fn touched_bytes(&self) -> usize {
++                self.expert_bytes * self.initialized_experts.len()
++            }
++        }
++
++        struct ProfileLayer {
++            layer: usize,
++            schedule: Vec<ExpertBucket>,
++            slot_values: Vec<i32>,
++            slots: MetalTensor,
++            input: MetalTensor,
++            inner: MetalTensor,
++            output: MetalTensor,
++        }
++
++        #[derive(Debug)]
++        struct EmptyCommandRecord {
++            index: usize,
++            gpu_start: f64,
++            gpu_end: f64,
++            positive_gpu_ms: Option<f64>,
++            wall_ms: f64,
++            upper_ms: f64,
++            censored: bool,
++        }
++
++        #[derive(Debug)]
++        struct EmptyBracket {
++            records: Vec<EmptyCommandRecord>,
++            censored_count: usize,
++            total_wall_ms: f64,
++            total_upper_ms: f64,
++            outer_wall_ms: f64,
++        }
++
++        impl EmptyBracket {
++            fn transcript(&self) -> String {
++                let records = self
++                    .records
++                    .iter()
++                    .map(|record| {
++                        format!(
++                            "{{index={},gpu_start={:.9},gpu_end={:.9},positive_gpu_ms={:?},wall_ms={:.9},upper_ms={:.9},censored={}}}",
++                            record.index,
++                            record.gpu_start,
++                            record.gpu_end,
++                            record.positive_gpu_ms,
++                            record.wall_ms,
++                            record.upper_ms,
++                            record.censored,
++                        )
++                    })
++                    .collect::<Vec<_>>()
++                    .join(",");
++                format!(
++                    "{{records=[{records}],censored_count={},total_wall_ms={:.9},total_upper_ms={:.9},outer_wall_ms={:.9}}}",
++                    self.censored_count,
++                    self.total_wall_ms,
++                    self.total_upper_ms,
++                    self.outer_wall_ms,
++                )
++            }
++        }
++
++        #[derive(Debug)]
++        struct PhaseResult {
++            phase: &'static str,
++            disjoint_gpu_ms: Vec<f64>,
++            warm_gpu_ms: Vec<f64>,
++            disjoint_drift: f64,
++            warm_drift: f64,
++            disjoint_range_ms: f64,
++            warm_range_ms: f64,
++            disjoint_p95_ms: f64,
++            warm_p95_ms: f64,
++            peak_p95_ms: f64,
++            range_bound_ms: f64,
++            core_upper_ms: f64,
++            bracket_upper_ms: f64,
++            empty_pre: EmptyBracket,
++            empty_post: EmptyBracket,
++            upper_ms: f64,
++            decision: &'static str,
++            logical_bank_bytes: usize,
++            touched_weight_bytes: usize,
++            allocated_bytes: u64,
++            weight_digest: String,
++            disjoint_state_digest: String,
++            warm_state_digest: String,
++        }
++
++        fn hex(digest: impl AsRef<[u8]>) -> String {
++            digest
++                .as_ref()
++                .iter()
++                .map(|byte| format!("{byte:02x}"))
++                .collect()
++        }
++
++        fn mix64(mut value: u64) -> u64 {
++            value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
++            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
++            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
++            value ^ (value >> 31)
++        }
++
++        fn expert_template(dtype: GgmlType, n_in: usize, n_out: usize) -> (Vec<u8>, usize, usize) {
++            let (block_elements, block_bytes) = ggml_type_layout(dtype).unwrap();
++            let block_elements = block_elements as usize;
++            let block_bytes = block_bytes as usize;
++            let elements = n_in.checked_mul(n_out).unwrap();
++            assert!(elements.is_multiple_of(block_elements));
++            let blocks = elements / block_elements;
++            let mut payload = vec![0u8; blocks * block_bytes];
++            for block in 0..blocks {
++                let start = block * block_bytes;
++                payload[start..start + 2].copy_from_slice(
++                    &half::f16::from_f32(0.00390625 * (1 + block % 7) as f32)
++                        .to_bits()
++                        .to_le_bytes(),
++                );
++                for byte in 2..block_bytes {
++                    payload[start + byte] =
++                        (block.wrapping_mul(31) + byte.wrapping_mul(13) + 5) as u8;
++                }
++            }
++            (payload, blocks, block_bytes)
++        }
++
++        fn profile_bank(
++            ctx: &MetalContext,
++            dtype: GgmlType,
++            n_in: usize,
++            n_out: usize,
++            initialized_experts: Vec<usize>,
++            seed: u64,
++            template: &[u8],
++            blocks_per_expert: usize,
++            block_bytes: usize,
++        ) -> ProfileBank {
++            assert!(!initialized_experts.is_empty());
++            assert!(
++                initialized_experts
++                    .windows(2)
++                    .all(|window| window[0] < window[1])
++            );
++            assert!(initialized_experts.iter().all(|&expert| expert < E));
++            let expert_bytes = template.len();
++            assert_eq!(expert_bytes, blocks_per_expert * block_bytes);
++            let bank_bytes = expert_bytes.checked_mul(E).unwrap();
++            assert!(bank_bytes <= ctx.max_buffer_length());
++            let buffer = ctx.buffer_uninit(bank_bytes).unwrap();
++            let tensor = MetalTensor {
++                buffer,
++                offset: 0,
++                shape: vec![n_in as u64, n_out as u64, E as u64],
++                dtype,
++                provenance: MetalTensorProvenance::OwnedWritable,
++            };
++            assert_eq!(tensor.n_bytes() as usize, bank_bytes);
++            let base = tensor.buffer.contents().as_ptr().cast::<u8>();
++            for &expert in &initialized_experts {
++                let destination = unsafe { base.add(expert * expert_bytes) };
++                unsafe {
++                    std::ptr::copy_nonoverlapping(template.as_ptr(), destination, expert_bytes);
++                }
++                for block in (0..blocks_per_expert).step_by(16) {
++                    let value = mix64(seed ^ ((expert as u64) << 32) ^ block as u64);
++                    unsafe {
++                        std::ptr::copy_nonoverlapping(
++                            value.to_le_bytes().as_ptr(),
++                            destination.add(block * block_bytes + 2),
++                            8,
++                        );
++                    }
++                }
++            }
++            let mut bank = ProfileBank {
++                tensor,
++                expert_bytes,
++                initialized_experts,
++                original_digest: [0; 32],
++            };
++            bank.original_digest = bank.digest();
++            bank
++        }
++
++        fn profile_layers(ctx: &MetalContext) -> Vec<ProfileLayer> {
++            let fixture = packed_grouped_iq2_route_census_fixture();
++            assert_eq!(fixture.schema_version, 1);
++            assert_eq!(fixture.route_payload_sha256, ROUTE_PAYLOAD_SHA256);
++            assert_eq!(fixture.n_tokens, N);
++            assert_eq!(fixture.top_k, K);
++            assert_eq!(fixture.expert_count, E);
++            assert_eq!(fixture.route_count, ROUTES);
++            assert_eq!(fixture.layer_count, fixture.layers.len());
++            assert_eq!(fixture.grouped_layer_ids.len(), fixture.layer_count);
++            fixture
++                .layers
++                .into_iter()
++                .zip(fixture.grouped_layer_ids)
++                .map(|(route_layer, expected_layer)| {
++                    assert_eq!(route_layer.layer, expected_layer);
++                    let (expert_ids, rows, slots, schedule) =
++                        packed_grouped_schedule_from_route_ids(N, &route_layer.route_expert_ids);
++                    assert_eq!(
++                        packed_post_route_expert_ids(N, &expert_ids, &rows, &slots, &schedule,)
++                            .unwrap(),
++                        route_layer.route_expert_ids
++                    );
++                    let slots_tensor = MetalTensor::from_bytes(
++                        ctx,
++                        bytemuck::cast_slice(&slots),
++                        vec![ROUTES as u64],
++                        GgmlType::I32,
++                    )
++                    .unwrap();
++                    let input = grouped_guarded_f32(ctx, vec![H as u64, N as u64], 17.0);
++                    let input_values = unsafe {
++                        std::slice::from_raw_parts_mut(
++                            input
++                                .buffer
++                                .contents()
++                                .as_ptr()
++                                .cast::<u8>()
++                                .add(input.offset as usize)
++                                .cast::<f32>(),
++                            H * N,
++                        )
++                    };
++                    for (index, value) in input_values.iter_mut().enumerate() {
++                        let magnitude = 0.000_125
++                            * (1 + (index.wrapping_mul(37) + expected_layer.wrapping_mul(101))
++                                % 997) as f32;
++                        *value = if (index + expected_layer).is_multiple_of(2) {
++                            magnitude
++                        } else {
++                            -magnitude
++                        };
++                    }
++                    ProfileLayer {
++                        layer: expected_layer,
++                        schedule,
++                        slot_values: slots,
++                        slots: slots_tensor,
++                        input,
++                        inner: grouped_guarded_f32(
++                            ctx,
++                            vec![F as u64, K as u64, N as u64],
++                            INNER_POISON,
++                        ),
++                        output: grouped_guarded_f32(
++                            ctx,
++                            vec![H as u64, K as u64, N as u64],
++                            OUTPUT_POISON,
++                        ),
++                    }
++                })
++                .collect()
++        }
++
++        fn logical_f32_values(tensor: &MetalTensor) -> &[f32] {
++            assert_eq!(tensor.dtype, GgmlType::F32);
++            unsafe {
++                std::slice::from_raw_parts(
++                    tensor
++                        .buffer
++                        .contents()
++                        .as_ptr()
++                        .cast::<u8>()
++                        .add(tensor.offset as usize)
++                        .cast::<f32>(),
++                    tensor.n_elements() as usize,
++                )
++            }
++        }
++
++        fn logical_f32_values_mut(tensor: &MetalTensor) -> &mut [f32] {
++            assert_eq!(tensor.dtype, GgmlType::F32);
++            unsafe {
++                std::slice::from_raw_parts_mut(
++                    tensor
++                        .buffer
++                        .contents()
++                        .as_ptr()
++                        .cast::<u8>()
++                        .add(tensor.offset as usize)
++                        .cast::<f32>(),
++                    tensor.n_elements() as usize,
++                )
++            }
++        }
++
++        fn poison_layers(layers: &[ProfileLayer]) {
++            for layer in layers {
++                logical_f32_values_mut(&layer.inner).fill(INNER_POISON);
++                logical_f32_values_mut(&layer.output).fill(OUTPUT_POISON);
++            }
++        }
++
++        fn input_digest(layers: &[ProfileLayer]) -> [u8; 32] {
++            let mut digest = Sha256::new();
++            for layer in layers {
++                digest.update((layer.layer as u32).to_le_bytes());
++                digest.update(bytemuck::cast_slice(logical_f32_values(&layer.input)));
++            }
++            digest.finalize().into()
++        }
++
++        fn state_digest(layers: &[ProfileLayer], include_output: bool) -> String {
++            let mut digest = Sha256::new();
++            for layer in layers {
++                digest.update((layer.layer as u32).to_le_bytes());
++                digest.update(bytemuck::cast_slice(logical_f32_values(&layer.inner)));
++                if include_output {
++                    digest.update(bytemuck::cast_slice(logical_f32_values(&layer.output)));
++                }
++            }
++            hex(digest.finalize())
++        }
++
++        fn assert_layer_state(layers: &[ProfileLayer], include_output: bool) {
++            for layer in layers {
++                let input = logical_f32_values(&layer.input);
++                assert!(input.iter().all(|value| value.is_finite() && *value != 0.0));
++                let inner = logical_f32_values(&layer.inner);
++                assert!(inner.iter().all(|value| value.is_finite()));
++                assert!(
++                    inner
++                        .iter()
++                        .all(|value| value.to_bits() != INNER_POISON.to_bits()),
++                    "layer {} did not overwrite every inner element",
++                    layer.layer
++                );
++                let output = logical_f32_values(&layer.output);
++                assert!(output.iter().all(|value| value.is_finite()));
++                if include_output {
++                    assert!(
++                        output
++                            .iter()
++                            .all(|value| value.to_bits() != OUTPUT_POISON.to_bits()),
++                        "layer {} did not overwrite every output element",
++                        layer.layer
++                    );
++                } else {
++                    assert!(
++                        output
++                            .iter()
++                            .all(|value| value.to_bits() == OUTPUT_POISON.to_bits()),
++                        "layer {} gate phase changed the down output",
++                        layer.layer
++                    );
++                }
++                assert_eq!(
++                    host_read_i32(&layer.slots, "grouped phase slots").unwrap(),
++                    layer.slot_values,
++                    "layer {} changed destination slots",
++                    layer.layer
++                );
++                assert_grouped_guards("grouped phase input", &layer.input);
++                assert_grouped_guards("grouped phase inner", &layer.inner);
++                assert_grouped_guards("grouped phase output", &layer.output);
++            }
++        }
++
++        fn completed_gpu_ms(
++            command: &(impl MTLCommandBuffer + objc2::Message),
++            label: &str,
++        ) -> f64 {
++            assert!(command.error().is_none(), "{label}: {:?}", command.error());
++            let start = command.GPUStartTime();
++            let end = command.GPUEndTime();
++            let gpu_ms = (end - start) * 1e3;
++            assert!(
++                start.is_finite()
++                    && end.is_finite()
++                    && end > start
++                    && gpu_ms.is_finite()
++                    && gpu_ms > 0.0,
++                "{label} has invalid GPU timestamps {start}..{end}"
++            );
++            gpu_ms
++        }
++
++        fn submit_gate(
++            ctx: &MetalContext,
++            layer: &ProfileLayer,
++            gate: &ProfileBank,
++            up: &ProfileBank,
++        ) -> f64 {
++            let command = ctx.queue.commandBuffer().unwrap();
++            let encoder = KernelEncoder::begin(&command);
++            let result = encode_packed_grouped_swiglu_iq2_xs_f32(
++                ctx,
++                &encoder,
++                &gate.tensor,
++                &up.tensor,
++                &layer.input,
++                &layer.slots,
++                &layer.schedule,
++                &layer.inner,
++                H,
++                F,
++                E,
++                K,
++                N,
++                CLAMP,
++            );
++            encoder.end();
++            result.unwrap();
++            command.commit();
++            command.waitUntilCompleted();
++            completed_gpu_ms(&*command, &format!("grouped gate layer {}", layer.layer))
++        }
++
++        fn submit_down(ctx: &MetalContext, layer: &ProfileLayer, down: &ProfileBank) -> f64 {
++            let command = ctx.queue.commandBuffer().unwrap();
++            let encoder = KernelEncoder::begin(&command);
++            let result = encode_packed_grouped_down_iq3_xxs_f32(
++                ctx,
++                &encoder,
++                &down.tensor,
++                &layer.inner,
++                &layer.slots,
++                &layer.schedule,
++                &layer.output,
++                F,
++                H,
++                E,
++                K,
++                N,
++            );
++            encoder.end();
++            result.unwrap();
++            command.commit();
++            command.waitUntilCompleted();
++            completed_gpu_ms(&*command, &format!("grouped down layer {}", layer.layer))
++        }
++
++        fn empty_bracket(ctx: &MetalContext, phase: &str) -> EmptyBracket {
++            let outer_started = std::time::Instant::now();
++            let mut records = Vec::with_capacity(25);
++            for index in 0..25 {
++                let wall_started = std::time::Instant::now();
++                let command = ctx.queue.commandBuffer().unwrap();
++                let encoder = KernelEncoder::begin(&command);
++                encoder.end();
++                command.commit();
++                command.waitUntilCompleted();
++                let wall_ms = wall_started.elapsed().as_secs_f64() * 1e3;
++                assert!(
++                    command.error().is_none(),
++                    "grouped {phase} empty command {index}: {:?}",
++                    command.error()
++                );
++                assert!(wall_ms.is_finite() && wall_ms > 0.0);
++                let gpu_start = command.GPUStartTime();
++                let gpu_end = command.GPUEndTime();
++                assert!(
++                    gpu_start.is_finite() && gpu_end.is_finite() && gpu_end >= gpu_start,
++                    "grouped {phase} empty command {index} has invalid GPU timestamps {gpu_start}..{gpu_end}"
++                );
++                let positive_gpu_ms = (gpu_end > gpu_start).then(|| {
++                    let duration = (gpu_end - gpu_start) * 1e3;
++                    assert!(duration.is_finite() && duration > 0.0);
++                    duration
++                });
++                let upper_ms = wall_ms.max(positive_gpu_ms.unwrap_or(0.0));
++                assert!(upper_ms.is_finite() && upper_ms > 0.0);
++                records.push(EmptyCommandRecord {
++                    index,
++                    gpu_start,
++                    gpu_end,
++                    positive_gpu_ms,
++                    wall_ms,
++                    upper_ms,
++                    censored: positive_gpu_ms.is_none(),
++                });
++            }
++            assert_eq!(records.len(), 25);
++            let censored_count = records.iter().filter(|record| record.censored).count();
++            let total_wall_ms = records.iter().map(|record| record.wall_ms).sum::<f64>();
++            let total_upper_ms = records.iter().map(|record| record.upper_ms).sum::<f64>();
++            let outer_wall_ms = outer_started.elapsed().as_secs_f64() * 1e3;
++            assert!(
++                total_wall_ms.is_finite()
++                    && total_wall_ms > 0.0
++                    && total_upper_ms.is_finite()
++                    && total_upper_ms > 0.0
++                    && outer_wall_ms.is_finite()
++                    && outer_wall_ms > 0.0
++            );
++            EmptyBracket {
++                records,
++                censored_count,
++                total_wall_ms,
++                total_upper_ms,
++                outer_wall_ms,
++            }
++        }
++
++        fn gate_sample(
++            ctx: &MetalContext,
++            layers: &[ProfileLayer],
++            disjoint: &[(ProfileBank, ProfileBank)],
++            warm: &(ProfileBank, ProfileBank),
++            use_warm: bool,
++        ) -> f64 {
++            assert_eq!(layers.len(), disjoint.len());
++            layers
++                .iter()
++                .zip(disjoint)
++                .map(|(layer, pair)| {
++                    let pair = if use_warm { warm } else { pair };
++                    submit_gate(ctx, layer, &pair.0, &pair.1)
++                })
++                .sum()
++        }
++
++        fn down_sample(
++            ctx: &MetalContext,
++            layers: &[ProfileLayer],
++            producer: &(ProfileBank, ProfileBank),
++            disjoint: &[ProfileBank],
++            warm: &ProfileBank,
++            use_warm: bool,
++        ) -> f64 {
++            assert_eq!(layers.len(), disjoint.len());
++            layers
++                .iter()
++                .zip(disjoint)
++                .map(|(layer, down)| {
++                    let _ = submit_gate(ctx, layer, &producer.0, &producer.1);
++                    submit_down(ctx, layer, if use_warm { warm } else { down })
++                })
++                .sum()
++        }
++
++        fn collect_samples(
++            ctx: &MetalContext,
++            phase: &str,
++            mut sample: impl FnMut(bool) -> f64,
++        ) -> (Vec<f64>, Vec<f64>, EmptyBracket, EmptyBracket) {
++            let _ = sample(false);
++            let _ = sample(true);
++            let _ = sample(true);
++            let _ = sample(false);
++            let empty_pre = empty_bracket(ctx, phase);
++            let mut disjoint = Vec::with_capacity(SAMPLES);
++            let mut warm = Vec::with_capacity(SAMPLES);
++            for _ in 0..SAMPLES / 2 {
++                disjoint.push(sample(false));
++                warm.push(sample(true));
++                warm.push(sample(true));
++                disjoint.push(sample(false));
++            }
++            let empty_post = empty_bracket(ctx, phase);
++            assert_eq!(disjoint.len(), SAMPLES);
++            assert_eq!(warm.len(), SAMPLES);
++            (disjoint, warm, empty_pre, empty_post)
++        }
++
++        fn frozen_drift(values: &[f64]) -> f64 {
++            let minimum = values.iter().copied().reduce(f64::min).unwrap();
++            let maximum = values.iter().copied().reduce(f64::max).unwrap();
++            assert!(minimum.is_finite() && minimum > 0.0 && maximum.is_finite());
++            2.0 * (maximum - minimum) / (maximum + minimum)
++        }
++
++        fn value_range(values: &[f64]) -> f64 {
++            values.iter().copied().reduce(f64::max).unwrap()
++                - values.iter().copied().reduce(f64::min).unwrap()
++        }
++
++        #[allow(clippy::too_many_arguments)]
++        fn phase_result(
++            phase: &'static str,
++            disjoint_gpu_ms: Vec<f64>,
++            warm_gpu_ms: Vec<f64>,
++            empty_pre: EmptyBracket,
++            empty_post: EmptyBracket,
++            logical_bank_bytes: usize,
++            touched_weight_bytes: usize,
++            allocated_bytes: u64,
++            weight_digest: String,
++            disjoint_state_digest: String,
++            warm_state_digest: String,
++        ) -> PhaseResult {
++            let disjoint_drift = frozen_drift(&disjoint_gpu_ms);
++            let warm_drift = frozen_drift(&warm_gpu_ms);
++            let disjoint_range_ms = value_range(&disjoint_gpu_ms);
++            let warm_range_ms = value_range(&warm_gpu_ms);
++            let disjoint_p95_ms = percentile_ms(&disjoint_gpu_ms, 0.95);
++            let warm_p95_ms = percentile_ms(&warm_gpu_ms, 0.95);
++            assert_eq!(
++                disjoint_p95_ms,
++                disjoint_gpu_ms.iter().copied().reduce(f64::max).unwrap()
++            );
++            assert_eq!(
++                warm_p95_ms,
++                warm_gpu_ms.iter().copied().reduce(f64::max).unwrap()
++            );
++            let peak_p95_ms = disjoint_p95_ms.max(warm_p95_ms);
++            let range_bound_ms = 5.0 * disjoint_range_ms.max(warm_range_ms);
++            let core_upper_ms = peak_p95_ms + range_bound_ms;
++            let bracket_upper_ms = empty_pre.total_upper_ms.max(empty_post.total_upper_ms);
++            let upper_ms = peak_p95_ms + range_bound_ms.max(bracket_upper_ms);
++            let stable = disjoint_drift <= 0.05 && warm_drift <= 0.05;
++            let decision = if !stable {
++                "INCONCLUSIVE_HOLD"
++            } else if upper_ms < ECONOMIC_FLOOR_MS {
++                "KILL_PHASE_ONLY"
++            } else if core_upper_ms >= ECONOMIC_FLOOR_MS {
++                "AUTHORIZE_CANDIDATE_DESIGN_ONLY"
++            } else {
++                "INCONCLUSIVE_BRACKET_LIMITED"
++            };
++            PhaseResult {
++                phase,
++                disjoint_gpu_ms,
++                warm_gpu_ms,
++                disjoint_drift,
++                warm_drift,
++                disjoint_range_ms,
++                warm_range_ms,
++                disjoint_p95_ms,
++                warm_p95_ms,
++                peak_p95_ms,
++                range_bound_ms,
++                core_upper_ms,
++                bracket_upper_ms,
++                empty_pre,
++                empty_post,
++                upper_ms,
++                decision,
++                logical_bank_bytes,
++                touched_weight_bytes,
++                allocated_bytes,
++                weight_digest,
++                disjoint_state_digest,
++                warm_state_digest,
++            }
++        }
++
++        fn aggregate_weight_digest(banks: &[&ProfileBank]) -> String {
++            let mut digest = Sha256::new();
++            for (index, bank) in banks.iter().enumerate() {
++                digest.update((index as u32).to_le_bytes());
++                digest.update(bank.original_digest);
++            }
++            hex(digest.finalize())
++        }
++
++        fn run_gate_campaign(ctx: &MetalContext) -> PhaseResult {
++            let layers = profile_layers(ctx);
++            assert_eq!(layers.len(), 25);
++            let input_before = input_digest(&layers);
++            let (template, blocks, block_bytes) = expert_template(GgmlType::IQ2_XS, H, F);
++            let mut disjoint = Vec::with_capacity(layers.len());
++            for layer in &layers {
++                let experts = layer
++                    .schedule
++                    .iter()
++                    .map(|bucket| bucket.expert)
++                    .collect::<Vec<_>>();
++                disjoint.push((
++                    profile_bank(
++                        ctx,
++                        GgmlType::IQ2_XS,
++                        H,
++                        F,
++                        experts.clone(),
++                        0x1000_0000 ^ layer.layer as u64,
++                        &template,
++                        blocks,
++                        block_bytes,
++                    ),
++                    profile_bank(
++                        ctx,
++                        GgmlType::IQ2_XS,
++                        H,
++                        F,
++                        experts,
++                        0x2000_0000 ^ layer.layer as u64,
++                        &template,
++                        blocks,
++                        block_bytes,
++                    ),
++                ));
++            }
++            let all_experts = (0..E).collect::<Vec<_>>();
++            let warm = (
++                profile_bank(
++                    ctx,
++                    GgmlType::IQ2_XS,
++                    H,
++                    F,
++                    all_experts.clone(),
++                    0x3000_0000,
++                    &template,
++                    blocks,
++                    block_bytes,
++                ),
++                profile_bank(
++                    ctx,
++                    GgmlType::IQ2_XS,
++                    H,
++                    F,
++                    all_experts,
++                    0x4000_0000,
++                    &template,
++                    blocks,
++                    block_bytes,
++                ),
++            );
++            let logical_bank_bytes = disjoint
++                .iter()
++                .map(|pair| pair.0.tensor.n_bytes() + pair.1.tensor.n_bytes())
++                .sum::<u64>()
++                .checked_add(warm.0.tensor.n_bytes() + warm.1.tensor.n_bytes())
++                .unwrap() as usize;
++            assert_eq!(logical_bank_bytes, 32_279_363_584);
++            let mut bank_refs = Vec::with_capacity(52);
++            for pair in &disjoint {
++                bank_refs.extend([&pair.0, &pair.1]);
++            }
++            bank_refs.extend([&warm.0, &warm.1]);
++            let touched_weight_bytes = bank_refs.iter().map(|bank| bank.touched_bytes()).sum();
++            let weight_digest = aggregate_weight_digest(&bank_refs);
++            let allocated_bytes = ctx.current_allocated_size();
++
++            poison_layers(&layers);
++            let _ = gate_sample(ctx, &layers, &disjoint, &warm, false);
++            assert_layer_state(&layers, false);
++            let disjoint_state_digest = state_digest(&layers, false);
++            poison_layers(&layers);
++            let _ = gate_sample(ctx, &layers, &disjoint, &warm, true);
++            assert_layer_state(&layers, false);
++            let warm_state_digest = state_digest(&layers, false);
++
++            let (disjoint_gpu_ms, warm_gpu_ms, empty_pre, empty_post) =
++                collect_samples(ctx, "gate", |use_warm| {
++                    gate_sample(ctx, &layers, &disjoint, &warm, use_warm)
++                });
++            assert_layer_state(&layers, false);
++            assert_eq!(state_digest(&layers, false), disjoint_state_digest);
++            poison_layers(&layers);
++            let _ = gate_sample(ctx, &layers, &disjoint, &warm, true);
++            assert_layer_state(&layers, false);
++            assert_eq!(state_digest(&layers, false), warm_state_digest);
++            assert_eq!(input_digest(&layers), input_before);
++            for (index, pair) in disjoint.iter().enumerate() {
++                pair.0.assert_unchanged(&format!("gate layer {index}"));
++                pair.1.assert_unchanged(&format!("up layer {index}"));
++            }
++            warm.0.assert_unchanged("warm gate");
++            warm.1.assert_unchanged("warm up");
++
++            phase_result(
++                "gate_up_swiglu",
++                disjoint_gpu_ms,
++                warm_gpu_ms,
++                empty_pre,
++                empty_post,
++                logical_bank_bytes,
++                touched_weight_bytes,
++                allocated_bytes,
++                weight_digest,
++                disjoint_state_digest,
++                warm_state_digest,
++            )
++        }
++
++        fn run_down_campaign(ctx: &MetalContext) -> PhaseResult {
++            let layers = profile_layers(ctx);
++            assert_eq!(layers.len(), 25);
++            let input_before = input_digest(&layers);
++            let (iq2_template, iq2_blocks, iq2_block_bytes) =
++                expert_template(GgmlType::IQ2_XS, H, F);
++            let all_experts = (0..E).collect::<Vec<_>>();
++            let producer = (
++                profile_bank(
++                    ctx,
++                    GgmlType::IQ2_XS,
++                    H,
++                    F,
++                    all_experts.clone(),
++                    0x5000_0000,
++                    &iq2_template,
++                    iq2_blocks,
++                    iq2_block_bytes,
++                ),
++                profile_bank(
++                    ctx,
++                    GgmlType::IQ2_XS,
++                    H,
++                    F,
++                    all_experts.clone(),
++                    0x6000_0000,
++                    &iq2_template,
++                    iq2_blocks,
++                    iq2_block_bytes,
++                ),
++            );
++            let (iq3_template, iq3_blocks, iq3_block_bytes) =
++                expert_template(GgmlType::IQ3_XXS, F, H);
++            let mut disjoint = Vec::with_capacity(layers.len());
++            for layer in &layers {
++                let experts = layer
++                    .schedule
++                    .iter()
++                    .map(|bucket| bucket.expert)
++                    .collect::<Vec<_>>();
++                disjoint.push(profile_bank(
++                    ctx,
++                    GgmlType::IQ3_XXS,
++                    F,
++                    H,
++                    experts,
++                    0x7000_0000 ^ layer.layer as u64,
++                    &iq3_template,
++                    iq3_blocks,
++                    iq3_block_bytes,
++                ));
++            }
++            let warm = profile_bank(
++                ctx,
++                GgmlType::IQ3_XXS,
++                F,
++                H,
++                all_experts,
++                0x8000_0000,
++                &iq3_template,
++                iq3_blocks,
++                iq3_block_bytes,
++            );
++            let logical_bank_bytes = disjoint
++                .iter()
++                .map(|bank| bank.tensor.n_bytes())
++                .sum::<u64>()
++                .checked_add(
++                    warm.tensor.n_bytes()
++                        + producer.0.tensor.n_bytes()
++                        + producer.1.tensor.n_bytes(),
++                )
++                .unwrap() as usize;
++            assert_eq!(logical_bank_bytes, 22_615_687_168);
++            let mut bank_refs = Vec::with_capacity(28);
++            bank_refs.extend([&producer.0, &producer.1]);
++            bank_refs.extend(disjoint.iter());
++            bank_refs.push(&warm);
++            let touched_weight_bytes = bank_refs.iter().map(|bank| bank.touched_bytes()).sum();
++            let weight_digest = aggregate_weight_digest(&bank_refs);
++            let allocated_bytes = ctx.current_allocated_size();
++
++            poison_layers(&layers);
++            let _ = down_sample(ctx, &layers, &producer, &disjoint, &warm, false);
++            assert_layer_state(&layers, true);
++            let disjoint_state_digest = state_digest(&layers, true);
++            poison_layers(&layers);
++            let _ = down_sample(ctx, &layers, &producer, &disjoint, &warm, true);
++            assert_layer_state(&layers, true);
++            let warm_state_digest = state_digest(&layers, true);
++
++            let (disjoint_gpu_ms, warm_gpu_ms, empty_pre, empty_post) =
++                collect_samples(ctx, "down", |use_warm| {
++                    down_sample(ctx, &layers, &producer, &disjoint, &warm, use_warm)
++                });
++            assert_layer_state(&layers, true);
++            assert_eq!(state_digest(&layers, true), disjoint_state_digest);
++            poison_layers(&layers);
++            let _ = down_sample(ctx, &layers, &producer, &disjoint, &warm, true);
++            assert_layer_state(&layers, true);
++            assert_eq!(state_digest(&layers, true), warm_state_digest);
++            assert_eq!(input_digest(&layers), input_before);
++            producer.0.assert_unchanged("down producer gate");
++            producer.1.assert_unchanged("down producer up");
++            for (index, bank) in disjoint.iter().enumerate() {
++                bank.assert_unchanged(&format!("down layer {index}"));
++            }
++            warm.assert_unchanged("warm down");
++
++            phase_result(
++                "down_scatter",
++                disjoint_gpu_ms,
++                warm_gpu_ms,
++                empty_pre,
++                empty_post,
++                logical_bank_bytes,
++                touched_weight_bytes,
++                allocated_bytes,
++                weight_digest,
++                disjoint_state_digest,
++                warm_state_digest,
++            )
++        }
++
++        fn print_result(result: &PhaseResult) {
++            let empty_pre = result.empty_pre.transcript();
++            let empty_post = result.empty_post.transcript();
++            eprintln!(
++                "deepseek_v4 grouped_iq2_phase_packet_v2 phase={} route_payload_sha256={} clamp={} samples_per_cell={} disjoint_gpu_ms={:?} warm_gpu_ms={:?} disjoint_drift={:.9} warm_drift={:.9} disjoint_range_ms={:.9} warm_range_ms={:.9} disjoint_p95_ms={:.9} warm_p95_ms={:.9} peak_p95_ms={:.9} range_bound_ms={:.9} core_upper_ms={:.9} bracket_upper_ms={:.9} empty_pre={} empty_post={} upper_ms={:.9} economic_floor_ms={:.3} decision={} logical_bank_bytes={} touched_weight_bytes={} allocated_bytes={} weight_digest={} disjoint_state_digest={} warm_state_digest={}",
++                result.phase,
++                ROUTE_PAYLOAD_SHA256,
++                CLAMP,
++                SAMPLES,
++                result.disjoint_gpu_ms,
++                result.warm_gpu_ms,
++                result.disjoint_drift,
++                result.warm_drift,
++                result.disjoint_range_ms,
++                result.warm_range_ms,
++                result.disjoint_p95_ms,
++                result.warm_p95_ms,
++                result.peak_p95_ms,
++                result.range_bound_ms,
++                result.core_upper_ms,
++                result.bracket_upper_ms,
++                empty_pre,
++                empty_post,
++                result.upper_ms,
++                ECONOMIC_FLOOR_MS,
++                result.decision,
++                result.logical_bank_bytes,
++                result.touched_weight_bytes,
++                result.allocated_bytes,
++                result.weight_digest,
++                result.disjoint_state_digest,
++                result.warm_state_digest,
++            );
++        }
++
++        let ctx = MetalContext::new().expect("grouped-IQ2 phase profiler requires Metal");
++        assert_eq!(
++            ctx.device.name().to_string(),
++            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
++        );
++        assert!(
++            packed_grouped_expert_enabled_for_test(&ctx),
++            "production grouped-expert policy is not enabled"
++        );
++        assert!(crate::metal::matmat_iq3_xxs_mm_is_enabled());
++        let baseline_allocated_bytes = ctx.current_allocated_size();
++        let gate = objc2::rc::autoreleasepool(|_| run_gate_campaign(&ctx));
++        let after_gate_allocated_bytes = ctx.current_allocated_size();
++        print_result(&gate);
++        let down = objc2::rc::autoreleasepool(|_| run_down_campaign(&ctx));
++        let after_down_allocated_bytes = ctx.current_allocated_size();
++        print_result(&down);
++        eprintln!(
++            "deepseek_v4 grouped_iq2_phase_lifetime baseline_allocated_bytes={baseline_allocated_bytes} after_gate_allocated_bytes={after_gate_allocated_bytes} after_down_allocated_bytes={after_down_allocated_bytes}"
++        );
++        for result in [&gate, &down] {
++            assert!(
++                result.disjoint_drift <= 0.05 && result.warm_drift <= 0.05,
++                "{} is INCONCLUSIVE: disjoint drift {:.6}, warm drift {:.6}",
++                result.phase,
++                result.disjoint_drift,
++                result.warm_drift
++            );
++        }
++    }
++

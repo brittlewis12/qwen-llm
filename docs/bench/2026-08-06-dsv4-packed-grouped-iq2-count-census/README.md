@@ -118,6 +118,11 @@ censored empty commands, relevant device/toolchain drift, or a new accepted
 production observer. This census remains valid exact route geometry and
 operation-count evidence; it authorizes no new profiler or kernel by itself.
 
+The separately reviewed V2 instrumentation consumes that reopen and authorizes
+design review only for the exact gate/up/SwiGLU phase. Down/scatter remains
+inconclusive. This does not convert the count ratios into timing or independently
+authorize a kernel.
+
 ## Provenance
 
 - Base revision: `864fece95c6c44f8c7182046819eaa9775383de2`.

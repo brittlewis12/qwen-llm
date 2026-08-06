@@ -481,16 +481,27 @@ the down campaign never allocates or executes. Preserve no phase timing or
 economic result. Remove the profiler and keep grouped-IQ2 on
 `HOLD - closed inconclusive`.
 
+A separately reviewed V2 resolves only the censored empty-bracket premise with
+full per-command wall upper bounds. Gate disjoint/warm cells pass stationarity
+at 0.344817%/0.059705%; `P=527.963833 ms`, `R=9.086871 ms`, and
+`C=U=537.050704 ms`, while the 0.492790 ms empty bound is non-dominant. This
+authorizes gate/up/SwiGLU candidate design only. Down warm drift reaches
+5.483643%, so down remains `HOLD - INCONCLUSIVE` with no timing decision.
+
 Force-ranked queue:
 
-1. **Grouped-IQ2 instrumentation reopen.** Do not retry the censored empty-
-   command protocol. First design and separately review a conservative upper
-   bound for commands below Metal timestamp resolution, likely a matched minimal
-   nonempty dispatch that can only enlarge the uncertainty term. Preserve exact
-   routes, 25-command matching, every retained sample, <=5% drift, and the
-   phase-only 158.3 ms decision boundary. No kernel work precedes a valid phase
-   result.
-2. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+1. **Grouped-IQ2 gate/up/SwiGLU design.** Inspect the deployed IQ2 kernel and
+   exact 1,542-bucket/1,748-tile geometry. Draft one bounded candidate that
+   changes only the authorized gate/up/SwiGLU phase, preserves exact route and
+   destination-slot order plus deployed clamp/reduction semantics, and has a
+   credible structural reduction before coding. Require separate design GO,
+   model-free exactness, a stable production-shape candidate gate, and current-
+   asset packed A/B before product promotion. Down/scatter is out of scope.
+2. **Down/scatter attribution.** Keep `HOLD - INCONCLUSIVE`; do not filter or
+   rerun V2. Reopen only for a materially new candidate composed with the gate
+   design, a new accepted observer, or relevant device/toolchain drift under a
+   new protocol.
+3. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

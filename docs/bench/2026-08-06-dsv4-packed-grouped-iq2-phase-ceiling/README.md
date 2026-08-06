@@ -101,6 +101,12 @@ authorized campaign. Also reopen for relevant device, Metal, compiler, or
 accepted production-observer drift. Any new protocol must preserve 25-command
 matching, every retained sample, the 5% stability gate, and phase-only claims.
 
+That reopen is consumed by V2. Wall time from immediately before command-buffer
+creation through immediately after completed wait provides a one-sided bound
+for every empty command without authorizing work by itself.
+Gate cells pass and authorize gate/up/SwiGLU candidate design only;
+down/scatter misses stationarity and remains inconclusive. See the V2 packet.
+
 ## Validation
 
 - The executed profiler compiles in release diagnostics before its sole run.

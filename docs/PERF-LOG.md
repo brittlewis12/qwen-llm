@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Phase Ceiling V2
+
+Status: gate/up/SwiGLU is `GO - AUTHORIZE_CANDIDATE_DESIGN_ONLY`;
+down/scatter remains `HOLD - INCONCLUSIVE`.
+
+- V2 preserves the exact routes, banks, deployed kernels, 25-command phase
+  samples, D/W/W/D ordering, and validation from V1. Empty commands remain
+  empty; wall time from immediately before command-buffer creation through
+  immediately after completed wait conservatively bounds censored GPU
+  timestamps and can block a KILL but never authorize work.
+- Gate disjoint/warm cells pass at 0.344817%/0.059705% drift. The p95s of
+  retained 25-command sums are 527.963833/526.355958 ms; `P=527.963833`,
+  `R=9.086871`, and
+  `C=U=537.050704 ms`. The 0.492790 ms bracket bound is non-dominant.
+- Down disjoint drift is 0.928512%, but warm drift reaches 5.483643% after the
+  retained final 75.617124 ms sample. Preserve all raw values, but publish no
+  down ceiling, KILL, or candidate decision.
+- The gate packet completes and emits before down allocation, so down
+  instability does not invalidate or broaden the gate-only authorization.
+
+Decision: consume the sole V2 run, remove its profiler, and authorize design
+review only for an exact-route grouped-IQ2 gate/up/SwiGLU candidate over the 25
+grouped layers. Do not bundle down or infer removable/product milliseconds.
+Evidence:
+`docs/bench/2026-08-06-dsv4-packed-grouped-iq2-phase-ceiling-v2/README.md`.
+CX: `019fd588-96b0-7033-afd1-66d7e354e523`.
+
 ## 2026-08-06 - DeepSeek V4 Grouped-IQ2 Phase Ceiling Inconclusive
 
 Status: `INCONCLUSIVE - timestamp-invalid`; the phase lane remains

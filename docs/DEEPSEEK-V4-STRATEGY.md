@@ -2331,6 +2331,13 @@ noise without reducing technical risk. Revisit after S5.
    routing. Continue through pre-expert matrix work rather than another packed
    cap increase, retaining `QWEN_DSV4_PACKED_GROUPED_EXPERTS=0` and
    `QWEN_DSV4_PACKED_BM16_IQ2=0` as exact rollbacks.
+   The retained F32 Q8 Q-B matrix is not part of that exact default. With exact
+   BM16 common to both arms, it keeps a 6,092-token structured retrieval
+   byte-identical and saves about 10%, but on a 9,960-token ledger task it
+   returns 2,812 where exact Q8 correctly computes 2,578. Stop the quality
+   battery at that decisive aggregate regression, keep
+   `QWEN_DSV4_PACKED_Q8_QB=f32_matrix` opt-in, and pursue an exact cooperative
+   token tile that shares Q8 dequantization without changing per-token K-order.
 7. Keep the packed before-attention and exact multi-row scorer closures
    explicit. The corrected four-encoder packet remains `HOLD`: its material
    pre-attention interval contains one unowned encoder transition, and Apple M4

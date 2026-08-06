@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 F32 Q8 Q-B Default KILL
+
+Status: keep `QWEN_DSV4_PACKED_Q8_QB=f32_matrix` as an explicit approximate
+opt-in, but close default promotion for the current F32 matrix arithmetic.
+Exact per-token Q8 remains the default.
+
+- Both arms use the promoted exact BM16 path at every full N=2,048 chunk; only
+  the Q-B projection policy changes between exact and F32 matrix execution.
+- On a 6,092-token four-key structured-retrieval task, exact and F32 matrix
+  execution produce the same 34 token IDs and exact minified JSON. Prefill falls
+  from 97.578 to 87.566 seconds, preserving the expected roughly 10% saving.
+- The second battery task has 9,960 tokens and requires adding five named ledger
+  values. Exact Q8 retrieves `281+162+902+770+463` and reaches the correct total
+  2,578. F32 matrix follows the requested surface format but returns 2,812.
+- That task still records a real performance win, 157.338 to 141.406 seconds,
+  but the incorrect aggregate is a decision-changing quality regression. The
+  exact arm includes its arithmetic expression despite the stricter format, so
+  neither arm is perfect; only the candidate loses the core requested value.
+- Stop the battery at the first decisive failure rather than spending two more
+  long-prompt pairs. Prior evidence already showed a coherent but different
+  6,642-token summary, while structured retrieval remains strong.
+
+Decision: the candidate is faster but not objectively quality-equivalent, so
+do not default it. Reopen default promotion only for arithmetic that preserves
+the scalar accumulation contract more closely, or for an explicit approximate
+product policy with a broader quality tradeoff. Pursue exact token-tile Q8 work
+sharing before another matrix reduction schedule.
+
 ## 2026-08-06 - DeepSeek V4 2,048-Token BM16 Default GO
 
 Status: exact BM16 IQ2 gate/up execution now covers full N=2,048 chunks on

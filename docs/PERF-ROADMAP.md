@@ -587,13 +587,14 @@ moves post-route from 10.530 to 7.218 seconds and the IQ2 cohort from 7.825 to
 
 Force-ranked queue:
 
-1. **Q-B approximate-quality decision.** The F32 `R2C4K64` candidate applies
-   only to Q-B on complete N=2,048 chunks and cuts the 2,385-token prefill by
-   10.3%. It preserves one 64-token greedy continuation and passes a four-key
-   5,255-token structured retrieval probe, but a coherent 6,642-token summary
-   diverges from exact. Keep it opt-in until a small diverse task battery finds
-   no retrieval, constraint, EOS, or aggregate quality regression. Output A/B
-   remain closed by their prior full-model KILL.
+1. **Exact cooperative Q8 token tiling.** Close F32 Q-B matrix defaulting: it
+   preserves a 6,092-token structured-retrieval result and saves about 10% with
+   exact BM16 common to both arms, but returns 2,812 instead of the exact arm's
+   correct 2,578 on a 9,960-token five-value ledger aggregation. Audit an exact
+   work-sharing kernel where a token tile shares each Q8 dequantized weight
+   block while every token lane retains the scalar K-order accumulation. Price
+   Q-B first, then transfer only if the same work unit applies to the other
+   dominant Q8 projections.
 2. **Attribute the remaining BM16 cohort.** BM16 cuts the 25 IQ2 layers from
    7.825 to 4.542 seconds, but pre-expert work is now 20.368 seconds. Use the
    retained post-route stage instrument to separate gate/up, SwiGLU, down, and

@@ -5578,8 +5578,19 @@ const PACKED_BM16_POST_ROUTE_STAGE_KINDS: [PackedPostRouteStageKind; 6] = [
 ];
 
 #[cfg(feature = "dsv4-diagnostics")]
+const PACKED_PAIRED_IQ2_POST_ROUTE_STAGE_KINDS: [PackedPostRouteStageKind; 5] = [
+    PackedPostRouteStageKind::RoutedGateUp,
+    PackedPostRouteStageKind::RoutedDown,
+    PackedPostRouteStageKind::SharedExpert,
+    PackedPostRouteStageKind::ExpertCombine,
+    PackedPostRouteStageKind::HyperPostAndHead,
+];
+
+#[cfg(feature = "dsv4-diagnostics")]
 fn packed_post_route_stage_kinds(bm16: bool) -> &'static [PackedPostRouteStageKind] {
-    if bm16 {
+    if bm16 && packed_iq2_pair_swiglu_enabled() {
+        &PACKED_PAIRED_IQ2_POST_ROUTE_STAGE_KINDS
+    } else if bm16 {
         &PACKED_BM16_POST_ROUTE_STAGE_KINDS
     } else {
         &PACKED_POST_ROUTE_STAGE_KINDS
@@ -7190,7 +7201,6 @@ impl PrefillMoeScratch {
                             route_count,
                             expert_clamp,
                         )?;
-                        enc.boundary(PackedPostRouteStageKind::RoutedSwiGlu)?;
                         enc.boundary(PackedPostRouteStageKind::RoutedDown)?;
                     } else {
                         for (bank, projection) in [(gate_bank, &gate), (up_bank, &up)] {

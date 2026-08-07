@@ -16902,14 +16902,14 @@ mod tests {
             0
         };
         let packed_route_allocations = if cfg!(feature = "dsv4-diagnostics") {
-            7
+            8
         } else {
-            0
+            4
         };
         let packed_route_logical = if cfg!(feature = "dsv4-diagnostics") {
-            134_176
+            2_115_648
         } else {
-            0
+            17_440
         };
         assert_eq!(
             requests.len(),

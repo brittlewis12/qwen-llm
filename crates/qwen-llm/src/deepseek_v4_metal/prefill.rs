@@ -14,22 +14,25 @@ const INDEXER_QUERY_WIDTH: usize = INDEXER_HEAD_COUNT * INDEXER_HEAD_DIM;
 const MOE_FFN_SIZE: usize = 2_048;
 const MOE_EXPERT_COUNT: usize = 256;
 const MOE_TOP_K: usize = 6;
-#[cfg(feature = "dsv4-diagnostics")]
-const PACKED_ROUTE_RECORD_WIDTH: usize = 4;
-
 #[cfg(any(test, feature = "dsv4-diagnostics"))]
+const PACKED_ROUTE_RECORD_WIDTH: usize = 4;
+const PACKED_COMPACT_ROUTE_HEADER_WIDTH: usize = 8;
+const PACKED_COMPACT_ROUTE_STATUS_READY: i32 = 1;
+#[cfg(test)]
+const PACKED_COMPACT_ROUTE_STATUS_INVALID_ROUTE: i32 = -301;
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PackedRouteArgs {
     expert_count: u32,
     top_k: u32,
     n_tokens: u32,
+    produced_tokens: u32,
     vocab_size: u32,
     generation: u32,
     routed_scale: f32,
 }
 
-#[cfg(any(test, feature = "dsv4-diagnostics"))]
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PackedRouteScheduleArgs {
@@ -37,9 +40,10 @@ struct PackedRouteScheduleArgs {
     top_k: u32,
     n_tokens: u32,
     generation: u32,
+    max_tiles32: u32,
+    max_tiles16: u32,
 }
 
-#[cfg(any(test, feature = "dsv4-diagnostics"))]
 struct PackedGpuRouteBuffers<'a> {
     logits: &'a MetalTensor,
     token_ids: &'a MetalTensor,
@@ -48,15 +52,20 @@ struct PackedGpuRouteBuffers<'a> {
     route_generations: &'a MetalTensor,
     route_status: &'a MetalTensor,
     counts: &'a MetalTensor,
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     slot_ids: &'a MetalTensor,
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     schedule_generations: &'a MetalTensor,
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     aggregate: &'a MetalTensor,
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     signature: &'a MetalTensor,
+    compact_header: &'a MetalTensor,
 }
 
-#[cfg(any(test, feature = "dsv4-diagnostics"))]
 fn packed_route_args(
     n_tokens: usize,
+    produced_tokens: usize,
     vocab_size: usize,
     generation: NonZeroU32,
     routed_scale: f32,
@@ -68,6 +77,9 @@ fn packed_route_args(
         expert_count: MOE_EXPERT_COUNT as u32,
         top_k: MOE_TOP_K as u32,
         n_tokens: checked_token_count(n_tokens)?,
+        produced_tokens: u32::try_from(produced_tokens).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("packed GPU route producer count exceeds u32".into())
+        })?,
         vocab_size: u32::try_from(vocab_size).map_err(|_| {
             DeepSeekV4MetalError::Invalid("packed GPU route vocabulary exceeds u32".into())
         })?,
@@ -76,7 +88,6 @@ fn packed_route_args(
     })
 }
 
-#[cfg(any(test, feature = "dsv4-diagnostics"))]
 fn packed_route_schedule_args(
     n_tokens: usize,
     generation: NonZeroU32,
@@ -86,6 +97,8 @@ fn packed_route_schedule_args(
         top_k: MOE_TOP_K as u32,
         n_tokens: checked_token_count(n_tokens)?,
         generation: generation.get(),
+        max_tiles32: PACKED_GROUPED_EXPERT_MAX_TILES as u32,
+        max_tiles16: PACKED_GROUPED_IQ2_MMA16_MAX_TILES as u32,
     })
 }
 
@@ -97,6 +110,10 @@ fn packed_route_completion(generation: u32, n_tokens: usize) -> u32 {
 #[cfg(any(test, feature = "dsv4-diagnostics"))]
 fn packed_route_signature_completion(generation: u32, n_tokens: usize) -> u32 {
     0xd552_0000 ^ generation ^ ((n_tokens as u32) << 8)
+}
+
+fn packed_route_compact_completion(generation: u32, n_tokens: usize) -> u32 {
+    0xd553_0000 ^ generation ^ ((n_tokens as u32) << 8)
 }
 
 #[cfg(any(test, feature = "dsv4-diagnostics"))]
@@ -138,7 +155,6 @@ fn packed_route_signature_hash(
         .fold(2_166_136_261, packed_route_signature_mix))
 }
 
-#[cfg(any(test, feature = "dsv4-diagnostics"))]
 impl PackedGpuRouteBuffers<'_> {
     #[allow(clippy::too_many_arguments)]
     fn encode_learned(
@@ -170,7 +186,7 @@ impl PackedGpuRouteBuffers<'_> {
         enc.set_pipeline(&pso);
         enc.set_bytes(
             0,
-            &packed_route_args(n_tokens, 0, generation, routed_scale)?,
+            &packed_route_args(n_tokens, produced_tokens, 0, generation, routed_scale)?,
         );
         enc.set_tensor(1, self.logits);
         enc.set_tensor(2, bias);
@@ -215,13 +231,19 @@ impl PackedGpuRouteBuffers<'_> {
             DeepSeekV4MetalError::Invalid("packed hash vocabulary exceeds usize".into())
         })?;
         let pso = ctx.pipeline("kernel_deepseek_v4_packed_route_hash")?;
-        if pso.maxTotalThreadsPerThreadgroup() < produced_tokens {
-            return invalid("packed hash route exceeds pipeline threadgroup capacity");
+        if pso.maxTotalThreadsPerThreadgroup() < 256 {
+            return invalid("packed hash route requires 256 threads per threadgroup");
         }
         enc.set_pipeline(&pso);
         enc.set_bytes(
             0,
-            &packed_route_args(n_tokens, vocab_size, generation, routed_scale)?,
+            &packed_route_args(
+                n_tokens,
+                produced_tokens,
+                vocab_size,
+                generation,
+                routed_scale,
+            )?,
         );
         enc.set_tensor(1, self.logits);
         enc.set_tensor(2, self.token_ids);
@@ -232,12 +254,12 @@ impl PackedGpuRouteBuffers<'_> {
         enc.set_tensor(7, self.route_status);
         enc.dispatch(
             MTLSize {
-                width: 1,
+                width: produced_tokens.div_ceil(256),
                 height: 1,
                 depth: 1,
             },
             MTLSize {
-                width: produced_tokens,
+                width: 256,
                 height: 1,
                 depth: 1,
             },
@@ -245,6 +267,7 @@ impl PackedGpuRouteBuffers<'_> {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     fn encode_schedule(
         &self,
         ctx: &MetalContext,
@@ -284,6 +307,7 @@ impl PackedGpuRouteBuffers<'_> {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     fn encode_validate(
         &self,
         ctx: &MetalContext,
@@ -321,6 +345,7 @@ impl PackedGpuRouteBuffers<'_> {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     fn encode_signature(
         &self,
         ctx: &MetalContext,
@@ -341,6 +366,80 @@ impl PackedGpuRouteBuffers<'_> {
         enc.set_tensor(4, self.counts);
         enc.set_tensor(5, self.slot_ids);
         enc.set_tensor(6, self.signature);
+        enc.dispatch(
+            MTLSize {
+                width: 1,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        Ok(())
+    }
+
+    fn encode_compact(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        bucket_rows: &MetalTensor,
+        bucket_slots: &MetalTensor,
+        tiles32: &MetalTensor,
+        tiles16: &MetalTensor,
+        n_tokens: usize,
+        generation: NonZeroU32,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        require_serial(enc, "packed GPU route compaction")?;
+        let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed GPU compact routes")?;
+        validate_i32(
+            bucket_rows,
+            &[route_count as u64],
+            true,
+            "packed GPU compact rows",
+        )?;
+        validate_i32(
+            bucket_slots,
+            &[route_count as u64],
+            true,
+            "packed GPU compact slots",
+        )?;
+        validate_i32(
+            tiles32,
+            &[PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS as u64],
+            true,
+            "packed GPU compact 32-row tiles",
+        )?;
+        validate_i32(
+            tiles16,
+            &[PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS as u64],
+            true,
+            "packed GPU compact 16-row tiles",
+        )?;
+        validate_i32(
+            self.compact_header,
+            &[PACKED_COMPACT_ROUTE_HEADER_WIDTH as u64],
+            true,
+            "packed GPU compact header",
+        )?;
+        let pso = ctx.pipeline("kernel_deepseek_v4_packed_route_compact")?;
+        if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 256 {
+            return invalid("packed route compaction requires SIMD width 32 and 256 threads");
+        }
+        enc.set_pipeline(&pso);
+        enc.set_bytes(0, &packed_route_schedule_args(n_tokens, generation)?);
+        enc.set_tensor(1, self.route_generations);
+        enc.set_tensor(2, self.route_status);
+        enc.set_tensor(3, self.expert_ids);
+        enc.set_tensor(4, self.weights);
+        enc.set_tensor(5, self.counts);
+        enc.set_tensor(6, bucket_rows);
+        enc.set_tensor(7, bucket_slots);
+        enc.set_tensor(8, tiles32);
+        enc.set_tensor(9, tiles16);
+        enc.set_tensor(10, self.compact_header);
         enc.dispatch(
             MTLSize {
                 width: 1,
@@ -442,7 +541,6 @@ struct PrefillMoeScratch {
     grouped_tiles: MetalTensor,
     grouped_iq2_mma16_tiles: MetalTensor,
     grouped_inner: MetalTensor,
-    #[cfg(feature = "dsv4-diagnostics")]
     gpu_route: PrefillGpuRouteScratch,
     #[cfg(feature = "dsv4-diagnostics")]
     grouped_iq2_invocations: Cell<u32>,
@@ -450,15 +548,19 @@ struct PrefillMoeScratch {
     grouped_iq3_invocations: Cell<u32>,
 }
 
-#[cfg(feature = "dsv4-diagnostics")]
 struct PrefillGpuRouteScratch {
     route_generations: MetalTensor,
     route_status: MetalTensor,
     counts: MetalTensor,
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     slot_ids: MetalTensor,
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     schedule_generations: MetalTensor,
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     aggregate: MetalTensor,
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     signature: MetalTensor,
+    compact_header: MetalTensor,
     next_generation: Cell<u32>,
 }
 
@@ -619,7 +721,6 @@ impl DeepSeekV4PrefillScratch {
                         PACKED_GROUPED_EXPERT_MAX_TOKENS as u64,
                     ],
                 )?,
-                #[cfg(feature = "dsv4-diagnostics")]
                 gpu_route: PrefillGpuRouteScratch {
                     route_generations: MetalTensor::zeros_i32(
                         ctx,
@@ -630,16 +731,24 @@ impl DeepSeekV4PrefillScratch {
                         vec![PACKED_GPU_ROUTE_MAX_TOKENS as u64],
                     )?,
                     counts: MetalTensor::zeros_i32(ctx, vec![MOE_EXPERT_COUNT as u64])?,
+                    #[cfg(any(test, feature = "dsv4-diagnostics"))]
                     slot_ids: MetalTensor::zeros_i32(
                         ctx,
                         vec![PACKED_GPU_ROUTE_MAX_TOKENS as u64, MOE_EXPERT_COUNT as u64],
                     )?,
+                    #[cfg(any(test, feature = "dsv4-diagnostics"))]
                     schedule_generations: MetalTensor::zeros_i32(
                         ctx,
                         vec![MOE_EXPERT_COUNT as u64],
                     )?,
+                    #[cfg(any(test, feature = "dsv4-diagnostics"))]
                     aggregate: MetalTensor::zeros_i32(ctx, vec![PACKED_ROUTE_RECORD_WIDTH as u64])?,
+                    #[cfg(any(test, feature = "dsv4-diagnostics"))]
                     signature: MetalTensor::zeros_i32(ctx, vec![PACKED_ROUTE_RECORD_WIDTH as u64])?,
+                    compact_header: MetalTensor::zeros_i32(
+                        ctx,
+                        vec![PACKED_COMPACT_ROUTE_HEADER_WIDTH as u64],
+                    )?,
                     next_generation: Cell::new(1),
                 },
                 #[cfg(feature = "dsv4-diagnostics")]
@@ -834,29 +943,35 @@ pub(super) fn append_session_allocation_requests(
         )?,
         f32_bytes,
     )?;
+    for (name, elements) in [
+        (
+            "moe.gpu_route.route_generations",
+            PACKED_GPU_ROUTE_MAX_TOKENS,
+        ),
+        ("moe.gpu_route.route_status", PACKED_GPU_ROUTE_MAX_TOKENS),
+        ("moe.gpu_route.counts", MOE_EXPERT_COUNT),
+        (
+            "moe.gpu_route.compact_header",
+            PACKED_COMPACT_ROUTE_HEADER_WIDTH,
+        ),
+    ] {
+        push(name, elements, i32_bytes)?;
+    }
     #[cfg(feature = "dsv4-diagnostics")]
-    {
-        for (name, elements) in [
-            (
-                "moe.gpu_route.route_generations",
+    for (name, elements) in [
+        (
+            "moe.gpu_route.slot_ids",
+            checked_mul(
                 PACKED_GPU_ROUTE_MAX_TOKENS,
-            ),
-            ("moe.gpu_route.route_status", PACKED_GPU_ROUTE_MAX_TOKENS),
-            ("moe.gpu_route.counts", MOE_EXPERT_COUNT),
-            (
-                "moe.gpu_route.slot_ids",
-                checked_mul(
-                    PACKED_GPU_ROUTE_MAX_TOKENS,
-                    MOE_EXPERT_COUNT,
-                    "packed GPU route slots",
-                )?,
-            ),
-            ("moe.gpu_route.schedule_generations", MOE_EXPERT_COUNT),
-            ("moe.gpu_route.aggregate", PACKED_ROUTE_RECORD_WIDTH),
-            ("moe.gpu_route.signature", PACKED_ROUTE_RECORD_WIDTH),
-        ] {
-            push(name, elements, i32_bytes)?;
-        }
+                MOE_EXPERT_COUNT,
+                "packed GPU route slots",
+            )?,
+        ),
+        ("moe.gpu_route.schedule_generations", MOE_EXPERT_COUNT),
+        ("moe.gpu_route.aggregate", PACKED_ROUTE_RECORD_WIDTH),
+        ("moe.gpu_route.signature", PACKED_ROUTE_RECORD_WIDTH),
+    ] {
+        push(name, elements, i32_bytes)?;
     }
     Ok(())
 }
@@ -3088,6 +3203,7 @@ fn packed_grouped_expert_tiles(
 struct PackedGroupedExpertPlan {
     tiles: Vec<PackedGroupedExpertTile>,
     buffer: Option<MetalTensor>,
+    dispatch_tiles: usize,
 }
 
 impl PackedGroupedExpertPlan {
@@ -3135,7 +3251,29 @@ impl PackedGroupedExpertPlan {
         } else {
             None
         };
-        Ok(Self { tiles, buffer })
+        let dispatch_tiles = tiles.len();
+        Ok(Self {
+            tiles,
+            buffer,
+            dispatch_tiles,
+        })
+    }
+
+    fn from_device(
+        buffer: &MetalTensor,
+        dispatch_tiles: usize,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        validate_i32(
+            buffer,
+            &[(dispatch_tiles * 3) as u64],
+            false,
+            "packed grouped device descriptors",
+        )?;
+        Ok(Self {
+            tiles: Vec::new(),
+            buffer: Some(buffer.clone()),
+            dispatch_tiles,
+        })
     }
 
     fn bind(&self, enc: &KernelEncoder, index: usize) {
@@ -3243,7 +3381,7 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
         true,
         "packed grouped inner",
     )?;
-    let tile_count = plan.tiles.len();
+    let tile_count = plan.dispatch_tiles;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -3352,7 +3490,7 @@ fn encode_packed_grouped_down_iq3_xxs_f32(
         true,
         "packed grouped output",
     )?;
-    let tile_count = plan.tiles.len();
+    let tile_count = plan.dispatch_tiles;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -3476,7 +3614,7 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_mma16(
         true,
         "packed grouped mapped IQ2_XS F32 MMA output",
     )?;
-    let tile_count = plan.tiles.len();
+    let tile_count = plan.dispatch_tiles;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -4016,6 +4154,11 @@ crate::env_flag!(
     "QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE"
 );
 
+crate::env_flag!(
+    default_off packed_gpu_route_compact_enabled,
+    "QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT"
+);
+
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
 fn packed_grouped_iq3_candidate_supported(ctx: &MetalContext) -> bool {
     if !crate::metal::matmat_iq3_xxs_mm_is_enabled()
@@ -4046,8 +4189,7 @@ fn packed_grouped_iq3_fused_candidate_supported(ctx: &MetalContext) -> bool {
 
 const PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_GROUPED_EXPERT_MAX_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
-#[cfg(any(test, feature = "dsv4-diagnostics"))]
-const PACKED_GPU_ROUTE_MAX_TOKENS: usize = 128;
+const PACKED_GPU_ROUTE_MAX_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PackedGroupedExpertMode {
@@ -5251,6 +5393,7 @@ enum PackedRouteSource<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PackedRoutePolicy {
     Cpu,
+    GpuCompact,
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
     GpuExperimental,
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -5258,10 +5401,10 @@ enum PackedRoutePolicy {
 }
 
 impl PackedRoutePolicy {
-    #[cfg(feature = "dsv4-diagnostics")]
     fn uses_gpu(self) -> bool {
         match self {
             Self::Cpu => false,
+            Self::GpuCompact => true,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
             Self::GpuExperimental => true,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -5315,7 +5458,6 @@ impl PackedExpertPolicy {
 }
 
 impl PrefillMoeScratch {
-    #[cfg(feature = "dsv4-diagnostics")]
     fn gpu_route_buffers<'a>(
         &'a self,
         logits: &'a MetalTensor,
@@ -5329,14 +5471,18 @@ impl PrefillMoeScratch {
             route_generations: &self.gpu_route.route_generations,
             route_status: &self.gpu_route.route_status,
             counts: &self.gpu_route.counts,
+            #[cfg(any(test, feature = "dsv4-diagnostics"))]
             slot_ids: &self.gpu_route.slot_ids,
+            #[cfg(any(test, feature = "dsv4-diagnostics"))]
             schedule_generations: &self.gpu_route.schedule_generations,
+            #[cfg(any(test, feature = "dsv4-diagnostics"))]
             aggregate: &self.gpu_route.aggregate,
+            #[cfg(any(test, feature = "dsv4-diagnostics"))]
             signature: &self.gpu_route.signature,
+            compact_header: &self.gpu_route.compact_header,
         }
     }
 
-    #[cfg(feature = "dsv4-diagnostics")]
     fn take_gpu_route_generation(&self) -> Result<NonZeroU32, DeepSeekV4MetalError> {
         let generation =
             NonZeroU32::new(self.gpu_route.next_generation.get()).ok_or_else(|| {
@@ -5349,6 +5495,140 @@ impl PrefillMoeScratch {
         })?;
         self.gpu_route.next_generation.set(next);
         Ok(generation)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_gpu_route_compact(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        views: &PackedMoeViews,
+        source: PackedRouteSource<'_>,
+        token_ids: &MetalTensor,
+        token_to_expert: Option<&MetalTensor>,
+        n_tokens: usize,
+        routed_scale: f32,
+        generation: NonZeroU32,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        let buffers = self.gpu_route_buffers(&views.logits, token_ids);
+        match source {
+            PackedRouteSource::Hash => buffers.encode_hash(
+                ctx,
+                enc,
+                token_to_expert.ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(
+                        "packed compact hash route has no token-to-expert map".into(),
+                    )
+                })?,
+                n_tokens,
+                n_tokens,
+                generation,
+                routed_scale,
+            )?,
+            PackedRouteSource::Learned(bias) => buffers.encode_learned(
+                ctx,
+                enc,
+                bias,
+                n_tokens,
+                n_tokens,
+                generation,
+                routed_scale,
+            )?,
+        }
+        let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed compact route count")?;
+        let rows = i32_prefix(
+            &self.bucket_rows,
+            vec![route_count as u64],
+            "packed compact route rows",
+        )?;
+        let slots = i32_prefix(
+            &self.bucket_slots,
+            vec![route_count as u64],
+            "packed compact route slots",
+        )?;
+        buffers.encode_compact(
+            ctx,
+            enc,
+            &rows,
+            &slots,
+            &self.grouped_tiles,
+            &self.grouped_iq2_mma16_tiles,
+            n_tokens,
+            generation,
+        )
+    }
+
+    fn capture_gpu_compact_schedule(
+        &self,
+        n_tokens: usize,
+        generation: NonZeroU32,
+    ) -> Result<Vec<ExpertBucket>, DeepSeekV4MetalError> {
+        let header = host_read_i32(
+            &self.gpu_route.compact_header,
+            "packed compact route header",
+        )?;
+        let expected_completion = packed_route_compact_completion(generation.get(), n_tokens);
+        if header.len() != PACKED_COMPACT_ROUTE_HEADER_WIDTH
+            || header[0] != generation.get() as i32
+            || header[1] != PACKED_COMPACT_ROUTE_STATUS_READY
+            || header[2] != (n_tokens * MOE_TOP_K) as i32
+            || header[3] < 0
+            || header[3] as usize > MOE_EXPERT_COUNT
+            || header[4] < 0
+            || header[4] as usize > PACKED_GROUPED_IQ2_MMA16_MAX_TILES
+            || header[5] < 0
+            || header[5] as usize > PACKED_GROUPED_EXPERT_MAX_TILES
+            || header[6] as u32 != expected_completion
+            || header[7] != n_tokens as i32
+        {
+            return invalid(format!(
+                "packed compact route header {header:?} is invalid for generation {} and N={n_tokens}",
+                generation.get(),
+            ));
+        }
+        let counts = host_read_i32(&self.gpu_route.counts, "packed compact expert counts")?;
+        if counts.len() != MOE_EXPERT_COUNT {
+            return invalid("packed compact expert counts have invalid length");
+        }
+        let mut cursor = 0usize;
+        let mut schedule = Vec::with_capacity(header[3].max(0) as usize);
+        let mut tile16_count = 0usize;
+        let mut tile32_count = 0usize;
+        for (expert, count) in counts.into_iter().enumerate() {
+            let count = usize::try_from(count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!(
+                    "packed compact expert {expert} has negative count"
+                ))
+            })?;
+            if count > n_tokens {
+                return invalid(format!(
+                    "packed compact expert {expert} count {count} exceeds N={n_tokens}"
+                ));
+            }
+            if count != 0 {
+                schedule.push(ExpertBucket {
+                    expert,
+                    start: cursor,
+                    len: count,
+                });
+                tile16_count += count.div_ceil(PACKED_GROUPED_IQ2_MMA16_TILE_ROWS);
+                tile32_count += count.div_ceil(PACKED_GROUPED_EXPERT_TILE_ROWS);
+            }
+            cursor = cursor.checked_add(count).ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid("packed compact route count overflow".into())
+            })?;
+        }
+        if cursor != n_tokens * MOE_TOP_K
+            || schedule.len() != header[3] as usize
+            || tile16_count != header[4] as usize
+            || tile32_count != header[5] as usize
+        {
+            return invalid(format!(
+                "packed compact schedule has {cursor} routes, {} experts, {tile16_count} 16-row tiles, and {tile32_count} 32-row tiles",
+                schedule.len(),
+            ));
+        }
+        Ok(schedule)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5933,6 +6213,7 @@ impl PrefillMoeScratch {
         enc: &mut PackedPostRouteLayerEncoder<'_>,
         normalized_input: &MetalTensor,
         schedule: &[ExpertBucket],
+        gpu_compacted: bool,
         gate_bank: &MetalTensor,
         up_bank: &MetalTensor,
         down_bank: &MetalTensor,
@@ -5973,6 +6254,15 @@ impl PrefillMoeScratch {
             MOE_EXPERT_COUNT,
             "packed routed down bank",
         )?;
+        if gpu_compacted
+            && !(expert_policy.uses_iq2_mma16(n_tokens)
+                && gate_bank.dtype == GgmlType::IQ2_XS
+                && up_bank.dtype == GgmlType::IQ2_XS
+                && down_bank.dtype == GgmlType::IQ3_XXS
+                && packed_grouped_expert_kernels_supported(ctx))
+        {
+            return invalid("packed GPU compaction reached an unqualified expert layer");
+        }
         let expert_outputs = f32_prefix(
             &self.expert_outputs,
             vec![
@@ -5998,14 +6288,27 @@ impl PrefillMoeScratch {
                 vec![MOE_FFN_SIZE as u64, MOE_TOP_K as u64, n_tokens as u64],
                 "packed grouped expert inner",
             )?;
-            let grouped_plan =
-                PackedGroupedExpertPlan::new(n_tokens, schedule, Some(&self.grouped_tiles))?;
+            let grouped_plan = if gpu_compacted {
+                PackedGroupedExpertPlan::from_device(
+                    &self.grouped_tiles,
+                    PACKED_GROUPED_EXPERT_MAX_TILES,
+                )?
+            } else {
+                PackedGroupedExpertPlan::new(n_tokens, schedule, Some(&self.grouped_tiles))?
+            };
             let used_iq2_mma16 = if expert_policy.uses_iq2_mma16(n_tokens) {
-                let mma16_plan = PackedGroupedExpertPlan::new_iq2_mma16(
-                    n_tokens,
-                    schedule,
-                    Some(&self.grouped_iq2_mma16_tiles),
-                )?;
+                let mma16_plan = if gpu_compacted {
+                    PackedGroupedExpertPlan::from_device(
+                        &self.grouped_iq2_mma16_tiles,
+                        PACKED_GROUPED_IQ2_MMA16_MAX_TILES,
+                    )?
+                } else {
+                    PackedGroupedExpertPlan::new_iq2_mma16(
+                        n_tokens,
+                        schedule,
+                        Some(&self.grouped_iq2_mma16_tiles),
+                    )?
+                };
                 let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed BM16 IQ2 routes")?;
                 let rows = i32_prefix(
                     &self.bucket_rows,
@@ -7216,6 +7519,18 @@ impl DeepSeekV4Session {
             ));
         }
         let n_tokens = checked_token_count(token_ids.len())?;
+        let route_policy = if route_policy == PackedRoutePolicy::Cpu
+            && packed_gpu_route_compact_enabled()
+            && packed_q8_compressor_matrix_scope_qualified(
+                &ctx.device.name().to_string(),
+                self.residency.report().tensor_count,
+                self.residency.report().source_bytes,
+                token_ids.len(),
+            ) {
+            PackedRoutePolicy::GpuCompact
+        } else {
+            route_policy
+        };
         let q_b_projection =
             packed_q8_qb_projection_for_chunk(ctx, &self.residency, token_ids.len())?;
         let output_projection =
@@ -7373,6 +7688,15 @@ impl DeepSeekV4Session {
                 );
             }
         }
+        if route_policy == PackedRoutePolicy::GpuCompact {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: compact GPU routing active for qualified N={n_tokens} IQ2 layers; rollback=QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT=0"
+                );
+            }
+        }
         let last_position = start_position
             .checked_add(u32::try_from(n_tokens - 1).map_err(|_| {
                 DeepSeekV4MetalError::Invalid("packed token count exceeds u32".into())
@@ -7449,14 +7773,19 @@ impl DeepSeekV4Session {
 
         for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
             let pre_expert_started = trace_layers.then(std::time::Instant::now);
-            #[cfg(feature = "dsv4-diagnostics")]
-            let gpu_route_generation = if route_policy.uses_gpu() {
+            let compact_gpu_route = route_policy == PackedRoutePolicy::GpuCompact
+                && expert_policy.uses_iq2_mma16(n_tokens)
+                && self.layer_tensor(layer, "ffn_gate_exps.weight")?.dtype == GgmlType::IQ2_XS
+                && self.layer_tensor(layer, "ffn_up_exps.weight")?.dtype == GgmlType::IQ2_XS
+                && self.layer_tensor(layer, "ffn_down_exps.weight")?.dtype == GgmlType::IQ3_XXS
+                && packed_grouped_expert_kernels_supported(ctx);
+            let gpu_route_generation = if compact_gpu_route
+                || (route_policy.uses_gpu() && route_policy != PackedRoutePolicy::GpuCompact)
+            {
                 Some(self.prefill.moe.take_gpu_route_generation()?)
             } else {
                 None
             };
-            #[cfg(not(feature = "dsv4-diagnostics"))]
-            let _ = route_policy;
             let raw_cache = self.raw_cache_layer(layer)?;
             let rope = deepseek_v4_layer_rope(self.residency.config(), layer)?;
             let attention_kind = self.residency.config().attention_kinds[layer];
@@ -7934,24 +8263,40 @@ impl DeepSeekV4Session {
                     n_tokens,
                     rms_eps,
                 )?;
-                #[cfg(feature = "dsv4-diagnostics")]
                 if let Some(generation) = gpu_route_generation {
                     let source = if hash_map.is_some() {
                         PackedRouteSource::Hash
                     } else {
                         PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
                     };
-                    self.prefill.moe.encode_gpu_route_schedule(
-                        ctx,
-                        &encoder,
-                        &moe_views,
-                        source,
-                        token_view,
-                        hash_map,
-                        n_tokens,
-                        self.residency.config().expert_weights_scale,
-                        generation,
-                    )?;
+                    if compact_gpu_route {
+                        self.prefill.moe.encode_gpu_route_compact(
+                            ctx,
+                            &encoder,
+                            &moe_views,
+                            source,
+                            token_view,
+                            hash_map,
+                            n_tokens,
+                            self.residency.config().expert_weights_scale,
+                            generation,
+                        )?;
+                    } else {
+                        #[cfg(feature = "dsv4-diagnostics")]
+                        self.prefill.moe.encode_gpu_route_schedule(
+                            ctx,
+                            &encoder,
+                            &moe_views,
+                            source,
+                            token_view,
+                            hash_map,
+                            n_tokens,
+                            self.residency.config().expert_weights_scale,
+                            generation,
+                        )?;
+                        #[cfg(not(feature = "dsv4-diagnostics"))]
+                        return invalid("packed diagnostic GPU route is unavailable");
+                    }
                 }
                 Ok::<_, DeepSeekV4MetalError>((moe_views, captured_sparse))
             })();
@@ -8053,74 +8398,85 @@ impl DeepSeekV4Session {
             let pre_expert_post_seconds = pre_expert_seconds - pre_expert_command_seconds;
 
             let route_started = trace_layers.then(std::time::Instant::now);
-            #[cfg(feature = "dsv4-diagnostics")]
-            let schedule = if let Some(generation) = gpu_route_generation {
-                #[cfg(test)]
-                let cpu_route = {
+            let schedule = if compact_gpu_route {
+                self.prefill.moe.capture_gpu_compact_schedule(
+                    n_tokens,
+                    gpu_route_generation.expect("compact route generation"),
+                )?
+            } else {
+                #[cfg(feature = "dsv4-diagnostics")]
+                if let Some(generation) = gpu_route_generation {
+                    #[cfg(test)]
+                    let cpu_route = {
+                        let source = if layer < self.residency.config().hash_layer_count as usize {
+                            PackedRouteSource::Hash
+                        } else {
+                            PackedRouteSource::Learned(
+                                self.layer_tensor(layer, "exp_probs_b.bias")?,
+                            )
+                        };
+                        self.prefill.moe.audit_gpu_route_against_cpu(
+                            &moe_views,
+                            source,
+                            n_tokens,
+                            layer,
+                            start_position,
+                            generation,
+                        )?
+                    };
+                    let schedule = self
+                        .prefill
+                        .moe
+                        .capture_gpu_route_schedule(n_tokens, generation)?;
+                    #[cfg(test)]
+                    if route_policy == PackedRoutePolicy::GpuExperimentalCpuWeights {
+                        let (cpu_ids, cpu_weights) = cpu_route;
+                        let route_count = n_tokens * MOE_TOP_K;
+                        let mut gpu_ids = host_read_i32(
+                            &self.prefill.moe.expert_ids,
+                            "packed GPU hybrid route IDs",
+                        )?;
+                        gpu_ids.truncate(route_count);
+                        if gpu_ids != cpu_ids {
+                            return invalid(format!(
+                                "packed GPU hybrid layer {layer} route IDs differ from Rust"
+                            ));
+                        }
+                        let weights = f32_prefix(
+                            &self.prefill.moe.weights,
+                            vec![route_count as u64],
+                            "packed GPU hybrid route weights",
+                        )?;
+                        host_write_f32(&weights, &cpu_weights, "packed GPU hybrid route weights")?;
+                    }
+                    schedule
+                } else {
                     let source = if layer < self.residency.config().hash_layer_count as usize {
                         PackedRouteSource::Hash
                     } else {
                         PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
                     };
-                    self.prefill.moe.audit_gpu_route_against_cpu(
+                    self.prefill.moe.route(
                         &moe_views,
                         source,
                         n_tokens,
-                        layer,
-                        start_position,
-                        generation,
+                        self.residency.config().expert_weights_scale,
                     )?
-                };
-                let schedule = self
-                    .prefill
-                    .moe
-                    .capture_gpu_route_schedule(n_tokens, generation)?;
-                #[cfg(test)]
-                if route_policy == PackedRoutePolicy::GpuExperimentalCpuWeights {
-                    let (cpu_ids, cpu_weights) = cpu_route;
-                    let route_count = n_tokens * MOE_TOP_K;
-                    let mut gpu_ids =
-                        host_read_i32(&self.prefill.moe.expert_ids, "packed GPU hybrid route IDs")?;
-                    gpu_ids.truncate(route_count);
-                    if gpu_ids != cpu_ids {
-                        return invalid(format!(
-                            "packed GPU hybrid layer {layer} route IDs differ from Rust"
-                        ));
-                    }
-                    let weights = f32_prefix(
-                        &self.prefill.moe.weights,
-                        vec![route_count as u64],
-                        "packed GPU hybrid route weights",
-                    )?;
-                    host_write_f32(&weights, &cpu_weights, "packed GPU hybrid route weights")?;
                 }
-                schedule
-            } else {
-                let source = if layer < self.residency.config().hash_layer_count as usize {
-                    PackedRouteSource::Hash
-                } else {
-                    PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
-                };
-                self.prefill.moe.route(
-                    &moe_views,
-                    source,
-                    n_tokens,
-                    self.residency.config().expert_weights_scale,
-                )?
-            };
-            #[cfg(not(feature = "dsv4-diagnostics"))]
-            let schedule = {
-                let source = if layer < self.residency.config().hash_layer_count as usize {
-                    PackedRouteSource::Hash
-                } else {
-                    PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
-                };
-                self.prefill.moe.route(
-                    &moe_views,
-                    source,
-                    n_tokens,
-                    self.residency.config().expert_weights_scale,
-                )?
+                #[cfg(not(feature = "dsv4-diagnostics"))]
+                {
+                    let source = if layer < self.residency.config().hash_layer_count as usize {
+                        PackedRouteSource::Hash
+                    } else {
+                        PackedRouteSource::Learned(self.layer_tensor(layer, "exp_probs_b.bias")?)
+                    };
+                    self.prefill.moe.route(
+                        &moe_views,
+                        source,
+                        n_tokens,
+                        self.residency.config().expert_weights_scale,
+                    )?
+                }
             };
             let route_seconds = route_started
                 .as_ref()
@@ -8208,6 +8564,7 @@ impl DeepSeekV4Session {
                     &mut encoder,
                     &moe_views.normalized_input,
                     &schedule,
+                    compact_gpu_route,
                     routed_gate,
                     routed_up,
                     routed_down,
@@ -12791,6 +13148,11 @@ mod tests {
         schedule_generations: MetalTensor,
         aggregate: MetalTensor,
         signature: MetalTensor,
+        compact_header: MetalTensor,
+        compact_rows: MetalTensor,
+        compact_slots: MetalTensor,
+        compact_tiles32: MetalTensor,
+        compact_tiles16: MetalTensor,
     }
 
     struct PackedRouteCapture {
@@ -12804,6 +13166,16 @@ mod tests {
         schedule_generations: Vec<i32>,
         aggregate: Vec<i32>,
         signature: Vec<i32>,
+    }
+
+    struct PackedRouteCompactCapture {
+        header: Vec<i32>,
+        expert_ids: Vec<i32>,
+        counts: Vec<i32>,
+        rows: Vec<i32>,
+        slots: Vec<i32>,
+        tiles32: Vec<i32>,
+        tiles16: Vec<i32>,
     }
 
     impl PackedRouteMicroproofScratch {
@@ -12838,6 +13210,20 @@ mod tests {
                 schedule_generations: MetalTensor::zeros_i32(ctx, vec![MOE_EXPERT_COUNT as u64])?,
                 aggregate: MetalTensor::zeros_i32(ctx, vec![PACKED_ROUTE_AGGREGATE_WIDTH as u64])?,
                 signature: MetalTensor::zeros_i32(ctx, vec![PACKED_ROUTE_AGGREGATE_WIDTH as u64])?,
+                compact_header: MetalTensor::zeros_i32(
+                    ctx,
+                    vec![PACKED_COMPACT_ROUTE_HEADER_WIDTH as u64],
+                )?,
+                compact_rows: MetalTensor::zeros_i32(ctx, vec![n * MOE_TOP_K as u64])?,
+                compact_slots: MetalTensor::zeros_i32(ctx, vec![n * MOE_TOP_K as u64])?,
+                compact_tiles32: MetalTensor::zeros_i32(
+                    ctx,
+                    vec![PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS as u64],
+                )?,
+                compact_tiles16: MetalTensor::zeros_i32(
+                    ctx,
+                    vec![PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS as u64],
+                )?,
             })
         }
 
@@ -12873,6 +13259,7 @@ mod tests {
                 schedule_generations: &self.schedule_generations,
                 aggregate: &self.aggregate,
                 signature: &self.signature,
+                compact_header: &self.compact_header,
             }
         }
 
@@ -12950,6 +13337,34 @@ mod tests {
                 .encode_signature(ctx, enc, n_tokens, generation)
         }
 
+        fn encode_compact(
+            &self,
+            ctx: &MetalContext,
+            enc: &KernelEncoder,
+            n_tokens: usize,
+            generation: NonZeroU32,
+        ) -> Result<(), DeepSeekV4MetalError> {
+            let route_count = n_tokens * MOE_TOP_K;
+            self.buffers().encode_compact(
+                ctx,
+                enc,
+                &i32_prefix(
+                    &self.compact_rows,
+                    vec![route_count as u64],
+                    "packed compact proof rows",
+                )?,
+                &i32_prefix(
+                    &self.compact_slots,
+                    vec![route_count as u64],
+                    "packed compact proof slots",
+                )?,
+                &self.compact_tiles32,
+                &self.compact_tiles16,
+                n_tokens,
+                generation,
+            )
+        }
+
         #[allow(clippy::too_many_arguments)]
         fn encode_pipeline(
             &self,
@@ -13011,6 +13426,29 @@ mod tests {
                 .unwrap(),
                 aggregate: host_read_i32(&self.aggregate, "packed route aggregate").unwrap(),
                 signature: host_read_i32(&self.signature, "packed route signature").unwrap(),
+            }
+        }
+
+        fn capture_compact(&self, n_tokens: usize) -> PackedRouteCompactCapture {
+            let route_count = n_tokens * MOE_TOP_K;
+            let mut expert_ids =
+                host_read_i32(&self.expert_ids, "packed compact proof expert IDs").unwrap();
+            let mut rows = host_read_i32(&self.compact_rows, "packed compact proof rows").unwrap();
+            let mut slots =
+                host_read_i32(&self.compact_slots, "packed compact proof slots").unwrap();
+            rows.truncate(route_count);
+            slots.truncate(route_count);
+            expert_ids.truncate(route_count);
+            PackedRouteCompactCapture {
+                header: host_read_i32(&self.compact_header, "packed compact proof header").unwrap(),
+                expert_ids,
+                counts: host_read_i32(&self.counts, "packed compact proof counts").unwrap(),
+                rows,
+                slots,
+                tiles32: host_read_i32(&self.compact_tiles32, "packed compact proof 32-row tiles")
+                    .unwrap(),
+                tiles16: host_read_i32(&self.compact_tiles16, "packed compact proof 16-row tiles")
+                    .unwrap(),
             }
         }
     }
@@ -13126,6 +13564,46 @@ mod tests {
             self.scratch.capture(n_tokens, generation.get())
         }
 
+        fn run_compact(
+            &self,
+            ctx: &MetalContext,
+            source: PackedRouteMicroproofSource,
+            n_tokens: usize,
+        ) -> (u32, PackedRouteCompactCapture) {
+            let generation = self.generations.take().unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            match source {
+                PackedRouteMicroproofSource::Learned => self
+                    .scratch
+                    .encode_learned(ctx, &encoder, &self.bias, n_tokens, n_tokens, generation)
+                    .unwrap(),
+                PackedRouteMicroproofSource::Hash => self
+                    .scratch
+                    .encode_hash(
+                        ctx,
+                        &encoder,
+                        &self.token_to_expert,
+                        n_tokens,
+                        n_tokens,
+                        generation,
+                    )
+                    .unwrap(),
+            }
+            self.scratch
+                .encode_compact(ctx, &encoder, n_tokens, generation)
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "packed compact route command failed: {:?}",
+                command.error()
+            );
+            (generation.get(), self.scratch.capture_compact(n_tokens))
+        }
+
         fn expected_routes(
             &self,
             source: PackedRouteMicroproofSource,
@@ -13182,6 +13660,88 @@ mod tests {
         (counts, slots)
     }
 
+    fn expected_compact_schedule(
+        expert_ids: &[i32],
+        n_tokens: usize,
+    ) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<ExpertBucket>) {
+        let (counts, dense_slots) = expected_packed_schedule(expert_ids, n_tokens);
+        let mut rows = Vec::with_capacity(n_tokens * MOE_TOP_K);
+        let mut slots = Vec::with_capacity(n_tokens * MOE_TOP_K);
+        let mut buckets = Vec::new();
+        for (expert, &count) in counts.iter().enumerate() {
+            let count = count as usize;
+            if count == 0 {
+                continue;
+            }
+            let start = slots.len();
+            for &slot in &dense_slots[expert * n_tokens..expert * n_tokens + count] {
+                rows.push(slot / MOE_TOP_K as i32);
+                slots.push(slot);
+            }
+            buckets.push(ExpertBucket {
+                expert,
+                start,
+                len: count,
+            });
+        }
+        (counts, rows, slots, buckets)
+    }
+
+    fn padded_tile_words(tiles: &[PackedGroupedExpertTile], descriptor_words: usize) -> Vec<i32> {
+        let mut words = bytemuck::cast_slice::<PackedGroupedExpertTile, i32>(tiles).to_vec();
+        words.resize(descriptor_words, 0);
+        words
+    }
+
+    fn assert_packed_compact_capture(
+        fixture: &PackedRouteFixture,
+        source: PackedRouteMicroproofSource,
+        n_tokens: usize,
+        generation: u32,
+        capture: &PackedRouteCompactCapture,
+    ) {
+        let (expected_ids, _) = fixture.expected_routes(source, n_tokens);
+        for token in 0..n_tokens {
+            let start = token * MOE_TOP_K;
+            let mut actual = capture.expert_ids[start..start + MOE_TOP_K].to_vec();
+            let mut expected = expected_ids[start..start + MOE_TOP_K].to_vec();
+            actual.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(
+                actual, expected,
+                "packed {source:?} route set at token {token}"
+            );
+        }
+        let (counts, rows, slots, buckets) =
+            expected_compact_schedule(&capture.expert_ids, n_tokens);
+        let tiles32 = packed_grouped_expert_tiles(n_tokens, &buckets).unwrap();
+        let tiles16 = packed_grouped_iq2_mma16_tiles(n_tokens, &buckets).unwrap();
+        assert_eq!(capture.counts, counts);
+        assert_eq!(capture.rows, rows);
+        assert_eq!(capture.slots, slots);
+        assert_eq!(
+            capture.tiles32,
+            padded_tile_words(&tiles32, PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS)
+        );
+        assert_eq!(
+            capture.tiles16,
+            padded_tile_words(&tiles16, PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS)
+        );
+        assert_eq!(
+            capture.header,
+            vec![
+                generation as i32,
+                PACKED_COMPACT_ROUTE_STATUS_READY,
+                (n_tokens * MOE_TOP_K) as i32,
+                buckets.len() as i32,
+                tiles16.len() as i32,
+                tiles32.len() as i32,
+                packed_route_compact_completion(generation, n_tokens) as i32,
+                n_tokens as i32,
+            ]
+        );
+    }
+
     fn write_raw_f32(tensor: &MetalTensor, values: &[f32]) {
         assert_eq!(tensor.dtype, GgmlType::F32);
         assert!(tensor.is_writable());
@@ -13213,9 +13773,12 @@ mod tests {
             .zip(&expected_ids)
             .position(|(actual, expected)| actual != expected)
         {
+            let token = index / MOE_TOP_K;
+            let start = token * MOE_TOP_K;
             panic!(
-                "packed {source:?} route ID differs at N={n_tokens} slot {index}: {} vs {}",
-                capture.expert_ids[index], expected_ids[index]
+                "packed {source:?} route ID differs at N={n_tokens} token {token}: actual={:?} expected={:?}",
+                &capture.expert_ids[start..start + MOE_TOP_K],
+                &expected_ids[start..start + MOE_TOP_K],
             );
         }
         for (index, (&actual, &expected)) in
@@ -13270,6 +13833,82 @@ mod tests {
         );
     }
 
+    fn assert_packed_route_set_capture(
+        fixture: &PackedRouteFixture,
+        source: PackedRouteMicroproofSource,
+        n_tokens: usize,
+        capture: &PackedRouteCapture,
+    ) {
+        let (expected_ids, expected_weights) = fixture.expected_routes(source, n_tokens);
+        for token in 0..n_tokens {
+            let start = token * MOE_TOP_K;
+            let actual_ids = &capture.expert_ids[start..start + MOE_TOP_K];
+            let expected_ids = &expected_ids[start..start + MOE_TOP_K];
+            let mut actual_set = actual_ids.to_vec();
+            let mut expected_set = expected_ids.to_vec();
+            actual_set.sort_unstable();
+            expected_set.sort_unstable();
+            assert_eq!(
+                actual_set, expected_set,
+                "packed {source:?} route set at N={n_tokens} token {token}"
+            );
+            for (slot, &expert) in actual_ids.iter().enumerate() {
+                let expected_slot = expected_ids
+                    .iter()
+                    .position(|&expected| expected == expert)
+                    .unwrap();
+                let actual = capture.weights[start + slot];
+                let expected = expected_weights[start + expected_slot];
+                let allowed = 1e-4 * expected.abs().max(1.0);
+                assert!(
+                    (actual - expected).abs() <= allowed,
+                    "packed route weight for expert {expert}: {actual} vs {expected}, allowed {allowed}"
+                );
+            }
+        }
+        let (expected_counts, expected_slots) =
+            expected_packed_schedule(&capture.expert_ids, n_tokens);
+        assert_eq!(capture.counts, expected_counts);
+        assert_eq!(capture.slot_ids, expected_slots);
+        assert_eq!(
+            capture.route_generations,
+            vec![capture.generation as i32; n_tokens]
+        );
+        assert_eq!(
+            capture.route_status,
+            vec![DEEPSEEK_V4_ROUTE_STATUS_READY; n_tokens]
+        );
+        assert_eq!(
+            capture.schedule_generations,
+            vec![capture.generation as i32; MOE_EXPERT_COUNT]
+        );
+        assert_eq!(
+            capture.aggregate,
+            vec![
+                capture.generation as i32,
+                DEEPSEEK_V4_ROUTE_STATUS_READY,
+                (n_tokens * MOE_TOP_K) as i32,
+                packed_route_completion(capture.generation, n_tokens) as i32,
+            ]
+        );
+        assert_eq!(
+            capture.signature,
+            vec![
+                capture.generation as i32,
+                DEEPSEEK_V4_ROUTE_STATUS_READY,
+                packed_route_signature_hash(
+                    &capture.expert_ids,
+                    &capture.weights,
+                    &capture.counts,
+                    &capture.slot_ids,
+                    n_tokens,
+                )
+                .unwrap() as i32,
+                packed_route_signature_completion(capture.generation, n_tokens) as i32,
+            ]
+        );
+    }
+
     fn assert_packed_route_failure(
         capture: &PackedRouteCapture,
         n_tokens: usize,
@@ -13297,20 +13936,141 @@ mod tests {
     }
 
     #[test]
-    fn packed_gpu_routes_and_schedules_match_cpu_for_every_qualified_width() {
+    fn packed_gpu_routes_and_schedules_match_cpu_at_representative_widths() {
         let Ok(ctx) = MetalContext::new() else {
             return;
         };
         let fixture = PackedRouteFixture::new(&ctx);
-        for n_tokens in 1..=PACKED_GPU_ROUTE_MAX_TOKENS {
+        for n_tokens in [1, 2, 7, 16, 31, 32, 127, 128, 129, 511, 512, 2_047, 2_048] {
             for source in [
                 PackedRouteMicroproofSource::Learned,
                 PackedRouteMicroproofSource::Hash,
             ] {
                 let capture = fixture.run(&ctx, source, n_tokens, n_tokens, MOE_EXPERT_COUNT);
-                assert_packed_route_capture(&fixture, source, n_tokens, &capture);
+                if n_tokens <= 128 || matches!(source, PackedRouteMicroproofSource::Hash) {
+                    assert_packed_route_capture(&fixture, source, n_tokens, &capture);
+                } else {
+                    assert_packed_route_set_capture(&fixture, source, n_tokens, &capture);
+                }
             }
         }
+    }
+
+    #[test]
+    fn packed_gpu_route_compaction_matches_cpu_at_capacity_boundaries() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let fixture = PackedRouteFixture::new(&ctx);
+        for n_tokens in [1, 127, 128, 129, 2_047, 2_048] {
+            for source in [
+                PackedRouteMicroproofSource::Learned,
+                PackedRouteMicroproofSource::Hash,
+            ] {
+                let (generation, capture) = fixture.run_compact(&ctx, source, n_tokens);
+                assert_packed_compact_capture(&fixture, source, n_tokens, generation, &capture);
+            }
+        }
+    }
+
+    #[test]
+    fn packed_gpu_route_compaction_rejects_invalid_late_tokens() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let fixture = PackedRouteFixture::new(&ctx);
+        let n_tokens = 512;
+        let (valid_generation, valid_capture) =
+            fixture.run_compact(&ctx, PackedRouteMicroproofSource::Learned, n_tokens);
+        assert_packed_compact_capture(
+            &fixture,
+            PackedRouteMicroproofSource::Learned,
+            n_tokens,
+            valid_generation,
+            &valid_capture,
+        );
+        let (valid_ids, valid_weights) =
+            fixture.expected_routes(PackedRouteMicroproofSource::Learned, n_tokens);
+        let run = |ids: &[i32], weights: &[f32], generations: &[i32], statuses: &[i32]| {
+            let generation = fixture.generations.take().unwrap();
+            let mut full_ids = vec![-1; PACKED_GPU_ROUTE_MAX_TOKENS * MOE_TOP_K];
+            full_ids[..ids.len()].copy_from_slice(ids);
+            host_write_i32(
+                &fixture.scratch.expert_ids,
+                &full_ids,
+                "compact invalid IDs",
+            )
+            .unwrap();
+            let mut full_weights = vec![0.0; PACKED_GPU_ROUTE_MAX_TOKENS * MOE_TOP_K];
+            full_weights[..weights.len()].copy_from_slice(weights);
+            write_raw_f32(&fixture.scratch.weights, &full_weights);
+            let mut full_generations = vec![0; PACKED_GPU_ROUTE_MAX_TOKENS];
+            full_generations[..generations.len()].copy_from_slice(generations);
+            host_write_i32(
+                &fixture.scratch.route_generations,
+                &full_generations,
+                "compact invalid generations",
+            )
+            .unwrap();
+            let mut full_statuses = vec![0; PACKED_GPU_ROUTE_MAX_TOKENS];
+            full_statuses[..statuses.len()].copy_from_slice(statuses);
+            host_write_i32(
+                &fixture.scratch.route_status,
+                &full_statuses,
+                "compact invalid statuses",
+            )
+            .unwrap();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            fixture
+                .scratch
+                .encode_compact(&ctx, &encoder, n_tokens, generation)
+                .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            let header =
+                host_read_i32(&fixture.scratch.compact_header, "compact invalid header").unwrap();
+            assert_eq!(header[0], generation.get() as i32);
+            assert_eq!(header[1], PACKED_COMPACT_ROUTE_STATUS_INVALID_ROUTE);
+            assert_eq!(
+                header[6],
+                packed_route_compact_completion(generation.get(), n_tokens) as i32
+            );
+            assert_eq!(header[7], n_tokens as i32);
+        };
+
+        let ready = vec![DEEPSEEK_V4_ROUTE_STATUS_READY; n_tokens];
+        let next_generation = fixture.generations.next.get() as i32;
+        let valid_generations = vec![next_generation; n_tokens];
+
+        let mut stale_generations = valid_generations.clone();
+        stale_generations[256] = 0;
+        run(&valid_ids, &valid_weights, &stale_generations, &ready);
+
+        let next_generation = fixture.generations.next.get() as i32;
+        let valid_generations = vec![next_generation; n_tokens];
+        let mut failed_status = ready.clone();
+        failed_status[300] = DEEPSEEK_V4_ROUTE_STATUS_INVALID_TOKEN;
+        run(
+            &valid_ids,
+            &valid_weights,
+            &valid_generations,
+            &failed_status,
+        );
+
+        let next_generation = fixture.generations.next.get() as i32;
+        let valid_generations = vec![next_generation; n_tokens];
+        let mut duplicate_ids = valid_ids.clone();
+        duplicate_ids[400 * MOE_TOP_K + 1] = duplicate_ids[400 * MOE_TOP_K];
+        run(&duplicate_ids, &valid_weights, &valid_generations, &ready);
+
+        let next_generation = fixture.generations.next.get() as i32;
+        let valid_generations = vec![next_generation; n_tokens];
+        let mut nonfinite_weights = valid_weights;
+        nonfinite_weights[511 * MOE_TOP_K + 5] = f32::NAN;
+        run(&valid_ids, &nonfinite_weights, &valid_generations, &ready);
     }
 
     #[cfg(feature = "dsv4-diagnostics")]
@@ -13612,7 +14372,7 @@ mod tests {
             };
             production
                 .moe
-                .encode_gpu_route_schedule(
+                .encode_gpu_route_compact(
                     &ctx,
                     &encoder,
                     &views,
@@ -13631,12 +14391,12 @@ mod tests {
             assert!(command.error().is_none());
             let schedule = production
                 .moe
-                .capture_gpu_route_schedule(n_tokens, generation)
+                .capture_gpu_compact_schedule(n_tokens, generation)
                 .unwrap();
 
             let (expected_ids, expected_weights) = fixture.expected_routes(source_kind, n_tokens);
-            let (expected_counts, expected_slots) =
-                expected_packed_schedule(&expected_ids, n_tokens);
+            let (_, compact_rows, compact_slots, expected_buckets) =
+                expected_compact_schedule(&expected_ids, n_tokens);
             let mut actual_ids =
                 host_read_i32(&production.moe.expert_ids, "production packed route IDs").unwrap();
             let mut actual_weights =
@@ -13648,26 +14408,11 @@ mod tests {
                 assert!((actual - expected).abs() <= 1e-4 * expected.abs().max(1.0));
             }
 
-            let mut expected_buckets = Vec::new();
-            let mut compact_slots = Vec::with_capacity(n_tokens * MOE_TOP_K);
-            let mut compact_rows = Vec::with_capacity(n_tokens * MOE_TOP_K);
-            for expert in 0..MOE_EXPERT_COUNT {
-                let count = expected_counts[expert] as usize;
-                if count == 0 {
-                    continue;
-                }
-                let start = compact_slots.len();
-                for &slot in &expected_slots[expert * n_tokens..expert * n_tokens + count] {
-                    compact_slots.push(slot);
-                    compact_rows.push(slot / MOE_TOP_K as i32);
-                }
-                expected_buckets.push((expert, start, count));
-            }
             assert_eq!(schedule.len(), expected_buckets.len());
-            for (actual, &(expert, start, len)) in schedule.iter().zip(&expected_buckets) {
+            for (actual, expected) in schedule.iter().zip(&expected_buckets) {
                 assert_eq!(
                     (actual.expert, actual.start, actual.len),
-                    (expert, start, len)
+                    (expected.expert, expected.start, expected.len)
                 );
             }
             let mut actual_rows = host_read_i32(
@@ -13684,6 +14429,26 @@ mod tests {
             actual_slots.truncate(n_tokens * MOE_TOP_K);
             assert_eq!(actual_rows, compact_rows);
             assert_eq!(actual_slots, compact_slots);
+            let expected_tiles32 =
+                packed_grouped_expert_tiles(n_tokens, &expected_buckets).unwrap();
+            let expected_tiles16 =
+                packed_grouped_iq2_mma16_tiles(n_tokens, &expected_buckets).unwrap();
+            assert_eq!(
+                host_read_i32(
+                    &production.moe.grouped_tiles,
+                    "production packed compact 32-row tiles",
+                )
+                .unwrap(),
+                padded_tile_words(&expected_tiles32, PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS,)
+            );
+            assert_eq!(
+                host_read_i32(
+                    &production.moe.grouped_iq2_mma16_tiles,
+                    "production packed compact 16-row tiles",
+                )
+                .unwrap(),
+                padded_tile_words(&expected_tiles16, PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS,)
+            );
         }
 
         production.moe.gpu_route.next_generation.set(u32::MAX);
@@ -13749,6 +14514,34 @@ mod tests {
             n_tokens,
             PACKED_ROUTE_STALE_ROUTE,
             (n_tokens * MOE_TOP_K) as i32,
+        );
+
+        let wide_tokens = 512;
+        let valid_hash_route = fixture.run(
+            &ctx,
+            PackedRouteMicroproofSource::Hash,
+            wide_tokens,
+            wide_tokens,
+            MOE_EXPERT_COUNT,
+        );
+        assert_packed_route_capture(
+            &fixture,
+            PackedRouteMicroproofSource::Hash,
+            wide_tokens,
+            &valid_hash_route,
+        );
+        let missing_hash_route = fixture.run(
+            &ctx,
+            PackedRouteMicroproofSource::Hash,
+            wide_tokens,
+            257,
+            MOE_EXPERT_COUNT,
+        );
+        assert_packed_route_failure(
+            &missing_hash_route,
+            wide_tokens,
+            PACKED_ROUTE_STALE_ROUTE,
+            (wide_tokens * MOE_TOP_K) as i32,
         );
 
         let missing_schedule = fixture.run(

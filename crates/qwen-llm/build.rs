@@ -15,8 +15,10 @@ fn main() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("could not resolve workspace root from {manifest_dir:?}"))?
         .to_path_buf();
     let kernels_dir = workspace_root.join("kernels");
+    let watched_kernels_dir = PathBuf::from("../../kernels");
 
-    println!("cargo:rerun-if-changed={}", kernels_dir.display());
+    // Keep the fingerprint portable when worktrees share CARGO_TARGET_DIR.
+    println!("cargo:rerun-if-changed={}", watched_kernels_dir.display());
     println!("cargo:rerun-if-changed=build.rs");
 
     if !kernels_dir.exists() {
@@ -33,7 +35,12 @@ fn main() -> anyhow::Result<()> {
         .collect();
     metal_files.sort();
     for path in &metal_files {
-        println!("cargo:rerun-if-changed={}", path.display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            watched_kernels_dir
+                .join(path.file_name().unwrap())
+                .display()
+        );
     }
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);

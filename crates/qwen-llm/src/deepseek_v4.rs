@@ -500,7 +500,15 @@ impl DeepSeekV4Config {
         exact!(tokenizer_pre, "joyai-llm");
         exact!(bos_token_id, Some(0));
         exact!(eos_token_id, Some(1));
-        exact!(padding_token_id, Some(2));
+        // AtomicChat's AD-* line uses Some(1) (same as eos_token_id); Unsloth's UD-* uses Some(2).
+        // padding_token_id is not used at inference time, so accept either.
+        if !matches!(self.padding_token_id, Some(1) | Some(2)) {
+            return Err(DeepSeekV4Error::ProfileMismatch {
+                field: "padding_token_id",
+                expected: "Some(1) or Some(2)".into(),
+                actual: format!("{:?}", self.padding_token_id),
+            });
+        }
         exact!(tokenizer_token_type_count, 129_280);
         exact!(tokenizer_merge_count, 127_741);
         exact!(add_bos_token, false);

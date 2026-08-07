@@ -7693,7 +7693,7 @@ impl DeepSeekV4Session {
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
-                    "deepseek_v4: compact GPU routing active for qualified N={n_tokens} IQ2 layers; rollback=QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT=0"
+                    "deepseek_v4: compact GPU routing active for qualified N={n_tokens} IQ2 layers; unprofiled execution merges router and experts; rollback=QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT=0"
                 );
             }
         }
@@ -7779,6 +7779,15 @@ impl DeepSeekV4Session {
                 && self.layer_tensor(layer, "ffn_up_exps.weight")?.dtype == GgmlType::IQ2_XS
                 && self.layer_tensor(layer, "ffn_down_exps.weight")?.dtype == GgmlType::IQ3_XXS
                 && packed_grouped_expert_kernels_supported(ctx);
+            #[cfg(feature = "dsv4-diagnostics")]
+            let merge_gpu_route = compact_gpu_route
+                && !trace_layers
+                && stage_recorder.is_none()
+                && post_route_stage_recorder.is_none()
+                && !self.fp4_shadow_diagnostics.is_capturing()
+                && !self.fp4_selection_mode.is_counterfactual();
+            #[cfg(not(feature = "dsv4-diagnostics"))]
+            let merge_gpu_route = compact_gpu_route;
             let gpu_route_generation = if compact_gpu_route
                 || (route_policy.uses_gpu() && route_policy != PackedRoutePolicy::GpuCompact)
             {
@@ -8307,98 +8316,61 @@ impl DeepSeekV4Session {
             let pre_expert_encode_seconds = pre_expert_started
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
-            let pre_expert_wait_started = trace_layers.then(std::time::Instant::now);
-            command.commit();
-            command.waitUntilCompleted();
-            let pre_expert_wait_seconds = pre_expert_wait_started
-                .as_ref()
-                .map_or(0.0, |started| started.elapsed().as_secs_f64());
-            let pre_expert_command_seconds = pre_expert_started
-                .as_ref()
-                .map_or(0.0, |started| started.elapsed().as_secs_f64());
             #[cfg(feature = "dsv4-diagnostics")]
             let stage_profile_active = stage_recorder.is_some();
             #[cfg(not(feature = "dsv4-diagnostics"))]
             let stage_profile_active = false;
-            let pre_expert_gpu_seconds = if trace_layers || stage_profile_active {
-                command.GPUEndTime() - command.GPUStartTime()
+            let (
+                pre_expert_wait_seconds,
+                pre_expert_command_seconds,
+                pre_expert_gpu_seconds,
+                pre_expert_wait_residual_seconds,
+            ) = if merge_gpu_route {
+                (0.0, 0.0, 0.0, 0.0)
             } else {
-                0.0
-            };
-            let pre_expert_wait_residual_seconds = pre_expert_wait_seconds - pre_expert_gpu_seconds;
-            if let Some(error) = command.error() {
-                return invalid(format!(
-                    "packed layer {layer} router command failed: {error:?}"
-                ));
-            }
-            #[cfg(feature = "dsv4-diagnostics")]
-            if let Some(recorder) = stage_recorder.as_deref_mut() {
-                recorder.record_command_gpu_seconds(layer, pre_expert_gpu_seconds)?;
-            }
-            if let Some(query_offset) = sparse_query_offset
-                && {
-                    #[cfg(feature = "dsv4-diagnostics")]
-                    {
-                        fp4_score_plan.runs_f16()
-                    }
-                    #[cfg(not(feature = "dsv4-diagnostics"))]
-                    {
-                        true
-                    }
+                let wait_started = trace_layers.then(std::time::Instant::now);
+                command.commit();
+                command.waitUntilCompleted();
+                let wait_seconds = wait_started
+                    .as_ref()
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64());
+                let command_seconds = pre_expert_started
+                    .as_ref()
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64());
+                let gpu_seconds = if trace_layers || stage_profile_active {
+                    command.GPUEndTime() - command.GPUStartTime()
+                } else {
+                    0.0
+                };
+                if let Some(error) = command.error() {
+                    return invalid(format!(
+                        "packed layer {layer} router command failed: {error:?}"
+                    ));
                 }
-            {
-                self.prefill
-                    .attention
-                    .sparse_csa
-                    .validate_completed(n_tokens - query_offset)?;
-            }
-            #[cfg(feature = "dsv4-diagnostics")]
-            if self.fp4_shadow_diagnostics.is_capturing()
-                && attention_kind == AttentionKind::CompressedSparse
-            {
-                let sparse = captured_sparse.as_ref().ok_or_else(|| {
-                    DeepSeekV4MetalError::Invalid(format!(
-                        "FP4 packed shadow layer {layer} did not retain sparse views"
-                    ))
-                })?;
-                let rows = self
-                    .compressor_frontiers
-                    .csa_rows(layer, last_position)?
-                    .ok_or_else(|| {
-                        DeepSeekV4MetalError::Invalid(format!(
-                            "FP4 packed shadow layer {layer} has no published rows"
-                        ))
-                    })?;
-                let report = self.fp4_shadow.capture_layer(
-                    layer,
-                    last_position,
-                    rows,
-                    &sparse.scores,
-                    &sparse.selected_mask,
-                    &sparse.cache_order_ids,
-                    &sparse.selected_counts,
-                    &sparse.status,
-                )?;
-                self.fp4_shadow_diagnostics.capture_layer(report)?;
-            }
-            #[cfg(feature = "dsv4-diagnostics")]
-            if fp4_score_plan.consumes_fp4() && sparse_query_offset.is_some() {
-                self.fp4_shadow.validate_completed()?;
-                self.fp4_shadow.record_counterfactual_selection(
-                    &mut self.fp4_counterfactual_trace,
-                    DeepSeekV4Fp4ShadowExecution::Packed,
-                    DeepSeekV4Fp4SelectionSource::Fp4,
-                    last_position,
-                    layer,
-                )?;
-            }
-            let pre_expert_seconds = pre_expert_started
-                .as_ref()
-                .map_or(0.0, |started| started.elapsed().as_secs_f64());
+                #[cfg(feature = "dsv4-diagnostics")]
+                if let Some(recorder) = stage_recorder.as_deref_mut() {
+                    recorder.record_command_gpu_seconds(layer, gpu_seconds)?;
+                }
+                (
+                    wait_seconds,
+                    command_seconds,
+                    gpu_seconds,
+                    wait_seconds - gpu_seconds,
+                )
+            };
+            let pre_expert_seconds = if merge_gpu_route {
+                0.0
+            } else {
+                pre_expert_started
+                    .as_ref()
+                    .map_or(0.0, |started| started.elapsed().as_secs_f64())
+            };
             let pre_expert_post_seconds = pre_expert_seconds - pre_expert_command_seconds;
 
             let route_started = trace_layers.then(std::time::Instant::now);
-            let schedule = if compact_gpu_route {
+            let mut schedule = if merge_gpu_route {
+                Vec::new()
+            } else if compact_gpu_route {
                 self.prefill.moe.capture_gpu_compact_schedule(
                     n_tokens,
                     gpu_route_generation.expect("compact route generation"),
@@ -8540,14 +8512,19 @@ impl DeepSeekV4Session {
                 })?;
             }
 
-            let command = ctx.queue.commandBuffer().ok_or_else(|| {
-                DeepSeekV4MetalError::Invalid(format!(
-                    "failed to allocate packed layer {layer} expert command buffer"
-                ))
-            })?;
+            let separate_expert_command = if merge_gpu_route {
+                None
+            } else {
+                Some(ctx.queue.commandBuffer().ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "failed to allocate packed layer {layer} expert command buffer"
+                    ))
+                })?)
+            };
+            let expert_command = separate_expert_command.as_ref().unwrap_or(&command);
             #[cfg(feature = "dsv4-diagnostics")]
             let mut encoder = PackedPostRouteLayerEncoder::begin(
-                &command,
+                expert_command,
                 layer,
                 expert_policy.uses_iq2_mma16(n_tokens)
                     && routed_gate.dtype == GgmlType::IQ2_XS
@@ -8557,7 +8534,7 @@ impl DeepSeekV4Session {
                 post_route_stage_recorder.as_deref_mut(),
             )?;
             #[cfg(not(feature = "dsv4-diagnostics"))]
-            let mut encoder = PackedPostRouteLayerEncoder::begin(&command)?;
+            let mut encoder = PackedPostRouteLayerEncoder::begin(expert_command)?;
             let expert_result = (|| {
                 let moe_output = self.prefill.moe.encode_experts(
                     ctx,
@@ -8633,22 +8610,83 @@ impl DeepSeekV4Session {
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
             let post_route_wait_started = trace_layers.then(std::time::Instant::now);
-            command.commit();
-            command.waitUntilCompleted();
+            expert_command.commit();
+            expert_command.waitUntilCompleted();
             let post_route_wait_seconds = post_route_wait_started
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
-            if let Some(error) = command.error() {
-                return invalid(format!(
-                    "packed layer {layer} expert command failed: {error:?}"
-                ));
+            if let Some(error) = expert_command.error() {
+                return invalid(format!("packed layer {layer} command failed: {error:?}"));
+            }
+            if merge_gpu_route {
+                schedule = self.prefill.moe.capture_gpu_compact_schedule(
+                    n_tokens,
+                    gpu_route_generation.expect("compact route generation"),
+                )?;
+            }
+            if let Some(query_offset) = sparse_query_offset
+                && {
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    {
+                        fp4_score_plan.runs_f16()
+                    }
+                    #[cfg(not(feature = "dsv4-diagnostics"))]
+                    {
+                        true
+                    }
+                }
+            {
+                self.prefill
+                    .attention
+                    .sparse_csa
+                    .validate_completed(n_tokens - query_offset)?;
+            }
+            #[cfg(feature = "dsv4-diagnostics")]
+            if self.fp4_shadow_diagnostics.is_capturing()
+                && attention_kind == AttentionKind::CompressedSparse
+            {
+                let sparse = captured_sparse.as_ref().ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "FP4 packed shadow layer {layer} did not retain sparse views"
+                    ))
+                })?;
+                let rows = self
+                    .compressor_frontiers
+                    .csa_rows(layer, last_position)?
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid(format!(
+                            "FP4 packed shadow layer {layer} has no published rows"
+                        ))
+                    })?;
+                let report = self.fp4_shadow.capture_layer(
+                    layer,
+                    last_position,
+                    rows,
+                    &sparse.scores,
+                    &sparse.selected_mask,
+                    &sparse.cache_order_ids,
+                    &sparse.selected_counts,
+                    &sparse.status,
+                )?;
+                self.fp4_shadow_diagnostics.capture_layer(report)?;
+            }
+            #[cfg(feature = "dsv4-diagnostics")]
+            if fp4_score_plan.consumes_fp4() && sparse_query_offset.is_some() {
+                self.fp4_shadow.validate_completed()?;
+                self.fp4_shadow.record_counterfactual_selection(
+                    &mut self.fp4_counterfactual_trace,
+                    DeepSeekV4Fp4ShadowExecution::Packed,
+                    DeepSeekV4Fp4SelectionSource::Fp4,
+                    last_position,
+                    layer,
+                )?;
             }
             let measure_post_route_gpu = trace_layers;
             #[cfg(feature = "dsv4-diagnostics")]
             let measure_post_route_gpu =
                 measure_post_route_gpu || post_route_stage_recorder.is_some();
-            let measured_post_route_gpu_seconds =
-                measure_post_route_gpu.then(|| command.GPUEndTime() - command.GPUStartTime());
+            let measured_post_route_gpu_seconds = measure_post_route_gpu
+                .then(|| expert_command.GPUEndTime() - expert_command.GPUStartTime());
             let post_route_gpu_seconds = if trace_layers {
                 measured_post_route_gpu_seconds.ok_or_else(|| {
                     DeepSeekV4MetalError::Invalid(

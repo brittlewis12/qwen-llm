@@ -2015,10 +2015,6 @@ impl PrefillSparseCsaScratch {
         )?;
 
         let query_count = n_tokens - query_offset;
-        let q_lora_suffix = q_lora.view_subrange(
-            checked_mul(query_offset, 1_024, "packed sparse Q-LoRA offset")? as u64,
-            vec![1_024, query_count as u64],
-        );
         let normalized_suffix = normalized_input.view_subrange(
             checked_mul(
                 query_offset,
@@ -2027,14 +2023,14 @@ impl PrefillSparseCsaScratch {
             )? as u64,
             vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, query_count as u64],
         );
-        let index_queries = f32_prefix(
+        let index_query_storage = f32_prefix(
             &self.index_queries,
             vec![
                 INDEXER_HEAD_DIM as u64,
                 INDEXER_HEAD_COUNT as u64,
-                query_count as u64,
+                n_tokens as u64,
             ],
-            "packed sparse index queries",
+            "packed sparse index query storage",
         )?;
         let head_weights = f32_prefix(
             &self.head_weights,
@@ -2080,17 +2076,66 @@ impl PrefillSparseCsaScratch {
             "packed sparse CSA visible counts",
         )?;
 
-        encode_batch_projection(
-            ctx,
-            enc,
-            indexer_q_weight,
-            &q_lora_suffix,
-            &index_queries,
-            1_024,
-            INDEXER_QUERY_WIDTH,
-            query_count,
-            "packed indexer Q",
-        )?;
+        let index_queries = if packed_indexer_q_matrix_enabled()
+            && packed_q8_matrix_chunk_qualified(n_tokens)
+        {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: wide F32 Q8 sparse-indexer Q matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_INDEXER_Q_MATRIX=0"
+                );
+            }
+            let matrix_output = index_query_storage
+                .view_subrange(0, vec![INDEXER_QUERY_WIDTH as u64, n_tokens as u64]);
+            encode_q8_f32_mma_r2c16k64(
+                ctx,
+                enc,
+                indexer_q_weight,
+                q_lora,
+                &matrix_output,
+                1_024,
+                INDEXER_QUERY_WIDTH,
+                n_tokens,
+            )?;
+            index_query_storage.view_subrange(
+                checked_mul(
+                    query_offset,
+                    INDEXER_QUERY_WIDTH,
+                    "packed sparse matrix-query offset",
+                )? as u64,
+                vec![
+                    INDEXER_HEAD_DIM as u64,
+                    INDEXER_HEAD_COUNT as u64,
+                    query_count as u64,
+                ],
+            )
+        } else {
+            let q_lora_suffix = q_lora.view_subrange(
+                checked_mul(query_offset, 1_024, "packed sparse Q-LoRA offset")? as u64,
+                vec![1_024, query_count as u64],
+            );
+            let index_queries = index_query_storage.view_subrange(
+                0,
+                vec![
+                    INDEXER_HEAD_DIM as u64,
+                    INDEXER_HEAD_COUNT as u64,
+                    query_count as u64,
+                ],
+            );
+            encode_batch_projection(
+                ctx,
+                enc,
+                indexer_q_weight,
+                &q_lora_suffix,
+                &index_queries,
+                1_024,
+                INDEXER_QUERY_WIDTH,
+                query_count,
+                "packed indexer Q",
+            )?;
+            index_queries
+        };
         let batched_indexer_rope = packed_indexer_batched_rope_enabled();
         static POLICY_LOGGED: std::sync::Once = std::sync::Once::new();
         POLICY_LOGGED.call_once(|| {
@@ -4486,6 +4531,11 @@ crate::env_flag!(
 crate::env_flag!(
     default_on packed_indexer_tiled_f32_enabled,
     "QWEN_DSV4_PACKED_INDEXER_TILED_F32"
+);
+
+crate::env_flag!(
+    default_off packed_indexer_q_matrix_enabled,
+    "QWEN_DSV4_PACKED_INDEXER_Q_MATRIX"
 );
 
 crate::env_flag!(

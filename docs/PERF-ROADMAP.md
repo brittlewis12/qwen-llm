@@ -860,37 +860,43 @@ output projections, and 1.75 seconds after attention. The attention body is
 preparation, 1.61 seconds scoring, and 0.05 seconds selection. Inverse RoPE is
 0.05 seconds. Post-route is 13.82 seconds and host residual is 3.14 seconds.
 
+The one-row DwarfStar selected-CSA transfer is also closed. Sharing one F16 KV
+row across 16 heads reduces scratch from the prior pilot's 16 KiB to 1 KiB and
+preserves every incumbent result bit, but compressed-sparse attention core
+regresses `2,688.779/2,674.337 -> 3,366.240 ms` in a clean
+control/candidate/control bracket. The second failure with a different staging
+granularity isolates cross-head synchronization rather than scratch capacity:
+selected rows appear sufficiently cache-served that full-threadgroup barriers
+and dual-head register pressure dominate. Remove the pilot and require a
+barrier-free topology or changed traffic evidence before reopening.
+
 Force-ranked queue:
 
-1. **One-row multi-head selected CSA.** Attention core costs 3.42 seconds. Port
-   the DwarfStar one-row topology that shares each selected row across heads,
-   not the killed sixteen-row staging design whose barriers and 16 KiB scratch
-   regressed. Require a model-free recurrence differential before timing.
-2. **Further IQ2 execution.** The exact wide cohort is 7.15 seconds, with
+1. **Further IQ2 execution.** The exact wide cohort is 7.15 seconds, with
    3.99 seconds in gate/up and 1.96 seconds in down. Half-staged operands or a
    paired gate/up boundary require explicit quality authority and must project a
    competitive whole-request gain before implementation.
-3. **All-IQ3 routed experts.** The 16-layer routed subtotal is 3.67 seconds and
+2. **All-IQ3 routed experts.** The 16-layer routed subtotal is 3.67 seconds and
    already uses a 64-output by 32-route matrix. Reopen only for a new dataflow
    boundary such as grouped down or deterministic sorted-output finalization,
    not another bank-axis or scalar sweep.
-4. **Mixed-quant routed experts.** Layers 26 and 42 cost 2.23 seconds in the
+3. **Mixed-quant routed experts.** Layers 26 and 42 cost 2.23 seconds in the
    generic routed-expert path. Price a matrix work unit across their IQ3_S or
    IQ3_XXS gate/up and MXFP4 down shapes before tuning either dtype locally.
-5. **Further Lightning score production.** At the 4K default, the exact tiled
+4. **Further Lightning score production.** At the 4K default, the exact tiled
    F32 scorer costs 1.61 seconds. Reopen around lower-precision tensor execution
    only when its whole-request ceiling competes with routed-expert work; exact
    radix selection remains only 47 ms and must not be folded into the claim.
-6. **Far-context scoring and selection.** Keep the tiled F32 scorer and radix4
+5. **Far-context scoring and selection.** Keep the tiled F32 scorer and radix4
    selector while prefill is the larger product deficit. Reopen exact Lightning
    scheduling only for a structurally new design with a credible >=0.50 ms
    terminal saving and <=0.05 ms shallow regression; do not auto-sweep R4 or
    repeat the held R2 packet.
-7. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+6. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-8. **Broad GPU route ownership.** The 1.448-second ceiling remains below the
+7. **Broad GPU route ownership.** The 1.448-second ceiling remains below the
    grouped-attention and sparse-indexer opportunities, and its ledger regression
    is unresolved. Reopen only with a CPU-equivalent route-weight lineage or a
    materially larger measured endpoint ceiling.

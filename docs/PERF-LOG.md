@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 One-Row Multi-Head Selected CSA KILL
+
+Status: remove the 16-head selected-CSA pilot. Packed sparse CSA remains on the
+one-SIMDgroup-per-head online kernel.
+
+- The candidate stages one shared 512-wide F16 row at a time for 16 heads. Eight
+  SIMDgroups each retain the incumbent F32 query and online-softmax recurrence
+  for two heads. Production-shape differentials and complete 8K logits are
+  bit-identical to the incumbent.
+- In a clean control/candidate/control 8K bracket, compressed-sparse attention
+  core moves `2,688.779/2,674.337 -> 3,366.240 ms`, a 25.20-25.87% regression.
+  Sampled pre-expert GPU moves `18,911.471/18,693.286 -> 19,409.444 ms`.
+- Candidate ordinary wall is `35,432.278 ms` versus controls at
+  `37,366.094/35,854.786 ms`, but sampled wall regresses against both controls
+  at `36,314.442` versus `36,163.174/35,580.752 ms`. The noisy ordinary result
+  cannot rescue a directly measured target regression.
+- Reducing the prior killed design from sixteen staged rows and 16 KiB scratch
+  to one row and 1 KiB does not reverse the result. Full-threadgroup barriers
+  and dual-head register pressure cost more than sharing already cache-served
+  selected rows saves.
+
+Decision: remove the pilot and close cross-head selected-row staging under the
+current F32 recurrence. Reopen only for a topology that removes the per-row
+threadgroup barriers or evidence that selected-row device traffic has become
+the limiter.
+
 ## 2026-08-07 - DeepSeek V4 Strided Grouped Output A Default GO
 
 Status: qualified N=2,048 and N=4,096 Q8 output-A execution now reads groups

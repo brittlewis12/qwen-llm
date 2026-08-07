@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 4,096-Token Chunk Cap HOLD
+
+Status: do not implement N=4,096 as a standalone chunk-cap change. The clean
+N=2,048 long-prompt profile puts complete removal of the fixed adjacent-chunk
+seam at the bottom of the prior 2-3% build range, before replacement work or
+the candidate's additional memory and qualification costs.
+
+- A detached clean `646b05d` binary traverses the first 8,192 tokens of the
+  retained real 32K prompt in four production N=2,048 chunks. One discarded
+  warm pass, one ordinary reference, and one sampled pass end with the same
+  complete F32 logits. The ordinary reference is `122,328.468 ms`, or
+  `66.97 token/s`.
+- Ordinary chunk walls rise from `26,828.535` to `32,570.541 ms`. Sampled
+  attention-body time rises from `5,009.604` to `9,705.772 ms`, while the
+  non-GPU residual rises only from `854.148` to `1,297.370 ms`. Context work,
+  not a growing fixed boundary, explains the depth slope.
+- Granting each adjacent pair deletion of its larger complete positive
+  residual gives an optimistic N=4,096 ceiling of `2,495.334 ms`, or 2.04% of
+  ordinary wall. This deliberately charges zero replacement cost and therefore
+  is not a speedup estimate.
+- Real-prompt routing activates 201-256 experts per layer. Weighted occupancy
+  is 86.02% for the 25 BM16 width-16 layers and 73.44% for the remaining
+  width-32 layers, stable across all four chunks. This resolves the synthetic
+  low-active-expert concern only for this canonical prompt prefix.
+- BM16 route-sensitive gate/up, SwiGLU, and down total 17,265.0 ms; scaling that
+  work by its 13.98% empty-lane share gives a 1.97%-of-wall operation-count
+  signal. The non-BM16 routed-expert stage totals 9,765.3 ms; its 26.56%
+  empty-lane share gives a 2.12% signal. These are not timings or additive
+  ceilings. Doubling the chunk can recover only a subset, and the prior BM32
+  result shows that descriptor reduction translates weakly into request wall.
+
+Decision: N=4,096 is HOLD as a composition opportunity, not the next build.
+Reopen it when an independently measured N=4,096 GPU mechanism lets the
+combined credible net benefit clear the existing 2-3% ordinary-request gate
+after replacement and memory costs. Move first to the open product-depth
+attention body and same-GGUF external calibration.
+
 ## 2026-08-06 - DeepSeek V4 Q8 Compressor Matrix Default GO
 
 Status: half-staged Q8 matrices now default on Apple M4 Max for the current

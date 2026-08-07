@@ -568,6 +568,18 @@ prompt-logit digest. Stop cap growth here; reopen a larger work unit only if
 longer-prompt attribution prices the remaining chunk boundary above the matrix
 work below.
 
+The clean 8,192-token product-depth profile now adjudicates that reopen. Its
+ordinary reference is 122.328 seconds or 66.97 token/s. Across four N=2,048
+chunks, attention body grows from 5.010 to 9.706 seconds while non-GPU residual
+only grows from 0.854 to 1.297 seconds. Even granting each adjacent pair free
+deletion of its larger residual prices the N=4,096 boundary at only 2.495
+seconds or 2.04% of request wall. Real-prompt route occupancy is stable at
+86.02% for BM16 and 73.44% for the width-32 cohort, with 201-256 active experts
+per layer. N=4,096 is therefore HOLD as a composition opportunity rather than
+a standalone cap build; reopen only with a separately measured GPU mechanism
+that lets the combined credible net benefit clear the existing 2-3% gate after
+replacement and memory costs.
+
 Exact grouped IQ2/IQ3 experts now cover all packed chunks through N=2,048.
 Buffer-backed 32-assignment descriptors remove the old 4 KiB inline ceiling
 without changing the stable expert/token/slot schedule or arithmetic. A/B/B/A
@@ -619,25 +631,30 @@ compressor-specific promotion does not imply a global Q8 matrix crossover.
 
 Force-ranked queue:
 
-1. **Reprice the packed chunk cap at product depth.** N=2,048 removed the known
-   chunk and expert-plan ceilings, but 8K-32K prompts still execute many chunks.
-   Attribute fixed per-chunk seams and route occupancy on one canonical long
-   prompt before considering N=4,096. Reopen cap growth only if the removable
-   boundary clears a 2-3% ordinary-request ceiling; do not infer it from a
-   synthetic route census.
+1. **Product-depth attention decomposition.** The reusable 8K profile assigns
+   28.24% of wall to attention output projections, 26.50% to attention body,
+   17.31% to before-attention work, and 23.42% to post-route work. Q8 output and
+   q_b matrix replacement remain closed under their measured quality contracts;
+   split the growing attention body by local/CSA/HCA mechanism and price one
+   open work reduction rather than returning to closed scalar or panel sweeps.
 2. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
    pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
    proof, not a binding floor.
-3. **Far-context scoring and selection.** Keep the deployed cooperative scorer
+3. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
+   only a 2.04% optimistic ceiling on the 8K request. Do not pay a larger scratch
+   allocation and new sparse/qualification surface for that alone. Reopen when
+   another measured N=4,096 mechanism lets the combined credible net benefit
+   clear the existing 2-3% gate after costs.
+4. **Far-context scoring and selection.** Keep the deployed cooperative scorer
    and radix4 selector while prefill is the larger product deficit. Reopen exact
    Lightning scheduling only for a structurally new design with a credible
    >=0.50 ms terminal saving and <=0.05 ms shallow regression; do not auto-sweep
    R4 or repeat the held R2 packet.
-4. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+5. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-5. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+6. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

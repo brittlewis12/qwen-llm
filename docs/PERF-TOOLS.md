@@ -143,9 +143,10 @@ reference, and then runs one sampled pass against the same residency. Complete
 final logits must match bit for bit across all three. Each sampled chunk reports
 pre-expert and post-route GPU time, both stage decompositions, route-panel
 occupancy, and Q8 compressor-matrix ownership. Qualified BM16 layers retain
-their gate/up, SwiGLU, and down split. Schema v3 also groups every pre-expert
-stage by sliding-window, CSA, and HCA layer and retains the per-layer split, so
-product-depth attention attribution does not require another profiler.
+their gate/up, SwiGLU, and down split. Schema v5 groups every pre-expert stage
+by sliding-window, CSA, and HCA layer, retains the per-layer split, and separates
+sparse-indexer preparation, score production, and selection while preserving
+their legacy aggregate.
 
 The candidate chunk must currently be twice the executed chunk. For each
 adjacent pair, the report charges the larger positive sampled non-GPU residual

@@ -15231,7 +15231,9 @@ mod tests {
         fn stage_index(kind: prefill::PackedPrefillStageKind) -> usize {
             match kind {
                 prefill::PackedPrefillStageKind::BeforeAttentionBody => 0,
-                prefill::PackedPrefillStageKind::SparseIndexerAndSelection
+                prefill::PackedPrefillStageKind::SparseIndexerPrepare
+                | prefill::PackedPrefillStageKind::SparseIndexerScore
+                | prefill::PackedPrefillStageKind::SparseSelection
                 | prefill::PackedPrefillStageKind::AttentionCore
                 | prefill::PackedPrefillStageKind::InverseRope => 1,
                 prefill::PackedPrefillStageKind::AttentionOutputProjections => 2,
@@ -15447,8 +15449,12 @@ mod tests {
                             assert_eq!(stage.duration_ticks, end - start);
                         }
                         (None, None)
-                            if stage.kind
-                                == prefill::PackedPrefillStageKind::SparseIndexerAndSelection =>
+                            if matches!(
+                                stage.kind,
+                                prefill::PackedPrefillStageKind::SparseIndexerPrepare
+                                    | prefill::PackedPrefillStageKind::SparseIndexerScore
+                                    | prefill::PackedPrefillStageKind::SparseSelection
+                            ) =>
                         {
                             assert_eq!(stage.duration_ticks, 0);
                             assert_eq!(stage.duration_ms_scaled, 0.0);

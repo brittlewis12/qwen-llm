@@ -2066,7 +2066,19 @@ impl PrefillSparseCsaScratch {
         })
     }
 
+    #[cfg(not(feature = "dsv4-diagnostics"))]
     fn encode_f16_score_and_select(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        rows: DeepSeekV4CsaRows<'_>,
+        prepared: &PackedSparseCsaViews,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        self.encode_f16_scores(ctx, enc, rows, prepared)?;
+        self.encode_f16_selection(ctx, enc, rows, prepared)
+    }
+
+    fn encode_f16_scores(
         &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
@@ -2085,7 +2097,16 @@ impl PrefillSparseCsaScratch {
             INDEXER_HEAD_DIM,
             rows.capacity_rows,
             prepared.query_count,
-        )?;
+        )
+    }
+
+    fn encode_f16_selection(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        rows: DeepSeekV4CsaRows<'_>,
+        prepared: &PackedSparseCsaViews,
+    ) -> Result<(), DeepSeekV4MetalError> {
         encode_select_top_k_f32(
             ctx,
             enc,
@@ -4416,7 +4437,9 @@ struct PackedLayerTrace {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackedPrefillStageKind {
     BeforeAttentionBody,
-    SparseIndexerAndSelection,
+    SparseIndexerPrepare,
+    SparseIndexerScore,
+    SparseSelection,
     AttentionCore,
     InverseRope,
     AttentionOutputProjections,
@@ -4424,9 +4447,11 @@ pub enum PackedPrefillStageKind {
 }
 
 #[cfg(feature = "dsv4-diagnostics")]
-pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 6] = [
+pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 8] = [
     PackedPrefillStageKind::BeforeAttentionBody,
-    PackedPrefillStageKind::SparseIndexerAndSelection,
+    PackedPrefillStageKind::SparseIndexerPrepare,
+    PackedPrefillStageKind::SparseIndexerScore,
+    PackedPrefillStageKind::SparseSelection,
     PackedPrefillStageKind::AttentionCore,
     PackedPrefillStageKind::InverseRope,
     PackedPrefillStageKind::AttentionOutputProjections,
@@ -4491,7 +4516,7 @@ fn resolve_packed_prefill_layer_stage_samples(
     records: &[PackedPrefillPendingStageSample],
     timestamps: &[u64],
     command_gpu_ms: f64,
-    allowed_empty: Option<PackedPrefillStageKind>,
+    allowed_empty: &[PackedPrefillStageKind],
 ) -> Result<PackedPrefillSampledLayerProfile, DeepSeekV4MetalError> {
     if records.len() != PACKED_PREFILL_STAGE_KINDS.len() {
         return invalid(format!(
@@ -4523,7 +4548,7 @@ fn resolve_packed_prefill_layer_stage_samples(
                 }
             }
             None => {
-                if Some(record.kind) != allowed_empty {
+                if !allowed_empty.contains(&record.kind) {
                     return invalid(format!(
                         "packed prefill sampled layer {layer} has unexpected empty stage {:?}",
                         record.kind
@@ -4827,7 +4852,11 @@ impl PackedPrefillStageRecorder {
                 records,
                 &timestamps,
                 duration,
-                Some(PackedPrefillStageKind::SparseIndexerAndSelection),
+                &[
+                    PackedPrefillStageKind::SparseIndexerPrepare,
+                    PackedPrefillStageKind::SparseIndexerScore,
+                    PackedPrefillStageKind::SparseSelection,
+                ],
             )?);
         }
         Ok(PackedPrefillStageProfile {
@@ -4893,9 +4922,9 @@ impl<'command, 'recorder> PackedPrefillLayerEncoder<'command, 'recorder> {
         Ok(())
     }
 
-    fn skip_stage(
+    fn skip_stages(
         &mut self,
-        skipped: PackedPrefillStageKind,
+        skipped: &[PackedPrefillStageKind],
         next: PackedPrefillStageKind,
     ) -> Result<(), DeepSeekV4MetalError> {
         if !self.sampled {
@@ -4907,7 +4936,9 @@ impl<'command, 'recorder> PackedPrefillLayerEncoder<'command, 'recorder> {
         let recorder = self.recorder.as_deref_mut().ok_or_else(|| {
             DeepSeekV4MetalError::Invalid("sampled packed prefill encoder lost its recorder".into())
         })?;
-        recorder.record_empty_stage(self.layer, skipped)?;
+        for &kind in skipped {
+            recorder.record_empty_stage(self.layer, kind)?;
+        }
         self.encoder = Some(recorder.begin_encoder(self.command, self.layer, next)?);
         Ok(())
     }
@@ -8213,10 +8244,14 @@ impl DeepSeekV4Session {
 
                 #[cfg(feature = "dsv4-diagnostics")]
                 if sparse_query_offset.is_some() {
-                    encoder.boundary(PackedPrefillStageKind::SparseIndexerAndSelection)?;
+                    encoder.boundary(PackedPrefillStageKind::SparseIndexerPrepare)?;
                 } else {
-                    encoder.skip_stage(
-                        PackedPrefillStageKind::SparseIndexerAndSelection,
+                    encoder.skip_stages(
+                        &[
+                            PackedPrefillStageKind::SparseIndexerPrepare,
+                            PackedPrefillStageKind::SparseIndexerScore,
+                            PackedPrefillStageKind::SparseSelection,
+                        ],
                         PackedPrefillStageKind::AttentionCore,
                     )?;
                 }
@@ -8264,12 +8299,13 @@ impl DeepSeekV4Session {
                     #[cfg(feature = "dsv4-diagnostics")]
                     fp4_score_dispatch_ledger.record_common_prepare()?;
                     #[cfg(feature = "dsv4-diagnostics")]
+                    encoder.boundary(PackedPrefillStageKind::SparseIndexerScore)?;
+                    #[cfg(feature = "dsv4-diagnostics")]
                     if fp4_score_plan.runs_f16() {
                         self.prefill
                             .attention
                             .sparse_csa
-                            .encode_f16_score_and_select(ctx, &encoder, rows, &sparse)?;
-                        fp4_score_dispatch_ledger.record_f16_score_and_selector()?;
+                            .encode_f16_scores(ctx, &encoder, rows, &sparse)?;
                     }
                     #[cfg(feature = "dsv4-diagnostics")]
                     if fp4_score_plan.runs_fp4() {
@@ -8292,6 +8328,16 @@ impl DeepSeekV4Session {
                     #[cfg(feature = "dsv4-diagnostics")]
                     if self.fp4_shadow_diagnostics.is_capturing() {
                         captured_sparse = Some(sparse.clone());
+                    }
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    encoder.boundary(PackedPrefillStageKind::SparseSelection)?;
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    if fp4_score_plan.runs_f16() {
+                        self.prefill
+                            .attention
+                            .sparse_csa
+                            .encode_f16_selection(ctx, &encoder, rows, &sparse)?;
+                        fp4_score_dispatch_ledger.record_f16_score_and_selector()?;
                     }
                     #[cfg(feature = "dsv4-diagnostics")]
                     let selected = if fp4_score_plan.consumes_fp4() {
@@ -9274,8 +9320,7 @@ mod tests {
             cursor += 3;
         }
         let profile =
-            resolve_packed_prefill_layer_stage_samples(0, &records, &timestamps, 2.0, None)
-                .unwrap();
+            resolve_packed_prefill_layer_stage_samples(0, &records, &timestamps, 2.0, &[]).unwrap();
         assert_eq!(profile.layer, 0);
         assert_eq!(profile.command_gpu_ms, 2.0);
         assert_eq!(profile.stages.len(), PACKED_PREFILL_STAGE_KINDS.len());
@@ -9424,7 +9469,17 @@ mod tests {
             },
             PackedPrefillPendingStageSample {
                 layer: 0,
-                kind: PackedPrefillStageKind::SparseIndexerAndSelection,
+                kind: PackedPrefillStageKind::SparseIndexerPrepare,
+                samples: None,
+            },
+            PackedPrefillPendingStageSample {
+                layer: 0,
+                kind: PackedPrefillStageKind::SparseIndexerScore,
+                samples: None,
+            },
+            PackedPrefillPendingStageSample {
+                layer: 0,
+                kind: PackedPrefillStageKind::SparseSelection,
                 samples: None,
             },
             PackedPrefillPendingStageSample {
@@ -9453,13 +9508,19 @@ mod tests {
             &records,
             &[100, 110, 113, 120, 123, 130, 133, 140, 143, 150],
             1.0,
-            Some(PackedPrefillStageKind::SparseIndexerAndSelection),
+            &[
+                PackedPrefillStageKind::SparseIndexerPrepare,
+                PackedPrefillStageKind::SparseIndexerScore,
+                PackedPrefillStageKind::SparseSelection,
+            ],
         )
         .unwrap();
-        assert_eq!(profile.stages[1].start_timestamp, None);
-        assert_eq!(profile.stages[1].end_timestamp, None);
-        assert_eq!(profile.stages[1].duration_ticks, 0);
-        assert_eq!(profile.stages[1].duration_ms_scaled, 0.0);
+        for stage in &profile.stages[1..=3] {
+            assert_eq!(stage.start_timestamp, None);
+            assert_eq!(stage.end_timestamp, None);
+            assert_eq!(stage.duration_ticks, 0);
+            assert_eq!(stage.duration_ms_scaled, 0.0);
+        }
         assert_eq!(profile.transitions.len(), 4);
         assert_eq!(
             profile.transitions[0].from,

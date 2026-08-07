@@ -754,39 +754,45 @@ span. Remove the candidate and do not pay a quality campaign for this N=2,048
 work unit. Reopen the matrix premise for larger chunks or an exact-order
 shared-weight schedule that avoids route displacement.
 
+The selected-CSA grouped-head transfer is also closed. Although its
+sixteen-row shared staging is bit-identical to the promoted online recurrence,
+the same-binary 8K comparison raises compressed-sparse attention core
+`2,617.621 -> 3,035.176 ms`, or 15.95%. Ordinary wall rises
+`49,461.968 -> 50,845.939 ms` and throughput falls
+`165.62 -> 161.11 token/s`. Unlike contiguous dense history, the result is
+consistent with repeated random-row loads already being cache-served: this
+topology's synchronization and 16 KiB threadgroup allocation cost more than
+shared staging saves. Remove the pilot. Reopen only for a barrier-free sharing
+topology or evidence that selected-row device traffic is the limiter.
+
 Force-ranked queue:
 
-1. **Group selected sparse CSA heads.** The selected suffix accounts for about
-   2.19 of the remaining 2.60 CSA-core seconds. Selected IDs and F16 KV are
-   shared across all 64 heads, so port the promoted eight-head staging schedule
-   while preserving cache-order selection and the online recurrence. This is
-   the nearest concrete cache-reuse hypothesis.
-2. **Lightning score production.** Scoring costs 1.806 seconds at 8K and grows
+1. **Lightning score production.** Scoring costs 1.806 seconds at 8K and grows
    from 366 to 837 ms across the three sparse chunks. Revisit visible-row
    dispatch, query staging, and vectorization against this isolated interval;
    exact radix selection is only 47 ms and must not be fused into the target.
-3. **Indexer preparation with a changed work unit.** Preparation costs 1.886
+2. **Indexer preparation with a changed work unit.** Preparation costs 1.886
    seconds, but the F32 Q8 matrix candidate fails whole-request accounting.
    Reopen only for an exact-order shared-weight schedule or larger chunks where
    the measured endpoint ceiling materially changes.
-4. **Routed-expert work units.** Post-route GPU remains 25.59 seconds and BM16
+3. **Routed-expert work units.** Post-route GPU remains 25.59 seconds and BM16
    accounts for about 18.07 seconds. Scalar IQ2 row/panel retuning is closed;
    reopen only around a larger matrix/schedule unit, not another scalar axis.
-5. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
+4. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
    only a 2.04% optimistic ceiling on the 8K request. Do not pay a larger scratch
    allocation and new sparse/qualification surface for that alone. Reopen when
    another measured N=4,096 mechanism lets the combined credible net benefit
    clear the existing 2-3% gate after costs.
-6. **Far-context scoring and selection.** Keep the deployed cooperative scorer
+5. **Far-context scoring and selection.** Keep the deployed cooperative scorer
    and radix4 selector while prefill is the larger product deficit. Reopen exact
    Lightning scheduling only for a structurally new design with a credible
    >=0.50 ms terminal saving and <=0.05 ms shallow regression; do not auto-sweep
    R4 or repeat the held R2 packet.
-7. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+6. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-8. **Broad GPU route ownership.** The 1.448-second ceiling remains below the
+7. **Broad GPU route ownership.** The 1.448-second ceiling remains below the
    grouped-attention and sparse-indexer opportunities, and its ledger regression
    is unresolved. Reopen only with a CPU-equivalent route-weight lineage or a
    materially larger measured endpoint ceiling.

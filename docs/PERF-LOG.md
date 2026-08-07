@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Grouped Selected-CSA KILL
+
+Status: the eight-head selected-attention pilot is removed. Packed sparse CSA
+stays on the promoted one-simdgroup-per-head online kernel.
+
+- The candidate stages sixteen raw or selected F16 rows once for eight heads,
+  then preserves the existing cache-order online recurrence. It is bit-identical
+  to that recurrence at positions 2,051, 2,052, and 3,071 and preserves the
+  complete 8K final-logit hash.
+- The shared staging work unit regresses its target. Against the same `fe32a8e`
+  binary, compressed-sparse attention core rises
+  `2,617.621 -> 3,035.176 ms`, or 15.95%. The three selected chunks add
+  150.513, 135.708, and 131.298 ms; the dense-only first chunk is flat.
+- Sampled pre-expert GPU rises 387.974 ms. Unrelated post-route and host drift
+  hide that regression in sampled request wall, but ordinary wall rises
+  `49,461.968 -> 50,845.939 ms` and throughput falls
+  `165.62 -> 161.11 token/s`.
+- Raw profiles:
+  `target/profiles/dsv4-prefill-8k-selected-group8-control-fe32a8e.json` and
+  `target/profiles/dsv4-prefill-8k-selected-group8-fe32a8e.json`.
+
+Decision: remove the pilot. The result is consistent with repeated selected-row
+loads already being cache-served: this topology's synchronization and 16 KiB
+threadgroup allocation cost more than shared staging saves. Reopen only for a
+schedule that shares selected rows without this staging topology, or new
+attribution showing selected-row device traffic is the limiter.
+
 ## 2026-08-07 - DeepSeek V4 Sparse Indexer Split / Matrix KILL
 
 Status: schema-v5 attribution is retained; the N=2,048 F32 indexer-Q matrix

@@ -4277,11 +4277,6 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    default_off packed_selected_group8_enabled,
-    "QWEN_DSV4_PACKED_SELECTED_GROUP8"
-);
-
-crate::env_flag!(
     default_on packed_grouped_dense_attention_enabled,
     "QWEN_DSV4_PACKED_GROUP8_DENSE"
 );
@@ -7429,25 +7424,11 @@ fn encode_packed_selected_sink_attention_f16(
     )?;
 
     let online = packed_selected_online_enabled();
-    let grouped = online && packed_selected_group8_enabled();
-    let kernel = if grouped {
-        DeepSeekV4SelectedAttentionKernel::GroupedOnline
-    } else if online {
-        DeepSeekV4SelectedAttentionKernel::Online
-    } else {
-        DeepSeekV4SelectedAttentionKernel::Cooperative
-    };
     static POLICY_LOGGED: std::sync::Once = std::sync::Once::new();
     POLICY_LOGGED.call_once(|| {
         eprintln!(
-            "deepseek_v4: packed selected attention policy={}; rollback=QWEN_DSV4_PACKED_SELECTED_GROUP8=0 or QWEN_DSV4_PACKED_SELECTED_ONLINE=0",
-            if grouped {
-                "grouped-online"
-            } else if online {
-                "online"
-            } else {
-                "legacy"
-            },
+            "deepseek_v4: packed selected attention policy={}; rollback=QWEN_DSV4_PACKED_SELECTED_ONLINE=0",
+            if online { "online" } else { "legacy" },
         );
     });
     encode_cooperative_selected_sink_attention_f16(
@@ -7469,7 +7450,7 @@ fn encode_packed_selected_sink_attention_f16(
         sparse.query_count,
         n_tokens,
         DEEPSEEK_V4_CSA_TOP_K,
-        kernel,
+        online,
         config,
     )
 }

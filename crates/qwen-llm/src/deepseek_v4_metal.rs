@@ -6287,7 +6287,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             1,
             1,
             DEEPSEEK_V4_CSA_TOP_K,
-            false,
+            DeepSeekV4SelectedAttentionKernel::Cooperative,
             c,
         )?;
         Ok(())
@@ -12126,6 +12126,13 @@ fn encode_selected_sink_attention_f16(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeepSeekV4SelectedAttentionKernel {
+    Cooperative,
+    Online,
+    GroupedOnline,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_cooperative_selected_sink_attention_f16(
     ctx: &MetalContext,
@@ -12146,7 +12153,7 @@ fn encode_cooperative_selected_sink_attention_f16(
     query_count: usize,
     token_count: usize,
     selected_slots: usize,
-    online: bool,
+    kernel: DeepSeekV4SelectedAttentionKernel,
     config: DeepSeekV4PositionZeroAttentionConfig,
 ) -> Result<(), DeepSeekV4MetalError> {
     require_serial(enc, "deepseek_v4_cooperative_selected_attention")?;
@@ -12252,39 +12259,81 @@ fn encode_cooperative_selected_sink_attention_f16(
         .ok_or_else(|| {
             DeepSeekV4MetalError::Invalid("cooperative selected maximum row count overflow".into())
         })?;
-    let (kernel, threadgroup_width, threadgroup_bytes) = if online {
-        if config.head_count != 64
+    if kernel != DeepSeekV4SelectedAttentionKernel::Cooperative
+        && (config.head_count != 64
             || config.head_dim != DEEPSEEK_V4_HCA_TILE_ROWS
-            || selected_slots != DEEPSEEK_V4_CSA_TOP_K
-        {
-            return invalid(
-                "online selected attention requires 64 heads x 512 dimensions and top-512 rows",
-            );
-        }
-        (
-            "kernel_deepseek_v4_online_packed_selected_sink_attention_f16",
-            DEEPSEEK_V4_ONLINE_HCA_THREADS,
-            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
-        )
-    } else {
-        (
+            || selected_slots != DEEPSEEK_V4_CSA_TOP_K)
+    {
+        return invalid(
+            "online selected attention requires 64 heads x 512 dimensions and top-512 rows",
+        );
+    }
+    let (kernel_name, head_groups, threads, threadgroup_bytes) = match kernel {
+        DeepSeekV4SelectedAttentionKernel::Cooperative => (
             "kernel_deepseek_v4_packed_selected_sink_attention_f16",
-            config.head_dim.max(maximum_rows),
+            config.head_count,
+            MTLSize {
+                width: config.head_dim.max(maximum_rows),
+                height: 1,
+                depth: 1,
+            },
             (maximum_rows + 1) * std::mem::size_of::<f32>(),
-        )
+        ),
+        DeepSeekV4SelectedAttentionKernel::Online => (
+            "kernel_deepseek_v4_online_packed_selected_sink_attention_f16",
+            config.head_count,
+            MTLSize {
+                width: DEEPSEEK_V4_ONLINE_HCA_THREADS,
+                height: 1,
+                depth: 1,
+            },
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+        ),
+        DeepSeekV4SelectedAttentionKernel::GroupedOnline => (
+            "kernel_deepseek_v4_grouped_online_packed_selected_sink_attention_f16",
+            config.head_count / DEEPSEEK_V4_GROUPED_DENSE_HEADS,
+            MTLSize {
+                width: 32,
+                height: DEEPSEEK_V4_GROUPED_DENSE_HEADS,
+                depth: 1,
+            },
+            DEEPSEEK_V4_GROUPED_DENSE_THREADGROUP_BYTES,
+        ),
     };
-    let pso = ctx.pipeline(kernel)?;
-    if online {
-        validate_deepseek_v4_online_hca_launch_geometry(
-            pso.threadExecutionWidth(),
-            pso.maxTotalThreadsPerThreadgroup(),
-            ctx.device.maxThreadgroupMemoryLength(),
-        )?;
-    } else if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
-        return invalid(format!(
-            "cooperative selected attention pipeline supports {} threads, requires {threadgroup_width}",
-            pso.maxTotalThreadsPerThreadgroup()
-        ));
+    let pso = ctx.pipeline(kernel_name)?;
+    match kernel {
+        DeepSeekV4SelectedAttentionKernel::Cooperative => {
+            if pso.maxTotalThreadsPerThreadgroup() < threads.width {
+                return invalid(format!(
+                    "cooperative selected attention pipeline supports {} threads, requires {}",
+                    pso.maxTotalThreadsPerThreadgroup(),
+                    threads.width,
+                ));
+            }
+        }
+        DeepSeekV4SelectedAttentionKernel::Online => {
+            validate_deepseek_v4_online_hca_launch_geometry(
+                pso.threadExecutionWidth(),
+                pso.maxTotalThreadsPerThreadgroup(),
+                ctx.device.maxThreadgroupMemoryLength(),
+            )?;
+        }
+        DeepSeekV4SelectedAttentionKernel::GroupedOnline => {
+            if pso.threadExecutionWidth() != 32
+                || pso.maxTotalThreadsPerThreadgroup() < DEEPSEEK_V4_GROUPED_DENSE_THREADS
+                || ctx.device.maxThreadgroupMemoryLength()
+                    < DEEPSEEK_V4_GROUPED_DENSE_THREADGROUP_BYTES
+            {
+                return invalid(format!(
+                    "grouped online selected attention requires SIMD width 32, {} threads, and {} threadgroup bytes; pipeline width={} max_threads={} device_bytes={}",
+                    DEEPSEEK_V4_GROUPED_DENSE_THREADS,
+                    DEEPSEEK_V4_GROUPED_DENSE_THREADGROUP_BYTES,
+                    pso.threadExecutionWidth(),
+                    pso.maxTotalThreadsPerThreadgroup(),
+                    ctx.device.maxThreadgroupMemoryLength(),
+                ));
+            }
+        }
     }
     enc.set_pipeline(&pso);
     enc.set_bytes(
@@ -12315,14 +12364,10 @@ fn encode_cooperative_selected_sink_attention_f16(
     enc.dispatch(
         MTLSize {
             width: query_count,
-            height: config.head_count,
+            height: head_groups,
             depth: 1,
         },
-        MTLSize {
-            width: threadgroup_width,
-            height: 1,
-            depth: 1,
-        },
+        threads,
     );
     Ok(())
 }
@@ -26267,7 +26312,7 @@ mod tests {
             1,
             1,
             TOP_K,
-            false,
+            DeepSeekV4SelectedAttentionKernel::Cooperative,
             attention_config,
         )
         .unwrap();
@@ -26938,6 +26983,7 @@ mod tests {
             let cooperative =
                 MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
             let online = MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
+            let grouped = MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
             let command = ctx.queue.commandBuffer().unwrap();
             let encoder = KernelEncoder::begin(&command);
             encode_selected_sink_attention_f16(
@@ -26975,7 +27021,7 @@ mod tests {
                 1,
                 1,
                 TOP_K,
-                false,
+                DeepSeekV4SelectedAttentionKernel::Cooperative,
                 config,
             )
             .unwrap();
@@ -26998,7 +27044,30 @@ mod tests {
                 1,
                 1,
                 TOP_K,
-                true,
+                DeepSeekV4SelectedAttentionKernel::Online,
+                config,
+            )
+            .unwrap();
+            encode_cooperative_selected_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &packed_queries,
+                &raw_cache,
+                &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
+                &compressed,
+                CAPACITY,
+                &selected_ids,
+                &selected_counts,
+                &visible_counts,
+                &sinks,
+                &grouped,
+                position,
+                0,
+                1,
+                1,
+                TOP_K,
+                DeepSeekV4SelectedAttentionKernel::GroupedOnline,
                 config,
             )
             .unwrap();
@@ -27014,6 +27083,7 @@ mod tests {
             for (label, candidate, max_allowed) in [
                 ("cooperative", read_f32(&cooperative), 1e-8),
                 ("online", read_f32(&online), 1e-8),
+                ("grouped online", read_f32(&grouped), 1e-8),
             ] {
                 let differing = legacy
                     .iter()
@@ -27038,6 +27108,15 @@ mod tests {
                 assert!(max_abs <= max_allowed, "{label} max abs {max_abs}");
                 assert!(relative_rms <= 1e-6, "{label} relative RMS {relative_rms}");
             }
+            let online = read_f32(&online);
+            let grouped = read_f32(&grouped);
+            assert!(
+                online
+                    .iter()
+                    .zip(&grouped)
+                    .all(|(online, grouped)| online.to_bits() == grouped.to_bits()),
+                "grouped and single-head online selected attention differ at position {position}"
+            );
         }
     }
 
@@ -27108,7 +27187,7 @@ mod tests {
                 1,
                 1,
                 SELECTED_SLOTS,
-                false,
+                DeepSeekV4SelectedAttentionKernel::Cooperative,
                 config,
             )
             .unwrap();
@@ -29650,7 +29729,7 @@ mod tests {
                 1,
                 1,
                 TOP_K,
-                false,
+                DeepSeekV4SelectedAttentionKernel::Cooperative,
                 attention_config,
             )
             .unwrap();
@@ -29880,7 +29959,7 @@ mod tests {
                                 1,
                                 1,
                                 TOP_K,
-                                false,
+                                DeepSeekV4SelectedAttentionKernel::Cooperative,
                                 attention_config,
                             )
                         })

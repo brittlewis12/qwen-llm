@@ -1986,6 +1986,143 @@ kernel void kernel_deepseek_v4_online_packed_selected_sink_attention_f16(
     output4[lane + 96] = o3 * inverse;
 }
 
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_deepseek_v4_grouped_online_packed_selected_sink_attention_f16(
+        constant ds4_packed_selected_attention_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * raw_cache [[buffer(2)]],
+        device const half * preserved_raw_cache [[buffer(3)]],
+        device const half * compressed_cache [[buffer(4)]],
+        device const int * selected_ids [[buffer(5)]],
+        device const int * selected_counts [[buffer(6)]],
+        device const int * visible_counts [[buffer(7)]],
+        device const float * sinks [[buffer(8)]],
+        device float * output [[buffer(9)]],
+        threadgroup half4 * staged [[threadgroup(0)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort tid_u [[thread_index_in_threadgroup]],
+        ushort lane_u [[thread_index_in_simdgroup]],
+        ushort simdgroup_u [[simdgroup_index_in_threadgroup]]) {
+    constexpr uint grouped_heads = 8u;
+    constexpr uint staged_rows = 16u;
+    constexpr uint row_vectors = 128u;
+    const uint local_query = group.x;
+    if (local_query >= args.query_count ||
+        args.head_count != 64u ||
+        args.head_dim != 512u ||
+        args.selected_slots != 512u) {
+        return;
+    }
+
+    const uint tid = uint(tid_u);
+    const uint lane = uint(lane_u);
+    const uint head = group.y * grouped_heads + uint(simdgroup_u);
+    const uint token = args.query_token_offset + local_query;
+    const uint absolute_position = args.chunk_start_position + token;
+    const uint visible_end = absolute_position + 1u;
+    const uint raw_count = min(visible_end, args.window);
+    const uint raw_start = visible_end - raw_count;
+    const int selected_i = selected_counts[local_query];
+    const int visible_i = visible_counts[local_query];
+    const uint selected_count = selected_i > 0
+        ? min(uint(selected_i), args.selected_slots)
+        : 0u;
+    const uint visible_count = visible_i > 0 ? uint(visible_i) : 0u;
+    const uint row_count = raw_count + selected_count;
+    const uint query_start = (token * args.head_count + head) * args.head_dim;
+    const uint ids_base = local_query * args.selected_slots;
+    device const float4 * query4 = (device const float4 *)(queries + query_start);
+    const float4 q0 = query4[lane];
+    const float4 q1 = query4[lane + 32u];
+    const float4 q2 = query4[lane + 64u];
+    const float4 q3 = query4[lane + 96u];
+
+    float maximum = sinks[head];
+    float denominator = 1.0f;
+    float4 o0 = 0.0f;
+    float4 o1 = 0.0f;
+    float4 o2 = 0.0f;
+    float4 o3 = 0.0f;
+
+    for (uint base = 0u; base < row_count; base += staged_rows) {
+        const uint rows = min(staged_rows, row_count - base);
+        for (uint offset = tid; offset < rows * row_vectors; offset += 256u) {
+            const uint staged_row = offset / row_vectors;
+            const uint vector = offset - staged_row * row_vectors;
+            const uint attention_row = base + staged_row;
+            const bool compressed = attention_row >= raw_count;
+            const uint row = compressed ? attention_row - raw_count : attention_row;
+            const int selected_id = compressed ? selected_ids[ids_base + row] : -1;
+            const bool valid_selected = compressed && selected_id >= 0
+                && uint(selected_id) < visible_count
+                && uint(selected_id) < args.compressed_capacity;
+            const uint logical_position = raw_start + row;
+            const bool preserved = !compressed
+                && args.raw_cache_is_chunk != 0u
+                && logical_position < args.chunk_start_position;
+            device const half * cache = compressed
+                ? compressed_cache
+                : (preserved ? preserved_raw_cache : raw_cache);
+            const uint cache_start = compressed
+                ? (valid_selected ? uint(selected_id) * args.head_dim : 0u)
+                : (args.raw_cache_is_chunk == 0u || preserved
+                    ? (logical_position % args.window) * args.head_dim
+                    : (logical_position - args.chunk_start_position) * args.head_dim);
+            staged[offset] = !compressed || valid_selected
+                ? ((device const half4 *)(cache + cache_start))[vector]
+                : half4(half(0.0f));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint staged_row = 0u; staged_row < rows; ++staged_row) {
+            const uint attention_row = base + staged_row;
+            const bool compressed = attention_row >= raw_count;
+            const uint slot = compressed ? attention_row - raw_count : 0u;
+            const int selected_id = compressed ? selected_ids[ids_base + slot] : -1;
+            const bool valid = !compressed || (selected_id >= 0
+                && uint(selected_id) < visible_count
+                && uint(selected_id) < args.compressed_capacity);
+            if (!valid) continue;
+
+            threadgroup const half4 * row = staged + staged_row * row_vectors;
+            const half4 h0 = row[lane];
+            const half4 h1 = row[lane + 32u];
+            const half4 h2 = row[lane + 64u];
+            const half4 h3 = row[lane + 96u];
+            const float score = simd_sum(
+                dot(q0, float4(h0)) +
+                dot(q1, float4(h1)) +
+                dot(q2, float4(h2)) +
+                dot(q3, float4(h3))) * args.scale;
+
+            if (score > maximum) {
+                const float previous_scale = exp(maximum - score);
+                denominator = denominator * previous_scale + 1.0f;
+                o0 = o0 * previous_scale + float4(h0);
+                o1 = o1 * previous_scale + float4(h1);
+                o2 = o2 * previous_scale + float4(h2);
+                o3 = o3 * previous_scale + float4(h3);
+                maximum = score;
+            } else {
+                const float row_scale = exp(score - maximum);
+                denominator += row_scale;
+                o0 += float4(h0) * row_scale;
+                o1 += float4(h1) * row_scale;
+                o2 += float4(h2) * row_scale;
+                o3 += float4(h3) * row_scale;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float inverse = 1.0f / denominator;
+    device float4 * output4 = (device float4 *)(output + query_start);
+    output4[lane] = o0 * inverse;
+    output4[lane + 32u] = o1 * inverse;
+    output4[lane + 64u] = o2 * inverse;
+    output4[lane + 96u] = o3 * inverse;
+}
+
 kernel void kernel_deepseek_v4_compressor_frontier_write(
         constant ds4_compressor_frontier_args & args [[buffer(0)]],
         device const float * projected_kv [[buffer(1)]],

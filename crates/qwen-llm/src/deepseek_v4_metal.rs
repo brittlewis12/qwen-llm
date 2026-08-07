@@ -912,19 +912,6 @@ impl DeepSeekV4SessionPhase {
         matches!(self, Self::ReadyWithObservation { .. })
     }
 
-    fn revoke_observation(&mut self) -> Result<(), DeepSeekV4MetalError> {
-        *self = match *self {
-            Self::ReadyWithObservation { next_position }
-            | Self::ReadyWithoutObservation { next_position } => {
-                Self::ReadyWithoutObservation { next_position }
-            }
-            Self::Poisoned { .. } => {
-                return invalid("cannot revoke observations from a poisoned DeepSeek V4 session");
-            }
-        };
-        Ok(())
-    }
-
     fn begin_mutation(&mut self) -> Result<u32, DeepSeekV4MetalError> {
         let next_position = self.ready_position()?;
         *self = Self::Poisoned { next_position };
@@ -1672,7 +1659,11 @@ impl DeepSeekV4Session {
                 vec![DEEPSEEK_V4_HIDDEN_SIZE as u64],
             )?,
             logits: MetalTensor::zeros_f32(ctx, vec![DEEPSEEK_V4_VOCAB_SIZE as u64])?,
-            prefill: prefill::DeepSeekV4PrefillScratch::new(ctx, capacity.csa_physical_rows())?,
+            prefill: prefill::DeepSeekV4PrefillScratch::new(
+                ctx,
+                capacity.csa_physical_rows(),
+                moe_config.expert_count,
+            )?,
             phase: DeepSeekV4SessionPhase::fresh(),
             committed_tokens,
             snapshot_model_content_id,
@@ -14606,10 +14597,6 @@ mod tests {
         phase.complete_mutation(0, 1, true).unwrap();
         assert_eq!(phase.ready_position().unwrap(), 1);
         assert!(phase.observation_valid());
-        phase.revoke_observation().unwrap();
-        assert_eq!(phase.ready_position().unwrap(), 1);
-        assert!(!phase.observation_valid());
-
         assert_eq!(phase.begin_mutation().unwrap(), 1);
         assert!(!phase.observation_valid());
         phase.complete_mutation(1, 2, false).unwrap();

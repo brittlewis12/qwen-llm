@@ -524,6 +524,7 @@ struct PrefillCompressorScratch {
 }
 
 struct PrefillMoeScratch {
+    expert_count: usize,
     normalized_input: MetalTensor,
     logits: MetalTensor,
     hash_ids: MetalTensor,
@@ -570,6 +571,7 @@ impl DeepSeekV4PrefillScratch {
     pub(super) fn new(
         ctx: &MetalContext,
         csa_capacity_rows: usize,
+        expert_count: usize,
     ) -> Result<Self, DeepSeekV4MetalError> {
         if csa_capacity_rows < DEEPSEEK_V4_CSA_TOP_K
             || !csa_capacity_rows.is_multiple_of(DEEPSEEK_V4_COMPRESSED_HISTORY_SLAB_ROWS)
@@ -578,6 +580,7 @@ impl DeepSeekV4PrefillScratch {
                 "packed sparse CSA capacity {csa_capacity_rows} is not an aligned top-k superset"
             ));
         }
+        validate_packed_expert_count(expert_count)?;
         let n = DEEPSEEK_V4_PREFILL_MAX_TOKENS as u64;
         let compressed_rows = DEEPSEEK_V4_PREFILL_MAX_TOKENS.div_ceil(4) as u64;
         let h = DEEPSEEK_V4_HIDDEN_SIZE as u64;
@@ -679,6 +682,7 @@ impl DeepSeekV4PrefillScratch {
                 q8_matrix_invocations: Cell::new(0),
             },
             moe: PrefillMoeScratch {
+                expert_count,
                 normalized_input: MetalTensor::zeros_f32(ctx, vec![h, n])?,
                 logits: MetalTensor::zeros_f32(ctx, vec![MOE_EXPERT_COUNT as u64, n])?,
                 hash_ids: MetalTensor::zeros_dtype(ctx, vec![MOE_TOP_K as u64, n], GgmlType::I32)?,
@@ -986,6 +990,15 @@ fn checked_token_count(n_tokens: usize) -> Result<u32, DeepSeekV4MetalError> {
     }
     u32::try_from(n_tokens)
         .map_err(|_| DeepSeekV4MetalError::Invalid("prefill token count exceeds u32".into()))
+}
+
+fn validate_packed_expert_count(expert_count: usize) -> Result<(), DeepSeekV4MetalError> {
+    if expert_count == 0 || expert_count > MOE_EXPERT_COUNT {
+        return invalid(format!(
+            "packed MoE expert count {expert_count} is outside 1..={MOE_EXPERT_COUNT}"
+        ));
+    }
+    Ok(())
 }
 
 fn f32_prefix(
@@ -1560,10 +1573,10 @@ impl PrefillHyperScratch {
             false,
             "packed mHC residual",
         )?;
-        validate_f32(
+        validate_matvec_weight(
             function,
-            &[residual_width as u64, DEEPSEEK_V4_HC_PARAMETER_COUNT as u64],
-            false,
+            residual_width,
+            DEEPSEEK_V4_HC_PARAMETER_COUNT,
             "packed mHC function",
         )?;
         validate_f32(scale, &[3], false, "packed mHC scale")?;
@@ -3480,11 +3493,13 @@ const _: () = assert!(
 
 fn validate_packed_expert_schedule(
     n_tokens: usize,
+    expert_count: usize,
     expert_ids: &[i32],
     bucket_rows: &[i32],
     bucket_slots: &[i32],
     schedule: &[ExpertBucket],
 ) -> Result<(), DeepSeekV4MetalError> {
+    validate_packed_expert_count(expert_count)?;
     let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed expert route count")?;
     if expert_ids.len() != route_count
         || bucket_rows.len() != route_count
@@ -3496,11 +3511,10 @@ fn validate_packed_expert_schedule(
     let mut previous_expert = None;
     let mut seen_slots = vec![false; route_count];
     for bucket in schedule {
-        if bucket.expert >= MOE_EXPERT_COUNT
+        if bucket.expert >= expert_count
             || previous_expert.is_some_and(|expert| bucket.expert <= expert)
             || bucket.start != cursor
             || bucket.len == 0
-            || bucket.len > n_tokens
         {
             return invalid("packed expert schedule has invalid bucket geometry");
         }
@@ -5445,16 +5459,17 @@ fn packed_post_route_stage_kinds(bm16: bool) -> &'static [PackedPostRouteStageKi
 fn packed_post_route_expert_counts(
     n_tokens: usize,
     schedule: &[ExpertBucket],
+    expert_count: usize,
 ) -> Result<[u16; MOE_EXPERT_COUNT], DeepSeekV4MetalError> {
     checked_token_count(n_tokens)?;
+    validate_packed_expert_count(expert_count)?;
     let expected = checked_mul(n_tokens, MOE_TOP_K, "packed expert-count coverage")?;
     let mut counts = [0u16; MOE_EXPERT_COUNT];
     let mut covered = 0usize;
     let mut previous_expert = None;
     for bucket in schedule {
-        if bucket.expert >= MOE_EXPERT_COUNT
+        if bucket.expert >= expert_count
             || bucket.len == 0
-            || bucket.len > n_tokens
             || bucket.start != covered
             || previous_expert.is_some_and(|previous| bucket.expert <= previous)
         {
@@ -5478,12 +5493,20 @@ fn packed_post_route_expert_counts(
 #[cfg(feature = "dsv4-diagnostics")]
 fn packed_post_route_expert_ids(
     n_tokens: usize,
+    expert_count: usize,
     expert_ids: &[i32],
     bucket_rows: &[i32],
     bucket_slots: &[i32],
     schedule: &[ExpertBucket],
 ) -> Result<Vec<u16>, DeepSeekV4MetalError> {
-    validate_packed_expert_schedule(n_tokens, expert_ids, bucket_rows, bucket_slots, schedule)?;
+    validate_packed_expert_schedule(
+        n_tokens,
+        expert_count,
+        expert_ids,
+        bucket_rows,
+        bucket_slots,
+        schedule,
+    )?;
     let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed route-ID coverage")?;
     let mut reconstructed = vec![u16::MAX; route_count];
     for bucket in schedule {
@@ -5503,23 +5526,15 @@ fn packed_post_route_expert_ids(
         return invalid("packed route-ID capture omitted a slot");
     }
     for (&reconstructed, &stored) in reconstructed.iter().zip(expert_ids) {
-        if usize::from(reconstructed) >= MOE_EXPERT_COUNT || i32::from(reconstructed) != stored {
+        if usize::from(reconstructed) >= expert_count || i32::from(reconstructed) != stored {
             return invalid("packed route-ID capture differs from routed storage");
-        }
-    }
-    for token_ids in reconstructed.chunks_exact(MOE_TOP_K) {
-        let mut seen = [false; MOE_EXPERT_COUNT];
-        for &expert in token_ids {
-            if std::mem::replace(&mut seen[usize::from(expert)], true) {
-                return invalid("packed route-ID capture duplicates an expert within a token");
-            }
         }
     }
 
     let mut rebuilt_rows = Vec::with_capacity(route_count);
     let mut rebuilt_slots = Vec::with_capacity(route_count);
     let mut rebuilt_schedule = Vec::with_capacity(schedule.len());
-    for expert in 0..MOE_EXPERT_COUNT {
+    for expert in 0..expert_count {
         let start = rebuilt_slots.len();
         for (slot, &routed_expert) in reconstructed.iter().enumerate() {
             if usize::from(routed_expert) == expert {
@@ -6519,6 +6534,7 @@ impl PrefillMoeScratch {
         }
         validate_packed_expert_schedule(
             n_tokens,
+            self.expert_count,
             &expert_ids,
             &compact_rows,
             &compact_slots,
@@ -6699,7 +6715,7 @@ impl PrefillMoeScratch {
         )?;
         let logits = f32_prefix(
             &self.logits,
-            vec![MOE_EXPERT_COUNT as u64, n_tokens as u64],
+            vec![self.expert_count as u64, n_tokens as u64],
             "packed MoE logits",
         )?;
         encode_rms_norm_batched_f32(
@@ -6719,7 +6735,7 @@ impl PrefillMoeScratch {
             &normalized_input,
             &logits,
             DEEPSEEK_V4_HIDDEN_SIZE,
-            MOE_EXPERT_COUNT,
+            self.expert_count,
             n_tokens,
             "packed MoE router",
         )?;
@@ -6769,7 +6785,7 @@ impl PrefillMoeScratch {
             PackedRouteSource::Learned(bias) => {
                 validate_f32(
                     bias,
-                    &[MOE_EXPERT_COUNT as u64],
+                    &[self.expert_count as u64],
                     false,
                     "packed router correction bias",
                 )?;
@@ -6779,9 +6795,9 @@ impl PrefillMoeScratch {
         let mut expert_ids = Vec::with_capacity(n_tokens * MOE_TOP_K);
         let mut weights = Vec::with_capacity(n_tokens * MOE_TOP_K);
         for token in 0..n_tokens {
-            let start = token * MOE_EXPERT_COUNT;
+            let start = token * self.expert_count;
             let scores = crate::deepseek_v4_oracle::sqrt_softplus_scores(
-                &logits[start..start + MOE_EXPERT_COUNT],
+                &logits[start..start + self.expert_count],
             )
             .map_err(|error| {
                 DeepSeekV4MetalError::Invalid(format!(
@@ -6798,9 +6814,10 @@ impl PrefillMoeScratch {
                                 "packed hash route contains negative ID {expert}"
                             ))
                         })?;
-                        if expert >= MOE_EXPERT_COUNT {
+                        if expert >= self.expert_count {
                             return invalid(format!(
-                                "packed hash route expert {expert} exceeds {MOE_EXPERT_COUNT}"
+                                "packed hash route expert {expert} exceeds {}",
+                                self.expert_count
                             ));
                         }
                         Ok(expert)
@@ -6834,7 +6851,7 @@ impl PrefillMoeScratch {
         host_write_i32(&expert_ids_view, &expert_ids, "packed selected expert IDs")?;
         host_write_f32(&weights_view, &weights, "packed selected expert weights")?;
 
-        let mut by_expert = (0..MOE_EXPERT_COUNT)
+        let mut by_expert = (0..self.expert_count)
             .map(|_| Vec::<(usize, usize)>::new())
             .collect::<Vec<_>>();
         for token in 0..n_tokens {
@@ -6866,6 +6883,7 @@ impl PrefillMoeScratch {
         }
         validate_packed_expert_schedule(
             n_tokens,
+            self.expert_count,
             &expert_ids,
             &bucket_rows,
             &bucket_slots,
@@ -6921,21 +6939,21 @@ impl PrefillMoeScratch {
             gate_bank,
             DEEPSEEK_V4_HIDDEN_SIZE,
             MOE_FFN_SIZE,
-            MOE_EXPERT_COUNT,
+            self.expert_count,
             "packed routed gate bank",
         )?;
         validate_expert_bank(
             up_bank,
             DEEPSEEK_V4_HIDDEN_SIZE,
             MOE_FFN_SIZE,
-            MOE_EXPERT_COUNT,
+            self.expert_count,
             "packed routed up bank",
         )?;
         validate_expert_bank(
             down_bank,
             MOE_FFN_SIZE,
             DEEPSEEK_V4_HIDDEN_SIZE,
-            MOE_EXPERT_COUNT,
+            self.expert_count,
             "packed routed down bank",
         )?;
         if gpu_compacted
@@ -7231,52 +7249,6 @@ impl PrefillMoeScratch {
         let used_grouped_target = used_grouped_iq2 || used_grouped_iq3;
         if !used_grouped_target {
             for bucket in schedule {
-                let rows = i32_slice(
-                    &self.bucket_rows,
-                    bucket.start,
-                    bucket.len,
-                    "packed expert input rows",
-                )?;
-                let slots = i32_slice(
-                    &self.bucket_slots,
-                    bucket.start,
-                    bucket.len,
-                    "packed expert output slots",
-                )?;
-                let expert_input = f32_prefix(
-                    &self.expert_input,
-                    vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, bucket.len as u64],
-                    "packed expert input",
-                )?;
-                encode_get_rows_f32(
-                    ctx,
-                    enc,
-                    normalized_input,
-                    &rows,
-                    &expert_input,
-                    bucket.len,
-                    DEEPSEEK_V4_HIDDEN_SIZE,
-                )?;
-                let gate = f32_prefix(
-                    &self.gate,
-                    vec![MOE_FFN_SIZE as u64, bucket.len as u64],
-                    "packed routed gate",
-                )?;
-                let up = f32_prefix(
-                    &self.up,
-                    vec![MOE_FFN_SIZE as u64, bucket.len as u64],
-                    "packed routed up",
-                )?;
-                let inner = f32_prefix(
-                    &self.inner,
-                    vec![MOE_FFN_SIZE as u64, bucket.len as u64],
-                    "packed routed inner",
-                )?;
-                let bucket_output = f32_prefix(
-                    &self.bucket_output,
-                    vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, bucket.len as u64],
-                    "packed routed bucket output",
-                )?;
                 let gate_weight = expert_weight_view(
                     gate_bank,
                     DEEPSEEK_V4_HIDDEN_SIZE,
@@ -7298,89 +7270,141 @@ impl PrefillMoeScratch {
                     bucket.expert,
                     "packed routed down slice",
                 )?;
-                encode_batch_projection(
-                    ctx,
-                    enc,
-                    &gate_weight,
-                    &expert_input,
-                    &gate,
-                    DEEPSEEK_V4_HIDDEN_SIZE,
-                    MOE_FFN_SIZE,
-                    bucket.len,
-                    "packed routed gate",
-                )?;
-                encode_batch_projection(
-                    ctx,
-                    enc,
-                    &up_weight,
-                    &expert_input,
-                    &up,
-                    DEEPSEEK_V4_HIDDEN_SIZE,
-                    MOE_FFN_SIZE,
-                    bucket.len,
-                    "packed routed up",
-                )?;
-                let flat_len = checked_mul(bucket.len, MOE_FFN_SIZE, "packed SwiGLU")?;
-                let gate_flat = gate.view_subrange(0, vec![flat_len as u64]);
-                let up_flat = up.view_subrange(0, vec![flat_len as u64]);
-                let inner_flat = inner.view_subrange(0, vec![flat_len as u64]);
-                encode_ds4_clamped_swiglu(
-                    ctx,
-                    enc,
-                    &gate_flat,
-                    &up_flat,
-                    &inner_flat,
-                    expert_clamp,
-                )?;
-                if down_weight.dtype == GgmlType::MXFP4 {
-                    for row in 0..bucket.len {
-                        let inner_row = f32_row(
-                            &inner,
-                            row,
-                            MOE_FFN_SIZE,
-                            vec![MOE_FFN_SIZE as u64],
-                            "packed MXFP4 routed inner row",
-                        )?;
-                        let output_row = f32_row(
-                            &bucket_output,
-                            row,
-                            DEEPSEEK_V4_HIDDEN_SIZE,
-                            vec![DEEPSEEK_V4_HIDDEN_SIZE as u64],
-                            "packed MXFP4 routed output row",
-                        )?;
-                        encode_projection(
-                            ctx,
-                            enc,
-                            &down_weight,
-                            &inner_row,
-                            &output_row,
-                            MOE_FFN_SIZE,
-                            DEEPSEEK_V4_HIDDEN_SIZE,
-                            "packed MXFP4 routed down",
-                        )?;
-                    }
-                } else {
+                for bucket_offset in (0..bucket.len).step_by(n_tokens) {
+                    let chunk_len = (bucket.len - bucket_offset).min(n_tokens);
+                    let chunk_start = bucket.start.checked_add(bucket_offset).ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid("packed expert chunk start overflow".into())
+                    })?;
+                    let rows = i32_slice(
+                        &self.bucket_rows,
+                        chunk_start,
+                        chunk_len,
+                        "packed expert input rows",
+                    )?;
+                    let slots = i32_slice(
+                        &self.bucket_slots,
+                        chunk_start,
+                        chunk_len,
+                        "packed expert output slots",
+                    )?;
+                    let expert_input = f32_prefix(
+                        &self.expert_input,
+                        vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, chunk_len as u64],
+                        "packed expert input",
+                    )?;
+                    encode_get_rows_f32(
+                        ctx,
+                        enc,
+                        normalized_input,
+                        &rows,
+                        &expert_input,
+                        chunk_len,
+                        DEEPSEEK_V4_HIDDEN_SIZE,
+                    )?;
+                    let gate = f32_prefix(
+                        &self.gate,
+                        vec![MOE_FFN_SIZE as u64, chunk_len as u64],
+                        "packed routed gate",
+                    )?;
+                    let up = f32_prefix(
+                        &self.up,
+                        vec![MOE_FFN_SIZE as u64, chunk_len as u64],
+                        "packed routed up",
+                    )?;
+                    let inner = f32_prefix(
+                        &self.inner,
+                        vec![MOE_FFN_SIZE as u64, chunk_len as u64],
+                        "packed routed inner",
+                    )?;
+                    let bucket_output = f32_prefix(
+                        &self.bucket_output,
+                        vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, chunk_len as u64],
+                        "packed routed bucket output",
+                    )?;
                     encode_batch_projection(
                         ctx,
                         enc,
-                        &down_weight,
-                        &inner,
-                        &bucket_output,
-                        MOE_FFN_SIZE,
+                        &gate_weight,
+                        &expert_input,
+                        &gate,
                         DEEPSEEK_V4_HIDDEN_SIZE,
-                        bucket.len,
-                        "packed routed down",
+                        MOE_FFN_SIZE,
+                        chunk_len,
+                        "packed routed gate",
+                    )?;
+                    encode_batch_projection(
+                        ctx,
+                        enc,
+                        &up_weight,
+                        &expert_input,
+                        &up,
+                        DEEPSEEK_V4_HIDDEN_SIZE,
+                        MOE_FFN_SIZE,
+                        chunk_len,
+                        "packed routed up",
+                    )?;
+                    let flat_len = checked_mul(chunk_len, MOE_FFN_SIZE, "packed SwiGLU")?;
+                    let gate_flat = gate.view_subrange(0, vec![flat_len as u64]);
+                    let up_flat = up.view_subrange(0, vec![flat_len as u64]);
+                    let inner_flat = inner.view_subrange(0, vec![flat_len as u64]);
+                    encode_ds4_clamped_swiglu(
+                        ctx,
+                        enc,
+                        &gate_flat,
+                        &up_flat,
+                        &inner_flat,
+                        expert_clamp,
+                    )?;
+                    if down_weight.dtype == GgmlType::MXFP4 {
+                        for row in 0..chunk_len {
+                            let inner_row = f32_row(
+                                &inner,
+                                row,
+                                MOE_FFN_SIZE,
+                                vec![MOE_FFN_SIZE as u64],
+                                "packed MXFP4 routed inner row",
+                            )?;
+                            let output_row = f32_row(
+                                &bucket_output,
+                                row,
+                                DEEPSEEK_V4_HIDDEN_SIZE,
+                                vec![DEEPSEEK_V4_HIDDEN_SIZE as u64],
+                                "packed MXFP4 routed output row",
+                            )?;
+                            encode_projection(
+                                ctx,
+                                enc,
+                                &down_weight,
+                                &inner_row,
+                                &output_row,
+                                MOE_FFN_SIZE,
+                                DEEPSEEK_V4_HIDDEN_SIZE,
+                                "packed MXFP4 routed down",
+                            )?;
+                        }
+                    } else {
+                        encode_batch_projection(
+                            ctx,
+                            enc,
+                            &down_weight,
+                            &inner,
+                            &bucket_output,
+                            MOE_FFN_SIZE,
+                            DEEPSEEK_V4_HIDDEN_SIZE,
+                            chunk_len,
+                            "packed routed down",
+                        )?;
+                    }
+                    crate::metal::encode_scatter_rows_f32_unique(
+                        ctx,
+                        enc,
+                        &bucket_output,
+                        &slots,
+                        &expert_outputs,
+                        DEEPSEEK_V4_HIDDEN_SIZE,
+                        chunk_len,
                     )?;
                 }
-                crate::metal::encode_scatter_rows_f32_unique(
-                    ctx,
-                    enc,
-                    &bucket_output,
-                    &slots,
-                    &expert_outputs,
-                    DEEPSEEK_V4_HIDDEN_SIZE,
-                    bucket.len,
-                )?;
             }
         }
 
@@ -8140,44 +8164,10 @@ impl DeepSeekV4Session {
         emit_logits: bool,
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
-        if self.residency.config().expert_count as usize != MOE_EXPERT_COUNT {
-            checked_token_count(token_ids.len())?;
-            let start_position = self.phase.ready_position()?;
-            for (index, &token) in token_ids.iter().enumerate() {
-                if token as usize >= DEEPSEEK_V4_VOCAB_SIZE {
-                    return invalid(format!(
-                        "prefill token {index} id {token} is outside vocabulary {DEEPSEEK_V4_VOCAB_SIZE}"
-                    ));
-                }
-                let position = start_position
-                    .checked_add(u32::try_from(index).map_err(|_| {
-                        DeepSeekV4MetalError::Invalid("prefill token index exceeds u32".into())
-                    })?)
-                    .ok_or_else(|| {
-                        DeepSeekV4MetalError::Invalid("prefill position overflow".into())
-                    })?;
-                self.capacity.validate_position(position)?;
-            }
-            self.validate_committed_token_append(start_position, token_ids.len())?;
-            static REPORTED: std::sync::Once = std::sync::Once::new();
-            REPORTED.call_once(|| {
-                eprintln!(
-                    "deepseek_v4: K160 REAP prefill uses native singleton execution; packed K160 follows"
-                );
-            });
-            for &token_id in token_ids {
-                self.forward_token(ctx, token_id)?;
-            }
-            if !emit_logits {
-                self.phase.revoke_observation()?;
-            }
-            for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
-                layer_completed(layer);
-            }
-            return Ok(());
-        }
         let grouped_mode = packed_grouped_expert_mode();
-        let expert_policy = if packed_grouped_expert_scope(grouped_mode, token_ids.len())? {
+        let expert_policy = if self.prefill.moe.expert_count == MOE_EXPERT_COUNT
+            && packed_grouped_expert_scope(grouped_mode, token_ids.len())?
+        {
             packed_grouped_expert_policy(ctx, token_ids.len())?
         } else {
             PackedExpertPolicy::Current
@@ -8214,11 +8204,8 @@ impl DeepSeekV4Session {
         #[cfg(feature = "dsv4-diagnostics")]
         self.decision_diagnostics
             .ensure_no_active_capture("execute packed tokens")?;
-        if self.residency.config().expert_count as usize != MOE_EXPERT_COUNT {
-            return invalid(format!(
-                "packed DeepSeek V4 execution requires {MOE_EXPERT_COUNT} experts, got {}",
-                self.residency.config().expert_count
-            ));
+        if self.prefill.moe.expert_count != MOE_EXPERT_COUNT && route_policy.uses_gpu() {
+            return invalid("packed GPU routing is not enabled for compact-expert DeepSeek V4");
         }
         if ctx.device.registryID() != self.device_registry_id {
             return invalid(format!(
@@ -8229,6 +8216,7 @@ impl DeepSeekV4Session {
         }
         let n_tokens = checked_token_count(token_ids.len())?;
         let route_policy = if route_policy == PackedRoutePolicy::Cpu
+            && self.prefill.moe.expert_count == MOE_EXPERT_COUNT
             && packed_gpu_route_compact_enabled()
             && token_ids.len() <= PACKED_GPU_ROUTE_MAX_TOKENS
             && packed_q8_compressor_matrix_scope_qualified(
@@ -8241,12 +8229,21 @@ impl DeepSeekV4Session {
         } else {
             route_policy
         };
-        let expert_policy =
-            if packed_grouped_iq3_enabled() && packed_grouped_iq3_candidate_supported(ctx) {
-                expert_policy.with_iq3_target()
-            } else {
-                expert_policy
-            };
+        let expert_policy = if self.prefill.moe.expert_count != MOE_EXPERT_COUNT {
+            PackedExpertPolicy::Current
+        } else if packed_grouped_iq3_enabled() && packed_grouped_iq3_candidate_supported(ctx) {
+            expert_policy.with_iq3_target()
+        } else {
+            expert_policy
+        };
+        if self.prefill.moe.expert_count != MOE_EXPERT_COUNT {
+            static REPORTED: std::sync::Once = std::sync::Once::new();
+            REPORTED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: packed compact-expert prefill uses CPU routing and generic expert matmat"
+                );
+            });
+        }
         let q_b_projection =
             packed_q8_qb_projection_for_chunk(ctx, &self.residency, token_ids.len())?;
         let output_projection =
@@ -9316,9 +9313,14 @@ impl DeepSeekV4Session {
                     up_dtype: routed_up.dtype,
                     down_dtype: routed_down.dtype,
                     bucket_count: schedule.len(),
-                    expert_counts: packed_post_route_expert_counts(n_tokens, &schedule)?,
+                    expert_counts: packed_post_route_expert_counts(
+                        n_tokens,
+                        &schedule,
+                        self.prefill.moe.expert_count,
+                    )?,
                     route_expert_ids: packed_post_route_expert_ids(
                         n_tokens,
+                        self.prefill.moe.expert_count,
                         &expert_ids,
                         &bucket_rows,
                         &bucket_slots,
@@ -9834,8 +9836,68 @@ mod tests {
                 });
             }
         }
-        validate_packed_expert_schedule(n_tokens, &expert_ids, &rows, &slots, &schedule).unwrap();
+        validate_packed_expert_schedule(
+            n_tokens,
+            MOE_EXPERT_COUNT,
+            &expert_ids,
+            &rows,
+            &slots,
+            &schedule,
+        )
+        .unwrap();
         (expert_ids, rows, slots, schedule)
+    }
+
+    #[test]
+    fn packed_schedule_honors_runtime_expert_count_and_duplicate_slots() {
+        const E: usize = 160;
+        let n_tokens = 2;
+        let expert_ids = vec![0, 0, 159, 5, 5, 7, 159, 0, 42, 42, 7, 7];
+        let mut rows = Vec::with_capacity(expert_ids.len());
+        let mut slots = Vec::with_capacity(expert_ids.len());
+        let mut schedule = Vec::new();
+        for expert in 0..E {
+            let start = slots.len();
+            for (slot, &routed_expert) in expert_ids.iter().enumerate() {
+                if routed_expert == expert as i32 {
+                    rows.push((slot / MOE_TOP_K) as i32);
+                    slots.push(slot as i32);
+                }
+            }
+            if slots.len() != start {
+                schedule.push(ExpertBucket {
+                    expert,
+                    start,
+                    len: slots.len() - start,
+                });
+            }
+        }
+
+        validate_packed_expert_schedule(n_tokens, E, &expert_ids, &rows, &slots, &schedule)
+            .unwrap();
+        assert_eq!(schedule.last().unwrap().expert, E - 1);
+        assert!(
+            validate_packed_expert_schedule(
+                n_tokens,
+                E - 1,
+                &expert_ids,
+                &rows,
+                &slots,
+                &schedule,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_packed_expert_schedule(
+                n_tokens,
+                MOE_EXPERT_COUNT + 1,
+                &expert_ids,
+                &rows,
+                &slots,
+                &schedule,
+            )
+            .is_err()
+        );
     }
 
     #[cfg(feature = "dsv4-diagnostics")]
@@ -10275,7 +10337,15 @@ mod tests {
                 len: rows.len() - start,
             });
         }
-        validate_packed_expert_schedule(n_tokens, &expert_ids, &rows, &slots, &schedule).unwrap();
+        validate_packed_expert_schedule(
+            n_tokens,
+            MOE_EXPERT_COUNT,
+            &expert_ids,
+            &rows,
+            &slots,
+            &schedule,
+        )
+        .unwrap();
         (expert_ids, rows, slots, schedule)
     }
 
@@ -10524,7 +10594,15 @@ mod tests {
         assert!(tiles.iter().all(|tile| (1..=32).contains(&tile.count)));
         #[cfg(feature = "dsv4-diagnostics")]
         assert_eq!(
-            packed_post_route_expert_ids(128, &expert_ids, &rows, &slots, &schedule).unwrap(),
+            packed_post_route_expert_ids(
+                128,
+                MOE_EXPERT_COUNT,
+                &expert_ids,
+                &rows,
+                &slots,
+                &schedule,
+            )
+            .unwrap(),
             expert_ids
                 .iter()
                 .map(|&expert| expert as u16)
@@ -10534,18 +10612,42 @@ mod tests {
         let mut bad_rows = rows.clone();
         bad_rows[0] ^= 1;
         assert!(
-            validate_packed_expert_schedule(128, &expert_ids, &bad_rows, &slots, &schedule)
-                .is_err()
+            validate_packed_expert_schedule(
+                128,
+                MOE_EXPERT_COUNT,
+                &expert_ids,
+                &bad_rows,
+                &slots,
+                &schedule,
+            )
+            .is_err()
         );
         let mut bad_slots = slots.clone();
         bad_slots[1] = bad_slots[0];
         assert!(
-            validate_packed_expert_schedule(128, &expert_ids, &rows, &bad_slots, &schedule)
-                .is_err()
+            validate_packed_expert_schedule(
+                128,
+                MOE_EXPERT_COUNT,
+                &expert_ids,
+                &rows,
+                &bad_slots,
+                &schedule,
+            )
+            .is_err()
         );
         let mut bad_ids = expert_ids.clone();
         bad_ids[slots[0] as usize] ^= 1;
-        assert!(validate_packed_expert_schedule(128, &bad_ids, &rows, &slots, &schedule).is_err());
+        assert!(
+            validate_packed_expert_schedule(
+                128,
+                MOE_EXPERT_COUNT,
+                &bad_ids,
+                &rows,
+                &slots,
+                &schedule,
+            )
+            .is_err()
+        );
 
         let mut cursor = 0usize;
         let maximum = (0..MOE_EXPERT_COUNT)
@@ -10643,7 +10745,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(cursor, 128 * MOE_TOP_K);
 
-        let counts = packed_post_route_expert_counts(128, &schedule).unwrap();
+        let counts = packed_post_route_expert_counts(128, &schedule, MOE_EXPERT_COUNT).unwrap();
         assert_eq!(&counts[..lengths.len()], &lengths.map(|len| len as u16));
         assert!(counts[lengths.len()..].iter().all(|&count| count == 0));
         assert_eq!(
@@ -10666,12 +10768,12 @@ mod tests {
         };
         let mut duplicate = copy_schedule();
         duplicate[1].expert = duplicate[0].expert;
-        assert!(packed_post_route_expert_counts(128, &duplicate).is_err());
+        assert!(packed_post_route_expert_counts(128, &duplicate, MOE_EXPERT_COUNT).is_err());
 
         let mut oversized = copy_schedule();
         oversized[0].len = 129;
-        assert!(packed_post_route_expert_counts(128, &oversized).is_err());
-        assert!(packed_post_route_expert_counts(128, &schedule[..8]).is_err());
+        assert!(packed_post_route_expert_counts(128, &oversized, MOE_EXPERT_COUNT).is_err());
+        assert!(packed_post_route_expert_counts(128, &schedule[..8], MOE_EXPERT_COUNT).is_err());
     }
 
     #[cfg(feature = "dsv4-diagnostics")]
@@ -10859,6 +10961,7 @@ mod tests {
             assert_eq!(
                 packed_post_route_expert_ids(
                     routes.n_tokens,
+                    routes.expert_count,
                     &expert_ids,
                     &rows,
                     &slots,
@@ -10868,7 +10971,7 @@ mod tests {
                 route_layer.route_expert_ids
             );
             assert_eq!(
-                packed_post_route_expert_counts(routes.n_tokens, &schedule)
+                packed_post_route_expert_counts(routes.n_tokens, &schedule, routes.expert_count,)
                     .unwrap()
                     .as_slice(),
                 count_layer.counts.as_slice()
@@ -10957,7 +11060,9 @@ mod tests {
             assert_eq!(layer.route_expert_ids.len(), routes.route_count);
             let (_, rows, slots, schedule) =
                 packed_grouped_schedule_from_route_ids(routes.n_tokens, &layer.route_expert_ids);
-            let counts = packed_post_route_expert_counts(routes.n_tokens, &schedule).unwrap();
+            let counts =
+                packed_post_route_expert_counts(routes.n_tokens, &schedule, routes.expert_count)
+                    .unwrap();
             assert_eq!(counts.len(), MOE_EXPERT_COUNT);
             let tiles_16 = packed_grouped_iq2_mma16_tiles(routes.n_tokens, &schedule)
                 .unwrap()
@@ -11118,6 +11223,7 @@ mod tests {
             assert_eq!(
                 packed_post_route_expert_ids(
                     fixture.n_tokens,
+                    fixture.expert_count,
                     &expert_ids,
                     &rows,
                     &slots,
@@ -11127,7 +11233,7 @@ mod tests {
                 layer.route_expert_ids
             );
             assert_eq!(
-                packed_post_route_expert_counts(fixture.n_tokens, &schedule)
+                packed_post_route_expert_counts(fixture.n_tokens, &schedule, fixture.expert_count,)
                     .unwrap()
                     .as_slice(),
                 layer.expert_counts.as_slice()
@@ -11711,9 +11817,10 @@ mod tests {
             .collect::<Vec<_>>();
         let attention = grouped_guarded_f32(&ctx, vec![QUERY_WIDTH as u64, N as u64], 13.0);
         write_raw_f32(&attention, &attention_values);
-        let mut scratch = DeepSeekV4PrefillScratch::new(&ctx, DEEPSEEK_V4_CSA_TOP_K)
-            .unwrap()
-            .attention;
+        let mut scratch =
+            DeepSeekV4PrefillScratch::new(&ctx, DEEPSEEK_V4_CSA_TOP_K, MOE_EXPERT_COUNT)
+                .unwrap()
+                .attention;
         scratch.low_rank = grouped_guarded_f32(&ctx, vec![LOW_RANK_WIDTH as u64, N as u64], 17.0);
         scratch.output =
             grouped_guarded_f32(&ctx, vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, N as u64], 19.0);
@@ -15687,8 +15794,12 @@ mod tests {
             return;
         };
         let fixture = PackedRouteFixture::new(&ctx);
-        let production =
-            DeepSeekV4PrefillScratch::new(&ctx, DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS).unwrap();
+        let production = DeepSeekV4PrefillScratch::new(
+            &ctx,
+            DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+            MOE_EXPERT_COUNT,
+        )
+        .unwrap();
         host_write_f32(
             &production.moe.logits,
             &fixture.logits,

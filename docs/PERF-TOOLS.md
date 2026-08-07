@@ -118,6 +118,30 @@ ztrace summary "$TRACE" --threshold 0.5 --depth 8
 
 Use this as the starting point, then switch tools based on the question below.
 
+### DeepSeek V4 packed prefill
+
+Build the diagnostic bench surface once, then use the production chunk and
+expert policies rather than an ignored test or a bespoke packet:
+
+```sh
+cargo build --release -p qwen-cli --bin qwen-bench \
+  --features dsv4-diagnostics
+
+./target/release/qwen-bench dsv4-prefill \
+  -m "$DSV4_MODEL" \
+  --tokens 2048 \
+  --prompt-file "$PROMPT" \
+  --json-out target/profiles/dsv4-prefill.json
+```
+
+The default schedule runs one unsampled warm pass and one sampled pass against
+the same residency. It compares complete prompt logits bit for bit, reports
+whole post-route command GPU time, and splits qualified BM16 layers into
+gate/up, SwiGLU, and down while retaining shared, combine, and hyper/head
+stages. Without `--prompt-file`, a deterministic vocabulary-wide token ramp is
+used. Profiler stage times explain a separate product wall result; do not use
+the sampled wall as a throughput claim.
+
 ## Decision table
 
 | Question | First tool | Why |
@@ -125,6 +149,7 @@ Use this as the starting point, then switch tools based on the question below.
 | Did throughput regress? | `qwen-bench`, `hyperfine` | Stable wall-clock and model-aware numbers. |
 | Which model phase dominates? | `qwen-bench phase` | Knows GDN, attention, LM head, DFlash phases. |
 | Which live MoE decode stage dominates? | `decode-window --stage-timestamps` | Uses one command buffer and Metal timestamp samples at encoder boundaries. |
+| Which DS4 packed MoE stage dominates? | `qwen-bench dsv4-prefill` | Uses production BM16 policy and reusable encoder-boundary timestamps. |
 | Is host/FFI/argmax/load CPU expensive? | `xctrace` + `ztrace` | Best headless symbolicated CPU stack summaries. |
 | Is the process blocked on GPU completion? | source-built `samply --presymbolicate` | Shows off-CPU waits and CPU deltas. |
 | Are command buffers/gaps/competing GPU work visible? | `Metal System Trace` | Exposes Metal app and GPU interval tables. |

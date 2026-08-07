@@ -7,6 +7,12 @@
 #[cfg(feature = "dsv4-diagnostics")]
 mod diagnostics;
 mod prefill;
+
+#[cfg(feature = "dsv4-diagnostics")]
+pub use prefill::{
+    PackedPostRouteLayerMetadata, PackedPostRouteSampledLayerProfile, PackedPostRouteStageKind,
+    PackedPostRouteStageProfile, PackedPostRouteStageTiming,
+};
 mod snapshot;
 
 #[cfg(feature = "dsv4-diagnostics")]
@@ -15696,6 +15702,11 @@ mod tests {
                 prefill::PackedPostRouteStageKind::SharedExpert => 1,
                 prefill::PackedPostRouteStageKind::ExpertCombine => 2,
                 prefill::PackedPostRouteStageKind::HyperPostAndHead => 3,
+                prefill::PackedPostRouteStageKind::RoutedGateUp
+                | prefill::PackedPostRouteStageKind::RoutedSwiGlu
+                | prefill::PackedPostRouteStageKind::RoutedDown => {
+                    panic!("N=128 post-route packet unexpectedly selected BM16 stages")
+                }
             }
         }
 

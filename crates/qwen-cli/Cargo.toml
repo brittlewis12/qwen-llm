@@ -29,6 +29,10 @@ path = "src/grammar_oracle.rs"
 [lints]
 workspace = true
 
+[features]
+default = []
+dsv4-diagnostics = ["qwen-llm/dsv4-diagnostics"]
+
 [dependencies]
 qwen-llm = { path = "../qwen-llm" }
 objc2.workspace = true

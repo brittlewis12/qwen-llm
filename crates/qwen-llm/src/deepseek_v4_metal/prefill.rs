@@ -1813,6 +1813,7 @@ crate::env_flag!(
 
 const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES: u64 = 104_202_502_492;
+const PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES: u64 = 89_920_886_108;
 
 fn packed_q8_matrix_chunk_qualified(n_tokens: usize) -> bool {
     matches!(
@@ -1830,7 +1831,11 @@ fn packed_q8_compressor_matrix_scope_qualified(
     packed_q8_matrix_chunk_qualified(n_tokens)
         && device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
         && tensor_count == 1_328
-        && source_bytes == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES
+        && matches!(
+            source_bytes,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES
+                | PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
+        )
 }
 
 fn packed_indexer_q_matrix_scope_qualified(
@@ -10525,6 +10530,12 @@ mod tests {
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
+        assert!(qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
         assert!(!qualified(
             "Apple M3 Max",
             1_328,
@@ -10546,6 +10557,12 @@ mod tests {
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES - 1,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS - 1,
         ));
@@ -10560,6 +10577,12 @@ mod tests {
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
         assert!(!qualified(

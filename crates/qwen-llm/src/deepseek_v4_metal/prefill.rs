@@ -1233,6 +1233,102 @@ fn encode_q8_f32_mma_r2c4k64(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn encode_q8_f32_mma_r2c16k64(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_tokens: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, "packed Q8 F32 R2C16K64 projection")?;
+    checked_token_count(n_tokens)?;
+    validate_matvec_weight(weight, n_in, n_out, "packed Q8 F32 R2C16K64 weight")?;
+    validate_f32(
+        input,
+        &[n_in as u64, n_tokens as u64],
+        false,
+        "packed Q8 F32 R2C16K64 input",
+    )?;
+    validate_f32(
+        output,
+        &[n_out as u64, n_tokens as u64],
+        true,
+        "packed Q8 F32 R2C16K64 output",
+    )?;
+    if weight.dtype != GgmlType::Q8_0
+        || !n_in.is_multiple_of(64)
+        || !n_out.is_multiple_of(16)
+        || !n_tokens.is_multiple_of(128)
+        || n_tokens > DEEPSEEK_V4_PREFILL_MAX_TOKENS
+    {
+        return invalid("packed Q8 F32 R2C16K64 projection has invalid geometry or storage");
+    }
+    if packed_grouped_tensor_ranges_overlap(input, output)
+        || packed_grouped_tensor_ranges_overlap(weight, output)
+    {
+        return invalid("packed Q8 F32 R2C16K64 output overlaps an input");
+    }
+    let pso = ctx.pipeline("kernel_mat_mat_q8_0_f32_r2c16k64")?;
+    if pso.threadExecutionWidth() != 32
+        || pso.maxTotalThreadsPerThreadgroup() < 128
+        || ctx.device.maxThreadgroupMemoryLength() < 4_096
+    {
+        return invalid("packed Q8 F32 R2C16K64 requires four SIMDgroups and 4 KiB TGM");
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    let row_bytes = checked_mul(n_in / 32, 34, "packed Q8 F32 R2C16K64 row bytes")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: u32::try_from(n_out).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed Q8 F32 output exceeds u32".into())
+            })?,
+            n: u32::try_from(n_tokens).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed Q8 F32 token count exceeds u32".into())
+            })?,
+            k: u32::try_from(n_in).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed Q8 F32 input exceeds u32".into())
+            })?,
+            nb01: u32::try_from(row_bytes).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed Q8 F32 row bytes exceed u32".into())
+            })?,
+            stride_b: u32::try_from(n_in).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("packed Q8 F32 stride exceeds u32".into())
+            })?,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, output);
+    enc.set_threadgroup_memory(0, 4_096);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens / 128,
+            height: n_out / 16,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn encode_state_batch_projection(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -1571,6 +1667,7 @@ enum Q8PrecisionProjection {
     #[cfg(test)]
     HalfMatrix,
     F32Matrix,
+    WideF32Matrix,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1578,6 +1675,7 @@ enum PackedQ8MatrixPolicy {
     Auto,
     Exact,
     F32Matrix,
+    WideF32Matrix,
 }
 
 crate::env_flag!(
@@ -1628,8 +1726,9 @@ fn parse_packed_q8_qb_policy(
         None | Some("auto") => Ok(PackedQ8MatrixPolicy::Auto),
         Some("exact") => Ok(PackedQ8MatrixPolicy::Exact),
         Some("f32_matrix") => Ok(PackedQ8MatrixPolicy::F32Matrix),
+        Some("wide_f32_matrix") => Ok(PackedQ8MatrixPolicy::WideF32Matrix),
         Some(value) => invalid(format!(
-            "QWEN_DSV4_PACKED_Q8_QB must be auto, exact, or f32_matrix, got {value:?}"
+            "QWEN_DSV4_PACKED_Q8_QB must be auto, exact, f32_matrix, or wide_f32_matrix, got {value:?}"
         )),
     }
 }
@@ -1641,8 +1740,9 @@ fn parse_packed_q8_output_policy(
         None | Some("auto") => Ok(PackedQ8MatrixPolicy::Auto),
         Some("exact") => Ok(PackedQ8MatrixPolicy::Exact),
         Some("f32_matrix") => Ok(PackedQ8MatrixPolicy::F32Matrix),
+        Some("wide_f32_matrix") => Ok(PackedQ8MatrixPolicy::WideF32Matrix),
         Some(value) => invalid(format!(
-            "QWEN_DSV4_PACKED_Q8_OUTPUT must be auto, exact, or f32_matrix, got {value:?}"
+            "QWEN_DSV4_PACKED_Q8_OUTPUT must be auto, exact, f32_matrix, or wide_f32_matrix, got {value:?}"
         )),
     }
 }
@@ -1671,6 +1771,7 @@ fn resolve_packed_q8_matrix_policy(
         PackedQ8MatrixPolicy::Auto if profile_qualified => Q8PrecisionProjection::F32Matrix,
         PackedQ8MatrixPolicy::Auto | PackedQ8MatrixPolicy::Exact => Q8PrecisionProjection::Exact,
         PackedQ8MatrixPolicy::F32Matrix => Q8PrecisionProjection::F32Matrix,
+        PackedQ8MatrixPolicy::WideF32Matrix => Q8PrecisionProjection::WideF32Matrix,
     }
 }
 
@@ -1692,7 +1793,18 @@ fn packed_q8_qb_projection_for_chunk(
 
 impl Q8PrecisionProjection {
     fn uses_full_chunk_f32(self, n_tokens: usize) -> bool {
-        self == Self::F32Matrix && packed_q8_matrix_chunk_qualified(n_tokens)
+        matches!(self, Self::F32Matrix | Self::WideF32Matrix)
+            && packed_q8_matrix_chunk_qualified(n_tokens)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            #[cfg(test)]
+            Self::HalfMatrix => "half_matrix",
+            Self::F32Matrix => "f32_matrix",
+            Self::WideF32Matrix => "wide_f32_matrix",
+        }
     }
 }
 
@@ -2308,16 +2420,29 @@ impl PrefillAttentionScratch {
             rms_eps,
         )?;
         if q_b_projection.uses_full_chunk_f32(n_tokens) {
-            encode_q8_f32_mma_r2c4k64(
-                ctx,
-                enc,
-                q_b,
-                &q_lora,
-                &queries_raw,
-                config.q_lora_rank,
-                dims.query_width,
-                n_tokens,
-            )?;
+            match q_b_projection {
+                Q8PrecisionProjection::F32Matrix => encode_q8_f32_mma_r2c4k64(
+                    ctx,
+                    enc,
+                    q_b,
+                    &q_lora,
+                    &queries_raw,
+                    config.q_lora_rank,
+                    dims.query_width,
+                    n_tokens,
+                )?,
+                Q8PrecisionProjection::WideF32Matrix => encode_q8_f32_mma_r2c16k64(
+                    ctx,
+                    enc,
+                    q_b,
+                    &q_lora,
+                    &queries_raw,
+                    config.q_lora_rank,
+                    dims.query_width,
+                    n_tokens,
+                )?,
+                _ => unreachable!("full-chunk F32 predicate admitted a non-F32 policy"),
+            }
         } else {
             encode_batch_projection(
                 ctx,
@@ -2550,6 +2675,9 @@ impl PrefillAttentionScratch {
                 )
                 .map_err(DeepSeekV4MetalError::Metal),
                 Q8PrecisionProjection::F32Matrix => encode_q8_f32_mma_r2c4k64(
+                    ctx, enc, weight, input, output, n_in, n_out, n_tokens,
+                ),
+                Q8PrecisionProjection::WideF32Matrix => encode_q8_f32_mma_r2c16k64(
                     ctx, enc, weight, input, output, n_in, n_out, n_tokens,
                 ),
             }
@@ -7977,7 +8105,8 @@ impl DeepSeekV4Session {
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
-                    "deepseek_v4: F32 Q8 Q-B matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB=exact"
+                    "deepseek_v4: Q8 Q-B matrix policy={} active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB=exact",
+                    q_b_projection.label(),
                 );
             }
         }
@@ -7986,7 +8115,8 @@ impl DeepSeekV4Session {
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
-                    "deepseek_v4: F32 Q8 output A/B matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT=exact"
+                    "deepseek_v4: Q8 output A/B matrix policy={} active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT=exact",
+                    output_projection.label(),
                 );
             }
         }
@@ -8594,8 +8724,8 @@ impl DeepSeekV4Session {
                         output_a,
                         output_b,
                         n_tokens,
-                        Q8PrecisionProjection::F32Matrix,
-                        Q8PrecisionProjection::F32Matrix,
+                        output_projection,
+                        output_projection,
                     )?
                 } else {
                     self.prefill.attention.encode_output(
@@ -9930,6 +10060,10 @@ mod tests {
             PackedQ8MatrixPolicy::F32Matrix
         );
         assert_eq!(
+            parse_packed_q8_qb_policy(Some("wide_f32_matrix")).unwrap(),
+            PackedQ8MatrixPolicy::WideF32Matrix
+        );
+        assert_eq!(
             resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true),
             Q8PrecisionProjection::F32Matrix
         );
@@ -9945,10 +10079,18 @@ mod tests {
             resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::F32Matrix, false),
             Q8PrecisionProjection::F32Matrix
         );
+        assert_eq!(
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::WideF32Matrix, false),
+            Q8PrecisionProjection::WideF32Matrix
+        );
         let matrix = Q8PrecisionProjection::F32Matrix;
         assert!(!matrix.uses_full_chunk_f32(512));
         assert!(matrix.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
         assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
+        let wide = Q8PrecisionProjection::WideF32Matrix;
+        assert!(!wide.uses_full_chunk_f32(512));
+        assert!(wide.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
+        assert!(wide.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
         assert!(parse_packed_q8_qb_policy(Some("half_matrix")).is_err());
     }
 
@@ -9969,6 +10111,10 @@ mod tests {
         assert_eq!(
             parse_packed_q8_output_policy(Some("f32_matrix")).unwrap(),
             PackedQ8MatrixPolicy::F32Matrix
+        );
+        assert_eq!(
+            parse_packed_q8_output_policy(Some("wide_f32_matrix")).unwrap(),
+            PackedQ8MatrixPolicy::WideF32Matrix
         );
         assert!(parse_packed_q8_output_policy(Some("half_matrix")).is_err());
         assert_eq!(
@@ -10913,6 +11059,77 @@ mod tests {
                     assert_grouped_guards(label, tensor);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn q8_f32_mma_r2c16k64_matches_r2c4k64_bits() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        const M: usize = 32;
+        const N: usize = 128;
+
+        fn submit(
+            ctx: &MetalContext,
+            encode: impl FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        ) {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let result = encode(&encoder);
+            encoder.end();
+            result.unwrap();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{:?}", command.error());
+        }
+
+        for k in [128usize, 4_096] {
+            let weight = q8_precision_test_weight(&ctx, k, M);
+            let input = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&q8_precision_test_input(k * N)),
+                vec![k as u64, N as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let control = grouped_guarded_f32(&ctx, vec![M as u64, N as u64], 3.0);
+            let candidate = grouped_guarded_f32(&ctx, vec![M as u64, N as u64], 5.0);
+            let repeat = grouped_guarded_f32(&ctx, vec![M as u64, N as u64], 7.0);
+
+            submit(&ctx, |encoder| {
+                encode_q8_f32_mma_r2c4k64(&ctx, encoder, &weight, &input, &control, k, M, N)
+            });
+            for output in [&candidate, &repeat] {
+                submit(&ctx, |encoder| {
+                    encode_q8_f32_mma_r2c16k64(&ctx, encoder, &weight, &input, output, k, M, N)
+                });
+            }
+
+            let bits = |tensor: &MetalTensor, label| {
+                host_read_f32(tensor, label)
+                    .unwrap()
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>()
+            };
+            let control_bits = bits(&control, "Q8 R2C4K64 control");
+            let candidate_bits = bits(&candidate, "Q8 R2C16K64 candidate");
+            let repeat_bits = bits(&repeat, "Q8 R2C16K64 repeat");
+            let first_mismatch = candidate_bits
+                .iter()
+                .zip(&control_bits)
+                .position(|(candidate, control)| candidate != control);
+            assert!(
+                first_mismatch.is_none(),
+                "K={k} first mismatch={first_mismatch:?} candidate={:?} control={:?}",
+                &candidate_bits[..64],
+                &control_bits[..64],
+            );
+            assert_eq!(repeat_bits, candidate_bits, "K={k} repeat");
+            assert_grouped_guards("Q8 R2C4K64 control", &control);
+            assert_grouped_guards("Q8 R2C16K64 candidate", &candidate);
+            assert_grouped_guards("Q8 R2C16K64 repeat", &repeat);
         }
     }
 

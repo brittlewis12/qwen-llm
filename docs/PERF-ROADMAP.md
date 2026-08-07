@@ -888,35 +888,82 @@ cohort falls 5.02-6.43%, and ordinary wall falls 3.12-5.18%. A real 6,642-token
 continuation remains coherent and reaches EOS. Default the faster arithmetic
 with `QWEN_DSV4_PACKED_IQ2_F16_MATRIX=0` as the F32-staging rollback.
 
+The K160 REAP lane supplies a new same-GGUF prefill anchor. Native N=2,048
+moves from 227.9 to 266.1 token/s after mapped grouped Q3_K/Q4_K matrices cut
+routed experts from 4.03 to 2.76 seconds. The warm 2,385-token product prompt
+moves from 161.2 to 179.5 token/s with identical generated IDs. Pinned
+llama.cpp reaches 352.0 token/s on the same asset and shape, so the remaining
+prefill gap is real implementation headroom rather than model size.
+
+The CSA/HCA leverage map is now regime-specific. At terminal singleton shape,
+the production scorer costs 2.102 ms across each of 21 CSA layers, radix4 costs
+1.875 ms on mixed scores, selected attention costs 0.323 ms, and online HCA
+costs 3.410 ms across each of 20 HCA layers. Their subtotals are about
+44.1/39.4/6.8/68.2 ms respectively. The exact multigroup selector lowers the
+selection subtotal to about 14.2 ms where qualified, so "selection is closed"
+remains true for 47 ms of packed 8K prefill but not for far singleton decode.
+
+Four corrections constrain the new queue:
+
+- Cache-order selected IDs are already strictly ascending. Sorting them again
+  cannot improve locality; run/page descriptors remain a separate measured
+  possibility.
+- Packed terminal-capacity score and selected-mask scratch each occupy 4 GiB
+  at N=4,096. Attention consumes compact IDs, counts, and status rather than the
+  dense mask. Deleting materialization is a memory and dataflow opportunity.
+- A simple previous-score delta certificate is not recursively exact. Skipped
+  rows need conservative upper envelopes, newly published rows need exact
+  scores, and signed weight changes need an outward-rounded bound containing
+  both `|w| * ||delta q||` and `|delta w| * ||q||`, scaled by each published
+  row norm. Lazy cumulative envelopes remain correct as slack grows, but
+  periodic exact refresh may be needed for useful pruning.
+- HCA is not two free GEMMs under the current contract. The 64-head logical
+  reads, F32 queries, sink-aware softmax, output state, and merge lineage remain
+  charged. Grouped split-K online attention is open, but a 0.1 ms matrix
+  arithmetic floor is not a product projection.
+
+The first exact deletion already clears. Direct per-lane row loads remove four
+threadgroup stores, four reloads, and one barrier without changing the online
+recurrence. HCA at 8,192 rows moves `3.406 -> 2.993 ms/layer`, saving about
+8.3 ms across 20 layers; selected CSA moves `0.233 -> 0.200 ms/layer` and stays
+flat from 16,384 through 262,144 history rows. Staged and direct outputs are
+bit-identical across selected-CSA boundaries and HCA 512/513 through 8,192.
+One same-binary warm K160 product pair moves the 2,385-token prompt from
+13,249 to 13,111 ms (`180.01 -> 181.90 token/s`) with the same generated-ID
+digest. Default the deletion with `QWEN_DSV4_ONLINE_DIRECT_LOAD=0` as rollback.
+
 Force-ranked queue:
 
-1. **Further IQ2 execution.** Half-staged gate/up is now default. The routed
-   down projection remains about 1.9 seconds of the clean 8K profile; require a
-   changed work unit rather than another scalar or bank-axis retune.
-2. **All-IQ3 routed experts.** The 16-layer routed subtotal is 3.67 seconds and
-   already uses a 64-output by 32-route matrix. Reopen only for a new dataflow
-   boundary such as grouped down or deterministic sorted-output finalization,
-   not another bank-axis or scalar sweep.
-3. **Mixed-quant routed experts.** Layers 26 and 42 cost 2.23 seconds in the
-   generic routed-expert path. Price a matrix work unit across their IQ3_S or
-   IQ3_XXS gate/up and MXFP4 down shapes before tuning either dtype locally.
-4. **Further Lightning score production.** At the 4K default, the exact tiled
-   F32 scorer costs 1.61 seconds. Reopen around lower-precision tensor execution
-   only when its whole-request ceiling competes with routed-expert work; exact
-   radix selection remains only 47 ms and must not be folded into the claim.
-5. **Far-context scoring and selection.** Keep the tiled F32 scorer and radix4
-   selector while prefill is the larger product deficit. Reopen exact Lightning
-   scheduling only for a structurally new design with a credible >=0.50 ms
-   terminal saving and <=0.05 ms shallow regression; do not auto-sweep R4 or
-   repeat the held R2 packet.
-6. **Bounded multi-group product evidence.** Preserve radix4 as default and the
-   exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
-   through 262,144 reachable visible rows. Reopen default-on only for reusable
-   real continuation evidence or material implementation/device drift.
-7. **Broad GPU route ownership.** The 1.448-second ceiling remains below the
-   grouped-attention and sparse-indexer opportunities, and its ledger regression
-   is unresolved. Reopen only with a CPU-equivalent route-weight lineage or a
-   materially larger measured endpoint ceiling.
+1. **Close the K160 same-GGUF prefill gap.** Attribute the 1.88-second gap
+   between native's 7.70-second N=2,048 wall and llama.cpp's 5.82 seconds, then
+   change the remaining Q3_K/Q4_K work unit. Prefer lower-pressure gate/up
+   reuse, wider route tiles, or grouped down over another scalar or bank-axis
+   retune.
+2. **Stream exact Lightning score-to-top-k.** Replace full score/mask production
+   with deterministic partition-local top-512 and exact merge, or a LiteTopK
+   style conservative histogram filter with complete overflow fallback. Keep
+   F32 score arithmetic and lower-ID ties. The immediate prize is 8 GiB of
+   packed terminal scratch; far-decode latency can also delete radix scans.
+3. **Build grouped split-K online HCA.** Direct loading leaves 2.993 ms/layer at
+   terminal shape. Combine contiguous group-eight cache reuse with partitioned
+   online `(max, mass, value)` states and a numerically bounded sink-aware merge.
+   Claim bitwise identity only if a fixed merge reproduces the incumbent
+   recurrence. Treat Qwen `attn_v4` as topology lineage, not drop-in
+   dimension-256/GQA code.
+4. **Promote multigroup only on real far continuation.** The exact M4-Max path
+   already saves 13.9 ms whole-token on restored synthetic state. One reusable
+   real-prefix continuation with exact IDs, logits, and causal state can decide
+   default-on inside its existing 196,608-row qualification band.
+5. **Measure temporal certification, do not assume it.** Reuse existing score,
+   cutoff, and decision diagnostics at a restored two-token far endpoint to
+   record adjacent top-k overlap, signed weight changes, row-norm bound slack,
+   and corrected upper-envelope candidate fractions. Build incremental scoring
+   only if the recurring exact certificate rejects most rows after accumulated
+   slack.
+6. **Keep direct FP4/BF16 replacement closed.** Unguarded FP4 changed every
+   deep mask and regressed wall. Reopen low precision only as a certified
+   conservative filter whose exact fallback and all-in ceiling beat the F32
+   streaming path; do not treat candidate recall alone as exactness.
 
 Short-context local tuning is bounded-KILL under the current 0.75 ms/token
 two-depth gate: all-slot barrier removal, larger IQ2 row groups, fixed-geometry

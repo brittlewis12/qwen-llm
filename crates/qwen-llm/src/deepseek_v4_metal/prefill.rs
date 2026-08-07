@@ -8229,11 +8229,18 @@ fn encode_packed_selected_sink_attention_f16(
     )?;
 
     let online = packed_selected_online_enabled();
+    let direct_load = online && deepseek_v4_online_direct_load_enabled();
     static POLICY_LOGGED: std::sync::Once = std::sync::Once::new();
     POLICY_LOGGED.call_once(|| {
         eprintln!(
-            "deepseek_v4: packed selected attention policy={}; rollback=QWEN_DSV4_PACKED_SELECTED_ONLINE=0",
-            if online { "online" } else { "legacy" },
+            "deepseek_v4: packed selected attention policy={}; staged=QWEN_DSV4_ONLINE_DIRECT_LOAD=0 legacy=QWEN_DSV4_PACKED_SELECTED_ONLINE=0",
+            if direct_load {
+                "online-direct"
+            } else if online {
+                "online-staged"
+            } else {
+                "legacy"
+            },
         );
     });
     encode_cooperative_selected_sink_attention_f16(
@@ -8256,6 +8263,7 @@ fn encode_packed_selected_sink_attention_f16(
         n_tokens,
         DEEPSEEK_V4_CSA_TOP_K,
         online,
+        direct_load,
         config,
     )
 }

@@ -6181,6 +6181,15 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                 .attention
                 .view_subrange(0, vec![dims.query_width as u64, 1]);
             if self.use_online_hca() {
+                let direct_load = deepseek_v4_online_direct_load_enabled();
+                if direct_load {
+                    static REPORTED: std::sync::Once = std::sync::Once::new();
+                    REPORTED.call_once(|| {
+                        eprintln!(
+                            "deepseek_v4: online HCA loads rows directly; rollback=QWEN_DSV4_ONLINE_DIRECT_LOAD=0"
+                        );
+                    });
+                }
                 encode_online_dense_sink_attention_f16(
                     ctx,
                     enc,
@@ -6195,6 +6204,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                     0,
                     1,
                     128,
+                    direct_load,
                     c,
                 )?;
             } else {
@@ -6299,6 +6309,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             1,
             1,
             DEEPSEEK_V4_CSA_TOP_K,
+            false,
             false,
             c,
         )?;
@@ -9653,6 +9664,11 @@ const DEEPSEEK_V4_ONLINE_HCA_THREADS: usize = 32;
 const DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES: usize =
     DEEPSEEK_V4_HCA_TILE_ROWS * std::mem::size_of::<half::f16>();
 
+crate::env_flag!(
+    default_on deepseek_v4_online_direct_load_enabled,
+    "QWEN_DSV4_ONLINE_DIRECT_LOAD"
+);
+
 fn validate_deepseek_v4_online_hca_request_geometry(
     config: DeepSeekV4PositionZeroAttentionConfig,
     compression_ratio: usize,
@@ -9678,6 +9694,7 @@ fn validate_deepseek_v4_online_hca_launch_geometry(
     thread_execution_width: usize,
     max_threads_per_group: usize,
     max_threadgroup_bytes: usize,
+    required_threadgroup_bytes: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
     if thread_execution_width != DEEPSEEK_V4_ONLINE_HCA_THREADS
         || max_threads_per_group < DEEPSEEK_V4_ONLINE_HCA_THREADS
@@ -9687,10 +9704,10 @@ fn validate_deepseek_v4_online_hca_launch_geometry(
             DEEPSEEK_V4_ONLINE_HCA_THREADS, DEEPSEEK_V4_ONLINE_HCA_THREADS,
         ));
     }
-    if max_threadgroup_bytes < DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES {
+    if max_threadgroup_bytes < required_threadgroup_bytes {
         return invalid(format!(
             "online tiled HCA requires {} threadgroup bytes, device allows {max_threadgroup_bytes}",
-            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+            required_threadgroup_bytes,
         ));
     }
     Ok(())
@@ -9729,6 +9746,7 @@ fn encode_tiled_dense_sink_attention_f16(
         compression_ratio,
         config,
         false,
+        false,
     )
 }
 
@@ -9747,6 +9765,7 @@ fn encode_online_dense_sink_attention_f16(
     query_token_offset: usize,
     query_count: usize,
     compression_ratio: usize,
+    direct_load: bool,
     config: DeepSeekV4PositionZeroAttentionConfig,
 ) -> Result<(), DeepSeekV4MetalError> {
     encode_tiled_dense_sink_attention_f16_with_mode(
@@ -9765,6 +9784,7 @@ fn encode_online_dense_sink_attention_f16(
         compression_ratio,
         config,
         true,
+        direct_load,
     )
 }
 
@@ -9785,6 +9805,7 @@ fn encode_tiled_dense_sink_attention_f16_with_mode(
     compression_ratio: usize,
     config: DeepSeekV4PositionZeroAttentionConfig,
     online: bool,
+    direct_load: bool,
 ) -> Result<(), DeepSeekV4MetalError> {
     let query_width = checked_mul(config.head_count, config.head_dim, "tiled query width")?;
     if config.head_dim != DEEPSEEK_V4_HCA_TILE_ROWS || compression_ratio != 128 || query_count == 0
@@ -9796,6 +9817,9 @@ fn encode_tiled_dense_sink_attention_f16_with_mode(
     }
     let token_count = usize::try_from(queries.shape[1])
         .map_err(|_| DeepSeekV4MetalError::Invalid("tiled query count exceeds usize".into()))?;
+    if direct_load && !online {
+        return invalid("direct row loading requires online dense attention");
+    }
     if online {
         validate_deepseek_v4_online_hca_request_geometry(
             config,
@@ -9902,9 +9926,17 @@ fn encode_tiled_dense_sink_attention_f16_with_mode(
     };
     let (kernel, threadgroup_width, threadgroup_bytes) = if online {
         (
-            "kernel_deepseek_v4_online_dense_sink_attention_f16",
+            if direct_load {
+                "kernel_deepseek_v4_online_dense_sink_attention_f16_direct"
+            } else {
+                "kernel_deepseek_v4_online_dense_sink_attention_f16"
+            },
             DEEPSEEK_V4_ONLINE_HCA_THREADS,
-            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+            if direct_load {
+                0
+            } else {
+                DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES
+            },
         )
     } else {
         (
@@ -9919,6 +9951,7 @@ fn encode_tiled_dense_sink_attention_f16_with_mode(
             pso.threadExecutionWidth(),
             pso.maxTotalThreadsPerThreadgroup(),
             ctx.device.maxThreadgroupMemoryLength(),
+            threadgroup_bytes,
         )?;
     } else if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
         return invalid(format!(
@@ -9934,7 +9967,9 @@ fn encode_tiled_dense_sink_attention_f16_with_mode(
     enc.set_tensor(4, compressed.cache);
     enc.set_tensor(5, sinks);
     enc.set_tensor(6, output);
-    enc.set_threadgroup_memory(0, threadgroup_bytes);
+    if threadgroup_bytes != 0 {
+        enc.set_threadgroup_memory(0, threadgroup_bytes);
+    }
     enc.dispatch(
         MTLSize {
             width: query_count,
@@ -12395,6 +12430,7 @@ fn encode_cooperative_selected_sink_attention_f16(
     token_count: usize,
     selected_slots: usize,
     online: bool,
+    direct_load: bool,
     config: DeepSeekV4PositionZeroAttentionConfig,
 ) -> Result<(), DeepSeekV4MetalError> {
     require_serial(enc, "deepseek_v4_cooperative_selected_attention")?;
@@ -12500,6 +12536,9 @@ fn encode_cooperative_selected_sink_attention_f16(
         .ok_or_else(|| {
             DeepSeekV4MetalError::Invalid("cooperative selected maximum row count overflow".into())
         })?;
+    if direct_load && !online {
+        return invalid("direct row loading requires online selected attention");
+    }
     let (kernel, threadgroup_width, threadgroup_bytes) = if online {
         if config.head_count != 64
             || config.head_dim != DEEPSEEK_V4_HCA_TILE_ROWS
@@ -12510,9 +12549,17 @@ fn encode_cooperative_selected_sink_attention_f16(
             );
         }
         (
-            "kernel_deepseek_v4_online_packed_selected_sink_attention_f16",
+            if direct_load {
+                "kernel_deepseek_v4_online_packed_selected_sink_attention_f16_direct"
+            } else {
+                "kernel_deepseek_v4_online_packed_selected_sink_attention_f16"
+            },
             DEEPSEEK_V4_ONLINE_HCA_THREADS,
-            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+            if direct_load {
+                0
+            } else {
+                DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES
+            },
         )
     } else {
         (
@@ -12527,6 +12574,7 @@ fn encode_cooperative_selected_sink_attention_f16(
             pso.threadExecutionWidth(),
             pso.maxTotalThreadsPerThreadgroup(),
             ctx.device.maxThreadgroupMemoryLength(),
+            threadgroup_bytes,
         )?;
     } else if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
         return invalid(format!(
@@ -12559,7 +12607,9 @@ fn encode_cooperative_selected_sink_attention_f16(
     enc.set_tensor(7, visible_counts);
     enc.set_tensor(8, sinks);
     enc.set_tensor(9, output);
-    enc.set_threadgroup_memory(0, threadgroup_bytes);
+    if threadgroup_bytes != 0 {
+        enc.set_threadgroup_memory(0, threadgroup_bytes);
+    }
     enc.dispatch(
         MTLSize {
             width: query_count,
@@ -22122,12 +22172,21 @@ mod tests {
             DEEPSEEK_V4_ONLINE_HCA_THREADS,
             DEEPSEEK_V4_ONLINE_HCA_THREADS,
             DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+        )
+        .unwrap();
+        validate_deepseek_v4_online_hca_launch_geometry(
+            DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            0,
+            0,
         )
         .unwrap();
 
         let width_error = validate_deepseek_v4_online_hca_launch_geometry(
             16,
             DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
             DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
         )
         .unwrap_err();
@@ -22136,6 +22195,7 @@ mod tests {
             DEEPSEEK_V4_ONLINE_HCA_THREADS,
             DEEPSEEK_V4_ONLINE_HCA_THREADS - 1,
             DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
         )
         .unwrap_err();
         assert!(thread_error.to_string().contains("max 31"));
@@ -22143,6 +22203,7 @@ mod tests {
             DEEPSEEK_V4_ONLINE_HCA_THREADS,
             DEEPSEEK_V4_ONLINE_HCA_THREADS,
             DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES - 1,
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
         )
         .unwrap_err();
         assert!(memory_error.to_string().contains("device allows 1023"));
@@ -22582,6 +22643,7 @@ mod tests {
             let online = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
             let online_repeat =
                 MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
+            let direct = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
             let rows = DeepSeekV4PublishedRows {
                 cache: &compressed_cache,
                 count,
@@ -22621,10 +22683,29 @@ mod tests {
                     0,
                     1,
                     128,
+                    false,
                     config,
                 )
                 .unwrap();
             }
+            encode_online_dense_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &query_tensor,
+                &current_raw,
+                &preserved_raw,
+                DeepSeekV4RawCacheLayout::Ring,
+                rows,
+                &sinks,
+                &direct,
+                position as u32,
+                0,
+                1,
+                128,
+                true,
+                config,
+            )
+            .unwrap();
             encoder.end();
             command.commit();
             command.waitUntilCompleted();
@@ -22645,6 +22726,17 @@ mod tests {
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
                 "{count}-row online HCA is not bit-stable"
+            );
+            assert_eq!(
+                online
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                read_f32(&direct)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{count}-row direct HCA changed the online recurrence"
             );
             assert_close(
                 &format!("{count}-row legacy HCA head zero"),
@@ -26520,6 +26612,7 @@ mod tests {
             1,
             TOP_K,
             false,
+            false,
             attention_config,
         )
         .unwrap();
@@ -26972,6 +27065,7 @@ mod tests {
                     0,
                     1,
                     128,
+                    false,
                     config,
                 )
                 .unwrap();
@@ -27190,6 +27284,7 @@ mod tests {
             let cooperative =
                 MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
             let online = MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
+            let direct = MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
             let command = ctx.queue.commandBuffer().unwrap();
             let encoder = KernelEncoder::begin(&command);
             encode_selected_sink_attention_f16(
@@ -27228,6 +27323,7 @@ mod tests {
                 1,
                 TOP_K,
                 false,
+                false,
                 config,
             )
             .unwrap();
@@ -27251,6 +27347,31 @@ mod tests {
                 1,
                 TOP_K,
                 true,
+                false,
+                config,
+            )
+            .unwrap();
+            encode_cooperative_selected_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &packed_queries,
+                &raw_cache,
+                &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
+                &compressed,
+                CAPACITY,
+                &selected_ids,
+                &selected_counts,
+                &visible_counts,
+                &sinks,
+                &direct,
+                position,
+                0,
+                1,
+                1,
+                TOP_K,
+                true,
+                true,
                 config,
             )
             .unwrap();
@@ -27266,6 +27387,7 @@ mod tests {
             for (label, candidate, max_allowed) in [
                 ("cooperative", read_f32(&cooperative), 1e-8),
                 ("online", read_f32(&online), 1e-8),
+                ("direct", read_f32(&direct), 1e-8),
             ] {
                 let differing = legacy
                     .iter()
@@ -27290,7 +27412,129 @@ mod tests {
                 assert!(max_abs <= max_allowed, "{label} max abs {max_abs}");
                 assert!(relative_rms <= 1e-6, "{label} relative RMS {relative_rms}");
             }
+            assert_eq!(
+                read_f32(&online)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                read_f32(&direct)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "direct selected attention changed online output at {position}"
+            );
         }
+    }
+
+    #[test]
+    fn direct_selected_attention_matches_staged_for_packed_chunk_layout() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const TOKENS: usize = 4;
+        const START_POSITION: u32 = 2_048;
+        const CAPACITY: usize = 513;
+        const TOP_K: usize = 512;
+        let config = deepseek_v4_session_attention_config();
+        let dims = config.checked().unwrap();
+        let queries = offset_f32(
+            &ctx,
+            &(0..TOKENS * dims.query_width)
+                .map(|index| ((index * 17 + index / 31 + 5) % 257) as f32 * 0.0004 - 0.051)
+                .collect::<Vec<_>>(),
+            vec![dims.query_width as u64, TOKENS as u64],
+        );
+        let f16_tensor = |elements: usize, shape: Vec<u64>, seed: usize| {
+            let bits = (0..elements)
+                .map(|index| {
+                    half::f16::from_f32(
+                        ((index * 29 + index / 13 + seed) % 251) as f32 * 0.0005 - 0.061,
+                    )
+                    .to_bits()
+                })
+                .collect::<Vec<_>>();
+            MetalTensor::from_bytes(&ctx, bytemuck::cast_slice(&bits), shape, GgmlType::F16)
+                .unwrap()
+        };
+        let raw_chunk = f16_tensor(
+            TOKENS * config.head_dim,
+            vec![config.head_dim as u64, TOKENS as u64],
+            7,
+        );
+        let preserved_raw = f16_tensor(
+            DEEPSEEK_V4_LOCAL_WINDOW * config.head_dim,
+            vec![config.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+            11,
+        );
+        let compressed = f16_tensor(
+            CAPACITY * config.head_dim,
+            vec![config.head_dim as u64, CAPACITY as u64],
+            19,
+        );
+        let selected_ids = offset_i32(
+            &ctx,
+            &(0..TOKENS)
+                .flat_map(|_| 0..TOP_K as i32)
+                .collect::<Vec<_>>(),
+            vec![TOP_K as u64, TOKENS as u64],
+        );
+        let selected_counts = offset_i32(&ctx, &vec![TOP_K as i32; TOKENS], vec![TOKENS as u64]);
+        let visible_counts = offset_i32(&ctx, &[512, 512, 512, 513], vec![TOKENS as u64]);
+        let sinks = offset_f32(
+            &ctx,
+            &(0..config.head_count)
+                .map(|head| -0.43 + head as f32 * 0.002)
+                .collect::<Vec<_>>(),
+            vec![config.head_count as u64],
+        );
+        let staged =
+            MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, TOKENS as u64]).unwrap();
+        let direct =
+            MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, TOKENS as u64]).unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        for (output, direct_load) in [(&staged, false), (&direct, true)] {
+            encode_cooperative_selected_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &queries,
+                &raw_chunk,
+                &preserved_raw,
+                DeepSeekV4RawCacheLayout::Chunk,
+                &compressed,
+                CAPACITY,
+                &selected_ids,
+                &selected_counts,
+                &visible_counts,
+                &sinks,
+                output,
+                START_POSITION,
+                0,
+                TOKENS,
+                TOKENS,
+                TOP_K,
+                true,
+                direct_load,
+                config,
+            )
+            .unwrap();
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none(), "{:?}", command.error());
+        assert_eq!(
+            read_f32(&direct)
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            read_f32(&staged)
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "direct packed-chunk attention changed staged online output"
+        );
     }
 
     #[test]
@@ -27360,6 +27604,7 @@ mod tests {
                 1,
                 1,
                 SELECTED_SLOTS,
+                false,
                 false,
                 config,
             )
@@ -29926,6 +30171,12 @@ mod tests {
         let cooperative_output =
             MetalTensor::zeros_f32(&ctx, vec![(ATTENTION_HEADS * ATTENTION_DIM) as u64, 1])
                 .expect("allocate profile cooperative attention output");
+        let online_output =
+            MetalTensor::zeros_f32(&ctx, vec![(ATTENTION_HEADS * ATTENTION_DIM) as u64, 1])
+                .expect("allocate profile online attention output");
+        let direct_output =
+            MetalTensor::zeros_f32(&ctx, vec![(ATTENTION_HEADS * ATTENTION_DIM) as u64, 1])
+                .expect("allocate profile direct attention output");
         let attention_config = DeepSeekV4PositionZeroAttentionConfig {
             hidden_size: 1,
             q_lora_rank: 1,
@@ -30032,9 +30283,36 @@ mod tests {
                 1,
                 TOP_K,
                 false,
+                false,
                 attention_config,
             )
             .unwrap();
+            for (candidate, direct_load) in [(&online_output, false), (&direct_output, true)] {
+                encode_cooperative_selected_sink_attention_f16(
+                    &ctx,
+                    &encoder,
+                    &cooperative_queries,
+                    &raw_cache,
+                    &raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
+                    &compressed_rows,
+                    row_count,
+                    &cache_order_ids,
+                    &selected_counts,
+                    &visible_counts,
+                    &sinks,
+                    candidate,
+                    position,
+                    0,
+                    1,
+                    1,
+                    TOP_K,
+                    true,
+                    direct_load,
+                    attention_config,
+                )
+                .unwrap();
+            }
             encoder.end();
             warm.commit();
             warm.waitUntilCompleted();
@@ -30262,6 +30540,71 @@ mod tests {
                                 1,
                                 TOP_K,
                                 false,
+                                false,
+                                attention_config,
+                            )
+                        })
+                    })
+                    .collect(),
+            )
+            .0;
+            let online_attention_ms = median_and_p95(
+                (0..3)
+                    .map(|_| {
+                        timed_gpu(&ctx, 4, |encoder| {
+                            encode_cooperative_selected_sink_attention_f16(
+                                &ctx,
+                                encoder,
+                                &cooperative_queries,
+                                &raw_cache,
+                                &raw_cache,
+                                DeepSeekV4RawCacheLayout::Ring,
+                                &compressed_rows,
+                                row_count,
+                                &cache_order_ids,
+                                &selected_counts,
+                                &visible_counts,
+                                &sinks,
+                                &online_output,
+                                position,
+                                0,
+                                1,
+                                1,
+                                TOP_K,
+                                true,
+                                false,
+                                attention_config,
+                            )
+                        })
+                    })
+                    .collect(),
+            )
+            .0;
+            let direct_attention_ms = median_and_p95(
+                (0..3)
+                    .map(|_| {
+                        timed_gpu(&ctx, 4, |encoder| {
+                            encode_cooperative_selected_sink_attention_f16(
+                                &ctx,
+                                encoder,
+                                &cooperative_queries,
+                                &raw_cache,
+                                &raw_cache,
+                                DeepSeekV4RawCacheLayout::Ring,
+                                &compressed_rows,
+                                row_count,
+                                &cache_order_ids,
+                                &selected_counts,
+                                &visible_counts,
+                                &sinks,
+                                &direct_output,
+                                position,
+                                0,
+                                1,
+                                1,
+                                TOP_K,
+                                true,
+                                true,
                                 attention_config,
                             )
                         })
@@ -30281,13 +30624,25 @@ mod tests {
                     .iter()
                     .all(|value| value.is_finite())
             );
+            assert_eq!(
+                read_f32(&direct_output)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                read_f32(&online_output)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "direct selected attention changed online output at {row_count} rows"
+            );
             let conservative_select_ms = tied_select_ms.max(mixed_select_ms);
             eprintln!(
-                "deepseek_v4 sparse_profile rows={row_count} token_equivalent={} scalar_score_before_ms={scalar_score_before_ms:.3} score_ms={score_ms:.3} score_p95_ms={score_p95_ms:.3} scalar_score_after_ms={scalar_score_after_ms:.3} score_speedup={:.2} tied_bit_before_ms={tied_select_before_ms:.3} tied_radix4_ms={tied_select_ms:.3} tied_radix4_p95_ms={tied_select_p95_ms:.3} tied_bit_after_ms={tied_select_after_ms:.3} tied_speedup={:.2} mixed_bit_before_ms={mixed_select_before_ms:.3} mixed_radix4_ms={mixed_select_ms:.3} mixed_radix4_p95_ms={mixed_select_p95_ms:.3} mixed_bit_after_ms={mixed_select_after_ms:.3} mixed_speedup={:.2} legacy_attention_ms={legacy_attention_ms:.3} cooperative_attention_ms={cooperative_attention_ms:.3} attention_speedup={:.2} conservative_projected_21_csa_ms={:.3}",
+                "deepseek_v4 sparse_profile rows={row_count} token_equivalent={} scalar_score_before_ms={scalar_score_before_ms:.3} score_ms={score_ms:.3} score_p95_ms={score_p95_ms:.3} scalar_score_after_ms={scalar_score_after_ms:.3} score_speedup={:.2} tied_bit_before_ms={tied_select_before_ms:.3} tied_radix4_ms={tied_select_ms:.3} tied_radix4_p95_ms={tied_select_p95_ms:.3} tied_bit_after_ms={tied_select_after_ms:.3} tied_speedup={:.2} mixed_bit_before_ms={mixed_select_before_ms:.3} mixed_radix4_ms={mixed_select_ms:.3} mixed_radix4_p95_ms={mixed_select_p95_ms:.3} mixed_bit_after_ms={mixed_select_after_ms:.3} mixed_speedup={:.2} legacy_attention_ms={legacy_attention_ms:.3} cooperative_attention_ms={cooperative_attention_ms:.3} online_attention_ms={online_attention_ms:.3} direct_attention_ms={direct_attention_ms:.3} direct_attention_saving_ms={:.3} attention_speedup={:.2} conservative_projected_21_csa_ms={:.3}",
                 row_count * 4,
                 ((scalar_score_before_ms + scalar_score_after_ms) * 0.5) / score_ms,
                 ((tied_select_before_ms + tied_select_after_ms) * 0.5) / tied_select_ms,
                 ((mixed_select_before_ms + mixed_select_after_ms) * 0.5) / mixed_select_ms,
+                online_attention_ms - direct_attention_ms,
                 legacy_attention_ms / cooperative_attention_ms,
                 (score_ms + conservative_select_ms + cooperative_attention_ms) * 21.0,
             );
@@ -30401,6 +30756,8 @@ mod tests {
             .expect("allocate HCA profile output");
         let online_output = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1])
             .expect("allocate online HCA profile output");
+        let direct_output = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1])
+            .expect("allocate direct HCA profile output");
 
         for count in [513usize, 2_048, CAPACITY] {
             let position = u32::try_from(count * 128 - 1).unwrap();
@@ -30445,36 +30802,61 @@ mod tests {
                     0,
                     1,
                     128,
+                    false,
+                    config,
+                )
+            };
+            let direct = |encoder: &KernelEncoder| {
+                encode_online_dense_sink_attention_f16(
+                    &ctx,
+                    encoder,
+                    &queries,
+                    &raw_cache,
+                    &preserved_raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
+                    DeepSeekV4PublishedRows {
+                        cache: &compressed_cache,
+                        count,
+                        capacity_rows: CAPACITY,
+                    },
+                    &sinks,
+                    &direct_output,
+                    position,
+                    0,
+                    1,
+                    128,
+                    true,
                     config,
                 )
             };
             let (before_samples, before_ms, before_p95_ms) = profile_arm(&ctx, legacy);
             let (online_samples, online_ms, online_p95_ms) = profile_arm(&ctx, online);
+            let (direct_samples, direct_ms, direct_p95_ms) = profile_arm(&ctx, direct);
+            let (online_after_samples, online_after_ms, online_after_p95_ms) =
+                profile_arm(&ctx, online);
             let (after_samples, after_ms, after_p95_ms) = profile_arm(&ctx, legacy);
             let output_values = read_f32(&output);
             assert!(output_values.iter().all(|value| value.is_finite()));
-            let mut hasher = Sha256::new();
-            for value in &output_values {
-                hasher.update(value.to_le_bytes());
-            }
-            let output_hash = format!("{:x}", hasher.finalize());
-            let expected_hash = match count {
-                513 => "9ce26438499d531557fec9b8a25914cba70a363e2ac4b187c165e8cf5896d54d",
-                2_048 => "a87bda8fb2745802832806b922ab67a71c7b4ffd2890b1fd822f000a3cf77586",
-                CAPACITY => "7344fffbdf7e8350aee2a96e1f3d9f69d406f7c32d9bf65dbd86717ee3252590",
-                _ => unreachable!(),
-            };
-            assert_eq!(output_hash, expected_hash, "{count}-row HCA output drift");
             let online_values = read_f32(&online_output);
             assert!(online_values.iter().all(|value| value.is_finite()));
-            let mut online_hasher = Sha256::new();
+            let direct_values = read_f32(&direct_output);
+            assert_eq!(
+                direct_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                online_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{count}-row direct HCA changed online output"
+            );
             let mut dot = 0.0f64;
             let mut online_norm = 0.0f64;
             let mut reference_norm = 0.0f64;
             let mut squared_error = 0.0f64;
             let mut max_scaled_error = 0.0f64;
             for (&actual, &reference) in online_values.iter().zip(&output_values) {
-                online_hasher.update(actual.to_le_bytes());
                 dot += f64::from(actual) * f64::from(reference);
                 online_norm += f64::from(actual).powi(2);
                 reference_norm += f64::from(reference).powi(2);
@@ -30483,13 +30865,13 @@ mod tests {
                     (actual - reference).abs() / reference.abs().max(1.0),
                 ));
             }
-            let online_hash = format!("{:x}", online_hasher.finalize());
             let cosine = dot / (online_norm.sqrt() * reference_norm.sqrt());
             let relative_rms = (squared_error / reference_norm).sqrt();
             let baseline_midpoint_ms = (before_ms + after_ms) * 0.5;
             let saving_ms = baseline_midpoint_ms - online_ms;
+            let direct_saving_ms = (online_ms + online_after_ms) * 0.5 - direct_ms;
             eprintln!(
-                "deepseek_v4 tiled_hca_profile rows={count} token_equivalent={} legacy_before_ms={before_ms:.3} legacy_before_p95_ms={before_p95_ms:.3} online_ms={online_ms:.3} online_p95_ms={online_p95_ms:.3} legacy_after_ms={after_ms:.3} legacy_after_p95_ms={after_p95_ms:.3} saving_ms={saving_ms:.3} online_cosine={cosine:.9} online_rel_rms={relative_rms:.9} online_max_scaled={max_scaled_error:.9} legacy_sha256={output_hash} online_sha256={online_hash} legacy_before_samples_ms={before_samples:?} online_samples_ms={online_samples:?} legacy_after_samples_ms={after_samples:?}",
+                "deepseek_v4 tiled_hca_profile rows={count} token_equivalent={} legacy_before_ms={before_ms:.3} legacy_before_p95_ms={before_p95_ms:.3} online_before_ms={online_ms:.3} online_before_p95_ms={online_p95_ms:.3} direct_ms={direct_ms:.3} direct_p95_ms={direct_p95_ms:.3} online_after_ms={online_after_ms:.3} online_after_p95_ms={online_after_p95_ms:.3} direct_saving_ms={direct_saving_ms:.3} legacy_after_ms={after_ms:.3} legacy_after_p95_ms={after_p95_ms:.3} saving_ms={saving_ms:.3} online_cosine={cosine:.9} online_rel_rms={relative_rms:.9} online_max_scaled={max_scaled_error:.9} legacy_before_samples_ms={before_samples:?} online_before_samples_ms={online_samples:?} direct_samples_ms={direct_samples:?} online_after_samples_ms={online_after_samples:?} legacy_after_samples_ms={after_samples:?}",
                 count * 128,
             );
             assert!(max_scaled_error <= 8e-5, "{count}-row scaled error");

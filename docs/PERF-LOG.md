@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Batched Sparse-Query RoPE GO
+
+Status: batched indexer-query RoPE is now the packed sparse-CSA default. Set
+`QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE=0` to restore the scalar per-query
+dispatches. Dense CSA, attention, selection code, cache representation, and
+decode are unchanged.
+
+- One existing consecutive-position RoPE dispatch now replaces 2,048 scalar
+  dispatches per CSA layer, or 43,008 dispatches in a full N=2,048 sparse
+  chunk. The tensor layout, absolute positions, YaRN policy, and output storage
+  are unchanged.
+- The retained primitive differential covers ordinary and far-YaRN positions.
+  Batched and ordered execution stay within `6.41e-7` maximum absolute error
+  and `1.47e-7` relative RMS.
+- On the clean 8K profile, CSA attention falls
+  `9,748.681 -> 9,407.718 ms`, or 3.50%. Complete attention falls 2.33% and
+  pre-expert GPU falls 1.35%; post-route GPU also improves by 137.879 ms.
+- Ordinary request wall falls `107,926.903 -> 106,576.900 ms`, saving
+  1,350.003 ms or 1.25%. Prefill rises `75.90 -> 76.87 token/s`; the sampled
+  request independently saves 1.06%.
+- The final-logit vector changes, but the 9,960-token ledger, 6,092-token
+  structured retrieval, and 7,263-token multilingual retrieval reproduce all
+  incumbent generated IDs and requested values. The ledger's pre-existing
+  literal-total format defect again receives no promotion credit.
+
+Decision: default the simpler batched work unit with an exact scalar rollback.
+The whole-request gain is modest, but it removes linear launch growth using an
+already-regressed kernel and clears three retained long-prompt discriminators.
+Move next to same-GGUF external prefill calibration; do not reopen N=4,096 from
+this result alone.
+
 ## 2026-08-06 - DeepSeek V4 Online Packed Selected Attention GO
 
 Status: online selected attention is now the default for packed sparse CSA.

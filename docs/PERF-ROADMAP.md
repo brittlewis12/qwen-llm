@@ -652,31 +652,38 @@ authorize another exact compressor kernel without a new mechanism and an
 equally large ceiling. The q_b quality failure likewise remains closed; this
 compressor-specific promotion does not imply a global Q8 matrix crossover.
 
+Packed sparse-indexer query RoPE now uses the existing consecutive-position
+batch kernel by default. A full N=2,048 sparse chunk replaces 43,008 scalar
+dispatches with 21 batched dispatches. On the clean 8K profile, CSA attention
+moves `9,748.681 -> 9,407.718 ms`, pre-expert GPU saves 1.35%, and ordinary
+request wall moves `107,926.903 -> 106,576.900 ms`, or 1.25%. Prefill rises
+from 75.90 to 76.87 token/s. The established primitive differential remains
+within `6.41e-7` maximum absolute error and `1.47e-7` relative RMS, while all
+generated IDs and requested values remain unchanged across the three retained
+long-prompt discriminators. Default the batched path with
+`QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE=0` as the scalar rollback. This removes
+linear dispatch growth but does not independently reopen N=4,096.
+
 Force-ranked queue:
 
-1. **Batch sparse-indexer query RoPE.** Common preparation still emits one RoPE
-   dispatch per sparse query: 2,048 dispatches per CSA layer and 43,008 per
-   full sparse chunk. Route the same tensor through the existing batched kernel
-   and require the established numerical contract; do not bundle it with the
-   promoted selected-attention result.
-2. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
+1. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
    pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
    proof, not a binding floor.
-3. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
+2. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
    only a 2.04% optimistic ceiling on the 8K request. Do not pay a larger scratch
    allocation and new sparse/qualification surface for that alone. Reopen when
    another measured N=4,096 mechanism lets the combined credible net benefit
    clear the existing 2-3% gate after costs.
-4. **Far-context scoring and selection.** Keep the deployed cooperative scorer
+3. **Far-context scoring and selection.** Keep the deployed cooperative scorer
    and radix4 selector while prefill is the larger product deficit. Reopen exact
    Lightning scheduling only for a structurally new design with a credible
    >=0.50 ms terminal saving and <=0.05 ms shallow regression; do not auto-sweep
    R4 or repeat the held R2 packet.
-5. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+4. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-6. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+5. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

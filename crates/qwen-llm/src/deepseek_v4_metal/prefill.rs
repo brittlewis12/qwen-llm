@@ -1796,24 +1796,18 @@ impl PrefillSparseCsaScratch {
             query_count,
             "packed indexer Q",
         )?;
-        #[cfg(feature = "dsv4-diagnostics")]
         let batched_indexer_rope = packed_indexer_batched_rope_enabled();
-        #[cfg(not(feature = "dsv4-diagnostics"))]
-        let batched_indexer_rope = false;
-        #[cfg(feature = "dsv4-diagnostics")]
-        {
-            static POLICY_LOGGED: std::sync::Once = std::sync::Once::new();
-            POLICY_LOGGED.call_once(|| {
-                eprintln!(
-                    "deepseek_v4: packed indexer query RoPE policy={}; rollback=QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE=0",
-                    if batched_indexer_rope {
-                        "batched"
-                    } else {
-                        "scalar"
-                    },
-                );
-            });
-        }
+        static POLICY_LOGGED: std::sync::Once = std::sync::Once::new();
+        POLICY_LOGGED.call_once(|| {
+            eprintln!(
+                "deepseek_v4: packed indexer query RoPE policy={}; rollback=QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE=0",
+                if batched_indexer_rope {
+                    "batched"
+                } else {
+                    "scalar"
+                },
+            );
+        });
         if batched_indexer_rope {
             let first_position = start_position
                 .checked_add(u32::try_from(query_offset).map_err(|_| {
@@ -3958,9 +3952,8 @@ crate::env_flag!(
     "QWEN_DSV4_PACKED_SELECTED_ONLINE"
 );
 
-#[cfg(feature = "dsv4-diagnostics")]
 crate::env_flag!(
-    default_off packed_indexer_batched_rope_enabled,
+    default_on packed_indexer_batched_rope_enabled,
     "QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE"
 );
 

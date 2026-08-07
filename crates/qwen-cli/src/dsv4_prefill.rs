@@ -39,9 +39,12 @@ pub struct Dsv4PrefillArgs {
     /// Sampled production-policy passes to report.
     #[arg(long, default_value_t = 1)]
     samples: usize,
-    /// Optional path for the same JSON emitted to stdout.
+    /// Optional path for the complete per-chunk and per-layer JSON report.
     #[arg(long)]
     json_out: Option<PathBuf>,
+    /// Emit the complete report to stdout instead of the compact summary.
+    #[arg(long)]
+    full_json: bool,
 }
 
 #[derive(Serialize)]
@@ -82,6 +85,47 @@ struct Dsv4PrefillRun {
     optimistic_boundary_ceiling_ms: f64,
     optimistic_boundary_ceiling_percent: f64,
     chunks: Vec<Dsv4PrefillChunk>,
+}
+
+#[derive(Serialize)]
+struct Dsv4PrefillSummary<'a> {
+    schema_version: u32,
+    report_kind: &'static str,
+    full_report_schema_version: u32,
+    build: &'a Value,
+    model: &'a str,
+    device: &'a str,
+    token_source: &'a str,
+    n_tokens: usize,
+    chunk_tokens: usize,
+    candidate_chunk_tokens: usize,
+    load_ms: f64,
+    ordinary_wall_ms: f64,
+    ordinary_prefill_tps: f64,
+    ordinary_chunk_wall_ms: &'a [f64],
+    logits_bit_exact: bool,
+    logits_sha256: &'a str,
+    warmup_wall_ms: Vec<f64>,
+    samples: Vec<Dsv4PrefillSampleSummary>,
+}
+
+#[derive(Serialize)]
+struct Dsv4PrefillSampleSummary {
+    wall_ms: f64,
+    prefill_tps: f64,
+    chunk_count: usize,
+    pre_expert_gpu_ms: f64,
+    post_route_gpu_ms: f64,
+    non_gpu_residual_ms: f64,
+    q8_compressor_matrix_invocations: u32,
+    bm16_gpu_ms: f64,
+    optimistic_boundary_ceiling_ms: f64,
+    optimistic_boundary_ceiling_percent: f64,
+    pre_expert_stage_ms: BTreeMap<&'static str, f64>,
+    attention_body_stage_ms: BTreeMap<&'static str, f64>,
+    sparse_indexer_stage_ms: BTreeMap<&'static str, f64>,
+    post_route_stage_ms: BTreeMap<&'static str, f64>,
+    bm16_stage_ms: BTreeMap<&'static str, f64>,
 }
 
 #[derive(Serialize)]
@@ -472,6 +516,74 @@ fn summarize_run(
     }
 }
 
+fn add_stage_totals(
+    totals: &mut BTreeMap<&'static str, f64>,
+    stages: &BTreeMap<&'static str, f64>,
+) {
+    for (&stage, &milliseconds) in stages {
+        *totals.entry(stage).or_default() += milliseconds;
+    }
+}
+
+fn sample_summary(run: &Dsv4PrefillRun, n_tokens: usize) -> Dsv4PrefillSampleSummary {
+    let mut pre_expert_stage_ms = BTreeMap::new();
+    let mut attention_body_stage_ms = BTreeMap::new();
+    let mut sparse_indexer_stage_ms = BTreeMap::new();
+    let mut post_route_stage_ms = BTreeMap::new();
+    let mut bm16_stage_ms = BTreeMap::new();
+    for chunk in &run.chunks {
+        add_stage_totals(&mut pre_expert_stage_ms, &chunk.pre_expert_stage_ms);
+        add_stage_totals(&mut attention_body_stage_ms, &chunk.attention_body_stage_ms);
+        add_stage_totals(&mut sparse_indexer_stage_ms, &chunk.sparse_indexer_stage_ms);
+        add_stage_totals(&mut post_route_stage_ms, &chunk.post_route_stage_ms);
+        add_stage_totals(&mut bm16_stage_ms, &chunk.bm16_stage_ms);
+    }
+    Dsv4PrefillSampleSummary {
+        wall_ms: run.wall_ms,
+        prefill_tps: n_tokens as f64 * 1e3 / run.wall_ms,
+        chunk_count: run.chunk_count,
+        pre_expert_gpu_ms: run.pre_expert_gpu_ms,
+        post_route_gpu_ms: run.post_route_gpu_ms,
+        non_gpu_residual_ms: run.non_gpu_residual_ms,
+        q8_compressor_matrix_invocations: run.q8_compressor_matrix_invocations,
+        bm16_gpu_ms: run.bm16_gpu_ms,
+        optimistic_boundary_ceiling_ms: run.optimistic_boundary_ceiling_ms,
+        optimistic_boundary_ceiling_percent: run.optimistic_boundary_ceiling_percent,
+        pre_expert_stage_ms,
+        attention_body_stage_ms,
+        sparse_indexer_stage_ms,
+        post_route_stage_ms,
+        bm16_stage_ms,
+    }
+}
+
+fn compact_summary(report: &Dsv4PrefillReport) -> Dsv4PrefillSummary<'_> {
+    Dsv4PrefillSummary {
+        schema_version: 1,
+        report_kind: "dsv4_prefill_summary",
+        full_report_schema_version: report.schema_version,
+        build: &report.build,
+        model: &report.model,
+        device: &report.device,
+        token_source: &report.token_source,
+        n_tokens: report.n_tokens,
+        chunk_tokens: report.chunk_tokens,
+        candidate_chunk_tokens: report.candidate_chunk_tokens,
+        load_ms: report.load_ms,
+        ordinary_wall_ms: report.ordinary.wall_ms,
+        ordinary_prefill_tps: report.n_tokens as f64 * 1e3 / report.ordinary.wall_ms,
+        ordinary_chunk_wall_ms: &report.ordinary.chunk_wall_ms,
+        logits_bit_exact: report.logits_bit_exact,
+        logits_sha256: &report.logits_sha256,
+        warmup_wall_ms: report.warmups.iter().map(|run| run.wall_ms).collect(),
+        samples: report
+            .samples
+            .iter()
+            .map(|run| sample_summary(run, report.n_tokens))
+            .collect(),
+    }
+}
+
 fn logits_sha256(logit_bits: &[u32]) -> String {
     format!(
         "{:x}",
@@ -684,11 +796,18 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
         ordinary,
         samples,
     };
-    let json = serde_json::to_string_pretty(&report)?;
-    if let Some(path) = args.json_out {
-        std::fs::write(&path, format!("{json}\n"))
+    let full_json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = &args.json_out {
+        std::fs::write(path, format!("{full_json}\n"))
             .with_context(|| format!("write profile {}", path.display()))?;
     }
-    println!("{json}");
+    if args.full_json {
+        println!("{full_json}");
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&compact_summary(&report))?
+        );
+    }
     Ok(())
 }

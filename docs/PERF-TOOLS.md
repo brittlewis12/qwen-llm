@@ -148,6 +148,12 @@ by sliding-window, CSA, and HCA layer, retains the per-layer split, and separate
 sparse-indexer preparation, score production, and selection while preserving
 their legacy aggregate.
 
+Stdout defaults to a compact summary with request totals and aggregate stage
+maps. `--json-out` always writes the complete schema-v5 report, including every
+chunk and layer, so one expensive acquisition remains sufficient for later
+attribution. Use `--full-json` only when the complete report must also be emitted
+to stdout.
+
 The candidate chunk must currently be twice the executed chunk. For each
 adjacent pair, the report charges the larger positive sampled non-GPU residual
 as an intentionally optimistic removable-boundary allowance and divides their

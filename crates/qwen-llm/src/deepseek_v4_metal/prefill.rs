@@ -1810,6 +1810,10 @@ crate::env_flag!(
     default_on packed_q8_compressor_matrix_enabled,
     "QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX"
 );
+crate::env_flag!(
+    default_on packed_q8_shared_matrix_enabled,
+    "QWEN_DSV4_PACKED_Q8_SHARED_MATRIX"
+);
 
 const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES: u64 = 104_202_502_492;
@@ -1859,6 +1863,20 @@ fn packed_q8_compressor_matrix_for_chunk(
     n_tokens: usize,
 ) -> bool {
     packed_q8_compressor_matrix_enabled()
+        && packed_q8_compressor_matrix_scope_qualified(
+            &ctx.device.name().to_string(),
+            residency.report().tensor_count,
+            residency.report().source_bytes,
+            n_tokens,
+        )
+}
+
+fn packed_q8_shared_matrix_for_chunk(
+    ctx: &MetalContext,
+    residency: &DeepSeekV4MetalResidency,
+    n_tokens: usize,
+) -> bool {
+    packed_q8_shared_matrix_enabled()
         && packed_q8_compressor_matrix_scope_qualified(
             &ctx.device.name().to_string(),
             residency.report().tensor_count,
@@ -6928,6 +6946,7 @@ impl PrefillMoeScratch {
         shared_up: &MetalTensor,
         shared_down: &MetalTensor,
         expert_policy: PackedExpertPolicy,
+        shared_matrix: bool,
         expert_clamp: f32,
         shared_clamp: f32,
         n_tokens: usize,
@@ -7436,28 +7455,57 @@ impl PrefillMoeScratch {
             vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, n_tokens as u64],
             "packed shared output",
         )?;
-        encode_batch_projection(
-            ctx,
-            enc,
-            shared_gate,
-            normalized_input,
-            &gate,
-            DEEPSEEK_V4_HIDDEN_SIZE,
-            MOE_FFN_SIZE,
-            n_tokens,
-            "packed shared gate",
-        )?;
-        encode_batch_projection(
-            ctx,
-            enc,
-            shared_up,
-            normalized_input,
-            &up,
-            DEEPSEEK_V4_HIDDEN_SIZE,
-            MOE_FFN_SIZE,
-            n_tokens,
-            "packed shared up",
-        )?;
+        if shared_matrix && !packed_q8_matrix_chunk_qualified(n_tokens) {
+            return invalid("packed shared Q8 matrix policy reached an unsupported chunk");
+        }
+        if shared_matrix && shared_gate.dtype == GgmlType::Q8_0 {
+            encode_q8_f32_mma_r2c16k64(
+                ctx,
+                enc,
+                shared_gate,
+                normalized_input,
+                &gate,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                MOE_FFN_SIZE,
+                n_tokens,
+            )?;
+        } else {
+            encode_batch_projection(
+                ctx,
+                enc,
+                shared_gate,
+                normalized_input,
+                &gate,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                MOE_FFN_SIZE,
+                n_tokens,
+                "packed shared gate",
+            )?;
+        }
+        if shared_matrix && shared_up.dtype == GgmlType::Q8_0 {
+            encode_q8_f32_mma_r2c16k64(
+                ctx,
+                enc,
+                shared_up,
+                normalized_input,
+                &up,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                MOE_FFN_SIZE,
+                n_tokens,
+            )?;
+        } else {
+            encode_batch_projection(
+                ctx,
+                enc,
+                shared_up,
+                normalized_input,
+                &up,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                MOE_FFN_SIZE,
+                n_tokens,
+                "packed shared up",
+            )?;
+        }
         let flat_len = checked_mul(n_tokens, MOE_FFN_SIZE, "packed shared SwiGLU")?;
         encode_ds4_clamped_swiglu(
             ctx,
@@ -7467,17 +7515,30 @@ impl PrefillMoeScratch {
             &inner.view_subrange(0, vec![flat_len as u64]),
             shared_clamp,
         )?;
-        encode_batch_projection(
-            ctx,
-            enc,
-            shared_down,
-            &inner,
-            &shared_output,
-            MOE_FFN_SIZE,
-            DEEPSEEK_V4_HIDDEN_SIZE,
-            n_tokens,
-            "packed shared down",
-        )?;
+        if shared_matrix && shared_down.dtype == GgmlType::Q8_0 {
+            encode_q8_f32_mma_r2c16k64(
+                ctx,
+                enc,
+                shared_down,
+                &inner,
+                &shared_output,
+                MOE_FFN_SIZE,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                n_tokens,
+            )?;
+        } else {
+            encode_batch_projection(
+                ctx,
+                enc,
+                shared_down,
+                &inner,
+                &shared_output,
+                MOE_FFN_SIZE,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                n_tokens,
+                "packed shared down",
+            )?;
+        }
 
         #[cfg(feature = "dsv4-diagnostics")]
         enc.boundary(PackedPostRouteStageKind::ExpertCombine)?;
@@ -8255,6 +8316,8 @@ impl DeepSeekV4Session {
             packed_q8_output_projection_for_chunk(ctx, &self.residency, token_ids.len())?;
         let compressor_matrix =
             packed_q8_compressor_matrix_for_chunk(ctx, &self.residency, token_ids.len());
+        let shared_matrix =
+            packed_q8_shared_matrix_for_chunk(ctx, &self.residency, token_ids.len());
         let indexer_q_matrix = packed_indexer_q_matrix_enabled()
             && packed_indexer_q_matrix_scope_qualified(
                 &ctx.device.name().to_string(),
@@ -8328,6 +8391,7 @@ impl DeepSeekV4Session {
             q_b_projection,
             output_projection,
             compressor_matrix,
+            shared_matrix,
             indexer_q_matrix,
             #[cfg(feature = "dsv4-diagnostics")]
             stage_recorder,
@@ -8358,6 +8422,7 @@ impl DeepSeekV4Session {
         q_b_projection: Q8PrecisionProjection,
         output_projection: Q8PrecisionProjection,
         compressor_matrix: bool,
+        shared_matrix: bool,
         indexer_q_matrix: bool,
         #[cfg(feature = "dsv4-diagnostics")] mut stage_recorder: Option<
             &mut PackedPrefillStageRecorder,
@@ -8383,6 +8448,15 @@ impl DeepSeekV4Session {
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "deepseek_v4: Q8 compressor matrices active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX=0"
+                );
+            }
+        }
+        if shared_matrix {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: shared-expert Q8 matrices active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_SHARED_MATRIX=0"
                 );
             }
         }
@@ -9374,6 +9448,7 @@ impl DeepSeekV4Session {
                     shared_up,
                     shared_down,
                     expert_policy,
+                    shared_matrix,
                     self.residency.config().swiglu_clamp_experts[layer],
                     self.residency.config().swiglu_clamp_shared[layer],
                     n_tokens,
@@ -11551,7 +11626,7 @@ mod tests {
             assert!(command.error().is_none(), "{:?}", command.error());
         }
 
-        for k in [128usize, 4_096] {
+        for k in [128usize, 2_048, 4_096] {
             let weight = q8_precision_test_weight(&ctx, k, M);
             let input = MetalTensor::from_bytes(
                 &ctx,

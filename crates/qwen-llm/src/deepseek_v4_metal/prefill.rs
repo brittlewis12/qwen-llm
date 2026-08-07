@@ -1510,6 +1510,23 @@ fn parse_packed_q8_qb_policy(
     }
 }
 
+fn parse_packed_q8_output_projection(
+    value: Option<&str>,
+) -> Result<Q8PrecisionProjection, DeepSeekV4MetalError> {
+    match value {
+        None | Some("exact") => Ok(Q8PrecisionProjection::Exact),
+        Some("f32_matrix") => Ok(Q8PrecisionProjection::F32Matrix),
+        Some(value) => invalid(format!(
+            "QWEN_DSV4_PACKED_Q8_OUTPUT must be exact or f32_matrix, got {value:?}"
+        )),
+    }
+}
+
+fn packed_q8_output_projection() -> Result<Q8PrecisionProjection, DeepSeekV4MetalError> {
+    let value = std::env::var("QWEN_DSV4_PACKED_Q8_OUTPUT").ok();
+    parse_packed_q8_output_projection(value.as_deref())
+}
+
 fn resolve_packed_q8_qb_policy(
     policy: PackedQ8QbPolicy,
     profile_qualified: bool,
@@ -1538,7 +1555,7 @@ fn packed_q8_qb_projection_for_chunk(
 }
 
 impl Q8PrecisionProjection {
-    fn uses_full_chunk_qb_f32(self, n_tokens: usize) -> bool {
+    fn uses_full_chunk_f32(self, n_tokens: usize) -> bool {
         self == Self::F32Matrix && n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS
     }
 }
@@ -2105,7 +2122,7 @@ impl PrefillAttentionScratch {
             config.q_lora_rank,
             rms_eps,
         )?;
-        if q_b_projection.uses_full_chunk_qb_f32(n_tokens) {
+        if q_b_projection.uses_full_chunk_f32(n_tokens) {
             encode_q8_f32_mma_r2c4k64(
                 ctx,
                 enc,
@@ -2270,9 +2287,8 @@ impl PrefillAttentionScratch {
         Ok(output)
     }
 
-    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    fn encode_output_q8_precision_for_test(
+    fn encode_output_q8_precision(
         &self,
         ctx: &MetalContext,
         enc: &KernelEncoder,
@@ -2343,6 +2359,7 @@ impl PrefillAttentionScratch {
                 Q8PrecisionProjection::Exact => encode_batch_projection(
                     ctx, enc, weight, input, output, n_in, n_out, n_tokens, name,
                 ),
+                #[cfg(test)]
                 Q8PrecisionProjection::HalfMatrix => crate::metal::encode_mat_mat_q8_0_f32(
                     ctx, enc, weight, input, output, n_in, n_out, n_tokens,
                 )
@@ -7189,6 +7206,7 @@ impl DeepSeekV4Session {
         let n_tokens = checked_token_count(token_ids.len())?;
         let q_b_projection =
             packed_q8_qb_projection_for_chunk(ctx, &self.residency, token_ids.len())?;
+        let output_projection = packed_q8_output_projection()?;
         let compressor_matrix =
             packed_q8_compressor_matrix_for_chunk(ctx, &self.residency, token_ids.len());
         #[cfg(feature = "dsv4-diagnostics")]
@@ -7255,6 +7273,7 @@ impl DeepSeekV4Session {
             route_policy,
             expert_policy,
             q_b_projection,
+            output_projection,
             compressor_matrix,
             #[cfg(feature = "dsv4-diagnostics")]
             stage_recorder,
@@ -7283,6 +7302,7 @@ impl DeepSeekV4Session {
         route_policy: PackedRoutePolicy,
         expert_policy: PackedExpertPolicy,
         q_b_projection: Q8PrecisionProjection,
+        output_projection: Q8PrecisionProjection,
         compressor_matrix: bool,
         #[cfg(feature = "dsv4-diagnostics")] mut stage_recorder: Option<
             &mut PackedPrefillStageRecorder,
@@ -7302,12 +7322,21 @@ impl DeepSeekV4Session {
                 );
             }
         }
-        if q_b_projection.uses_full_chunk_qb_f32(n_tokens) {
+        if q_b_projection.uses_full_chunk_f32(n_tokens) {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "deepseek_v4: F32 Q8 Q-B matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB=exact"
+                );
+            }
+        }
+        if output_projection.uses_full_chunk_f32(n_tokens) {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: F32 Q8 output A/B matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT=exact"
                 );
             }
         }
@@ -7829,14 +7858,29 @@ impl DeepSeekV4Session {
                 #[cfg(feature = "dsv4-diagnostics")]
                 encoder.boundary(PackedPrefillStageKind::AttentionOutputProjections)?;
 
-                let attention_output = self.prefill.attention.encode_output(
-                    ctx,
-                    &encoder,
-                    &attention.attention,
-                    self.layer_tensor(layer, "attn_output_a.weight")?,
-                    self.layer_tensor(layer, "attn_output_b.weight")?,
-                    n_tokens,
-                )?;
+                let output_a = self.layer_tensor(layer, "attn_output_a.weight")?;
+                let output_b = self.layer_tensor(layer, "attn_output_b.weight")?;
+                let attention_output = if output_projection.uses_full_chunk_f32(n_tokens) {
+                    self.prefill.attention.encode_output_q8_precision(
+                        ctx,
+                        &encoder,
+                        &attention.attention,
+                        output_a,
+                        output_b,
+                        n_tokens,
+                        Q8PrecisionProjection::F32Matrix,
+                        Q8PrecisionProjection::F32Matrix,
+                    )?
+                } else {
+                    self.prefill.attention.encode_output(
+                        ctx,
+                        &encoder,
+                        &attention.attention,
+                        output_a,
+                        output_b,
+                        n_tokens,
+                    )?
+                };
 
                 #[cfg(feature = "dsv4-diagnostics")]
                 encoder.boundary(PackedPrefillStageKind::AfterAttentionOutput)?;
@@ -9079,9 +9123,29 @@ mod tests {
             Q8PrecisionProjection::F32Matrix
         );
         let matrix = Q8PrecisionProjection::F32Matrix;
-        assert!(!matrix.uses_full_chunk_qb_f32(512));
-        assert!(matrix.uses_full_chunk_qb_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
+        assert!(!matrix.uses_full_chunk_f32(512));
+        assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
         assert!(parse_packed_q8_qb_policy(Some("half_matrix")).is_err());
+    }
+
+    #[test]
+    fn packed_q8_output_matrix_policy_is_explicit_and_full_chunk_only() {
+        assert_eq!(
+            parse_packed_q8_output_projection(None).unwrap(),
+            Q8PrecisionProjection::Exact
+        );
+        assert_eq!(
+            parse_packed_q8_output_projection(Some("exact")).unwrap(),
+            Q8PrecisionProjection::Exact
+        );
+        assert_eq!(
+            parse_packed_q8_output_projection(Some("f32_matrix")).unwrap(),
+            Q8PrecisionProjection::F32Matrix
+        );
+        assert!(parse_packed_q8_output_projection(Some("half_matrix")).is_err());
+        let matrix = Q8PrecisionProjection::F32Matrix;
+        assert!(!matrix.uses_full_chunk_f32(512));
+        assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
     }
 
     #[test]
@@ -10181,7 +10245,7 @@ mod tests {
                 scratch.encode_output(&ctx, &encoder, &attention, &output_a, &output_b, N)
             } else {
                 let (output_a_projection, output_b_projection) = projections(variant);
-                scratch.encode_output_q8_precision_for_test(
+                scratch.encode_output_q8_precision(
                     &ctx,
                     &encoder,
                     &attention,

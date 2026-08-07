@@ -712,15 +712,30 @@ logit vector, but a same-binary 8K comparison moves ordinary wall only
 for near-tied learned-route rank changes. The mechanism is infrastructure, not
 yet a product promotion.
 
+Stable-route grouped all-IQ3 execution now defaults on independently. The
+16-layer cohort falls `7,965.459 -> 4,748.927 ms`, sampled post-route GPU falls
+`28,609.244 -> 25,593.623 ms`, and ordinary 8K wall falls
+`61,448.693 -> 59,900.783 ms`, raising prefill from 133.31 to 136.76 token/s.
+Complete logits and all generated IDs across the ledger, structured, and
+multilingual discriminators remain exact. Rollback is
+`QWEN_DSV4_PACKED_GROUPED_IQ3=0`.
+
+Broad GPU ownership is not promotable yet. Routing all 41 grouped layers reaches
+58,452.545 ms and 140.15 token/s, but changes the ledger total from 2,578 to
+2,812. The 25-layer GPU-route predecessor and stable-route all-IQ3 schedule each
+retain the exact answer, so the failure belongs to cumulative route ownership,
+not grouped IQ3 arithmetic. `QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT` keeps its
+25-layer scope; `QWEN_DSV4_PACKED_GPU_ROUTE_IQ3=1` is an additional diagnostic
+override only.
+
 Force-ranked queue:
 
-1. **Extend GPU ownership through the all-IQ3 cohort.** The 25-layer pilot is
-   too narrow to default, while 16 all-IQ3 layers still force CPU routing and
-   per-bucket execution. Reintroduce the exact bank-axis grouped schedule only
-   as composition with deterministic GPU compaction and same-command execution.
-   Its prior N=2,048 result removed 58.57% of isolated GPU work and missed the
-   old charged floor by only 2.341 ms; the broader ownership work unit is the
-   changed premise. Preserve unique slot writes and fixed slot-order reduction.
+1. **Recover exact broad GPU route ownership.** The broad candidate has a
+   measured 1.448-second ordinary ceiling beyond stable-route grouped IQ3, but
+   its ledger failure forbids promotion. First compare the 16 added route
+   records against CPU and replay GPU IDs with CPU-associated weights/order.
+   Continue only if the hybrid recovers the exact transcript and final logits;
+   do not tune compaction or expert kernels around a routing-quality failure.
 2. **Attention/indexer fusion at product depth.** Attention now contributes
    16.21 seconds, or 26.4% of sampled 8K wall. Reattribute CSA score, selection,
    and online selected attention after the matrix promotions, then target a

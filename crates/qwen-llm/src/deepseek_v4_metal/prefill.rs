@@ -4266,8 +4266,13 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    default_off packed_grouped_iq3_enabled,
+    default_on packed_grouped_iq3_enabled,
     "QWEN_DSV4_PACKED_GROUPED_IQ3"
+);
+
+crate::env_flag!(
+    default_off packed_gpu_route_iq3_enabled,
+    "QWEN_DSV4_PACKED_GPU_ROUTE_IQ3"
 );
 
 fn packed_grouped_iq3_candidate_supported(ctx: &MetalContext) -> bool {
@@ -5588,6 +5593,7 @@ fn packed_gpu_compact_expert_layer_qualified(
     ctx: &MetalContext,
     policy: PackedExpertPolicy,
     n_tokens: usize,
+    allow_iq3_route: bool,
     gate_dtype: GgmlType,
     up_dtype: GgmlType,
     down_dtype: GgmlType,
@@ -5597,7 +5603,8 @@ fn packed_gpu_compact_expert_layer_qualified(
         && up_dtype == GgmlType::IQ2_XS
         && down_dtype == GgmlType::IQ3_XXS
         && packed_grouped_expert_kernels_supported(ctx))
-        || (policy.uses_iq3_target()
+        || (allow_iq3_route
+            && policy.uses_iq3_target()
             && gate_dtype == GgmlType::IQ3_XXS
             && up_dtype == GgmlType::IQ3_XXS
             && down_dtype == GgmlType::IQ3_XXS
@@ -6406,6 +6413,7 @@ impl PrefillMoeScratch {
                 ctx,
                 expert_policy,
                 n_tokens,
+                packed_gpu_route_iq3_enabled(),
                 gate_bank.dtype,
                 up_bank.dtype,
                 down_bank.dtype,
@@ -7640,14 +7648,12 @@ impl DeepSeekV4Session {
         } else {
             route_policy
         };
-        let expert_policy = if (route_policy == PackedRoutePolicy::GpuCompact
-            || packed_grouped_iq3_enabled())
-            && packed_grouped_iq3_candidate_supported(ctx)
-        {
-            expert_policy.with_iq3_target()
-        } else {
-            expert_policy
-        };
+        let expert_policy =
+            if packed_grouped_iq3_enabled() && packed_grouped_iq3_candidate_supported(ctx) {
+                expert_policy.with_iq3_target()
+            } else {
+                expert_policy
+            };
         let q_b_projection =
             packed_q8_qb_projection_for_chunk(ctx, &self.residency, token_ids.len())?;
         let output_projection =
@@ -7809,13 +7815,8 @@ impl DeepSeekV4Session {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                let rollback = if route_policy == PackedRoutePolicy::GpuCompact {
-                    "QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT=0"
-                } else {
-                    "QWEN_DSV4_PACKED_GROUPED_IQ3=0"
-                };
                 eprintln!(
-                    "deepseek_v4: grouped all-IQ3 packed experts active for full N={n_tokens} chunks; rollback={rollback}"
+                    "deepseek_v4: grouped all-IQ3 packed experts active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_GROUPED_IQ3=0"
                 );
             }
         }
@@ -7823,8 +7824,13 @@ impl DeepSeekV4Session {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let scope = if packed_gpu_route_iq3_enabled() {
+                    "IQ2/all-IQ3"
+                } else {
+                    "IQ2"
+                };
                 eprintln!(
-                    "deepseek_v4: compact GPU routing active for qualified N={n_tokens} IQ2/all-IQ3 layers; unprofiled execution merges router and experts; rollback=QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT=0"
+                    "deepseek_v4: compact GPU routing active for qualified N={n_tokens} {scope} layers; unprofiled execution merges router and experts; rollback=QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT=0"
                 );
             }
         }
@@ -7912,6 +7918,7 @@ impl DeepSeekV4Session {
                     ctx,
                     expert_policy,
                     n_tokens,
+                    packed_gpu_route_iq3_enabled(),
                     routed_gate_dtype,
                     routed_up_dtype,
                     routed_down_dtype,
@@ -12041,6 +12048,7 @@ mod tests {
             &ctx,
             policy,
             N,
+            true,
             GgmlType::IQ3_XXS,
             GgmlType::IQ3_XXS,
             GgmlType::IQ3_XXS,
@@ -12049,6 +12057,25 @@ mod tests {
             &ctx,
             policy,
             N,
+            false,
+            GgmlType::IQ3_XXS,
+            GgmlType::IQ3_XXS,
+            GgmlType::IQ3_XXS,
+        ));
+        assert!(packed_gpu_compact_expert_layer_qualified(
+            &ctx,
+            policy,
+            N,
+            false,
+            GgmlType::IQ2_XS,
+            GgmlType::IQ2_XS,
+            GgmlType::IQ3_XXS,
+        ));
+        assert!(!packed_gpu_compact_expert_layer_qualified(
+            &ctx,
+            policy,
+            N,
+            true,
             GgmlType::IQ3_XXS,
             GgmlType::IQ3_XXS,
             GgmlType::MXFP4,

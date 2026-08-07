@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Grouped All-IQ3 Default GO
+
+Status: stable-CPU-route grouped execution is now the default for the 16
+IQ3_XXS/IQ3_XXS/IQ3_XXS layers. Set
+`QWEN_DSV4_PACKED_GROUPED_IQ3=0` to restore per-bucket execution. Broad GPU
+route ownership remains a separate default-off diagnostic.
+
+- The mapped schedule applies exact IQ3 gate and up projections, the deployed
+  clamped SwiGLU, and exact IQ3 down projection against one stable
+  expert/token/original-slot plan. BM16 remains active on the 25 IQ2 layers;
+  the two MXFP4-down layers retain their incumbent path.
+- Against the same-binary CPU-route control, the 16-layer cohort falls
+  `7,965.459 -> 4,748.927 ms`, or 40.38%. Sampled post-route GPU falls
+  `28,609.244 -> 25,593.623 ms`; ordinary 8K wall falls
+  `61,448.693 -> 59,900.783 ms`, or 2.52%. Prefill rises
+  `133.31 -> 136.76 token/s`.
+- Complete final logits remain bit-identical at SHA-256 `9e21fcca...9fa8d`.
+  The retained 9,960-token ledger, 6,092-token structured retrieval, and
+  7,263-token multilingual retrieval reproduce every incumbent generated ID,
+  requested value, format, and EOS. The ledger retains the correct 2,578 total.
+- Extending GPU route ownership through the same 16 layers is faster
+  (`58,452.545 ms`, 140.15 token/s), but returns the wrong ledger total 2,812.
+  The 25-layer GPU-route predecessor and CPU-route grouped-IQ3 candidate both
+  preserve the exact 2,578 answer, isolating the regression to broad route
+  ownership rather than grouped expert arithmetic.
+- Raw profiles:
+  `target/profiles/dsv4-prefill-8k-gpu-route-all-iq3-control-e90cb5d.json`,
+  `target/profiles/dsv4-prefill-8k-grouped-iq3-cpu-route-95d44f2.json`, and
+  `target/profiles/dsv4-prefill-8k-gpu-route-all-iq3-e90cb5d.json`.
+
+Decision: default the exact stable-route compute win. Keep
+`QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT` scoped to its prior 25 IQ2 layers;
+all-IQ3 ownership additionally requires the diagnostic-only
+`QWEN_DSV4_PACKED_GPU_ROUTE_IQ3=1`. Reopen broad ownership only after a route
+record/hybrid replay recovers the incumbent transcript and logits.
+
 ## 2026-08-07 - DeepSeek V4 25-Layer GPU Route Pilot HOLD
 
 Status: deterministic GPU routing and compaction are structurally proven, but

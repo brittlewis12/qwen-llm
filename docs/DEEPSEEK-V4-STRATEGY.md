@@ -2345,6 +2345,20 @@ noise without reducing technical risk. Revisit after S5.
    ms/layer. A low-synchronization online form costs 119.300 ms and loses one
    ULP. Remove both prototypes. Reopen only for a coarser quality-qualified
    reduction boundary, a different representation, or changed hardware.
+   That quality-qualified boundary is now established narrowly for compressor
+   projections. Half-staged Q8 matrices save 1,167.835 ms, or 4.03%, on the
+   N=2,048 attributed request. The five-value ledger and structured retrieval
+   reproduce every paired exact-arm token, and the multilingual guard retrieves
+   all frozen values. Default the current asset's 124 eligible Q8 compressor
+   projections in each complete N=2,048 chunk on Apple M4 Max with
+   `QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX=0` as exact rollback. Tails, decode,
+   other asset/device profiles, non-Q8 weights, raw KV, q_b, outputs, and experts
+   remain exact. Selection qualifies the current 1,328-tensor /
+   104,202,502,492-byte payload profile without rehashing weights. The ledger's
+   literal schema clause remains uncredited because its retained exact baseline
+   also emits the arithmetic expression; paired token identity, not that
+   impossible absolute clause, supplies the comparative quality evidence. This
+   does not reopen the failed q_b or global Q8 crossover.
 7. Keep the packed before-attention and exact multi-row scorer closures
    explicit. The corrected four-encoder packet remains `HOLD`: its material
    pre-attention interval contains one unowned encoder transition, and Apple M4

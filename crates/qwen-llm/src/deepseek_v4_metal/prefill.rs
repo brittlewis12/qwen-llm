@@ -1456,23 +1456,38 @@ enum Q8PrecisionProjection {
     F32Matrix,
 }
 
-#[cfg(feature = "dsv4-diagnostics")]
 crate::env_flag!(
-    default_off packed_q8_compressor_matrix_enabled,
-    "QWEN_DSV4_PROFILE_Q8_COMPRESSOR_MATRIX"
+    default_on packed_q8_compressor_matrix_enabled,
+    "QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX"
 );
 
-fn packed_q8_compressor_matrix_for_chunk(n_tokens: usize) -> Result<bool, DeepSeekV4MetalError> {
-    #[cfg(feature = "dsv4-diagnostics")]
-    {
-        let enabled = packed_q8_compressor_matrix_enabled();
-        Ok(enabled && n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS)
-    }
-    #[cfg(not(feature = "dsv4-diagnostics"))]
-    {
-        let _ = n_tokens;
-        Ok(false)
-    }
+const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE: &str = "Apple M4 Max";
+const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES: u64 = 104_202_502_492;
+
+fn packed_q8_compressor_matrix_scope_qualified(
+    device_name: &str,
+    tensor_count: usize,
+    source_bytes: u64,
+    n_tokens: usize,
+) -> bool {
+    n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS
+        && device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
+        && tensor_count == 1_328
+        && source_bytes == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES
+}
+
+fn packed_q8_compressor_matrix_for_chunk(
+    ctx: &MetalContext,
+    residency: &DeepSeekV4MetalResidency,
+    n_tokens: usize,
+) -> bool {
+    packed_q8_compressor_matrix_enabled()
+        && packed_q8_compressor_matrix_scope_qualified(
+            &ctx.device.name().to_string(),
+            residency.report().tensor_count,
+            residency.report().source_bytes,
+            n_tokens,
+        )
 }
 
 fn parse_packed_q8_qb_projection(
@@ -2436,7 +2451,7 @@ impl PrefillCompressorScratch {
         name: &str,
         use_matrix: bool,
     ) -> Result<(), DeepSeekV4MetalError> {
-        if !use_matrix {
+        if !use_matrix || weight.dtype != GgmlType::Q8_0 {
             return encode_state_batch_projection(
                 ctx,
                 enc,
@@ -2450,40 +2465,29 @@ impl PrefillCompressorScratch {
             );
         }
         #[cfg(feature = "dsv4-diagnostics")]
-        {
-            if weight.dtype != GgmlType::Q8_0 {
-                return invalid(format!(
-                    "{name} compressor matrix oracle requires Q8_0, got {:?}",
-                    weight.dtype
-                ));
-            }
-            let next = self
-                .q8_matrix_invocations
-                .get()
-                .checked_add(1)
-                .ok_or_else(|| {
-                    DeepSeekV4MetalError::Invalid(
-                        "packed Q8 compressor matrix invocation count overflow".into(),
-                    )
-                })?;
-            crate::metal::encode_mat_mat_q8_0_f32(
-                ctx,
-                enc,
-                weight,
-                input,
-                output,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                n_out,
-                n_tokens,
-            )
-            .map_err(DeepSeekV4MetalError::Metal)?;
-            self.q8_matrix_invocations.set(next);
-            Ok(())
-        }
-        #[cfg(not(feature = "dsv4-diagnostics"))]
-        {
-            unreachable!("compressor matrix oracle is diagnostics-only")
-        }
+        let next = self
+            .q8_matrix_invocations
+            .get()
+            .checked_add(1)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "packed Q8 compressor matrix invocation count overflow".into(),
+                )
+            })?;
+        crate::metal::encode_mat_mat_q8_0_f32(
+            ctx,
+            enc,
+            weight,
+            input,
+            output,
+            DEEPSEEK_V4_HIDDEN_SIZE,
+            n_out,
+            n_tokens,
+        )
+        .map_err(DeepSeekV4MetalError::Metal)?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.q8_matrix_invocations.set(next);
+        Ok(())
     }
 
     fn encode_layer_projections(
@@ -7057,7 +7061,8 @@ impl DeepSeekV4Session {
         }
         let n_tokens = checked_token_count(token_ids.len())?;
         let q_b_projection = packed_q8_qb_projection()?;
-        let compressor_matrix = packed_q8_compressor_matrix_for_chunk(token_ids.len())?;
+        let compressor_matrix =
+            packed_q8_compressor_matrix_for_chunk(ctx, &self.residency, token_ids.len());
         #[cfg(feature = "dsv4-diagnostics")]
         self.prefill.compressor.reset_q8_matrix_invocations();
         #[cfg(feature = "dsv4-diagnostics")]
@@ -7131,13 +7136,6 @@ impl DeepSeekV4Session {
         );
         match result {
             Ok(()) => {
-                #[cfg(feature = "dsv4-diagnostics")]
-                if compressor_matrix {
-                    eprintln!(
-                        "deepseek_v4: half-staged Q8 compressor matrix oracle invocations={}; tokens={n_tokens}",
-                        self.prefill.compressor.q8_matrix_invocations()
-                    );
-                }
                 self.commit_tokens(token_ids);
                 self.phase
                     .complete_mutation(start_position, end_position, emit_logits)?;
@@ -7167,6 +7165,15 @@ impl DeepSeekV4Session {
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
         let n_tokens = token_ids.len();
+        if compressor_matrix {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: Q8 compressor matrices active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX=0"
+                );
+            }
+        }
         if q_b_projection.uses_full_chunk_qb_f32(n_tokens) {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
@@ -8924,6 +8931,43 @@ mod tests {
         assert!(!matrix.uses_full_chunk_qb_f32(512));
         assert!(matrix.uses_full_chunk_qb_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
         assert!(parse_packed_q8_qb_projection(Some("half_matrix")).is_err());
+    }
+
+    #[test]
+    fn packed_q8_compressor_matrix_scope_is_exact() {
+        let qualified = |device, tensors, bytes, tokens| {
+            packed_q8_compressor_matrix_scope_qualified(device, tensors, bytes, tokens)
+        };
+        assert!(qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(!qualified(
+            "Apple M3 Max",
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_327,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES - 1,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS - 1,
+        ));
     }
 
     #[test]

@@ -600,39 +600,44 @@ projections on a full N=2,048 chunk. A/B/B/A ordinary wall moves
 `28,947.093 -> 27,779.258 ms`, saving 1,167.835 ms or 4.03%; sampled wall saves
 1,051.409 ms. Post-route GPU regresses by 44.633 ms, so the adjusted pre-expert
 saving remains the full 1,167.835 ms. This proves a material matrix opportunity,
-not product quality. Prior exact T2 already regresses the same 4,096x512 raw-KV
-geometry, so do not authorize another exact compressor kernel without a new
-mechanism and an equally large ceiling.
+not product quality by itself. The bounded quality follow-up now clears: the
+9,960-token ledger and 6,092-token structured retrieval reproduce every paired
+exact-arm generated ID, including all five ledger values and total 2,578, while
+the multilingual guard returns all three frozen values. The ledger's literal
+schema clause is invalid rather than passed: its retained exact baseline also
+emits the arithmetic expression despite the `<integer>` instruction. Promote
+half-staged matrices only on Apple M4 Max for the structurally qualified current
+1,328-tensor / 104,202,502,492-byte payload profile and its 124 eligible Q8
+projections in complete N=2,048 chunks. Other assets/devices, non-Q8 weights,
+tails, decode, raw KV, q_b, outputs, and experts remain unchanged; rollback is
+`QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX=0`.
+
+Prior exact T2 already regresses the same 4,096x512 raw-KV geometry, so do not
+authorize another exact compressor kernel without a new mechanism and an
+equally large ceiling. The q_b quality failure likewise remains closed; this
+compressor-specific promotion does not imply a global Q8 matrix crossover.
 
 Force-ranked queue:
 
-1. **Matrix-shaped Q8 quality frontier.** The compressor-only oracle clears the
-   performance premise by 2.07x, while q_b and output evidence show that matrix
-   reduction changes need an explicit approximate contract. Replay the frozen
-   9,960-token five-value ledger with half-staged matrices only on the four full
-   compressor chunks and exact tail/decode. Require the same five values, total
-   2,578, requested schema, and EOS. On failure, remove the seam and close this
-   narrow admission. On success, design a small compressor-only quality battery;
-   do not combine q_b, output, raw KV, or a global Q8 crossover yet.
-2. **Reprice the packed chunk cap at product depth.** N=2,048 removed the known
+1. **Reprice the packed chunk cap at product depth.** N=2,048 removed the known
    chunk and expert-plan ceilings, but 8K-32K prompts still execute many chunks.
    Attribute fixed per-chunk seams and route occupancy on one canonical long
    prompt before considering N=4,096. Reopen cap growth only if the removable
    boundary clears a 2-3% ordinary-request ceiling; do not infer it from a
    synthetic route census.
-3. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
+2. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
    pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
    proof, not a binding floor.
-4. **Far-context scoring and selection.** Keep the deployed cooperative scorer
+3. **Far-context scoring and selection.** Keep the deployed cooperative scorer
    and radix4 selector while prefill is the larger product deficit. Reopen exact
    Lightning scheduling only for a structurally new design with a credible
    >=0.50 ms terminal saving and <=0.05 ms shallow regression; do not auto-sweep
    R4 or repeat the held R2 packet.
-5. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+4. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-6. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+5. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

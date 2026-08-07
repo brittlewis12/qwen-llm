@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Q8 Compressor Matrix Default GO
+
+Status: half-staged Q8 matrices now default on Apple M4 Max for the current
+asset profile's 124 eligible compressor projections in each complete N=2,048
+packed chunk. The policy qualifies the 1,328-tensor / 104,202,502,492-byte
+payload profile before selection. Other assets/devices, non-Q8 weights,
+intermediate tails, singleton decode, raw KV, q_b, attention output, and expert
+projections retain their prior arithmetic. Set
+`QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX=0` for exact rollback.
+
+- The prior A/B/B/A performance bracket moves mean ordinary wall from
+  `28,947.093` to `27,779.258 ms`, saving `1,167.835 ms` or 4.03%. Post-route
+  GPU time regresses by 44.633 ms, so downstream route drift cannot explain the
+  win.
+- On the decisive 9,960-token ledger replay, four complete chunks each report
+  exactly 124 substitutions. The candidate retrieves `281+162+902+770+463`,
+  reaches total 2,578 and EOS, and reproduces all 47 exact-arm generated token
+  IDs.
+- The 6,092-token structured-retrieval pair also reproduces all 34 exact-arm
+  token IDs and the exact four-key JSON. A 7,263-token multilingual retrieval
+  returns all three frozen values and the requested schema.
+- The 4,726-token code-comprehension candidate and exact control reproduce the
+  same 21 token IDs. Both miss the fixture's stale expected values in the same
+  way, so this row is nondiscriminating and receives no promotion credit.
+- The semantic runs are not timing evidence: their cache states differ from the
+  accepted performance bracket. Their authority is limited to comparative
+  output quality under the already measured compressor-only boundary.
+- Adversarial review caught that the ledger's literal schema clause was
+  impossible under its retained exact baseline: both arms emit the arithmetic
+  expression despite the prompt's `<integer>` instruction. That clause is
+  INVALID as an absolute admission gate and receives no credit. The useful
+  evidence is exact candidate/control transcript identity, which directly
+  falsifies the candidate-specific aggregate failure seen in the broader q_b
+  experiment.
+
+Decision: the narrow compressor policy is materially faster with no observed
+quality regression across the paired long-prompt discriminators. Promote it
+for structurally qualified current-asset N=2,048 chunks on M4 Max, retain exact
+rollback, and do not transfer this authority to other assets/devices, q_b, raw
+KV, output projections, smaller chunks, or a global Q8 crossover.
+
 ## 2026-08-06 - DeepSeek V4 Q8 Compressor Matrix Ceiling GO
 
 Status: the N=2,048 compressor matrix performance premise is GO; product

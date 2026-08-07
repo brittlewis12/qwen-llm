@@ -404,6 +404,107 @@ kernel void kernel_mat_mat_q8_0_f32_r2c16k64(
     }
 }
 
+struct mat_mat_q8_0_grouped_args {
+    uint M;
+    uint N;
+    uint K;
+    uint groups;
+    uint nb01;
+    uint stride_b;
+    uint stride_c;
+};
+
+// Strided grouped-output form of R2C16K64. Each grid depth owns one output-A
+// group and preserves the accepted per-group matrix arithmetic while reading
+// and writing directly in the full attention and low-rank row layouts.
+[[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_mat_mat_q8_0_f32_r2c16k64_grouped(
+        constant mat_mat_q8_0_grouped_args & args [[buffer(0)]],
+        device const uchar                 * srcA [[buffer(1)]],
+        device const float                 * srcB [[buffer(2)]],
+        device       float                 * dst  [[buffer(3)]],
+        threadgroup  float                 * shmem [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const uint group = tgpig.z;
+    if (group >= args.groups) {
+        return;
+    }
+    const uint r0 = tgpig.y * 16u;
+    const uint c0 = tgpig.x * 128u + (uint)sgitg * 32u;
+    const ulong row_stride_bytes = (ulong)args.nb01;
+    const ulong group_weight_bytes = (ulong)args.M * row_stride_bytes;
+    device const uchar * group_weights = srcA + (ulong)group * group_weight_bytes;
+
+    simdgroup_float8x8 acc[2][4];
+    FOR_UNROLL (short rt = 0; rt < 2; ++rt) {
+        FOR_UNROLL (short ct = 0; ct < 4; ++ct) {
+            acc[rt][ct] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+        }
+    }
+
+    for (uint k0 = 0; k0 < args.K; k0 += 64u) {
+        if (sgitg == 0) {
+            FOR_UNROLL (short chunk = 0; chunk < 2; ++chunk) {
+                const uint cell = (uint)tiisg + 32u * (uint)chunk;
+                const uint row = cell / 4u;
+                const uint kchunk = cell % 4u;
+                const uint kbase = k0 + 16u * kchunk;
+                device const uchar * block = group_weights
+                    + (ulong)(r0 + row) * row_stride_bytes
+                    + (ulong)(kbase / QK8_0) * Q8_0_BYTES;
+                const float scale = (float)((device const half *)block)[0];
+                device const int8_t * quants =
+                    (device const int8_t *)(block + 2) + (kbase % QK8_0);
+                FOR_UNROLL (short i = 0; i < 16; ++i) {
+                    shmem[row * 64u + kchunk * 16u + (uint)i] =
+                        scale * (float)quants[i];
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        FOR_UNROLL (short kt = 0; kt < 8; ++kt) {
+            simdgroup_float8x8 activation[4];
+            FOR_UNROLL (short ct = 0; ct < 4; ++ct) {
+                simdgroup_load(
+                    activation[ct],
+                    srcB + (ulong)(c0 + (uint)ct * 8u) * args.stride_b
+                         + group * args.K + k0 + (uint)kt * 8u,
+                    args.stride_b,
+                    ulong2(0, 0),
+                    true);
+            }
+            FOR_UNROLL (short rt = 0; rt < 2; ++rt) {
+                simdgroup_float8x8 weight;
+                simdgroup_load(
+                    weight,
+                    shmem + (uint)rt * 8u * 64u + (uint)kt * 8u,
+                    64);
+                FOR_UNROLL (short ct = 0; ct < 4; ++ct) {
+                    simdgroup_multiply_accumulate(
+                        acc[rt][ct], weight, activation[ct], acc[rt][ct]);
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    FOR_UNROLL (short rt = 0; rt < 2; ++rt) {
+        FOR_UNROLL (short ct = 0; ct < 4; ++ct) {
+            const uint column = c0 + (uint)ct * 8u;
+            simdgroup_store(
+                acc[rt][ct],
+                dst + (ulong)column * args.stride_c + group * args.M
+                    + r0 + (uint)rt * 8u,
+                args.stride_c,
+                ulong2(0, 0),
+                true);
+        }
+    }
+}
+
 // =============================================================================
 // kernel_mat_mat_q8_0_f32_n16 — H5.3b.5.5 NR1=16 specialization for Q8_0.
 //

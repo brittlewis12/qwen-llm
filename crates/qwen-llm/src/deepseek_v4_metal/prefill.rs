@@ -1329,6 +1329,121 @@ fn encode_q8_f32_mma_r2c16k64(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn encode_q8_f32_mma_r2c16k64_grouped(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    input: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    group_count: usize,
+    n_tokens: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, "packed grouped Q8 F32 R2C16K64 projection")?;
+    checked_token_count(n_tokens)?;
+    let input_width = checked_mul(n_in, group_count, "grouped Q8 F32 input width")?;
+    let output_width = checked_mul(n_out, group_count, "grouped Q8 F32 output width")?;
+    validate_matvec_weight(
+        weight,
+        n_in,
+        output_width,
+        "packed grouped Q8 F32 R2C16K64 weight",
+    )?;
+    validate_f32(
+        input,
+        &[input_width as u64, n_tokens as u64],
+        false,
+        "packed grouped Q8 F32 R2C16K64 input",
+    )?;
+    validate_f32(
+        output,
+        &[output_width as u64, n_tokens as u64],
+        true,
+        "packed grouped Q8 F32 R2C16K64 output",
+    )?;
+    if weight.dtype != GgmlType::Q8_0
+        || group_count == 0
+        || !n_in.is_multiple_of(64)
+        || !n_out.is_multiple_of(16)
+        || !n_tokens.is_multiple_of(128)
+        || n_tokens > DEEPSEEK_V4_PREFILL_MAX_TOKENS
+    {
+        return invalid(
+            "packed grouped Q8 F32 R2C16K64 projection has invalid geometry or storage",
+        );
+    }
+    if packed_grouped_tensor_ranges_overlap(input, output)
+        || packed_grouped_tensor_ranges_overlap(weight, output)
+    {
+        return invalid("packed grouped Q8 F32 R2C16K64 output overlaps an input");
+    }
+    let pso = ctx.pipeline("kernel_mat_mat_q8_0_f32_r2c16k64_grouped")?;
+    if pso.threadExecutionWidth() != 32
+        || pso.maxTotalThreadsPerThreadgroup() < 128
+        || ctx.device.maxThreadgroupMemoryLength() < 4_096
+    {
+        return invalid("packed grouped Q8 F32 R2C16K64 requires four SIMDgroups and 4 KiB TGM");
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        groups: u32,
+        nb01: u32,
+        stride_b: u32,
+        stride_c: u32,
+    }
+    let row_bytes = checked_mul(n_in / 32, 34, "grouped Q8 F32 R2C16K64 row bytes")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: u32::try_from(n_out).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("grouped Q8 F32 output exceeds u32".into())
+            })?,
+            n: u32::try_from(n_tokens).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("grouped Q8 F32 token count exceeds u32".into())
+            })?,
+            k: u32::try_from(n_in).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("grouped Q8 F32 input exceeds u32".into())
+            })?,
+            groups: u32::try_from(group_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("grouped Q8 F32 group count exceeds u32".into())
+            })?,
+            nb01: u32::try_from(row_bytes).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("grouped Q8 F32 row bytes exceed u32".into())
+            })?,
+            stride_b: u32::try_from(input_width).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("grouped Q8 F32 input stride exceeds u32".into())
+            })?,
+            stride_c: u32::try_from(output_width).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("grouped Q8 F32 output stride exceeds u32".into())
+            })?,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, output);
+    enc.set_threadgroup_memory(0, 4_096);
+    enc.dispatch(
+        MTLSize {
+            width: n_tokens / 128,
+            height: n_out / 16,
+            depth: group_count,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn encode_state_batch_projection(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -2736,39 +2851,63 @@ impl PrefillAttentionScratch {
                 ),
             }
         };
-        for group in 0..config.group_count {
-            encode_group_pack(
+        if output_a_projection == Q8PrecisionProjection::WideF32Matrix
+            && packed_q8_grouped_output_enabled()
+        {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: strided grouped Q8 output A active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT_GROUPED=0"
+                );
+            }
+            encode_q8_f32_mma_r2c16k64_grouped(
                 ctx,
                 enc,
+                output_a,
                 attention,
-                &group_input,
-                n_tokens,
-                dims.query_width,
-                dims.group_width,
-                group,
-                false,
-            )?;
-            let weight = group_weight_view(output_a, dims.group_width, config.output_rank, group)?;
-            encode_projection(
-                &weight,
-                &group_input,
-                &group_output,
-                dims.group_width,
-                config.output_rank,
-                output_a_projection,
-                "Q8 precision grouped output A",
-            )?;
-            encode_group_pack(
-                ctx,
-                enc,
-                &group_output,
                 &low_rank,
-                n_tokens,
-                dims.low_rank_width,
+                dims.group_width,
                 config.output_rank,
-                group,
-                true,
+                config.group_count,
+                n_tokens,
             )?;
+        } else {
+            for group in 0..config.group_count {
+                encode_group_pack(
+                    ctx,
+                    enc,
+                    attention,
+                    &group_input,
+                    n_tokens,
+                    dims.query_width,
+                    dims.group_width,
+                    group,
+                    false,
+                )?;
+                let weight =
+                    group_weight_view(output_a, dims.group_width, config.output_rank, group)?;
+                encode_projection(
+                    &weight,
+                    &group_input,
+                    &group_output,
+                    dims.group_width,
+                    config.output_rank,
+                    output_a_projection,
+                    "Q8 precision grouped output A",
+                )?;
+                encode_group_pack(
+                    ctx,
+                    enc,
+                    &group_output,
+                    &low_rank,
+                    n_tokens,
+                    dims.low_rank_width,
+                    config.output_rank,
+                    group,
+                    true,
+                )?;
+            }
         }
         encode_projection(
             output_b,
@@ -4540,6 +4679,11 @@ crate::env_flag!(
 crate::env_flag!(
     default_on packed_indexer_tiled_f32_enabled,
     "QWEN_DSV4_PACKED_INDEXER_TILED_F32"
+);
+
+crate::env_flag!(
+    default_off packed_q8_grouped_output_enabled,
+    "QWEN_DSV4_PACKED_Q8_OUTPUT_GROUPED"
 );
 
 crate::env_flag!(
@@ -11248,6 +11392,103 @@ mod tests {
             assert_grouped_guards("Q8 R2C4K64 control", &control);
             assert_grouped_guards("Q8 R2C16K64 candidate", &candidate);
             assert_grouped_guards("Q8 R2C16K64 repeat", &repeat);
+        }
+    }
+
+    #[test]
+    fn q8_f32_grouped_r2c16k64_matches_per_group_controls_bits() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        const GROUPS: usize = 2;
+        const M: usize = 32;
+        const N: usize = 128;
+
+        fn submit(
+            ctx: &MetalContext,
+            encode: impl FnOnce(&KernelEncoder) -> Result<(), DeepSeekV4MetalError>,
+        ) {
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            let result = encode(&encoder);
+            encoder.end();
+            result.unwrap();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{:?}", command.error());
+        }
+
+        for k in [128usize, 4_096] {
+            let weight = q8_precision_test_weight(&ctx, k, M * GROUPS);
+            let input_values = q8_precision_test_input(k * GROUPS * N);
+            let input = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&input_values),
+                vec![(k * GROUPS) as u64, N as u64],
+                GgmlType::F32,
+            )
+            .unwrap();
+            let controls = (0..GROUPS)
+                .map(|group| {
+                    let mut values = Vec::with_capacity(k * N);
+                    for token in 0..N {
+                        let start = token * k * GROUPS + group * k;
+                        values.extend_from_slice(&input_values[start..start + k]);
+                    }
+                    let group_input = MetalTensor::from_bytes(
+                        &ctx,
+                        bytemuck::cast_slice(&values),
+                        vec![k as u64, N as u64],
+                        GgmlType::F32,
+                    )
+                    .unwrap();
+                    let group_weight = group_weight_view(&weight, k, M, group).unwrap();
+                    let control =
+                        grouped_guarded_f32(&ctx, vec![M as u64, N as u64], 3.0 + group as f32);
+                    submit(&ctx, |encoder| {
+                        encode_q8_f32_mma_r2c16k64(
+                            &ctx,
+                            encoder,
+                            &group_weight,
+                            &group_input,
+                            &control,
+                            k,
+                            M,
+                            N,
+                        )
+                    });
+                    control
+                })
+                .collect::<Vec<_>>();
+            let candidate = grouped_guarded_f32(&ctx, vec![(M * GROUPS) as u64, N as u64], 7.0);
+            let repeat = grouped_guarded_f32(&ctx, vec![(M * GROUPS) as u64, N as u64], 11.0);
+            for output in [&candidate, &repeat] {
+                submit(&ctx, |encoder| {
+                    encode_q8_f32_mma_r2c16k64_grouped(
+                        &ctx, encoder, &weight, &input, output, k, M, GROUPS, N,
+                    )
+                });
+            }
+
+            let mut expected = vec![0.0f32; M * GROUPS * N];
+            for (group, control) in controls.iter().enumerate() {
+                let values = host_read_f32(control, "grouped Q8 control").unwrap();
+                for token in 0..N {
+                    let source = token * M;
+                    let destination = token * M * GROUPS + group * M;
+                    expected[destination..destination + M]
+                        .copy_from_slice(&values[source..source + M]);
+                }
+                assert_grouped_guards("grouped Q8 control", control);
+            }
+            let bits = |values: Vec<f32>| values.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+            let expected_bits = bits(expected);
+            let candidate_bits = bits(host_read_f32(&candidate, "grouped Q8 candidate").unwrap());
+            let repeat_bits = bits(host_read_f32(&repeat, "grouped Q8 repeat").unwrap());
+            assert_eq!(candidate_bits, expected_bits, "K={k} candidate");
+            assert_eq!(repeat_bits, candidate_bits, "K={k} repeat");
+            assert_grouped_guards("grouped Q8 candidate", &candidate);
+            assert_grouped_guards("grouped Q8 repeat", &repeat);
         }
     }
 

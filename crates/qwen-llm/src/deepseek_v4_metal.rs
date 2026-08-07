@@ -72,7 +72,7 @@ const DEEPSEEK_V4_ROUTE_MAX_EXPERTS: usize = 256;
 const DEEPSEEK_V4_ROUTE_MAX_TOP_K: usize = 6;
 #[cfg(feature = "dsv4-diagnostics")]
 const DEEPSEEK_V4_FP4_STATUS_UNAVAILABLE: i32 = i32::MIN;
-pub use prefill::DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+pub use prefill::{DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS};
 /// Engine-owned evidence ceiling through the model's exact context length.
 /// A request may allocate less, but allocation never authorizes execution past
 /// this independently promoted boundary.
@@ -17260,7 +17260,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            2_202_056_132 + diagnostics_logical + packed_route_logical
+            4_352_846_788 + diagnostics_logical + packed_route_logical
         );
         let names = requests
             .iter()
@@ -17300,21 +17300,21 @@ mod tests {
                 .iter()
                 .find(|request| request.name == "prefill.moe.grouped_inner")
                 .map(|request| request.logical_bytes),
-            Some(100_663_296)
+            Some(201_326_592)
         );
         assert_eq!(
             requests
                 .iter()
                 .find(|request| request.name == "prefill.moe.grouped_tiles")
                 .map(|request| request.logical_bytes),
-            Some(7_584)
+            Some(12_192)
         );
         assert_eq!(
             requests
                 .iter()
                 .find(|request| request.name == "prefill.moe.grouped_iq2_mma16_tiles")
                 .map(|request| request.logical_bytes),
-            Some(12_096)
+            Some(21_312)
         );
 
         let promoted_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
@@ -17334,7 +17334,7 @@ mod tests {
                     .iter()
                     .find(|request| request.name == name)
                     .map(|request| request.logical_bytes),
-                Some(2_147_483_648)
+                Some(4_294_967_296)
             );
         }
         let promoted_diagnostics_logical = if cfg!(feature = "dsv4-diagnostics") {
@@ -17349,7 +17349,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            13_669_872_236 + promoted_diagnostics_logical + packed_route_logical
+            20_103_047_276 + promoted_diagnostics_logical + packed_route_logical
         );
         assert_eq!(
             promoted
@@ -19533,12 +19533,14 @@ mod tests {
                    start_position: usize,
                    row_count: usize| {
             let width = if ratio == 4 { 2 * head_dim } else { head_dim };
+            let history_capacity =
+                DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS.max(DEEPSEEK_V4_PREFILL_MAX_TOKENS / 4);
             let ordered = DeepSeekV4CompressorFrontier::new(
                 &ctx,
                 ratio,
                 head_dim,
                 publication,
-                DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+                history_capacity,
             )
             .unwrap();
             let batched = DeepSeekV4CompressorFrontier::new(
@@ -19546,7 +19548,7 @@ mod tests {
                 ratio,
                 head_dim,
                 publication,
-                DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+                history_capacity,
             )
             .unwrap();
             #[cfg(feature = "dsv4-diagnostics")]

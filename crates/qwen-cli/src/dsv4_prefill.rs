@@ -3,8 +3,8 @@ use clap::Args;
 use objc2_metal::MTLDevice;
 use qwen_llm::deepseek_v4::AttentionKind;
 use qwen_llm::deepseek_v4_metal::{
-    DEEPSEEK_V4_PREFILL_MAX_TOKENS, DeepSeekV4MetalResidency, DeepSeekV4Session,
-    PackedChunkProfile, PackedPostRouteStageKind, PackedPrefillStageKind,
+    DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS, DeepSeekV4MetalResidency,
+    DeepSeekV4Session, PackedChunkProfile, PackedPostRouteStageKind, PackedPrefillStageKind,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
@@ -25,7 +25,7 @@ pub struct Dsv4PrefillArgs {
     #[arg(short = 'p', long, default_value_t = 2_048)]
     tokens: usize,
     /// Production packed-chunk size used to traverse the prompt.
-    #[arg(long, default_value_t = DEEPSEEK_V4_PREFILL_MAX_TOKENS)]
+    #[arg(long, default_value_t = DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS)]
     chunk_tokens: usize,
     /// Larger chunk size whose optimistic boundary ceiling is reported.
     #[arg(long, default_value_t = 4_096)]

@@ -1,7 +1,8 @@
 use super::*;
 use std::sync::OnceLock;
 
-pub const DEEPSEEK_V4_PREFILL_MAX_TOKENS: usize = 2_048;
+pub const DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS: usize = 2_048;
+pub const DEEPSEEK_V4_PREFILL_MAX_TOKENS: usize = 4_096;
 
 const QUERY_WIDTH: usize = 64 * 512;
 const GROUP_WIDTH: usize = QUERY_WIDTH / 8;
@@ -1586,13 +1587,20 @@ crate::env_flag!(
 const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES: u64 = 104_202_502_492;
 
+fn packed_q8_matrix_chunk_qualified(n_tokens: usize) -> bool {
+    matches!(
+        n_tokens,
+        DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS | DEEPSEEK_V4_PREFILL_MAX_TOKENS
+    )
+}
+
 fn packed_q8_compressor_matrix_scope_qualified(
     device_name: &str,
     tensor_count: usize,
     source_bytes: u64,
     n_tokens: usize,
 ) -> bool {
-    n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS
+    packed_q8_matrix_chunk_qualified(n_tokens)
         && device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
         && tensor_count == 1_328
         && source_bytes == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES
@@ -1683,7 +1691,7 @@ fn packed_q8_qb_projection_for_chunk(
 
 impl Q8PrecisionProjection {
     fn uses_full_chunk_f32(self, n_tokens: usize) -> bool {
-        self == Self::F32Matrix && n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS
+        self == Self::F32Matrix && packed_q8_matrix_chunk_qualified(n_tokens)
     }
 }
 
@@ -3114,7 +3122,8 @@ const PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES: usize = 4_096;
 const PACKED_GROUPED_EXPERT_INLINE_MAX_TILES: usize = PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES / 12;
 const PACKED_GROUPED_IQ2_MMA16_TILE_ROWS: usize = 16;
 const PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS: usize = 128;
-const PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS: usize = 2_048;
+const PACKED_GROUPED_IQ2_MMA16_MEDIUM_TOKENS: usize = DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS;
+const PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 const PACKED_GROUPED_IQ2_MMA16_MAX_TILES: usize = MOE_EXPERT_COUNT
     + (PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS * MOE_TOP_K - MOE_EXPERT_COUNT)
         / PACKED_GROUPED_IQ2_MMA16_TILE_ROWS;
@@ -4394,7 +4403,7 @@ fn packed_grouped_iq3_fused_candidate_supported(ctx: &MetalContext) -> bool {
 
 const PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_GROUPED_EXPERT_MAX_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
-const PACKED_GPU_ROUTE_MAX_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+const PACKED_GPU_ROUTE_MAX_TOKENS: usize = DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PackedGroupedExpertMode {
@@ -4423,7 +4432,9 @@ fn packed_grouped_expert_mode() -> PackedGroupedExpertMode {
 fn packed_grouped_iq2_mma16_qualified(n_tokens: usize) -> bool {
     matches!(
         n_tokens,
-        PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS | PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS
+        PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS
+            | PACKED_GROUPED_IQ2_MMA16_MEDIUM_TOKENS
+            | PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS
     )
 }
 
@@ -7815,6 +7826,7 @@ impl DeepSeekV4Session {
         let n_tokens = checked_token_count(token_ids.len())?;
         let route_policy = if route_policy == PackedRoutePolicy::Cpu
             && packed_gpu_route_compact_enabled()
+            && token_ids.len() <= PACKED_GPU_ROUTE_MAX_TOKENS
             && packed_q8_compressor_matrix_scope_qualified(
                 &ctx.device.name().to_string(),
                 self.residency.report().tensor_count,
@@ -9839,6 +9851,7 @@ mod tests {
         assert!(!mma16.uses_iq2_mma16(127));
         assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS));
         assert!(!mma16.uses_iq2_mma16(129));
+        assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_MEDIUM_TOKENS));
         assert!(!mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS - 1));
         assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS));
         assert!(!mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS + 1));
@@ -9871,7 +9884,7 @@ mod tests {
             )
             .unwrap_err()
             .to_string()
-            .contains("qualified through 2048 tokens")
+            .contains("qualified through 4096 tokens")
         );
         assert_eq!(
             parse_packed_grouped_expert_mode(None),
@@ -9933,6 +9946,7 @@ mod tests {
         );
         let matrix = Q8PrecisionProjection::F32Matrix;
         assert!(!matrix.uses_full_chunk_f32(512));
+        assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS));
         assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
         assert!(parse_packed_q8_qb_policy(Some("half_matrix")).is_err());
     }
@@ -9966,6 +9980,7 @@ mod tests {
         );
         let matrix = Q8PrecisionProjection::F32Matrix;
         assert!(!matrix.uses_full_chunk_f32(512));
+        assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS));
         assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
     }
 
@@ -9974,6 +9989,12 @@ mod tests {
         let qualified = |device, tensors, bytes, tokens| {
             packed_q8_compressor_matrix_scope_qualified(device, tensors, bytes, tokens)
         };
+        assert!(qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS,
+        ));
         assert!(qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
@@ -10068,8 +10089,8 @@ mod tests {
         let maximum = (0..MOE_EXPERT_COUNT)
             .map(|expert| {
                 let len = match expert {
-                    0..5 => 2_017,
-                    5 => 1_953,
+                    0..5 => 4_065,
+                    5 => 4_001,
                     _ => 1,
                 };
                 let bucket = ExpertBucket {
@@ -10093,8 +10114,8 @@ mod tests {
         let mma16_maximum = (0..MOE_EXPERT_COUNT)
             .map(|expert| {
                 let len = match expert {
-                    0..5 => 2_033,
-                    5 => 1_873,
+                    0..5 => 4_081,
+                    5 => 3_921,
                     _ => 1,
                 };
                 let bucket = ExpertBucket {
@@ -10113,8 +10134,8 @@ mod tests {
                 .len(),
             PACKED_GROUPED_IQ2_MMA16_MAX_TILES
         );
-        assert_eq!(PACKED_GROUPED_IQ2_MMA16_MAX_TILES, 1_008);
-        assert_eq!(PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS, 3_024);
+        assert_eq!(PACKED_GROUPED_IQ2_MMA16_MAX_TILES, 1_776);
+        assert_eq!(PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS, 5_328);
     }
 
     #[cfg(feature = "dsv4-diagnostics")]
@@ -11641,7 +11662,7 @@ mod tests {
         let mma16_tile_buffer =
             MetalTensor::zeros_i32(&ctx, vec![PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS as u64])
                 .unwrap();
-        for n_tokens in [1, 12, 15, 16, 17, 31, 32, 33, 64, 128, 2_048] {
+        for n_tokens in [1, 12, 15, 16, 17, 31, 32, 33, 64, 128, 2_048, 4_096] {
             let route_count = n_tokens * K;
             let (_expert_ids, rows, slots, schedule) = grouped_test_schedule(n_tokens);
             let grouped_plan =
@@ -11987,7 +12008,7 @@ mod tests {
         let mma16_tile_buffer =
             MetalTensor::zeros_i32(&ctx, vec![PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS as u64])
                 .unwrap();
-        for n_tokens in [1, 15, 16, 17, 128, 2_048] {
+        for n_tokens in [1, 15, 16, 17, 128, 2_048, 4_096] {
             let route_count = n_tokens * K;
             let (_expert_ids, rows, slots, schedule) = grouped_test_schedule(n_tokens);
             let grouped_plan =
@@ -12302,7 +12323,7 @@ mod tests {
         const F: usize = 256;
         const E: usize = MOE_EXPERT_COUNT;
         const K: usize = MOE_TOP_K;
-        const N: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+        const N: usize = PACKED_GPU_ROUTE_MAX_TOKENS;
         const CLAMP: f32 = 0.25;
 
         let fixture = PackedRouteFixture::new(&ctx);

@@ -17,9 +17,9 @@ use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
 use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
 use qwen_llm::deepseek_v4_metal::{
     DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS,
-    DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS, DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-    DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples, DeepSeekV4MetalResidency,
-    DeepSeekV4ModelContentId, DeepSeekV4MultigroupSelectorGeometry,
+    DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS, DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS,
+    DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples,
+    DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4MultigroupSelectorGeometry,
     DeepSeekV4MultigroupSelectorTelemetry, DeepSeekV4Session, DeepSeekV4SessionCapacity,
     DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotFileOutcome,
     causal_snapshot_record_bytes, load_causal_snapshot_file, publish_causal_snapshot_file,
@@ -2527,7 +2527,7 @@ fn validate_deepseek_v4_request_context_limit(
 
 fn parse_deepseek_v4_prefill_chunk_tokens(value: Option<&str>) -> Result<usize> {
     let Some(value) = value else {
-        return Ok(DEEPSEEK_V4_PREFILL_MAX_TOKENS);
+        return Ok(DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS);
     };
     let chunk_tokens = value
         .parse::<usize>()
@@ -7418,19 +7418,23 @@ mod tests {
             parse_deepseek_v4_prefill_chunk_tokens(Some("512")).unwrap(),
             512
         );
+        assert_eq!(
+            parse_deepseek_v4_prefill_chunk_tokens(Some("4096")).unwrap(),
+            4_096
+        );
         assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("0")).is_err());
-        assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("2049")).is_err());
+        assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("4097")).is_err());
         assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("nope")).is_err());
         assert_eq!(deepseek_v4_packed_chunk_count(0, 512), 0);
         assert_eq!(deepseek_v4_packed_chunk_count(1, 512), 0);
         assert_eq!(deepseek_v4_packed_chunk_count(2, 512), 1);
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS, 512),
-            4
+            8
         );
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS + 1, 512),
-            5
+            9
         );
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 512),
@@ -7438,7 +7442,7 @@ mod tests {
         );
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PREFILL_MAX_TOKENS, 2_048),
-            1
+            2
         );
         assert_eq!(
             deepseek_v4_packed_chunk_count(DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, 2_048),

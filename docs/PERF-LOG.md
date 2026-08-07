@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 N=2,048 BM32 IQ2 KILL
+
+Status: remove the exact two-panel BM32 candidate. BM16 remains the default
+N=2,048 IQ2 gate/up work unit; no BM32 force path or production code remains.
+
+- The real prompt has 22,387 width-16 descriptors at 85.76% occupancy and
+  13,097 width-32 descriptors at 73.30% occupancy. The reusable trace assigns
+  3,662.943 ms of the sampled 4,543.268 ms BM16 cohort to gate/up.
+- BM32 lets two SIMD groups share one decoded 16x32 IQ2 weight tile while each
+  group preserves BM16's independent 16-route matrix operations and destination
+  writes. Reduced-K boundaries through N=2,048 and full K=4,096 traversals are
+  bit-identical to BM16, including gate, up, clamped SwiGLU, and guards.
+- Candidate markers fire on all 25 eligible layers. Their individual gate/up
+  savings span 10.18-12.72%, with an 11.58% median, so the mechanism is real
+  rather than an aggregate timing artifact.
+- Sampled gate/up falls `3,662.943 -> 3,244.204 ms`, an 11.43% or 418.739 ms
+  saving. The ordinary warm request falls `28,273.485 -> 27,969.800 ms`, only
+  1.07%; sampled wall falls 2.26%. This misses the frozen 20% stage / 739 ms
+  survival gate.
+
+Decision: the nominal 41.5% descriptor reduction does not translate into enough
+request movement to pay for a second IQ2 kernel and host branch. Remove the
+candidate rather than retaining a below-bar opt-in. Do not retune this N=2,048
+two-panel shape. Reopen only for a materially larger work unit with newly
+measured occupancy and a credible >=2% ordinary-request saving, or for a new
+representation that removes more than duplicate dequantization.
+
 ## 2026-08-06 - DeepSeek V4 Exact Q8 Work-Sharing KILL
 
 Status: close exact token-axis Q8 work sharing under the current Q8_0 layout,

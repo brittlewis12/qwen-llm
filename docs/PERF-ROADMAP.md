@@ -585,24 +585,34 @@ token/s, with identical prompt logits and 64-token output. The full-chunk trace
 moves post-route from 10.530 to 7.218 seconds and the IQ2 cohort from 7.825 to
 4.542 seconds. Pre-expert work now leads at 20.368 seconds.
 
+The reusable N=2,048 trace assigns 3.663 of those 4.542 BM16 seconds to
+gate/up. A real prompt needs 22,387 width-16 descriptors but only 13,097
+width-32 descriptors, so an exact two-SIMD-group BM32 candidate tested whether
+two route panels could share each decoded weight tile. The mechanism is real
+and bit-exact, but not economic: all 25 layers improve by 10.18-12.72%, while
+aggregate gate/up moves only `3,662.943 -> 3,244.204 ms`. Ordinary warm wall
+moves `28,273.485 -> 27,969.800 ms`, or 1.07%, missing the frozen 20% stage /
+739 ms survival gate. Remove BM32 and close same-work panel widening at N=2,048.
+
 Force-ranked queue:
 
-1. **Attribute the remaining BM16 cohort.** BM16 cuts the 25 IQ2 layers from
-   7.825 to 4.542 seconds, but pre-expert work is now 20.368 seconds. Use the
-   retained post-route stage instrument to separate gate/up, SwiGLU, down, and
-   shared/combine before pricing a 32-route matrix tile that reuses each weight
-   dequantization across two route panels. Keep intermediate token counts on
-   scalar grouped execution until a crossover is measured.
-2. **Q8 reduction-quality frontier.** Exact token tiles are closed: Q-B is the
-   only improving family, and its best T2 result, `102.626 -> 94.714 ms/layer`,
+1. **Q8 reduction and representation frontier.** Pre-expert work leads at
+   20.368 seconds, while exact token sharing and post-route BM32 panel sharing
+   are now closed below the request-level bar. Q-B is the only improving exact
+   token-tile family, and its best T2 result, `102.626 -> 94.714 ms/layer`,
    moves less than 1% of the request. Exact matrix leaves work, but rebuilding
    the incumbent SIMD trees costs 151.656 ms/layer; a low-synchronization form
    costs 119.300 ms and loses one ULP. The current F32 matrix is faster but
    failed the five-value ledger task. Before implementation, source-audit one
-   coarser segmented reduction and require a credible >=2% whole-request
-   ceiling. Any candidate must retain the correct structured-retrieval and
-   ledger results that distinguish the exact and current F32 arms. Otherwise
-   close this asset's Q8 arithmetic and move to representation or quant mix.
+   coarser segmented reduction or changed representation and require a credible
+   >=2% whole-request ceiling plus an integrated comparative quality path.
+   Otherwise close this asset's Q8 arithmetic and move to quant mix.
+2. **Reprice the packed chunk cap at product depth.** N=2,048 removed the known
+   chunk and expert-plan ceilings, but 8K-32K prompts still execute many chunks.
+   Attribute fixed per-chunk seams and route occupancy on one canonical long
+   prompt before considering N=4,096. Reopen cap growth only if the removable
+   boundary clears a 2-3% ordinary-request ceiling; do not infer it from a
+   synthetic route census.
 3. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
    pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
    proof, not a binding floor.

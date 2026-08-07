@@ -2086,6 +2086,7 @@ impl PrefillSparseCsaScratch {
         prepared: &PackedSparseCsaViews,
     ) -> Result<(), DeepSeekV4MetalError> {
         let bounded = packed_indexer_visible_dispatch_enabled();
+        let tiled_f32 = packed_indexer_tiled_f32_enabled();
         if bounded {
             static POLICY_LOGGED: std::sync::Once = std::sync::Once::new();
             POLICY_LOGGED.call_once(|| {
@@ -2094,7 +2095,20 @@ impl PrefillSparseCsaScratch {
                 );
             });
         }
-        encode_lightning_indexer_scores_f16_with_limit(
+        if tiled_f32 {
+            static TILED_POLICY_LOGGED: std::sync::Once = std::sync::Once::new();
+            TILED_POLICY_LOGGED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: packed indexer score policy=tiled_f32; rollback=QWEN_DSV4_PACKED_INDEXER_TILED_F32=0"
+                );
+            });
+        }
+        let encode = if tiled_f32 {
+            encode_lightning_indexer_scores_f16_tiled_f32_with_limit
+        } else {
+            encode_lightning_indexer_scores_f16_with_limit
+        };
+        encode(
             ctx,
             enc,
             &prepared.index_queries,
@@ -4303,6 +4317,11 @@ crate::env_flag!(
 crate::env_flag!(
     default_on packed_indexer_visible_dispatch_enabled,
     "QWEN_DSV4_PACKED_INDEXER_VISIBLE_DISPATCH"
+);
+
+crate::env_flag!(
+    default_off packed_indexer_tiled_f32_enabled,
+    "QWEN_DSV4_PACKED_INDEXER_TILED_F32"
 );
 
 crate::env_flag!(

@@ -10332,6 +10332,13 @@ fn encode_lightning_indexer_scores_f16(
     )
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeepSeekV4LightningScoreKernel {
+    Scalar,
+    Cooperative,
+    TiledF32,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_lightning_indexer_scores_f16_with_limit(
     ctx: &MetalContext,
@@ -10347,7 +10354,7 @@ fn encode_lightning_indexer_scores_f16_with_limit(
     max_dispatched_rows: usize,
     query_count: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
-    encode_lightning_indexer_scores_f16_with_limit_and_policy(
+    encode_lightning_indexer_scores_f16_with_limit_and_kernel(
         ctx,
         enc,
         queries,
@@ -10360,7 +10367,43 @@ fn encode_lightning_indexer_scores_f16_with_limit(
         row_capacity,
         max_dispatched_rows,
         query_count,
-        false,
+        if head_count == 64 && head_dim == 128 {
+            DeepSeekV4LightningScoreKernel::Cooperative
+        } else {
+            DeepSeekV4LightningScoreKernel::Scalar
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_lightning_indexer_scores_f16_tiled_f32_with_limit(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    head_weights: &MetalTensor,
+    keys: &MetalTensor,
+    visible_counts: &MetalTensor,
+    scores: &MetalTensor,
+    head_count: usize,
+    head_dim: usize,
+    row_capacity: usize,
+    max_dispatched_rows: usize,
+    query_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    encode_lightning_indexer_scores_f16_with_limit_and_kernel(
+        ctx,
+        enc,
+        queries,
+        head_weights,
+        keys,
+        visible_counts,
+        scores,
+        head_count,
+        head_dim,
+        row_capacity,
+        max_dispatched_rows,
+        query_count,
+        DeepSeekV4LightningScoreKernel::TiledF32,
     )
 }
 
@@ -10379,7 +10422,7 @@ fn encode_lightning_indexer_scores_f16_with_policy(
     query_count: usize,
     force_scalar: bool,
 ) -> Result<(), DeepSeekV4MetalError> {
-    encode_lightning_indexer_scores_f16_with_limit_and_policy(
+    encode_lightning_indexer_scores_f16_with_limit_and_kernel(
         ctx,
         enc,
         queries,
@@ -10392,12 +10435,16 @@ fn encode_lightning_indexer_scores_f16_with_policy(
         row_capacity,
         row_capacity,
         query_count,
-        force_scalar,
+        if !force_scalar && head_count == 64 && head_dim == 128 {
+            DeepSeekV4LightningScoreKernel::Cooperative
+        } else {
+            DeepSeekV4LightningScoreKernel::Scalar
+        },
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode_lightning_indexer_scores_f16_with_limit_and_policy(
+fn encode_lightning_indexer_scores_f16_with_limit_and_kernel(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     queries: &MetalTensor,
@@ -10410,7 +10457,7 @@ fn encode_lightning_indexer_scores_f16_with_limit_and_policy(
     row_capacity: usize,
     max_dispatched_rows: usize,
     query_count: usize,
-    force_scalar: bool,
+    kernel: DeepSeekV4LightningScoreKernel,
 ) -> Result<(), DeepSeekV4MetalError> {
     for (name, value) in [
         ("indexer head count", head_count),
@@ -10426,6 +10473,11 @@ fn encode_lightning_indexer_scores_f16_with_limit_and_policy(
     if max_dispatched_rows > row_capacity {
         return invalid(format!(
             "indexer maximum dispatched rows {max_dispatched_rows} exceed row capacity {row_capacity}"
+        ));
+    }
+    if kernel == DeepSeekV4LightningScoreKernel::TiledF32 && (head_count != 64 || head_dim != 128) {
+        return invalid(format!(
+            "tiled F32 indexer scoring requires 64 heads of width 128, got {head_count}x{head_dim}"
         ));
     }
     validate_lightning_indexer_score_offsets(head_count, head_dim, row_capacity, query_count)?;
@@ -10467,20 +10519,34 @@ fn encode_lightning_indexer_scores_f16_with_limit_and_policy(
         row_capacity: u32,
         query_count: u32,
     }
-    let cooperative = !force_scalar && head_count == 64 && head_dim == 128;
-    let kernel = if cooperative {
-        "kernel_deepseek_v4_lightning_indexer_scores_f16_cooperative"
-    } else {
-        "kernel_deepseek_v4_lightning_indexer_scores_f16"
+    let kernel_name = match kernel {
+        DeepSeekV4LightningScoreKernel::Scalar => "kernel_deepseek_v4_lightning_indexer_scores_f16",
+        DeepSeekV4LightningScoreKernel::Cooperative => {
+            "kernel_deepseek_v4_lightning_indexer_scores_f16_cooperative"
+        }
+        DeepSeekV4LightningScoreKernel::TiledF32 => {
+            "kernel_deepseek_v4_lightning_indexer_scores_f16_tiled_f32"
+        }
     };
-    let pso = ctx.pipeline(kernel)?;
-    if cooperative {
-        validate_cooperative_lightning_score_geometry(
-            kernel,
-            pso.threadExecutionWidth(),
-            pso.maxTotalThreadsPerThreadgroup(),
-            ctx.device.maxThreadgroupMemoryLength(),
-        )?;
+    let pso = ctx.pipeline(kernel_name)?;
+    match kernel {
+        DeepSeekV4LightningScoreKernel::Scalar => {}
+        DeepSeekV4LightningScoreKernel::Cooperative => {
+            validate_cooperative_lightning_score_geometry(
+                kernel_name,
+                pso.threadExecutionWidth(),
+                pso.maxTotalThreadsPerThreadgroup(),
+                ctx.device.maxThreadgroupMemoryLength(),
+            )?;
+        }
+        DeepSeekV4LightningScoreKernel::TiledF32 => {
+            validate_tiled_f32_lightning_score_geometry(
+                kernel_name,
+                pso.threadExecutionWidth(),
+                pso.maxTotalThreadsPerThreadgroup(),
+                ctx.device.maxThreadgroupMemoryLength(),
+            )?;
+        }
     }
     enc.set_pipeline(&pso);
     enc.set_bytes(
@@ -10497,34 +10563,52 @@ fn encode_lightning_indexer_scores_f16_with_limit_and_policy(
     enc.set_tensor(3, keys);
     enc.set_tensor(4, visible_counts);
     enc.set_tensor(5, scores);
-    if cooperative {
-        enc.set_threadgroup_memory(0, 8 * 128 * std::mem::size_of::<u16>());
-        enc.set_threadgroup_memory(1, 8 * 64 * std::mem::size_of::<f32>());
-        enc.dispatch(
-            MTLSize {
-                width: max_dispatched_rows.div_ceil(8),
-                height: query_count,
-                depth: 1,
-            },
-            MTLSize {
-                width: 256,
-                height: 1,
-                depth: 1,
-            },
-        );
-    } else {
-        enc.dispatch(
-            MTLSize {
-                width: max_dispatched_rows.div_ceil(256),
-                height: query_count,
-                depth: 1,
-            },
-            MTLSize {
-                width: 256,
-                height: 1,
-                depth: 1,
-            },
-        );
+    match kernel {
+        DeepSeekV4LightningScoreKernel::Scalar => {
+            enc.dispatch(
+                MTLSize {
+                    width: max_dispatched_rows.div_ceil(256),
+                    height: query_count,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
+        DeepSeekV4LightningScoreKernel::Cooperative => {
+            enc.set_threadgroup_memory(0, 8 * 128 * std::mem::size_of::<u16>());
+            enc.set_threadgroup_memory(1, 8 * 64 * std::mem::size_of::<f32>());
+            enc.dispatch(
+                MTLSize {
+                    width: max_dispatched_rows.div_ceil(8),
+                    height: query_count,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
+        DeepSeekV4LightningScoreKernel::TiledF32 => {
+            enc.set_threadgroup_memory(0, 5_376 * std::mem::size_of::<f32>());
+            enc.dispatch(
+                MTLSize {
+                    width: max_dispatched_rows.div_ceil(32),
+                    height: query_count.div_ceil(8),
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 128,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
     }
     Ok(())
 }
@@ -11328,6 +11412,27 @@ fn validate_cooperative_lightning_score_geometry(
     const DOT_BYTES: usize = 8 * 64 * std::mem::size_of::<f32>();
     const THREADGROUP_BYTES: usize = KEY_BYTES + DOT_BYTES;
 
+    if thread_execution_width != 32 || max_threads_per_group < THREADS {
+        return invalid(format!(
+            "{kernel} requires SIMD width 32 and {THREADS} threads, got width {thread_execution_width} max {max_threads_per_group}"
+        ));
+    }
+    if max_threadgroup_bytes < THREADGROUP_BYTES {
+        return invalid(format!(
+            "{kernel} requires {THREADGROUP_BYTES} threadgroup bytes, device allows {max_threadgroup_bytes}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tiled_f32_lightning_score_geometry(
+    kernel: &str,
+    thread_execution_width: usize,
+    max_threads_per_group: usize,
+    max_threadgroup_bytes: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const THREADS: usize = 128;
+    const THREADGROUP_BYTES: usize = 5_376 * std::mem::size_of::<f32>();
     if thread_execution_width != 32 || max_threads_per_group < THREADS {
         return invalid(format!(
             "{kernel} requires SIMD width 32 and {THREADS} threads, got width {thread_execution_width} max {max_threads_per_group}"
@@ -27219,9 +27324,9 @@ mod tests {
         };
         const HEADS: usize = 64;
         const DIM: usize = 128;
-        const CAPACITY: usize = 24;
-        const MAX_VISIBLE: usize = 16;
-        const QUERIES: usize = 4;
+        const CAPACITY: usize = 48;
+        const MAX_VISIBLE: usize = 40;
+        const QUERIES: usize = 9;
         const TOP_K: usize = 8;
 
         let query_values = (0..QUERIES * HEADS * DIM)
@@ -27255,7 +27360,7 @@ mod tests {
         .unwrap();
         let visible_counts = offset_i32(
             &ctx,
-            &[MAX_VISIBLE as i32, 9, -1, MAX_VISIBLE as i32],
+            &[MAX_VISIBLE as i32, 9, -1, 40, 17, 33, 34, 39, 40],
             vec![QUERIES as u64],
         );
         let scalar_scores =
@@ -27263,6 +27368,8 @@ mod tests {
         let cooperative_scores =
             MetalTensor::zeros_f32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap();
         let bounded_scores =
+            MetalTensor::zeros_f32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap();
+        let tiled_scores =
             MetalTensor::zeros_f32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap();
         let make_selection = || {
             (
@@ -27276,6 +27383,7 @@ mod tests {
         let (cooperative_mask, cooperative_ids, cooperative_counts, cooperative_status) =
             make_selection();
         let (bounded_mask, bounded_ids, bounded_counts, bounded_status) = make_selection();
+        let (tiled_mask, tiled_ids, tiled_counts, tiled_status) = make_selection();
 
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
@@ -27292,6 +27400,21 @@ mod tests {
             CAPACITY,
             QUERIES,
             true,
+        )
+        .unwrap();
+        encode_lightning_indexer_scores_f16_tiled_f32_with_limit(
+            &ctx,
+            &encoder,
+            &queries,
+            &head_weights,
+            &keys,
+            &visible_counts,
+            &tiled_scores,
+            HEADS,
+            DIM,
+            CAPACITY,
+            MAX_VISIBLE,
+            QUERIES,
         )
         .unwrap();
         encode_lightning_indexer_scores_f16(
@@ -27371,6 +27494,22 @@ mod tests {
             QUERIES,
         )
         .unwrap();
+        encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &tiled_scores,
+            &visible_counts,
+            &tiled_mask,
+            None,
+            &tiled_ids,
+            &tiled_counts,
+            &tiled_status,
+            CAPACITY,
+            MAX_VISIBLE,
+            TOP_K,
+            QUERIES,
+        )
+        .unwrap();
         encoder.end();
         command.commit();
         command.waitUntilCompleted();
@@ -27383,6 +27522,7 @@ mod tests {
         let scalar = read_f32(&scalar_scores);
         let cooperative = read_f32(&cooperative_scores);
         let bounded = read_f32(&bounded_scores);
+        let tiled = read_f32(&tiled_scores);
         assert_eq!(
             cooperative
                 .iter()
@@ -27423,9 +27563,39 @@ mod tests {
                 .all(|value| *value == f32::NEG_INFINITY)
         );
         assert!(
-            cooperative[3 * CAPACITY..]
+            cooperative[3 * CAPACITY..4 * CAPACITY]
                 .iter()
                 .all(|value| !value.is_finite())
+        );
+        let mut tiled_max_abs = 0.0f32;
+        let mut tiled_squared_error = 0.0f64;
+        let mut tiled_reference_norm = 0.0f64;
+        for (query, visible) in [
+            (0usize, MAX_VISIBLE),
+            (1, 9),
+            (4, 17),
+            (5, 33),
+            (6, 34),
+            (7, 39),
+            (8, 40),
+        ] {
+            let start = query * CAPACITY;
+            for row in 0..visible {
+                let reference = cooperative[start + row];
+                let candidate = tiled[start + row];
+                tiled_max_abs = tiled_max_abs.max((reference - candidate).abs());
+                tiled_squared_error += f64::from(reference - candidate).powi(2);
+                tiled_reference_norm += f64::from(reference).powi(2);
+            }
+        }
+        let tiled_relative_rms = (tiled_squared_error / tiled_reference_norm).sqrt();
+        eprintln!(
+            "tiled F32 Lightning scores max_abs={tiled_max_abs:.9} rel_rms={tiled_relative_rms:.9}"
+        );
+        assert!(tiled_max_abs <= 1e-5, "tiled score max abs {tiled_max_abs}");
+        assert!(
+            tiled_relative_rms <= 1e-3,
+            "tiled score relative RMS {tiled_relative_rms}"
         );
         assert_eq!(read_i32(&cooperative_mask), read_i32(&scalar_mask));
         assert_eq!(read_i32(&cooperative_ids), read_i32(&scalar_ids));
@@ -27435,13 +27605,19 @@ mod tests {
         assert_eq!(read_i32(&bounded_ids), read_i32(&scalar_ids));
         assert_eq!(read_i32(&bounded_counts), read_i32(&scalar_counts));
         assert_eq!(read_i32(&bounded_status), read_i32(&scalar_status));
+        assert_eq!(read_i32(&tiled_mask), read_i32(&scalar_mask));
+        assert_eq!(read_i32(&tiled_ids), read_i32(&scalar_ids));
+        assert_eq!(read_i32(&tiled_counts), read_i32(&scalar_counts));
+        assert_eq!(read_i32(&tiled_status), read_i32(&scalar_status));
+        let mut expected_counts = vec![TOP_K as i32; QUERIES];
+        expected_counts[2] = 0;
+        assert_eq!(read_i32(&cooperative_counts), expected_counts);
+        let mut expected_status = vec![0; QUERIES];
+        expected_status[2] = 1;
+        expected_status[3] = 2;
+        assert_eq!(read_i32(&cooperative_status), expected_status);
         assert_eq!(
-            read_i32(&cooperative_counts),
-            vec![TOP_K as i32, TOP_K as i32, 0, TOP_K as i32]
-        );
-        assert_eq!(read_i32(&cooperative_status), vec![0, 0, 1, 2]);
-        assert_eq!(
-            &read_i32(&cooperative_ids)[3 * TOP_K..],
+            &read_i32(&cooperative_ids)[3 * TOP_K..4 * TOP_K],
             &(0..TOP_K as i32).collect::<Vec<_>>()
         );
     }

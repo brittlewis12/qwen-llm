@@ -1956,12 +1956,14 @@ impl PrefillSparseCsaScratch {
         )?;
 
         let index_queries = if packed_indexer_q_matrix_enabled() {
+            let matrix_output = index_query_storage
+                .view_subrange(0, vec![INDEXER_QUERY_WIDTH as u64, n_tokens as u64]);
             encode_q8_f32_mma_r2c4k64(
                 ctx,
                 enc,
                 indexer_q_weight,
                 q_lora,
-                &index_query_storage,
+                &matrix_output,
                 1_024,
                 INDEXER_QUERY_WIDTH,
                 n_tokens,

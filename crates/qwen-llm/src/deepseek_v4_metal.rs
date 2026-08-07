@@ -34,7 +34,10 @@ pub use snapshot::{
     encode_causal_snapshot, load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 
-use crate::deepseek_v4::{AttentionKind, DeepSeekV4Config, DeepSeekV4Error, DeepSeekV4Model};
+use crate::deepseek_v4::{
+    AttentionKind, DeepSeekV4Config, DeepSeekV4Error, DeepSeekV4Model,
+    flash_0731_expert_count_supported,
+};
 use crate::gguf::{GgufError, GgufFile};
 use crate::metal::{
     KernelEncoder, MetalContext, MetalError, MetalGgufBacking, MetalMemoryAdmission,
@@ -3287,7 +3290,7 @@ fn deepseek_v4_session_moe_config(config: &DeepSeekV4Config) -> DeepSeekV4MoeCon
     DeepSeekV4MoeConfig {
         hidden_size: DEEPSEEK_V4_HIDDEN_SIZE,
         ffn_size: 2_048,
-        expert_count: 256,
+        expert_count: config.expert_count as usize,
         top_k: 6,
         routed_scale: config.expert_weights_scale,
     }
@@ -3305,13 +3308,18 @@ fn validate_session_config(config: &DeepSeekV4Config) -> Result<(), DeepSeekV4Me
         || config.q_lora_rank != 1_024
         || config.output_group_count != 8
         || config.output_lora_rank != 1_024
-        || config.expert_count != 256
         || config.expert_used_count != 6
         || config.expert_feed_forward_length != 2_048
         || config.shared_expert_count != 1
         || config.sinkhorn_iterations != DEEPSEEK_V4_SINKHORN_ITERATIONS as u32
     {
         return invalid("native session requires the exact Flash-0731 dimensions");
+    }
+    if !flash_0731_expert_count_supported(config.expert_count) {
+        return invalid(format!(
+            "native session supports Flash-0731 expert counts 160 and 256, got {}",
+            config.expert_count
+        ));
     }
     if !config.expert_weights_norm || config.expert_gating_func != 4 {
         return invalid(
@@ -7014,7 +7022,6 @@ impl DeepSeekV4CompletedLayerRouteRecords {
                 deepseek_v4_route_status_name(status)
             ));
         }
-        let mut seen = [false; DEEPSEEK_V4_ROUTE_MAX_EXPERTS];
         for slot in 0..self.config.top_k {
             let expert = self.integers[integer_base + slot];
             let Ok(expert_index) = usize::try_from(expert) else {
@@ -7026,11 +7033,6 @@ impl DeepSeekV4CompletedLayerRouteRecords {
                 return invalid(format!(
                     "layer {layer} GPU route slot {slot} returned expert {expert_index} outside {}",
                     self.config.expert_count
-                ));
-            }
-            if std::mem::replace(&mut seen[expert_index], true) {
-                return invalid(format!(
-                    "layer {layer} GPU route returned duplicate expert {expert_index}"
                 ));
             }
             let weight = self.weights[weight_base + slot];
@@ -12772,14 +12774,14 @@ fn validate_session_lookup_dtypes(
     embedding_dtype: GgmlType,
     output_dtype: GgmlType,
 ) -> Result<(), DeepSeekV4MetalError> {
-    if embedding_dtype != GgmlType::Q6_K {
+    if !matches!(embedding_dtype, GgmlType::Q6_K | GgmlType::Q8_0) {
         return invalid(format!(
-            "token_embd.weight must be Q6_K for the native session get_rows path, got {embedding_dtype:?}"
+            "token_embd.weight must be Q6_K or Q8_0 for the native session get_rows path, got {embedding_dtype:?}"
         ));
     }
-    if output_dtype != GgmlType::Q6_K {
+    if !matches!(output_dtype, GgmlType::Q6_K | GgmlType::Q8_0) {
         return invalid(format!(
-            "output.weight must be Q6_K for the native session logits path, got {output_dtype:?}"
+            "output.weight must be Q6_K or Q8_0 for the native session logits path, got {output_dtype:?}"
         ));
     }
     Ok(())
@@ -18612,6 +18614,9 @@ mod tests {
     #[test]
     fn session_lookup_storage_rejects_unsupported_dtypes_before_residency() {
         validate_session_lookup_dtypes(GgmlType::Q6_K, GgmlType::Q6_K).unwrap();
+        validate_session_lookup_dtypes(GgmlType::Q8_0, GgmlType::Q8_0).unwrap();
+        validate_session_lookup_dtypes(GgmlType::Q6_K, GgmlType::Q8_0).unwrap();
+        validate_session_lookup_dtypes(GgmlType::Q8_0, GgmlType::Q6_K).unwrap();
         let embedding = validate_session_lookup_dtypes(GgmlType::F32, GgmlType::Q6_K).unwrap_err();
         assert!(embedding.to_string().contains("token_embd.weight"));
         let output = validate_session_lookup_dtypes(GgmlType::Q6_K, GgmlType::F32).unwrap_err();
@@ -31756,9 +31761,17 @@ mod tests {
             DEEPSEEK_V4_ROUTE_STATUS_INVALID_EXPERT
         );
         let duplicate_map = offset_i32(&ctx, &[0, 2, 4, 1, 1, 3], vec![K as u64, 2]);
-        assert_eq!(
-            run(&|encoder| scratch.encode_route_hash_gpu(&ctx, encoder, 1, &duplicate_map)).status,
-            DEEPSEEK_V4_ROUTE_STATUS_DUPLICATE_EXPERT
+        let duplicate =
+            run(&|encoder| scratch.encode_route_hash_gpu(&ctx, encoder, 1, &duplicate_map));
+        let expected_duplicate =
+            crate::deepseek_v4_oracle::hash_route(&scores, &[1, 1, 3], 1.5).unwrap();
+        assert_eq!(duplicate.status, DEEPSEEK_V4_ROUTE_STATUS_READY);
+        assert_eq!(duplicate.expert_ids, vec![1, 1, 3]);
+        assert_close(
+            "GPU duplicate-slot hash route",
+            &duplicate.weights,
+            &expected_duplicate.weights,
+            2e-6,
         );
     }
 

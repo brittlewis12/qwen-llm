@@ -9,6 +9,15 @@ use crate::tensor::{GgmlType, TensorDesc};
 use std::collections::HashSet;
 
 const ARCHITECTURE: &str = "deepseek4";
+const FLASH_0731_FULL_EXPERT_COUNT: u32 = 256;
+const FLASH_0731_REAP_K160_EXPERT_COUNT: u32 = 160;
+
+pub(crate) fn flash_0731_expert_count_supported(expert_count: u32) -> bool {
+    matches!(
+        expert_count,
+        FLASH_0731_FULL_EXPERT_COUNT | FLASH_0731_REAP_K160_EXPERT_COUNT
+    )
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttentionKind {
@@ -170,7 +179,8 @@ impl DeepSeekV4Config {
             .collect::<Result<Vec<_>, _>>()?;
 
         let swiglu_clamp_experts = required_f32_array(gguf, "deepseek4.swiglu_clamp_exp")?;
-        let swiglu_clamp_shared = required_f32_array(gguf, "deepseek4.swiglu_clamp_shexp")?;
+        let swiglu_clamp_shared = optional_f32_array(gguf, "deepseek4.swiglu_clamp_shexp")?
+            .unwrap_or_else(|| swiglu_clamp_experts.clone());
         validate_layer_array(
             "deepseek4.swiglu_clamp_exp",
             &swiglu_clamp_experts,
@@ -479,7 +489,13 @@ impl DeepSeekV4Config {
         exact!(rope_yarn_beta_slow, 1.0);
         exact!(q_lora_rank, 1_024);
         exact!(sliding_window, 128);
-        exact!(expert_count, 256);
+        if !flash_0731_expert_count_supported(self.expert_count) {
+            return Err(DeepSeekV4Error::ProfileMismatch {
+                field: "expert_count",
+                expected: "160 or 256".into(),
+                actual: self.expert_count.to_string(),
+            });
+        }
         exact!(expert_used_count, 6);
         exact!(expert_feed_forward_length, 2_048);
         exact!(shared_expert_count, 1);
@@ -1091,7 +1107,7 @@ fn validate_bound_dtypes(gguf: &GgufFile) -> Result<(), DeepSeekV4Error> {
 
 fn requires_f32_storage(name: &str) -> bool {
     name == "output_norm.weight"
-        || name.starts_with("output_hc_")
+        || matches!(name, "output_hc_scale.weight" | "output_hc_base.weight")
         || [
             ".attn_norm.weight",
             ".attn_sinks.weight",
@@ -1104,10 +1120,8 @@ fn requires_f32_storage(name: &str) -> bool {
             ".indexer_compressor_norm.weight",
             ".exp_probs_b.bias",
             ".ffn_norm.weight",
-            ".hc_attn_fn.weight",
             ".hc_attn_scale.weight",
             ".hc_attn_base.weight",
-            ".hc_ffn_fn.weight",
             ".hc_ffn_scale.weight",
             ".hc_ffn_base.weight",
         ]
@@ -1205,12 +1219,8 @@ fn validate_hash_expert_payload(
         });
     }
     let mut chunks = bytes.chunks_exact(4);
-    let mut seen = vec![false; expert_count as usize];
     let mut entries = 0usize;
     for (index, chunk) in chunks.by_ref().enumerate() {
-        if index % topk == 0 {
-            seen.fill(false);
-        }
         let expert = i32::from_le_bytes(chunk.try_into().expect("four-byte I32 chunk"));
         if expert < 0 || expert as u32 >= expert_count {
             return Err(DeepSeekV4Error::InvalidTensorValue {
@@ -1220,16 +1230,6 @@ fn validate_hash_expert_payload(
                 ),
             });
         }
-        if seen[expert as usize] {
-            return Err(DeepSeekV4Error::InvalidTensorValue {
-                tensor: tensor_name.into(),
-                detail: format!(
-                    "token row {} selects expert {expert} more than once",
-                    index / topk
-                ),
-            });
-        }
-        seen[expert as usize] = true;
         entries += 1;
     }
     if !chunks.remainder().is_empty() {
@@ -1289,27 +1289,34 @@ fn required_f32(gguf: &GgufFile, key: &str) -> Result<f32, DeepSeekV4Error> {
 }
 
 fn required_f32_array(gguf: &GgufFile, key: &str) -> Result<Vec<f32>, DeepSeekV4Error> {
+    optional_f32_array(gguf, key)?.ok_or_else(|| DeepSeekV4Error::MissingMetadata(key.into()))
+}
+
+fn optional_f32_array(gguf: &GgufFile, key: &str) -> Result<Option<Vec<f32>>, DeepSeekV4Error> {
     gguf.get_f64_array(key)?
-        .ok_or_else(|| DeepSeekV4Error::MissingMetadata(key.into()))?
-        .into_iter()
-        .enumerate()
-        .map(|(idx, value)| {
-            if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
-                return Err(DeepSeekV4Error::InvalidMetadata {
-                    key: key.into(),
-                    detail: format!("entry {idx} value {value} is not a finite f32"),
-                });
-            }
-            let narrowed = value as f32;
-            if value != 0.0 && narrowed == 0.0 {
-                return Err(DeepSeekV4Error::InvalidMetadata {
-                    key: key.into(),
-                    detail: format!("entry {idx} value {value} underflows f32"),
-                });
-            }
-            Ok(narrowed)
+        .map(|values| {
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(idx, value)| {
+                    if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
+                        return Err(DeepSeekV4Error::InvalidMetadata {
+                            key: key.into(),
+                            detail: format!("entry {idx} value {value} is not a finite f32"),
+                        });
+                    }
+                    let narrowed = value as f32;
+                    if value != 0.0 && narrowed == 0.0 {
+                        return Err(DeepSeekV4Error::InvalidMetadata {
+                            key: key.into(),
+                            detail: format!("entry {idx} value {value} underflows f32"),
+                        });
+                    }
+                    Ok(narrowed)
+                })
+                .collect()
         })
-        .collect()
+        .transpose()
 }
 
 fn required_bool(gguf: &GgufFile, key: &str) -> Result<bool, DeepSeekV4Error> {
@@ -1498,6 +1505,7 @@ mod tests {
     use std::path::Path;
 
     const DS4_0731_CURRENT: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+    const DS4_0731_REAP_K160: &str = "/Users/tito/models/deepseek-v4-flash-0731-reap-k160/DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf";
 
     #[test]
     fn compression_ratios_are_closed() {
@@ -1544,6 +1552,16 @@ mod tests {
         wrong_hidden.hidden_size += 1;
         assert!(wrong_hidden.validate_flash_0731_profile().is_err());
 
+        let mut reap_k160 = config.clone();
+        reap_k160.expert_count = 160;
+        reap_k160
+            .validate_flash_0731_profile()
+            .expect("valid K160 REAP profile");
+
+        let mut unsupported_experts = config.clone();
+        unsupported_experts.expert_count = 159;
+        assert!(unsupported_experts.validate_flash_0731_profile().is_err());
+
         let mut wrong_schedule = config;
         wrong_schedule.attention_kinds[3] = AttentionKind::CompressedSparse;
         assert!(wrong_schedule.validate_flash_0731_profile().is_err());
@@ -1553,6 +1571,9 @@ mod tests {
     fn semantic_and_weight_dtype_classes_are_distinct() {
         assert!(requires_f32_storage("blk.2.attn_compressor_ape.weight"));
         assert!(requires_f32_storage("blk.3.exp_probs_b.bias"));
+        assert!(requires_f32_storage("blk.2.hc_attn_scale.weight"));
+        assert!(!requires_f32_storage("blk.2.hc_attn_fn.weight"));
+        assert!(!requires_f32_storage("output_hc_fn.weight"));
         assert!(!requires_f32_storage("blk.2.attn_compressor_kv.weight"));
         assert!(is_supported_weight_dtype(GgmlType::IQ2_S));
         assert!(!is_supported_weight_dtype(GgmlType::I32));
@@ -1566,7 +1587,7 @@ mod tests {
     }
 
     #[test]
-    fn hash_router_payload_rejects_duplicate_and_out_of_range_experts() {
+    fn hash_router_payload_accepts_duplicate_slots_and_rejects_out_of_range_experts() {
         fn bytes(values: &[i32]) -> Vec<u8> {
             values
                 .iter()
@@ -1578,7 +1599,8 @@ mod tests {
         validate_hash_expert_payload("hash", &valid, 6, 256).expect("valid hash rows");
 
         let duplicate = bytes(&[0, 1, 2, 2, 4, 5]);
-        assert!(validate_hash_expert_payload("hash", &duplicate, 6, 256).is_err());
+        validate_hash_expert_payload("hash", &duplicate, 6, 256)
+            .expect("duplicate hash slots retain independent route weights");
 
         let out_of_range = bytes(&[0, 1, 2, 3, 4, 256]);
         assert!(validate_hash_expert_payload("hash", &out_of_range, 6, 256).is_err());
@@ -1609,5 +1631,24 @@ mod tests {
             model.blocks[3].attention.lane,
             AttentionLane::HeavilyCompressed { .. }
         ));
+    }
+
+    #[test]
+    #[ignore = "requires the local DeepSeek V4 Flash-0731 REAP K160 fixture"]
+    fn live_0731_reap_k160_schema_binds_every_tensor() {
+        assert!(
+            Path::new(DS4_0731_REAP_K160).exists(),
+            "missing K160 REAP fixture"
+        );
+        let gguf = GgufFile::open(DS4_0731_REAP_K160).expect("open K160 REAP fixture");
+        let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind K160 REAP fixture");
+        assert_eq!(model.config.expert_count, 160);
+        assert_eq!(model.config.swiglu_clamp_experts, vec![10.0; 43]);
+        assert_eq!(model.config.swiglu_clamp_shared, vec![10.0; 43]);
+        assert_eq!(model.token_embedding.dtype, GgmlType::Q8_0);
+        assert_eq!(model.output.dtype, GgmlType::Q8_0);
+        assert_eq!(model.blocks[0].moe.gate_experts.dtype, GgmlType::Q3_K);
+        assert_eq!(model.blocks[0].moe.down_experts.dtype, GgmlType::Q4_K);
+        assert_eq!(model.source_tensor_count, 1_328);
     }
 }

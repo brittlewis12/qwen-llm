@@ -1030,14 +1030,6 @@ pub(crate) fn build_route_decision(
             "routed expert ID exceeds expert count".into(),
         ));
     }
-    let mut unique_ids = decision.expert_ids.clone();
-    unique_ids.sort_unstable();
-    unique_ids.dedup();
-    if unique_ids.len() != ROUTE_TOP_K {
-        return Err(DeepSeekV4DiagnosticsError::Shape(
-            "routed expert IDs are not unique".into(),
-        ));
-    }
     validate_route(&decision)?;
     Ok(decision)
 }

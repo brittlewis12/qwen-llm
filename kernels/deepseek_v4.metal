@@ -215,12 +215,6 @@ kernel void kernel_deepseek_v4_route_hash(
             status[0] = DS4_ROUTE_INVALID_EXPERT;
             return;
         }
-        for (uint prior = 0; prior < slot; ++prior) {
-            if (selected[prior] == expert) {
-                status[0] = DS4_ROUTE_DUPLICATE_EXPERT;
-                return;
-            }
-        }
         selected[slot] = expert;
         selected_weights[slot] = ds4_router_score_exact(logits[expert]);
     }

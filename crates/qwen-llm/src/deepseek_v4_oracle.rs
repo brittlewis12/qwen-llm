@@ -1407,16 +1407,11 @@ pub fn hash_route(
         return invalid("routed expert scale", "must be finite and positive");
     }
     require_router_scores(scores)?;
-    let mut seen = vec![false; scores.len()];
     let mut weights = Vec::with_capacity(selected_experts.len());
     for &expert in selected_experts {
         if expert >= scores.len() {
             return invalid("hash-selected experts", "contains an out-of-range expert");
         }
-        if seen[expert] {
-            return invalid("hash-selected experts", "contains a duplicate expert");
-        }
-        seen[expert] = true;
         weights.push(scores[expert]);
     }
     normalize_router_weights(&mut weights, routed_scale)?;

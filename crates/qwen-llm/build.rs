@@ -26,11 +26,15 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let metal_files: Vec<PathBuf> = std::fs::read_dir(&kernels_dir)?
+    let mut metal_files: Vec<PathBuf> = std::fs::read_dir(&kernels_dir)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("metal"))
         .collect();
+    metal_files.sort();
+    for path in &metal_files {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR")?);
 

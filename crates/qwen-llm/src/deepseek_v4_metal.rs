@@ -15105,7 +15105,9 @@ mod tests {
         fn stage_index(kind: prefill::PackedPrefillStageKind) -> usize {
             match kind {
                 prefill::PackedPrefillStageKind::BeforeAttentionBody => 0,
-                prefill::PackedPrefillStageKind::AttentionBody => 1,
+                prefill::PackedPrefillStageKind::SparseIndexerAndSelection
+                | prefill::PackedPrefillStageKind::AttentionCore
+                | prefill::PackedPrefillStageKind::InverseRope => 1,
                 prefill::PackedPrefillStageKind::AttentionOutputProjections => 2,
                 prefill::PackedPrefillStageKind::AfterAttentionOutput => 3,
             }
@@ -15286,8 +15288,19 @@ mod tests {
             let mut max_single_transition_ambiguity = 0.0f64;
             for (layer, sampled_layer) in profile.sampled_layers.iter().enumerate() {
                 assert_eq!(sampled_layer.layer, layer);
-                assert_eq!(sampled_layer.stages.len(), 4);
-                assert_eq!(sampled_layer.transitions.len(), 3);
+                assert_eq!(
+                    sampled_layer.stages.len(),
+                    prefill::PACKED_PREFILL_STAGE_KINDS.len()
+                );
+                let physical_stage_count = sampled_layer
+                    .stages
+                    .iter()
+                    .filter(|stage| stage.start_timestamp.is_some())
+                    .count();
+                assert_eq!(
+                    sampled_layer.transitions.len(),
+                    physical_stage_count.saturating_sub(1)
+                );
                 assert!(
                     (sampled_layer.command_gpu_ms - profile.command_gpu_ms[layer]).abs() < 1e-9
                 );
@@ -15300,15 +15313,21 @@ mod tests {
                 };
                 cohort_command_ms[cohort] += sampled_layer.command_gpu_ms;
                 let mut layer_stage_ms = 0.0;
-                for (expected_index, stage) in sampled_layer.stages.iter().enumerate() {
+                for stage in &sampled_layer.stages {
                     let index = stage_index(stage.kind);
-                    assert_eq!(index, expected_index);
                     match (stage.start_timestamp, stage.end_timestamp) {
                         (Some(start), Some(end)) => {
                             assert!(start <= end);
                             assert_eq!(stage.duration_ticks, end - start);
                         }
-                        _ => panic!("layer {layer} stage {:?} is not physical", stage.kind),
+                        (None, None)
+                            if stage.kind
+                                == prefill::PackedPrefillStageKind::SparseIndexerAndSelection =>
+                        {
+                            assert_eq!(stage.duration_ticks, 0);
+                            assert_eq!(stage.duration_ms_scaled, 0.0);
+                        }
+                        _ => panic!("layer {layer} stage {:?} is malformed", stage.kind),
                     }
                     stage_ms[index] += stage.duration_ms_scaled;
                     cohort_stage_ms[cohort][index] += stage.duration_ms_scaled;
@@ -15592,10 +15611,22 @@ mod tests {
             );
             let config = crate::deepseek_v4::flash_0731_config_fixture();
             for layer in &sampled_runs[index].profile.sampled_layers {
-                let stage_ticks: [u64; 4] =
+                let stage_ticks: [u64; 6] =
                     std::array::from_fn(|stage| layer.stages[stage].duration_ticks);
-                let stage_ms: [f64; 4] =
+                let stage_ms: [f64; 6] =
                     std::array::from_fn(|stage| layer.stages[stage].duration_ms_scaled);
+                let layer_body_ms = layer
+                    .stages
+                    .iter()
+                    .filter(|stage| stage_index(stage.kind) == 1)
+                    .map(|stage| stage.duration_ms_scaled)
+                    .sum::<f64>();
+                let layer_output_ms = layer
+                    .stages
+                    .iter()
+                    .find(|stage| stage_index(stage.kind) == 2)
+                    .unwrap()
+                    .duration_ms_scaled;
                 eprintln!(
                     "deepseek_v4 packed_attention_split_profile_layer sample={index} layer={} attention_kind={:?} command_gpu_ms={:.6} raw_span_ticks={} raw_span_ms={:.6} raw_coverage={:.9} gap_ms={:.6} overlap_ms={:.6} transition_ambiguity={:.9} body_share={:.9} output_share={:.9} combined_share={:.9} stage_ticks={stage_ticks:?} stage_ms={stage_ms:?} transitions={:?}",
                     layer.layer,
@@ -15608,10 +15639,9 @@ mod tests {
                     layer.encoder_overlap_ms_scaled,
                     (layer.encoder_gap_ms_scaled + layer.encoder_overlap_ms_scaled)
                         / layer.command_gpu_ms,
-                    layer.stages[1].duration_ms_scaled / layer.command_gpu_ms,
-                    layer.stages[2].duration_ms_scaled / layer.command_gpu_ms,
-                    (layer.stages[1].duration_ms_scaled + layer.stages[2].duration_ms_scaled)
-                        / layer.command_gpu_ms,
+                    layer_body_ms / layer.command_gpu_ms,
+                    layer_output_ms / layer.command_gpu_ms,
+                    (layer_body_ms + layer_output_ms) / layer.command_gpu_ms,
                     layer.transitions,
                 );
             }

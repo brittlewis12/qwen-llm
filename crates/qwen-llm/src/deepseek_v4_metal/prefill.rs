@@ -4411,15 +4411,19 @@ struct PackedLayerTrace {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PackedPrefillStageKind {
     BeforeAttentionBody,
-    AttentionBody,
+    SparseIndexerAndSelection,
+    AttentionCore,
+    InverseRope,
     AttentionOutputProjections,
     AfterAttentionOutput,
 }
 
 #[cfg(feature = "dsv4-diagnostics")]
-pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 4] = [
+pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 6] = [
     PackedPrefillStageKind::BeforeAttentionBody,
-    PackedPrefillStageKind::AttentionBody,
+    PackedPrefillStageKind::SparseIndexerAndSelection,
+    PackedPrefillStageKind::AttentionCore,
+    PackedPrefillStageKind::InverseRope,
     PackedPrefillStageKind::AttentionOutputProjections,
     PackedPrefillStageKind::AfterAttentionOutput,
 ];
@@ -4722,6 +4726,31 @@ impl PackedPrefillStageRecorder {
         )?)
     }
 
+    fn record_empty_stage(
+        &mut self,
+        layer: usize,
+        kind: PackedPrefillStageKind,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if !self.sampled || layer >= DEEPSEEK_V4_LAYER_COUNT {
+            return invalid("packed prefill empty stage has invalid sampled layer");
+        }
+        let record_index = self.records.len();
+        let expected_layer = record_index / PACKED_PREFILL_STAGE_KINDS.len();
+        let expected_kind =
+            PACKED_PREFILL_STAGE_KINDS[record_index % PACKED_PREFILL_STAGE_KINDS.len()];
+        if layer != expected_layer || kind != expected_kind {
+            return invalid(format!(
+                "packed prefill empty stage {kind:?} for layer {layer} expected {expected_kind:?} for layer {expected_layer}"
+            ));
+        }
+        self.records.push(PackedPrefillPendingStageSample {
+            layer,
+            kind,
+            samples: None,
+        });
+        Ok(())
+    }
+
     fn record_command_gpu_seconds(
         &mut self,
         layer: usize,
@@ -4767,7 +4796,12 @@ impl PackedPrefillStageRecorder {
             });
         }
         let expected_records = DEEPSEEK_V4_LAYER_COUNT * PACKED_PREFILL_STAGE_KINDS.len();
-        let expected_samples = expected_records * 2;
+        let expected_samples = self
+            .records
+            .iter()
+            .filter(|record| record.samples.is_some())
+            .count()
+            * 2;
         if self.records.len() != expected_records || self.next_sample != expected_samples {
             return invalid(format!(
                 "packed prefill stage recorder produced {} records/{} samples, expected {expected_records}/{expected_samples}",
@@ -4788,7 +4822,7 @@ impl PackedPrefillStageRecorder {
                 records,
                 &timestamps,
                 duration,
-                None,
+                Some(PackedPrefillStageKind::SparseIndexerAndSelection),
             )?);
         }
         Ok(PackedPrefillStageProfile {
@@ -4851,6 +4885,25 @@ impl<'command, 'recorder> PackedPrefillLayerEncoder<'command, 'recorder> {
                 })?
                 .begin_encoder(self.command, self.layer, next)?,
         );
+        Ok(())
+    }
+
+    fn skip_stage(
+        &mut self,
+        skipped: PackedPrefillStageKind,
+        next: PackedPrefillStageKind,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if !self.sampled {
+            return Ok(());
+        }
+        if let Some(encoder) = self.encoder.take() {
+            encoder.end();
+        }
+        let recorder = self.recorder.as_deref_mut().ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("sampled packed prefill encoder lost its recorder".into())
+        })?;
+        recorder.record_empty_stage(self.layer, skipped)?;
+        self.encoder = Some(recorder.begin_encoder(self.command, self.layer, next)?);
         Ok(())
     }
 
@@ -8140,7 +8193,14 @@ impl DeepSeekV4Session {
                 }
 
                 #[cfg(feature = "dsv4-diagnostics")]
-                encoder.boundary(PackedPrefillStageKind::AttentionBody)?;
+                if sparse_query_offset.is_some() {
+                    encoder.boundary(PackedPrefillStageKind::SparseIndexerAndSelection)?;
+                } else {
+                    encoder.skip_stage(
+                        PackedPrefillStageKind::SparseIndexerAndSelection,
+                        PackedPrefillStageKind::AttentionCore,
+                    )?;
+                }
 
                 let compressed = self
                     .compressor_frontiers
@@ -8154,47 +8214,6 @@ impl DeepSeekV4Session {
                                 "CSA layer {layer} has no rows at sparse position {last_position}"
                             ))
                         })?;
-                    if query_offset > 0 {
-                        let dense_queries = f32_prefix(
-                            &attention.queries,
-                            vec![attention_dims.query_width as u64, query_offset as u64],
-                            "packed dense-prefix queries",
-                        )?;
-                        let dense_output = f32_prefix(
-                            &attention.attention,
-                            vec![attention_dims.query_width as u64, query_offset as u64],
-                            "packed dense-prefix attention",
-                        )?;
-                        let dense_last = start_position
-                            .checked_add(u32::try_from(query_offset - 1).map_err(|_| {
-                                DeepSeekV4MetalError::Invalid(
-                                    "packed dense-prefix offset exceeds u32".into(),
-                                )
-                            })?)
-                            .ok_or_else(|| {
-                                DeepSeekV4MetalError::Invalid(
-                                    "packed dense-prefix position overflow".into(),
-                                )
-                            })?;
-                        let dense_count = csa_visible_rows(dense_last);
-                        encode_packed_dense_sink_attention_f16(
-                            ctx,
-                            &encoder,
-                            &dense_queries,
-                            &raw_chunk,
-                            &self.prefill.attention.raw_cache_before_chunk,
-                            Some(DeepSeekV4PublishedRows {
-                                cache: rows.attention_cache,
-                                count: dense_count,
-                                capacity_rows: rows.capacity_rows,
-                            }),
-                            self.layer_tensor(layer, "attn_sinks.weight")?,
-                            &dense_output,
-                            attention_kind,
-                            start_position,
-                            query_offset,
-                        )?;
-                    }
                     #[cfg(not(feature = "dsv4-diagnostics"))]
                     let sparse = self.prefill.attention.sparse_csa.encode(
                         ctx,
@@ -8269,6 +8288,49 @@ impl DeepSeekV4Session {
                     };
                     #[cfg(not(feature = "dsv4-diagnostics"))]
                     let selected = sparse.selection_view();
+                    #[cfg(feature = "dsv4-diagnostics")]
+                    encoder.boundary(PackedPrefillStageKind::AttentionCore)?;
+                    if query_offset > 0 {
+                        let dense_queries = f32_prefix(
+                            &attention.queries,
+                            vec![attention_dims.query_width as u64, query_offset as u64],
+                            "packed dense-prefix queries",
+                        )?;
+                        let dense_output = f32_prefix(
+                            &attention.attention,
+                            vec![attention_dims.query_width as u64, query_offset as u64],
+                            "packed dense-prefix attention",
+                        )?;
+                        let dense_last = start_position
+                            .checked_add(u32::try_from(query_offset - 1).map_err(|_| {
+                                DeepSeekV4MetalError::Invalid(
+                                    "packed dense-prefix offset exceeds u32".into(),
+                                )
+                            })?)
+                            .ok_or_else(|| {
+                                DeepSeekV4MetalError::Invalid(
+                                    "packed dense-prefix position overflow".into(),
+                                )
+                            })?;
+                        let dense_count = csa_visible_rows(dense_last);
+                        encode_packed_dense_sink_attention_f16(
+                            ctx,
+                            &encoder,
+                            &dense_queries,
+                            &raw_chunk,
+                            &self.prefill.attention.raw_cache_before_chunk,
+                            Some(DeepSeekV4PublishedRows {
+                                cache: rows.attention_cache,
+                                count: dense_count,
+                                capacity_rows: rows.capacity_rows,
+                            }),
+                            self.layer_tensor(layer, "attn_sinks.weight")?,
+                            &dense_output,
+                            attention_kind,
+                            start_position,
+                            query_offset,
+                        )?;
+                    }
                     encode_packed_selected_sink_attention_f16(
                         ctx,
                         &encoder,
@@ -8297,6 +8359,8 @@ impl DeepSeekV4Session {
                         n_tokens,
                     )?;
                 }
+                #[cfg(feature = "dsv4-diagnostics")]
+                encoder.boundary(PackedPrefillStageKind::InverseRope)?;
                 let attention_heads = attention.attention.view_subrange(
                     0,
                     vec![
@@ -9341,40 +9405,50 @@ mod tests {
             },
             PackedPrefillPendingStageSample {
                 layer: 0,
-                kind: PackedPrefillStageKind::AttentionBody,
+                kind: PackedPrefillStageKind::SparseIndexerAndSelection,
                 samples: None,
             },
             PackedPrefillPendingStageSample {
                 layer: 0,
-                kind: PackedPrefillStageKind::AttentionOutputProjections,
+                kind: PackedPrefillStageKind::AttentionCore,
                 samples: Some((2, 3)),
             },
             PackedPrefillPendingStageSample {
                 layer: 0,
-                kind: PackedPrefillStageKind::AfterAttentionOutput,
+                kind: PackedPrefillStageKind::InverseRope,
                 samples: Some((4, 5)),
+            },
+            PackedPrefillPendingStageSample {
+                layer: 0,
+                kind: PackedPrefillStageKind::AttentionOutputProjections,
+                samples: Some((6, 7)),
+            },
+            PackedPrefillPendingStageSample {
+                layer: 0,
+                kind: PackedPrefillStageKind::AfterAttentionOutput,
+                samples: Some((8, 9)),
             },
         ];
         let profile = resolve_packed_prefill_layer_stage_samples(
             0,
             &records,
-            &[100, 110, 113, 130, 133, 145],
+            &[100, 110, 113, 120, 123, 130, 133, 140, 143, 150],
             1.0,
-            Some(PackedPrefillStageKind::AttentionBody),
+            Some(PackedPrefillStageKind::SparseIndexerAndSelection),
         )
         .unwrap();
         assert_eq!(profile.stages[1].start_timestamp, None);
         assert_eq!(profile.stages[1].end_timestamp, None);
         assert_eq!(profile.stages[1].duration_ticks, 0);
         assert_eq!(profile.stages[1].duration_ms_scaled, 0.0);
-        assert_eq!(profile.transitions.len(), 2);
+        assert_eq!(profile.transitions.len(), 4);
         assert_eq!(
             profile.transitions[0].from,
             PackedPrefillStageKind::BeforeAttentionBody
         );
         assert_eq!(
             profile.transitions[0].to,
-            PackedPrefillStageKind::AttentionOutputProjections
+            PackedPrefillStageKind::AttentionCore
         );
     }
 

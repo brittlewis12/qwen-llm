@@ -103,6 +103,8 @@ struct Dsv4PrefillChunk {
     post_route_encoder_overlap_ms: f64,
     pre_expert_stage_ms: BTreeMap<&'static str, f64>,
     attention_kind_stage_ms: BTreeMap<&'static str, BTreeMap<&'static str, f64>>,
+    attention_body_stage_ms: BTreeMap<&'static str, f64>,
+    attention_kind_body_stage_ms: BTreeMap<&'static str, BTreeMap<&'static str, f64>>,
     post_route_stage_ms: BTreeMap<&'static str, f64>,
     bm16_stage_ms: BTreeMap<&'static str, f64>,
     pre_expert_layers: Vec<Dsv4PrefillPreExpertLayer>,
@@ -118,6 +120,7 @@ struct Dsv4PrefillPreExpertLayer {
     encoder_overlap_ms: f64,
     raw_coverage: f64,
     stage_ms: BTreeMap<&'static str, f64>,
+    attention_body_stage_ms: BTreeMap<&'static str, f64>,
 }
 
 #[derive(Serialize)]
@@ -147,9 +150,22 @@ struct Dsv4PrefillLayer {
 fn pre_expert_stage_label(kind: PackedPrefillStageKind) -> &'static str {
     match kind {
         PackedPrefillStageKind::BeforeAttentionBody => "before_attention_body",
-        PackedPrefillStageKind::AttentionBody => "attention_body",
+        PackedPrefillStageKind::SparseIndexerAndSelection
+        | PackedPrefillStageKind::AttentionCore
+        | PackedPrefillStageKind::InverseRope => "attention_body",
         PackedPrefillStageKind::AttentionOutputProjections => "attention_output_projections",
         PackedPrefillStageKind::AfterAttentionOutput => "after_attention_output",
+    }
+}
+
+fn attention_body_stage_label(kind: PackedPrefillStageKind) -> Option<&'static str> {
+    match kind {
+        PackedPrefillStageKind::SparseIndexerAndSelection => Some("sparse_indexer_and_selection"),
+        PackedPrefillStageKind::AttentionCore => Some("attention_core"),
+        PackedPrefillStageKind::InverseRope => Some("inverse_rope"),
+        PackedPrefillStageKind::BeforeAttentionBody
+        | PackedPrefillStageKind::AttentionOutputProjections
+        | PackedPrefillStageKind::AfterAttentionOutput => None,
     }
 }
 
@@ -221,6 +237,8 @@ fn summarize_chunk(
         .sum();
     let mut pre_expert_stage_ms = BTreeMap::new();
     let mut attention_kind_stage_ms = BTreeMap::new();
+    let mut attention_body_stage_ms = BTreeMap::new();
+    let mut attention_kind_body_stage_ms = BTreeMap::new();
     let mut post_route_stage_ms = BTreeMap::new();
     let mut bm16_stage_ms = BTreeMap::new();
     let mut pre_expert_encoder_gap_ms = 0.0;
@@ -232,6 +250,7 @@ fn summarize_chunk(
             .context("sampled pre-expert layer exceeds attention schedule")?;
         let attention_kind = attention_kind_label(attention_kind);
         let mut layer_stages = BTreeMap::new();
+        let mut layer_attention_body_stages = BTreeMap::new();
         pre_expert_encoder_gap_ms += sampled.encoder_gap_ms_scaled;
         pre_expert_encoder_overlap_ms += sampled.encoder_overlap_ms_scaled;
         for stage in &sampled.stages {
@@ -245,6 +264,25 @@ fn summarize_chunk(
                 label,
                 stage.duration_ms_scaled,
             );
+            if let Some(body_label) = attention_body_stage_label(stage.kind) {
+                add_stage(
+                    &mut layer_attention_body_stages,
+                    body_label,
+                    stage.duration_ms_scaled,
+                );
+                add_stage(
+                    &mut attention_body_stage_ms,
+                    body_label,
+                    stage.duration_ms_scaled,
+                );
+                add_stage(
+                    attention_kind_body_stage_ms
+                        .entry(attention_kind)
+                        .or_insert_with(BTreeMap::new),
+                    body_label,
+                    stage.duration_ms_scaled,
+                );
+            }
         }
         pre_expert_layers.push(Dsv4PrefillPreExpertLayer {
             layer: sampled.layer,
@@ -254,6 +292,7 @@ fn summarize_chunk(
             encoder_overlap_ms: sampled.encoder_overlap_ms_scaled,
             raw_coverage: sampled.raw_coverage_assuming_ns,
             stage_ms: layer_stages,
+            attention_body_stage_ms: layer_attention_body_stages,
         });
     }
 
@@ -342,6 +381,8 @@ fn summarize_chunk(
         post_route_encoder_overlap_ms,
         pre_expert_stage_ms,
         attention_kind_stage_ms,
+        attention_body_stage_ms,
+        attention_kind_body_stage_ms,
         post_route_stage_ms,
         bm16_stage_ms,
         pre_expert_layers,
@@ -582,7 +623,7 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
         samples.push(run);
     }
     let report = Dsv4PrefillReport {
-        schema_version: 3,
+        schema_version: 4,
         build,
         model: args.model.display().to_string(),
         device: ctx.device.name().to_string(),

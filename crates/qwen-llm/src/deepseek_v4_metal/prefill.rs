@@ -4256,6 +4256,11 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
+    default_off packed_grouped_dense_attention_enabled,
+    "QWEN_DSV4_PACKED_GROUP8_DENSE"
+);
+
+crate::env_flag!(
     default_on packed_indexer_batched_rope_enabled,
     "QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE"
 );
@@ -7281,7 +7286,12 @@ fn encode_packed_cooperative_dense_sink_attention_f16(
     start_position: u32,
     n_tokens: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
-    encode_cooperative_dense_sink_attention_f16(
+    let encode = if packed_grouped_dense_attention_enabled() {
+        encode_grouped_online_dense_sink_attention_f16
+    } else {
+        encode_cooperative_dense_sink_attention_f16
+    };
+    encode(
         ctx,
         enc,
         queries,
@@ -7817,6 +7827,15 @@ impl DeepSeekV4Session {
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
         let n_tokens = token_ids.len();
+        if packed_grouped_dense_attention_enabled() {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: grouped-head online dense attention active; rollback=QWEN_DSV4_PACKED_GROUP8_DENSE=0"
+                );
+            }
+        }
         if compressor_matrix {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);

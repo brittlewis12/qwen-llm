@@ -1460,6 +1460,115 @@ kernel void kernel_deepseek_v4_packed_dense_sink_attention_f16(
     }
 }
 
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_deepseek_v4_grouped_online_dense_sink_attention_f16(
+        constant ds4_packed_attention_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * raw_cache [[buffer(2)]],
+        device const half * preserved_raw_cache [[buffer(3)]],
+        device const half * compressed_cache [[buffer(4)]],
+        device const float * sinks [[buffer(5)]],
+        device float * output [[buffer(6)]],
+        threadgroup half4 * staged [[threadgroup(0)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort tid_u [[thread_index_in_threadgroup]],
+        ushort lane_u [[thread_index_in_simdgroup]],
+        ushort simdgroup_u [[simdgroup_index_in_threadgroup]]) {
+    constexpr uint grouped_heads = 8u;
+    constexpr uint staged_rows = 16u;
+    constexpr uint row_vectors = 128u;
+    const uint token = group.x;
+    if (token >= args.n_tokens || args.head_count != 64u || args.head_dim != 512u) return;
+
+    const uint tid = uint(tid_u);
+    const uint lane = uint(lane_u);
+    const uint head = group.y * grouped_heads + uint(simdgroup_u);
+    const uint absolute_position = args.start_position + token;
+    const uint visible_end = absolute_position + 1u;
+    const uint raw_count = min(visible_end, args.window);
+    const uint raw_start = visible_end - raw_count;
+    const uint compressed_count = args.compression_ratio == 0u
+        ? 0u
+        : visible_end / args.compression_ratio;
+    const uint row_count = raw_count + compressed_count;
+    const uint query_start = (token * args.head_count + head) * args.head_dim;
+    device const float4 * query4 = (device const float4 *)(queries + query_start);
+    const float4 q0 = query4[lane];
+    const float4 q1 = query4[lane + 32u];
+    const float4 q2 = query4[lane + 64u];
+    const float4 q3 = query4[lane + 96u];
+
+    float maximum = sinks[head];
+    float denominator = 1.0f;
+    float4 o0 = 0.0f;
+    float4 o1 = 0.0f;
+    float4 o2 = 0.0f;
+    float4 o3 = 0.0f;
+
+    for (uint base = 0u; base < row_count; base += staged_rows) {
+        const uint rows = min(staged_rows, row_count - base);
+        for (uint offset = tid; offset < rows * row_vectors; offset += 256u) {
+            const uint staged_row = offset / row_vectors;
+            const uint vector = offset - staged_row * row_vectors;
+            const uint attention_row = base + staged_row;
+            const bool compressed = attention_row >= raw_count;
+            const uint row = compressed ? attention_row - raw_count : attention_row;
+            const uint logical_position = raw_start + row;
+            const bool preserved = !compressed
+                && args.raw_cache_is_chunk != 0u
+                && logical_position < args.start_position;
+            device const half * cache = compressed
+                ? compressed_cache
+                : (preserved ? preserved_raw_cache : raw_cache);
+            const uint cache_start = compressed
+                ? row * args.head_dim
+                : (args.raw_cache_is_chunk == 0u || preserved
+                    ? (logical_position % args.window) * args.head_dim
+                    : (logical_position - args.start_position) * args.head_dim);
+            staged[offset] = ((device const half4 *)(cache + cache_start))[vector];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint staged_row = 0u; staged_row < rows; ++staged_row) {
+            threadgroup const half4 * row = staged + staged_row * row_vectors;
+            const half4 h0 = row[lane];
+            const half4 h1 = row[lane + 32u];
+            const half4 h2 = row[lane + 64u];
+            const half4 h3 = row[lane + 96u];
+            const float score = simd_sum(
+                dot(q0, float4(h0)) +
+                dot(q1, float4(h1)) +
+                dot(q2, float4(h2)) +
+                dot(q3, float4(h3))) * args.scale;
+
+            if (score > maximum) {
+                const float previous_scale = exp(maximum - score);
+                denominator = denominator * previous_scale + 1.0f;
+                o0 = o0 * previous_scale + float4(h0);
+                o1 = o1 * previous_scale + float4(h1);
+                o2 = o2 * previous_scale + float4(h2);
+                o3 = o3 * previous_scale + float4(h3);
+                maximum = score;
+            } else {
+                const float row_scale = exp(score - maximum);
+                denominator += row_scale;
+                o0 += float4(h0) * row_scale;
+                o1 += float4(h1) * row_scale;
+                o2 += float4(h2) * row_scale;
+                o3 += float4(h3) * row_scale;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float inverse = 1.0f / denominator;
+    device float4 * output4 = (device float4 *)(output + query_start);
+    output4[lane] = o0 * inverse;
+    output4[lane + 32u] = o1 * inverse;
+    output4[lane + 64u] = o2 * inverse;
+    output4[lane + 96u] = o3 * inverse;
+}
+
 kernel void kernel_deepseek_v4_tiled_dense_sink_attention_f16(
         constant ds4_tiled_dense_attention_args & args [[buffer(0)]],
         device const float * queries [[buffer(1)]],

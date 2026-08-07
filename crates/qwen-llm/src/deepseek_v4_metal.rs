@@ -9297,6 +9297,19 @@ fn validate_raw_attention_caches(
     Ok(())
 }
 
+const DEEPSEEK_V4_GROUPED_DENSE_HEADS: usize = 8;
+const DEEPSEEK_V4_GROUPED_DENSE_THREADS: usize = 256;
+const DEEPSEEK_V4_GROUPED_DENSE_STAGED_ROWS: usize = 16;
+const DEEPSEEK_V4_GROUPED_DENSE_THREADGROUP_BYTES: usize = DEEPSEEK_V4_GROUPED_DENSE_STAGED_ROWS
+    * DEEPSEEK_V4_HCA_TILE_ROWS
+    * std::mem::size_of::<half::f16>();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeepSeekV4DenseAttentionKernel {
+    Cooperative,
+    GroupedOnline,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_cooperative_dense_sink_attention_f16(
     ctx: &MetalContext,
@@ -9312,6 +9325,75 @@ fn encode_cooperative_dense_sink_attention_f16(
     start_position: u32,
     token_count: usize,
     config: DeepSeekV4PositionZeroAttentionConfig,
+) -> Result<(), DeepSeekV4MetalError> {
+    encode_dense_sink_attention_f16_with_kernel(
+        ctx,
+        enc,
+        queries,
+        raw_cache,
+        raw_cache_before_chunk,
+        raw_cache_layout,
+        compressed,
+        sinks,
+        output,
+        kind,
+        start_position,
+        token_count,
+        config,
+        DeepSeekV4DenseAttentionKernel::Cooperative,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_grouped_online_dense_sink_attention_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    raw_cache: &MetalTensor,
+    raw_cache_before_chunk: &MetalTensor,
+    raw_cache_layout: DeepSeekV4RawCacheLayout,
+    compressed: Option<DeepSeekV4PublishedRows<'_>>,
+    sinks: &MetalTensor,
+    output: &MetalTensor,
+    kind: AttentionKind,
+    start_position: u32,
+    token_count: usize,
+    config: DeepSeekV4PositionZeroAttentionConfig,
+) -> Result<(), DeepSeekV4MetalError> {
+    encode_dense_sink_attention_f16_with_kernel(
+        ctx,
+        enc,
+        queries,
+        raw_cache,
+        raw_cache_before_chunk,
+        raw_cache_layout,
+        compressed,
+        sinks,
+        output,
+        kind,
+        start_position,
+        token_count,
+        config,
+        DeepSeekV4DenseAttentionKernel::GroupedOnline,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_dense_sink_attention_f16_with_kernel(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    raw_cache: &MetalTensor,
+    raw_cache_before_chunk: &MetalTensor,
+    raw_cache_layout: DeepSeekV4RawCacheLayout,
+    compressed: Option<DeepSeekV4PublishedRows<'_>>,
+    sinks: &MetalTensor,
+    output: &MetalTensor,
+    kind: AttentionKind,
+    start_position: u32,
+    token_count: usize,
+    config: DeepSeekV4PositionZeroAttentionConfig,
+    kernel: DeepSeekV4DenseAttentionKernel,
 ) -> Result<(), DeepSeekV4MetalError> {
     require_serial(enc, "deepseek_v4_cooperative_dense_attention")?;
     let dims = config.checked()?;
@@ -9408,13 +9490,68 @@ fn encode_cooperative_dense_sink_attention_f16(
         raw_cache_is_chunk: u32,
         scale: f32,
     }
-    let pso = ctx.pipeline("kernel_deepseek_v4_packed_dense_sink_attention_f16")?;
     let threadgroup_width = config.head_dim.max(maximum_rows);
-    if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
-        return invalid(format!(
-            "cooperative dense attention pipeline supports {} threads, requires {threadgroup_width}",
-            pso.maxTotalThreadsPerThreadgroup()
-        ));
+    let (kernel_name, threadgroup_bytes, grid, threads) = match kernel {
+        DeepSeekV4DenseAttentionKernel::Cooperative => (
+            "kernel_deepseek_v4_packed_dense_sink_attention_f16",
+            (maximum_rows + 1) * std::mem::size_of::<f32>(),
+            MTLSize {
+                width: token_count,
+                height: config.head_count,
+                depth: 1,
+            },
+            MTLSize {
+                width: threadgroup_width,
+                height: 1,
+                depth: 1,
+            },
+        ),
+        DeepSeekV4DenseAttentionKernel::GroupedOnline => {
+            if config.head_count != 64 || config.head_dim != DEEPSEEK_V4_HCA_TILE_ROWS {
+                return invalid("grouped online dense attention requires 64 heads of width 512");
+            }
+            (
+                "kernel_deepseek_v4_grouped_online_dense_sink_attention_f16",
+                DEEPSEEK_V4_GROUPED_DENSE_THREADGROUP_BYTES,
+                MTLSize {
+                    width: token_count,
+                    height: config.head_count / DEEPSEEK_V4_GROUPED_DENSE_HEADS,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 32,
+                    height: DEEPSEEK_V4_GROUPED_DENSE_HEADS,
+                    depth: 1,
+                },
+            )
+        }
+    };
+    let pso = ctx.pipeline(kernel_name)?;
+    match kernel {
+        DeepSeekV4DenseAttentionKernel::Cooperative => {
+            if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
+                return invalid(format!(
+                    "cooperative dense attention pipeline supports {} threads, requires {threadgroup_width}",
+                    pso.maxTotalThreadsPerThreadgroup()
+                ));
+            }
+        }
+        DeepSeekV4DenseAttentionKernel::GroupedOnline => {
+            if pso.threadExecutionWidth() != 32
+                || pso.maxTotalThreadsPerThreadgroup() < DEEPSEEK_V4_GROUPED_DENSE_THREADS
+                || ctx.device.maxThreadgroupMemoryLength()
+                    < DEEPSEEK_V4_GROUPED_DENSE_THREADGROUP_BYTES
+            {
+                return invalid(format!(
+                    "grouped online dense attention requires SIMD width 32, {} threads, and {} threadgroup bytes; pipeline width={} max_threads={} device_bytes={}",
+                    DEEPSEEK_V4_GROUPED_DENSE_THREADS,
+                    DEEPSEEK_V4_GROUPED_DENSE_THREADGROUP_BYTES,
+                    pso.threadExecutionWidth(),
+                    pso.maxTotalThreadsPerThreadgroup(),
+                    ctx.device.maxThreadgroupMemoryLength(),
+                ));
+            }
+        }
     }
     enc.set_pipeline(&pso);
     enc.set_bytes(
@@ -9436,19 +9573,8 @@ fn encode_cooperative_dense_sink_attention_f16(
     enc.set_tensor(4, compressed_cache);
     enc.set_tensor(5, sinks);
     enc.set_tensor(6, output);
-    enc.set_threadgroup_memory(0, (maximum_rows + 1) * std::mem::size_of::<f32>());
-    enc.dispatch(
-        MTLSize {
-            width: token_count,
-            height: config.head_count,
-            depth: 1,
-        },
-        MTLSize {
-            width: threadgroup_width,
-            height: 1,
-            depth: 1,
-        },
-    );
+    enc.set_threadgroup_memory(0, threadgroup_bytes);
+    enc.dispatch(grid, threads);
     Ok(())
 }
 
@@ -26529,6 +26655,9 @@ mod tests {
             .unwrap();
             let cooperative =
                 MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
+            let grouped = MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
+            let online = (kind == AttentionKind::HeavilyCompressed)
+                .then(|| MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap());
             let tiled = (kind == AttentionKind::HeavilyCompressed
                 && compressed_count == DEEPSEEK_V4_HCA_TILE_ROWS)
                 .then(|| MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap());
@@ -26554,6 +26683,41 @@ mod tests {
                 config,
             )
             .unwrap();
+            encode_grouped_online_dense_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &cooperative_queries,
+                &raw_cache,
+                &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
+                compressed,
+                &sinks,
+                &grouped,
+                kind,
+                position,
+                1,
+                config,
+            )
+            .unwrap();
+            if let Some(online) = &online {
+                encode_online_dense_sink_attention_f16(
+                    &ctx,
+                    &encoder,
+                    &cooperative_queries,
+                    &raw_cache,
+                    &raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
+                    compressed.expect("online HCA has compressed rows"),
+                    &sinks,
+                    online,
+                    position,
+                    0,
+                    1,
+                    128,
+                    config,
+                )
+                .unwrap();
+            }
             if let Some(tiled) = &tiled {
                 encode_tiled_dense_sink_attention_f16(
                     &ctx,
@@ -26606,6 +26770,42 @@ mod tests {
             );
             assert!(max_abs <= 5e-7, "{label} max abs {max_abs}");
             assert!(relative_rms <= 1e-6, "{label} relative RMS {relative_rms}");
+            let grouped = read_f32(&grouped);
+            let grouped_max_abs = legacy
+                .iter()
+                .zip(&grouped)
+                .map(|(legacy, grouped)| (legacy - grouped).abs())
+                .fold(0.0f32, f32::max);
+            let grouped_squared_error = legacy
+                .iter()
+                .zip(&grouped)
+                .map(|(legacy, grouped)| f64::from(legacy - grouped).powi(2))
+                .sum::<f64>();
+            let grouped_relative_rms = (grouped_squared_error / reference_norm).sqrt();
+            eprintln!(
+                "grouped online dense {label} rows={} max_abs={grouped_max_abs} rel_rms={grouped_relative_rms:.9}",
+                DEEPSEEK_V4_LOCAL_WINDOW.min(position as usize + 1) + compressed_count,
+            );
+            assert!(
+                grouped_max_abs <= 8e-5,
+                "grouped {label} max abs {grouped_max_abs}"
+            );
+            assert!(
+                grouped_relative_rms <= 1e-3,
+                "grouped {label} relative RMS {grouped_relative_rms}"
+            );
+            if let Some(online) = online {
+                let online = read_f32(&online);
+                let differing = grouped
+                    .iter()
+                    .zip(&online)
+                    .filter(|(grouped, online)| grouped.to_bits() != online.to_bits())
+                    .count();
+                assert_eq!(
+                    differing, 0,
+                    "grouped and single-head online HCA differ for {label}"
+                );
+            }
             if let Some(tiled) = tiled {
                 let tiled = read_f32(&tiled);
                 let tiled_differing = legacy

@@ -728,35 +728,53 @@ not grouped IQ3 arithmetic. `QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT` keeps its
 25-layer scope; `QWEN_DSV4_PACKED_GPU_ROUTE_IQ3=1` is an additional diagnostic
 override only.
 
+Grouped-head online dense attention now defaults on. One 256-thread group gives
+each of eight SIMDgroups one head while staging sixteen shared F16 KV rows once.
+It preserves packed raw-ring causality, raw-before-compressed order,
+denominator-only sinks, and the promoted online HCA recurrence. Against the
+same-binary control, attention core falls `12,434.453 -> 3,306.676 ms` and
+ordinary 8K wall falls `58,608.999 -> 50,829.061 ms`, raising prefill from
+139.77 to 161.17 token/s. HCA, SWA, and CSA core move
+`6,286.562 -> 652.852`, `595.045 -> 52.263`, and
+`5,552.847 -> 2,601.561 ms`. The kernel is bit-identical to the existing online
+HCA lineage and stays below `6.87e-7` relative RMS versus cooperative attention.
+The maintained 6,642-token product prompt keeps its top token and first 28
+greedy IDs before legal schedule divergence; candidate and independent
+llama_core continuations remain coherent three-point answers. This is numerical
+and greedy-semantic authority, not incumbent bit identity. Rollback is
+`QWEN_DSV4_PACKED_GROUP8_DENSE=0`.
+
 Force-ranked queue:
 
-1. **Recover exact broad GPU route ownership.** The broad candidate has a
-   measured 1.448-second ordinary ceiling beyond stable-route grouped IQ3, but
-   its ledger failure forbids promotion. First compare the 16 added route
-   records against CPU and replay GPU IDs with CPU-associated weights/order.
-   Continue only if the hybrid recovers the exact transcript and final logits;
-   do not tune compaction or expert kernels around a routing-quality failure.
-2. **Attention/indexer fusion at product depth.** Attention now contributes
-   16.21 seconds, or 26.4% of sampled 8K wall. Reattribute CSA score, selection,
-   and online selected attention after the matrix promotions, then target a
-   materialized score/top-k boundary only if it survives full accounting.
-3. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
+1. **Sparse indexer and selection.** This is now the largest measured
+   attention-adjacent interval at 3.741 seconds per 8K request and grows with
+   depth. Split score production from exact radix selection with the reusable
+   profiler, then attack the larger work unit rather than another fused guess.
+2. **Group selected sparse CSA heads.** Remaining CSA core is 2.602 seconds.
+   Selected IDs and F16 KV are shared across all 64 heads, so port the promoted
+   eight-head staging schedule while preserving cache-order selection and the
+   online recurrence. This is the nearest concrete cache-reuse hypothesis.
+3. **Routed-expert work units.** Post-route GPU remains 25.59 seconds and BM16
+   accounts for about 18.07 seconds. Scalar IQ2 row/panel retuning is closed;
+   reopen only around a larger matrix/schedule unit, not another scalar axis.
+4. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
    only a 2.04% optimistic ceiling on the 8K request. Do not pay a larger scratch
    allocation and new sparse/qualification surface for that alone. Reopen when
    another measured N=4,096 mechanism lets the combined credible net benefit
    clear the existing 2-3% gate after costs.
-4. **Far-context scoring and selection.** Keep the deployed cooperative scorer
+5. **Far-context scoring and selection.** Keep the deployed cooperative scorer
    and radix4 selector while prefill is the larger product deficit. Reopen exact
    Lightning scheduling only for a structurally new design with a credible
    >=0.50 ms terminal saving and <=0.05 ms shallow regression; do not auto-sweep
    R4 or repeat the held R2 packet.
-5. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+6. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-6. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
-   below CSA. Reopen only if later attribution returns HCA to the lead or the
-   simpler online recurrence stops scaling on another supported device.
+7. **Broad GPU route ownership.** The 1.448-second ceiling remains below the
+   grouped-attention and sparse-indexer opportunities, and its ledger regression
+   is unresolved. Reopen only with a CPU-equivalent route-weight lineage or a
+   materially larger measured endpoint ceiling.
 
 Short-context local tuning is bounded-KILL under the current 0.75 ms/token
 two-depth gate: all-slot barrier removal, larger IQ2 row groups, fixed-geometry

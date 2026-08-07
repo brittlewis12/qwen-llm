@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Grouped Dense Attention Default GO
+
+Status: eight-head online dense attention is now the packed SWA, HCA, and dense
+CSA default. Set `QWEN_DSV4_PACKED_GROUP8_DENSE=0` to restore the cooperative
+token/head kernel. Selected sparse CSA remains on its existing online path.
+
+- One 256-thread group assigns one SIMDgroup to each of eight heads and stages
+  sixteen shared 512-wide F16 KV rows once. Raw-ring/chunk causality,
+  raw-before-compressed order, denominator-only sinks, and the promoted online
+  recurrence are unchanged.
+- Against the same clean `59c25b8` binary, attention core falls
+  `12,434.453 -> 3,306.676 ms`, or 73.41%. HCA falls 89.62%, SWA 91.22%, and
+  CSA 53.15%. Sparse indexer/selection is unchanged at 3.741 seconds.
+- Ordinary 8K wall falls `58,608.999 -> 50,829.061 ms`, or 13.27%; prefill
+  rises `139.77 -> 161.17 token/s`. The sampled pre-expert interval saves
+  9,137.319 ms while post-route and host residual remain flat.
+- The grouped kernel is bit-identical to the prior online HCA kernel at 129 and
+  640 rows. Against cooperative SWA/CSA/HCA, maximum relative RMS is
+  `6.87e-7`; retained multi-token ring and absolute-visibility cases pass.
+- The real 6,642-token prompt moves `52,943.6 -> 45,064.9 ms`, keeps token 19
+  at rank zero with a larger margin, and follows the maintained battery stream
+  for 28 greedy IDs before coherent schedule divergence. Independent
+  llama_core uses the same 6,642-token template and produces another coherent
+  three-point answer with the same argmax.
+- Raw profiles:
+  `target/profiles/dsv4-prefill-8k-group8-control-59c25b8.json` and
+  `target/profiles/dsv4-prefill-8k-group8-dense-59c25b8.json`.
+
+Decision: default the measured cache-sharing work unit with numerical and
+greedy-semantic authority, not incumbent bitwise authority. Re-rank around the
+3.741-second sparse indexer/selection interval and grouped selected sparse CSA.
+
 ## 2026-08-07 - DeepSeek V4 Grouped All-IQ3 Default GO
 
 Status: stable-CPU-route grouped execution is now the default for the 16

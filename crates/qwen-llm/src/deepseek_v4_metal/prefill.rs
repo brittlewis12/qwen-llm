@@ -4256,7 +4256,7 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    default_off packed_grouped_dense_attention_enabled,
+    default_on packed_grouped_dense_attention_enabled,
     "QWEN_DSV4_PACKED_GROUP8_DENSE"
 );
 

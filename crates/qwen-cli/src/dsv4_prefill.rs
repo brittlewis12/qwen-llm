@@ -74,6 +74,11 @@ struct Dsv4PrefillLayer {
     bucket_count: usize,
     active_experts: usize,
     max_routes_per_expert: u16,
+    route_count: usize,
+    route_tiles16: usize,
+    route_tiles32: usize,
+    route_tile16_occupancy: f64,
+    route_tile32_occupancy: f64,
     command_gpu_ms: f64,
     encoder_gap_ms: f64,
     encoder_overlap_ms: f64,
@@ -136,6 +141,21 @@ fn summarize(profile: PackedPostRouteStageProfile, wall_ms: f64) -> Dsv4PrefillR
         }
         encoder_gap_ms += sampled.encoder_gap_ms_scaled;
         encoder_overlap_ms += sampled.encoder_overlap_ms_scaled;
+        let route_count = metadata
+            .expert_counts
+            .iter()
+            .map(|&count| usize::from(count))
+            .sum::<usize>();
+        let route_tiles16 = metadata
+            .expert_counts
+            .iter()
+            .map(|&count| usize::from(count).div_ceil(16))
+            .sum::<usize>();
+        let route_tiles32 = metadata
+            .expert_counts
+            .iter()
+            .map(|&count| usize::from(count).div_ceil(32))
+            .sum::<usize>();
         layers.push(Dsv4PrefillLayer {
             layer: metadata.layer,
             gate_dtype: format!("{:?}", metadata.gate_dtype),
@@ -150,6 +170,11 @@ fn summarize(profile: PackedPostRouteStageProfile, wall_ms: f64) -> Dsv4PrefillR
                 .filter(|&&count| count > 0)
                 .count(),
             max_routes_per_expert: metadata.expert_counts.iter().copied().max().unwrap_or(0),
+            route_count,
+            route_tiles16,
+            route_tiles32,
+            route_tile16_occupancy: route_count as f64 / (route_tiles16 * 16) as f64,
+            route_tile32_occupancy: route_count as f64 / (route_tiles32 * 32) as f64,
             command_gpu_ms: sampled.command_gpu_ms,
             encoder_gap_ms: sampled.encoder_gap_ms_scaled,
             encoder_overlap_ms: sampled.encoder_overlap_ms_scaled,

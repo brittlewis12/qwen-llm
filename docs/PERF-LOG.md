@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Visible-Row Score Dispatch Default GO
+
+Status: packed Lightning scoring now dispatches only through the chunk's final
+published CSA row. Set `QWEN_DSV4_PACKED_INDEXER_VISIBLE_DISPATCH=0` to restore
+physical-capacity dispatch.
+
+- Score strides, per-query visibility, arithmetic, and exact selection are
+  unchanged. Only row groups beyond every query's visibility stop launching;
+  their scratch values are outside the selector's scan limit.
+- A capacity-24 differential bounded at row 16 preserves every visible score
+  bit plus selected masks, IDs, counts, and statuses. The unreachable score tail
+  remains untouched rather than receiving unobservable negative infinities.
+- On the same `ee961d9` binary, canonical 8K score GPU falls
+  `1,816.993 -> 1,787.957 ms`, or 1.60%. The three sparse chunks save
+  11.888, 4.149, and 13.000 ms. Complete final logits retain SHA-256
+  `5289990e...d1ac`.
+- Ordinary request wall is below resolution and order-confounded
+  (`49,622.276` control versus `50,810.677 ms` candidate); no endpoint-speed
+  claim is made. The exact structural deletion matters increasingly when early
+  chunks run inside 32K-to-1M request-capacity sessions.
+- Raw profiles:
+  `target/profiles/dsv4-prefill-8k-visible-score-control-ee961d9.json` and
+  `target/profiles/dsv4-prefill-8k-visible-score-ee961d9.json`.
+
+Decision: default the exact work deletion as capacity-scaling hygiene and keep a
+rollback. It does not close score arithmetic: the 1.788-second producer remains
+the next isolated pre-expert target.
+
 ## 2026-08-07 - DeepSeek V4 Grouped Selected-CSA KILL
 
 Status: the eight-head selected-attention pilot is removed. Packed sparse CSA

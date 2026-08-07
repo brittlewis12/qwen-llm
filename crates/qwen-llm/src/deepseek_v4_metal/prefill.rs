@@ -4301,7 +4301,7 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    default_off packed_indexer_visible_dispatch_enabled,
+    default_on packed_indexer_visible_dispatch_enabled,
     "QWEN_DSV4_PACKED_INDEXER_VISIBLE_DISPATCH"
 );
 

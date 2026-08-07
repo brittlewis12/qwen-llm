@@ -765,11 +765,22 @@ topology's synchronization and 16 KiB threadgroup allocation cost more than
 shared staging saves. Remove the pilot. Reopen only for a barrier-free sharing
 topology or evidence that selected-row device traffic is the limiter.
 
+Packed Lightning score dispatch is now bounded by the chunk's final published
+row rather than the session's physical capacity. The exact change preserves all
+visible score bits, selected masks, IDs, counts, statuses, and complete 8K
+logits. On the same binary, score GPU falls only
+`1,816.993 -> 1,787.957 ms`, or 1.60%; ordinary request wall is
+order-confounded and receives no speed claim. Default the deletion anyway: it
+cannot remove a selector-visible row and prevents early chunks from launching
+through unused 32K-to-1M request capacity. Rollback is
+`QWEN_DSV4_PACKED_INDEXER_VISIBLE_DISPATCH=0`. The remaining 1.788-second score
+producer stays open for a new arithmetic work unit.
+
 Force-ranked queue:
 
-1. **Lightning score production.** Scoring costs 1.806 seconds at 8K and grows
-   from 366 to 837 ms across the three sparse chunks. Revisit visible-row
-   dispatch, query staging, and vectorization against this isolated interval;
+1. **Lightning score production.** Scoring costs 1.788 seconds at 8K and grows
+   from 354 to 837 ms across the three sparse chunks. Revisit query/token tiling,
+   matrix execution, and vectorization against this isolated interval;
    exact radix selection is only 47 ms and must not be fused into the target.
 2. **Indexer preparation with a changed work unit.** Preparation costs 1.886
    seconds, but the F32 Q8 matrix candidate fails whole-request accounting.

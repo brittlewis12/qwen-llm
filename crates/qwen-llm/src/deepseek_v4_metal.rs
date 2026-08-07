@@ -912,6 +912,19 @@ impl DeepSeekV4SessionPhase {
         matches!(self, Self::ReadyWithObservation { .. })
     }
 
+    fn revoke_observation(&mut self) -> Result<(), DeepSeekV4MetalError> {
+        *self = match *self {
+            Self::ReadyWithObservation { next_position }
+            | Self::ReadyWithoutObservation { next_position } => {
+                Self::ReadyWithoutObservation { next_position }
+            }
+            Self::Poisoned { .. } => {
+                return invalid("cannot revoke observations from a poisoned DeepSeek V4 session");
+            }
+        };
+        Ok(())
+    }
+
     fn begin_mutation(&mut self) -> Result<u32, DeepSeekV4MetalError> {
         let next_position = self.ready_position()?;
         *self = Self::Poisoned { next_position };
@@ -6562,13 +6575,10 @@ impl DeepSeekV4HyperConnectionScratch {
         validate_eps(hc_eps, "hyper-connection epsilon")?;
         let residual_shape = [self.hidden_size as u64, DEEPSEEK_V4_CONNECTION_COUNT as u64];
         validate_f32(residual, &residual_shape, false, "residual")?;
-        validate_f32(
+        validate_matvec_weight(
             function,
-            &[
-                residual_len(self.hidden_size)? as u64,
-                DEEPSEEK_V4_HC_PARAMETER_COUNT as u64,
-            ],
-            false,
+            residual_len(self.hidden_size)?,
+            DEEPSEEK_V4_HC_PARAMETER_COUNT,
             "function",
         )?;
         validate_f32(scale, &[3], false, "scale")?;
@@ -6581,15 +6591,28 @@ impl DeepSeekV4HyperConnectionScratch {
         self.validate_scratch()?;
 
         encode_rms_norm_mul_f32(ctx, enc, residual, &self.ones, &self.normalized, rms_eps)?;
-        encode_f32_projection(
-            ctx,
-            enc,
-            function,
-            &self.normalized,
-            &self.mixes,
-            residual_len(self.hidden_size)?,
-            DEEPSEEK_V4_HC_PARAMETER_COUNT,
-        )?;
+        if function.dtype == GgmlType::F32 {
+            encode_f32_projection(
+                ctx,
+                enc,
+                function,
+                &self.normalized,
+                &self.mixes,
+                residual_len(self.hidden_size)?,
+                DEEPSEEK_V4_HC_PARAMETER_COUNT,
+            )?;
+        } else {
+            encode_projection(
+                ctx,
+                enc,
+                function,
+                &self.normalized,
+                &self.mixes,
+                residual_len(self.hidden_size)?,
+                DEEPSEEK_V4_HC_PARAMETER_COUNT,
+                "hyper-connection function",
+            )?;
+        }
 
         let pso = ctx.pipeline("kernel_deepseek_v4_hc_controls")?;
         enc.set_pipeline(&pso);
@@ -6697,13 +6720,10 @@ impl DeepSeekV4HyperConnectionScratch {
         validate_eps(hc_eps, "hyper-connection epsilon")?;
         let shape = [self.hidden_size as u64, DEEPSEEK_V4_CONNECTION_COUNT as u64];
         validate_f32(residual, &shape, false, "residual")?;
-        validate_f32(
+        validate_matvec_weight(
             function,
-            &[
-                residual_len(self.hidden_size)? as u64,
-                DEEPSEEK_V4_CONNECTION_COUNT as u64,
-            ],
-            false,
+            residual_len(self.hidden_size)?,
+            DEEPSEEK_V4_CONNECTION_COUNT,
             "head function",
         )?;
         validate_f32(scale, &[1], false, "head scale")?;
@@ -6717,15 +6737,28 @@ impl DeepSeekV4HyperConnectionScratch {
         self.validate_scratch()?;
 
         encode_rms_norm_mul_f32(ctx, enc, residual, &self.ones, &self.normalized, rms_eps)?;
-        encode_f32_projection(
-            ctx,
-            enc,
-            function,
-            &self.normalized,
-            &self.head_mixes,
-            residual_len(self.hidden_size)?,
-            DEEPSEEK_V4_CONNECTION_COUNT,
-        )?;
+        if function.dtype == GgmlType::F32 {
+            encode_f32_projection(
+                ctx,
+                enc,
+                function,
+                &self.normalized,
+                &self.head_mixes,
+                residual_len(self.hidden_size)?,
+                DEEPSEEK_V4_CONNECTION_COUNT,
+            )?;
+        } else {
+            encode_projection(
+                ctx,
+                enc,
+                function,
+                &self.normalized,
+                &self.head_mixes,
+                residual_len(self.hidden_size)?,
+                DEEPSEEK_V4_CONNECTION_COUNT,
+                "hyper-connection head function",
+            )?;
+        }
         let pso = ctx.pipeline("kernel_deepseek_v4_hc_head")?;
         enc.set_pipeline(&pso);
         #[repr(C)]
@@ -7616,16 +7649,40 @@ impl DeepSeekV4MoeScratch {
         down_bank: &MetalTensor,
         expert_clamp: f32,
     ) -> Result<(), DeepSeekV4MetalError> {
+        let record = self.default_route_record();
+        self.encode_routed_experts_indexed_from_record(
+            ctx,
+            enc,
+            gate_bank,
+            up_bank,
+            down_bank,
+            expert_clamp,
+            &record,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_routed_experts_indexed_from_record(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        gate_bank: &MetalTensor,
+        up_bank: &MetalTensor,
+        down_bank: &MetalTensor,
+        expert_clamp: f32,
+        record: &DeepSeekV4RouteRecord,
+    ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_moe_routed_experts_indexed")?;
         let c = self.config;
+        record.validate(c)?;
         for slot in 0..c.top_k {
             encode_ds4_indexed_expert_projection(
                 ctx,
                 enc,
                 gate_bank,
                 &self.normalized_input,
-                &self.expert_ids,
-                &self.route_status,
+                &record.expert_ids,
+                &record.status,
                 &self.gate,
                 c.hidden_size,
                 c.ffn_size,
@@ -7638,8 +7695,8 @@ impl DeepSeekV4MoeScratch {
                 enc,
                 up_bank,
                 &self.normalized_input,
-                &self.expert_ids,
-                &self.route_status,
+                &record.expert_ids,
+                &record.status,
                 &self.up,
                 c.hidden_size,
                 c.ffn_size,
@@ -7656,8 +7713,8 @@ impl DeepSeekV4MoeScratch {
                 enc,
                 down_bank,
                 &self.inner,
-                &self.expert_ids,
-                &self.route_status,
+                &record.expert_ids,
+                &record.status,
                 &output,
                 c.ffn_size,
                 c.hidden_size,
@@ -7735,6 +7792,26 @@ impl DeepSeekV4MoeScratch {
             c.expert_count,
             "all-slot routed down bank",
         )?;
+        if gate_bank.dtype == GgmlType::Q3_K
+            && up_bank.dtype == GgmlType::Q3_K
+            && down_bank.dtype == GgmlType::Q4_K
+        {
+            static REPORTED: std::sync::Once = std::sync::Once::new();
+            REPORTED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: native indexed Q3_K/Q4_K routed experts active for K160 REAP"
+                );
+            });
+            return self.encode_routed_experts_indexed_from_record(
+                ctx,
+                enc,
+                gate_bank,
+                up_bank,
+                down_bank,
+                expert_clamp,
+                record,
+            );
+        }
         if gate_bank.dtype != up_bank.dtype
             || !matches!(
                 gate_bank.dtype,
@@ -8053,7 +8130,6 @@ fn deepseek_v4_route_status_name(status: i32) -> &'static str {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(test)]
 fn encode_ds4_indexed_expert_projection(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -8116,6 +8192,8 @@ fn encode_ds4_indexed_expert_projection(
             64,
             256,
         ),
+        GgmlType::Q3_K => ("kernel_deepseek_v4_indexed_mat_vec_q3_K_f32", 8, 64, 256),
+        GgmlType::Q4_K => ("kernel_deepseek_v4_indexed_mat_vec_q4_K_f32", 4, 64, 256),
         GgmlType::MXFP4 => ("kernel_deepseek_v4_indexed_mat_vec_mxfp4_f32", 4, 128, 32),
         dtype => {
             return invalid(format!(
@@ -14528,6 +14606,9 @@ mod tests {
         phase.complete_mutation(0, 1, true).unwrap();
         assert_eq!(phase.ready_position().unwrap(), 1);
         assert!(phase.observation_valid());
+        phase.revoke_observation().unwrap();
+        assert_eq!(phase.ready_position().unwrap(), 1);
+        assert!(!phase.observation_valid());
 
         assert_eq!(phase.begin_mutation().unwrap(), 1);
         assert!(!phase.observation_valid());
@@ -32060,6 +32141,29 @@ mod tests {
                     for byte in 1..block_bytes {
                         payload[start + byte] = (block * 29 + byte * 17 + 11) as u8;
                     }
+                } else if dtype == GgmlType::Q3_K {
+                    for byte in 0..block_bytes - 2 {
+                        payload[start + byte] = (block * 31 + byte * 13 + 7) as u8;
+                    }
+                    payload[start + block_bytes - 2..start + block_bytes].copy_from_slice(
+                        &half::f16::from_f32(0.015625 * (1 + block % 5) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                } else if dtype == GgmlType::Q4_K {
+                    payload[start..start + 2].copy_from_slice(
+                        &half::f16::from_f32(0.015625 * (1 + block % 5) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                    payload[start + 2..start + 4].copy_from_slice(
+                        &half::f16::from_f32(0.0078125 * (1 + block % 3) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                    for byte in 4..block_bytes {
+                        payload[start + byte] = (block * 31 + byte * 13 + 7) as u8;
+                    }
                 } else {
                     payload[start..start + 2].copy_from_slice(
                         &half::f16::from_f32(0.015625 * (1 + block % 5) as f32)
@@ -32095,6 +32199,8 @@ mod tests {
             GgmlType::IQ2_S,
             GgmlType::IQ3_XXS,
             GgmlType::IQ3_S,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
             GgmlType::MXFP4,
         ] {
             let bank = make_bank(dtype);
@@ -32139,17 +32245,28 @@ mod tests {
                 "{dtype:?} indexed command failed: {:?}",
                 command.error()
             );
-            assert_eq!(
-                read_f32(&actual)
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>(),
-                read_f32(&expected)
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>(),
-                "{dtype:?} indexed projection changed reduction lineage"
-            );
+            let actual_values = read_f32(&actual);
+            let expected_values = read_f32(&expected);
+            if matches!(dtype, GgmlType::Q3_K | GgmlType::Q4_K) {
+                assert_close(
+                    &format!("{dtype:?} indexed projection"),
+                    &actual_values,
+                    &expected_values,
+                    5e-4,
+                );
+            } else {
+                assert_eq!(
+                    actual_values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    expected_values
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    "{dtype:?} indexed projection changed reduction lineage"
+                );
+            }
 
             for (label, ids, status) in [
                 ("failed status", vec![2, 0], -1),

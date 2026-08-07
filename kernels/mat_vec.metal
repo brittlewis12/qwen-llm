@@ -482,6 +482,13 @@ struct block_q3_k_local {
     half d;
 };
 
+struct block_q4_k_local {
+    half d;
+    half dmin;
+    uchar scales[12];
+    uchar qs[128];
+};
+
 struct block_q2_k_local {
     uchar scales[16];
     uchar qs[64];
@@ -545,6 +552,25 @@ static inline float deq_q3_k(device const block_q3_k_local & b, uint i) {
     const uint h_bit = 1u << (sub >> 1);
     const int q = q_low - ((uint(b.hmask[h_index]) & h_bit) != 0u ? 0 : 4);
     return float(b.d) * float(q3_k_scale_int(b, sub)) * float(q);
+}
+
+static inline float deq_q4_k(device const block_q4_k_local & b, uint i) {
+    const uint sub = i >> 5;
+    const uint lane = i & 31u;
+    uint scale;
+    uint minimum;
+    if (sub < 4u) {
+        scale = uint(b.scales[sub]) & 63u;
+        minimum = uint(b.scales[sub + 4u]) & 63u;
+    } else {
+        scale = (uint(b.scales[sub + 4u]) & 15u)
+            | ((uint(b.scales[sub - 4u]) >> 6u) << 4u);
+        minimum = (uint(b.scales[sub + 4u]) >> 4u)
+            | ((uint(b.scales[sub]) >> 6u) << 4u);
+    }
+    const uchar packed = b.qs[(sub >> 1) * 32u + lane];
+    const uint q = (sub & 1u) == 0u ? uint(packed & 15u) : uint(packed >> 4u);
+    return float(b.d) * float(scale * q) - float(b.dmin) * float(minimum);
 }
 
 static inline float deq_q2_k(device const block_q2_k_local & b, uint i) {
@@ -1812,6 +1838,108 @@ kernel void kernel_deepseek_v4_indexed_mat_vec_iq3_s_f32_fast(
             sumf[row] += d * (sum[0] + sum[1]);
         }
         y4 += 32u * 32u;
+    }
+
+    for (short row = 0; row < NR0; ++row) {
+        const uint out_row = first_row + uint(row);
+        if (out_row >= args.n_out) continue;
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0) y[out_row] = total;
+    }
+}
+
+kernel void kernel_deepseek_v4_indexed_mat_vec_q3_K_f32(
+        constant ds4_indexed_mat_vec_args & args [[buffer(0)]],
+        device const block_q3_k_local * weight [[buffer(1)]],
+        device const float * x [[buffer(2)]],
+        device const int * expert_ids [[buffer(3)]],
+        device const int * route_status [[buffer(4)]],
+        device float * y [[buffer(5)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const short NR0 = 4;
+    const short NSG = 2;
+    const uint first_row = (tgpig * NSG + uint(sgitg)) * NR0;
+    if (first_row >= args.n_out) return;
+    const int expert = expert_ids[args.slot];
+    if (route_status[0] != 1 || expert < 0 || uint(expert) >= args.n_expert) {
+        if (tiisg == 0) {
+            for (short row = 0; row < NR0; ++row) {
+                const uint out_row = first_row + uint(row);
+                if (out_row < args.n_out) y[out_row] = 0.0f;
+            }
+        }
+        return;
+    }
+
+    const uint nb = args.n_in / 256u;
+    const ulong expert_stride = (ulong)args.n_out * nb;
+    device const block_q3_k_local * expert_weight = weight
+        + (ulong)expert * expert_stride;
+    float sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (uint block = 0; block < nb; ++block) {
+        const uint input_base = block * 256u;
+        for (short row = 0; row < NR0; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+            device const block_q3_k_local & weights =
+                expert_weight[(ulong)out_row * nb + block];
+            for (uint element = uint(tiisg); element < 256u; element += 32u) {
+                sumf[row] += deq_q3_k(weights, element) * x[input_base + element];
+            }
+        }
+    }
+
+    for (short row = 0; row < NR0; ++row) {
+        const uint out_row = first_row + uint(row);
+        if (out_row >= args.n_out) continue;
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0) y[out_row] = total;
+    }
+}
+
+kernel void kernel_deepseek_v4_indexed_mat_vec_q4_K_f32(
+        constant ds4_indexed_mat_vec_args & args [[buffer(0)]],
+        device const block_q4_k_local * weight [[buffer(1)]],
+        device const float * x [[buffer(2)]],
+        device const int * expert_ids [[buffer(3)]],
+        device const int * route_status [[buffer(4)]],
+        device float * y [[buffer(5)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const short NR0 = 2;
+    const short NSG = 2;
+    const uint first_row = (tgpig * NSG + uint(sgitg)) * NR0;
+    if (first_row >= args.n_out) return;
+    const int expert = expert_ids[args.slot];
+    if (route_status[0] != 1 || expert < 0 || uint(expert) >= args.n_expert) {
+        if (tiisg == 0) {
+            for (short row = 0; row < NR0; ++row) {
+                const uint out_row = first_row + uint(row);
+                if (out_row < args.n_out) y[out_row] = 0.0f;
+            }
+        }
+        return;
+    }
+
+    const uint nb = args.n_in / 256u;
+    const ulong expert_stride = (ulong)args.n_out * nb;
+    device const block_q4_k_local * expert_weight = weight
+        + (ulong)expert * expert_stride;
+    float sumf[2] = {0.0f, 0.0f};
+    for (uint block = 0; block < nb; ++block) {
+        const uint input_base = block * 256u;
+        for (short row = 0; row < NR0; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+            device const block_q4_k_local & weights =
+                expert_weight[(ulong)out_row * nb + block];
+            for (uint element = uint(tiisg); element < 256u; element += 32u) {
+                sumf[row] += deq_q4_k(weights, element) * x[input_base + element];
+            }
+        }
     }
 
     for (short row = 0; row < NR0; ++row) {

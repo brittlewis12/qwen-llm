@@ -8140,6 +8140,42 @@ impl DeepSeekV4Session {
         emit_logits: bool,
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
+        if self.residency.config().expert_count as usize != MOE_EXPERT_COUNT {
+            checked_token_count(token_ids.len())?;
+            let start_position = self.phase.ready_position()?;
+            for (index, &token) in token_ids.iter().enumerate() {
+                if token as usize >= DEEPSEEK_V4_VOCAB_SIZE {
+                    return invalid(format!(
+                        "prefill token {index} id {token} is outside vocabulary {DEEPSEEK_V4_VOCAB_SIZE}"
+                    ));
+                }
+                let position = start_position
+                    .checked_add(u32::try_from(index).map_err(|_| {
+                        DeepSeekV4MetalError::Invalid("prefill token index exceeds u32".into())
+                    })?)
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid("prefill position overflow".into())
+                    })?;
+                self.capacity.validate_position(position)?;
+            }
+            self.validate_committed_token_append(start_position, token_ids.len())?;
+            static REPORTED: std::sync::Once = std::sync::Once::new();
+            REPORTED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: K160 REAP prefill uses native singleton execution; packed K160 follows"
+                );
+            });
+            for &token_id in token_ids {
+                self.forward_token(ctx, token_id)?;
+            }
+            if !emit_logits {
+                self.phase.revoke_observation()?;
+            }
+            for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
+                layer_completed(layer);
+            }
+            return Ok(());
+        }
         let grouped_mode = packed_grouped_expert_mode();
         let expert_policy = if packed_grouped_expert_scope(grouped_mode, token_ids.len())? {
             packed_grouped_expert_policy(ctx, token_ids.len())?
@@ -8178,6 +8214,12 @@ impl DeepSeekV4Session {
         #[cfg(feature = "dsv4-diagnostics")]
         self.decision_diagnostics
             .ensure_no_active_capture("execute packed tokens")?;
+        if self.residency.config().expert_count as usize != MOE_EXPERT_COUNT {
+            return invalid(format!(
+                "packed DeepSeek V4 execution requires {MOE_EXPERT_COUNT} experts, got {}",
+                self.residency.config().expert_count
+            ));
+        }
         if ctx.device.registryID() != self.device_registry_id {
             return invalid(format!(
                 "DeepSeek V4 session belongs to Metal device registry {}, got {}",

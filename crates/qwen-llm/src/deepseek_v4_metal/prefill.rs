@@ -3740,16 +3740,15 @@ fn encode_packed_grouped_mapped_iq2_xs_swiglu_f32_mma16(
     )
 }
 
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-fn encode_packed_grouped_mapped_iq3_xxs_f32(
+fn encode_packed_grouped_mapped_iq3_xxs_f32_plan(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     bank: &MetalTensor,
     input: &MetalTensor,
     source_rows: &MetalTensor,
     destination_slots: &MetalTensor,
-    schedule: &[ExpertBucket],
+    plan: &PackedGroupedExpertPlan,
     output: &MetalTensor,
     n_in: usize,
     n_out: usize,
@@ -3805,8 +3804,7 @@ fn encode_packed_grouped_mapped_iq3_xxs_f32(
         true,
         "packed grouped mapped IQ3_XXS output",
     )?;
-    let tiles = packed_grouped_expert_tiles(n_tokens, schedule)?;
-    let tile_count = tiles.len();
+    let tile_count = plan.dispatch_tiles;
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
     struct Args {
@@ -3858,7 +3856,7 @@ fn encode_packed_grouped_mapped_iq3_xxs_f32(
     enc.set_tensor(2, input);
     enc.set_tensor(3, source_rows);
     enc.set_tensor(4, destination_slots);
-    enc.set_bytes_slice(5, &tiles);
+    plan.bind(enc, 5);
     enc.set_tensor(6, output);
     enc.set_threadgroup_memory(0, 8_192);
     enc.dispatch(
@@ -3874,6 +3872,114 @@ fn encode_packed_grouped_mapped_iq3_xxs_f32(
         },
     );
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn encode_packed_grouped_mapped_iq3_xxs_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    source_rows: &MetalTensor,
+    destination_slots: &MetalTensor,
+    schedule: &[ExpertBucket],
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    expert_count: usize,
+    top_k: usize,
+    n_tokens: usize,
+    source_count: usize,
+    destination_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    let plan = PackedGroupedExpertPlan::new(n_tokens, schedule, None)?;
+    encode_packed_grouped_mapped_iq3_xxs_f32_plan(
+        ctx,
+        enc,
+        bank,
+        input,
+        source_rows,
+        destination_slots,
+        &plan,
+        output,
+        n_in,
+        n_out,
+        expert_count,
+        top_k,
+        n_tokens,
+        source_count,
+        destination_count,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_packed_grouped_all_iq3(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    down_bank: &MetalTensor,
+    input: &MetalTensor,
+    source_rows: &MetalTensor,
+    destination_slots: &MetalTensor,
+    plan: &PackedGroupedExpertPlan,
+    output: &MetalTensor,
+    inner: &MetalTensor,
+    hidden: usize,
+    ffn: usize,
+    expert_count: usize,
+    top_k: usize,
+    n_tokens: usize,
+    clamp: f32,
+) -> Result<(), DeepSeekV4MetalError> {
+    let route_count = checked_mul(n_tokens, top_k, "packed grouped all-IQ3 routes")?;
+    let projected_elements = checked_mul(ffn, route_count, "packed grouped all-IQ3 projection")?;
+    let (gate, up) = packed_grouped_gate_up_views(output, hidden, ffn, route_count)?;
+    for (bank, projection) in [(gate_bank, &gate), (up_bank, &up)] {
+        encode_packed_grouped_mapped_iq3_xxs_f32_plan(
+            ctx,
+            enc,
+            bank,
+            input,
+            source_rows,
+            destination_slots,
+            plan,
+            projection,
+            hidden,
+            ffn,
+            expert_count,
+            top_k,
+            n_tokens,
+            n_tokens,
+            route_count,
+        )?;
+    }
+    encode_ds4_clamped_swiglu(
+        ctx,
+        enc,
+        &gate.view_subrange(0, vec![projected_elements as u64]),
+        &up.view_subrange(0, vec![projected_elements as u64]),
+        &inner.view_subrange(0, vec![projected_elements as u64]),
+        clamp,
+    )?;
+    encode_packed_grouped_mapped_iq3_xxs_f32_plan(
+        ctx,
+        enc,
+        down_bank,
+        inner,
+        destination_slots,
+        destination_slots,
+        plan,
+        output,
+        ffn,
+        hidden,
+        expert_count,
+        top_k,
+        n_tokens,
+        route_count,
+        route_count,
+    )
 }
 
 fn packed_grouped_tensor_ranges_overlap(left: &MetalTensor, right: &MetalTensor) -> bool {
@@ -4159,7 +4265,6 @@ crate::env_flag!(
     "QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT"
 );
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
 fn packed_grouped_iq3_candidate_supported(ctx: &MetalContext) -> bool {
     if !crate::metal::matmat_iq3_xxs_mm_is_enabled()
         || ctx.device.maxThreadgroupMemoryLength() < 8_192
@@ -4918,6 +5023,7 @@ pub struct PackedPostRouteLayerMetadata {
     pub expert_counts: [u16; MOE_EXPERT_COUNT],
     pub route_expert_ids: Vec<u16>,
     pub grouped_iq2: bool,
+    pub grouped_iq3: bool,
     pub bm16: bool,
 }
 
@@ -5431,8 +5537,8 @@ enum PackedExpertPolicy {
     Current,
     GroupedIq2XsIq3Xxs,
     GroupedIq2XsIq3XxsMma16QualifiedChunk,
-    #[cfg(all(test, feature = "dsv4-diagnostics"))]
     GroupedIq2XsIq3XxsAndIq3Xxs,
+    GroupedIq2XsIq3XxsMma16AndIq3XxsQualifiedChunk,
 }
 
 impl PackedExpertPolicy {
@@ -5441,20 +5547,56 @@ impl PackedExpertPolicy {
             Self::Current => false,
             Self::GroupedIq2XsIq3Xxs => true,
             Self::GroupedIq2XsIq3XxsMma16QualifiedChunk => true,
-            #[cfg(all(test, feature = "dsv4-diagnostics"))]
             Self::GroupedIq2XsIq3XxsAndIq3Xxs => true,
+            Self::GroupedIq2XsIq3XxsMma16AndIq3XxsQualifiedChunk => true,
         }
     }
 
     fn uses_iq2_mma16(self, n_tokens: usize) -> bool {
-        matches!(self, Self::GroupedIq2XsIq3XxsMma16QualifiedChunk)
-            && packed_grouped_iq2_mma16_qualified(n_tokens)
+        matches!(
+            self,
+            Self::GroupedIq2XsIq3XxsMma16QualifiedChunk
+                | Self::GroupedIq2XsIq3XxsMma16AndIq3XxsQualifiedChunk
+        ) && packed_grouped_iq2_mma16_qualified(n_tokens)
     }
 
-    #[cfg(all(test, feature = "dsv4-diagnostics"))]
     fn uses_iq3_target(self) -> bool {
-        matches!(self, Self::GroupedIq2XsIq3XxsAndIq3Xxs)
+        matches!(
+            self,
+            Self::GroupedIq2XsIq3XxsAndIq3Xxs
+                | Self::GroupedIq2XsIq3XxsMma16AndIq3XxsQualifiedChunk
+        )
     }
+
+    fn with_iq3_target(self) -> Self {
+        match self {
+            Self::GroupedIq2XsIq3Xxs => Self::GroupedIq2XsIq3XxsAndIq3Xxs,
+            Self::GroupedIq2XsIq3XxsMma16QualifiedChunk => {
+                Self::GroupedIq2XsIq3XxsMma16AndIq3XxsQualifiedChunk
+            }
+            other => other,
+        }
+    }
+}
+
+fn packed_gpu_compact_expert_layer_qualified(
+    ctx: &MetalContext,
+    policy: PackedExpertPolicy,
+    n_tokens: usize,
+    gate_dtype: GgmlType,
+    up_dtype: GgmlType,
+    down_dtype: GgmlType,
+) -> bool {
+    (policy.uses_iq2_mma16(n_tokens)
+        && gate_dtype == GgmlType::IQ2_XS
+        && up_dtype == GgmlType::IQ2_XS
+        && down_dtype == GgmlType::IQ3_XXS
+        && packed_grouped_expert_kernels_supported(ctx))
+        || (policy.uses_iq3_target()
+            && gate_dtype == GgmlType::IQ3_XXS
+            && up_dtype == GgmlType::IQ3_XXS
+            && down_dtype == GgmlType::IQ3_XXS
+            && packed_grouped_iq3_candidate_supported(ctx))
 }
 
 impl PrefillMoeScratch {
@@ -6255,11 +6397,14 @@ impl PrefillMoeScratch {
             "packed routed down bank",
         )?;
         if gpu_compacted
-            && !(expert_policy.uses_iq2_mma16(n_tokens)
-                && gate_bank.dtype == GgmlType::IQ2_XS
-                && up_bank.dtype == GgmlType::IQ2_XS
-                && down_bank.dtype == GgmlType::IQ3_XXS
-                && packed_grouped_expert_kernels_supported(ctx))
+            && !packed_gpu_compact_expert_layer_qualified(
+                ctx,
+                expert_policy,
+                n_tokens,
+                gate_bank.dtype,
+                up_bank.dtype,
+                down_bank.dtype,
+            )
         {
             return invalid("packed GPU compaction reached an unqualified expert layer");
         }
@@ -6457,7 +6602,6 @@ impl PrefillMoeScratch {
         } else {
             false
         };
-        #[cfg(all(test, feature = "dsv4-diagnostics"))]
         let used_grouped_iq3 = if expert_policy.uses_iq3_target()
             && gate_bank.dtype == GgmlType::IQ3_XXS
             && up_bank.dtype == GgmlType::IQ3_XXS
@@ -6465,8 +6609,6 @@ impl PrefillMoeScratch {
             && packed_grouped_iq3_candidate_supported(ctx)
         {
             let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed grouped IQ3 routes")?;
-            let half_elements =
-                checked_mul(route_count, MOE_FFN_SIZE, "packed grouped IQ3 half arena")?;
             let rows = i32_prefix(
                 &self.bucket_rows,
                 vec![route_count as u64],
@@ -6479,93 +6621,55 @@ impl PrefillMoeScratch {
             )?;
             let expert_output_flat = expert_outputs
                 .view_subrange(0, vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, route_count as u64]);
-            let (gate, up) = packed_grouped_gate_up_views(
-                &expert_output_flat,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                MOE_FFN_SIZE,
-                route_count,
-            )?;
             let grouped_inner = f32_prefix(
                 &self.grouped_inner,
                 vec![MOE_FFN_SIZE as u64, route_count as u64],
                 "packed grouped IQ3 inner",
             )?;
-            packed_grouped_expert_tiles(n_tokens, schedule)?;
-            encode_packed_grouped_mapped_iq3_xxs_f32(
+            let grouped_plan = if gpu_compacted {
+                PackedGroupedExpertPlan::from_device(
+                    &self.grouped_tiles,
+                    PACKED_GROUPED_EXPERT_MAX_TILES,
+                )?
+            } else {
+                PackedGroupedExpertPlan::new(n_tokens, schedule, Some(&self.grouped_tiles))?
+            };
+            encode_packed_grouped_all_iq3(
                 ctx,
                 enc,
                 gate_bank,
-                normalized_input,
-                &rows,
-                &slots,
-                schedule,
-                &gate,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                MOE_FFN_SIZE,
-                MOE_EXPERT_COUNT,
-                MOE_TOP_K,
-                n_tokens,
-                n_tokens,
-                route_count,
-            )?;
-            encode_packed_grouped_mapped_iq3_xxs_f32(
-                ctx,
-                enc,
                 up_bank,
+                down_bank,
                 normalized_input,
                 &rows,
                 &slots,
-                schedule,
-                &up,
+                &grouped_plan,
+                &expert_output_flat,
+                &grouped_inner,
                 DEEPSEEK_V4_HIDDEN_SIZE,
                 MOE_FFN_SIZE,
                 MOE_EXPERT_COUNT,
                 MOE_TOP_K,
                 n_tokens,
-                n_tokens,
-                route_count,
-            )?;
-            encode_ds4_clamped_swiglu(
-                ctx,
-                enc,
-                &gate.view_subrange(0, vec![half_elements as u64]),
-                &up.view_subrange(0, vec![half_elements as u64]),
-                &grouped_inner.view_subrange(0, vec![half_elements as u64]),
                 expert_clamp,
             )?;
-            encode_packed_grouped_mapped_iq3_xxs_f32(
-                ctx,
-                enc,
-                down_bank,
-                &grouped_inner,
-                &slots,
-                &slots,
-                schedule,
-                &expert_output_flat,
-                MOE_FFN_SIZE,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                MOE_EXPERT_COUNT,
-                MOE_TOP_K,
-                n_tokens,
-                route_count,
-                route_count,
-            )?;
-            self.grouped_iq3_invocations.set(
-                self.grouped_iq3_invocations
-                    .get()
-                    .checked_add(1)
-                    .ok_or_else(|| {
-                        DeepSeekV4MetalError::Invalid(
-                            "packed grouped IQ3 invocation count overflow".into(),
-                        )
-                    })?,
-            );
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            {
+                self.grouped_iq3_invocations.set(
+                    self.grouped_iq3_invocations
+                        .get()
+                        .checked_add(1)
+                        .ok_or_else(|| {
+                            DeepSeekV4MetalError::Invalid(
+                                "packed grouped IQ3 invocation count overflow".into(),
+                            )
+                        })?,
+                );
+            }
             true
         } else {
             false
         };
-        #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
-        let used_grouped_iq3 = false;
         let used_grouped_target = used_grouped_iq2 || used_grouped_iq3;
         if !used_grouped_target {
             for bucket in schedule {
@@ -7531,6 +7635,13 @@ impl DeepSeekV4Session {
         } else {
             route_policy
         };
+        let expert_policy = if route_policy == PackedRoutePolicy::GpuCompact
+            && packed_grouped_iq3_candidate_supported(ctx)
+        {
+            expert_policy.with_iq3_target()
+        } else {
+            expert_policy
+        };
         let q_b_projection =
             packed_q8_qb_projection_for_chunk(ctx, &self.residency, token_ids.len())?;
         let output_projection =
@@ -7693,7 +7804,7 @@ impl DeepSeekV4Session {
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
-                    "deepseek_v4: compact GPU routing active for qualified N={n_tokens} IQ2 layers; unprofiled execution merges router and experts; rollback=QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT=0"
+                    "deepseek_v4: compact GPU routing active for qualified N={n_tokens} IQ2/all-IQ3 layers; unprofiled execution merges router and experts; rollback=QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT=0"
                 );
             }
         }
@@ -7773,12 +7884,18 @@ impl DeepSeekV4Session {
 
         for layer in 0..DEEPSEEK_V4_LAYER_COUNT {
             let pre_expert_started = trace_layers.then(std::time::Instant::now);
+            let routed_gate_dtype = self.layer_tensor(layer, "ffn_gate_exps.weight")?.dtype;
+            let routed_up_dtype = self.layer_tensor(layer, "ffn_up_exps.weight")?.dtype;
+            let routed_down_dtype = self.layer_tensor(layer, "ffn_down_exps.weight")?.dtype;
             let compact_gpu_route = route_policy == PackedRoutePolicy::GpuCompact
-                && expert_policy.uses_iq2_mma16(n_tokens)
-                && self.layer_tensor(layer, "ffn_gate_exps.weight")?.dtype == GgmlType::IQ2_XS
-                && self.layer_tensor(layer, "ffn_up_exps.weight")?.dtype == GgmlType::IQ2_XS
-                && self.layer_tensor(layer, "ffn_down_exps.weight")?.dtype == GgmlType::IQ3_XXS
-                && packed_grouped_expert_kernels_supported(ctx);
+                && packed_gpu_compact_expert_layer_qualified(
+                    ctx,
+                    expert_policy,
+                    n_tokens,
+                    routed_gate_dtype,
+                    routed_up_dtype,
+                    routed_down_dtype,
+                );
             #[cfg(feature = "dsv4-diagnostics")]
             let merge_gpu_route = compact_gpu_route
                 && !trace_layers
@@ -8493,6 +8610,11 @@ impl DeepSeekV4Session {
                     && routed_up.dtype == GgmlType::IQ2_XS
                     && routed_down.dtype == GgmlType::IQ3_XXS
                     && packed_grouped_expert_kernels_supported(ctx);
+                let grouped_iq3 = expert_policy.uses_iq3_target()
+                    && routed_gate.dtype == GgmlType::IQ3_XXS
+                    && routed_up.dtype == GgmlType::IQ3_XXS
+                    && routed_down.dtype == GgmlType::IQ3_XXS
+                    && packed_grouped_iq3_candidate_supported(ctx);
                 recorder.record_layer(PackedPostRouteLayerMetadata {
                     layer,
                     gate_dtype: routed_gate.dtype,
@@ -8508,6 +8630,7 @@ impl DeepSeekV4Session {
                         &schedule,
                     )?,
                     grouped_iq2,
+                    grouped_iq3,
                     bm16: grouped_iq2 && expert_policy.uses_iq2_mma16(n_tokens),
                 })?;
             }
@@ -9449,6 +9572,14 @@ mod tests {
         assert!(!mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS - 1));
         assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS));
         assert!(!mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS + 1));
+        assert!(!mma16.uses_iq3_target());
+        let gpu_compact = mma16.with_iq3_target();
+        assert_eq!(
+            gpu_compact,
+            PackedExpertPolicy::GroupedIq2XsIq3XxsMma16AndIq3XxsQualifiedChunk
+        );
+        assert!(gpu_compact.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS));
+        assert!(gpu_compact.uses_iq3_target());
         assert!(
             packed_grouped_expert_scope(
                 PackedGroupedExpertMode::Auto,
@@ -11868,6 +11999,165 @@ mod tests {
             ] {
                 assert_grouped_guards(label, tensor);
             }
+        }
+    }
+
+    #[test]
+    fn packed_gpu_route_compaction_feeds_all_iq3_at_n2048() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        assert!(packed_grouped_iq3_candidate_supported(&ctx));
+        const H: usize = 512;
+        const F: usize = 256;
+        const E: usize = MOE_EXPERT_COUNT;
+        const K: usize = MOE_TOP_K;
+        const N: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
+        const CLAMP: f32 = 0.25;
+
+        let fixture = PackedRouteFixture::new(&ctx);
+        let policy = PackedExpertPolicy::GroupedIq2XsIq3XxsMma16QualifiedChunk.with_iq3_target();
+        assert!(packed_gpu_compact_expert_layer_qualified(
+            &ctx,
+            policy,
+            N,
+            GgmlType::IQ3_XXS,
+            GgmlType::IQ3_XXS,
+            GgmlType::IQ3_XXS,
+        ));
+        assert!(!packed_gpu_compact_expert_layer_qualified(
+            &ctx,
+            policy,
+            N,
+            GgmlType::IQ3_XXS,
+            GgmlType::IQ3_XXS,
+            GgmlType::MXFP4,
+        ));
+
+        let gate_bank = grouped_test_bank(&ctx, GgmlType::IQ3_XXS, H, F, E, 163);
+        let up_bank = grouped_test_bank(&ctx, GgmlType::IQ3_XXS, H, F, E, 167);
+        let down_bank = grouped_test_bank(&ctx, GgmlType::IQ3_XXS, F, H, E, 173);
+        let route_count = N * K;
+        let input_values = (0..N * H)
+            .map(|index| ((index * 43 + index / H * 17 + 11) % 509) as f32 * 0.0005 - 0.127)
+            .collect::<Vec<_>>();
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&input_values),
+            vec![H as u64, N as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let device_plan = PackedGroupedExpertPlan::from_device(
+            &fixture.scratch.compact_tiles32,
+            PACKED_GROUPED_EXPERT_MAX_TILES,
+        )
+        .unwrap();
+        let device_output = grouped_guarded_f32(&ctx, vec![H as u64, K as u64, N as u64], 181.0);
+        let device_output_flat = device_output.view_subrange(0, vec![H as u64, route_count as u64]);
+        let device_inner = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 183.0);
+        let generation = fixture.generations.take().unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        fixture
+            .scratch
+            .encode_learned(&ctx, &encoder, &fixture.bias, N, N, generation)
+            .unwrap();
+        fixture
+            .scratch
+            .encode_compact(&ctx, &encoder, N, generation)
+            .unwrap();
+        encode_packed_grouped_all_iq3(
+            &ctx,
+            &encoder,
+            &gate_bank,
+            &up_bank,
+            &down_bank,
+            &input,
+            &fixture.scratch.compact_rows,
+            &fixture.scratch.compact_slots,
+            &device_plan,
+            &device_output_flat,
+            &device_inner,
+            H,
+            F,
+            E,
+            K,
+            N,
+            CLAMP,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none(), "{:?}", command.error());
+
+        let capture = fixture.scratch.capture_compact(N);
+        assert_packed_compact_capture(
+            &fixture,
+            PackedRouteMicroproofSource::Learned,
+            N,
+            generation.get(),
+            &capture,
+        );
+        let (_, _, _, schedule) = expected_compact_schedule(&capture.expert_ids, N);
+        let host_descriptors =
+            MetalTensor::zeros_i32(&ctx, vec![PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS as u64])
+                .unwrap();
+        let host_plan =
+            PackedGroupedExpertPlan::new(N, &schedule, Some(&host_descriptors)).unwrap();
+        let host_output = grouped_guarded_f32(&ctx, vec![H as u64, K as u64, N as u64], 191.0);
+        let host_output_flat = host_output.view_subrange(0, vec![H as u64, route_count as u64]);
+        let host_inner = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 193.0);
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_packed_grouped_all_iq3(
+            &ctx,
+            &encoder,
+            &gate_bank,
+            &up_bank,
+            &down_bank,
+            &input,
+            &fixture.scratch.compact_rows,
+            &fixture.scratch.compact_slots,
+            &host_plan,
+            &host_output_flat,
+            &host_inner,
+            H,
+            F,
+            E,
+            K,
+            N,
+            CLAMP,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none(), "{:?}", command.error());
+
+        let bits = |tensor: &MetalTensor, label| {
+            host_read_f32(tensor, label)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            bits(&device_inner, "all-IQ3 device-plan inner"),
+            bits(&host_inner, "all-IQ3 host-plan inner")
+        );
+        assert_eq!(
+            bits(&device_output, "all-IQ3 device-plan output"),
+            bits(&host_output, "all-IQ3 host-plan output")
+        );
+        for (label, tensor) in [
+            ("all-IQ3 host-plan inner", &host_inner),
+            ("all-IQ3 host-plan output", &host_output),
+            ("all-IQ3 device-plan inner", &device_inner),
+            ("all-IQ3 device-plan output", &device_output),
+        ] {
+            assert_grouped_guards(label, tensor);
         }
     }
 

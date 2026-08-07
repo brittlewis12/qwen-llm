@@ -127,6 +127,7 @@ struct Dsv4PrefillLayer {
     up_dtype: String,
     down_dtype: String,
     grouped_iq2: bool,
+    grouped_iq3: bool,
     bm16: bool,
     bucket_count: usize,
     active_experts: usize,
@@ -301,6 +302,7 @@ fn summarize_chunk(
             up_dtype: format!("{:?}", metadata.up_dtype),
             down_dtype: format!("{:?}", metadata.down_dtype),
             grouped_iq2: metadata.grouped_iq2,
+            grouped_iq3: metadata.grouped_iq3,
             bm16: metadata.bm16,
             bucket_count: metadata.bucket_count,
             active_experts: metadata

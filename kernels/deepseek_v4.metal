@@ -530,6 +530,7 @@ kernel void kernel_deepseek_v4_packed_route_compact(
     for (uint index = tid; index < args.max_tiles16; index += 256u) {
         tiles16[index] = ds4_packed_route_tile{0u, 0u, 0u};
     }
+    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
 
     uint local_error = 0u;
     for (uint token = tid; token < args.n_tokens; token += 256u) {

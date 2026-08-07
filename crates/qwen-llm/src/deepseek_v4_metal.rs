@@ -16209,12 +16209,13 @@ mod tests {
                 let stage_ms: [f64; STAGE_COUNT] =
                     std::array::from_fn(|stage| sampled_layer.stages[stage].duration_ms_scaled);
                 eprintln!(
-                    "deepseek_v4 packed_post_route_stage_profile_layer sample={index} layer={layer} cohort={} gate={:?} up={:?} down={:?} grouped_iq2={} buckets={} command_gpu_ms={:.6} raw_coverage={:.9} gap_ms={:.6} overlap_ms={:.6} stage_ms={stage_ms:?}",
+                    "deepseek_v4 packed_post_route_stage_profile_layer sample={index} layer={layer} cohort={} gate={:?} up={:?} down={:?} grouped_iq2={} grouped_iq3={} buckets={} command_gpu_ms={:.6} raw_coverage={:.9} gap_ms={:.6} overlap_ms={:.6} stage_ms={stage_ms:?}",
                     cohort(metadata),
                     metadata.gate_dtype,
                     metadata.up_dtype,
                     metadata.down_dtype,
                     metadata.grouped_iq2,
+                    metadata.grouped_iq3,
                     metadata.bucket_count,
                     sampled_layer.command_gpu_ms,
                     sampled_layer.raw_coverage_assuming_ns,

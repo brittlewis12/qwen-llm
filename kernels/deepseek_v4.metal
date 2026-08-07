@@ -1696,9 +1696,8 @@ kernel void kernel_deepseek_v4_tiled_dense_sink_attention_f16(
     }
 }
 
-static inline void deepseek_v4_online_attend_f16_row(
-        device const half4 * source,
-        threadgroup half4 * staged,
+static inline void deepseek_v4_online_attend_staged_f16_row(
+        threadgroup const half4 * staged,
         float4 q0,
         float4 q1,
         float4 q2,
@@ -1711,12 +1710,6 @@ static inline void deepseek_v4_online_attend_f16_row(
         thread float4 & o1,
         thread float4 & o2,
         thread float4 & o3) {
-    staged[lane] = source[lane];
-    staged[lane + 32] = source[lane + 32];
-    staged[lane + 64] = source[lane + 64];
-    staged[lane + 96] = source[lane + 96];
-    simdgroup_barrier(mem_flags::mem_threadgroup);
-
     const half4 h0 = staged[lane];
     const half4 h1 = staged[lane + 32];
     const half4 h2 = staged[lane + 64];
@@ -1743,6 +1736,31 @@ static inline void deepseek_v4_online_attend_f16_row(
         o2 += float4(h2) * row_scale;
         o3 += float4(h3) * row_scale;
     }
+}
+
+static inline void deepseek_v4_online_attend_f16_row(
+        device const half4 * source,
+        threadgroup half4 * staged,
+        float4 q0,
+        float4 q1,
+        float4 q2,
+        float4 q3,
+        float scale,
+        ushort lane,
+        thread float & maximum,
+        thread float & denominator,
+        thread float4 & o0,
+        thread float4 & o1,
+        thread float4 & o2,
+        thread float4 & o3) {
+    staged[lane] = source[lane];
+    staged[lane + 32] = source[lane + 32];
+    staged[lane + 64] = source[lane + 64];
+    staged[lane + 96] = source[lane + 96];
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    deepseek_v4_online_attend_staged_f16_row(
+        staged, q0, q1, q2, q3, scale, lane,
+        maximum, denominator, o0, o1, o2, o3);
 }
 
 [[max_total_threads_per_threadgroup(32)]]
@@ -1984,6 +2002,132 @@ kernel void kernel_deepseek_v4_online_packed_selected_sink_attention_f16(
     output4[lane + 32] = o1 * inverse;
     output4[lane + 64] = o2 * inverse;
     output4[lane + 96] = o3 * inverse;
+}
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_deepseek_v4_online_packed_selected_sink_attention_heads16_f16(
+        constant ds4_packed_selected_attention_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * raw_cache [[buffer(2)]],
+        device const half * preserved_raw_cache [[buffer(3)]],
+        device const half * compressed_cache [[buffer(4)]],
+        device const int * selected_ids [[buffer(5)]],
+        device const int * selected_counts [[buffer(6)]],
+        device const int * visible_counts [[buffer(7)]],
+        device const float * sinks [[buffer(8)]],
+        device float * output [[buffer(9)]],
+        threadgroup half4 * staged [[threadgroup(0)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]]) {
+    const uint local_query = group.x;
+    const uint head0 = group.y * 16u + uint(simdgroup);
+    const uint head1 = head0 + 8u;
+    if (local_query >= args.query_count || head0 >= args.head_count) return;
+
+    const uint token = args.query_token_offset + local_query;
+    const uint absolute_position = args.chunk_start_position + token;
+    const uint visible_end = absolute_position + 1u;
+    const uint raw_count = min(visible_end, args.window);
+    const uint raw_start = visible_end - raw_count;
+    const int selected_i = selected_counts[local_query];
+    const int visible_i = visible_counts[local_query];
+    const uint selected_count = selected_i > 0
+        ? min(uint(selected_i), args.selected_slots)
+        : 0u;
+    const uint visible_count = visible_i > 0 ? uint(visible_i) : 0u;
+    const uint ids_base = local_query * args.selected_slots;
+
+    const uint query_start0 = (token * args.head_count + head0) * args.head_dim;
+    device const float4 * query40 = (device const float4 *)(queries + query_start0);
+    const float4 a0 = query40[lane];
+    const float4 a1 = query40[lane + 32];
+    const float4 a2 = query40[lane + 64];
+    const float4 a3 = query40[lane + 96];
+    float4 b0 = 0.0f;
+    float4 b1 = 0.0f;
+    float4 b2 = 0.0f;
+    float4 b3 = 0.0f;
+    if (head1 < args.head_count) {
+        const uint query_start1 = (token * args.head_count + head1) * args.head_dim;
+        device const float4 * query41 = (device const float4 *)(queries + query_start1);
+        b0 = query41[lane];
+        b1 = query41[lane + 32];
+        b2 = query41[lane + 64];
+        b3 = query41[lane + 96];
+    }
+
+    float maximum0 = sinks[head0];
+    float denominator0 = 1.0f;
+    float4 o00 = 0.0f;
+    float4 o01 = 0.0f;
+    float4 o02 = 0.0f;
+    float4 o03 = 0.0f;
+    float maximum1 = head1 < args.head_count ? sinks[head1] : 0.0f;
+    float denominator1 = 1.0f;
+    float4 o10 = 0.0f;
+    float4 o11 = 0.0f;
+    float4 o12 = 0.0f;
+    float4 o13 = 0.0f;
+
+    for (uint row = 0u; row < raw_count; ++row) {
+        const uint logical_position = raw_start + row;
+        const bool preserved = args.raw_cache_is_chunk != 0u
+            && logical_position < args.chunk_start_position;
+        device const half * cache = preserved ? preserved_raw_cache : raw_cache;
+        const uint cache_start = args.raw_cache_is_chunk == 0u || preserved
+            ? (logical_position % args.window) * args.head_dim
+            : (logical_position - args.chunk_start_position) * args.head_dim;
+        if (tid < 128u) {
+            staged[tid] = ((device const half4 *)(cache + cache_start))[tid];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        deepseek_v4_online_attend_staged_f16_row(
+            staged, a0, a1, a2, a3, args.scale, lane,
+            maximum0, denominator0, o00, o01, o02, o03);
+        if (head1 < args.head_count) {
+            deepseek_v4_online_attend_staged_f16_row(
+                staged, b0, b1, b2, b3, args.scale, lane,
+                maximum1, denominator1, o10, o11, o12, o13);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint slot = 0u; slot < selected_count; ++slot) {
+        const int selected_id = selected_ids[ids_base + slot];
+        if (selected_id < 0 || uint(selected_id) >= visible_count
+                || uint(selected_id) >= args.compressed_capacity) continue;
+        if (tid < 128u) {
+            staged[tid] = ((device const half4 *)(compressed_cache
+                + uint(selected_id) * args.head_dim))[tid];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        deepseek_v4_online_attend_staged_f16_row(
+            staged, a0, a1, a2, a3, args.scale, lane,
+            maximum0, denominator0, o00, o01, o02, o03);
+        if (head1 < args.head_count) {
+            deepseek_v4_online_attend_staged_f16_row(
+                staged, b0, b1, b2, b3, args.scale, lane,
+                maximum1, denominator1, o10, o11, o12, o13);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const float inverse0 = 1.0f / denominator0;
+    device float4 * output40 = (device float4 *)(output + query_start0);
+    output40[lane] = o00 * inverse0;
+    output40[lane + 32] = o01 * inverse0;
+    output40[lane + 64] = o02 * inverse0;
+    output40[lane + 96] = o03 * inverse0;
+    if (head1 < args.head_count) {
+        const float inverse1 = 1.0f / denominator1;
+        const uint query_start1 = (token * args.head_count + head1) * args.head_dim;
+        device float4 * output41 = (device float4 *)(output + query_start1);
+        output41[lane] = o10 * inverse1;
+        output41[lane + 32] = o11 * inverse1;
+        output41[lane + 64] = o12 * inverse1;
+        output41[lane + 96] = o13 * inverse1;
+    }
 }
 
 kernel void kernel_deepseek_v4_compressor_frontier_write(

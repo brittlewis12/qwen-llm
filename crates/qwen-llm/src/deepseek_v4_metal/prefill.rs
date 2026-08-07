@@ -7877,6 +7877,7 @@ fn encode_packed_selected_sink_attention_f16(
         n_tokens,
         DEEPSEEK_V4_CSA_TOP_K,
         online,
+        deepseek_v4_grouped_selected_prefill_enabled(),
         config,
     )
 }

@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Sparse Indexer Split / Matrix KILL
+
+Status: schema-v5 attribution is retained; the N=2,048 F32 indexer-Q matrix
+candidate is removed. Production stays on the exact Q8 matvec projection.
+
+- The canonical 8K sparse interval splits into 1,885.955 ms preparation,
+  1,805.971 ms Lightning scoring, and 47.282 ms exact radix selection.
+  Preparation is nearly flat across full chunks; scoring grows
+  `366.089 -> 603.326 -> 836.557 ms` with history. Selection is closed.
+- Reusing the promoted R2C4K64 Q8 matrix schedule reduces preparation to
+  493.096 ms, saving 1,392.859 ms in that isolated interval. It projects the
+  full chunk and exposes only the causally eligible suffix downstream.
+- Full accounting rejects the candidate. Against the same-binary control,
+  pre-expert GPU improves 967.923 ms, but changed downstream routes add
+  699.373 ms post-route. Sampled wall saves only 311.494 ms, or 0.63%.
+- Candidate ordinary wall is 49,976.022 ms, between the 50,733.809 and
+  49,426.459 ms controls. The effect is below the observed 1.31-second drift
+  span, and final logits change.
+- Raw profiles:
+  `target/profiles/dsv4-prefill-8k-sparse-split-55fee1c.json`,
+  `target/profiles/dsv4-prefill-8k-indexer-q-matrix-dc42dc7.json`, and
+  `target/profiles/dsv4-prefill-8k-indexer-q-control-dc42dc7.json`.
+
+Decision: remove the force path without a quality campaign. Reopen Q8 matrix
+projection only for a larger chunk or an exact-order shared-weight schedule.
+Move grouped selected sparse attention ahead of Lightning score work.
+
 ## 2026-08-07 - DeepSeek V4 Grouped Dense Attention Default GO
 
 Status: eight-head online dense attention is now the packed SWA, HCA, and dense

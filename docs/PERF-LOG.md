@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Product-Depth CSA Lead / F16 Matrix KILL
+
+Status: remove the diagnostics-only packed F16 indexer matrix pilot. It proves
+that sparse scoring is not the dominant CSA cost at 2K compressed rows, but its
+approximate arithmetic misses the whole-request gate before quality evaluation.
+
+- The clean schema-v3 control splits the 8K attention body into 25,921.268 ms
+  of CSA, 6,401.332 ms of HCA, and 596.861 ms of local attention. CSA therefore
+  owns 20.87% of complete sampled wall and 78.74% of attention-body time.
+- The matrix pilot rounds prepared index queries to F16 once, reuses the prior
+  eight-simdgroup scorer and current F16 K cache, then retains the deployed
+  selector and selected-attention path. Its clean run repeats internally and
+  completes every selector validation.
+- CSA attention falls `25,921.268 -> 24,820.570 ms`, saving 1,100.699 ms or
+  4.25%. Pre-expert GPU falls 1,310.921 ms while post-route GPU regresses
+  72.057 ms, so the mechanism is localized rather than route drift.
+- Ordinary request wall falls `122,704.460 -> 121,099.746 ms`, only 1.31%;
+  sampled wall falls 1.12%. The final-logit SHA-256 changes from
+  `a54d584e...8686d5` to `f7223282...722be`, adding a quality burden to an
+  already below-gate request result.
+- Source geometry explains the remaining target. Every sparse CSA layer runs
+  2,048 scalar query-RoPE dispatches, then packed selected attention launches
+  2,048 x 64 threadgroups of width 640. Each row lane scans all 512 dimensions,
+  and output lanes scan all 640 raw-plus-selected rows. The existing online HCA
+  kernel already demonstrates the 32-lane vectorized alternative.
+
+Decision: remove the candidate caller, flag, and 32 MiB scratch without paying
+for a semantic battery. Retain the model-free matrix ceiling as prior evidence.
+Build the structurally different online selected-attention candidate next, with
+batched indexer RoPE as the smaller exact-work follow-up.
+
 ## 2026-08-06 - DeepSeek V4 4,096-Token Chunk Cap HOLD
 
 Status: do not implement N=4,096 as a standalone chunk-cap change. The clean

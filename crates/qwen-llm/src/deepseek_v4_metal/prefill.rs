@@ -400,8 +400,6 @@ struct PrefillAttentionScratch {
 struct PrefillSparseCsaScratch {
     capacity_rows: usize,
     index_queries: MetalTensor,
-    #[cfg(feature = "dsv4-diagnostics")]
-    index_queries_f16: MetalTensor,
     head_weights: MetalTensor,
     visible_counts: MetalTensor,
     scores: MetalTensor,
@@ -540,11 +538,6 @@ impl DeepSeekV4PrefillScratch {
                 sparse_csa: PrefillSparseCsaScratch {
                     capacity_rows: csa_capacity_rows,
                     index_queries: MetalTensor::zeros_f32(
-                        ctx,
-                        vec![INDEXER_HEAD_DIM as u64, INDEXER_HEAD_COUNT as u64, n],
-                    )?,
-                    #[cfg(feature = "dsv4-diagnostics")]
-                    index_queries_f16: MetalTensor::zeros_f16(
                         ctx,
                         vec![INDEXER_HEAD_DIM as u64, INDEXER_HEAD_COUNT as u64, n],
                     )?,
@@ -749,12 +742,6 @@ pub(super) fn append_session_allocation_requests(
         "attention.sparse_csa.index_queries",
         checked_mul(n, INDEXER_QUERY_WIDTH, "packed sparse index queries")?,
         f32_bytes,
-    )?;
-    #[cfg(feature = "dsv4-diagnostics")]
-    push(
-        "attention.sparse_csa.index_queries_f16",
-        checked_mul(n, INDEXER_QUERY_WIDTH, "packed sparse F16 index queries")?,
-        f16_bytes,
     )?;
     push(
         "attention.sparse_csa.head_weights",
@@ -1534,8 +1521,6 @@ struct PackedSparseCsaViews {
     selected_counts: MetalTensor,
     visible_counts: MetalTensor,
     index_queries: MetalTensor,
-    #[cfg(feature = "dsv4-diagnostics")]
-    index_queries_f16: MetalTensor,
     head_weights: MetalTensor,
     scores: MetalTensor,
     selected_mask: MetalTensor,
@@ -1756,16 +1741,6 @@ impl PrefillSparseCsaScratch {
             ],
             "packed sparse index queries",
         )?;
-        #[cfg(feature = "dsv4-diagnostics")]
-        let index_queries_f16 = f16_prefix(
-            &self.index_queries_f16,
-            vec![
-                INDEXER_HEAD_DIM as u64,
-                INDEXER_HEAD_COUNT as u64,
-                query_count as u64,
-            ],
-            "packed sparse F16 index queries",
-        )?;
         let head_weights = f32_prefix(
             &self.head_weights,
             vec![INDEXER_HEAD_COUNT as u64, query_count as u64],
@@ -1874,8 +1849,6 @@ impl PrefillSparseCsaScratch {
             selected_counts,
             visible_counts,
             index_queries,
-            #[cfg(feature = "dsv4-diagnostics")]
-            index_queries_f16,
             head_weights,
             scores,
             selected_mask,
@@ -1890,49 +1863,6 @@ impl PrefillSparseCsaScratch {
         rows: DeepSeekV4CsaRows<'_>,
         prepared: &PackedSparseCsaViews,
     ) -> Result<(), DeepSeekV4MetalError> {
-        #[cfg(feature = "dsv4-diagnostics")]
-        if packed_indexer_f16_matrix_enabled() {
-            encode_scatter_offset_f32_to_f16(
-                ctx,
-                enc,
-                &prepared.index_queries,
-                &prepared.index_queries_f16,
-                0,
-                checked_mul(
-                    prepared.query_count,
-                    INDEXER_QUERY_WIDTH,
-                    "packed sparse F16 index query conversion",
-                )?,
-            )?;
-            encode_lightning_indexer_scores_f16_matrix_ceiling(
-                ctx,
-                enc,
-                &prepared.index_queries_f16,
-                &prepared.head_weights,
-                rows.indexer_cache,
-                &prepared.visible_counts,
-                &prepared.scores,
-                INDEXER_HEAD_COUNT,
-                INDEXER_HEAD_DIM,
-                rows.capacity_rows,
-                prepared.query_count,
-            )?;
-            return encode_select_top_k_f32(
-                ctx,
-                enc,
-                &prepared.scores,
-                &prepared.visible_counts,
-                &prepared.selected_mask,
-                None,
-                &prepared.cache_order_ids,
-                &prepared.selected_counts,
-                &prepared.status,
-                rows.capacity_rows,
-                rows.count,
-                DEEPSEEK_V4_CSA_TOP_K,
-                prepared.query_count,
-            );
-        }
         encode_lightning_indexer_scores_f16(
             ctx,
             enc,
@@ -3979,12 +3909,6 @@ crate::env_flag!(
 crate::env_flag!(
     default_on packed_batched_compressor_enabled,
     "QWEN_DSV4_BATCHED_COMPRESSOR"
-);
-
-#[cfg(feature = "dsv4-diagnostics")]
-crate::env_flag!(
-    default_off packed_indexer_f16_matrix_enabled,
-    "QWEN_DSV4_PACKED_INDEXER_F16_MATRIX"
 );
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -14946,9 +14870,6 @@ mod tests {
             selected_counts,
             visible_counts,
             index_queries: MetalTensor::zeros_f32(&ctx, vec![128, 64, query_count as u64]).unwrap(),
-            #[cfg(feature = "dsv4-diagnostics")]
-            index_queries_f16: MetalTensor::zeros_f16(&ctx, vec![128, 64, query_count as u64])
-                .unwrap(),
             head_weights: MetalTensor::zeros_f32(&ctx, vec![64, query_count as u64]).unwrap(),
             scores: MetalTensor::zeros_f32(
                 &ctx,

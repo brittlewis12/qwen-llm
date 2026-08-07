@@ -10330,7 +10330,7 @@ fn encode_lightning_indexer_scores_f16_with_policy(
     Ok(())
 }
 
-#[cfg(any(test, feature = "dsv4-diagnostics"))]
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn encode_lightning_indexer_scores_f16_matrix_ceiling(
     ctx: &MetalContext,
@@ -16862,7 +16862,7 @@ mod tests {
             .filter(|&&kind| kind == AttentionKind::CompressedSparse)
             .count();
         let diagnostics_allocations = if cfg!(feature = "dsv4-diagnostics") {
-            csa_layer_count * 3 + 14
+            csa_layer_count * 3 + 13
         } else {
             0
         };
@@ -16870,7 +16870,6 @@ mod tests {
             csa_layer_count as u64 * capacity.csa_physical_rows() as u64 * 72
                 + 112_160
                 + capacity.csa_physical_rows() as u64 * 8
-                + 33_554_432
         } else {
             0
         };
@@ -16974,7 +16973,6 @@ mod tests {
             csa_layer_count as u64 * promoted_capacity.csa_physical_rows() as u64 * 72
                 + 112_160
                 + promoted_capacity.csa_physical_rows() as u64 * 8
-                + 33_554_432
         } else {
             0
         };

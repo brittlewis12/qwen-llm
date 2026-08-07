@@ -4045,16 +4045,16 @@ struct PackedLayerTrace {
     bucket_count: usize,
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum PackedPrefillStageKind {
+pub enum PackedPrefillStageKind {
     BeforeAttentionBody,
     AttentionBody,
     AttentionOutputProjections,
     AfterAttentionOutput,
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 4] = [
     PackedPrefillStageKind::BeforeAttentionBody,
     PackedPrefillStageKind::AttentionBody,
@@ -4062,51 +4062,51 @@ pub(super) const PACKED_PREFILL_STAGE_KINDS: [PackedPrefillStageKind; 4] = [
     PackedPrefillStageKind::AfterAttentionOutput,
 ];
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 #[derive(Clone, Debug)]
-pub(super) struct PackedPrefillStageTiming {
-    pub(super) kind: PackedPrefillStageKind,
-    pub(super) start_timestamp: Option<u64>,
-    pub(super) end_timestamp: Option<u64>,
-    pub(super) duration_ticks: u64,
-    pub(super) duration_ms_scaled: f64,
+pub struct PackedPrefillStageTiming {
+    pub kind: PackedPrefillStageKind,
+    pub start_timestamp: Option<u64>,
+    pub end_timestamp: Option<u64>,
+    pub duration_ticks: u64,
+    pub duration_ms_scaled: f64,
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 #[derive(Clone, Debug)]
-pub(super) struct PackedPrefillStageTransition {
-    pub(super) from: PackedPrefillStageKind,
-    pub(super) to: PackedPrefillStageKind,
-    pub(super) delta_ticks: i128,
-    pub(super) gap_ticks: u64,
-    pub(super) overlap_ticks: u64,
-    pub(super) gap_ms_scaled: f64,
-    pub(super) overlap_ms_scaled: f64,
+pub struct PackedPrefillStageTransition {
+    pub from: PackedPrefillStageKind,
+    pub to: PackedPrefillStageKind,
+    pub delta_ticks: i128,
+    pub gap_ticks: u64,
+    pub overlap_ticks: u64,
+    pub gap_ms_scaled: f64,
+    pub overlap_ms_scaled: f64,
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 #[derive(Clone, Debug)]
-pub(super) struct PackedPrefillSampledLayerProfile {
-    pub(super) layer: usize,
-    pub(super) command_gpu_ms: f64,
-    pub(super) sampled_span_ticks: u64,
-    pub(super) raw_span_ms_assuming_ns: f64,
-    pub(super) raw_coverage_assuming_ns: f64,
-    pub(super) encoder_gap_ms_scaled: f64,
-    pub(super) encoder_overlap_ms_scaled: f64,
-    pub(super) stages: Vec<PackedPrefillStageTiming>,
-    pub(super) transitions: Vec<PackedPrefillStageTransition>,
+pub struct PackedPrefillSampledLayerProfile {
+    pub layer: usize,
+    pub command_gpu_ms: f64,
+    pub sampled_span_ticks: u64,
+    pub raw_span_ms_assuming_ns: f64,
+    pub raw_coverage_assuming_ns: f64,
+    pub encoder_gap_ms_scaled: f64,
+    pub encoder_overlap_ms_scaled: f64,
+    pub stages: Vec<PackedPrefillStageTiming>,
+    pub transitions: Vec<PackedPrefillStageTransition>,
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 #[derive(Clone, Debug)]
-pub(super) struct PackedPrefillStageProfile {
-    pub(super) sampled: bool,
-    pub(super) command_gpu_ms: Vec<f64>,
-    pub(super) sampled_layers: Vec<PackedPrefillSampledLayerProfile>,
+pub struct PackedPrefillStageProfile {
+    pub sampled: bool,
+    pub command_gpu_ms: Vec<f64>,
+    pub sampled_layers: Vec<PackedPrefillSampledLayerProfile>,
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 #[derive(Clone, Copy, Debug)]
 struct PackedPrefillPendingStageSample {
     layer: usize,
@@ -4114,7 +4114,7 @@ struct PackedPrefillPendingStageSample {
     samples: Option<(usize, usize)>,
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 fn resolve_packed_prefill_layer_stage_samples(
     layer: usize,
     records: &[PackedPrefillPendingStageSample],
@@ -4289,7 +4289,7 @@ fn resolve_packed_prefill_layer_stage_samples(
     })
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 struct PackedPrefillStageRecorder {
     sampled: bool,
     samples: Option<MetalTimestampSampleBuffer>,
@@ -4298,7 +4298,7 @@ struct PackedPrefillStageRecorder {
     command_gpu_ms: [Option<f64>; DEEPSEEK_V4_LAYER_COUNT],
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 impl PackedPrefillStageRecorder {
     fn new(ctx: &MetalContext, sampled: bool) -> Result<Self, DeepSeekV4MetalError> {
         let record_count = DEEPSEEK_V4_LAYER_COUNT
@@ -4437,7 +4437,7 @@ impl PackedPrefillStageRecorder {
     }
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 struct PackedPrefillLayerEncoder<'command, 'recorder> {
     command: &'command Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     layer: usize,
@@ -4446,7 +4446,7 @@ struct PackedPrefillLayerEncoder<'command, 'recorder> {
     encoder: Option<KernelEncoder>,
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 impl<'command, 'recorder> PackedPrefillLayerEncoder<'command, 'recorder> {
     fn begin(
         command: &'command Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -4499,7 +4499,7 @@ impl<'command, 'recorder> PackedPrefillLayerEncoder<'command, 'recorder> {
     }
 }
 
-#[cfg(all(test, feature = "dsv4-diagnostics"))]
+#[cfg(feature = "dsv4-diagnostics")]
 impl std::ops::Deref for PackedPrefillLayerEncoder<'_, '_> {
     type Target = KernelEncoder;
 
@@ -4705,6 +4705,13 @@ pub struct PackedPostRouteStageProfile {
     pub command_gpu_ms: Vec<f64>,
     pub metadata: Vec<PackedPostRouteLayerMetadata>,
     pub sampled_layers: Vec<PackedPostRouteSampledLayerProfile>,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+#[derive(Clone, Debug)]
+pub struct PackedChunkProfile {
+    pub pre_expert: PackedPrefillStageProfile,
+    pub post_route: PackedPostRouteStageProfile,
 }
 
 #[cfg(feature = "dsv4-diagnostics")]
@@ -6854,6 +6861,42 @@ impl DeepSeekV4Session {
     }
 
     #[cfg(feature = "dsv4-diagnostics")]
+    pub fn profile_packed_chunk(
+        &mut self,
+        ctx: &MetalContext,
+        token_ids: &[u32],
+        emit_logits: bool,
+        sampled: bool,
+    ) -> Result<PackedChunkProfile, DeepSeekV4MetalError> {
+        let grouped_mode = packed_grouped_expert_mode();
+        let expert_policy = if packed_grouped_expert_scope(grouped_mode, token_ids.len())? {
+            packed_grouped_expert_policy(ctx, token_ids.len())?
+        } else {
+            PackedExpertPolicy::Current
+        };
+        let mut pre_expert = PackedPrefillStageRecorder::new(ctx, sampled)?;
+        let mut post_route = PackedPostRouteStageRecorder::new(ctx, sampled)?;
+        self.execute_packed_tokens_with_progress_policy(
+            ctx,
+            token_ids,
+            emit_logits,
+            PackedRoutePolicy::Cpu,
+            expert_policy,
+            Some(&mut pre_expert),
+            Some(&mut post_route),
+            &mut |_| {},
+        )?;
+        let pre_expert = pre_expert.resolve(ctx)?;
+        let mut post_route = post_route.resolve(ctx)?;
+        post_route.q8_compressor_matrix_invocations =
+            self.prefill.compressor.q8_matrix_invocations();
+        Ok(PackedChunkProfile {
+            pre_expert,
+            post_route,
+        })
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
     pub fn profile_packed_post_route(
         &mut self,
         ctx: &MetalContext,
@@ -6874,7 +6917,6 @@ impl DeepSeekV4Session {
             emit_logits,
             PackedRoutePolicy::Cpu,
             expert_policy,
-            #[cfg(all(test, feature = "dsv4-diagnostics"))]
             None,
             Some(&mut recorder),
             &mut |_| {},
@@ -7026,7 +7068,7 @@ impl DeepSeekV4Session {
             emit_logits,
             PackedRoutePolicy::Cpu,
             expert_policy,
-            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            #[cfg(feature = "dsv4-diagnostics")]
             None,
             #[cfg(feature = "dsv4-diagnostics")]
             None,
@@ -7041,7 +7083,7 @@ impl DeepSeekV4Session {
         emit_logits: bool,
         route_policy: PackedRoutePolicy,
         expert_policy: PackedExpertPolicy,
-        #[cfg(all(test, feature = "dsv4-diagnostics"))] stage_recorder: Option<
+        #[cfg(feature = "dsv4-diagnostics")] stage_recorder: Option<
             &mut PackedPrefillStageRecorder,
         >,
         #[cfg(feature = "dsv4-diagnostics")] post_route_stage_recorder: Option<
@@ -7128,7 +7170,7 @@ impl DeepSeekV4Session {
             expert_policy,
             q_b_projection,
             compressor_matrix,
-            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            #[cfg(feature = "dsv4-diagnostics")]
             stage_recorder,
             #[cfg(feature = "dsv4-diagnostics")]
             post_route_stage_recorder,
@@ -7156,7 +7198,7 @@ impl DeepSeekV4Session {
         expert_policy: PackedExpertPolicy,
         q_b_projection: Q8PrecisionProjection,
         compressor_matrix: bool,
-        #[cfg(all(test, feature = "dsv4-diagnostics"))] mut stage_recorder: Option<
+        #[cfg(feature = "dsv4-diagnostics")] mut stage_recorder: Option<
             &mut PackedPrefillStageRecorder,
         >,
         #[cfg(feature = "dsv4-diagnostics")] mut post_route_stage_recorder: Option<
@@ -7298,10 +7340,10 @@ impl DeepSeekV4Session {
                     "failed to allocate packed layer {layer} router command buffer"
                 ))
             })?;
-            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            #[cfg(feature = "dsv4-diagnostics")]
             let mut encoder =
                 PackedPrefillLayerEncoder::begin(&command, layer, stage_recorder.as_deref_mut())?;
-            #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
+            #[cfg(not(feature = "dsv4-diagnostics"))]
             let encoder = KernelEncoder::begin(&command);
             let router_result = (|| {
                 #[cfg(feature = "dsv4-diagnostics")]
@@ -7487,7 +7529,7 @@ impl DeepSeekV4Session {
                     }
                 }
 
-                #[cfg(all(test, feature = "dsv4-diagnostics"))]
+                #[cfg(feature = "dsv4-diagnostics")]
                 encoder.boundary(PackedPrefillStageKind::AttentionBody)?;
 
                 let compressed = self
@@ -7698,7 +7740,7 @@ impl DeepSeekV4Session {
                     }
                 }
 
-                #[cfg(all(test, feature = "dsv4-diagnostics"))]
+                #[cfg(feature = "dsv4-diagnostics")]
                 encoder.boundary(PackedPrefillStageKind::AttentionOutputProjections)?;
 
                 let attention_output = self.prefill.attention.encode_output(
@@ -7710,7 +7752,7 @@ impl DeepSeekV4Session {
                     n_tokens,
                 )?;
 
-                #[cfg(all(test, feature = "dsv4-diagnostics"))]
+                #[cfg(feature = "dsv4-diagnostics")]
                 encoder.boundary(PackedPrefillStageKind::AfterAttentionOutput)?;
 
                 self.prefill.hyper.encode_post(
@@ -7786,9 +7828,9 @@ impl DeepSeekV4Session {
             let pre_expert_command_seconds = pre_expert_started
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
-            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            #[cfg(feature = "dsv4-diagnostics")]
             let stage_profile_active = stage_recorder.is_some();
-            #[cfg(not(all(test, feature = "dsv4-diagnostics")))]
+            #[cfg(not(feature = "dsv4-diagnostics"))]
             let stage_profile_active = false;
             let pre_expert_gpu_seconds = if trace_layers || stage_profile_active {
                 command.GPUEndTime() - command.GPUStartTime()
@@ -7801,7 +7843,7 @@ impl DeepSeekV4Session {
                     "packed layer {layer} router command failed: {error:?}"
                 ));
             }
-            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            #[cfg(feature = "dsv4-diagnostics")]
             if let Some(recorder) = stage_recorder.as_deref_mut() {
                 recorder.record_command_gpu_seconds(layer, pre_expert_gpu_seconds)?;
             }

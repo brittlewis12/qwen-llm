@@ -10,8 +10,10 @@ mod prefill;
 
 #[cfg(feature = "dsv4-diagnostics")]
 pub use prefill::{
-    PackedPostRouteLayerMetadata, PackedPostRouteSampledLayerProfile, PackedPostRouteStageKind,
-    PackedPostRouteStageProfile, PackedPostRouteStageTiming,
+    PackedChunkProfile, PackedPostRouteLayerMetadata, PackedPostRouteSampledLayerProfile,
+    PackedPostRouteStageKind, PackedPostRouteStageProfile, PackedPostRouteStageTiming,
+    PackedPrefillSampledLayerProfile, PackedPrefillStageKind, PackedPrefillStageProfile,
+    PackedPrefillStageTiming, PackedPrefillStageTransition,
 };
 mod snapshot;
 

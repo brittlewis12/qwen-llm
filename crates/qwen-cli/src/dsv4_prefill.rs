@@ -2,14 +2,15 @@ use anyhow::{Context, Result, ensure};
 use clap::Args;
 use objc2_metal::MTLDevice;
 use qwen_llm::deepseek_v4_metal::{
-    DeepSeekV4MetalResidency, DeepSeekV4Session, PackedPostRouteStageKind,
-    PackedPostRouteStageProfile,
+    DEEPSEEK_V4_PREFILL_MAX_TOKENS, DeepSeekV4MetalResidency, DeepSeekV4Session,
+    PackedChunkProfile, PackedPostRouteStageKind, PackedPrefillStageKind,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
 use qwen_llm::tokenizer::Tokenizer;
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -19,9 +20,15 @@ pub struct Dsv4PrefillArgs {
     /// Path to the first shard of a DeepSeek V4 Flash-0731 GGUF.
     #[arg(short = 'm', long)]
     model: PathBuf,
-    /// Number of tokens in the profiled packed chunk.
+    /// Total prompt tokens in the profiled request.
     #[arg(short = 'p', long, default_value_t = 2_048)]
     tokens: usize,
+    /// Production packed-chunk size used to traverse the prompt.
+    #[arg(long, default_value_t = DEEPSEEK_V4_PREFILL_MAX_TOKENS)]
+    chunk_tokens: usize,
+    /// Larger chunk size whose optimistic boundary ceiling is reported.
+    #[arg(long, default_value_t = 4_096)]
+    candidate_chunk_tokens: usize,
     /// Optional raw prompt text. The first --tokens independently encoded IDs are used.
     #[arg(long)]
     prompt_file: Option<PathBuf>,
@@ -44,22 +51,57 @@ struct Dsv4PrefillReport {
     device: String,
     token_source: String,
     n_tokens: usize,
+    chunk_tokens: usize,
+    candidate_chunk_tokens: usize,
     load_ms: f64,
+    ordinary_reference_wall_ms: f64,
     logits_bit_exact: bool,
-    warmups: Vec<Dsv4PrefillRun>,
+    logits_sha256: String,
+    warmups: Vec<Dsv4PrefillOrdinaryRun>,
+    ordinary: Dsv4PrefillOrdinaryRun,
     samples: Vec<Dsv4PrefillRun>,
+}
+
+#[derive(Serialize)]
+struct Dsv4PrefillOrdinaryRun {
+    wall_ms: f64,
+    chunk_wall_ms: Vec<f64>,
 }
 
 #[derive(Serialize)]
 struct Dsv4PrefillRun {
     sampled: bool,
     wall_ms: f64,
-    q8_compressor_matrix_invocations: u32,
+    chunk_count: usize,
+    pre_expert_gpu_ms: f64,
     post_route_gpu_ms: f64,
+    non_gpu_residual_ms: f64,
+    q8_compressor_matrix_invocations: u32,
     bm16_gpu_ms: f64,
-    encoder_gap_ms: f64,
-    encoder_overlap_ms: f64,
-    stage_ms: BTreeMap<&'static str, f64>,
+    optimistic_boundary_ceiling_ms: f64,
+    optimistic_boundary_ceiling_percent: f64,
+    chunks: Vec<Dsv4PrefillChunk>,
+}
+
+#[derive(Serialize)]
+struct Dsv4PrefillChunk {
+    chunk_index: usize,
+    token_start: usize,
+    token_count: usize,
+    emit_logits: bool,
+    sampled: bool,
+    wall_ms: f64,
+    pre_expert_gpu_ms: f64,
+    post_route_gpu_ms: f64,
+    non_gpu_residual_ms: f64,
+    q8_compressor_matrix_invocations: u32,
+    bm16_gpu_ms: f64,
+    pre_expert_encoder_gap_ms: f64,
+    pre_expert_encoder_overlap_ms: f64,
+    post_route_encoder_gap_ms: f64,
+    post_route_encoder_overlap_ms: f64,
+    pre_expert_stage_ms: BTreeMap<&'static str, f64>,
+    post_route_stage_ms: BTreeMap<&'static str, f64>,
     bm16_stage_ms: BTreeMap<&'static str, f64>,
     layers: Vec<Dsv4PrefillLayer>,
 }
@@ -87,7 +129,16 @@ struct Dsv4PrefillLayer {
     stage_ms: BTreeMap<&'static str, f64>,
 }
 
-fn stage_label(kind: PackedPostRouteStageKind) -> &'static str {
+fn pre_expert_stage_label(kind: PackedPrefillStageKind) -> &'static str {
+    match kind {
+        PackedPrefillStageKind::BeforeAttentionBody => "before_attention_body",
+        PackedPrefillStageKind::AttentionBody => "attention_body",
+        PackedPrefillStageKind::AttentionOutputProjections => "attention_output_projections",
+        PackedPrefillStageKind::AfterAttentionOutput => "after_attention_output",
+    }
+}
+
+fn post_route_stage_label(kind: PackedPostRouteStageKind) -> &'static str {
     match kind {
         PackedPostRouteStageKind::RoutedExperts => "routed_experts",
         PackedPostRouteStageKind::RoutedGateUp => "routed_gate_up",
@@ -103,47 +154,84 @@ fn add_stage(map: &mut BTreeMap<&'static str, f64>, label: &'static str, value: 
     *map.entry(label).or_default() += value;
 }
 
-fn summarize(profile: PackedPostRouteStageProfile, wall_ms: f64) -> Dsv4PrefillRun {
-    let q8_compressor_matrix_invocations = profile.q8_compressor_matrix_invocations;
-    let post_route_gpu_ms = profile.command_gpu_ms.iter().sum();
-    let bm16_gpu_ms = profile
-        .metadata
-        .iter()
-        .zip(&profile.command_gpu_ms)
-        .filter_map(|(metadata, &duration)| metadata.bm16.then_some(duration))
-        .sum();
-    if !profile.sampled {
-        return Dsv4PrefillRun {
-            sampled: false,
-            wall_ms,
-            q8_compressor_matrix_invocations,
-            post_route_gpu_ms,
-            bm16_gpu_ms,
-            encoder_gap_ms: 0.0,
-            encoder_overlap_ms: 0.0,
-            stage_ms: BTreeMap::new(),
-            bm16_stage_ms: BTreeMap::new(),
-            layers: Vec::new(),
-        };
+fn summarize_chunk(
+    profile: PackedChunkProfile,
+    chunk_index: usize,
+    token_start: usize,
+    token_count: usize,
+    emit_logits: bool,
+    wall_ms: f64,
+) -> Result<Dsv4PrefillChunk> {
+    let PackedChunkProfile {
+        pre_expert,
+        post_route,
+    } = profile;
+    ensure!(
+        pre_expert.sampled == post_route.sampled,
+        "pre-expert and post-route profiler modes differ"
+    );
+    ensure!(
+        pre_expert.command_gpu_ms.len() == post_route.command_gpu_ms.len()
+            && post_route.command_gpu_ms.len() == post_route.metadata.len(),
+        "packed chunk profiler layer vectors differ"
+    );
+    if post_route.sampled {
+        ensure!(
+            pre_expert.sampled_layers.len() == pre_expert.command_gpu_ms.len()
+                && post_route.sampled_layers.len() == post_route.command_gpu_ms.len(),
+            "sampled packed chunk profiler omitted layers"
+        );
     }
 
-    let mut stage_ms = BTreeMap::new();
+    let pre_expert_gpu_ms = pre_expert.command_gpu_ms.iter().sum();
+    let post_route_gpu_ms = post_route.command_gpu_ms.iter().sum();
+    let bm16_gpu_ms = post_route
+        .metadata
+        .iter()
+        .zip(&post_route.command_gpu_ms)
+        .filter_map(|(metadata, &duration)| metadata.bm16.then_some(duration))
+        .sum();
+    let mut pre_expert_stage_ms = BTreeMap::new();
+    let mut post_route_stage_ms = BTreeMap::new();
     let mut bm16_stage_ms = BTreeMap::new();
-    let mut encoder_gap_ms = 0.0;
-    let mut encoder_overlap_ms = 0.0;
-    let mut layers = Vec::with_capacity(profile.sampled_layers.len());
-    for (sampled, metadata) in profile.sampled_layers.iter().zip(&profile.metadata) {
-        let mut layer_stages = BTreeMap::new();
+    let mut pre_expert_encoder_gap_ms = 0.0;
+    let mut pre_expert_encoder_overlap_ms = 0.0;
+    for sampled in &pre_expert.sampled_layers {
+        pre_expert_encoder_gap_ms += sampled.encoder_gap_ms_scaled;
+        pre_expert_encoder_overlap_ms += sampled.encoder_overlap_ms_scaled;
         for stage in &sampled.stages {
-            let label = stage_label(stage.kind);
-            add_stage(&mut layer_stages, label, stage.duration_ms_scaled);
-            add_stage(&mut stage_ms, label, stage.duration_ms_scaled);
-            if metadata.bm16 {
-                add_stage(&mut bm16_stage_ms, label, stage.duration_ms_scaled);
-            }
+            add_stage(
+                &mut pre_expert_stage_ms,
+                pre_expert_stage_label(stage.kind),
+                stage.duration_ms_scaled,
+            );
         }
-        encoder_gap_ms += sampled.encoder_gap_ms_scaled;
-        encoder_overlap_ms += sampled.encoder_overlap_ms_scaled;
+    }
+
+    let mut post_route_encoder_gap_ms = 0.0;
+    let mut post_route_encoder_overlap_ms = 0.0;
+    let mut layers = Vec::with_capacity(post_route.metadata.len());
+    for (index, metadata) in post_route.metadata.iter().enumerate() {
+        let sampled = post_route.sampled_layers.get(index);
+        let mut layer_stages = BTreeMap::new();
+        if let Some(sampled) = sampled {
+            ensure!(
+                sampled.layer == metadata.layer,
+                "sampled post-route layer {} differs from metadata layer {}",
+                sampled.layer,
+                metadata.layer
+            );
+            for stage in &sampled.stages {
+                let label = post_route_stage_label(stage.kind);
+                add_stage(&mut layer_stages, label, stage.duration_ms_scaled);
+                add_stage(&mut post_route_stage_ms, label, stage.duration_ms_scaled);
+                if metadata.bm16 {
+                    add_stage(&mut bm16_stage_ms, label, stage.duration_ms_scaled);
+                }
+            }
+            post_route_encoder_gap_ms += sampled.encoder_gap_ms_scaled;
+            post_route_encoder_overlap_ms += sampled.encoder_overlap_ms_scaled;
+        }
         let route_count = metadata
             .expert_counts
             .iter()
@@ -178,25 +266,79 @@ fn summarize(profile: PackedPostRouteStageProfile, wall_ms: f64) -> Dsv4PrefillR
             route_tiles32,
             route_tile16_occupancy: route_count as f64 / (route_tiles16 * 16) as f64,
             route_tile32_occupancy: route_count as f64 / (route_tiles32 * 32) as f64,
-            command_gpu_ms: sampled.command_gpu_ms,
-            encoder_gap_ms: sampled.encoder_gap_ms_scaled,
-            encoder_overlap_ms: sampled.encoder_overlap_ms_scaled,
-            raw_coverage: sampled.raw_coverage_assuming_ns,
+            command_gpu_ms: post_route.command_gpu_ms[index],
+            encoder_gap_ms: sampled.map_or(0.0, |profile| profile.encoder_gap_ms_scaled),
+            encoder_overlap_ms: sampled.map_or(0.0, |profile| profile.encoder_overlap_ms_scaled),
+            raw_coverage: sampled.map_or(0.0, |profile| profile.raw_coverage_assuming_ns),
             stage_ms: layer_stages,
         });
+    }
+
+    Ok(Dsv4PrefillChunk {
+        chunk_index,
+        token_start,
+        token_count,
+        emit_logits,
+        sampled: post_route.sampled,
+        wall_ms,
+        pre_expert_gpu_ms,
+        post_route_gpu_ms,
+        non_gpu_residual_ms: wall_ms - pre_expert_gpu_ms - post_route_gpu_ms,
+        q8_compressor_matrix_invocations: post_route.q8_compressor_matrix_invocations,
+        bm16_gpu_ms,
+        pre_expert_encoder_gap_ms,
+        pre_expert_encoder_overlap_ms,
+        post_route_encoder_gap_ms,
+        post_route_encoder_overlap_ms,
+        pre_expert_stage_ms,
+        post_route_stage_ms,
+        bm16_stage_ms,
+        layers,
+    })
+}
+
+fn summarize_run(
+    wall_ms: f64,
+    chunks: Vec<Dsv4PrefillChunk>,
+    ordinary_reference_wall_ms: f64,
+) -> Dsv4PrefillRun {
+    let mut optimistic_boundary_ceiling_ms = chunks
+        .chunks(2)
+        .filter(|pair| pair.len() == 2)
+        .map(|pair| {
+            pair.iter()
+                .map(|chunk| chunk.non_gpu_residual_ms.max(0.0))
+                .fold(0.0f64, f64::max)
+        })
+        .sum::<f64>();
+    if optimistic_boundary_ceiling_ms == 0.0 {
+        optimistic_boundary_ceiling_ms = 0.0;
     }
     Dsv4PrefillRun {
         sampled: true,
         wall_ms,
-        q8_compressor_matrix_invocations,
-        post_route_gpu_ms,
-        bm16_gpu_ms,
-        encoder_gap_ms,
-        encoder_overlap_ms,
-        stage_ms,
-        bm16_stage_ms,
-        layers,
+        chunk_count: chunks.len(),
+        pre_expert_gpu_ms: chunks.iter().map(|chunk| chunk.pre_expert_gpu_ms).sum(),
+        post_route_gpu_ms: chunks.iter().map(|chunk| chunk.post_route_gpu_ms).sum(),
+        non_gpu_residual_ms: chunks.iter().map(|chunk| chunk.non_gpu_residual_ms).sum(),
+        q8_compressor_matrix_invocations: chunks
+            .iter()
+            .map(|chunk| chunk.q8_compressor_matrix_invocations)
+            .sum(),
+        bm16_gpu_ms: chunks.iter().map(|chunk| chunk.bm16_gpu_ms).sum(),
+        optimistic_boundary_ceiling_ms,
+        optimistic_boundary_ceiling_percent: optimistic_boundary_ceiling_ms
+            / ordinary_reference_wall_ms
+            * 100.0,
+        chunks,
     }
+}
+
+fn logits_sha256(logit_bits: &[u32]) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(bytemuck::cast_slice::<u32, u8>(logit_bits))
+    )
 }
 
 fn prompt_tokens(args: &Dsv4PrefillArgs, gguf: &GgufFile) -> Result<(Vec<u32>, String)> {
@@ -229,10 +371,104 @@ fn prompt_tokens(args: &Dsv4PrefillArgs, gguf: &GgufFile) -> Result<(Vec<u32>, S
     Ok((tokens, "synthetic_ramp_7919".into()))
 }
 
+fn copy_logit_bits(session: &DeepSeekV4Session) -> Result<Vec<u32>> {
+    Ok(session
+        .copy_logits_f32()
+        .context("copy DeepSeek V4 profile logits")?
+        .into_iter()
+        .map(f32::to_bits)
+        .collect())
+}
+
+fn execute_ordinary_request(
+    ctx: &MetalContext,
+    residency: &mut Option<DeepSeekV4MetalResidency>,
+    tokens: &[u32],
+    chunk_tokens: usize,
+) -> Result<(Dsv4PrefillOrdinaryRun, Vec<u32>)> {
+    let current = residency
+        .take()
+        .context("DeepSeek V4 profiler lost model residency")?;
+    let mut session = DeepSeekV4Session::new(ctx, current)
+        .context("create ordinary DeepSeek V4 prefill profile session")?;
+    let chunk_count = tokens.len().div_ceil(chunk_tokens);
+    let request_started = Instant::now();
+    let mut chunk_wall_ms = Vec::with_capacity(chunk_count);
+    for (chunk_index, chunk) in tokens.chunks(chunk_tokens).enumerate() {
+        let chunk_started = Instant::now();
+        if chunk_index + 1 == chunk_count {
+            session
+                .prefill_tokens(ctx, chunk)
+                .context("execute final ordinary DeepSeek V4 profile chunk")?;
+        } else {
+            session
+                .advance_tokens(ctx, chunk)
+                .context("advance ordinary DeepSeek V4 profile chunk")?;
+        }
+        chunk_wall_ms.push(chunk_started.elapsed().as_secs_f64() * 1e3);
+    }
+    let wall_ms = request_started.elapsed().as_secs_f64() * 1e3;
+    let logits = copy_logit_bits(&session)?;
+    *residency = Some(session.into_residency());
+    Ok((
+        Dsv4PrefillOrdinaryRun {
+            wall_ms,
+            chunk_wall_ms,
+        },
+        logits,
+    ))
+}
+
+fn execute_profiled_request(
+    ctx: &MetalContext,
+    residency: &mut Option<DeepSeekV4MetalResidency>,
+    tokens: &[u32],
+    chunk_tokens: usize,
+    ordinary_reference_wall_ms: f64,
+) -> Result<(Dsv4PrefillRun, Vec<u32>)> {
+    let current = residency
+        .take()
+        .context("DeepSeek V4 profiler lost model residency")?;
+    let mut session = DeepSeekV4Session::new(ctx, current)
+        .context("create sampled DeepSeek V4 prefill profile session")?;
+    let chunk_count = tokens.len().div_ceil(chunk_tokens);
+    let request_started = Instant::now();
+    let mut chunks = Vec::with_capacity(chunk_count);
+    for (chunk_index, chunk) in tokens.chunks(chunk_tokens).enumerate() {
+        let emit_logits = chunk_index + 1 == chunk_count;
+        let token_start = chunk_index * chunk_tokens;
+        let chunk_started = Instant::now();
+        let profile = session
+            .profile_packed_chunk(ctx, chunk, emit_logits, true)
+            .context("profile sequential DeepSeek V4 packed chunk")?;
+        chunks.push(summarize_chunk(
+            profile,
+            chunk_index,
+            token_start,
+            chunk.len(),
+            emit_logits,
+            chunk_started.elapsed().as_secs_f64() * 1e3,
+        )?);
+    }
+    let wall_ms = request_started.elapsed().as_secs_f64() * 1e3;
+    let logits = copy_logit_bits(&session)?;
+    let run = summarize_run(wall_ms, chunks, ordinary_reference_wall_ms);
+    *residency = Some(session.into_residency());
+    Ok((run, logits))
+}
+
 pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
     ensure!(
-        (1..=2_048).contains(&args.tokens),
-        "--tokens must be 1..=2048"
+        (1..=32_768).contains(&args.tokens),
+        "--tokens must be 1..=32768"
+    );
+    ensure!(
+        (1..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&args.chunk_tokens),
+        "--chunk-tokens must be 1..={DEEPSEEK_V4_PREFILL_MAX_TOKENS}"
+    );
+    ensure!(
+        args.chunk_tokens.checked_mul(2) == Some(args.candidate_chunk_tokens),
+        "--candidate-chunk-tokens must be exactly twice --chunk-tokens"
     );
     ensure!(args.warmups > 0, "--warmups must be nonzero");
     ensure!(args.samples > 0, "--samples must be nonzero");
@@ -251,31 +487,11 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
     let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
     let mut residency = Some(realized.into_residency());
 
-    let mut execute = |sampled: bool| -> Result<(Dsv4PrefillRun, Vec<u32>)> {
-        let current = residency
-            .take()
-            .context("DeepSeek V4 profiler lost model residency")?;
-        let mut session = DeepSeekV4Session::new(&ctx, current)
-            .context("create DeepSeek V4 prefill profile session")?;
-        let started = Instant::now();
-        let profile = session
-            .profile_packed_post_route(&ctx, &tokens, true, sampled)
-            .context("profile DeepSeek V4 packed prefill")?;
-        let wall_ms = started.elapsed().as_secs_f64() * 1e3;
-        let logits = session
-            .copy_logits_f32()
-            .context("copy DeepSeek V4 profile logits")?
-            .into_iter()
-            .map(f32::to_bits)
-            .collect();
-        residency = Some(session.into_residency());
-        Ok((summarize(profile, wall_ms), logits))
-    };
-
     let mut warmups = Vec::with_capacity(args.warmups);
     let mut reference_logits = None;
     for _ in 0..args.warmups {
-        let (run, logits) = execute(false)?;
+        let (run, logits) =
+            execute_ordinary_request(&ctx, &mut residency, &tokens, args.chunk_tokens)?;
         if let Some(reference) = &reference_logits {
             ensure!(&logits == reference, "ordinary profiler logits changed");
         } else {
@@ -283,9 +499,26 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
         }
         warmups.push(run);
     }
+    let (ordinary, ordinary_logits) =
+        execute_ordinary_request(&ctx, &mut residency, &tokens, args.chunk_tokens)?;
+    ensure!(
+        reference_logits.as_ref() == Some(&ordinary_logits),
+        "ordinary reference logits differ from warmup execution"
+    );
+    let ordinary_reference_wall_ms = ordinary.wall_ms;
+    ensure!(
+        ordinary_reference_wall_ms.is_finite() && ordinary_reference_wall_ms > 0.0,
+        "ordinary DeepSeek V4 reference wall is invalid"
+    );
     let mut samples = Vec::with_capacity(args.samples);
     for _ in 0..args.samples {
-        let (run, logits) = execute(true)?;
+        let (run, logits) = execute_profiled_request(
+            &ctx,
+            &mut residency,
+            &tokens,
+            args.chunk_tokens,
+            ordinary_reference_wall_ms,
+        )?;
         ensure!(
             reference_logits.as_ref() == Some(&logits),
             "sampled profiler logits differ from ordinary execution"
@@ -293,15 +526,20 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
         samples.push(run);
     }
     let report = Dsv4PrefillReport {
-        schema_version: 1,
+        schema_version: 2,
         build,
         model: args.model.display().to_string(),
         device: ctx.device.name().to_string(),
         token_source,
         n_tokens: tokens.len(),
+        chunk_tokens: args.chunk_tokens,
+        candidate_chunk_tokens: args.candidate_chunk_tokens,
         load_ms,
+        ordinary_reference_wall_ms,
         logits_bit_exact: true,
+        logits_sha256: logits_sha256(&ordinary_logits),
         warmups,
+        ordinary,
         samples,
     };
     let json = serde_json::to_string_pretty(&report)?;

@@ -129,18 +129,29 @@ cargo build --release -p qwen-cli --bin qwen-bench \
 
 ./target/release/qwen-bench dsv4-prefill \
   -m "$DSV4_MODEL" \
-  --tokens 2048 \
+  --tokens 8192 \
+  --chunk-tokens 2048 \
+  --candidate-chunk-tokens 4096 \
   --prompt-file "$PROMPT" \
   --json-out target/profiles/dsv4-prefill.json
 ```
 
-The default schedule runs one unsampled warm pass and one sampled pass against
-the same residency. It compares complete prompt logits bit for bit, reports
-whole post-route command GPU time, and splits qualified BM16 layers into
-gate/up, SwiGLU, and down while retaining shared, combine, and hyper/head
-stages. Without `--prompt-file`, a deterministic vocabulary-wide token ramp is
-used. Profiler stage times explain a separate product wall result; do not use
-the sampled wall as a throughput claim.
+`--tokens` is the complete request length; the profiler walks it through one
+session in `--chunk-tokens` pieces. The default schedule discards one
+uninstrumented production warmup, records a separate uninstrumented ordinary
+reference, and then runs one sampled pass against the same residency. Complete
+final logits must match bit for bit across all three. Each sampled chunk reports
+pre-expert and post-route GPU time, both stage decompositions, route-panel
+occupancy, and Q8 compressor-matrix ownership. Qualified BM16 layers retain
+their gate/up, SwiGLU, and down split.
+
+The candidate chunk must currently be twice the executed chunk. For each
+adjacent pair, the report charges the larger positive sampled non-GPU residual
+as an intentionally optimistic removable-boundary allowance and divides their
+sum by the ordinary request wall. This is a ceiling for deciding whether a real
+larger-chunk implementation is worth building, not a speedup claim. Without
+`--prompt-file`, a deterministic vocabulary-wide token ramp is used. Do not use
+the sampled wall as product throughput.
 
 ## Decision table
 

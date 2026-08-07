@@ -2495,6 +2495,10 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_cooperative(
     }
 }
 
+// The 8-query by 32-row tile topology is adapted from DwarfStar's
+// kernel_dsv4_indexer_scores_tiled_f32 at revision b0309611 under MIT.
+// See docs/THIRD-PARTY-NOTICES.md. This variant retains qwen-llm's physical
+// score stride and explicit per-query visibility contract.
 [[max_total_threads_per_threadgroup(128)]]
 kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_tiled_f32(
         constant ds4_indexer_score_args & args [[buffer(0)]],

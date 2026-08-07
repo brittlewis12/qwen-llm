@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Tiled F32 Indexer Scorer Default GO
+
+Status: the packed Lightning scorer now defaults to an 8-query by 32-row F32
+matrix tile. Set `QWEN_DSV4_PACKED_INDEXER_TILED_F32=0` to restore the
+one-query cooperative scorer.
+
+- The work unit stages each F16 K row once for eight neighboring queries, then
+  uses four SIMDgroups to compute four 8-by-8 row subtiles. Query, weight, and
+  accumulation values remain F32; only the dot-product reduction schedule is
+  eligible to differ.
+- The differential covers nine queries, 48 physical rows, both query and row
+  tile boundaries, partial edges, varied visibility, and invalid status. Every
+  visible score bit, selected mask, ID, count, and status matches the incumbent.
+- On the same clean `ee5996f` binary, canonical 8K score GPU falls
+  `1,794.656 -> 1,354.564 ms`, saving 440.093 ms or 24.52%. Every sparse chunk
+  wins: `350.727 -> 299.592`, `597.417 -> 451.226`, and
+  `846.513 -> 603.746 ms`.
+- Sampled wall falls `49,362.966 -> 48,769.398 ms`; ordinary wall falls
+  `50,759.389 -> 50,284.666 ms`, raising prefill from 161.39 to
+  162.91 token/s. The complete final-logit SHA-256 remains
+  `5289990e...d1ac`.
+- Raw profiles:
+  `target/profiles/dsv4-prefill-8k-indexer-tiled-f32-control-ee5996f.json` and
+  `target/profiles/dsv4-prefill-8k-indexer-tiled-f32-ee5996f.json`.
+
+Decision: default the exact local and endpoint win with rollback. Scoring is now
+1.355 seconds of the 8K profile; the 25.62-second routed stage, including 18.09
+seconds of BM16 IQ2 work, becomes the leading prefill target.
+
 ## 2026-08-07 - DeepSeek V4 Visible-Row Score Dispatch Default GO
 
 Status: packed Lightning scoring now dispatches only through the chunk's final

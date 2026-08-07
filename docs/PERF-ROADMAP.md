@@ -776,29 +776,41 @@ through unused 32K-to-1M request capacity. Rollback is
 `QWEN_DSV4_PACKED_INDEXER_VISIBLE_DISPATCH=0`. The remaining 1.788-second score
 producer stays open for a new arithmetic work unit.
 
+That new work unit now defaults on. An 8-query by 32-row F32 matrix tile stages
+each F16 K row once for eight neighboring queries while preserving F32 query,
+weight, and accumulation values. A nine-query, 48-row differential crosses both
+tile axes and preserves every visible score bit and selector result. Against the
+same clean `ee5996f` binary, score GPU falls
+`1,794.656 -> 1,354.564 ms`, or 24.52%; sampled and ordinary 8K wall save
+593.568 and 474.723 ms respectively, and complete logits remain bit-identical.
+Rollback is `QWEN_DSV4_PACKED_INDEXER_TILED_F32=0`. This closes the immediate
+F32 scorer work unit; its remaining 1.355-second subtotal no longer outranks the
+25.62-second routed stage.
+
 Force-ranked queue:
 
-1. **Lightning score production.** Scoring costs 1.788 seconds at 8K and grows
-   from 354 to 837 ms across the three sparse chunks. Revisit query/token tiling,
-   matrix execution, and vectorization against this isolated interval;
-   exact radix selection is only 47 ms and must not be fused into the target.
-2. **Indexer preparation with a changed work unit.** Preparation costs 1.886
+1. **Routed-expert work units.** Post-route GPU remains 25.62 seconds and BM16
+   accounts for 18.09 seconds. Scalar IQ2 row/panel retuning is closed; attack a
+   larger matrix or schedule unit, including a tensor/NAX execution pilot, rather
+   than another scalar axis.
+2. **Indexer preparation with a changed work unit.** Preparation costs 1.887
    seconds, but the F32 Q8 matrix candidate fails whole-request accounting.
    Reopen only for an exact-order shared-weight schedule or larger chunks where
    the measured endpoint ceiling materially changes.
-3. **Routed-expert work units.** Post-route GPU remains 25.59 seconds and BM16
-   accounts for about 18.07 seconds. Scalar IQ2 row/panel retuning is closed;
-   reopen only around a larger matrix/schedule unit, not another scalar axis.
-4. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
+3. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
    only a 2.04% optimistic ceiling on the 8K request. Do not pay a larger scratch
    allocation and new sparse/qualification surface for that alone. Reopen when
-   another measured N=4,096 mechanism lets the combined credible net benefit
-   clear the existing 2-3% gate after costs.
-5. **Far-context scoring and selection.** Keep the deployed cooperative scorer
-   and radix4 selector while prefill is the larger product deficit. Reopen exact
-   Lightning scheduling only for a structurally new design with a credible
-   >=0.50 ms terminal saving and <=0.05 ms shallow regression; do not auto-sweep
-   R4 or repeat the held R2 packet.
+   routed matrix execution or another measured N=4,096 mechanism lets the
+   combined credible net benefit clear the existing 2-3% gate after costs.
+4. **Further Lightning score production.** The exact tiled F32 scorer reduces
+   this interval to 1.355 seconds. Reopen around lower-precision tensor execution
+   only when its whole-request ceiling competes with routed-expert work; exact
+   radix selection remains only 47 ms and must not be folded into the claim.
+5. **Far-context scoring and selection.** Keep the tiled F32 scorer and radix4
+   selector while prefill is the larger product deficit. Reopen exact Lightning
+   scheduling only for a structurally new design with a credible >=0.50 ms
+   terminal saving and <=0.05 ms shallow regression; do not auto-sweep R4 or
+   repeat the held R2 packet.
 6. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable

@@ -1796,23 +1796,65 @@ impl PrefillSparseCsaScratch {
             query_count,
             "packed indexer Q",
         )?;
-        for local in 0..query_count {
-            let query = f32_row(
-                &index_queries,
-                local,
-                INDEXER_QUERY_WIDTH,
-                vec![INDEXER_HEAD_DIM as u64, INDEXER_HEAD_COUNT as u64],
-                "packed sparse index query row",
-            )?;
-            let token = query_offset + local;
-            let position = start_position
-                .checked_add(u32::try_from(token).map_err(|_| {
-                    DeepSeekV4MetalError::Invalid("packed sparse token offset exceeds u32".into())
+        #[cfg(feature = "dsv4-diagnostics")]
+        let batched_indexer_rope = packed_indexer_batched_rope_enabled();
+        #[cfg(not(feature = "dsv4-diagnostics"))]
+        let batched_indexer_rope = false;
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            static POLICY_LOGGED: std::sync::Once = std::sync::Once::new();
+            POLICY_LOGGED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: packed indexer query RoPE policy={}; rollback=QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE=0",
+                    if batched_indexer_rope {
+                        "batched"
+                    } else {
+                        "scalar"
+                    },
+                );
+            });
+        }
+        if batched_indexer_rope {
+            let first_position = start_position
+                .checked_add(u32::try_from(query_offset).map_err(|_| {
+                    DeepSeekV4MetalError::Invalid("packed sparse query offset exceeds u32".into())
                 })?)
                 .ok_or_else(|| {
-                    DeepSeekV4MetalError::Invalid("packed sparse position overflow".into())
+                    DeepSeekV4MetalError::Invalid(
+                        "packed sparse query start position overflow".into(),
+                    )
                 })?;
-            encode_ds4_rope_tail_adjacent_in_place(ctx, enc, &query, position, rope, false)?;
+            encode_ds4_rope_tail_adjacent_batch_in_place(
+                ctx,
+                enc,
+                &index_queries,
+                first_position,
+                query_count,
+                1,
+                rope,
+                false,
+            )?;
+        } else {
+            for local in 0..query_count {
+                let query = f32_row(
+                    &index_queries,
+                    local,
+                    INDEXER_QUERY_WIDTH,
+                    vec![INDEXER_HEAD_DIM as u64, INDEXER_HEAD_COUNT as u64],
+                    "packed sparse index query row",
+                )?;
+                let token = query_offset + local;
+                let position = start_position
+                    .checked_add(u32::try_from(token).map_err(|_| {
+                        DeepSeekV4MetalError::Invalid(
+                            "packed sparse token offset exceeds u32".into(),
+                        )
+                    })?)
+                    .ok_or_else(|| {
+                        DeepSeekV4MetalError::Invalid("packed sparse position overflow".into())
+                    })?;
+                encode_ds4_rope_tail_adjacent_in_place(ctx, enc, &query, position, rope, false)?;
+            }
         }
         encode_hadamard_128_rows_in_place(
             ctx,
@@ -3914,6 +3956,12 @@ crate::env_flag!(
 crate::env_flag!(
     default_on packed_selected_online_enabled,
     "QWEN_DSV4_PACKED_SELECTED_ONLINE"
+);
+
+#[cfg(feature = "dsv4-diagnostics")]
+crate::env_flag!(
+    default_off packed_indexer_batched_rope_enabled,
+    "QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE"
 );
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]

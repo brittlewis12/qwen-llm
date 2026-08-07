@@ -10301,6 +10301,7 @@ fn encode_scale_f32_in_place(
     Ok(())
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn encode_lightning_indexer_scores_f16(
     ctx: &MetalContext,
@@ -10332,6 +10333,38 @@ fn encode_lightning_indexer_scores_f16(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn encode_lightning_indexer_scores_f16_with_limit(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    head_weights: &MetalTensor,
+    keys: &MetalTensor,
+    visible_counts: &MetalTensor,
+    scores: &MetalTensor,
+    head_count: usize,
+    head_dim: usize,
+    row_capacity: usize,
+    max_dispatched_rows: usize,
+    query_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    encode_lightning_indexer_scores_f16_with_limit_and_policy(
+        ctx,
+        enc,
+        queries,
+        head_weights,
+        keys,
+        visible_counts,
+        scores,
+        head_count,
+        head_dim,
+        row_capacity,
+        max_dispatched_rows,
+        query_count,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn encode_lightning_indexer_scores_f16_with_policy(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -10346,15 +10379,54 @@ fn encode_lightning_indexer_scores_f16_with_policy(
     query_count: usize,
     force_scalar: bool,
 ) -> Result<(), DeepSeekV4MetalError> {
+    encode_lightning_indexer_scores_f16_with_limit_and_policy(
+        ctx,
+        enc,
+        queries,
+        head_weights,
+        keys,
+        visible_counts,
+        scores,
+        head_count,
+        head_dim,
+        row_capacity,
+        row_capacity,
+        query_count,
+        force_scalar,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_lightning_indexer_scores_f16_with_limit_and_policy(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    head_weights: &MetalTensor,
+    keys: &MetalTensor,
+    visible_counts: &MetalTensor,
+    scores: &MetalTensor,
+    head_count: usize,
+    head_dim: usize,
+    row_capacity: usize,
+    max_dispatched_rows: usize,
+    query_count: usize,
+    force_scalar: bool,
+) -> Result<(), DeepSeekV4MetalError> {
     for (name, value) in [
         ("indexer head count", head_count),
         ("indexer head dimension", head_dim),
         ("indexer row capacity", row_capacity),
+        ("indexer maximum dispatched rows", max_dispatched_rows),
         ("indexer query count", query_count),
     ] {
         if value == 0 || u32::try_from(value).is_err() {
             return invalid(format!("{name} must be nonzero and fit u32"));
         }
+    }
+    if max_dispatched_rows > row_capacity {
+        return invalid(format!(
+            "indexer maximum dispatched rows {max_dispatched_rows} exceed row capacity {row_capacity}"
+        ));
     }
     validate_lightning_indexer_score_offsets(head_count, head_dim, row_capacity, query_count)?;
     validate_f32(
@@ -10430,7 +10502,7 @@ fn encode_lightning_indexer_scores_f16_with_policy(
         enc.set_threadgroup_memory(1, 8 * 64 * std::mem::size_of::<f32>());
         enc.dispatch(
             MTLSize {
-                width: row_capacity.div_ceil(8),
+                width: max_dispatched_rows.div_ceil(8),
                 height: query_count,
                 depth: 1,
             },
@@ -10443,7 +10515,7 @@ fn encode_lightning_indexer_scores_f16_with_policy(
     } else {
         enc.dispatch(
             MTLSize {
-                width: row_capacity.div_ceil(256),
+                width: max_dispatched_rows.div_ceil(256),
                 height: query_count,
                 depth: 1,
             },
@@ -27147,7 +27219,8 @@ mod tests {
         };
         const HEADS: usize = 64;
         const DIM: usize = 128;
-        const ROWS: usize = 19;
+        const CAPACITY: usize = 24;
+        const MAX_VISIBLE: usize = 16;
         const QUERIES: usize = 4;
         const TOP_K: usize = 8;
 
@@ -27161,7 +27234,7 @@ mod tests {
             .map(|index| 0.003 + (index * 13 % 29) as f32 * 0.0004)
             .collect::<Vec<_>>();
         weight_values[3 * HEADS] = f32::NAN;
-        let key_bits = (0..ROWS * DIM)
+        let key_bits = (0..CAPACITY * DIM)
             .map(|index| {
                 let tag = (index * 23 + index / DIM * 19 + 7) % 257;
                 half::f16::from_f32((tag as f32 - 128.0) * 0.0009).to_bits()
@@ -27176,22 +27249,24 @@ mod tests {
         let keys = MetalTensor::from_bytes(
             &ctx,
             bytemuck::cast_slice(&key_bits),
-            vec![DIM as u64, ROWS as u64],
+            vec![DIM as u64, CAPACITY as u64],
             GgmlType::F16,
         )
         .unwrap();
         let visible_counts = offset_i32(
             &ctx,
-            &[ROWS as i32, 9, -1, ROWS as i32],
+            &[MAX_VISIBLE as i32, 9, -1, MAX_VISIBLE as i32],
             vec![QUERIES as u64],
         );
         let scalar_scores =
-            MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+            MetalTensor::zeros_f32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap();
         let cooperative_scores =
-            MetalTensor::zeros_f32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap();
+            MetalTensor::zeros_f32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap();
+        let bounded_scores =
+            MetalTensor::zeros_f32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap();
         let make_selection = || {
             (
-                MetalTensor::zeros_i32(&ctx, vec![ROWS as u64, QUERIES as u64]).unwrap(),
+                MetalTensor::zeros_i32(&ctx, vec![CAPACITY as u64, QUERIES as u64]).unwrap(),
                 MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap(),
                 MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap(),
                 MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap(),
@@ -27200,6 +27275,7 @@ mod tests {
         let (scalar_mask, scalar_ids, scalar_counts, scalar_status) = make_selection();
         let (cooperative_mask, cooperative_ids, cooperative_counts, cooperative_status) =
             make_selection();
+        let (bounded_mask, bounded_ids, bounded_counts, bounded_status) = make_selection();
 
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
@@ -27213,7 +27289,7 @@ mod tests {
             &scalar_scores,
             HEADS,
             DIM,
-            ROWS,
+            CAPACITY,
             QUERIES,
             true,
         )
@@ -27228,7 +27304,22 @@ mod tests {
             &cooperative_scores,
             HEADS,
             DIM,
-            ROWS,
+            CAPACITY,
+            QUERIES,
+        )
+        .unwrap();
+        encode_lightning_indexer_scores_f16_with_limit(
+            &ctx,
+            &encoder,
+            &queries,
+            &head_weights,
+            &keys,
+            &visible_counts,
+            &bounded_scores,
+            HEADS,
+            DIM,
+            CAPACITY,
+            MAX_VISIBLE,
             QUERIES,
         )
         .unwrap();
@@ -27242,8 +27333,8 @@ mod tests {
             &scalar_ids,
             &scalar_counts,
             &scalar_status,
-            ROWS,
-            ROWS,
+            CAPACITY,
+            MAX_VISIBLE,
             TOP_K,
             QUERIES,
         )
@@ -27258,8 +27349,24 @@ mod tests {
             &cooperative_ids,
             &cooperative_counts,
             &cooperative_status,
-            ROWS,
-            ROWS,
+            CAPACITY,
+            MAX_VISIBLE,
+            TOP_K,
+            QUERIES,
+        )
+        .unwrap();
+        encode_select_top_k_f32(
+            &ctx,
+            &encoder,
+            &bounded_scores,
+            &visible_counts,
+            &bounded_mask,
+            None,
+            &bounded_ids,
+            &bounded_counts,
+            &bounded_status,
+            CAPACITY,
+            MAX_VISIBLE,
             TOP_K,
             QUERIES,
         )
@@ -27275,6 +27382,7 @@ mod tests {
 
         let scalar = read_f32(&scalar_scores);
         let cooperative = read_f32(&cooperative_scores);
+        let bounded = read_f32(&bounded_scores);
         assert_eq!(
             cooperative
                 .iter()
@@ -27285,19 +27393,37 @@ mod tests {
                 .map(|value| value.to_bits())
                 .collect::<Vec<_>>()
         );
-        assert!(cooperative[..ROWS].iter().any(|value| *value != 0.0));
+        for query in 0..QUERIES {
+            let start = query * CAPACITY;
+            assert_eq!(
+                bounded[start..start + MAX_VISIBLE]
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                cooperative[start..start + MAX_VISIBLE]
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                bounded[start + MAX_VISIBLE..start + CAPACITY]
+                    .iter()
+                    .all(|value| *value == 0.0)
+            );
+        }
+        assert!(cooperative[..MAX_VISIBLE].iter().any(|value| *value != 0.0));
         assert!(
-            cooperative[ROWS + 9..2 * ROWS]
+            cooperative[CAPACITY + 9..2 * CAPACITY]
                 .iter()
                 .all(|value| *value == f32::NEG_INFINITY)
         );
         assert!(
-            cooperative[2 * ROWS..][..ROWS]
+            cooperative[2 * CAPACITY..3 * CAPACITY]
                 .iter()
                 .all(|value| *value == f32::NEG_INFINITY)
         );
         assert!(
-            cooperative[3 * ROWS..]
+            cooperative[3 * CAPACITY..]
                 .iter()
                 .all(|value| !value.is_finite())
         );
@@ -27305,6 +27431,10 @@ mod tests {
         assert_eq!(read_i32(&cooperative_ids), read_i32(&scalar_ids));
         assert_eq!(read_i32(&cooperative_counts), read_i32(&scalar_counts));
         assert_eq!(read_i32(&cooperative_status), read_i32(&scalar_status));
+        assert_eq!(read_i32(&bounded_mask), read_i32(&scalar_mask));
+        assert_eq!(read_i32(&bounded_ids), read_i32(&scalar_ids));
+        assert_eq!(read_i32(&bounded_counts), read_i32(&scalar_counts));
+        assert_eq!(read_i32(&bounded_status), read_i32(&scalar_status));
         assert_eq!(
             read_i32(&cooperative_counts),
             vec![TOP_K as i32, TOP_K as i32, 0, TOP_K as i32]

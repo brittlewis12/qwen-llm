@@ -2085,7 +2085,16 @@ impl PrefillSparseCsaScratch {
         rows: DeepSeekV4CsaRows<'_>,
         prepared: &PackedSparseCsaViews,
     ) -> Result<(), DeepSeekV4MetalError> {
-        encode_lightning_indexer_scores_f16(
+        let bounded = packed_indexer_visible_dispatch_enabled();
+        if bounded {
+            static POLICY_LOGGED: std::sync::Once = std::sync::Once::new();
+            POLICY_LOGGED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: packed indexer score dispatch is visibility-bounded; rollback=QWEN_DSV4_PACKED_INDEXER_VISIBLE_DISPATCH=0"
+                );
+            });
+        }
+        encode_lightning_indexer_scores_f16_with_limit(
             ctx,
             enc,
             &prepared.index_queries,
@@ -2096,6 +2105,11 @@ impl PrefillSparseCsaScratch {
             INDEXER_HEAD_COUNT,
             INDEXER_HEAD_DIM,
             rows.capacity_rows,
+            if bounded {
+                rows.count
+            } else {
+                rows.capacity_rows
+            },
             prepared.query_count,
         )
     }
@@ -4284,6 +4298,11 @@ crate::env_flag!(
 crate::env_flag!(
     default_on packed_indexer_batched_rope_enabled,
     "QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE"
+);
+
+crate::env_flag!(
+    default_off packed_indexer_visible_dispatch_enabled,
+    "QWEN_DSV4_PACKED_INDEXER_VISIBLE_DISPATCH"
 );
 
 crate::env_flag!(

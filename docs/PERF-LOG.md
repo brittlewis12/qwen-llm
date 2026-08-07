@@ -36,11 +36,18 @@ and cache representation are unchanged.
   formats. The ledger's already-invalid literal-total format remains identical
   between arms and receives no promotion credit. Candidate prefill walls are
   134.031/82.957/95.905 seconds.
+- A post-commit same-binary ledger pair records clean build `8b0436f` and
+  explicit `legacy`/`online` policy markers. The only policy difference moves
+  prefill `190,273.6 -> 132,579.0 ms`; output text, all 47 generated IDs, EOS,
+  request geometry, and memory remain identical. This authenticates the earlier
+  candidate logs without treating the large cache-sensitive pair as the primary
+  performance estimate.
 
 Decision: the mechanism clears the request gate by a wide margin and the full
 retained long-prompt discriminators show no output change. Default it with an
 exact rollback rather than retaining a hidden faster path. Move next to the
-separate 43,008-dispatch sparse-query RoPE seam.
+separate 43,008-dispatch sparse-query RoPE seam. CX session
+`019fda79-a2a3-7e01-82f9-6d031783f6e6` returns GO.
 
 ## 2026-08-06 - DeepSeek V4 Product-Depth CSA Lead / F16 Matrix KILL
 

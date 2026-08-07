@@ -205,6 +205,18 @@ row lane, then scans up to 640 rows again for output. Port the already-proven
 32-lane online-softmax dataflow to selected row IDs before revisiting scorer
 precision.
 
+That port now clears both mechanism and product gates. One 32-lane simdgroup
+stages each selected F16 row once and updates online-softmax state in cache
+order. CSA attention falls from 25.921 to 9.749 seconds on the clean 8K profile;
+ordinary wall falls 12.04%, from 122.704 to 107.927 seconds, and prefill rises
+from 66.76 to 75.90 token/s. Primitive error stays below `9.32e-10` maximum
+absolute and `9.04e-7` relative RMS. Although final logits change, all generated
+IDs and core values repeat across the 9,960-token ledger, 6,092-token structured
+retrieval, and 7,263-token multilingual retrieval. Structured and multilingual
+formats remain exact; the ledger's already-invalid literal-total format receives
+no credit. Default packed sparse CSA to online attention; rollback is
+`QWEN_DSV4_PACKED_SELECTED_ONLINE=0`.
+
 The scalar packed contract is now frozen. Revision-addressed official, vLLM,
 and DwarfStar sources pin BF16-before-amax semantics, four 32-value blocks,
 adjacent low/even and high/odd E2M1 nibbles, four UE8M0 scales, the
@@ -642,35 +654,29 @@ compressor-specific promotion does not imply a global Q8 matrix crossover.
 
 Force-ranked queue:
 
-1. **Online packed selected CSA attention.** CSA owns 20.87% of the complete 8K
-   wall and the scorer pilot removes only 1.101 seconds. Replace the width-640
-   row-parallel kernel with one 32-lane online-softmax simdgroup per query/head,
-   borrowing the promoted HCA row staging while preserving selected-ID order,
-   raw visibility, sinks, and output geometry. Price the primitive before a
-   full request; this is the largest open structural prefill hypothesis.
-2. **Batch sparse-indexer query RoPE.** Common preparation still emits one RoPE
+1. **Batch sparse-indexer query RoPE.** Common preparation still emits one RoPE
    dispatch per sparse query: 2,048 dispatches per CSA layer and 43,008 per
    full sparse chunk. Route the same tensor through the existing batched kernel
    and require the established numerical contract; do not bundle it with the
-   selected-attention result.
-3. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
+   promoted selected-attention result.
+2. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
    pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
    proof, not a binding floor.
-4. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
+3. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
    only a 2.04% optimistic ceiling on the 8K request. Do not pay a larger scratch
    allocation and new sparse/qualification surface for that alone. Reopen when
    another measured N=4,096 mechanism lets the combined credible net benefit
    clear the existing 2-3% gate after costs.
-5. **Far-context scoring and selection.** Keep the deployed cooperative scorer
+4. **Far-context scoring and selection.** Keep the deployed cooperative scorer
    and radix4 selector while prefill is the larger product deficit. Reopen exact
    Lightning scheduling only for a structurally new design with a credible
    >=0.50 ms terminal saving and <=0.05 ms shallow regression; do not auto-sweep
    R4 or repeat the held R2 packet.
-6. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+5. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-7. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+6. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

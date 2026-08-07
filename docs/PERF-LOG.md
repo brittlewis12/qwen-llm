@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Online Packed Selected Attention GO
+
+Status: online selected attention is now the default for packed sparse CSA.
+Set `QWEN_DSV4_PACKED_SELECTED_ONLINE=0` to restore the prior width-640
+two-pass kernel. Dense CSA, HCA, local attention, singleton decode, selection,
+and cache representation are unchanged.
+
+- The new kernel assigns one 32-lane simdgroup to each packed query/head. It
+  stages every raw or selected F16 row once and updates F32 online-softmax
+  state in cache-order ID order, replacing a width-640 mass image plus a second
+  value pass. Raw-ring ownership, visibility, denominator-only sinks, invalid-ID
+  handling, and output placement remain explicit.
+- At production width and positions 2,051/2,052/3,071, maximum absolute error
+  against the prior attention lineage is `9.32e-10`; relative RMS is at most
+  `9.04e-7`. Repeated candidate requests reproduce their own complete final
+  logits bit for bit.
+- On the clean 8K profile, CSA attention falls
+  `25,921.268 -> 9,748.681 ms`, saving 62.39%. Complete attention body falls
+  48.84%, pre-expert GPU falls 17.16%, and post-route GPU regresses 405.491 ms.
+- Ordinary request wall falls `122,704.460 -> 107,926.903 ms`, saving
+  14,777.556 ms or 12.04%. Prefill rises `66.76 -> 75.90 token/s`; sampled wall
+  independently saves 12.29%.
+- The final-logit vector changes, so promotion uses comparative product
+  evidence rather than bit identity to the incumbent. The 9,960-token ledger,
+  6,092-token structured retrieval, and 7,263-token multilingual retrieval all
+  reproduce every incumbent generated ID, core value, EOS, and continuation
+  length. Structured and multilingual outputs retain their exact requested
+  formats. The ledger's already-invalid literal-total format remains identical
+  between arms and receives no promotion credit. Candidate prefill walls are
+  134.031/82.957/95.905 seconds.
+
+Decision: the mechanism clears the request gate by a wide margin and the full
+retained long-prompt discriminators show no output change. Default it with an
+exact rollback rather than retaining a hidden faster path. Move next to the
+separate 43,008-dispatch sparse-query RoPE seam.
+
 ## 2026-08-06 - DeepSeek V4 Product-Depth CSA Lead / F16 Matrix KILL
 
 Status: remove the diagnostics-only packed F16 indexer matrix pilot. It proves

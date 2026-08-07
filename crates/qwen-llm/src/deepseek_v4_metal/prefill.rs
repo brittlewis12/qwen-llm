@@ -3911,9 +3911,8 @@ crate::env_flag!(
     "QWEN_DSV4_BATCHED_COMPRESSOR"
 );
 
-#[cfg(feature = "dsv4-diagnostics")]
 crate::env_flag!(
-    default_off packed_selected_online_enabled,
+    default_on packed_selected_online_enabled,
     "QWEN_DSV4_PACKED_SELECTED_ONLINE"
 );
 
@@ -6810,10 +6809,14 @@ fn encode_packed_selected_sink_attention_f16(
         "packed selected attention output",
     )?;
 
-    #[cfg(feature = "dsv4-diagnostics")]
     let online = packed_selected_online_enabled();
-    #[cfg(not(feature = "dsv4-diagnostics"))]
-    let online = false;
+    static POLICY_LOGGED: std::sync::Once = std::sync::Once::new();
+    POLICY_LOGGED.call_once(|| {
+        eprintln!(
+            "deepseek_v4: packed selected attention policy={}; rollback=QWEN_DSV4_PACKED_SELECTED_ONLINE=0",
+            if online { "online" } else { "legacy" },
+        );
+    });
     encode_cooperative_selected_sink_attention_f16(
         ctx,
         enc,

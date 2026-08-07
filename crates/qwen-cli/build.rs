@@ -27,12 +27,16 @@ fn git_path(manifest_dir: &Path, name: &str) -> Option<PathBuf> {
 
 fn watch_git_metadata(manifest_dir: &Path) {
     for name in ["HEAD", "index", "packed-refs", "refs", "reftable"] {
-        if let Some(path) = git_path(manifest_dir, name) {
+        if let Some(path) = git_path(manifest_dir, name)
+            && path.exists()
+        {
+            // Cargo treats a missing rerun path as changed on every invocation.
             println!("cargo:rerun-if-changed={}", path.display());
         }
     }
     if let Some(symbolic_ref) = git_text(manifest_dir, &["symbolic-ref", "-q", "HEAD"])
         && let Some(path) = git_path(manifest_dir, &symbolic_ref)
+        && path.exists()
     {
         // Watching the symbolic ref target is the critical part: committing on
         // a branch changes refs/heads/<branch>, while .git/HEAD stays unchanged.

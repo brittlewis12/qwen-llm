@@ -41,8 +41,10 @@ docs/PLAN.md        — architectural decisions
 Requires the Xcode command-line tools (for `xcrun metal` / `xcrun metallib`).
 
 ```sh
-cargo build --release -p qwen-cli
+cargo build --release -p qwen-cli --bin qwen
 ./target/release/qwen --info
+
+cargo build --release -p qwen-cli --bin qwen-bench
 ./target/release/qwen-bench -m ~/models/Qwen3.6-27B-Q4_K_M.gguf
 ```
 

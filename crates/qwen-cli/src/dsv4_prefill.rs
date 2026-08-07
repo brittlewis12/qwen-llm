@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use objc2_metal::MTLDevice;
+use qwen_llm::deepseek_v4::AttentionKind;
 use qwen_llm::deepseek_v4_metal::{
     DEEPSEEK_V4_PREFILL_MAX_TOKENS, DeepSeekV4MetalResidency, DeepSeekV4Session,
     PackedChunkProfile, PackedPostRouteStageKind, PackedPrefillStageKind,
@@ -101,9 +102,22 @@ struct Dsv4PrefillChunk {
     post_route_encoder_gap_ms: f64,
     post_route_encoder_overlap_ms: f64,
     pre_expert_stage_ms: BTreeMap<&'static str, f64>,
+    attention_kind_stage_ms: BTreeMap<&'static str, BTreeMap<&'static str, f64>>,
     post_route_stage_ms: BTreeMap<&'static str, f64>,
     bm16_stage_ms: BTreeMap<&'static str, f64>,
+    pre_expert_layers: Vec<Dsv4PrefillPreExpertLayer>,
     layers: Vec<Dsv4PrefillLayer>,
+}
+
+#[derive(Serialize)]
+struct Dsv4PrefillPreExpertLayer {
+    layer: usize,
+    attention_kind: &'static str,
+    command_gpu_ms: f64,
+    encoder_gap_ms: f64,
+    encoder_overlap_ms: f64,
+    raw_coverage: f64,
+    stage_ms: BTreeMap<&'static str, f64>,
 }
 
 #[derive(Serialize)]
@@ -138,6 +152,14 @@ fn pre_expert_stage_label(kind: PackedPrefillStageKind) -> &'static str {
     }
 }
 
+fn attention_kind_label(kind: AttentionKind) -> &'static str {
+    match kind {
+        AttentionKind::SlidingWindow => "sliding_window",
+        AttentionKind::CompressedSparse => "compressed_sparse",
+        AttentionKind::HeavilyCompressed => "heavily_compressed",
+    }
+}
+
 fn post_route_stage_label(kind: PackedPostRouteStageKind) -> &'static str {
     match kind {
         PackedPostRouteStageKind::RoutedExperts => "routed_experts",
@@ -161,6 +183,7 @@ fn summarize_chunk(
     token_count: usize,
     emit_logits: bool,
     wall_ms: f64,
+    attention_kinds: &[AttentionKind],
 ) -> Result<Dsv4PrefillChunk> {
     let PackedChunkProfile {
         pre_expert,
@@ -182,6 +205,10 @@ fn summarize_chunk(
             "sampled packed chunk profiler omitted layers"
         );
     }
+    ensure!(
+        attention_kinds.len() == pre_expert.command_gpu_ms.len(),
+        "packed chunk attention-kind and profiler layer counts differ"
+    );
 
     let pre_expert_gpu_ms = pre_expert.command_gpu_ms.iter().sum();
     let post_route_gpu_ms = post_route.command_gpu_ms.iter().sum();
@@ -192,20 +219,41 @@ fn summarize_chunk(
         .filter_map(|(metadata, &duration)| metadata.bm16.then_some(duration))
         .sum();
     let mut pre_expert_stage_ms = BTreeMap::new();
+    let mut attention_kind_stage_ms = BTreeMap::new();
     let mut post_route_stage_ms = BTreeMap::new();
     let mut bm16_stage_ms = BTreeMap::new();
     let mut pre_expert_encoder_gap_ms = 0.0;
     let mut pre_expert_encoder_overlap_ms = 0.0;
+    let mut pre_expert_layers = Vec::with_capacity(pre_expert.sampled_layers.len());
     for sampled in &pre_expert.sampled_layers {
+        let attention_kind = *attention_kinds
+            .get(sampled.layer)
+            .context("sampled pre-expert layer exceeds attention schedule")?;
+        let attention_kind = attention_kind_label(attention_kind);
+        let mut layer_stages = BTreeMap::new();
         pre_expert_encoder_gap_ms += sampled.encoder_gap_ms_scaled;
         pre_expert_encoder_overlap_ms += sampled.encoder_overlap_ms_scaled;
         for stage in &sampled.stages {
+            let label = pre_expert_stage_label(stage.kind);
+            add_stage(&mut layer_stages, label, stage.duration_ms_scaled);
+            add_stage(&mut pre_expert_stage_ms, label, stage.duration_ms_scaled);
             add_stage(
-                &mut pre_expert_stage_ms,
-                pre_expert_stage_label(stage.kind),
+                attention_kind_stage_ms
+                    .entry(attention_kind)
+                    .or_insert_with(BTreeMap::new),
+                label,
                 stage.duration_ms_scaled,
             );
         }
+        pre_expert_layers.push(Dsv4PrefillPreExpertLayer {
+            layer: sampled.layer,
+            attention_kind,
+            command_gpu_ms: sampled.command_gpu_ms,
+            encoder_gap_ms: sampled.encoder_gap_ms_scaled,
+            encoder_overlap_ms: sampled.encoder_overlap_ms_scaled,
+            raw_coverage: sampled.raw_coverage_assuming_ns,
+            stage_ms: layer_stages,
+        });
     }
 
     let mut post_route_encoder_gap_ms = 0.0;
@@ -291,8 +339,10 @@ fn summarize_chunk(
         post_route_encoder_gap_ms,
         post_route_encoder_overlap_ms,
         pre_expert_stage_ms,
+        attention_kind_stage_ms,
         post_route_stage_ms,
         bm16_stage_ms,
+        pre_expert_layers,
         layers,
     })
 }
@@ -425,6 +475,7 @@ fn execute_profiled_request(
     tokens: &[u32],
     chunk_tokens: usize,
     ordinary_reference_wall_ms: f64,
+    attention_kinds: &[AttentionKind],
 ) -> Result<(Dsv4PrefillRun, Vec<u32>)> {
     let current = residency
         .take()
@@ -448,6 +499,7 @@ fn execute_profiled_request(
             chunk.len(),
             emit_logits,
             chunk_started.elapsed().as_secs_f64() * 1e3,
+            attention_kinds,
         )?);
     }
     let wall_ms = request_started.elapsed().as_secs_f64() * 1e3;
@@ -478,6 +530,7 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
     let ctx = MetalContext::new().context("create Metal context")?;
     let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, tokens.len())
         .context("plan DeepSeek V4 prefill profile")?;
+    let attention_kinds = plan.config().attention_kinds.clone();
     let admitted = plan
         .admit(ctx.memory_signals())
         .context("admit DeepSeek V4 prefill profile")?;
@@ -518,6 +571,7 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
             &tokens,
             args.chunk_tokens,
             ordinary_reference_wall_ms,
+            &attention_kinds,
         )?;
         ensure!(
             reference_logits.as_ref() == Some(&logits),
@@ -526,7 +580,7 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
         samples.push(run);
     }
     let report = Dsv4PrefillReport {
-        schema_version: 2,
+        schema_version: 3,
         build,
         model: args.model.display().to_string(),
         device: ctx.device.name().to_string(),

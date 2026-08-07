@@ -4072,6 +4072,136 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_matrix(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn encode_packed_grouped_mapped_iq2_xs_pair_swiglu_f32_mm64x32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_bank: &MetalTensor,
+    up_bank: &MetalTensor,
+    input: &MetalTensor,
+    source_rows: &MetalTensor,
+    destination_slots: &MetalTensor,
+    plan: &PackedGroupedExpertPlan,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    expert_count: usize,
+    top_k: usize,
+    n_tokens: usize,
+    source_count: usize,
+    destination_count: usize,
+    clamp: f32,
+) -> Result<(), DeepSeekV4MetalError> {
+    const THREADGROUP_BYTES: usize = 20_480;
+    const LABEL: &str = "packed grouped mapped IQ2_XS pair SwiGLU MM64x32";
+    require_serial(enc, LABEL)?;
+    if !n_in.is_multiple_of(256)
+        || !n_out.is_multiple_of(64)
+        || expert_count != MOE_EXPERT_COUNT
+        || top_k != MOE_TOP_K
+        || source_count == 0
+        || destination_count == 0
+        || gate_bank.dtype != GgmlType::IQ2_XS
+        || up_bank.dtype != GgmlType::IQ2_XS
+        || !clamp.is_finite()
+        || clamp <= 0.0
+    {
+        return invalid(format!("{LABEL} has invalid geometry or storage"));
+    }
+    if ctx.device.maxThreadgroupMemoryLength() < THREADGROUP_BYTES {
+        return invalid(format!(
+            "{LABEL} requires {THREADGROUP_BYTES} bytes of threadgroup memory"
+        ));
+    }
+    validate_expert_bank(gate_bank, n_in, n_out, expert_count, LABEL)?;
+    validate_expert_bank(up_bank, n_in, n_out, expert_count, LABEL)?;
+    validate_f32(input, &[n_in as u64, source_count as u64], false, LABEL)?;
+    let map_count = checked_mul(n_tokens, top_k, LABEL)?;
+    validate_i32(source_rows, &[map_count as u64], false, LABEL)?;
+    validate_i32(destination_slots, &[map_count as u64], false, LABEL)?;
+    let flat_output_shape = [n_out as u64, destination_count as u64];
+    let routed_output_shape = [n_out as u64, top_k as u64, n_tokens as u64];
+    if output.shape.as_slice() == flat_output_shape {
+        validate_f32(output, &flat_output_shape, true, LABEL)?;
+    } else if destination_count == map_count && output.shape.as_slice() == routed_output_shape {
+        validate_f32(output, &routed_output_shape, true, LABEL)?;
+    } else {
+        return invalid(format!("{LABEL} output shape is invalid"));
+    }
+    let output = output.view_subrange(0, flat_output_shape.to_vec());
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+        n_expert: u32,
+        map_count: u32,
+        source_count: u32,
+        destination_count: u32,
+        clamp: f32,
+    }
+    let row_bytes = checked_mul(n_in / 256, 74, LABEL)?;
+    let pso =
+        ctx.pipeline("kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_pair_swiglu_f32_mm64x32")?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
+        return invalid(format!("{LABEL} requires four SIMD groups"));
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: u32::try_from(n_out).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{LABEL} output exceeds u32"))
+            })?,
+            k: u32::try_from(n_in)
+                .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{LABEL} input exceeds u32")))?,
+            nb01: u32::try_from(row_bytes).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{LABEL} row bytes exceed u32"))
+            })?,
+            stride_b: u32::try_from(n_in).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{LABEL} stride exceeds u32"))
+            })?,
+            n_expert: u32::try_from(expert_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{LABEL} experts exceed u32"))
+            })?,
+            map_count: u32::try_from(map_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{LABEL} map count exceeds u32"))
+            })?,
+            source_count: u32::try_from(source_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{LABEL} source count exceeds u32"))
+            })?,
+            destination_count: u32::try_from(destination_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{LABEL} destination count exceeds u32"))
+            })?,
+            clamp,
+        },
+    );
+    enc.set_tensor(1, gate_bank);
+    enc.set_tensor(2, up_bank);
+    enc.set_tensor(3, input);
+    enc.set_tensor(4, source_rows);
+    enc.set_tensor(5, destination_slots);
+    plan.bind(enc, 6);
+    enc.set_tensor(7, &output);
+    enc.set_threadgroup_memory(0, THREADGROUP_BYTES);
+    enc.dispatch(
+        MTLSize {
+            width: plan.dispatch_tiles,
+            height: n_out / 64,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -4094,6 +4224,27 @@ fn encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
     clamp: f32,
     work_unit: PackedIq2MatrixWorkUnit,
 ) -> Result<(), DeepSeekV4MetalError> {
+    if work_unit == PackedIq2MatrixWorkUnit::Mm64x32 && packed_iq2_pair_swiglu_enabled() {
+        return encode_packed_grouped_mapped_iq2_xs_pair_swiglu_f32_mm64x32(
+            ctx,
+            enc,
+            gate_bank,
+            up_bank,
+            input,
+            source_rows,
+            destination_slots,
+            plan,
+            output,
+            n_in,
+            n_out,
+            expert_count,
+            top_k,
+            n_tokens,
+            source_count,
+            destination_count,
+            clamp,
+        );
+    }
     for (bank, projection) in [(gate_bank, gate), (up_bank, up)] {
         encode_packed_grouped_mapped_iq2_xs_f32_matrix(
             ctx,
@@ -4636,6 +4787,18 @@ fn packed_iq2_mm64x32_candidate_supported(ctx: &MetalContext) -> bool {
     projection.threadExecutionWidth() == 32 && projection.maxTotalThreadsPerThreadgroup() >= 128
 }
 
+fn packed_iq2_pair_swiglu_candidate_supported(ctx: &MetalContext) -> bool {
+    if ctx.device.maxThreadgroupMemoryLength() < 20_480 {
+        return false;
+    }
+    let Ok(pair) =
+        ctx.pipeline("kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_pair_swiglu_f32_mm64x32")
+    else {
+        return false;
+    };
+    pair.threadExecutionWidth() == 32 && pair.maxTotalThreadsPerThreadgroup() >= 128
+}
+
 crate::env_flag!(
     default_on packed_grouped_iq2_mma16_enabled,
     "QWEN_DSV4_PACKED_BM16_IQ2"
@@ -4644,6 +4807,11 @@ crate::env_flag!(
 crate::env_flag!(
     default_on packed_iq2_mm64x32_enabled,
     "QWEN_DSV4_PACKED_IQ2_MM64X32"
+);
+
+crate::env_flag!(
+    default_off packed_iq2_pair_swiglu_enabled,
+    "QWEN_DSV4_PACKED_IQ2_PAIR_SWIGLU"
 );
 
 crate::env_flag!(
@@ -4802,6 +4970,11 @@ fn packed_grouped_expert_policy(
     } else {
         packed_grouped_iq2_mma16_candidate_supported(ctx)
     };
+    if packed_iq2_pair_swiglu_enabled()
+        && (!wide_iq2 || !packed_iq2_pair_swiglu_candidate_supported(ctx))
+    {
+        return invalid("paired IQ2 gate/up requires the supported 64x32 matrix work unit");
+    }
     if packed_grouped_iq2_mma16_enabled()
         && enabled
         && packed_grouped_iq2_mma16_qualified(n_tokens)
@@ -6995,16 +7168,19 @@ impl PrefillMoeScratch {
                 )?;
                 #[cfg(feature = "dsv4-diagnostics")]
                 if enc.splits_bm16_stages() {
-                    for (bank, projection) in [(gate_bank, &gate), (up_bank, &up)] {
-                        encode_packed_grouped_mapped_iq2_xs_f32_matrix(
+                    if work_unit == PackedIq2MatrixWorkUnit::Mm64x32
+                        && packed_iq2_pair_swiglu_enabled()
+                    {
+                        encode_packed_grouped_mapped_iq2_xs_pair_swiglu_f32_mm64x32(
                             ctx,
                             enc,
-                            bank,
+                            gate_bank,
+                            up_bank,
                             normalized_input,
                             &rows,
                             &slots,
                             matrix_plan,
-                            projection,
+                            &grouped_inner,
                             DEEPSEEK_V4_HIDDEN_SIZE,
                             MOE_FFN_SIZE,
                             MOE_EXPERT_COUNT,
@@ -7012,24 +7188,47 @@ impl PrefillMoeScratch {
                             n_tokens,
                             n_tokens,
                             route_count,
-                            work_unit,
+                            expert_clamp,
                         )?;
+                        enc.boundary(PackedPostRouteStageKind::RoutedSwiGlu)?;
+                        enc.boundary(PackedPostRouteStageKind::RoutedDown)?;
+                    } else {
+                        for (bank, projection) in [(gate_bank, &gate), (up_bank, &up)] {
+                            encode_packed_grouped_mapped_iq2_xs_f32_matrix(
+                                ctx,
+                                enc,
+                                bank,
+                                normalized_input,
+                                &rows,
+                                &slots,
+                                matrix_plan,
+                                projection,
+                                DEEPSEEK_V4_HIDDEN_SIZE,
+                                MOE_FFN_SIZE,
+                                MOE_EXPERT_COUNT,
+                                MOE_TOP_K,
+                                n_tokens,
+                                n_tokens,
+                                route_count,
+                                work_unit,
+                            )?;
+                        }
+                        enc.boundary(PackedPostRouteStageKind::RoutedSwiGlu)?;
+                        let projected_elements = checked_mul(
+                            MOE_FFN_SIZE,
+                            route_count,
+                            "packed BM16 IQ2 projected elements",
+                        )?;
+                        encode_ds4_clamped_swiglu(
+                            ctx,
+                            enc,
+                            &gate.view_subrange(0, vec![projected_elements as u64]),
+                            &up.view_subrange(0, vec![projected_elements as u64]),
+                            &grouped_inner.view_subrange(0, vec![projected_elements as u64]),
+                            expert_clamp,
+                        )?;
+                        enc.boundary(PackedPostRouteStageKind::RoutedDown)?;
                     }
-                    enc.boundary(PackedPostRouteStageKind::RoutedSwiGlu)?;
-                    let projected_elements = checked_mul(
-                        MOE_FFN_SIZE,
-                        route_count,
-                        "packed BM16 IQ2 projected elements",
-                    )?;
-                    encode_ds4_clamped_swiglu(
-                        ctx,
-                        enc,
-                        &gate.view_subrange(0, vec![projected_elements as u64]),
-                        &up.view_subrange(0, vec![projected_elements as u64]),
-                        &grouped_inner.view_subrange(0, vec![projected_elements as u64]),
-                        expert_clamp,
-                    )?;
-                    enc.boundary(PackedPostRouteStageKind::RoutedDown)?;
                 } else {
                     encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
                         ctx,
@@ -8368,6 +8567,11 @@ impl DeepSeekV4Session {
                     eprintln!(
                         "deepseek_v4: 64x32 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_IQ2_MM64X32=0"
                     );
+                    if packed_iq2_pair_swiglu_enabled() {
+                        eprintln!(
+                            "deepseek_v4: paired IQ2 gate/up/SwiGLU active; rollback=QWEN_DSV4_PACKED_IQ2_PAIR_SWIGLU=0"
+                        );
+                    }
                 } else {
                     eprintln!(
                         "deepseek_v4: BM16 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_BM16_IQ2=0"
@@ -12293,6 +12497,8 @@ mod tests {
             let repeat_gate = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 101.0);
             let repeat_up = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 103.0);
             let repeat_inner = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 107.0);
+            let pair_inner =
+                grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 109.0);
 
             let _trace = crate::metal::kernel_trace_begin();
             let command = ctx.queue.commandBuffer().unwrap();
@@ -12431,6 +12637,26 @@ mod tests {
                 )
                 .unwrap();
             }
+            encode_packed_grouped_mapped_iq2_xs_pair_swiglu_f32_mm64x32(
+                &ctx,
+                &encoder,
+                &gate_bank,
+                &up_bank,
+                &input,
+                &source_rows,
+                &destination_slots,
+                &grouped_plan,
+                &pair_inner,
+                H,
+                F,
+                E,
+                K,
+                n_tokens,
+                n_tokens,
+                route_count,
+                CLAMP,
+            )
+            .unwrap();
             encoder.end();
             command.commit();
             command.waitUntilCompleted();
@@ -12442,7 +12668,7 @@ mod tests {
             let trace = crate::metal::kernel_trace_take_delta();
             assert_eq!(trace.encoders, 1);
             assert_eq!(trace.concurrent_encoders, 0);
-            assert_eq!(trace.dispatches, (schedule.len() * 5 + 7) as u64);
+            assert_eq!(trace.dispatches, (schedule.len() * 5 + 8) as u64);
 
             let read = |tensor: &MetalTensor, label| host_read_f32(tensor, label).unwrap();
             let control = read(&control_inner, "IQ2 MMA control inner");
@@ -12452,6 +12678,7 @@ mod tests {
             let candidate_up_values = read(&candidate_up, "IQ2 MMA candidate up");
             let candidate = read(&candidate_inner, "IQ2 MMA candidate inner");
             let wide = read(&repeat_inner, "IQ2 MM64x32 inner");
+            let pair = read(&pair_inner, "IQ2 pair SwiGLU inner");
             let gate_result = metrics(&control_gate_values, &candidate_gate_values);
             let up_result = metrics(&control_up_values, &candidate_up_values);
             let result = metrics(&control, &candidate);
@@ -12504,6 +12731,11 @@ mod tests {
                 "N={n_tokens} MM64x32 inner"
             );
             assert_eq!(
+                wide.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                pair.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                "N={n_tokens} paired MM64x32 inner"
+            );
+            assert_eq!(
                 candidate_gate_values
                     .iter()
                     .map(|value| value.to_bits())
@@ -12535,6 +12767,7 @@ mod tests {
                 ("IQ2 MM64x32 gate", &repeat_gate),
                 ("IQ2 MM64x32 up", &repeat_up),
                 ("IQ2 MM64x32 inner", &repeat_inner),
+                ("IQ2 pair SwiGLU inner", &pair_inner),
             ] {
                 assert_grouped_guards(label, tensor);
             }
@@ -12640,6 +12873,8 @@ mod tests {
             let repeat_gate = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 149.0);
             let repeat_up = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 151.0);
             let repeat_inner = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 157.0);
+            let pair_inner =
+                grouped_guarded_f32(&ctx, vec![F as u64, K as u64, n_tokens as u64], 163.0);
 
             let _trace = crate::metal::kernel_trace_begin();
             let command = ctx.queue.commandBuffer().unwrap();
@@ -12778,6 +13013,26 @@ mod tests {
                 )
                 .unwrap();
             }
+            encode_packed_grouped_mapped_iq2_xs_pair_swiglu_f32_mm64x32(
+                &ctx,
+                &encoder,
+                &gate_bank,
+                &up_bank,
+                &input,
+                &source_rows,
+                &destination_slots,
+                &grouped_plan,
+                &pair_inner,
+                H,
+                F,
+                E,
+                K,
+                n_tokens,
+                n_tokens,
+                route_count,
+                CLAMP,
+            )
+            .unwrap();
             encoder.end();
             command.commit();
             command.waitUntilCompleted();
@@ -12789,7 +13044,7 @@ mod tests {
             let trace = crate::metal::kernel_trace_take_delta();
             assert_eq!(trace.encoders, 1);
             assert_eq!(trace.concurrent_encoders, 0);
-            assert_eq!(trace.dispatches, (schedule.len() * 5 + 7) as u64);
+            assert_eq!(trace.dispatches, (schedule.len() * 5 + 8) as u64);
 
             let control_gate_values =
                 host_read_f32(&control_gate, "production-K scalar gate").unwrap();
@@ -12800,6 +13055,7 @@ mod tests {
             let control = host_read_f32(&control_inner, "production-K scalar inner").unwrap();
             let candidate = host_read_f32(&candidate_inner, "production-K BM16 inner").unwrap();
             let wide = host_read_f32(&repeat_inner, "production-K MM64x32 inner").unwrap();
+            let pair = host_read_f32(&pair_inner, "production-K pair SwiGLU inner").unwrap();
             let result = metrics(&control, &candidate);
             eprintln!(
                 "deepseek_v4 iq2_mma16_production_k n={n_tokens} cosine={:.9} rel_rms={:.9} max_abs={:.9}",
@@ -12851,6 +13107,11 @@ mod tests {
                 "N={n_tokens} production-K MM64x32 inner"
             );
             assert_eq!(
+                wide.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                pair.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                "N={n_tokens} production-K paired MM64x32 inner"
+            );
+            assert_eq!(
                 candidate_gate_values
                     .iter()
                     .map(|value| value.to_bits())
@@ -12884,6 +13145,7 @@ mod tests {
                 ("production-K MM64x32 gate", &repeat_gate),
                 ("production-K MM64x32 up", &repeat_up),
                 ("production-K MM64x32 inner", &repeat_inner),
+                ("production-K pair SwiGLU inner", &pair_inner),
             ] {
                 assert_grouped_guards(label, tensor);
             }

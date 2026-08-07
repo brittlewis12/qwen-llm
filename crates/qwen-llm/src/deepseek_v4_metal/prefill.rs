@@ -4265,6 +4265,11 @@ crate::env_flag!(
     "QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT"
 );
 
+crate::env_flag!(
+    default_off packed_grouped_iq3_enabled,
+    "QWEN_DSV4_PACKED_GROUPED_IQ3"
+);
+
 fn packed_grouped_iq3_candidate_supported(ctx: &MetalContext) -> bool {
     if !crate::metal::matmat_iq3_xxs_mm_is_enabled()
         || ctx.device.maxThreadgroupMemoryLength() < 8_192
@@ -7635,7 +7640,8 @@ impl DeepSeekV4Session {
         } else {
             route_policy
         };
-        let expert_policy = if route_policy == PackedRoutePolicy::GpuCompact
+        let expert_policy = if (route_policy == PackedRoutePolicy::GpuCompact
+            || packed_grouped_iq3_enabled())
             && packed_grouped_iq3_candidate_supported(ctx)
         {
             expert_policy.with_iq3_target()
@@ -7796,6 +7802,20 @@ impl DeepSeekV4Session {
             if eligible_layers > 0 && !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "deepseek_v4: BM16 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_BM16_IQ2=0"
+                );
+            }
+        }
+        if expert_policy.uses_iq3_target() {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let rollback = if route_policy == PackedRoutePolicy::GpuCompact {
+                    "QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT=0"
+                } else {
+                    "QWEN_DSV4_PACKED_GROUPED_IQ3=0"
+                };
+                eprintln!(
+                    "deepseek_v4: grouped all-IQ3 packed experts active for full N={n_tokens} chunks; rollback={rollback}"
                 );
             }
         }

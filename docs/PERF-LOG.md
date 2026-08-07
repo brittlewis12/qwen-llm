@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Wide F32 Q8 Matrix Default GO
+
+Status: qualified packed Q-B and output A/B projections now share each F32
+16x64 weight tile across 128 tokens. Set either
+`QWEN_DSV4_PACKED_Q8_QB=f32_matrix` or
+`QWEN_DSV4_PACKED_Q8_OUTPUT=f32_matrix` to restore the prior 32-token work
+unit independently.
+
+- Four SIMDgroups retain the accepted R2C4K64 operands, K traversal, F32
+  accumulation, and output ownership while loading and dequantizing each weight
+  tile once rather than four times. K=128 and K=4,096 differentials preserve
+  every output bit, repeat exactly, and retain output guards.
+- On the same clean `cdb6428` binary at N=4,096, the composed candidate reduces
+  before-attention GPU `6,992.796 -> 6,852.850 ms`, output-projection GPU
+  `5,526.999 -> 5,320.012 ms`, and total pre-expert GPU
+  `21,295.579 -> 20,920.218 ms`.
+- The repeat ordinary 8K reading is `39,004.478 -> 38,687.479 ms`, or
+  `210.03 -> 211.75 token/s`; its sampled reading is
+  `38,538.823 -> 38,424.765 ms`. These noisy endpoint observations are not
+  promotion authority. Complete logits retain SHA-256 `5289990e...d1ac`.
+- The first composed ordinary pass was a disclosed 44,548.714 ms outlier. Its
+  sampled pre-expert interval was still 20,869.141 ms, and the repeat restored
+  ordinary wall while reproducing the stage reduction.
+- At N=2,048 a cross-binary `76eebc2` control and `cdb6428` candidate retain
+  the same execution outside this default-off pilot. Before-attention GPU saves
+  98.578 ms, output-projection GPU saves 198.220 ms, and pre-expert GPU saves
+  299.302 ms. The complete final-logit hash remains unchanged.
+
+Decision: default the work unit that is bit-exact to the accepted R2C4K64
+schedule for the already qualified N=2,048 and N=4,096 current-asset profiles.
+Keep the prior F32 matrix policies as independent rollback controls; do not
+infer support for partial chunks or unqualified devices and assets.
+
 ## 2026-08-07 - DeepSeek V4 4,096-Token Packed Prefill Default GO
 
 Status: ordinary packed prefill now uses chunks of up to 4,096 tokens.

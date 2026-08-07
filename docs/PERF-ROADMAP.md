@@ -807,21 +807,36 @@ padding reduction. On the same clean `76eebc2` binary, N=4,096 reduces canonical
 remain bit-identical. Default N=4,096 with
 `QWEN_DSV4_PREFILL_CHUNK_TOKENS=2048` as the prior-policy override.
 
-The 4K result also closes capacity growth as the mechanism: pre-expert GPU
-increases by 1.746 seconds even though post-route and host residual fall by
-1.493 and 1.351 seconds. The current 38.49-second profile is now led by 21.24
-seconds pre-expert, split into 6.96 seconds before attention, 6.94 seconds in
-the attention body, 5.57 seconds in output projections, and 1.77 seconds after
-attention. Post-route is 14.16 seconds: the IQ2 cohort owns 7.15 seconds and the
-16 all-IQ3 routed layers own 3.67 seconds; mixed-quant layers 26 and 42 own
-another 2.23 seconds. Host residual is 3.09 seconds.
+The first N=4,096 pre-expert work-unit change also clears. Four SIMDgroups now
+share each accepted F32 16x64 Q8 weight tile across 128 tokens for Q-B and
+output A/B while preserving every result bit. Against a same-binary control,
+before-attention GPU falls `6,992.796 -> 6,852.850 ms`, output projections fall
+`5,526.999 -> 5,320.012 ms`, and pre-expert GPU falls
+`21,295.579 -> 20,920.218 ms`. The repeat ordinary reading is
+`39,004.478 -> 38,687.479 ms`, or `210.03 -> 211.75 token/s`; the first
+candidate ordinary pass was a disclosed outlier, so endpoint wall is not
+promotion authority. Both sampled candidate passes reproduce the GPU-stage
+reduction. A cross-binary N=2,048 check saves 299.302 ms pre-expert with no
+other active path change. Default the R2C4K64-bit-identical work unit with the
+prior `f32_matrix` policies retained as independent Q-B and output rollback
+controls.
+
+The 4K result still closes capacity growth as the mechanism: its earlier
+pre-expert GPU increase remains despite post-route and host savings. The current
+38.42-second sampled profile is led by 20.92 seconds pre-expert, split into 6.85
+seconds before attention, 7.00 seconds in the attention body, 5.32 seconds in
+output projections, and 1.75 seconds after attention. The attention body is
+3.40 seconds core and 3.56 seconds sparse indexer/selection, of which 1.91
+seconds is preparation and 1.60 seconds is scoring; inverse RoPE is the
+remaining 0.05 seconds. Post-route is 14.01 seconds.
 
 Force-ranked queue:
 
-1. **Pre-expert work units.** The 21.24-second leader is split across three
-   independent multi-second families. Attribute the remaining projection and
-   attention kernels at N=4,096, then choose a matrix/dataflow change that can
-   remove several seconds. Do not substitute another chunk-cap increase.
+1. **Pre-expert work units.** The 20.92-second leader is split across three
+   independent multi-second families. The bit-identical 128-token Q8 reuse axis
+   saves only 0.38 seconds, so do not continue widening the same F32 tile.
+   Price a changed projection dataflow or an attention/indexer fusion that can
+   remove several seconds; do not substitute another chunk-cap increase.
 2. **Further IQ2 execution.** The exact wide cohort is 7.15 seconds, with
    3.99 seconds in gate/up and 1.96 seconds in down. Half-staged operands or a
    paired gate/up boundary require explicit quality authority and must project a

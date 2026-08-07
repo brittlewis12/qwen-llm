@@ -1768,7 +1768,7 @@ fn resolve_packed_q8_matrix_policy(
     profile_qualified: bool,
 ) -> Q8PrecisionProjection {
     match policy {
-        PackedQ8MatrixPolicy::Auto if profile_qualified => Q8PrecisionProjection::F32Matrix,
+        PackedQ8MatrixPolicy::Auto if profile_qualified => Q8PrecisionProjection::WideF32Matrix,
         PackedQ8MatrixPolicy::Auto | PackedQ8MatrixPolicy::Exact => Q8PrecisionProjection::Exact,
         PackedQ8MatrixPolicy::F32Matrix => Q8PrecisionProjection::F32Matrix,
         PackedQ8MatrixPolicy::WideF32Matrix => Q8PrecisionProjection::WideF32Matrix,
@@ -8104,8 +8104,12 @@ impl DeepSeekV4Session {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let rollback = match q_b_projection {
+                    Q8PrecisionProjection::WideF32Matrix => "f32_matrix",
+                    _ => "exact",
+                };
                 eprintln!(
-                    "deepseek_v4: Q8 Q-B matrix policy={} active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB=exact",
+                    "deepseek_v4: Q8 Q-B matrix policy={} active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB={rollback}",
                     q_b_projection.label(),
                 );
             }
@@ -8114,8 +8118,12 @@ impl DeepSeekV4Session {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let rollback = match output_projection {
+                    Q8PrecisionProjection::WideF32Matrix => "f32_matrix",
+                    _ => "exact",
+                };
                 eprintln!(
-                    "deepseek_v4: Q8 output A/B matrix policy={} active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT=exact",
+                    "deepseek_v4: Q8 output A/B matrix policy={} active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT={rollback}",
                     output_projection.label(),
                 );
             }
@@ -10065,7 +10073,7 @@ mod tests {
         );
         assert_eq!(
             resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true),
-            Q8PrecisionProjection::F32Matrix
+            Q8PrecisionProjection::WideF32Matrix
         );
         assert_eq!(
             resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, false),
@@ -10119,7 +10127,7 @@ mod tests {
         assert!(parse_packed_q8_output_policy(Some("half_matrix")).is_err());
         assert_eq!(
             resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true),
-            Q8PrecisionProjection::F32Matrix
+            Q8PrecisionProjection::WideF32Matrix
         );
         assert_eq!(
             resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, false),

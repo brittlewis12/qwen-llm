@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Qualified Tail Scheduling GO
+
+Status: the default 4K prefill scheduler now emits complete 2K work units
+before the final remainder. Explicit non-4K chunk overrides preserve their
+fixed-size behavior.
+
+- Greedy 4K chunking turned a 2,385-token prompt into one unqualified chunk,
+  bypassing the promoted 2K Q8 compressor, Q-B/output, IQ2, and grouped-IQ3
+  paths. This regressed the maintained prompt from about 110 token/s to
+  70.98 token/s despite improving exact 4K/8K cells.
+- The scheduler now emits `4,096 -> 2,048 -> remainder`. The 2,385-token
+  prompt therefore runs as `2,048 + 337`; the 6,642-token prompt runs as
+  `4,096 + 2,048 + 498`. Ordinary, resident, snapshot-prefix, and restored
+  suffix execution share the same planner.
+- On clean `eb3c22d`, the 2,385-token CLI prompt falls
+  `33,600.6 -> 14,875.7 ms`, or `70.98 -> 160.33 token/s`. The complete output
+  remains coherent and terminates at EOS.
+- The 6,642-token prompt falls `55,437.7 -> 36,997.7 ms`, raising prefill
+  `119.81 -> 179.52 token/s`. This comparison spans the indexer promotion and
+  scheduler commits but retains the same promoted 4K indexer path; the changed
+  work is the replacement of the 2,546-token fallback by `2,048 + 498`.
+- Chunk schedule changes may change reduction lineage and greedy text. Both
+  named continuations remain coherent summaries; no bit-identity claim is made.
+
+Decision: retain hierarchical 4K/2K/tail scheduling. Exact-full-chunk
+benchmarks remain useful kernel cells but may not stand in for arbitrary prompt
+throughput without reporting the emitted chunk schedule.
+
 ## 2026-08-07 - DeepSeek V4 Sparse Indexer Q Matrix Default GO
 
 Status: the pinned M4 Max/current-asset profile now uses the wide F32 Q8

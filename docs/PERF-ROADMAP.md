@@ -833,6 +833,15 @@ one partial GEMV tail. Default only the pinned M4 Max/current-asset complete
 N=4,096 profile, with `QWEN_DSV4_PACKED_INDEXER_Q_MATRIX=0` as rollback.
 N=2,048 retains GEMV because its prior endpoint result remained unresolved.
 
+The default cap must not greedily absorb an unqualified remainder. That policy
+regressed the maintained 2,385-token prompt from about 110 to 70.98 token/s by
+turning `2,048 + 337` into one 2,385-token fallback. Commit `eb3c22d` restores
+hierarchical `4,096 -> 2,048 -> remainder` scheduling across ordinary,
+resident, and snapshot paths. The 2,385-token prompt now reaches 160.33 token/s
+and the 6,642-token prompt reaches 179.52 token/s, up from 119.81 after the 4K
+indexer promotion. Future product claims must report actual chunk geometry;
+exact 8K full-chunk cells cannot authorize arbitrary-tail throughput alone.
+
 The 4K result still closes capacity growth as the mechanism. The current
 36.84-second sampled profile is led by 19.62 seconds pre-expert, split into 6.88
 seconds before attention, 5.64 seconds in the attention body, 5.35 seconds in

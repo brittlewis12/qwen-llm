@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 F32 Q8 Output A/B Default GO
+
+Status: the F32 Q8 attention-output matrices are now the automatic default for
+complete N=2,048 chunks on the qualified Apple M4 Max/current-asset profile.
+Set `QWEN_DSV4_PACKED_Q8_OUTPUT=exact` for prior GEMV execution. `auto`
+retains profile qualification; `f32_matrix` remains an explicit force mode.
+
+- Reuse the retained F32 `R2C4K64` primitive for all eight grouped output-A
+  projections and output B. It preserves the existing pack/scatter schedule,
+  scratch, dispatch count, cache state, and partial-chunk path; only projection
+  arithmetic changes.
+- On the clean 8K profile, output-projection GPU falls
+  `35,110.500 -> 5,322.007 ms`, or 84.84%. Total pre-expert GPU falls 51.38%,
+  while post-route GPU independently improves by 603.489 ms.
+- Ordinary request wall falls `91,647.479 -> 61,979.581 ms`, saving
+  29,667.898 ms or 32.37%. Prefill rises `89.39 -> 132.17 token/s`; the sampled
+  request independently saves 33.35%.
+- The final-logit vector changes. On clean build `945a423`, the 9,960-token
+  ledger, 6,092-token structured retrieval, and 7,263-token multilingual
+  retrieval reproduce every incumbent generated ID and requested value. The
+  ledger returns the correct 2,578 total and both structured formats remain
+  exact.
+- This supersedes the old first-chunk asset KILL under the same changed premise
+  as Q-B: that gate predates the promoted compressor, online-attention,
+  batched-RoPE, and Q-B schedules. The current test covers multiple complete
+  chunks in the actual product path rather than relaxing the primitive's
+  numerical contract.
+
+Decision: default the measured output matrix work unit only on the exact
+qualified profile, retain exact GEMV as automatic fallback and rollback, and
+move GPU-resident packed MoE scheduling to the clear top of the queue.
+
 ## 2026-08-07 - DeepSeek V4 F32 Q8 Q-B Default GO
 
 Status: the F32 Q8 Q-B matrix is now the automatic default for complete

@@ -685,23 +685,33 @@ not identical to the retained native prompt, so treat this as a standard
 schedule floor rather than a paired product ratio. The source and native trace
 agree on the next two gaps: llama.cpp routes all prompt-width Q8 projections
 through dequantizing matrix kernels and keeps MoE compaction plus indirect
-IQ2/IQ3 matrices on GPU; native output projections and routed work still cost
-35.11 and 29.20 seconds respectively on the current 8K candidate trace.
+IQ2/IQ3 matrices on GPU. Before the output promotion, native output
+projections and routed work cost 35.11 and 29.20 seconds respectively on the
+8K Q-B trace.
+
+F32 Q8 output A/B matrices now default on under the same qualified profile as
+Q-B. Output-projection GPU falls `35,110.500 -> 5,322.007 ms`, pre-expert GPU
+falls 51.38%, and ordinary 8K wall moves
+`91,647.479 -> 61,979.581 ms`, or 32.37%. Prefill rises from 89.39 to 132.17
+token/s, and the sampled request independently saves 33.35%. Three clean
+current-lineage long-prompt tasks reproduce every incumbent generated ID and
+requested value. Under `auto`, partial and unqualified chunks retain exact
+GEMV; `QWEN_DSV4_PACKED_Q8_OUTPUT=exact` is the rollback and `f32_matrix` is an
+explicit full-chunk force mode. Post-route GPU is now the largest measured
+span at 28.60 seconds, followed by attention at 16.21 seconds; output A/B has
+fallen to 5.32 seconds.
 
 Force-ranked queue:
 
-1. **Current-lineage Q8 output matrix falsifier.** Reintroduce only the retained
-   F32 `R2C4K64` output A/B schedule on complete N=2,048 chunks. The prior
-   candidate cut its isolated stage about 70%, but failed incumbent-distance
-   gates before the current compressor, online-attention, and batched-RoPE
-   lineage existed. First require an 8K product win and the same direct
-   long-prompt task semantics; do not sweep geometry or privilege incumbent
-   hidden-state distance over task correctness.
-2. **GPU-resident packed MoE scheduling.** The current Q-B candidate leaves
-   29.20 seconds in post-route GPU across the 8K trace. Replace the per-layer
+1. **GPU-resident packed MoE scheduling.** The current matrix candidate leaves
+   28.60 seconds in post-route GPU across the 8K trace. Replace the per-layer
    CPU route read/bucket/write seam with deterministic expert/token/slot GPU
    compaction and indirect grouped IQ2/IQ3 matrix work. Preserve unique slot
    ownership and fixed slot-order reduction; do not build a monolithic FFN.
+2. **Attention/indexer fusion at product depth.** Attention now contributes
+   16.21 seconds, or 26.4% of sampled 8K wall. Reattribute CSA score, selection,
+   and online selected attention after the matrix promotions, then target a
+   materialized score/top-k boundary only if it survives full accounting.
 3. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
    only a 2.04% optimistic ceiling on the 8K request. Do not pay a larger scratch
    allocation and new sparse/qualification surface for that alone. Reopen when

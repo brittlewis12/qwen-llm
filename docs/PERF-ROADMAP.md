@@ -594,19 +594,26 @@ aggregate gate/up moves only `3,662.943 -> 3,244.204 ms`. Ordinary warm wall
 moves `28,273.485 -> 27,969.800 ms`, or 1.07%, missing the frozen 20% stage /
 739 ms survival gate. Remove BM32 and close same-work panel widening at N=2,048.
 
+The matrix-shaped Q8 compressor premise clears where exact panel sharing does
+not. A diagnostics-only half-staged oracle substitutes exactly 124 compressor
+projections on a full N=2,048 chunk. A/B/B/A ordinary wall moves
+`28,947.093 -> 27,779.258 ms`, saving 1,167.835 ms or 4.03%; sampled wall saves
+1,051.409 ms. Post-route GPU regresses by 44.633 ms, so the adjusted pre-expert
+saving remains the full 1,167.835 ms. This proves a material matrix opportunity,
+not product quality. Prior exact T2 already regresses the same 4,096x512 raw-KV
+geometry, so do not authorize another exact compressor kernel without a new
+mechanism and an equally large ceiling.
+
 Force-ranked queue:
 
-1. **Q8 reduction and representation frontier.** Pre-expert work leads at
-   20.368 seconds, while exact token sharing and post-route BM32 panel sharing
-   are now closed below the request-level bar. Q-B is the only improving exact
-   token-tile family, and its best T2 result, `102.626 -> 94.714 ms/layer`,
-   moves less than 1% of the request. Exact matrix leaves work, but rebuilding
-   the incumbent SIMD trees costs 151.656 ms/layer; a low-synchronization form
-   costs 119.300 ms and loses one ULP. The current F32 matrix is faster but
-   failed the five-value ledger task. Before implementation, source-audit one
-   coarser segmented reduction or changed representation and require a credible
-   >=2% whole-request ceiling plus an integrated comparative quality path.
-   Otherwise close this asset's Q8 arithmetic and move to quant mix.
+1. **Matrix-shaped Q8 quality frontier.** The compressor-only oracle clears the
+   performance premise by 2.07x, while q_b and output evidence show that matrix
+   reduction changes need an explicit approximate contract. Replay the frozen
+   9,960-token five-value ledger with half-staged matrices only on the four full
+   compressor chunks and exact tail/decode. Require the same five values, total
+   2,578, requested schema, and EOS. On failure, remove the seam and close this
+   narrow admission. On success, design a small compressor-only quality battery;
+   do not combine q_b, output, raw KV, or a global Q8 crossover yet.
 2. **Reprice the packed chunk cap at product depth.** N=2,048 removed the known
    chunk and expert-plan ceilings, but 8K-32K prompts still execute many chunks.
    Attribute fixed per-chunk seams and route occupancy on one canonical long

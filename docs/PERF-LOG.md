@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Q8 Compressor Matrix Ceiling GO
+
+Status: the N=2,048 compressor matrix performance premise is GO; product
+semantics remain HOLD. The half-staged path is a diagnostics-only oracle, not a
+default or supported inference policy.
+
+- Current llama.cpp and DwarfStar both route large Q8 prompt projections through
+  matrix kernels. The narrow oracle changes only 124 compressor projections per
+  full chunk: 41 attention KV, 41 attention gate, 21 indexer KV, and 21 indexer
+  gate. Raw KV, q_b, output projections, experts, and tails remain exact.
+- An A/B/B/A bracket records exact ownership `0/124/124/0`. Control and candidate
+  ordinary-wall drift are 3.45% and 1.39%, below 5%. Each arm repeats its own
+  complete prompt logits bit-for-bit.
+- Mean ordinary wall falls `28,947.093 -> 27,779.258 ms`, saving 1,167.835 ms or
+  4.03%. Sampled wall falls `28,166.605 -> 27,115.196 ms`, saving 1,051.409 ms.
+  Post-route GPU time regresses by 44.633 ms, so no downstream speedup is credited
+  to the candidate; the adjusted saving remains 1,167.835 ms, 2.07x the 565 ms
+  premise gate.
+- The original 930 ms estimate scaled q_b by weight count. Measured saving exceeds
+  it by 25.6%, proving that projection geometry and scheduling matter beyond raw
+  element count.
+
+Decision: matrix-shaped Q8 is now a stage-scale prefill opportunity, but another
+exact compressor kernel is not the next step. Prior exact T2 already regressed
+the same 4,096x512 raw-KV geometry from 4.437 to 5.479 ms/layer, and exact tree
+reconstruction is slower still. Preserve the exact default. Run one unchanged
+compressor-only replay of the decisive 9,960-token five-value ledger with matrix
+execution on four complete chunks and exact tail/decode. A core-value failure
+removes the diagnostics seam; a pass authorizes a small approximate-quality
+battery, not broad Q8 crossover or default admission.
+
 ## 2026-08-06 - DeepSeek V4 N=2,048 BM32 IQ2 KILL
 
 Status: remove the exact two-panel BM32 candidate. BM16 remains the default

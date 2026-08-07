@@ -1466,12 +1466,7 @@ fn packed_q8_compressor_matrix_for_chunk(n_tokens: usize) -> Result<bool, DeepSe
     #[cfg(feature = "dsv4-diagnostics")]
     {
         let enabled = packed_q8_compressor_matrix_enabled();
-        if enabled && n_tokens != DEEPSEEK_V4_PREFILL_MAX_TOKENS {
-            return invalid(format!(
-                "QWEN_DSV4_PROFILE_Q8_COMPRESSOR_MATRIX requires exactly {DEEPSEEK_V4_PREFILL_MAX_TOKENS} tokens, got {n_tokens}"
-            ));
-        }
-        Ok(enabled)
+        Ok(enabled && n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS)
     }
     #[cfg(not(feature = "dsv4-diagnostics"))]
     {
@@ -7136,6 +7131,13 @@ impl DeepSeekV4Session {
         );
         match result {
             Ok(()) => {
+                #[cfg(feature = "dsv4-diagnostics")]
+                if compressor_matrix {
+                    eprintln!(
+                        "deepseek_v4: half-staged Q8 compressor matrix oracle invocations={}; tokens={n_tokens}",
+                        self.prefill.compressor.q8_matrix_invocations()
+                    );
+                }
                 self.commit_tokens(token_ids);
                 self.phase
                     .complete_mutation(start_position, end_position, emit_logits)?;
@@ -7171,16 +7173,6 @@ impl DeepSeekV4Session {
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "deepseek_v4: F32 Q8 Q-B matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB=exact"
-                );
-            }
-        }
-        #[cfg(feature = "dsv4-diagnostics")]
-        if compressor_matrix {
-            static REPORTED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                eprintln!(
-                    "deepseek_v4: half-staged Q8 compressor matrix timing oracle active for N={n_tokens}; control=QWEN_DSV4_PACKED_Q8_COMPRESSOR=exact"
                 );
             }
         }

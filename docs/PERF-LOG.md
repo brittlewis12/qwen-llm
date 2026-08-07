@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Sparse Indexer Q Matrix Default GO
+
+Status: the pinned M4 Max/current-asset profile now uses the wide F32 Q8
+matrix for sparse-indexer Q on complete N=4,096 chunks. Set
+`QWEN_DSV4_PACKED_INDEXER_Q_MATRIX=0` to restore token-axis GEMV.
+
+- The prior N=2,048 R2C4K64 pilot established a 1.393-second preparation
+  saving but closed when endpoint movement was unresolved. Production N=4,096
+  and the accepted R2C16K64 work unit are the changed premises. The matrix
+  projects the complete chunk, while only the causally eligible suffix reaches
+  RoPE, Hadamard, scoring, and selection.
+- On clean `798a50c`, sparse-indexer preparation falls
+  `1,897.744/1,924.206 -> 518.858 ms` across the control/candidate/control
+  bracket. Pre-expert GPU falls `21,062.727/21,047.157 -> 19,616.433 ms`;
+  post-route GPU is noninferior to the faster control at
+  `14,064.484 -> 14,045.905 ms`.
+- Candidate ordinary wall is 37,040.317 ms versus control walls of
+  40,312.902 and 38,752.391 ms. Against the faster control, prefill rises
+  `211.39 -> 221.16 token/s`. Sampled wall falls
+  `38,359.552 -> 36,840.900 ms`, or 3.96%.
+- The changed indexer reduction changes the synthetic 8K final-logit vector;
+  it is not bit-equivalent to token-axis GEMV. A real 6,642-token prompt plus
+  80-token continuation preserves every generated ID and exact output text.
+  That run also exercises one matrix chunk followed by a partial GEMV tail.
+- The real-prompt control/candidate order reports prefill
+  `67,148.4 -> 55,437.7 ms`; retain this as corroborating, order-confounded
+  product evidence rather than the promotion measurement.
+
+Decision: default the large, repeated stage and endpoint win for the exact
+profile tested. Retain strict current-asset/device/N=4,096 qualification and a
+one-variable rollback. N=2,048, other assets, and partial chunks keep token-axis
+GEMV.
+
 ## 2026-08-07 - DeepSeek V4 Wide F32 Q8 Matrix Default GO
 
 Status: qualified packed Q-B and output A/B projections now share each F32

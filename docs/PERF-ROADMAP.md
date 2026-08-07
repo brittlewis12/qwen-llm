@@ -821,38 +821,49 @@ other active path change. Default the R2C4K64-bit-identical work unit with the
 prior `f32_matrix` policies retained as independent Q-B and output rollback
 controls.
 
-The 4K result still closes capacity growth as the mechanism: its earlier
-pre-expert GPU increase remains despite post-route and host savings. The current
-38.42-second sampled profile is led by 20.92 seconds pre-expert, split into 6.85
-seconds before attention, 7.00 seconds in the attention body, 5.32 seconds in
+The 4K work unit then changes the sparse-indexer matrix decision. On clean
+`798a50c`, wide F32 Q8 projection reduces preparation
+`1,897.744/1,924.206 -> 518.858 ms` across a control/candidate/control bracket.
+Against the faster control, ordinary wall falls
+`38,752.391 -> 37,040.317 ms`, or `211.39 -> 221.16 token/s`; sampled wall
+falls `38,359.552 -> 36,840.900 ms`. Post-route GPU is noninferior. The
+synthetic final vector changes, but a real 6,642-token prompt plus 80-token
+continuation preserves every generated ID while exercising one matrix chunk and
+one partial GEMV tail. Default only the pinned M4 Max/current-asset complete
+N=4,096 profile, with `QWEN_DSV4_PACKED_INDEXER_Q_MATRIX=0` as rollback.
+N=2,048 retains GEMV because its prior endpoint result remained unresolved.
+
+The 4K result still closes capacity growth as the mechanism. The current
+36.84-second sampled profile is led by 19.62 seconds pre-expert, split into 6.88
+seconds before attention, 5.64 seconds in the attention body, 5.35 seconds in
 output projections, and 1.75 seconds after attention. The attention body is
-3.40 seconds core and 3.56 seconds sparse indexer/selection, of which 1.91
-seconds is preparation and 1.60 seconds is scoring; inverse RoPE is the
-remaining 0.05 seconds. Post-route is 14.01 seconds.
+3.42 seconds core and 2.17 seconds sparse indexer/selection: 0.52 seconds
+preparation, 1.61 seconds scoring, and 0.05 seconds selection. Inverse RoPE is
+0.05 seconds. Post-route is 14.05 seconds and host residual is 3.18 seconds.
 
 Force-ranked queue:
 
-1. **Pre-expert work units.** The 20.92-second leader is split across three
-   independent multi-second families. The bit-identical 128-token Q8 reuse axis
-   saves only 0.38 seconds, so do not continue widening the same F32 tile.
-   Price a changed projection dataflow or an attention/indexer fusion that can
-   remove several seconds; do not substitute another chunk-cap increase.
-2. **Further IQ2 execution.** The exact wide cohort is 7.15 seconds, with
+1. **Direct grouped output A.** Output projections cost 5.35 seconds. Replace
+   the eight serial pack/matrix/scatter chains with one strided grouped workload
+   that writes final low-rank slices directly. Preserve the accepted F32 Q8
+   arithmetic first; do not couple copy deletion to another precision change.
+2. **One-row multi-head selected CSA.** Attention core costs 3.42 seconds. Port
+   the DwarfStar one-row topology that shares each selected row across heads,
+   not the killed sixteen-row staging design whose barriers and 16 KiB scratch
+   regressed. Require a model-free recurrence differential before timing.
+3. **Further IQ2 execution.** The exact wide cohort is 7.15 seconds, with
    3.99 seconds in gate/up and 1.96 seconds in down. Half-staged operands or a
    paired gate/up boundary require explicit quality authority and must project a
    competitive whole-request gain before implementation.
-3. **All-IQ3 routed experts.** The 16-layer routed subtotal is 3.67 seconds and
+4. **All-IQ3 routed experts.** The 16-layer routed subtotal is 3.67 seconds and
    already uses a 64-output by 32-route matrix. Reopen only for a new dataflow
    boundary such as grouped down or deterministic sorted-output finalization,
    not another bank-axis or scalar sweep.
-4. **Mixed-quant routed experts.** Layers 26 and 42 cost 2.23 seconds in the
+5. **Mixed-quant routed experts.** Layers 26 and 42 cost 2.23 seconds in the
    generic routed-expert path. Price a matrix work unit across their IQ3_S or
    IQ3_XXS gate/up and MXFP4 down shapes before tuning either dtype locally.
-5. **Indexer preparation with a changed work unit.** Preparation costs 1.89
-   seconds, but the F32 Q8 matrix candidate fails whole-request accounting.
-   Reopen only for an exact-order shared-weight or fused preparation schedule.
 6. **Further Lightning score production.** At the 4K default, the exact tiled
-   F32 scorer costs 1.57 seconds. Reopen around lower-precision tensor execution
+   F32 scorer costs 1.61 seconds. Reopen around lower-precision tensor execution
    only when its whole-request ceiling competes with routed-expert work; exact
    radix selection remains only 47 ms and must not be folded into the claim.
 7. **Far-context scoring and selection.** Keep the tiled F32 scorer and radix4

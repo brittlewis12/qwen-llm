@@ -1705,6 +1705,21 @@ fn packed_q8_compressor_matrix_scope_qualified(
         && source_bytes == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES
 }
 
+fn packed_indexer_q_matrix_scope_qualified(
+    device_name: &str,
+    tensor_count: usize,
+    source_bytes: u64,
+    n_tokens: usize,
+) -> bool {
+    n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS
+        && packed_q8_compressor_matrix_scope_qualified(
+            device_name,
+            tensor_count,
+            source_bytes,
+            n_tokens,
+        )
+}
+
 fn packed_q8_compressor_matrix_for_chunk(
     ctx: &MetalContext,
     residency: &DeepSeekV4MetalResidency,
@@ -1937,6 +1952,7 @@ impl PrefillSparseCsaScratch {
         start_position: u32,
         query_offset: usize,
         n_tokens: usize,
+        indexer_q_matrix: bool,
         rope: DeepSeekV4RopeParameters,
     ) -> Result<PackedSparseCsaViews, DeepSeekV4MetalError> {
         let prepared = self.encode_prepare(
@@ -1950,6 +1966,7 @@ impl PrefillSparseCsaScratch {
             start_position,
             query_offset,
             n_tokens,
+            indexer_q_matrix,
             rope,
         )?;
         self.encode_f16_score_and_select(ctx, enc, rows, &prepared)?;
@@ -1969,6 +1986,7 @@ impl PrefillSparseCsaScratch {
         start_position: u32,
         query_offset: usize,
         n_tokens: usize,
+        indexer_q_matrix: bool,
         rope: DeepSeekV4RopeParameters,
     ) -> Result<PackedSparseCsaViews, DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_packed_sparse_csa_indexer")?;
@@ -2076,16 +2094,7 @@ impl PrefillSparseCsaScratch {
             "packed sparse CSA visible counts",
         )?;
 
-        let index_queries = if packed_indexer_q_matrix_enabled()
-            && packed_q8_matrix_chunk_qualified(n_tokens)
-        {
-            static REPORTED: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                eprintln!(
-                    "deepseek_v4: wide F32 Q8 sparse-indexer Q matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_INDEXER_Q_MATRIX=0"
-                );
-            }
+        let index_queries = if indexer_q_matrix {
             let matrix_output = index_query_storage
                 .view_subrange(0, vec![INDEXER_QUERY_WIDTH as u64, n_tokens as u64]);
             encode_q8_f32_mma_r2c16k64(
@@ -4534,7 +4543,7 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    default_off packed_indexer_q_matrix_enabled,
+    default_on packed_indexer_q_matrix_enabled,
     "QWEN_DSV4_PACKED_INDEXER_Q_MATRIX"
 );
 
@@ -8028,6 +8037,13 @@ impl DeepSeekV4Session {
             packed_q8_output_projection_for_chunk(ctx, &self.residency, token_ids.len())?;
         let compressor_matrix =
             packed_q8_compressor_matrix_for_chunk(ctx, &self.residency, token_ids.len());
+        let indexer_q_matrix = packed_indexer_q_matrix_enabled()
+            && packed_indexer_q_matrix_scope_qualified(
+                &ctx.device.name().to_string(),
+                self.residency.report().tensor_count,
+                self.residency.report().source_bytes,
+                token_ids.len(),
+            );
         #[cfg(feature = "dsv4-diagnostics")]
         self.prefill.compressor.reset_q8_matrix_invocations();
         #[cfg(feature = "dsv4-diagnostics")]
@@ -8094,6 +8110,7 @@ impl DeepSeekV4Session {
             q_b_projection,
             output_projection,
             compressor_matrix,
+            indexer_q_matrix,
             #[cfg(feature = "dsv4-diagnostics")]
             stage_recorder,
             #[cfg(feature = "dsv4-diagnostics")]
@@ -8123,6 +8140,7 @@ impl DeepSeekV4Session {
         q_b_projection: Q8PrecisionProjection,
         output_projection: Q8PrecisionProjection,
         compressor_matrix: bool,
+        indexer_q_matrix: bool,
         #[cfg(feature = "dsv4-diagnostics")] mut stage_recorder: Option<
             &mut PackedPrefillStageRecorder,
         >,
@@ -8147,6 +8165,15 @@ impl DeepSeekV4Session {
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "deepseek_v4: Q8 compressor matrices active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX=0"
+                );
+            }
+        }
+        if indexer_q_matrix {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: wide F32 Q8 sparse-indexer Q matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_INDEXER_Q_MATRIX=0"
                 );
             }
         }
@@ -8570,6 +8597,7 @@ impl DeepSeekV4Session {
                         start_position,
                         query_offset,
                         n_tokens,
+                        indexer_q_matrix,
                         rope,
                     )?;
                     #[cfg(feature = "dsv4-diagnostics")]
@@ -8584,6 +8612,7 @@ impl DeepSeekV4Session {
                         start_position,
                         query_offset,
                         n_tokens,
+                        indexer_q_matrix,
                         rope,
                     )?;
                     #[cfg(feature = "dsv4-diagnostics")]
@@ -10229,6 +10258,37 @@ mod tests {
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS - 1,
+        ));
+    }
+
+    #[test]
+    fn packed_indexer_q_matrix_scope_is_4096_only() {
+        let qualified = |device, tensors, bytes, tokens| {
+            packed_indexer_q_matrix_scope_qualified(device, tensors, bytes, tokens)
+        };
+        assert!(qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            "Apple M3 Max",
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES + 1,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
     }
 

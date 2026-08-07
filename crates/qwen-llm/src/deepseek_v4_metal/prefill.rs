@@ -3602,8 +3602,14 @@ fn encode_packed_grouped_down_iq3_xxs_f32(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PackedIq2MatrixWorkUnit {
+    Mma16,
+    Mm64x32,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn encode_packed_grouped_mapped_iq2_xs_f32_mma16(
+fn encode_packed_grouped_mapped_iq2_xs_f32_matrix(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     bank: &MetalTensor,
@@ -3619,49 +3625,50 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_mma16(
     n_tokens: usize,
     source_count: usize,
     destination_count: usize,
+    work_unit: PackedIq2MatrixWorkUnit,
 ) -> Result<(), DeepSeekV4MetalError> {
-    require_serial(enc, "packed grouped mapped IQ2_XS F32 MMA projection")?;
+    let (tile_rows, threads, threadgroup_bytes, kernel, label) = match work_unit {
+        PackedIq2MatrixWorkUnit::Mma16 => (
+            16usize,
+            32usize,
+            4_096usize,
+            "kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f32_mma16",
+            "packed grouped mapped IQ2_XS F32 MMA16 projection",
+        ),
+        PackedIq2MatrixWorkUnit::Mm64x32 => (
+            64,
+            128,
+            12_288,
+            "kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f32_mm64x32",
+            "packed grouped mapped IQ2_XS F32 MM64x32 projection",
+        ),
+    };
+    require_serial(enc, label)?;
     if !n_in.is_multiple_of(256)
-        || !n_out.is_multiple_of(16)
+        || !n_out.is_multiple_of(tile_rows)
         || expert_count != MOE_EXPERT_COUNT
         || top_k != MOE_TOP_K
         || source_count == 0
         || destination_count == 0
         || bank.dtype != GgmlType::IQ2_XS
     {
-        return invalid("packed grouped mapped IQ2_XS F32 MMA has invalid geometry or storage");
+        return invalid(format!("{label} has invalid geometry or storage"));
     }
-    validate_expert_bank(
-        bank,
-        n_in,
-        n_out,
-        expert_count,
-        "packed grouped mapped IQ2_XS F32 MMA bank",
-    )?;
-    validate_f32(
-        input,
-        &[n_in as u64, source_count as u64],
-        false,
-        "packed grouped mapped IQ2_XS F32 MMA input",
-    )?;
-    let map_count = checked_mul(n_tokens, top_k, "packed grouped mapped IQ2 MMA rows")?;
-    validate_i32(
-        source_rows,
-        &[map_count as u64],
-        false,
-        "packed grouped mapped IQ2_XS F32 MMA source rows",
-    )?;
-    validate_i32(
-        destination_slots,
-        &[map_count as u64],
-        false,
-        "packed grouped mapped IQ2_XS F32 MMA destination slots",
-    )?;
+    if ctx.device.maxThreadgroupMemoryLength() < threadgroup_bytes {
+        return invalid(format!(
+            "{label} requires {threadgroup_bytes} bytes of threadgroup memory"
+        ));
+    }
+    validate_expert_bank(bank, n_in, n_out, expert_count, label)?;
+    validate_f32(input, &[n_in as u64, source_count as u64], false, label)?;
+    let map_count = checked_mul(n_tokens, top_k, label)?;
+    validate_i32(source_rows, &[map_count as u64], false, label)?;
+    validate_i32(destination_slots, &[map_count as u64], false, label)?;
     validate_f32(
         output,
         &[n_out as u64, destination_count as u64],
         true,
-        "packed grouped mapped IQ2_XS F32 MMA output",
+        label,
     )?;
     let tile_count = plan.dispatch_tiles;
     #[repr(C)]
@@ -3676,10 +3683,10 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_mma16(
         source_count: u32,
         destination_count: u32,
     }
-    let row_bytes = checked_mul(n_in / 256, 74, "packed grouped mapped IQ2 MMA row")?;
-    let pso = ctx.pipeline("kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f32_mma16")?;
-    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 32 {
-        return invalid("packed grouped mapped IQ2_XS F32 MMA requires one SIMD group");
+    let row_bytes = checked_mul(n_in / 256, 74, label)?;
+    let pso = ctx.pipeline(kernel)?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < threads {
+        return invalid(format!("{label} requires {} SIMD groups", threads / 32));
     }
     enc.set_pipeline(&pso);
     enc.set_bytes(
@@ -3717,15 +3724,15 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_mma16(
     enc.set_tensor(4, destination_slots);
     plan.bind(enc, 5);
     enc.set_tensor(6, output);
-    enc.set_threadgroup_memory(0, 4_096);
+    enc.set_threadgroup_memory(0, threadgroup_bytes);
     enc.dispatch(
         MTLSize {
             width: tile_count,
-            height: n_out / 16,
+            height: n_out / tile_rows,
             depth: 1,
         },
         MTLSize {
-            width: 32,
+            width: threads,
             height: 1,
             depth: 1,
         },
@@ -3734,7 +3741,7 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_mma16(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode_packed_grouped_mapped_iq2_xs_swiglu_f32_mma16(
+fn encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     gate_bank: &MetalTensor,
@@ -3754,9 +3761,10 @@ fn encode_packed_grouped_mapped_iq2_xs_swiglu_f32_mma16(
     source_count: usize,
     destination_count: usize,
     clamp: f32,
+    work_unit: PackedIq2MatrixWorkUnit,
 ) -> Result<(), DeepSeekV4MetalError> {
     for (bank, projection) in [(gate_bank, gate), (up_bank, up)] {
-        encode_packed_grouped_mapped_iq2_xs_f32_mma16(
+        encode_packed_grouped_mapped_iq2_xs_f32_matrix(
             ctx,
             enc,
             bank,
@@ -3772,6 +3780,7 @@ fn encode_packed_grouped_mapped_iq2_xs_swiglu_f32_mma16(
             n_tokens,
             source_count,
             destination_count,
+            work_unit,
         )?;
     }
     let projected_elements = checked_mul(
@@ -4284,9 +4293,26 @@ fn packed_grouped_iq2_mma16_candidate_supported(ctx: &MetalContext) -> bool {
     projection.threadExecutionWidth() == 32 && projection.maxTotalThreadsPerThreadgroup() >= 32
 }
 
+fn packed_iq2_mm64x32_candidate_supported(ctx: &MetalContext) -> bool {
+    if ctx.device.maxThreadgroupMemoryLength() < 12_288 {
+        return false;
+    }
+    let Ok(projection) =
+        ctx.pipeline("kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f32_mm64x32")
+    else {
+        return false;
+    };
+    projection.threadExecutionWidth() == 32 && projection.maxTotalThreadsPerThreadgroup() >= 128
+}
+
 crate::env_flag!(
     default_on packed_grouped_iq2_mma16_enabled,
     "QWEN_DSV4_PACKED_BM16_IQ2"
+);
+
+crate::env_flag!(
+    default_off packed_iq2_mm64x32_enabled,
+    "QWEN_DSV4_PACKED_IQ2_MM64X32"
 );
 
 crate::env_flag!(
@@ -4427,11 +4453,17 @@ fn packed_grouped_expert_policy(
         PackedGroupedExpertMode::ForceOn => true,
         PackedGroupedExpertMode::ForceOff => false,
     } && packed_grouped_expert_kernels_supported(ctx);
+    let wide_iq2 = packed_iq2_mm64x32_enabled();
+    let iq2_matrix_supported = if wide_iq2 {
+        packed_iq2_mm64x32_candidate_supported(ctx)
+    } else {
+        packed_grouped_iq2_mma16_candidate_supported(ctx)
+    };
     if packed_grouped_iq2_mma16_enabled()
         && enabled
         && packed_grouped_iq2_mma16_qualified(n_tokens)
         && ctx.device.name().to_string() == PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
-        && packed_grouped_iq2_mma16_candidate_supported(ctx)
+        && iq2_matrix_supported
     {
         return Ok(PackedExpertPolicy::GroupedIq2XsIq3XxsMma16QualifiedChunk);
     }
@@ -6582,18 +6614,28 @@ impl PrefillMoeScratch {
                 PackedGroupedExpertPlan::new(n_tokens, schedule, Some(&self.grouped_tiles))?
             };
             let used_iq2_mma16 = if expert_policy.uses_iq2_mma16(n_tokens) {
-                let mma16_plan = if gpu_compacted {
-                    PackedGroupedExpertPlan::from_device(
-                        &self.grouped_iq2_mma16_tiles,
-                        PACKED_GROUPED_IQ2_MMA16_MAX_TILES,
-                    )?
+                let work_unit = if packed_iq2_mm64x32_enabled() {
+                    PackedIq2MatrixWorkUnit::Mm64x32
                 } else {
-                    PackedGroupedExpertPlan::new_iq2_mma16(
-                        n_tokens,
-                        schedule,
-                        Some(&self.grouped_iq2_mma16_tiles),
-                    )?
+                    PackedIq2MatrixWorkUnit::Mma16
                 };
+                let mma16_plan = if work_unit == PackedIq2MatrixWorkUnit::Mma16 {
+                    Some(if gpu_compacted {
+                        PackedGroupedExpertPlan::from_device(
+                            &self.grouped_iq2_mma16_tiles,
+                            PACKED_GROUPED_IQ2_MMA16_MAX_TILES,
+                        )?
+                    } else {
+                        PackedGroupedExpertPlan::new_iq2_mma16(
+                            n_tokens,
+                            schedule,
+                            Some(&self.grouped_iq2_mma16_tiles),
+                        )?
+                    })
+                } else {
+                    None
+                };
+                let matrix_plan = mma16_plan.as_ref().unwrap_or(&grouped_plan);
                 let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed BM16 IQ2 routes")?;
                 let rows = i32_prefix(
                     &self.bucket_rows,
@@ -6611,14 +6653,14 @@ impl PrefillMoeScratch {
                 #[cfg(feature = "dsv4-diagnostics")]
                 if enc.splits_bm16_stages() {
                     for (bank, projection) in [(gate_bank, &gate), (up_bank, &up)] {
-                        encode_packed_grouped_mapped_iq2_xs_f32_mma16(
+                        encode_packed_grouped_mapped_iq2_xs_f32_matrix(
                             ctx,
                             enc,
                             bank,
                             normalized_input,
                             &rows,
                             &slots,
-                            &mma16_plan,
+                            matrix_plan,
                             projection,
                             DEEPSEEK_V4_HIDDEN_SIZE,
                             MOE_FFN_SIZE,
@@ -6627,6 +6669,7 @@ impl PrefillMoeScratch {
                             n_tokens,
                             n_tokens,
                             route_count,
+                            work_unit,
                         )?;
                     }
                     enc.boundary(PackedPostRouteStageKind::RoutedSwiGlu)?;
@@ -6645,7 +6688,7 @@ impl PrefillMoeScratch {
                     )?;
                     enc.boundary(PackedPostRouteStageKind::RoutedDown)?;
                 } else {
-                    encode_packed_grouped_mapped_iq2_xs_swiglu_f32_mma16(
+                    encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
                         ctx,
                         enc,
                         gate_bank,
@@ -6653,7 +6696,7 @@ impl PrefillMoeScratch {
                         normalized_input,
                         &rows,
                         &slots,
-                        &mma16_plan,
+                        matrix_plan,
                         &gate,
                         &up,
                         &grouped_inner,
@@ -6665,10 +6708,11 @@ impl PrefillMoeScratch {
                         n_tokens,
                         route_count,
                         expert_clamp,
+                        work_unit,
                     )?;
                 }
                 #[cfg(not(feature = "dsv4-diagnostics"))]
-                encode_packed_grouped_mapped_iq2_xs_swiglu_f32_mma16(
+                encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
                     ctx,
                     enc,
                     gate_bank,
@@ -6676,7 +6720,7 @@ impl PrefillMoeScratch {
                     normalized_input,
                     &rows,
                     &slots,
-                    &mma16_plan,
+                    matrix_plan,
                     &gate,
                     &up,
                     &grouped_inner,
@@ -6688,6 +6732,7 @@ impl PrefillMoeScratch {
                     n_tokens,
                     route_count,
                     expert_clamp,
+                    work_unit,
                 )?;
                 true
             } else {
@@ -7947,9 +7992,15 @@ impl DeepSeekV4Session {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if eligible_layers > 0 && !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                eprintln!(
-                    "deepseek_v4: BM16 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_BM16_IQ2=0"
-                );
+                if packed_iq2_mm64x32_enabled() {
+                    eprintln!(
+                        "deepseek_v4: 64x32 IQ2 packed prefill pilot active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_IQ2_MM64X32=0"
+                    );
+                } else {
+                    eprintln!(
+                        "deepseek_v4: BM16 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_BM16_IQ2=0"
+                    );
+                }
             }
         }
         if expert_policy.uses_iq3_target() {
@@ -11547,7 +11598,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_grouped_iq2_xs_f32_mma16_matches_reduced_k_scalar() {
+    fn packed_grouped_iq2_xs_f32_matrix_schedules_match_reduced_k_scalar() {
         let Ok(ctx) = MetalContext::new() else {
             return;
         };
@@ -11742,11 +11793,23 @@ mod tests {
                 CLAMP,
             )
             .unwrap();
-            for (gate, up, inner) in [
-                (&candidate_gate, &candidate_up, &candidate_inner),
-                (&repeat_gate, &repeat_up, &repeat_inner),
+            for (plan, work_unit, gate, up, inner) in [
+                (
+                    &mma16_plan,
+                    PackedIq2MatrixWorkUnit::Mma16,
+                    &candidate_gate,
+                    &candidate_up,
+                    &candidate_inner,
+                ),
+                (
+                    &grouped_plan,
+                    PackedIq2MatrixWorkUnit::Mm64x32,
+                    &repeat_gate,
+                    &repeat_up,
+                    &repeat_inner,
+                ),
             ] {
-                encode_packed_grouped_mapped_iq2_xs_swiglu_f32_mma16(
+                encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
                     &ctx,
                     &encoder,
                     &gate_bank,
@@ -11754,7 +11817,7 @@ mod tests {
                     &input,
                     &source_rows,
                     &destination_slots,
-                    &mma16_plan,
+                    plan,
                     gate,
                     up,
                     inner,
@@ -11766,6 +11829,7 @@ mod tests {
                     n_tokens,
                     route_count,
                     CLAMP,
+                    work_unit,
                 )
                 .unwrap();
             }
@@ -11789,7 +11853,7 @@ mod tests {
             let candidate_gate_values = read(&candidate_gate, "IQ2 MMA candidate gate");
             let candidate_up_values = read(&candidate_up, "IQ2 MMA candidate up");
             let candidate = read(&candidate_inner, "IQ2 MMA candidate inner");
-            let repeat = read(&repeat_inner, "IQ2 MMA repeat inner");
+            let wide = read(&repeat_inner, "IQ2 MM64x32 inner");
             let gate_result = metrics(&control_gate_values, &candidate_gate_values);
             let up_result = metrics(&control_up_values, &candidate_up_values);
             let result = metrics(&control, &candidate);
@@ -11838,33 +11902,30 @@ mod tests {
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                repeat
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>(),
-                "N={n_tokens} repeat inner"
+                wide.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                "N={n_tokens} MM64x32 inner"
             );
             assert_eq!(
                 candidate_gate_values
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                read(&repeat_gate, "IQ2 MMA repeat gate")
+                read(&repeat_gate, "IQ2 MM64x32 gate")
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                "N={n_tokens} repeat gate"
+                "N={n_tokens} MM64x32 gate"
             );
             assert_eq!(
                 candidate_up_values
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                read(&repeat_up, "IQ2 MMA repeat up")
+                read(&repeat_up, "IQ2 MM64x32 up")
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                "N={n_tokens} repeat up"
+                "N={n_tokens} MM64x32 up"
             );
             for (label, tensor) in [
                 ("IQ2 MMA control gate", &control_gate),
@@ -11873,9 +11934,9 @@ mod tests {
                 ("IQ2 MMA candidate gate", &candidate_gate),
                 ("IQ2 MMA candidate up", &candidate_up),
                 ("IQ2 MMA candidate inner", &candidate_inner),
-                ("IQ2 MMA repeat gate", &repeat_gate),
-                ("IQ2 MMA repeat up", &repeat_up),
-                ("IQ2 MMA repeat inner", &repeat_inner),
+                ("IQ2 MM64x32 gate", &repeat_gate),
+                ("IQ2 MM64x32 up", &repeat_up),
+                ("IQ2 MM64x32 inner", &repeat_inner),
             ] {
                 assert_grouped_guards(label, tensor);
             }
@@ -11883,12 +11944,12 @@ mod tests {
     }
 
     #[test]
-    fn packed_grouped_iq2_xs_f32_mma16_traverses_production_k() {
+    fn packed_grouped_iq2_xs_f32_matrix_schedules_traverse_production_k() {
         let Ok(ctx) = MetalContext::new() else {
             return;
         };
         const H: usize = 4_096;
-        const F: usize = 32;
+        const F: usize = 64;
         const E: usize = MOE_EXPERT_COUNT;
         const K: usize = MOE_TOP_K;
         const CLAMP: f32 = 0.25;
@@ -12079,11 +12140,23 @@ mod tests {
                 CLAMP,
             )
             .unwrap();
-            for (gate, up, inner) in [
-                (&candidate_gate, &candidate_up, &candidate_inner),
-                (&repeat_gate, &repeat_up, &repeat_inner),
+            for (plan, work_unit, gate, up, inner) in [
+                (
+                    &mma16_plan,
+                    PackedIq2MatrixWorkUnit::Mma16,
+                    &candidate_gate,
+                    &candidate_up,
+                    &candidate_inner,
+                ),
+                (
+                    &grouped_plan,
+                    PackedIq2MatrixWorkUnit::Mm64x32,
+                    &repeat_gate,
+                    &repeat_up,
+                    &repeat_inner,
+                ),
             ] {
-                encode_packed_grouped_mapped_iq2_xs_swiglu_f32_mma16(
+                encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
                     &ctx,
                     &encoder,
                     &gate_bank,
@@ -12091,7 +12164,7 @@ mod tests {
                     &input,
                     &source_rows,
                     &destination_slots,
-                    &mma16_plan,
+                    plan,
                     gate,
                     up,
                     inner,
@@ -12103,6 +12176,7 @@ mod tests {
                     n_tokens,
                     route_count,
                     CLAMP,
+                    work_unit,
                 )
                 .unwrap();
             }
@@ -12127,7 +12201,7 @@ mod tests {
             let candidate_up_values = host_read_f32(&candidate_up, "production-K BM16 up").unwrap();
             let control = host_read_f32(&control_inner, "production-K scalar inner").unwrap();
             let candidate = host_read_f32(&candidate_inner, "production-K BM16 inner").unwrap();
-            let repeat = host_read_f32(&repeat_inner, "production-K repeat inner").unwrap();
+            let wide = host_read_f32(&repeat_inner, "production-K MM64x32 inner").unwrap();
             let result = metrics(&control, &candidate);
             eprintln!(
                 "deepseek_v4 iq2_mma16_production_k n={n_tokens} cosine={:.9} rel_rms={:.9} max_abs={:.9}",
@@ -12175,35 +12249,32 @@ mod tests {
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                repeat
-                    .iter()
-                    .map(|value| value.to_bits())
-                    .collect::<Vec<_>>(),
-                "N={n_tokens} production-K repeat inner"
+                wide.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                "N={n_tokens} production-K MM64x32 inner"
             );
             assert_eq!(
                 candidate_gate_values
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                host_read_f32(&repeat_gate, "production-K repeat gate")
+                host_read_f32(&repeat_gate, "production-K MM64x32 gate")
                     .unwrap()
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                "N={n_tokens} production-K repeat gate"
+                "N={n_tokens} production-K MM64x32 gate"
             );
             assert_eq!(
                 candidate_up_values
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                host_read_f32(&repeat_up, "production-K repeat up")
+                host_read_f32(&repeat_up, "production-K MM64x32 up")
                     .unwrap()
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                "N={n_tokens} production-K repeat up"
+                "N={n_tokens} production-K MM64x32 up"
             );
             for (label, tensor) in [
                 ("production-K control gate", &control_gate),
@@ -12212,9 +12283,9 @@ mod tests {
                 ("production-K candidate gate", &candidate_gate),
                 ("production-K candidate up", &candidate_up),
                 ("production-K candidate inner", &candidate_inner),
-                ("production-K repeat gate", &repeat_gate),
-                ("production-K repeat up", &repeat_up),
-                ("production-K repeat inner", &repeat_inner),
+                ("production-K MM64x32 gate", &repeat_gate),
+                ("production-K MM64x32 up", &repeat_up),
+                ("production-K MM64x32 inner", &repeat_inner),
             ] {
                 assert_grouped_guards(label, tensor);
             }

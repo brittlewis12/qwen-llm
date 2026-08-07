@@ -7,6 +7,15 @@
 DwarfStar's `kernel_dsv4_indexer_scores_tiled_f32`, revision
 `b0309611041655f4e45671cfd9c9886aff161406`.
 
+## llama.cpp
+
+`kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f32_mm64x32` in
+`kernels/mat_mat_iq2_xs.metal` adapts the indirect 64-output by 32-route
+quantized matrix topology from llama.cpp's `kernel_mul_mm_id`, revision
+`6a32c29a746a2e44de463de647f9f6661eb5086b`.
+
+The adapted source portions are provided under the following terms:
+
 MIT License
 
 Copyright (c) 2026 The ds4.c authors

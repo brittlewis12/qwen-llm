@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 64x32 IQ2 Expert Matrix Default GO
+
+Status: the 25 IQ2_XS gate/up layers now default to a four-SIMDgroup
+64-output by 32-route F32 matrix work unit. Set
+`QWEN_DSV4_PACKED_IQ2_MM64X32=0` to restore BM16.
+
+- The kernel consumes the existing stable width-32 expert plan, decodes each
+  64-by-32 weight tile once, and reuses it across up to 32 routes. IQ2_XS
+  decoding, F32 operands and accumulation, route order, destination slots,
+  clamped SwiGLU, and down projection remain unchanged.
+- Reduced- and full-K differentials cover `N=1..2,048`, route-panel seams,
+  partial tails, and `K=4,096`. Every gate, up, and SwiGLU bit matches BM16.
+  Adversarial review caught and closed a partial-tail scratch race before
+  timing; CX session `019fdc6a-8f97-74c1-9eb6-51ee75de7134` returns GO.
+- On the same clean `2083d28` binary, canonical 8K gate/up falls
+  `14,834.930 -> 4,578.848 ms`, or 69.13%. The complete IQ2 cohort falls
+  `18,093.042 -> 7,985.966 ms`; post-route GPU falls
+  `25,630.046 -> 15,689.288 ms`.
+- Sampled wall falls `48,945.115 -> 39,507.390 ms`, or 19.28%. Ordinary wall
+  falls `48,842.379 -> 41,028.896 ms`, raising prefill
+  `167.72 -> 199.66 token/s`. Complete 8K logits retain SHA-256
+  `5289990e...d1ac`.
+- At `N=128`, where width-32 route occupancy is only about 10%, gate/up still
+  falls `352.607 -> 292.804 ms`, the IQ2 cohort falls
+  `516.241 -> 456.465 ms`, and sampled wall falls
+  `1,905.554 -> 1,831.711 ms`. Logits retain SHA-256 `ab2283af...ce27`.
+- Raw profiles:
+  `target/profiles/dsv4-prefill-8k-iq2-mm64x32-control-2083d28.json`,
+  `target/profiles/dsv4-prefill-8k-iq2-mm64x32-2083d28.json`,
+  `target/profiles/dsv4-prefill-128-iq2-mm64x32-control-2083d28.json`, and
+  `target/profiles/dsv4-prefill-128-iq2-mm64x32-2083d28.json`.
+
+Decision: default the exact win with BM16 rollback. This is the changed matrix
+premise required to reopen 4,096-token chunks as a composition experiment: the
+larger chunk can now combine fewer boundaries with broader route reuse instead
+of relying on padding reduction alone.
+
 ## 2026-08-07 - DeepSeek V4 Tiled F32 Indexer Scorer Default GO
 
 Status: the packed Lightning scorer now defaults to an 8-query by 32-row F32

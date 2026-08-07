@@ -4311,7 +4311,7 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    default_off packed_iq2_mm64x32_enabled,
+    default_on packed_iq2_mm64x32_enabled,
     "QWEN_DSV4_PACKED_IQ2_MM64X32"
 );
 
@@ -7994,7 +7994,7 @@ impl DeepSeekV4Session {
             if eligible_layers > 0 && !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 if packed_iq2_mm64x32_enabled() {
                     eprintln!(
-                        "deepseek_v4: 64x32 IQ2 packed prefill pilot active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_IQ2_MM64X32=0"
+                        "deepseek_v4: 64x32 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_IQ2_MM64X32=0"
                     );
                 } else {
                     eprintln!(

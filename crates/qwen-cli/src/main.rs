@@ -311,10 +311,15 @@ struct Args {
     /// Append per-request structured stats as JSONL under a common cross-family
     /// envelope (schema: qwen-llm.request-stats v1).
     ///
-    /// Currently populated by DeepSeek V4 single-turn generation only; other
-    /// invocation paths silently ignore this flag today (they continue emitting
-    /// via --request-stats with the legacy shape). The envelope has a small
-    /// stable core plus namespaced backend extensions under `diagnostics.<family>`.
+    /// Currently implemented by DeepSeek V4 single-turn generation only.
+    /// Other invocation paths (Qwen single-turn, Qwen batch, DS4 batch,
+    /// --info, --deepseek-census-json, model-info) REJECT this flag with a
+    /// fatal error rather than silently ignoring it — mandatory/fail-closed
+    /// telemetry policy. Use --request-stats for legacy stats output on
+    /// paths that support it.
+    ///
+    /// The envelope has a small stable core plus namespaced backend
+    /// extensions under `diagnostics.<family>`.
     #[arg(long)]
     request_stats_jsonl: Option<PathBuf>,
 
@@ -2075,6 +2080,11 @@ fn main() -> Result<()> {
     validate_sampling_attribution_mode(&args)?;
     validate_sampled_structural_mode(&args)?;
     validate_durable_prefix_cache_mode(&args)?;
+    if args.request_stats_jsonl.is_some() && args.info {
+        bail!(
+            "--request-stats-jsonl is not applicable with --info; only DeepSeek V4 single-turn generation emits the sidecar today"
+        );
+    }
     if args.info {
         let runtime = Runtime::metal()?;
         println!("device: {}", runtime.describe());
@@ -2089,6 +2099,10 @@ fn main() -> Result<()> {
     };
 
     if args.deepseek_census_json {
+        ensure!(
+            args.request_stats_jsonl.is_none(),
+            "--request-stats-jsonl is not applicable with --deepseek-census-json; only DeepSeek V4 single-turn generation emits the sidecar today"
+        );
         return print_deepseek_v4_census(model_path);
     }
 
@@ -2105,6 +2119,10 @@ fn main() -> Result<()> {
         && args.messages.is_none()
         && args.requests_jsonl.is_none()
     {
+        ensure!(
+            args.request_stats_jsonl.is_none(),
+            "--request-stats-jsonl is not applicable without a request; only DeepSeek V4 single-turn generation emits the sidecar today. Provide --prompt, --prompt-file, --messages, or --requests-jsonl."
+        );
         return print_model_info(model_path);
     }
 
@@ -2754,13 +2772,11 @@ fn run_deepseek_v4_single_turn(
 ) -> Result<()> {
     validate_deepseek_v4_generation_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
-    // Pre-flight validate the --request-stats-jsonl sidecar BEFORE model load.
-    // This also forces INVOCATION_ID initialization at the earliest point where
-    // telemetry is known to be requested, so /dev/urandom entropy is required
-    // only for invocations that opt in to structured stats — `--help`, invalid
-    // usage, and paths without telemetry never trigger the entropy dependency.
+    // Preflight the sidecar in the same open mode as emission (read+append),
+    // and force INVOCATION_ID init here so entropy is required only when
+    // telemetry is requested.
     if let Some(path) = args.request_stats_jsonl.as_ref() {
-        let _ = open_append_file(path, "request stats jsonl (pre-flight)")?;
+        preflight_request_stats_jsonl(path)?;
         LazyLock::force(&INVOCATION_ID);
     }
     let request_start = std::time::Instant::now();
@@ -7201,9 +7217,10 @@ fn hex_encode_bytes(bytes: &[u8]) -> String {
 /// to refuse to run than to emit records with a weak, potentially colliding
 /// identifier that consumers might trust for cross-run correlation.
 ///
-/// Generated on first access; force-init from `main()` to bind the value to
-/// process start rather than record-emission time. Cross-invocation replay
-/// requires this to be stable across all records emitted by one process.
+/// Generated on first access; force-init only when telemetry is actually
+/// requested (see the --request-stats-jsonl pre-flight branch in the DS4
+/// single-turn generator), so `--help`, `--version`, non-telemetry
+/// invocations, and dispatch errors never touch /dev/urandom.
 static INVOCATION_ID: LazyLock<String> = LazyLock::new(|| {
     generate_invocation_id_from(EntropySource::DevUrandom)
         .unwrap_or_else(|e| panic!("cannot initialize invocation id: {e}"))
@@ -7318,7 +7335,18 @@ fn append_jsonl_record<T: Serialize>(path: &Path, record: &T, label: &str) -> Re
                 std::io::Error::last_os_error()
             ));
         }
-        if n == 1 && probe[0] != b'\n' {
+        // Concurrent truncation between metadata and pread would leave the
+        // tail unprobed; refuse rather than risk concatenating onto it.
+        if n != 1 {
+            unlock(fd);
+            return Err(anyhow!(
+                "tail probe of {label} {} returned {n} bytes at offset {}; \
+                 expected 1 (concurrent truncation between metadata and pread?)",
+                path.display(),
+                offset,
+            ));
+        }
+        if probe[0] != b'\n' {
             // Isolate our record from the orphan tail rather than concatenating.
             buf.push(b'\n');
         }
@@ -7360,15 +7388,60 @@ fn append_jsonl_record<T: Serialize>(path: &Path, record: &T, label: &str) -> Re
 /// fsync the directory containing `path` so a newly-created entry is
 /// persisted before we report success. `sync_data`/`fsync` on the file
 /// itself is not enough for a new directory entry on most filesystems.
+///
+/// If the path's parent hierarchy was newly created (via `create_dir_all`),
+/// sync each newly-materialized directory on the way up to an existing
+/// ancestor, so the whole hierarchy is durable — not just the final leaf
+/// directory containing the file.
 fn sync_containing_dir(path: &Path) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let dir = if parent.as_os_str().is_empty() {
+    let leaf = if parent.as_os_str().is_empty() {
         Path::new(".")
     } else {
         parent
     };
-    let d = std::fs::File::open(dir)?;
-    d.sync_all()
+    // Walk up from the leaf, syncing each directory. Stop at root or when
+    // a further ancestor doesn't need syncing (best-effort: we always sync
+    // the leaf; ancestors are synced too as a conservative default so that
+    // a create_dir_all() hierarchy survives crash).
+    let mut cur: Option<&Path> = Some(leaf);
+    while let Some(dir) = cur {
+        std::fs::File::open(dir)?.sync_all()?;
+        cur = dir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty() && *p != dir);
+    }
+    Ok(())
+}
+
+/// Preflight the --request-stats-jsonl destination using the exact open
+/// mode the emission path uses (read+append). An append-writable but
+/// unreadable file cannot pass this check and then fail emission after
+/// inference cost is paid. Also creates parent directories so append
+/// itself doesn't fail on first record.
+fn preflight_request_stats_jsonl(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "create request stats jsonl (pre-flight) directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    let _ = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)
+        .with_context(|| {
+            format!(
+                "open request stats jsonl (pre-flight) with read+append {}",
+                path.display()
+            )
+        })?;
+    Ok(())
 }
 
 /// Coerce a metric to a well-defined finite JSON representation. Returns 0.0

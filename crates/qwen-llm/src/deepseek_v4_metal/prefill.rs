@@ -418,6 +418,8 @@ struct PrefillCompressorScratch {
     hca_score: MetalTensor,
     pooled_rows: MetalTensor,
     normalized_rows: MetalTensor,
+    #[cfg(feature = "dsv4-diagnostics")]
+    q8_matrix_invocations: Cell<u32>,
 }
 
 struct PrefillMoeScratch {
@@ -569,6 +571,8 @@ impl DeepSeekV4PrefillScratch {
                 hca_score: MetalTensor::zeros_f32(ctx, vec![512, n])?,
                 pooled_rows: MetalTensor::zeros_f32(ctx, vec![512, compressed_rows])?,
                 normalized_rows: MetalTensor::zeros_f32(ctx, vec![512, compressed_rows])?,
+                #[cfg(feature = "dsv4-diagnostics")]
+                q8_matrix_invocations: Cell::new(0),
             },
             moe: PrefillMoeScratch {
                 normalized_input: MetalTensor::zeros_f32(ctx, vec![h, n])?,
@@ -1450,6 +1454,30 @@ enum Q8PrecisionProjection {
     #[cfg(test)]
     HalfMatrix,
     F32Matrix,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+crate::env_flag!(
+    default_off packed_q8_compressor_matrix_enabled,
+    "QWEN_DSV4_PROFILE_Q8_COMPRESSOR_MATRIX"
+);
+
+fn packed_q8_compressor_matrix_for_chunk(n_tokens: usize) -> Result<bool, DeepSeekV4MetalError> {
+    #[cfg(feature = "dsv4-diagnostics")]
+    {
+        let enabled = packed_q8_compressor_matrix_enabled();
+        if enabled && n_tokens != DEEPSEEK_V4_PREFILL_MAX_TOKENS {
+            return invalid(format!(
+                "QWEN_DSV4_PROFILE_Q8_COMPRESSOR_MATRIX requires exactly {DEEPSEEK_V4_PREFILL_MAX_TOKENS} tokens, got {n_tokens}"
+            ));
+        }
+        Ok(enabled)
+    }
+    #[cfg(not(feature = "dsv4-diagnostics"))]
+    {
+        let _ = n_tokens;
+        Ok(false)
+    }
 }
 
 fn parse_packed_q8_qb_projection(
@@ -2390,6 +2418,79 @@ enum PackedCompressorViews {
 }
 
 impl PrefillCompressorScratch {
+    #[cfg(feature = "dsv4-diagnostics")]
+    fn reset_q8_matrix_invocations(&self) {
+        self.q8_matrix_invocations.set(0);
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    fn q8_matrix_invocations(&self) -> u32 {
+        self.q8_matrix_invocations.get()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_projection(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        weight: &MetalTensor,
+        input: &MetalTensor,
+        output: &MetalTensor,
+        n_out: usize,
+        n_tokens: usize,
+        name: &str,
+        use_matrix: bool,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        if !use_matrix {
+            return encode_state_batch_projection(
+                ctx,
+                enc,
+                weight,
+                input,
+                output,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                n_out,
+                n_tokens,
+                name,
+            );
+        }
+        #[cfg(feature = "dsv4-diagnostics")]
+        {
+            if weight.dtype != GgmlType::Q8_0 {
+                return invalid(format!(
+                    "{name} compressor matrix oracle requires Q8_0, got {:?}",
+                    weight.dtype
+                ));
+            }
+            let next = self
+                .q8_matrix_invocations
+                .get()
+                .checked_add(1)
+                .ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(
+                        "packed Q8 compressor matrix invocation count overflow".into(),
+                    )
+                })?;
+            crate::metal::encode_mat_mat_q8_0_f32(
+                ctx,
+                enc,
+                weight,
+                input,
+                output,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                n_out,
+                n_tokens,
+            )
+            .map_err(DeepSeekV4MetalError::Metal)?;
+            self.q8_matrix_invocations.set(next);
+            Ok(())
+        }
+        #[cfg(not(feature = "dsv4-diagnostics"))]
+        {
+            unreachable!("compressor matrix oracle is diagnostics-only")
+        }
+    }
+
     fn encode_layer_projections(
         &self,
         ctx: &MetalContext,
@@ -2398,6 +2499,7 @@ impl PrefillCompressorScratch {
         layer: usize,
         normalized_input: &MetalTensor,
         n_tokens: usize,
+        use_matrix: bool,
     ) -> Result<PackedCompressorViews, DeepSeekV4MetalError> {
         let tensor = |suffix: &str| residency.require_tensor(&format!("blk.{layer}.{suffix}"));
         match residency
@@ -2458,16 +2560,16 @@ impl PrefillCompressorScratch {
                         "packed indexer compressor score",
                     ),
                 ] {
-                    encode_state_batch_projection(
+                    self.encode_projection(
                         ctx,
                         enc,
                         weight,
                         normalized_input,
                         output,
-                        DEEPSEEK_V4_HIDDEN_SIZE,
                         width,
                         n_tokens,
                         name,
+                        use_matrix,
                     )?;
                 }
                 Ok(PackedCompressorViews::CompressedSparse {
@@ -2488,27 +2590,27 @@ impl PrefillCompressorScratch {
                     vec![512, n_tokens as u64],
                     "packed HCA compressor score",
                 )?;
-                encode_state_batch_projection(
+                self.encode_projection(
                     ctx,
                     enc,
                     tensor("attn_compressor_kv.weight")?,
                     normalized_input,
                     &attention_kv,
-                    DEEPSEEK_V4_HIDDEN_SIZE,
                     512,
                     n_tokens,
                     "packed HCA compressor KV",
+                    use_matrix,
                 )?;
-                encode_state_batch_projection(
+                self.encode_projection(
                     ctx,
                     enc,
                     tensor("attn_compressor_gate.weight")?,
                     normalized_input,
                     &attention_score,
-                    DEEPSEEK_V4_HIDDEN_SIZE,
                     512,
                     n_tokens,
                     "packed HCA compressor score",
+                    use_matrix,
                 )?;
                 Ok(PackedCompressorViews::HeavilyCompressed {
                     attention_kv,
@@ -4600,6 +4702,7 @@ pub struct PackedPostRouteSampledLayerProfile {
 #[derive(Clone, Debug)]
 pub struct PackedPostRouteStageProfile {
     pub sampled: bool,
+    pub q8_compressor_matrix_invocations: u32,
     pub command_gpu_ms: Vec<f64>,
     pub metadata: Vec<PackedPostRouteLayerMetadata>,
     pub sampled_layers: Vec<PackedPostRouteSampledLayerProfile>,
@@ -4883,6 +4986,7 @@ impl PackedPostRouteStageRecorder {
             }
             return Ok(PackedPostRouteStageProfile {
                 sampled: false,
+                q8_compressor_matrix_invocations: 0,
                 command_gpu_ms,
                 metadata,
                 sampled_layers: Vec::new(),
@@ -4921,6 +5025,7 @@ impl PackedPostRouteStageRecorder {
         }
         Ok(PackedPostRouteStageProfile {
             sampled: true,
+            q8_compressor_matrix_invocations: 0,
             command_gpu_ms,
             metadata,
             sampled_layers,
@@ -6775,7 +6880,9 @@ impl DeepSeekV4Session {
             Some(&mut recorder),
             &mut |_| {},
         )?;
-        recorder.resolve(ctx)
+        let mut profile = recorder.resolve(ctx)?;
+        profile.q8_compressor_matrix_invocations = self.prefill.compressor.q8_matrix_invocations();
+        Ok(profile)
     }
 
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -6955,6 +7062,9 @@ impl DeepSeekV4Session {
         }
         let n_tokens = checked_token_count(token_ids.len())?;
         let q_b_projection = packed_q8_qb_projection()?;
+        let compressor_matrix = packed_q8_compressor_matrix_for_chunk(token_ids.len())?;
+        #[cfg(feature = "dsv4-diagnostics")]
+        self.prefill.compressor.reset_q8_matrix_invocations();
         #[cfg(feature = "dsv4-diagnostics")]
         validate_packed_route_policy_scope(route_policy, token_ids.len())?;
         if expert_policy.uses_iq2_target() && token_ids.len() > PACKED_GROUPED_EXPERT_MAX_TOKENS {
@@ -7017,6 +7127,7 @@ impl DeepSeekV4Session {
             route_policy,
             expert_policy,
             q_b_projection,
+            compressor_matrix,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
             stage_recorder,
             #[cfg(feature = "dsv4-diagnostics")]
@@ -7044,6 +7155,7 @@ impl DeepSeekV4Session {
         route_policy: PackedRoutePolicy,
         expert_policy: PackedExpertPolicy,
         q_b_projection: Q8PrecisionProjection,
+        compressor_matrix: bool,
         #[cfg(all(test, feature = "dsv4-diagnostics"))] mut stage_recorder: Option<
             &mut PackedPrefillStageRecorder,
         >,
@@ -7059,6 +7171,16 @@ impl DeepSeekV4Session {
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "deepseek_v4: F32 Q8 Q-B matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB=exact"
+                );
+            }
+        }
+        #[cfg(feature = "dsv4-diagnostics")]
+        if compressor_matrix {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: half-staged Q8 compressor matrix timing oracle active for N={n_tokens}; control=QWEN_DSV4_PACKED_Q8_COMPRESSOR=exact"
                 );
             }
         }
@@ -7246,6 +7368,7 @@ impl DeepSeekV4Session {
                     layer,
                     &attention.normalized_input,
                     n_tokens,
+                    compressor_matrix,
                 )?;
 
                 let query_heads = attention.queries.view_subrange(

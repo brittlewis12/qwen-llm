@@ -54,6 +54,7 @@ struct Dsv4PrefillReport {
 struct Dsv4PrefillRun {
     sampled: bool,
     wall_ms: f64,
+    q8_compressor_matrix_invocations: u32,
     post_route_gpu_ms: f64,
     bm16_gpu_ms: f64,
     encoder_gap_ms: f64,
@@ -103,6 +104,7 @@ fn add_stage(map: &mut BTreeMap<&'static str, f64>, label: &'static str, value: 
 }
 
 fn summarize(profile: PackedPostRouteStageProfile, wall_ms: f64) -> Dsv4PrefillRun {
+    let q8_compressor_matrix_invocations = profile.q8_compressor_matrix_invocations;
     let post_route_gpu_ms = profile.command_gpu_ms.iter().sum();
     let bm16_gpu_ms = profile
         .metadata
@@ -114,6 +116,7 @@ fn summarize(profile: PackedPostRouteStageProfile, wall_ms: f64) -> Dsv4PrefillR
         return Dsv4PrefillRun {
             sampled: false,
             wall_ms,
+            q8_compressor_matrix_invocations,
             post_route_gpu_ms,
             bm16_gpu_ms,
             encoder_gap_ms: 0.0,
@@ -185,6 +188,7 @@ fn summarize(profile: PackedPostRouteStageProfile, wall_ms: f64) -> Dsv4PrefillR
     Dsv4PrefillRun {
         sampled: true,
         wall_ms,
+        q8_compressor_matrix_invocations,
         post_route_gpu_ms,
         bm16_gpu_ms,
         encoder_gap_ms,

@@ -3063,16 +3063,22 @@ fn run_deepseek_v4_single_turn(
     } else {
         0.0
     };
+    let prefill_tps = if prefill_ms > 0.0 {
+        prompt_ids.len() as f64 / (prefill_ms / 1e3)
+    } else {
+        0.0
+    };
     let transition_tps = if generation.transition_ms > 0.0 {
         generation.transitions as f64 / (generation.transition_ms / 1e3)
     } else {
         0.0
     };
+    let generated_ids_sha256 = generated_token_sha256(&generation.tokens);
     eprintln!(
         concat!(
             "deepseek_v4 stats: prompt_kind={} prefill_mode={} prefill_chunk_cap={} prompt_tokens={} generated_tokens={} transitions={} ",
-            "stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} ",
-            "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} build_commit={} build_dirty={} generated_ids={:?}"
+            "stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} ",
+            "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} build_commit={} build_dirty={} generated_ids_sha256={}"
         ),
         prompt_kind,
         prefill_mode,
@@ -3084,13 +3090,17 @@ fn run_deepseek_v4_single_turn(
         tokenizer_ms,
         load_ms,
         prefill_ms,
+        prefill_tps,
         generation.wall_ms,
         decode_tps,
         transition_tps,
         env!("QWEN_BUILD_COMMIT"),
         env!("QWEN_BUILD_DIRTY"),
-        generation.tokens,
+        generated_ids_sha256,
     );
+    if std::env::var_os("QWEN_DSV4_GENERATED_IDS").is_some() {
+        eprintln!("deepseek_v4 generated_ids: {:?}", generation.tokens);
+    }
     if let Some(path) = args.trace_request.as_ref() {
         append_request_trace(path, arrival_ms, prompt_ids.len(), generation.tokens.len())?;
     }
@@ -3431,6 +3441,11 @@ fn run_deepseek_v4_requests_jsonl(
         } else {
             0.0
         };
+        let prefill_tps = if prefill_ms > 0.0 {
+            request.prompt_tokens as f64 / (prefill_ms / 1e3)
+        } else {
+            0.0
+        };
         let output = RequestOutput {
             id: request.id.clone(),
             prompt_tokens: request.prompt_tokens,
@@ -3452,7 +3467,7 @@ fn run_deepseek_v4_requests_jsonl(
         eprintln!(
             concat!(
                 "deepseek_v4 stats: request={} line={} prompt_kind=raw prefill_mode={} prefill_chunk_cap={} prompt_tokens={} ",
-                "generated_tokens={} transitions={} stop_reason={} session_ms={:.1} prefill_ms={:.1} ",
+                "generated_tokens={} transitions={} stop_reason={} session_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} ",
                 "generation_ms={:.1} decode_tps={:.2} build_commit={} build_dirty={}"
             ),
             output.id,
@@ -3465,6 +3480,7 @@ fn run_deepseek_v4_requests_jsonl(
             generation.stop_reason.as_str(),
             session_ms,
             prefill_ms,
+            prefill_tps,
             generation.wall_ms,
             decode_tps,
             env!("QWEN_BUILD_COMMIT"),

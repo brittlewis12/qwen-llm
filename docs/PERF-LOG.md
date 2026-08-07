@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Paired IQ2 Gate/Up KILL
+
+Status: remove the exact paired IQ2 gate/up/SwiGLU pilot. The 25 IQ2 layers
+retain two independent MM64x32 projections followed by standalone SwiGLU.
+
+- The candidate stages both IQ2 weight tiles with one shared F32 activation
+  tile, retains independent F32 accumulators, and publishes only the routed
+  inner. Reduced- and production-K differentials through N=4,096 preserve every
+  inner bit, and complete 8K logits remain exact.
+- In a clean control/candidate/control bracket, combined IQ2 gate/up plus SwiGLU
+  moves `4,076.981/3,994.295 -> 4,207.414 ms`, a 3.20-5.34% regression.
+  Post-route GPU moves `14,034.687/13,760.077 -> 14,138.888 ms`.
+- Sampled wall is `35,981.118/35,458.363 -> 35,837.678 ms`; ordinary wall is
+  `37,009.594/35,499.558 -> 35,548.968 ms`. Those drift-spanning endpoint
+  readings cannot rescue a direct loss in the targeted work.
+- The first candidate acquisition was invalid before timing because an empty
+  diagnostic stage produced non-monotonic Metal timestamps. The corrected
+  five-stage profiler rerun above contains the only candidate measurements.
+
+Decision: remove the pilot. Together with the prior all-IQ3 fusion KILL, this
+closes same-tile dual-projection fusion with sixteen live accumulator lineages.
+Reopen only for a materially lower-pressure representation or work unit, not a
+minor tile, barrier, epilogue, or threshold retune.
+
 ## 2026-08-07 - DeepSeek V4 One-Row Multi-Head Selected CSA KILL
 
 Status: remove the 16-head selected-CSA pilot. Packed sparse CSA remains on the

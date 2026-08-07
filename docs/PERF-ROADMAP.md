@@ -870,12 +870,22 @@ selected rows appear sufficiently cache-served that full-threadgroup barriers
 and dual-head register pressure dominate. Remove the pilot and require a
 barrier-free topology or changed traffic evidence before reopening.
 
+Exact paired IQ2 gate/up is closed as well. Sharing one F32 activation tile,
+removing both projection materializations, and folding SwiGLU into the existing
+64x32 work unit preserves every bit but raises the combined target from
+`4,076.981/3,994.295` to `4,207.414 ms`. Post-route GPU also regresses. The
+20 KiB threadgroup allocation and sixteen simultaneous F32 accumulator lineages
+erase the dataflow saving, matching the prior all-IQ3 fusion result under a
+different quant format. Remove the pilot; same-tile dual-projection fusion now
+requires a materially lower-pressure premise before reopening.
+
 Force-ranked queue:
 
 1. **Further IQ2 execution.** The exact wide cohort is 7.15 seconds, with
-   3.99 seconds in gate/up and 1.96 seconds in down. Half-staged operands or a
-   paired gate/up boundary require explicit quality authority and must project a
-   competitive whole-request gain before implementation.
+   3.99 seconds in gate/up and 1.96 seconds in down. Exact paired F32 gate/up is
+   now closed. Half-staged operands remain a changed numerical premise; require
+   explicit quality authority and a projected competitive whole-request gain
+   before implementation.
 2. **All-IQ3 routed experts.** The 16-layer routed subtotal is 3.67 seconds and
    already uses a 64-output by 32-route matrix. Reopen only for a new dataflow
    boundary such as grouped down or deterministic sorted-output finalization,

@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Strided Grouped Output A Default GO
+
+Status: qualified N=2,048 and N=4,096 Q8 output-A execution now reads groups
+directly from the native attention layout and writes final low-rank slices
+without pack/scatter temporaries. Set
+`QWEN_DSV4_PACKED_Q8_OUTPUT_GROUPED=0` to restore the prior chain.
+
+- One grid-depth plane owns each of eight groups. Every plane retains the
+  accepted R2C16K64 F32 operands, K traversal, accumulation, and output bits;
+  only source/destination strides and dispatch ownership change. Output B is
+  unchanged.
+- Reduced and production-K differentials compare independent per-group controls
+  with the strided grouped result. Both K=128 and K=4,096 preserve every bit,
+  repeat exactly, and retain output guards.
+- On clean `3051b21` at N=4,096, output-projection GPU falls
+  `5,306.365 -> 4,455.770 ms`, or 16.03%. Sampled 8K wall falls
+  `36,598.057 -> 35,688.851 ms`; ordinary prefill rises
+  `221.50 -> 227.80 token/s`. Complete logits retain SHA-256
+  `a61a8155...eb386`.
+- At N=2,048, output-projection GPU falls
+  `1,301.486 -> 1,080.798 ms`, sampled wall falls
+  `8,432.373 -> 8,329.103 ms`, and ordinary prefill rises
+  `233.71 -> 238.85 token/s`. Complete logits retain SHA-256
+  `4e3348fb...e8095`.
+
+Decision: default the exact-to-R2C16 dataflow deletion for the already pinned
+M4 Max/current-asset Q8 matrix profiles. Keep one-variable rollback and do not
+infer qualification for partial chunks or explicit forced policies.
+
 ## 2026-08-07 - DeepSeek V4 Qualified Tail Scheduling GO
 
 Status: the default 4K prefill scheduler now emits complete 2K work units

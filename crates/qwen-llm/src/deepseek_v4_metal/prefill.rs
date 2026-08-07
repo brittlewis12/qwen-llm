@@ -4682,7 +4682,7 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    default_off packed_q8_grouped_output_enabled,
+    default_on packed_q8_grouped_output_enabled,
     "QWEN_DSV4_PACKED_Q8_OUTPUT_GROUPED"
 );
 

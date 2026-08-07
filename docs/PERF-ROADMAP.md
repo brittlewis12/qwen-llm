@@ -842,49 +842,55 @@ and the 6,642-token prompt reaches 179.52 token/s, up from 119.81 after the 4K
 indexer promotion. Future product claims must report actual chunk geometry;
 exact 8K full-chunk cells cannot authorize arbitrary-tail throughput alone.
 
+The grouped output-A dataflow then deletes all sixteen pack/scatter passes.
+Against clean `3051b21`, output-projection GPU falls
+`5,306.365 -> 4,455.770 ms`; sampled 8K wall falls
+`36,598.057 -> 35,688.851 ms`, and ordinary prefill rises
+`221.50 -> 227.80 token/s`. N=2,048 output GPU also falls
+`1,301.486 -> 1,080.798 ms`, with ordinary prefill rising
+`233.71 -> 238.85 token/s`. Both final-logit vectors remain bit-identical.
+Default the exact-to-R2C16 strided group-axis work unit with
+`QWEN_DSV4_PACKED_Q8_OUTPUT_GROUPED=0` as rollback.
+
 The 4K result still closes capacity growth as the mechanism. The current
-36.84-second sampled profile is led by 19.62 seconds pre-expert, split into 6.88
-seconds before attention, 5.64 seconds in the attention body, 5.35 seconds in
+35.69-second sampled profile is led by 18.73 seconds pre-expert, split into 6.93
+seconds before attention, 5.59 seconds in the attention body, 4.46 seconds in
 output projections, and 1.75 seconds after attention. The attention body is
 3.42 seconds core and 2.17 seconds sparse indexer/selection: 0.52 seconds
 preparation, 1.61 seconds scoring, and 0.05 seconds selection. Inverse RoPE is
-0.05 seconds. Post-route is 14.05 seconds and host residual is 3.18 seconds.
+0.05 seconds. Post-route is 13.82 seconds and host residual is 3.14 seconds.
 
 Force-ranked queue:
 
-1. **Direct grouped output A.** Output projections cost 5.35 seconds. Replace
-   the eight serial pack/matrix/scatter chains with one strided grouped workload
-   that writes final low-rank slices directly. Preserve the accepted F32 Q8
-   arithmetic first; do not couple copy deletion to another precision change.
-2. **One-row multi-head selected CSA.** Attention core costs 3.42 seconds. Port
+1. **One-row multi-head selected CSA.** Attention core costs 3.42 seconds. Port
    the DwarfStar one-row topology that shares each selected row across heads,
    not the killed sixteen-row staging design whose barriers and 16 KiB scratch
    regressed. Require a model-free recurrence differential before timing.
-3. **Further IQ2 execution.** The exact wide cohort is 7.15 seconds, with
+2. **Further IQ2 execution.** The exact wide cohort is 7.15 seconds, with
    3.99 seconds in gate/up and 1.96 seconds in down. Half-staged operands or a
    paired gate/up boundary require explicit quality authority and must project a
    competitive whole-request gain before implementation.
-4. **All-IQ3 routed experts.** The 16-layer routed subtotal is 3.67 seconds and
+3. **All-IQ3 routed experts.** The 16-layer routed subtotal is 3.67 seconds and
    already uses a 64-output by 32-route matrix. Reopen only for a new dataflow
    boundary such as grouped down or deterministic sorted-output finalization,
    not another bank-axis or scalar sweep.
-5. **Mixed-quant routed experts.** Layers 26 and 42 cost 2.23 seconds in the
+4. **Mixed-quant routed experts.** Layers 26 and 42 cost 2.23 seconds in the
    generic routed-expert path. Price a matrix work unit across their IQ3_S or
    IQ3_XXS gate/up and MXFP4 down shapes before tuning either dtype locally.
-6. **Further Lightning score production.** At the 4K default, the exact tiled
+5. **Further Lightning score production.** At the 4K default, the exact tiled
    F32 scorer costs 1.61 seconds. Reopen around lower-precision tensor execution
    only when its whole-request ceiling competes with routed-expert work; exact
    radix selection remains only 47 ms and must not be folded into the claim.
-7. **Far-context scoring and selection.** Keep the tiled F32 scorer and radix4
+6. **Far-context scoring and selection.** Keep the tiled F32 scorer and radix4
    selector while prefill is the larger product deficit. Reopen exact Lightning
    scheduling only for a structurally new design with a credible >=0.50 ms
    terminal saving and <=0.05 ms shallow regression; do not auto-sweep R4 or
    repeat the held R2 packet.
-8. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+7. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-9. **Broad GPU route ownership.** The 1.448-second ceiling remains below the
+8. **Broad GPU route ownership.** The 1.448-second ceiling remains below the
    grouped-attention and sparse-indexer opportunities, and its ledger regression
    is unresolved. Reopen only with a CPU-equivalent route-weight lineage or a
    materially larger measured endpoint ceiling.

@@ -3588,7 +3588,6 @@ fn packed_grouped_expert_tiles(
             || previous_expert.is_some_and(|expert| bucket.expert <= expert)
             || bucket.start != cursor
             || bucket.len == 0
-            || bucket.len > n_tokens
         {
             return invalid("packed grouped expert schedule has invalid bucket geometry");
         }
@@ -4172,6 +4171,133 @@ fn encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
         &output.view_subrange(0, vec![projected_elements as u64]),
         clamp,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_packed_grouped_mapped_k_block_f32_plan(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    source_rows: &MetalTensor,
+    destination_slots: &MetalTensor,
+    plan: &PackedGroupedExpertPlan,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    expert_count: usize,
+    top_k: usize,
+    n_tokens: usize,
+    source_count: usize,
+    destination_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    let (block_bytes, kernel, label) = match bank.dtype {
+        GgmlType::Q3_K => (
+            110usize,
+            "kernel_deepseek_v4_packed_grouped_mapped_q3_K_f32_mm",
+            "packed grouped mapped Q3_K projection",
+        ),
+        GgmlType::Q4_K => (
+            144,
+            "kernel_deepseek_v4_packed_grouped_mapped_q4_K_f32_mm",
+            "packed grouped mapped Q4_K projection",
+        ),
+        dtype => {
+            return invalid(format!(
+                "packed grouped mapped K-block dtype {dtype:?} is unsupported"
+            ));
+        }
+    };
+    require_serial(enc, label)?;
+    validate_packed_expert_count(expert_count)?;
+    if !n_in.is_multiple_of(256)
+        || !n_out.is_multiple_of(64)
+        || top_k != MOE_TOP_K
+        || source_count == 0
+        || destination_count == 0
+    {
+        return invalid(format!("{label} has invalid geometry"));
+    }
+    validate_expert_bank(bank, n_in, n_out, expert_count, label)?;
+    validate_f32(input, &[n_in as u64, source_count as u64], false, label)?;
+    let map_count = checked_mul(n_tokens, top_k, label)?;
+    validate_i32(source_rows, &[map_count as u64], false, label)?;
+    validate_i32(destination_slots, &[map_count as u64], false, label)?;
+    validate_f32(
+        output,
+        &[n_out as u64, destination_count as u64],
+        true,
+        label,
+    )?;
+    if ctx.device.maxThreadgroupMemoryLength() < 8_192 {
+        return invalid(format!("{label} requires 8192 bytes of threadgroup memory"));
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+        n_expert: u32,
+        map_count: u32,
+        source_count: u32,
+        destination_count: u32,
+    }
+    let row_bytes = checked_mul(n_in / 256, block_bytes, label)?;
+    let pso = ctx.pipeline(kernel)?;
+    if pso.threadExecutionWidth() != 32 || pso.maxTotalThreadsPerThreadgroup() < 128 {
+        return invalid(format!("{label} requires four SIMD groups"));
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            m: u32::try_from(n_out).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{label} output exceeds u32"))
+            })?,
+            k: u32::try_from(n_in)
+                .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{label} input exceeds u32")))?,
+            nb01: u32::try_from(row_bytes).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{label} row bytes exceed u32"))
+            })?,
+            stride_b: u32::try_from(n_in).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{label} stride exceeds u32"))
+            })?,
+            n_expert: u32::try_from(expert_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{label} expert count exceeds u32"))
+            })?,
+            map_count: u32::try_from(map_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{label} map count exceeds u32"))
+            })?,
+            source_count: u32::try_from(source_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{label} source count exceeds u32"))
+            })?,
+            destination_count: u32::try_from(destination_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!("{label} destination count exceeds u32"))
+            })?,
+        },
+    );
+    enc.set_tensor(1, bank);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, source_rows);
+    enc.set_tensor(4, destination_slots);
+    plan.bind(enc, 5);
+    enc.set_tensor(6, output);
+    enc.set_threadgroup_memory(0, 8_192);
+    enc.dispatch(
+        MTLSize {
+            width: plan.dispatch_tiles,
+            height: n_out / 64,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4764,6 +4890,11 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
+    default_on packed_grouped_q3q4_enabled,
+    "QWEN_DSV4_PACKED_GROUPED_Q3Q4"
+);
+
+crate::env_flag!(
     default_off packed_gpu_route_iq3_enabled,
     "QWEN_DSV4_PACKED_GPU_ROUTE_IQ3"
 );
@@ -4779,6 +4910,45 @@ fn packed_grouped_iq3_candidate_supported(ctx: &MetalContext) -> bool {
         return false;
     };
     projection.threadExecutionWidth() == 32 && projection.maxTotalThreadsPerThreadgroup() >= 128
+}
+
+fn packed_grouped_q3q4_candidate_supported(ctx: &MetalContext) -> bool {
+    if ctx.device.maxThreadgroupMemoryLength() < 8_192 {
+        return false;
+    }
+    for kernel in [
+        "kernel_deepseek_v4_packed_grouped_mapped_q3_K_f32_mm",
+        "kernel_deepseek_v4_packed_grouped_mapped_q4_K_f32_mm",
+    ] {
+        let Ok(pipeline) = ctx.pipeline(kernel) else {
+            return false;
+        };
+        if pipeline.threadExecutionWidth() != 32 || pipeline.maxTotalThreadsPerThreadgroup() < 128 {
+            return false;
+        }
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn packed_grouped_q3q4_scope_qualified(
+    device_name: &str,
+    tensor_count: usize,
+    source_bytes: u64,
+    expert_count: usize,
+    n_tokens: usize,
+    gate_dtype: GgmlType,
+    up_dtype: GgmlType,
+    down_dtype: GgmlType,
+) -> bool {
+    device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
+        && tensor_count == 1_328
+        && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
+        && expert_count == 160
+        && packed_q8_matrix_chunk_qualified(n_tokens)
+        && gate_dtype == GgmlType::Q3_K
+        && up_dtype == GgmlType::Q3_K
+        && down_dtype == GgmlType::Q4_K
 }
 
 #[cfg(test)]
@@ -6946,6 +7116,7 @@ impl PrefillMoeScratch {
         shared_up: &MetalTensor,
         shared_down: &MetalTensor,
         expert_policy: PackedExpertPolicy,
+        grouped_q3q4_qualified: bool,
         shared_matrix: bool,
         expert_clamp: f32,
         shared_clamp: f32,
@@ -7002,6 +7173,94 @@ impl PrefillMoeScratch {
             ],
             "packed expert outputs",
         )?;
+        let used_grouped_q3q4 = if grouped_q3q4_qualified
+            && packed_grouped_q3q4_candidate_supported(ctx)
+        {
+            let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed grouped Q3/Q4 routes")?;
+            let rows = i32_prefix(
+                &self.bucket_rows,
+                vec![route_count as u64],
+                "packed grouped Q3/Q4 source rows",
+            )?;
+            let slots = i32_prefix(
+                &self.bucket_slots,
+                vec![route_count as u64],
+                "packed grouped Q3/Q4 destination slots",
+            )?;
+            let expert_output_flat = expert_outputs
+                .view_subrange(0, vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, route_count as u64]);
+            let (gate, up) = packed_grouped_gate_up_views(
+                &expert_output_flat,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                MOE_FFN_SIZE,
+                route_count,
+            )?;
+            let grouped_inner = f32_prefix(
+                &self.grouped_inner,
+                vec![MOE_FFN_SIZE as u64, route_count as u64],
+                "packed grouped Q3/Q4 inner",
+            )?;
+            let plan = PackedGroupedExpertPlan::new(n_tokens, schedule, Some(&self.grouped_tiles))?;
+            for (bank, projection) in [(gate_bank, &gate), (up_bank, &up)] {
+                encode_packed_grouped_mapped_k_block_f32_plan(
+                    ctx,
+                    enc,
+                    bank,
+                    normalized_input,
+                    &rows,
+                    &slots,
+                    &plan,
+                    projection,
+                    DEEPSEEK_V4_HIDDEN_SIZE,
+                    MOE_FFN_SIZE,
+                    self.expert_count,
+                    MOE_TOP_K,
+                    n_tokens,
+                    n_tokens,
+                    route_count,
+                )?;
+            }
+            let projected_elements = checked_mul(
+                MOE_FFN_SIZE,
+                route_count,
+                "packed grouped Q3/Q4 projected elements",
+            )?;
+            encode_ds4_clamped_swiglu(
+                ctx,
+                enc,
+                &gate.view_subrange(0, vec![projected_elements as u64]),
+                &up.view_subrange(0, vec![projected_elements as u64]),
+                &grouped_inner.view_subrange(0, vec![projected_elements as u64]),
+                expert_clamp,
+            )?;
+            encode_packed_grouped_mapped_k_block_f32_plan(
+                ctx,
+                enc,
+                down_bank,
+                &grouped_inner,
+                &slots,
+                &slots,
+                &plan,
+                &expert_output_flat,
+                MOE_FFN_SIZE,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                self.expert_count,
+                MOE_TOP_K,
+                n_tokens,
+                route_count,
+                route_count,
+            )?;
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: grouped Q3_K/Q4_K packed experts active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_GROUPED_Q3Q4=0"
+                );
+            }
+            true
+        } else {
+            false
+        };
         let used_grouped_iq2 = if expert_policy.uses_iq2_target()
             && gate_bank.dtype == GgmlType::IQ2_XS
             && up_bank.dtype == GgmlType::IQ2_XS
@@ -7270,7 +7529,7 @@ impl PrefillMoeScratch {
         } else {
             false
         };
-        let used_grouped_target = used_grouped_iq2 || used_grouped_iq3;
+        let used_grouped_target = used_grouped_q3q4 || used_grouped_iq2 || used_grouped_iq3;
         if !used_grouped_target {
             for bucket in schedule {
                 let gate_weight = expert_weight_view(
@@ -8306,7 +8565,7 @@ impl DeepSeekV4Session {
             static REPORTED: std::sync::Once = std::sync::Once::new();
             REPORTED.call_once(|| {
                 eprintln!(
-                    "deepseek_v4: packed compact-expert prefill uses CPU routing and generic expert matmat"
+                    "deepseek_v4: packed compact-expert prefill uses CPU routing with runtime expert geometry"
                 );
             });
         }
@@ -9434,6 +9693,17 @@ impl DeepSeekV4Session {
             )?;
             #[cfg(not(feature = "dsv4-diagnostics"))]
             let mut encoder = PackedPostRouteLayerEncoder::begin(expert_command)?;
+            let grouped_q3q4_qualified = packed_grouped_q3q4_enabled()
+                && packed_grouped_q3q4_scope_qualified(
+                    &ctx.device.name().to_string(),
+                    self.residency.report().tensor_count,
+                    self.residency.report().source_bytes,
+                    self.prefill.moe.expert_count,
+                    n_tokens,
+                    routed_gate.dtype,
+                    routed_up.dtype,
+                    routed_down.dtype,
+                );
             let expert_result = (|| {
                 let moe_output = self.prefill.moe.encode_experts(
                     ctx,
@@ -9448,6 +9718,7 @@ impl DeepSeekV4Session {
                     shared_up,
                     shared_down,
                     expert_policy,
+                    grouped_q3q4_qualified,
                     shared_matrix,
                     self.residency.config().swiglu_clamp_experts[layer],
                     self.residency.config().swiglu_clamp_shared[layer],
@@ -10228,13 +10499,25 @@ mod tests {
         let mut payload = vec![0u8; blocks * block_bytes];
         for block in 0..blocks {
             let start = block * block_bytes;
-            payload[start..start + 2].copy_from_slice(
-                &half::f16::from_f32(0.00390625 * (1 + (block + seed) % 7) as f32)
-                    .to_bits()
-                    .to_le_bytes(),
-            );
-            for byte in 2..block_bytes {
+            for byte in 0..block_bytes {
                 payload[start + byte] = (block * 31 + byte * 13 + seed * 19 + 5) as u8;
+            }
+            let scale = half::f16::from_f32(0.00390625 * (1 + (block + seed) % 7) as f32)
+                .to_bits()
+                .to_le_bytes();
+            match dtype {
+                GgmlType::Q3_K => {
+                    payload[start + block_bytes - 2..start + block_bytes].copy_from_slice(&scale);
+                }
+                GgmlType::Q4_K => {
+                    payload[start..start + 2].copy_from_slice(&scale);
+                    payload[start + 2..start + 4].copy_from_slice(
+                        &half::f16::from_f32(0.001953125 * (1 + (block + seed) % 5) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                }
+                _ => payload[start..start + 2].copy_from_slice(&scale),
             }
         }
         MetalTensor {
@@ -10381,16 +10664,18 @@ mod tests {
         )
     }
 
-    fn grouped_test_schedule(n_tokens: usize) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<ExpertBucket>) {
+    fn grouped_test_schedule_for_experts(
+        n_tokens: usize,
+        expert_count: usize,
+    ) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<ExpertBucket>) {
         let mut expert_ids = Vec::with_capacity(n_tokens * MOE_TOP_K);
         for token in 0..n_tokens {
-            expert_ids.push((MOE_EXPERT_COUNT - 1) as i32);
+            expert_ids.push((expert_count - 1) as i32);
             for slot in 1..MOE_TOP_K {
-                expert_ids
-                    .push(((token * (MOE_TOP_K - 1) + slot - 1) % (MOE_EXPERT_COUNT - 1)) as i32);
+                expert_ids.push(((token * (MOE_TOP_K - 1) + slot - 1) % (expert_count - 1)) as i32);
             }
         }
-        let mut assignments = (0..MOE_EXPERT_COUNT)
+        let mut assignments = (0..expert_count)
             .map(|_| Vec::<(usize, usize)>::new())
             .collect::<Vec<_>>();
         for token in 0..n_tokens {
@@ -10419,7 +10704,7 @@ mod tests {
         }
         validate_packed_expert_schedule(
             n_tokens,
-            MOE_EXPERT_COUNT,
+            expert_count,
             &expert_ids,
             &rows,
             &slots,
@@ -10427,6 +10712,10 @@ mod tests {
         )
         .unwrap();
         (expert_ids, rows, slots, schedule)
+    }
+
+    fn grouped_test_schedule(n_tokens: usize) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<ExpertBucket>) {
+        grouped_test_schedule_for_experts(n_tokens, MOE_EXPERT_COUNT)
     }
 
     #[test]
@@ -10640,6 +10929,87 @@ mod tests {
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS - 1,
+        ));
+    }
+
+    #[test]
+    fn packed_grouped_q3q4_scope_is_exact() {
+        let qualified = |device, tensors, bytes, experts, tokens, gate, up, down| {
+            packed_grouped_q3q4_scope_qualified(
+                device, tensors, bytes, experts, tokens, gate, up, down,
+            )
+        };
+        for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+            assert!(qualified(
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+                tokens,
+                GgmlType::Q3_K,
+                GgmlType::Q3_K,
+                GgmlType::Q4_K,
+            ));
+        }
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            256,
+            PACKED_MATRIX_MIN_TOKENS,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        assert!(!qualified(
+            "Apple M3 Max",
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_MATRIX_MIN_TOKENS,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_327,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_MATRIX_MIN_TOKENS,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            160,
+            PACKED_MATRIX_MIN_TOKENS,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            512,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_MATRIX_MIN_TOKENS,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+            GgmlType::Q4_K,
         ));
     }
 
@@ -11511,6 +11881,187 @@ mod tests {
         );
         assert_grouped_guards("mapped IQ3 control", &control);
         assert_grouped_guards("mapped IQ3 candidate", &candidate);
+    }
+
+    #[test]
+    fn packed_grouped_mapped_q3_q4_match_static_expert_views() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        const H: usize = 512;
+        const O: usize = 128;
+        const N: usize = 33;
+        const E: usize = 160;
+        const K: usize = MOE_TOP_K;
+        const ROUTED: [usize; K] = [0, 1, 2, 3, E - 1, E - 1];
+
+        let expert_ids = (0..N)
+            .flat_map(|_| ROUTED.map(|expert| expert as i32))
+            .collect::<Vec<_>>();
+        let mut by_expert = (0..E)
+            .map(|_| Vec::<(usize, usize)>::new())
+            .collect::<Vec<_>>();
+        for token in 0..N {
+            for (slot, &expert) in ROUTED.iter().enumerate() {
+                by_expert[expert].push((token, token * K + slot));
+            }
+        }
+        let mut rows = Vec::with_capacity(N * K);
+        let mut slots = Vec::with_capacity(N * K);
+        let mut schedule = Vec::with_capacity(K);
+        for (expert, assignments) in by_expert.into_iter().enumerate() {
+            if assignments.is_empty() {
+                continue;
+            }
+            let start = rows.len();
+            for (token, slot) in assignments {
+                rows.push(token as i32);
+                slots.push(slot as i32);
+            }
+            schedule.push(ExpertBucket {
+                expert,
+                start,
+                len: rows.len() - start,
+            });
+        }
+        validate_packed_expert_schedule(N, E, &expert_ids, &rows, &slots, &schedule).unwrap();
+        let mapped_rows = rows
+            .iter()
+            .map(|&row| i32::try_from(N - 1).unwrap() - row)
+            .collect::<Vec<_>>();
+        let input_values = (0..N * H)
+            .map(|index| ((index * 41 + 7) % 257) as f32 * 0.002 - 0.25)
+            .collect::<Vec<_>>();
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&input_values),
+            vec![H as u64, N as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let source_rows = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&mapped_rows),
+            vec![(N * K) as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let destination_slots = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&slots),
+            vec![(N * K) as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+
+        for (dtype, seed) in [(GgmlType::Q3_K, 23usize), (GgmlType::Q4_K, 29)] {
+            let bank = grouped_test_bank(&ctx, dtype, H, O, E, seed);
+            let gathered = MetalTensor::zeros_f32(&ctx, vec![H as u64, (N * K) as u64]).unwrap();
+            let projected = MetalTensor::zeros_f32(&ctx, vec![O as u64, (N * K) as u64]).unwrap();
+            let control = grouped_guarded_f32(&ctx, vec![O as u64, (N * K) as u64], 7.0);
+            let candidate = grouped_guarded_f32(&ctx, vec![O as u64, (N * K) as u64], 11.0);
+            let plan = PackedGroupedExpertPlan::new(N, &schedule, None).unwrap();
+
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            for bucket in &schedule {
+                let gathered_view = f32_prefix(
+                    &gathered,
+                    vec![H as u64, bucket.len as u64],
+                    "mapped K-block control gathered",
+                )
+                .unwrap();
+                let projected_view = f32_prefix(
+                    &projected,
+                    vec![O as u64, bucket.len as u64],
+                    "mapped K-block control projected",
+                )
+                .unwrap();
+                let row_view = i32_slice(
+                    &source_rows,
+                    bucket.start,
+                    bucket.len,
+                    "mapped K-block control rows",
+                )
+                .unwrap();
+                let slot_view = i32_slice(
+                    &destination_slots,
+                    bucket.start,
+                    bucket.len,
+                    "mapped K-block control slots",
+                )
+                .unwrap();
+                encode_get_rows_f32(
+                    &ctx,
+                    &encoder,
+                    &input,
+                    &row_view,
+                    &gathered_view,
+                    bucket.len,
+                    H,
+                )
+                .unwrap();
+                let weight =
+                    expert_weight_view(&bank, H, O, bucket.expert, "mapped K-block control weight")
+                        .unwrap();
+                encode_batch_projection(
+                    &ctx,
+                    &encoder,
+                    &weight,
+                    &gathered_view,
+                    &projected_view,
+                    H,
+                    O,
+                    bucket.len,
+                    "mapped K-block control projection",
+                )
+                .unwrap();
+                crate::metal::encode_scatter_rows_f32_unique(
+                    &ctx,
+                    &encoder,
+                    &projected_view,
+                    &slot_view,
+                    &control,
+                    O,
+                    bucket.len,
+                )
+                .unwrap();
+            }
+            encode_packed_grouped_mapped_k_block_f32_plan(
+                &ctx,
+                &encoder,
+                &bank,
+                &input,
+                &source_rows,
+                &destination_slots,
+                &plan,
+                &candidate,
+                H,
+                O,
+                E,
+                K,
+                N,
+                N,
+                N * K,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "{dtype:?}: {:?}",
+                command.error()
+            );
+
+            assert_eq!(
+                host_read_f32(&candidate, "mapped K-block candidate").unwrap(),
+                host_read_f32(&control, "mapped K-block control").unwrap(),
+                "{dtype:?} mapped projection changed dense matrix lineage"
+            );
+            assert_grouped_guards("mapped K-block control", &control);
+            assert_grouped_guards("mapped K-block candidate", &candidate);
+        }
     }
 
     #[test]

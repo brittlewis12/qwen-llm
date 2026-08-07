@@ -800,38 +800,44 @@ guardrail also wins despite only about 10% width-32 occupancy: sampled wall
 falls 3.88% and gate/up falls 16.96%. Default the exact work-unit change with
 `QWEN_DSV4_PACKED_IQ2_MM64X32=0` as rollback.
 
-The new profile changes the topology of the queue. Pre-expert GPU now leads at
-19.49 seconds, split into 6.06 seconds before attention, 6.80 seconds in the
-attention body, 5.50 seconds in output projections, and 1.13 seconds after
-attention. Post-route is 15.69 seconds: the widened IQ2 cohort owns 7.99 seconds
-and the 16 all-IQ3 routed layers own 6.67 seconds. Within IQ2, gate/up is now
-4.58 seconds and down is 2.22 seconds.
+The changed expert work unit reopens larger chunks as composition rather than
+padding reduction. On the same clean `76eebc2` binary, N=4,096 reduces canonical
+8K ordinary wall `40,914.920 -> 39,933.627 ms`, raising prefill
+`200.22 -> 205.14 token/s`; profiled wall falls 1,098.489 ms. Complete logits
+remain bit-identical. Default N=4,096 with
+`QWEN_DSV4_PREFILL_CHUNK_TOKENS=2048` as the prior-policy override.
+
+The 4K result also closes capacity growth as the mechanism: pre-expert GPU
+increases by 1.746 seconds even though post-route and host residual fall by
+1.493 and 1.351 seconds. The current 38.49-second profile is now led by 21.24
+seconds pre-expert, split into 6.96 seconds before attention, 6.94 seconds in
+the attention body, 5.57 seconds in output projections, and 1.77 seconds after
+attention. Post-route is 14.16 seconds: the IQ2 cohort owns 7.15 seconds and the
+16 all-IQ3 routed layers own 3.67 seconds; mixed-quant layers 26 and 42 own
+another 2.23 seconds. Host residual is 3.09 seconds.
 
 Force-ranked queue:
 
-1. **N=4,096 as matrix composition.** The prior cap HOLD explicitly required a
-   new GPU mechanism beyond padding reduction. MM64x32 supplies it and the
-   DwarfStar long-prompt path uses 4,096-token chunks. Price and implement one
-   bounded 4K pilot that composes boundary deletion with route-panel reuse;
-   retain N=2,048 unless the complete request clears materially.
-2. **Pre-expert work units.** The new 19.49-second leader is split across
-   before-attention work, attention, and output projections. Attribute the
-   remaining projection families and choose a work-unit change that can remove
-   several seconds, not another local retune.
-3. **All-IQ3 routed experts.** The 16-layer routed subtotal is 6.67 seconds and
-   already uses a 64-output by 32-route matrix. Reopen only for a new dataflow
-   boundary such as larger-N composition or deterministic sorted-output
-   finalization, not another bank-axis or scalar sweep.
-4. **Further IQ2 execution.** The exact wide cohort is 7.99 seconds, with
-   4.58 seconds in gate/up and 2.22 seconds in down. Half-staged operands or a
+1. **Pre-expert work units.** The 21.24-second leader is split across three
+   independent multi-second families. Attribute the remaining projection and
+   attention kernels at N=4,096, then choose a matrix/dataflow change that can
+   remove several seconds. Do not substitute another chunk-cap increase.
+2. **Further IQ2 execution.** The exact wide cohort is 7.15 seconds, with
+   3.99 seconds in gate/up and 1.96 seconds in down. Half-staged operands or a
    paired gate/up boundary require explicit quality authority and must project a
    competitive whole-request gain before implementation.
-5. **Indexer preparation with a changed work unit.** Preparation costs 1.93
+3. **All-IQ3 routed experts.** The 16-layer routed subtotal is 3.67 seconds and
+   already uses a 64-output by 32-route matrix. Reopen only for a new dataflow
+   boundary such as grouped down or deterministic sorted-output finalization,
+   not another bank-axis or scalar sweep.
+4. **Mixed-quant routed experts.** Layers 26 and 42 cost 2.23 seconds in the
+   generic routed-expert path. Price a matrix work unit across their IQ3_S or
+   IQ3_XXS gate/up and MXFP4 down shapes before tuning either dtype locally.
+5. **Indexer preparation with a changed work unit.** Preparation costs 1.89
    seconds, but the F32 Q8 matrix candidate fails whole-request accounting.
-   Reopen only for an exact-order shared-weight schedule or larger chunks where
-   the measured endpoint ceiling materially changes.
-6. **Further Lightning score production.** The exact tiled F32 scorer reduces
-   this interval to 1.355 seconds. Reopen around lower-precision tensor execution
+   Reopen only for an exact-order shared-weight or fused preparation schedule.
+6. **Further Lightning score production.** At the 4K default, the exact tiled
+   F32 scorer costs 1.57 seconds. Reopen around lower-precision tensor execution
    only when its whole-request ceiling competes with routed-expert work; exact
    radix selection remains only 47 ms and must not be folded into the claim.
 7. **Far-context scoring and selection.** Keep the tiled F32 scorer and radix4
@@ -843,7 +849,7 @@ Force-ranked queue:
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-7. **Broad GPU route ownership.** The 1.448-second ceiling remains below the
+9. **Broad GPU route ownership.** The 1.448-second ceiling remains below the
    grouped-attention and sparse-indexer opportunities, and its ledger regression
    is unresolved. Reopen only with a CPU-equivalent route-weight lineage or a
    materially larger measured endpoint ceiling.

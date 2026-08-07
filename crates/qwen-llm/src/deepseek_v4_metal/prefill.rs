@@ -1,8 +1,9 @@
 use super::*;
 use std::sync::OnceLock;
 
-pub const DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS: usize = 2_048;
+pub const DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS: usize = 4_096;
 pub const DEEPSEEK_V4_PREFILL_MAX_TOKENS: usize = 4_096;
+const PACKED_MATRIX_MIN_TOKENS: usize = 2_048;
 
 const QUERY_WIDTH: usize = 64 * 512;
 const GROUP_WIDTH: usize = QUERY_WIDTH / 8;
@@ -1590,7 +1591,7 @@ const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES: u64 = 104_202_502_492;
 fn packed_q8_matrix_chunk_qualified(n_tokens: usize) -> bool {
     matches!(
         n_tokens,
-        DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS | DEEPSEEK_V4_PREFILL_MAX_TOKENS
+        PACKED_MATRIX_MIN_TOKENS | DEEPSEEK_V4_PREFILL_MAX_TOKENS
     )
 }
 
@@ -3122,7 +3123,7 @@ const PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES: usize = 4_096;
 const PACKED_GROUPED_EXPERT_INLINE_MAX_TILES: usize = PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES / 12;
 const PACKED_GROUPED_IQ2_MMA16_TILE_ROWS: usize = 16;
 const PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS: usize = 128;
-const PACKED_GROUPED_IQ2_MMA16_MEDIUM_TOKENS: usize = DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS;
+const PACKED_GROUPED_IQ2_MMA16_MEDIUM_TOKENS: usize = PACKED_MATRIX_MIN_TOKENS;
 const PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 const PACKED_GROUPED_IQ2_MMA16_MAX_TILES: usize = MOE_EXPERT_COUNT
     + (PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS * MOE_TOP_K - MOE_EXPERT_COUNT)
@@ -4403,7 +4404,7 @@ fn packed_grouped_iq3_fused_candidate_supported(ctx: &MetalContext) -> bool {
 
 const PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_GROUPED_EXPERT_MAX_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
-const PACKED_GPU_ROUTE_MAX_TOKENS: usize = DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS;
+const PACKED_GPU_ROUTE_MAX_TOKENS: usize = 2_048;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PackedGroupedExpertMode {
@@ -9946,7 +9947,7 @@ mod tests {
         );
         let matrix = Q8PrecisionProjection::F32Matrix;
         assert!(!matrix.uses_full_chunk_f32(512));
-        assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS));
+        assert!(matrix.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
         assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
         assert!(parse_packed_q8_qb_policy(Some("half_matrix")).is_err());
     }
@@ -9980,7 +9981,7 @@ mod tests {
         );
         let matrix = Q8PrecisionProjection::F32Matrix;
         assert!(!matrix.uses_full_chunk_f32(512));
-        assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS));
+        assert!(matrix.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
         assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
     }
 
@@ -9993,7 +9994,7 @@ mod tests {
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-            DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS,
+            PACKED_MATRIX_MIN_TOKENS,
         ));
         assert!(qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,

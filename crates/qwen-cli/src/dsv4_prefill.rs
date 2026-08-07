@@ -28,7 +28,7 @@ pub struct Dsv4PrefillArgs {
     #[arg(long, default_value_t = DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS)]
     chunk_tokens: usize,
     /// Larger chunk size whose optimistic boundary ceiling is reported.
-    #[arg(long, default_value_t = 4_096)]
+    #[arg(long, default_value_t = DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS * 2)]
     candidate_chunk_tokens: usize,
     /// Optional raw prompt text. The first --tokens independently encoded IDs are used.
     #[arg(long)]

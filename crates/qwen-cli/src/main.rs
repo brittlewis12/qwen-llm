@@ -7409,7 +7409,7 @@ mod tests {
 
     #[test]
     fn deepseek_v4_prefill_chunks_every_retained_prompt_interval() {
-        assert_eq!(parse_deepseek_v4_prefill_chunk_tokens(None).unwrap(), 2_048);
+        assert_eq!(parse_deepseek_v4_prefill_chunk_tokens(None).unwrap(), 4_096);
         assert_eq!(
             parse_deepseek_v4_prefill_chunk_tokens(Some("128")).unwrap(),
             128

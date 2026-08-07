@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 4,096-Token Packed Prefill Default GO
+
+Status: ordinary packed prefill now uses chunks of up to 4,096 tokens.
+`QWEN_DSV4_PREFILL_CHUNK_TOKENS=2048` restores the prior execution policy.
+
+- The pilot raises the execution ceiling and all cap-owned scratch together.
+  Q8 matrices, grouped IQ2 and IQ3 experts, raw-ring retention, compressor
+  publication, and sparse scratch are qualified at both N=2,048 and N=4,096.
+  Experimental GPU routing remains bounded to N<=2,048.
+- The hard-cap change raises shallow-session scratch from 2.20 to 4.35 GB and
+  maximum-context session storage from 13.67 to 20.10 GB. Both remain in the
+  pre-allocation memory plan and admission check.
+- On the same clean `76eebc2` binary, canonical 8K ordinary wall falls
+  `40,914.920 -> 39,933.627 ms`, raising prefill
+  `200.22 -> 205.14 token/s`. Profiled wall falls
+  `39,586.639 -> 38,488.151 ms`.
+- The larger work unit adds 1,745.681 ms to pre-expert GPU, but removes
+  1,492.910 ms post-route and 1,351.171 ms host residual. The IQ2 cohort alone
+  falls `7,966.394 -> 7,149.477 ms`. This is a composition win, not a claim
+  that every stage benefits from larger N.
+- Both policies retain the complete final-logit SHA-256
+  `5289990e...d1ac`. Raw profiles:
+  `target/profiles/dsv4-prefill-8k-chunk2048-control-76eebc2.json` and
+  `target/profiles/dsv4-prefill-8k-chunk4096-76eebc2.json`.
+
+Decision: default the exact whole-request win. Stop chunk growth here: at N=4K
+the 21.24-second pre-expert stage is larger and now leads the request, so another
+capacity increase is not a credible path to the remaining prefill gap without a
+new pre-expert work unit.
+
 ## 2026-08-07 - DeepSeek V4 64x32 IQ2 Expert Matrix Default GO
 
 Status: the 25 IQ2_XS gate/up layers now default to a four-SIMDgroup

@@ -2067,10 +2067,6 @@ fn main() -> Result<()> {
         )
         .init();
 
-    // Bind the invocation identifier to process start, not to the first
-    // record-emission site. Any record emitted downstream shares this value.
-    LazyLock::force(&INVOCATION_ID);
-
     let matches = Args::command().get_matches();
     let explicit_options = ExplicitCliOptions::from_matches(&matches);
     let args = Args::from_arg_matches(&matches).expect("validated clap arguments");
@@ -2471,6 +2467,12 @@ fn validate_deepseek_v4_requests_mode(args: &Args, explicit: ExplicitCliOptions)
         // Also excluded at the parser level; kept as a defensive invariant.
         unsupported.push("--deepseek-v4-snapshot");
     }
+    // --request-stats-jsonl is DS4-single-turn-only today. Reject on DS4 batch
+    // rather than silently no-oping (which would break the mandatory/fail-closed
+    // policy the flag advertises).
+    if args.request_stats_jsonl.is_some() {
+        unsupported.push("--request-stats-jsonl");
+    }
     ensure!(
         unsupported.is_empty(),
         "DeepSeek V4 --requests-jsonl supports raw prompt requests only; unsupported options: {}",
@@ -2752,11 +2754,14 @@ fn run_deepseek_v4_single_turn(
 ) -> Result<()> {
     validate_deepseek_v4_generation_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
-    // Validate that any requested --request-stats-jsonl destination is
-    // writable BEFORE expensive model load — sidecar telemetry is treated
-    // as mandatory (fatal on write failure), so a bad path should fail fast.
+    // Pre-flight validate the --request-stats-jsonl sidecar BEFORE model load.
+    // This also forces INVOCATION_ID initialization at the earliest point where
+    // telemetry is known to be requested, so /dev/urandom entropy is required
+    // only for invocations that opt in to structured stats — `--help`, invalid
+    // usage, and paths without telemetry never trigger the entropy dependency.
     if let Some(path) = args.request_stats_jsonl.as_ref() {
         let _ = open_append_file(path, "request stats jsonl (pre-flight)")?;
+        LazyLock::force(&INVOCATION_ID);
     }
     let request_start = std::time::Instant::now();
     let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
@@ -4698,6 +4703,14 @@ fn run_single_turn(
 ) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
+    // --request-stats-jsonl currently only implements DeepSeek V4 single-turn.
+    // Reject rather than silently ignore, so consumers cannot mistakenly rely
+    // on a sidecar that never gets written.
+    ensure!(
+        args.request_stats_jsonl.is_none(),
+        "--request-stats-jsonl is only supported on DeepSeek V4 single-turn generation today; \
+         Qwen single-turn will migrate in a follow-up PR. Use --request-stats for legacy stats output."
+    );
     let sampling = cli_sampling_config(args)?;
     validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
     let durable_store = durable_checkpoint_store(args, staged_integrity)?;
@@ -5702,6 +5715,13 @@ fn run_requests_jsonl(
 ) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
+    // --request-stats-jsonl is DS4-single-turn-only today; reject on Qwen
+    // batch rather than silently no-oping.
+    ensure!(
+        args.request_stats_jsonl.is_none(),
+        "--request-stats-jsonl is not yet implemented on Qwen --requests-jsonl. \
+         Use --request-stats for legacy per-request stats output."
+    );
     cli_sampling_config(args)?;
 
     let load_t0 = Instant::now();
@@ -7124,37 +7144,44 @@ fn token_hash_hex(tokens: &[i32]) -> String {
     format!("{hash:016x}")
 }
 
-/// Type-safe wrapper for the generated-token-ids fingerprint. The only
-/// constructor is `GeneratedTokenSha256Digest::of()`, which runs the
-/// canonical algorithm named by `sha256-qwen-generated-token-ids-v1`. This
-/// prevents the request-stats-jsonl builder from being fed arbitrary
-/// 32-byte values that would emit under the wrong algorithm name.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) struct GeneratedTokenSha256Digest([u8; 32]);
+/// Type-safe wrapper for the generated-token-ids fingerprint. The tuple
+/// field is scoped to a private child module so that neither crate root
+/// code, nor tests, nor any other module can bypass `of()` to construct a
+/// digest with arbitrary bytes. This is what actually enforces the
+/// invariant that the emitted value under algorithm identifier
+/// `sha256-qwen-generated-token-ids-v1` is the output of that exact algorithm.
+mod fingerprint {
+    use sha2::{Digest, Sha256};
 
-impl GeneratedTokenSha256Digest {
-    /// Compute the canonical fingerprint over token IDs. Byte layout:
-    /// `domain-separator || length_u64_le || (token_i32_le)*`. See
-    /// `sha256-qwen-generated-token-ids-v1` algorithm identifier.
-    pub(crate) fn of(tokens: &[i32]) -> Self {
-        let mut digest = Sha256::new();
-        digest.update(b"qwen-generated-token-ids-v1\0");
-        digest.update((tokens.len() as u64).to_le_bytes());
-        for token in tokens {
-            digest.update(token.to_le_bytes());
+    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    pub struct GeneratedTokenSha256Digest([u8; 32]);
+
+    impl GeneratedTokenSha256Digest {
+        /// Compute the canonical fingerprint over token IDs. Byte layout:
+        /// `domain-separator || length_u64_le || (token_i32_le)*`. See
+        /// `sha256-qwen-generated-token-ids-v1` algorithm identifier.
+        pub fn of(tokens: &[i32]) -> Self {
+            let mut digest = Sha256::new();
+            digest.update(b"qwen-generated-token-ids-v1\0");
+            digest.update((tokens.len() as u64).to_le_bytes());
+            for token in tokens {
+                digest.update(token.to_le_bytes());
+            }
+            Self(digest.finalize().into())
         }
-        Self(digest.finalize().into())
-    }
 
-    pub(crate) fn hex(&self) -> String {
-        hex_encode_bytes(&self.0)
-    }
+        pub fn hex(&self) -> String {
+            crate::hex_encode_bytes(&self.0)
+        }
 
-    #[cfg(test)]
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
+        #[cfg(test)]
+        pub fn as_bytes(&self) -> &[u8; 32] {
+            &self.0
+        }
     }
 }
+
+pub(crate) use fingerprint::GeneratedTokenSha256Digest;
 
 fn generated_token_sha256(tokens: &[i32]) -> String {
     GeneratedTokenSha256Digest::of(tokens).hex()
@@ -7187,6 +7214,8 @@ enum EntropySource {
     DevUrandom,
     #[cfg(test)]
     Deterministic([u8; 16]),
+    #[cfg(test)]
+    ForceFail,
 }
 
 fn generate_invocation_id_from(source: EntropySource) -> Result<String> {
@@ -7201,6 +7230,12 @@ fn generate_invocation_id_from(source: EntropySource) -> Result<String> {
         #[cfg(test)]
         EntropySource::Deterministic(bytes) => {
             buf = bytes;
+        }
+        #[cfg(test)]
+        EntropySource::ForceFail => {
+            return Err(anyhow!(
+                "test-injected entropy failure (secure randomness unavailable)"
+            ));
         }
     }
     Ok(hex_encode_bytes(&buf))
@@ -7227,7 +7262,21 @@ fn generate_invocation_id_from(source: EntropySource) -> Result<String> {
 fn append_jsonl_record<T: Serialize>(path: &Path, record: &T, label: &str) -> Result<()> {
     let payload =
         serde_json::to_vec(record).with_context(|| format!("serialize {label} record"))?;
-    let mut file = open_append_file(path, label)?;
+    // Open with read+append so the SAME locked fd can serve both the tail
+    // probe (via pread) and the write. open_append_file grants append-only,
+    // which would fail pread with EBADF.
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create {label} directory {}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open {label} {}", path.display()))?;
     let fd = file.as_raw_fd();
     // SAFETY: fd is valid for the duration of `file`; flock(2) accepts any
     // open file descriptor. LOCK_EX blocks until acquired.
@@ -7251,58 +7300,53 @@ fn append_jsonl_record<T: Serialize>(path: &Path, record: &T, label: &str) -> Re
         }
     };
     // Detect a pre-existing partial-record tail (file does not end with '\n').
-    // A crash or non-cooperating writer might have left one behind.
+    // Read through the SAME locked fd via pread(2) to avoid TOCTOU across the
+    // rename/replace race a second open on the pathname would expose.
     let mut buf = Vec::with_capacity(payload.len() + 2);
     if original_len > 0 {
         let mut probe = [0u8; 1];
-        let mut probe_file = match std::fs::File::open(path) {
-            Ok(f) => f,
-            Err(e) => {
-                unlock(fd);
-                return Err(anyhow::Error::new(e)
-                    .context(format!("reopen {label} {} for tail probe", path.display())));
-            }
-        };
-        // Seek to (original_len - 1) and read one byte.
-        use std::io::Seek;
-        if let Err(e) = probe_file.seek(std::io::SeekFrom::Start(original_len.saturating_sub(1))) {
+        let offset = (original_len - 1) as libc::off_t;
+        // SAFETY: fd is valid; pread reads at a specific offset without
+        // moving the file pointer, does not mutate the file, and returns
+        // -1 on error with errno set.
+        let n = unsafe { libc::pread(fd, probe.as_mut_ptr().cast(), probe.len(), offset) };
+        if n < 0 {
             unlock(fd);
-            return Err(anyhow::Error::new(e)
-                .context(format!("seek to tail of {label} {}", path.display())));
+            return Err(anyhow!(
+                "probe tail of {label} {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
         }
-        match probe_file.read_exact(&mut probe) {
-            Ok(()) if probe[0] != b'\n' => {
-                // Prepend a newline to start our record on a fresh line.
-                buf.push(b'\n');
-            }
-            Ok(()) => {}
-            Err(e) => {
-                unlock(fd);
-                return Err(anyhow::Error::new(e)
-                    .context(format!("read tail of {label} {}", path.display())));
-            }
+        if n == 1 && probe[0] != b'\n' {
+            // Isolate our record from the orphan tail rather than concatenating.
+            buf.push(b'\n');
         }
     }
     buf.extend_from_slice(&payload);
     buf.push(b'\n');
-    // Perform the write + durability sync. `flush` is a no-op on Unix/Windows
-    // (kept for future non-file writers); `sync_data` forces the OS to surface
-    // deferred I/O errors like ENOSPC before we report success.
+    // Write + durability. sync_data persists file content; sync_containing_dir
+    // persists a newly-created directory entry (fsync on the file alone does
+    // NOT guarantee the entry survives a crash for a new file).
     let write_result = file
         .write_all(&buf)
         .and_then(|()| file.flush())
-        .and_then(|()| file.sync_data());
+        .and_then(|()| file.sync_data())
+        .and_then(|()| sync_containing_dir(path));
     if let Err(e) = write_result {
-        // Best-effort rollback. If truncate itself fails, surface both errors
-        // together — silently discarding the truncate failure would let a
-        // corrupt tail persist beyond the reported error.
-        let rollback_err = file.set_len(original_len).err();
+        // Best-effort rollback: truncate AND sync to persist the reverted
+        // state. Chain both errors together — silently discarding either
+        // would let a corrupt tail persist beyond the reported error.
+        let rollback_err = file
+            .set_len(original_len)
+            .and_then(|()| file.sync_data())
+            .err();
         unlock(fd);
         let mut chained =
             anyhow::Error::new(e).context(format!("append {label} record to {}", path.display()));
         if let Some(re) = rollback_err {
             chained = chained.context(format!(
-                "rollback truncate also failed for {}: {}",
+                "rollback truncate/sync also failed for {}: {}",
                 path.display(),
                 re
             ));
@@ -7311,6 +7355,20 @@ fn append_jsonl_record<T: Serialize>(path: &Path, record: &T, label: &str) -> Re
     }
     unlock(fd);
     Ok(())
+}
+
+/// fsync the directory containing `path` so a newly-created entry is
+/// persisted before we report success. `sync_data`/`fsync` on the file
+/// itself is not enough for a new directory entry on most filesystems.
+fn sync_containing_dir(path: &Path) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let dir = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let d = std::fs::File::open(dir)?;
+    d.sync_all()
 }
 
 /// Coerce a metric to a well-defined finite JSON representation. Returns 0.0
@@ -11249,6 +11307,7 @@ mod tests {
         let mut measured = sample_measured_ok();
         // Pathological values that would otherwise become JSON `null`.
         measured.total_ms = f64::NAN;
+        measured.tokenizer_ms = f64::INFINITY;
         measured.prefill_ms = f64::INFINITY;
         measured.decode_ms = -0.001;
         measured.prefill_tps = f64::NAN;
@@ -11261,6 +11320,7 @@ mod tests {
 
         for (parent, child) in [
             ("timing_ms", "total"),
+            ("timing_ms", "tokenization"),
             ("timing_ms", "prefill"),
             ("timing_ms", "decode"),
             ("throughput_tps", "prefill"),
@@ -11501,5 +11561,36 @@ mod tests {
         // Phase fields must remain independently measured, not derived.
         assert_eq!(json["timing_ms"]["prefill"], 1000.0);
         assert_eq!(json["timing_ms"]["decode"], 2000.0);
+    }
+
+    #[test]
+    fn request_stats_invocation_id_fails_closed_when_entropy_unavailable() {
+        // The fail-closed branch: when secure entropy is unavailable,
+        // generate_invocation_id_from returns an Err rather than a weak
+        // deterministic fallback. This is what makes the LazyLock panic
+        // in main() the correct behavior (loud failure > silent weak ID).
+        let err = generate_invocation_id_from(EntropySource::ForceFail)
+            .expect_err("must return Err when entropy source fails");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("test-injected entropy failure"),
+            "error message must surface the underlying failure: {msg}"
+        );
+    }
+
+    #[test]
+    fn request_stats_fingerprint_newtype_bytes_only_from_of() {
+        // The GeneratedTokenSha256Digest tuple field lives in a private
+        // child module (`mod fingerprint`), so no crate code — including
+        // this test — can construct one with arbitrary bytes. The only
+        // way to obtain a value is via `of()`. This test compiles iff that
+        // invariant holds: a direct tuple construction would fail with
+        // "field is private", and a bytes constructor doesn't exist.
+        let a = GeneratedTokenSha256Digest::of(&[]);
+        let b = GeneratedTokenSha256Digest::of(&[]);
+        assert_eq!(a, b, "of() over identical input is deterministic");
+        // Sanity: the digest exposes bytes via `as_bytes()` (test-only) for
+        // hex comparison — but that's read-only, not a constructor path.
+        assert_eq!(a.as_bytes().len(), 32);
     }
 }

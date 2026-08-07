@@ -701,13 +701,26 @@ explicit full-chunk force mode. Post-route GPU is now the largest measured
 span at 28.60 seconds, followed by attention at 16.21 seconds; output A/B has
 fallen to 5.32 seconds.
 
+The first GPU-resident MoE slice is now bounded. Generation-stamped GPU
+routing and deterministic expert/token/original-slot compaction cover the 25
+IQ2_XS/IQ2_XS/IQ3_XXS layers. The split pilot removes 1.152 seconds of sampled
+host residual but adds 0.403 seconds of route/compaction and padded-dispatch GPU
+work. Same-command router-to-expert execution preserves the complete candidate
+logit vector, but a same-binary 8K comparison moves ordinary wall only
+`61,405.218 -> 61,101.490 ms`, or 0.49%; its two-run brackets overlap. Keep
+`QWEN_DSV4_PACKED_GPU_ROUTE_COMPACT` opt-in rather than paying a quality campaign
+for near-tied learned-route rank changes. The mechanism is infrastructure, not
+yet a product promotion.
+
 Force-ranked queue:
 
-1. **GPU-resident packed MoE scheduling.** The current matrix candidate leaves
-   28.60 seconds in post-route GPU across the 8K trace. Replace the per-layer
-   CPU route read/bucket/write seam with deterministic expert/token/slot GPU
-   compaction and indirect grouped IQ2/IQ3 matrix work. Preserve unique slot
-   ownership and fixed slot-order reduction; do not build a monolithic FFN.
+1. **Extend GPU ownership through the all-IQ3 cohort.** The 25-layer pilot is
+   too narrow to default, while 16 all-IQ3 layers still force CPU routing and
+   per-bucket execution. Reintroduce the exact bank-axis grouped schedule only
+   as composition with deterministic GPU compaction and same-command execution.
+   Its prior N=2,048 result removed 58.57% of isolated GPU work and missed the
+   old charged floor by only 2.341 ms; the broader ownership work unit is the
+   changed premise. Preserve unique slot writes and fixed slot-order reduction.
 2. **Attention/indexer fusion at product depth.** Attention now contributes
    16.21 seconds, or 26.4% of sampled 8K wall. Reattribute CSA score, selection,
    and online selected attention after the matrix promotions, then target a

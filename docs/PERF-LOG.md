@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 25-Layer GPU Route Pilot HOLD
+
+Status: deterministic GPU routing and compaction are structurally proven, but
+the 25-layer slice remains opt-in. It does not establish a stable default win.
+
+- On complete N=2,048 chunks, learned/hash routing writes generation-stamped
+  records and one 256-thread compactor emits expert/token/original-slot rows,
+  slots, and 16-/32-row grouped descriptors. Production retains 17,440 bytes of
+  authority scratch; the 2.10 MiB dense audit schedule remains diagnostic.
+- The split pilot moves sampled non-GPU residual
+  `4,261.947 -> 3,109.807 ms`, but GPU route/compaction adds 180.875 ms and
+  padded expert dispatch adds 222.519 ms. Sampled wall improves 1.22%; ordinary
+  wall improves 0.69% against the earlier clean control.
+- Merging router and expert encoders into one command preserves the complete
+  split-candidate logit vector. Against a same-binary CPU-route control,
+  ordinary 8K wall moves `61,405.218 -> 61,101.490 ms`, only 0.49%; the two
+  warmup/ordinary brackets overlap. Prefill is 134.07 token/s in the measured
+  merged ordinary pass.
+- GPU and CPU learned routing preserve selected expert sets and
+  expert-associated weights through N=2,048, but can exchange near-tied rank
+  order. The candidate vector therefore differs from the CPU-route control.
+  The marginal timing result does not justify a long quality campaign.
+- Raw artifacts:
+  `target/profiles/dsv4-prefill-8k-gpu-route-878d0d4.json`,
+  `target/profiles/dsv4-prefill-8k-gpu-route-merged-37f0f79.json`, and
+  `target/profiles/dsv4-prefill-8k-gpu-route-control-37f0f79.json`.
+
+Decision: keep the explicit force path as reusable ownership infrastructure,
+not an automatic policy. Reopen default admission only after extending the
+same deterministic schedule to a materially broader expert cohort. The first
+target is the 16 all-IQ3 layers: their prior exact bank-axis candidate removed
+58.57% of isolated GPU work, and composition with GPU ownership is a changed
+premise from its old 2.341 ms charged miss.
+
 ## 2026-08-07 - DeepSeek V4 F32 Q8 Output A/B Default GO
 
 Status: the F32 Q8 attention-output matrices are now the automatic default for

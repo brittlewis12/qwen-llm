@@ -17,6 +17,7 @@ constant constexpr uint IQ2_XS_QK = 256;
 constant constexpr uint IQ2_XS_BLOCK_BYTES = 74;
 constant constexpr uint IQ2_XS_TILE_ROWS = 16;
 constant constexpr uint IQ2_XS_TILE_ROUTES = 16;
+constant constexpr uint IQ2_XS_TILE_ROUTES_WIDE = 32;
 constant constexpr uint IQ2_XS_TILE_K = 32;
 
 constant uchar kmask_iq2_xs_mm[8] = {
@@ -223,5 +224,163 @@ kernel void kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f32_mma16(
         const uint destination = uint(destination_slots[tile.start + route]);
         output[(ulong)destination * args.M + output_base + row] =
             result[row * IQ2_XS_TILE_ROUTES + route];
+    }
+}
+
+[[max_total_threads_per_threadgroup(64)]]
+kernel void kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f32_mma32(
+        constant ds4_packed_grouped_iq2_projection_args & args [[buffer(0)]],
+        device const uchar * weights [[buffer(1)]],
+        device const float * input [[buffer(2)]],
+        device const int * source_rows [[buffer(3)]],
+        device const int * destination_slots [[buffer(4)]],
+        constant ds4_packed_iq2_expert_tile * tiles [[buffer(5)]],
+        device float * output [[buffer(6)]],
+        threadgroup float * scratch [[threadgroup(0)]],
+        uint2 group [[threadgroup_position_in_grid]],
+        ushort simd [[simdgroup_index_in_threadgroup]],
+        ushort lane [[thread_index_in_simdgroup]],
+        ushort thread_index [[thread_index_in_threadgroup]]) {
+    const ds4_packed_iq2_expert_tile tile = tiles[group.x];
+    if (thread_index == 0) {
+        uint valid = uint(tile.expert < args.n_expert
+            && tile.count > 0u
+            && tile.count <= IQ2_XS_TILE_ROUTES_WIDE
+            && tile.start + tile.count <= args.map_count);
+        for (uint row = 0; row < tile.count; ++row) {
+            const int source = source_rows[tile.start + row];
+            const int destination = destination_slots[tile.start + row];
+            if (source < 0 || uint(source) >= args.source_count
+                    || destination < 0
+                    || uint(destination) >= args.destination_count) {
+                valid = 0u;
+            }
+        }
+        *((threadgroup uint *)scratch) = valid;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (*((threadgroup uint *)scratch) == 0u) {
+        return;
+    }
+
+    threadgroup float * weight_tile = scratch;
+    threadgroup float * activation_tile =
+        scratch + IQ2_XS_TILE_ROWS * IQ2_XS_TILE_K
+        + uint(simd) * IQ2_XS_TILE_ROUTES * IQ2_XS_TILE_K;
+    const uint route_base = uint(simd) * IQ2_XS_TILE_ROUTES;
+    const uint route_count = route_base < tile.count
+        ? min(IQ2_XS_TILE_ROUTES, tile.count - route_base)
+        : 0u;
+    const bool active_panel = route_count > 0u;
+
+    const uint output_base = group.y * IQ2_XS_TILE_ROWS;
+    const uint output_rows = min(IQ2_XS_TILE_ROWS, args.M - output_base);
+    const uint local_output_row = uint(lane) / 2u;
+    short dequant_lane = short(uint(lane) & 1u);
+    device const uchar * weight_block = weights
+        + (ulong)tile.expert * (ulong)args.nb01 * args.M
+        + (ulong)(output_base + min(local_output_row, output_rows - 1u))
+            * args.nb01;
+
+    simdgroup_float8x8 accumulators[2][2];
+    FOR_UNROLL (short row = 0; row < 2; ++row) {
+        FOR_UNROLL (short column = 0; column < 2; ++column) {
+            accumulators[row][column] =
+                make_filled_simdgroup_matrix<float, 8>(0.0f);
+        }
+    }
+
+    for (uint k_base = 0; k_base < args.K; k_base += IQ2_XS_TILE_K) {
+        if (simd == 0) {
+            float4x4 dequantized;
+            dequantize_iq2_xs_f32(weight_block, dequant_lane, dequantized);
+            FOR_UNROLL (short element = 0; element < 16; ++element) {
+                weight_tile[local_output_row * IQ2_XS_TILE_K
+                            + (uint(lane) & 1u) * 16u + uint(element)] =
+                    dequantized[element / 4][element % 4];
+            }
+        }
+
+        if (active_panel) {
+            for (uint element = uint(lane);
+                 element < IQ2_XS_TILE_ROUTES * IQ2_XS_TILE_K;
+                 element += 32u) {
+                const uint route = element / IQ2_XS_TILE_K;
+                const uint k = element % IQ2_XS_TILE_K;
+                float value = 0.0f;
+                if (route < route_count) {
+                    const uint source =
+                        uint(source_rows[tile.start + route_base + route]);
+                    value = input[(ulong)source * args.stride_b + k_base + k];
+                }
+                activation_tile[k * IQ2_XS_TILE_ROUTES + route] = value;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (active_panel) {
+            FOR_UNROLL (short k_tile = 0; k_tile < 4; ++k_tile) {
+                simdgroup_float8x8 weight_matrices[2];
+                simdgroup_float8x8 activation_matrices[2];
+                FOR_UNROLL (short row = 0; row < 2; ++row) {
+                    simdgroup_load(
+                        weight_matrices[row],
+                        weight_tile + uint(row) * 8u * IQ2_XS_TILE_K
+                            + uint(k_tile) * 8u,
+                        IQ2_XS_TILE_K);
+                }
+                FOR_UNROLL (short column = 0; column < 2; ++column) {
+                    simdgroup_load(
+                        activation_matrices[column],
+                        activation_tile + uint(k_tile) * 8u * IQ2_XS_TILE_ROUTES
+                            + uint(column) * 8u,
+                        IQ2_XS_TILE_ROUTES);
+                }
+                FOR_UNROLL (short row = 0; row < 2; ++row) {
+                    FOR_UNROLL (short column = 0; column < 2; ++column) {
+                        simdgroup_multiply_accumulate(
+                            accumulators[row][column],
+                            weight_matrices[row],
+                            activation_matrices[column],
+                            accumulators[row][column]);
+                    }
+                }
+            }
+        }
+
+        if (simd == 0) {
+            dequant_lane = (dequant_lane + 2 < 16)
+                ? dequant_lane + 2
+                : short(uint(dequant_lane) & 1u);
+            if (dequant_lane < 2) {
+                weight_block += IQ2_XS_BLOCK_BYTES;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (active_panel) {
+        threadgroup float * result = activation_tile;
+        FOR_UNROLL (short row = 0; row < 2; ++row) {
+            FOR_UNROLL (short column = 0; column < 2; ++column) {
+                simdgroup_store(
+                    accumulators[row][column],
+                    result + uint(row) * 8u * IQ2_XS_TILE_ROUTES
+                        + uint(column) * 8u,
+                    IQ2_XS_TILE_ROUTES);
+            }
+        }
+        simdgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint element = uint(lane);
+             element < output_rows * route_count;
+             element += 32u) {
+            const uint row = element / route_count;
+            const uint route = element % route_count;
+            const uint destination =
+                uint(destination_slots[tile.start + route_base + route]);
+            output[(ulong)destination * args.M + output_base + row] =
+                result[row * IQ2_XS_TILE_ROUTES + route];
+        }
     }
 }

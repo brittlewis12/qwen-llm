@@ -71,6 +71,7 @@ struct Dsv4PrefillLayer {
     down_dtype: String,
     grouped_iq2: bool,
     bm16: bool,
+    bm32: bool,
     bucket_count: usize,
     active_experts: usize,
     max_routes_per_expert: u16,
@@ -163,6 +164,7 @@ fn summarize(profile: PackedPostRouteStageProfile, wall_ms: f64) -> Dsv4PrefillR
             down_dtype: format!("{:?}", metadata.down_dtype),
             grouped_iq2: metadata.grouped_iq2,
             bm16: metadata.bm16,
+            bm32: metadata.bm32,
             bucket_count: metadata.bucket_count,
             active_experts: metadata
                 .expert_counts

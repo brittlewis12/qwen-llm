@@ -2544,11 +2544,32 @@ fn deepseek_v4_prefill_chunk_tokens() -> Result<usize> {
     parse_deepseek_v4_prefill_chunk_tokens(value.as_deref())
 }
 
+fn deepseek_v4_prefill_chunk_ranges(
+    prompt_tokens: usize,
+    chunk_tokens: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    while start < prompt_tokens {
+        let remaining = prompt_tokens - start;
+        let len = if remaining >= chunk_tokens {
+            chunk_tokens
+        } else if chunk_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS && remaining >= 2_048 {
+            2_048
+        } else {
+            remaining
+        };
+        ranges.push(start..start + len);
+        start += len;
+    }
+    ranges
+}
+
 fn deepseek_v4_packed_chunk_count(prompt_tokens: usize, chunk_tokens: usize) -> usize {
     if prompt_tokens < 2 {
         0
     } else {
-        prompt_tokens.div_ceil(chunk_tokens)
+        deepseek_v4_prefill_chunk_ranges(prompt_tokens, chunk_tokens).len()
     }
 }
 
@@ -2642,7 +2663,11 @@ fn advance_deepseek_v4_prompt_prefix(
         !token_ids.is_empty(),
         "DeepSeek V4 snapshot prefix is empty"
     );
-    for (chunk_index, chunk) in token_ids.chunks(chunk_tokens).enumerate() {
+    for (chunk_index, range) in deepseek_v4_prefill_chunk_ranges(token_ids.len(), chunk_tokens)
+        .into_iter()
+        .enumerate()
+    {
+        let chunk = &token_ids[range];
         session.advance_tokens(ctx, chunk).with_context(|| {
             format!("advance DeepSeek V4 snapshot prefix chunk {chunk_index} without logits")
         })?;
@@ -2660,8 +2685,10 @@ fn execute_deepseek_v4_prompt_suffix(
         !token_ids.is_empty(),
         "DeepSeek V4 prompt suffix requires an endpoint token"
     );
-    let chunk_count = token_ids.len().div_ceil(chunk_tokens);
-    for (chunk_index, chunk) in token_ids.chunks(chunk_tokens).enumerate() {
+    let chunks = deepseek_v4_prefill_chunk_ranges(token_ids.len(), chunk_tokens);
+    let chunk_count = chunks.len();
+    for (chunk_index, range) in chunks.into_iter().enumerate() {
+        let chunk = &token_ids[range];
         if chunk_index + 1 == chunk_count {
             session
                 .prefill_tokens(ctx, chunk)
@@ -7441,6 +7468,17 @@ mod tests {
         assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("0")).is_err());
         assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("4097")).is_err());
         assert!(parse_deepseek_v4_prefill_chunk_tokens(Some("nope")).is_err());
+        let lengths = |tokens, chunk| {
+            deepseek_v4_prefill_chunk_ranges(tokens, chunk)
+                .into_iter()
+                .map(|range| range.len())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lengths(2_385, 4_096), vec![2_048, 337]);
+        assert_eq!(lengths(6_642, 4_096), vec![4_096, 2_048, 498]);
+        assert_eq!(lengths(8_192, 4_096), vec![4_096, 4_096]);
+        assert_eq!(lengths(2_385, 2_048), vec![2_048, 337]);
+        assert_eq!(lengths(2_385, 3_000), vec![2_385]);
         assert_eq!(deepseek_v4_packed_chunk_count(0, 512), 0);
         assert_eq!(deepseek_v4_packed_chunk_count(1, 512), 0);
         assert_eq!(deepseek_v4_packed_chunk_count(2, 512), 1);

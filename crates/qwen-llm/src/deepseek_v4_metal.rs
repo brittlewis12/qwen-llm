@@ -6287,6 +6287,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             1,
             1,
             DEEPSEEK_V4_CSA_TOP_K,
+            false,
             c,
         )?;
         Ok(())
@@ -12019,6 +12020,7 @@ fn encode_cooperative_selected_sink_attention_f16(
     query_count: usize,
     token_count: usize,
     selected_slots: usize,
+    online: bool,
     config: DeepSeekV4PositionZeroAttentionConfig,
 ) -> Result<(), DeepSeekV4MetalError> {
     require_serial(enc, "deepseek_v4_cooperative_selected_attention")?;
@@ -12119,14 +12121,40 @@ fn encode_cooperative_selected_sink_attention_f16(
         raw_cache_is_chunk: u32,
         scale: f32,
     }
-    let pso = ctx.pipeline("kernel_deepseek_v4_packed_selected_sink_attention_f16")?;
     let maximum_rows = DEEPSEEK_V4_LOCAL_WINDOW
         .checked_add(selected_slots)
         .ok_or_else(|| {
             DeepSeekV4MetalError::Invalid("cooperative selected maximum row count overflow".into())
         })?;
-    let threadgroup_width = config.head_dim.max(maximum_rows);
-    if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
+    let (kernel, threadgroup_width, threadgroup_bytes) = if online {
+        if config.head_count != 64
+            || config.head_dim != DEEPSEEK_V4_HCA_TILE_ROWS
+            || selected_slots != DEEPSEEK_V4_CSA_TOP_K
+        {
+            return invalid(
+                "online selected attention requires 64 heads x 512 dimensions and top-512 rows",
+            );
+        }
+        (
+            "kernel_deepseek_v4_online_packed_selected_sink_attention_f16",
+            DEEPSEEK_V4_ONLINE_HCA_THREADS,
+            DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES,
+        )
+    } else {
+        (
+            "kernel_deepseek_v4_packed_selected_sink_attention_f16",
+            config.head_dim.max(maximum_rows),
+            (maximum_rows + 1) * std::mem::size_of::<f32>(),
+        )
+    };
+    let pso = ctx.pipeline(kernel)?;
+    if online {
+        validate_deepseek_v4_online_hca_launch_geometry(
+            pso.threadExecutionWidth(),
+            pso.maxTotalThreadsPerThreadgroup(),
+            ctx.device.maxThreadgroupMemoryLength(),
+        )?;
+    } else if pso.maxTotalThreadsPerThreadgroup() < threadgroup_width {
         return invalid(format!(
             "cooperative selected attention pipeline supports {} threads, requires {threadgroup_width}",
             pso.maxTotalThreadsPerThreadgroup()
@@ -12157,7 +12185,7 @@ fn encode_cooperative_selected_sink_attention_f16(
     enc.set_tensor(7, visible_counts);
     enc.set_tensor(8, sinks);
     enc.set_tensor(9, output);
-    enc.set_threadgroup_memory(0, (maximum_rows + 1) * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(0, threadgroup_bytes);
     enc.dispatch(
         MTLSize {
             width: query_count,
@@ -26076,6 +26104,7 @@ mod tests {
             1,
             1,
             TOP_K,
+            false,
             attention_config,
         )
         .unwrap();
@@ -26671,6 +26700,7 @@ mod tests {
             .unwrap();
             let cooperative =
                 MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
+            let online = MetalTensor::zeros_f32(&ctx, vec![dims.query_width as u64, 1]).unwrap();
             let command = ctx.queue.commandBuffer().unwrap();
             let encoder = KernelEncoder::begin(&command);
             encode_selected_sink_attention_f16(
@@ -26708,6 +26738,30 @@ mod tests {
                 1,
                 1,
                 TOP_K,
+                false,
+                config,
+            )
+            .unwrap();
+            encode_cooperative_selected_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &packed_queries,
+                &raw_cache,
+                &raw_cache,
+                DeepSeekV4RawCacheLayout::Ring,
+                &compressed,
+                CAPACITY,
+                &selected_ids,
+                &selected_counts,
+                &visible_counts,
+                &sinks,
+                &online,
+                position,
+                0,
+                1,
+                1,
+                TOP_K,
+                true,
                 config,
             )
             .unwrap();
@@ -26716,34 +26770,37 @@ mod tests {
             command.waitUntilCompleted();
             assert!(command.error().is_none());
             let legacy = read_f32(&legacy);
-            let cooperative = read_f32(&cooperative);
-            let differing = legacy
-                .iter()
-                .zip(&cooperative)
-                .filter(|(legacy, cooperative)| legacy.to_bits() != cooperative.to_bits())
-                .count();
-            let max_abs = legacy
-                .iter()
-                .zip(&cooperative)
-                .map(|(legacy, cooperative)| (legacy - cooperative).abs())
-                .fold(0.0f32, f32::max);
-            let squared_error = legacy
-                .iter()
-                .zip(&cooperative)
-                .map(|(legacy, cooperative)| f64::from(legacy - cooperative).powi(2))
-                .sum::<f64>();
             let reference_norm = legacy
                 .iter()
                 .map(|value| f64::from(*value).powi(2))
                 .sum::<f64>();
-            let relative_rms = (squared_error / reference_norm).sqrt();
-            eprintln!(
-                "cooperative selected position={position} visible={visible} differing={differing}/{} max_abs={max_abs} rel_rms={:.9}",
-                legacy.len(),
-                relative_rms,
-            );
-            assert!(max_abs <= 1e-8);
-            assert!(relative_rms <= 1e-6);
+            for (label, candidate, max_allowed) in [
+                ("cooperative", read_f32(&cooperative), 1e-8),
+                ("online", read_f32(&online), 1e-8),
+            ] {
+                let differing = legacy
+                    .iter()
+                    .zip(&candidate)
+                    .filter(|(legacy, candidate)| legacy.to_bits() != candidate.to_bits())
+                    .count();
+                let max_abs = legacy
+                    .iter()
+                    .zip(&candidate)
+                    .map(|(legacy, candidate)| (legacy - candidate).abs())
+                    .fold(0.0f32, f32::max);
+                let squared_error = legacy
+                    .iter()
+                    .zip(&candidate)
+                    .map(|(legacy, candidate)| f64::from(legacy - candidate).powi(2))
+                    .sum::<f64>();
+                let relative_rms = (squared_error / reference_norm).sqrt();
+                eprintln!(
+                    "{label} selected position={position} visible={visible} differing={differing}/{} max_abs={max_abs} rel_rms={relative_rms:.9}",
+                    legacy.len(),
+                );
+                assert!(max_abs <= max_allowed, "{label} max abs {max_abs}");
+                assert!(relative_rms <= 1e-6, "{label} relative RMS {relative_rms}");
+            }
         }
     }
 
@@ -26814,6 +26871,7 @@ mod tests {
                 1,
                 1,
                 SELECTED_SLOTS,
+                false,
                 config,
             )
             .unwrap();
@@ -29355,6 +29413,7 @@ mod tests {
                 1,
                 1,
                 TOP_K,
+                false,
                 attention_config,
             )
             .unwrap();
@@ -29584,6 +29643,7 @@ mod tests {
                                 1,
                                 1,
                                 TOP_K,
+                                false,
                                 attention_config,
                             )
                         })

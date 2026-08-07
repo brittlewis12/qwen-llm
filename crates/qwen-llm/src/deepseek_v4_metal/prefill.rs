@@ -3911,6 +3911,12 @@ crate::env_flag!(
     "QWEN_DSV4_BATCHED_COMPRESSOR"
 );
 
+#[cfg(feature = "dsv4-diagnostics")]
+crate::env_flag!(
+    default_off packed_selected_online_enabled,
+    "QWEN_DSV4_PACKED_SELECTED_ONLINE"
+);
+
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
 fn packed_grouped_iq3_candidate_supported(ctx: &MetalContext) -> bool {
     if !crate::metal::matmat_iq3_xxs_mm_is_enabled()
@@ -6804,6 +6810,10 @@ fn encode_packed_selected_sink_attention_f16(
         "packed selected attention output",
     )?;
 
+    #[cfg(feature = "dsv4-diagnostics")]
+    let online = packed_selected_online_enabled();
+    #[cfg(not(feature = "dsv4-diagnostics"))]
+    let online = false;
     encode_cooperative_selected_sink_attention_f16(
         ctx,
         enc,
@@ -6823,6 +6833,7 @@ fn encode_packed_selected_sink_attention_f16(
         sparse.query_count,
         n_tokens,
         DEEPSEEK_V4_CSA_TOP_K,
+        online,
         config,
     )
 }

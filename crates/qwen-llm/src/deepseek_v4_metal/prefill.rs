@@ -4667,7 +4667,7 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
-    default_off packed_iq2_f16_mm64x32_enabled,
+    default_on packed_iq2_f16_mm64x32_enabled,
     "QWEN_DSV4_PACKED_IQ2_F16_MATRIX"
 );
 

@@ -879,13 +879,20 @@ erase the dataflow saving, matching the prior all-IQ3 fusion result under a
 different quant format. Remove the pilot; same-tile dual-projection fusion now
 requires a materially lower-pressure premise before reopening.
 
+Half-staging the existing 64x32 IQ2 operands is the lower-pressure premise that
+clears. It reduces threadgroup storage from 12 to 8 KiB while retaining F32
+accumulators and output. Production-K direct error is bounded at `3.41e-4`
+relative RMS for gate/up and `1.71e-3` after SwiGLU. In a clean 8K
+control/candidate/control bracket, gate/up falls 6.89-8.00%, the complete BM16
+cohort falls 5.02-6.43%, and ordinary wall falls 3.12-5.18%. A real 6,642-token
+continuation remains coherent and reaches EOS. Default the faster arithmetic
+with `QWEN_DSV4_PACKED_IQ2_F16_MATRIX=0` as the F32-staging rollback.
+
 Force-ranked queue:
 
-1. **Further IQ2 execution.** The exact wide cohort is 7.15 seconds, with
-   3.99 seconds in gate/up and 1.96 seconds in down. Exact paired F32 gate/up is
-   now closed. Half-staged operands remain a changed numerical premise; require
-   explicit quality authority and a projected competitive whole-request gain
-   before implementation.
+1. **Further IQ2 execution.** Half-staged gate/up is now default. The routed
+   down projection remains about 1.9 seconds of the clean 8K profile; require a
+   changed work unit rather than another scalar or bank-axis retune.
 2. **All-IQ3 routed experts.** The 16-layer routed subtotal is 3.67 seconds and
    already uses a 64-output by 32-route matrix. Reopen only for a new dataflow
    boundary such as grouped down or deterministic sorted-output finalization,

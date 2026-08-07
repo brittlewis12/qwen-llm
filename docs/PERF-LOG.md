@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 Half-Staged IQ2 Matrix Default GO
+
+Status: the 25 IQ2_XS gate/up layers now default to F16-staged operands in the
+existing 64x32 matrix work unit. Set `QWEN_DSV4_PACKED_IQ2_F16_MATRIX=0` to
+restore F32 staging.
+
+- The candidate keeps the stable expert/token/slot plan, separate gate and up
+  dispatches, F32 accumulators, standalone SwiGLU, and F32 outputs. Only the
+  activation and decoded-weight tiles change from F32 to F16, reducing
+  threadgroup storage from 12 to 8 KiB.
+- Production-K direct differentials through N=4,096 bound gate/up relative RMS
+  at `3.41e-4` and post-SwiGLU relative RMS at `1.71e-3`, with post-SwiGLU
+  cosine `0.999998551`. Candidate executions repeat their own complete logits.
+- In a clean 8K control/candidate/control bracket, gate/up moves
+  `4,014.0/3,966.1 -> 3,693.0 ms`, a 6.89-8.00% reduction. The full BM16 cohort
+  moves `7,200.3/7,093.2 -> 6,737.1 ms`, a 5.02-6.43% reduction.
+- Ordinary wall moves `37,130.8/36,342.4 -> 35,207.1 ms`, a 3.12-5.18%
+  reduction. Sampled wall also beats both controls, though one closing control
+  contains a large encoder-gap outlier and receives no stage attribution.
+- A real 6,642-token prompt produces a coherent three-theme summary and reaches
+  EOS after 80 tokens. Its stream differs from the F32-staged control, as
+  expected for the declared approximate arithmetic; no bit-equivalence claim is
+  made.
+
+Decision: default the consistently faster, bounded-error operand representation
+with one-variable F32 rollback. Keep the failed paired-projection fusion closed;
+this win comes from lower pressure, not more live accumulator lineages.
+
 ## 2026-08-07 - DeepSeek V4 Paired IQ2 Gate/Up KILL
 
 Status: remove the exact paired IQ2 gate/up/SwiGLU pilot. The 25 IQ2 layers

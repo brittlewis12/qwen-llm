@@ -3937,6 +3937,7 @@ fn encode_packed_grouped_down_iq3_xxs_f32(
 enum PackedIq2MatrixWorkUnit {
     Mma16,
     Mm64x32,
+    Mm64x32F16,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3972,6 +3973,13 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_matrix(
             12_288,
             "kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f32_mm64x32",
             "packed grouped mapped IQ2_XS F32 MM64x32 projection",
+        ),
+        PackedIq2MatrixWorkUnit::Mm64x32F16 => (
+            64,
+            128,
+            8_192,
+            "kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f16_mm64x32",
+            "packed grouped mapped IQ2_XS F16 MM64x32 projection",
         ),
     };
     require_serial(enc, label)?;
@@ -4636,6 +4644,18 @@ fn packed_iq2_mm64x32_candidate_supported(ctx: &MetalContext) -> bool {
     projection.threadExecutionWidth() == 32 && projection.maxTotalThreadsPerThreadgroup() >= 128
 }
 
+fn packed_iq2_f16_mm64x32_candidate_supported(ctx: &MetalContext) -> bool {
+    if ctx.device.maxThreadgroupMemoryLength() < 8_192 {
+        return false;
+    }
+    let Ok(projection) =
+        ctx.pipeline("kernel_deepseek_v4_packed_grouped_mapped_iq2_xs_f16_mm64x32")
+    else {
+        return false;
+    };
+    projection.threadExecutionWidth() == 32 && projection.maxTotalThreadsPerThreadgroup() >= 128
+}
+
 crate::env_flag!(
     default_on packed_grouped_iq2_mma16_enabled,
     "QWEN_DSV4_PACKED_BM16_IQ2"
@@ -4644,6 +4664,11 @@ crate::env_flag!(
 crate::env_flag!(
     default_on packed_iq2_mm64x32_enabled,
     "QWEN_DSV4_PACKED_IQ2_MM64X32"
+);
+
+crate::env_flag!(
+    default_off packed_iq2_f16_mm64x32_enabled,
+    "QWEN_DSV4_PACKED_IQ2_F16_MATRIX"
 );
 
 crate::env_flag!(
@@ -4796,8 +4821,11 @@ fn packed_grouped_expert_policy(
         PackedGroupedExpertMode::ForceOn => true,
         PackedGroupedExpertMode::ForceOff => false,
     } && packed_grouped_expert_kernels_supported(ctx);
+    let f16_iq2 = packed_iq2_f16_mm64x32_enabled();
     let wide_iq2 = packed_iq2_mm64x32_enabled();
-    let iq2_matrix_supported = if wide_iq2 {
+    let iq2_matrix_supported = if f16_iq2 {
+        packed_iq2_f16_mm64x32_candidate_supported(ctx)
+    } else if wide_iq2 {
         packed_iq2_mm64x32_candidate_supported(ctx)
     } else {
         packed_grouped_iq2_mma16_candidate_supported(ctx)
@@ -6957,7 +6985,9 @@ impl PrefillMoeScratch {
                 PackedGroupedExpertPlan::new(n_tokens, schedule, Some(&self.grouped_tiles))?
             };
             let used_iq2_mma16 = if expert_policy.uses_iq2_mma16(n_tokens) {
-                let work_unit = if packed_iq2_mm64x32_enabled() {
+                let work_unit = if packed_iq2_f16_mm64x32_enabled() {
+                    PackedIq2MatrixWorkUnit::Mm64x32F16
+                } else if packed_iq2_mm64x32_enabled() {
                     PackedIq2MatrixWorkUnit::Mm64x32
                 } else {
                     PackedIq2MatrixWorkUnit::Mma16
@@ -8364,7 +8394,11 @@ impl DeepSeekV4Session {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if eligible_layers > 0 && !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                if packed_iq2_mm64x32_enabled() {
+                if packed_iq2_f16_mm64x32_enabled() {
+                    eprintln!(
+                        "deepseek_v4: half-staged 64x32 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_IQ2_F16_MATRIX=0"
+                    );
+                } else if packed_iq2_mm64x32_enabled() {
                     eprintln!(
                         "deepseek_v4: 64x32 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_IQ2_MM64X32=0"
                     );
@@ -12293,6 +12327,9 @@ mod tests {
             let repeat_gate = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 101.0);
             let repeat_up = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 103.0);
             let repeat_inner = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 107.0);
+            let half_gate = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 109.0);
+            let half_up = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 113.0);
+            let half_inner = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 127.0);
 
             let _trace = crate::metal::kernel_trace_begin();
             let command = ctx.queue.commandBuffer().unwrap();
@@ -12406,6 +12443,13 @@ mod tests {
                     &repeat_up,
                     &repeat_inner,
                 ),
+                (
+                    &grouped_plan,
+                    PackedIq2MatrixWorkUnit::Mm64x32F16,
+                    &half_gate,
+                    &half_up,
+                    &half_inner,
+                ),
             ] {
                 encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
                     &ctx,
@@ -12442,7 +12486,7 @@ mod tests {
             let trace = crate::metal::kernel_trace_take_delta();
             assert_eq!(trace.encoders, 1);
             assert_eq!(trace.concurrent_encoders, 0);
-            assert_eq!(trace.dispatches, (schedule.len() * 5 + 7) as u64);
+            assert_eq!(trace.dispatches, (schedule.len() * 5 + 10) as u64);
 
             let read = |tensor: &MetalTensor, label| host_read_f32(tensor, label).unwrap();
             let control = read(&control_inner, "IQ2 MMA control inner");
@@ -12451,16 +12495,30 @@ mod tests {
             let candidate_gate_values = read(&candidate_gate, "IQ2 MMA candidate gate");
             let candidate_up_values = read(&candidate_up, "IQ2 MMA candidate up");
             let candidate = read(&candidate_inner, "IQ2 MMA candidate inner");
+            let wide_gate_values = read(&repeat_gate, "IQ2 MM64x32 gate");
+            let wide_up_values = read(&repeat_up, "IQ2 MM64x32 up");
             let wide = read(&repeat_inner, "IQ2 MM64x32 inner");
+            let half_gate_values = read(&half_gate, "IQ2 F16 MM64x32 gate");
+            let half_up_values = read(&half_up, "IQ2 F16 MM64x32 up");
+            let half = read(&half_inner, "IQ2 F16 MM64x32 inner");
             let gate_result = metrics(&control_gate_values, &candidate_gate_values);
             let up_result = metrics(&control_up_values, &candidate_up_values);
             let result = metrics(&control, &candidate);
+            let half_gate_result = metrics(&wide_gate_values, &half_gate_values);
+            let half_up_result = metrics(&wide_up_values, &half_up_values);
+            let half_result = metrics(&wide, &half);
             eprintln!(
-                "deepseek_v4 iq2_mma16_differential n={n_tokens} gate={gate_result:?} up={up_result:?} inner={result:?}",
+                "deepseek_v4 iq2_mma16_differential n={n_tokens} gate={gate_result:?} up={up_result:?} inner={result:?} half_gate={half_gate_result:?} half_up={half_up_result:?} half_inner={half_result:?}",
             );
             assert!(
                 result.0 >= 0.999 && result.1 <= 0.05,
                 "N={n_tokens} numerical gate failed: {result:?}"
+            );
+            assert!(
+                [half_gate_result, half_up_result, half_result]
+                    .into_iter()
+                    .all(|result| result.0 >= 0.999 && result.1 <= 0.05),
+                "N={n_tokens} half-staged numerical gate failed: gate={half_gate_result:?} up={half_up_result:?} inner={half_result:?}"
             );
             assert_eq!(
                 control_gate_values
@@ -12508,7 +12566,7 @@ mod tests {
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                read(&repeat_gate, "IQ2 MM64x32 gate")
+                wide_gate_values
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
@@ -12519,7 +12577,7 @@ mod tests {
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                read(&repeat_up, "IQ2 MM64x32 up")
+                wide_up_values
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
@@ -12535,6 +12593,9 @@ mod tests {
                 ("IQ2 MM64x32 gate", &repeat_gate),
                 ("IQ2 MM64x32 up", &repeat_up),
                 ("IQ2 MM64x32 inner", &repeat_inner),
+                ("IQ2 F16 MM64x32 gate", &half_gate),
+                ("IQ2 F16 MM64x32 up", &half_up),
+                ("IQ2 F16 MM64x32 inner", &half_inner),
             ] {
                 assert_grouped_guards(label, tensor);
             }
@@ -12640,6 +12701,9 @@ mod tests {
             let repeat_gate = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 149.0);
             let repeat_up = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 151.0);
             let repeat_inner = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 157.0);
+            let half_gate = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 163.0);
+            let half_up = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 167.0);
+            let half_inner = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], 173.0);
 
             let _trace = crate::metal::kernel_trace_begin();
             let command = ctx.queue.commandBuffer().unwrap();
@@ -12753,6 +12817,13 @@ mod tests {
                     &repeat_up,
                     &repeat_inner,
                 ),
+                (
+                    &grouped_plan,
+                    PackedIq2MatrixWorkUnit::Mm64x32F16,
+                    &half_gate,
+                    &half_up,
+                    &half_inner,
+                ),
             ] {
                 encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
                     &ctx,
@@ -12789,7 +12860,7 @@ mod tests {
             let trace = crate::metal::kernel_trace_take_delta();
             assert_eq!(trace.encoders, 1);
             assert_eq!(trace.concurrent_encoders, 0);
-            assert_eq!(trace.dispatches, (schedule.len() * 5 + 7) as u64);
+            assert_eq!(trace.dispatches, (schedule.len() * 5 + 10) as u64);
 
             let control_gate_values =
                 host_read_f32(&control_gate, "production-K scalar gate").unwrap();
@@ -12799,15 +12870,31 @@ mod tests {
             let candidate_up_values = host_read_f32(&candidate_up, "production-K BM16 up").unwrap();
             let control = host_read_f32(&control_inner, "production-K scalar inner").unwrap();
             let candidate = host_read_f32(&candidate_inner, "production-K BM16 inner").unwrap();
+            let wide_gate_values =
+                host_read_f32(&repeat_gate, "production-K MM64x32 gate").unwrap();
+            let wide_up_values = host_read_f32(&repeat_up, "production-K MM64x32 up").unwrap();
             let wide = host_read_f32(&repeat_inner, "production-K MM64x32 inner").unwrap();
+            let half_gate_values =
+                host_read_f32(&half_gate, "production-K F16 MM64x32 gate").unwrap();
+            let half_up_values = host_read_f32(&half_up, "production-K F16 MM64x32 up").unwrap();
+            let half = host_read_f32(&half_inner, "production-K F16 MM64x32 inner").unwrap();
             let result = metrics(&control, &candidate);
+            let half_gate_result = metrics(&wide_gate_values, &half_gate_values);
+            let half_up_result = metrics(&wide_up_values, &half_up_values);
+            let half_result = metrics(&wide, &half);
             eprintln!(
-                "deepseek_v4 iq2_mma16_production_k n={n_tokens} cosine={:.9} rel_rms={:.9} max_abs={:.9}",
+                "deepseek_v4 iq2_mma16_production_k n={n_tokens} cosine={:.9} rel_rms={:.9} max_abs={:.9} half_gate={half_gate_result:?} half_up={half_up_result:?} half_inner={half_result:?}",
                 result.0, result.1, result.2,
             );
             assert!(
                 result.0 >= 0.999_999 && result.1 <= 0.001,
                 "N={n_tokens} production-K numerical gate failed: {result:?}"
+            );
+            assert!(
+                [half_gate_result, half_up_result, half_result]
+                    .into_iter()
+                    .all(|result| result.0 >= 0.999_99 && result.1 <= 0.005),
+                "N={n_tokens} production-K half-staged numerical gate failed: gate={half_gate_result:?} up={half_up_result:?} inner={half_result:?}"
             );
             assert_eq!(
                 control_gate_values
@@ -12855,8 +12942,7 @@ mod tests {
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                host_read_f32(&repeat_gate, "production-K MM64x32 gate")
-                    .unwrap()
+                wide_gate_values
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
@@ -12867,8 +12953,7 @@ mod tests {
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
-                host_read_f32(&repeat_up, "production-K MM64x32 up")
-                    .unwrap()
+                wide_up_values
                     .iter()
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
@@ -12884,6 +12969,9 @@ mod tests {
                 ("production-K MM64x32 gate", &repeat_gate),
                 ("production-K MM64x32 up", &repeat_up),
                 ("production-K MM64x32 inner", &repeat_inner),
+                ("production-K F16 MM64x32 gate", &half_gate),
+                ("production-K F16 MM64x32 up", &half_up),
+                ("production-K F16 MM64x32 inner", &half_inner),
             ] {
                 assert_grouped_guards(label, tensor);
             }

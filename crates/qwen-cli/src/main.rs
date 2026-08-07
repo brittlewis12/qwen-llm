@@ -306,6 +306,16 @@ struct Args {
     #[arg(long)]
     request_stats: Option<PathBuf>,
 
+    /// Append per-request structured stats as JSONL under a common cross-family
+    /// envelope (schema: qwen-llm.request-stats v1).
+    ///
+    /// Currently populated by DeepSeek V4 single-turn generation only; other
+    /// invocation paths silently ignore this flag today (they continue emitting
+    /// via --request-stats with the legacy shape). The envelope has a small
+    /// stable core plus namespaced backend extensions under `diagnostics.<family>`.
+    #[arg(long)]
+    request_stats_jsonl: Option<PathBuf>,
+
     /// Append single-turn first-post-model-load timing rows as JSONL.
     #[arg(long)]
     request_timings: Option<PathBuf>,
@@ -3131,7 +3141,230 @@ fn run_deepseek_v4_single_turn(
     if let Some(path) = args.trace_request.as_ref() {
         append_request_trace(path, arrival_ms, prompt_ids.len(), generation.tokens.len())?;
     }
+    if let Some(path) = args.request_stats_jsonl.as_ref() {
+        // invocation_id is process-scoped; for single-turn it's also request-scoped
+        // since only one request runs per process. Matches the pattern used in
+        // append_request_trace elsewhere in this file.
+        let invocation_id = format!("{}-{}", std::process::id(), arrival_ms);
+        let record = build_deepseek_v4_single_turn_stats_record(
+            &invocation_id,
+            prompt_kind,
+            prefill_mode,
+            prefill_chunk_tokens,
+            prompt_ids.len(),
+            generation.tokens.len(),
+            generation.transitions,
+            generation.stop_reason,
+            tokenizer_ms,
+            load_ms,
+            prefill_ms,
+            prefill_tps,
+            generation.wall_ms,
+            decode_tps,
+            transition_tps,
+            &generated_ids_sha256,
+        );
+        let mut file = open_append_file(path, "request stats jsonl")?;
+        serde_json::to_writer(&mut file, &record)
+            .context("write DeepSeek V4 single-turn request stats record")?;
+        writeln!(file).context("terminate DeepSeek V4 single-turn request stats line")?;
+    }
     Ok(())
+}
+
+// ---- Common request-stats-jsonl envelope (schema: qwen-llm.request-stats v1) ----
+//
+// This envelope is a **small stable common core** plus namespaced backend
+// diagnostics under `diagnostics.<family>`. It is populated today only by
+// DeepSeek V4 single-turn generation; other paths will migrate additively in
+// follow-up PRs (Qwen batch, DS4 batch, single-turn Qwen).
+//
+// Constraints:
+//   * schema_version bumps ONLY for breaking changes. Additive fields stay in v1.
+//   * `diagnostics.<family>` has its own `schema_version`; family fields evolve
+//     independently of the common contract.
+//   * Consumers MUST ignore unknown top-level and namespaced fields.
+//   * `record_type` is the top-level discriminator; more record types (e.g. an
+//     invocation-level bookend) may be added later.
+//   * Timing fields are per-request. Process/invocation-level facts (model load
+//     time, binary hashes) live under `diagnostics` or a future invocation record.
+
+#[derive(Debug, Serialize)]
+struct RequestStatsRecord<'a> {
+    schema: &'static str,
+    schema_version: u32,
+    record_type: &'static str,
+    invocation_id: &'a str,
+    request_index: u32,
+    status: &'static str,
+    model: RequestStatsModel<'a>,
+    input: RequestStatsInput<'a>,
+    usage: RequestStatsUsage,
+    finish: RequestStatsFinish,
+    timing_ms: RequestStatsTiming,
+    throughput_tps: RequestStatsThroughput,
+    output_fingerprint: RequestStatsOutputFingerprint<'a>,
+    build: RequestStatsBuild,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<RequestStatsDiagnostics>,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestStatsModel<'a> {
+    family: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestStatsInput<'a> {
+    kind: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestStatsUsage {
+    input_tokens: usize,
+    output_tokens: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestStatsFinish {
+    reason: StopReason,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestStatsTiming {
+    total: f64,
+    tokenization: f64,
+    prefill: f64,
+    decode: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestStatsThroughput {
+    prefill: f64,
+    decode: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestStatsOutputFingerprint<'a> {
+    algorithm: &'static str,
+    value: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestStatsBuild {
+    commit: &'static str,
+    dirty: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestStatsDiagnostics {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deepseek_v4: Option<RequestStatsDeepSeekV4Diagnostics>,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestStatsDeepSeekV4Diagnostics {
+    schema_version: u32,
+    prefill_mode: &'static str,
+    prefill_chunk_cap: usize,
+    transitions: usize,
+    transition_tps: f64,
+    load_ms: f64,
+}
+
+fn parse_build_dirty(raw: &str) -> bool {
+    !matches!(raw.trim(), "0" | "" | "false" | "FALSE" | "no")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_deepseek_v4_single_turn_stats_record<'a>(
+    invocation_id: &'a str,
+    prompt_kind: &'a str,
+    prefill_mode: &'static str,
+    prefill_chunk_cap: usize,
+    prompt_tokens: usize,
+    generated_tokens: usize,
+    transitions: usize,
+    stop_reason: StopReason,
+    tokenizer_ms: f64,
+    load_ms: f64,
+    prefill_ms: f64,
+    prefill_tps: f64,
+    generation_ms: f64,
+    decode_tps: f64,
+    transition_tps: f64,
+    output_fingerprint_value: &'a str,
+) -> RequestStatsRecord<'a> {
+    // input.kind describes representation (raw vs messages); template surfaces
+    // the specific chat-template variant when known (e.g., messages_0731_chat
+    // -> kind=messages template=0731_chat).
+    let (input_kind, input_template) = split_ds4_prompt_kind(prompt_kind);
+    let total_ms = tokenizer_ms + prefill_ms + generation_ms;
+    RequestStatsRecord {
+        schema: "qwen-llm.request-stats",
+        schema_version: 1,
+        record_type: "request_stats",
+        invocation_id,
+        request_index: 0,
+        status: "ok",
+        model: RequestStatsModel {
+            family: "deepseek_v4",
+        },
+        input: RequestStatsInput {
+            kind: input_kind,
+            template: input_template,
+        },
+        usage: RequestStatsUsage {
+            input_tokens: prompt_tokens,
+            output_tokens: generated_tokens,
+        },
+        finish: RequestStatsFinish {
+            reason: stop_reason,
+        },
+        timing_ms: RequestStatsTiming {
+            total: total_ms,
+            tokenization: tokenizer_ms,
+            prefill: prefill_ms,
+            decode: generation_ms,
+        },
+        throughput_tps: RequestStatsThroughput {
+            prefill: prefill_tps,
+            decode: decode_tps,
+        },
+        output_fingerprint: RequestStatsOutputFingerprint {
+            algorithm: "sha256-qwen-generated-token-ids-v1",
+            value: output_fingerprint_value,
+        },
+        build: RequestStatsBuild {
+            commit: env!("QWEN_BUILD_COMMIT"),
+            dirty: parse_build_dirty(env!("QWEN_BUILD_DIRTY")),
+        },
+        diagnostics: Some(RequestStatsDiagnostics {
+            deepseek_v4: Some(RequestStatsDeepSeekV4Diagnostics {
+                schema_version: 1,
+                prefill_mode,
+                prefill_chunk_cap,
+                transitions,
+                transition_tps,
+                load_ms,
+            }),
+        }),
+    }
+}
+
+/// Split a DeepSeek V4 `prompt_kind` string into (input_kind, template).
+/// Known values:
+///   - "messages_0731_chat"     -> ("messages", Some("0731_chat"))
+///   - "messages_0731_thinking" -> ("messages", Some("0731_thinking"))
+///   - "raw"                    -> ("raw", None)
+fn split_ds4_prompt_kind(prompt_kind: &str) -> (&str, Option<&str>) {
+    if let Some(rest) = prompt_kind.strip_prefix("messages_") {
+        ("messages", Some(rest))
+    } else {
+        (prompt_kind, None)
+    }
 }
 
 struct DeepSeekV4PreparedRequest {
@@ -10588,5 +10821,126 @@ mod tests {
         assert_eq!(metrics.total.misses, 4);
         assert_eq!(metrics.total.miss_wall_ns, 40);
         assert_eq!(metrics.total.compiler_wall_ns, 33);
+    }
+
+    // ---- request-stats-jsonl envelope shape tests ----
+    //
+    // These tests pin the common envelope shape for schema v1. Adding a field
+    // in an additive way should keep these tests passing. Renaming, removing,
+    // or restructuring a field should require a schema_version bump AND
+    // updating these tests intentionally.
+
+    #[test]
+    fn request_stats_record_v1_envelope_shape_is_stable() {
+        let record = build_deepseek_v4_single_turn_stats_record(
+            "inv-42-1234567890",
+            "messages_0731_chat",
+            "layer_major_chunks",
+            4096,
+            100,
+            50,
+            49,
+            StopReason::Eos,
+            10.5,
+            40.1,
+            1000.0,
+            100.0,
+            2000.0,
+            25.0,
+            24.5,
+            "deadbeef",
+        );
+        let json = serde_json::to_value(&record).unwrap();
+
+        // Common core
+        assert_eq!(json["schema"], "qwen-llm.request-stats");
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["record_type"], "request_stats");
+        assert_eq!(json["invocation_id"], "inv-42-1234567890");
+        assert_eq!(json["request_index"], 0);
+        assert_eq!(json["status"], "ok");
+
+        // Model
+        assert_eq!(json["model"]["family"], "deepseek_v4");
+
+        // Input (kind + template split from prompt_kind)
+        assert_eq!(json["input"]["kind"], "messages");
+        assert_eq!(json["input"]["template"], "0731_chat");
+
+        // Usage (nested for extensibility - cached/reasoning tokens later)
+        assert_eq!(json["usage"]["input_tokens"], 100);
+        assert_eq!(json["usage"]["output_tokens"], 50);
+
+        // Finish
+        assert_eq!(json["finish"]["reason"], "eos");
+
+        // Timing (all ms, per-request)
+        assert_eq!(json["timing_ms"]["total"], 3010.5);
+        assert_eq!(json["timing_ms"]["tokenization"], 10.5);
+        assert_eq!(json["timing_ms"]["prefill"], 1000.0);
+        assert_eq!(json["timing_ms"]["decode"], 2000.0);
+
+        // Throughput (tokens/sec)
+        assert_eq!(json["throughput_tps"]["prefill"], 100.0);
+        assert_eq!(json["throughput_tps"]["decode"], 25.0);
+
+        // Fingerprint (algorithm identifies encoding, value is hex digest)
+        assert_eq!(
+            json["output_fingerprint"]["algorithm"],
+            "sha256-qwen-generated-token-ids-v1"
+        );
+        assert_eq!(json["output_fingerprint"]["value"], "deadbeef");
+
+        // Build (commit + dirty are compile-time env vars; values vary per build)
+        assert!(json["build"]["commit"].is_string());
+        assert!(json["build"]["dirty"].is_boolean());
+
+        // Diagnostics: family-namespaced, independently versioned
+        assert_eq!(json["diagnostics"]["deepseek_v4"]["schema_version"], 1);
+        assert_eq!(
+            json["diagnostics"]["deepseek_v4"]["prefill_mode"],
+            "layer_major_chunks"
+        );
+        assert_eq!(
+            json["diagnostics"]["deepseek_v4"]["prefill_chunk_cap"],
+            4096
+        );
+        assert_eq!(json["diagnostics"]["deepseek_v4"]["transitions"], 49);
+        assert_eq!(json["diagnostics"]["deepseek_v4"]["transition_tps"], 24.5);
+        assert_eq!(json["diagnostics"]["deepseek_v4"]["load_ms"], 40.1);
+    }
+
+    #[test]
+    fn request_stats_split_ds4_prompt_kind_recognizes_message_templates() {
+        assert_eq!(
+            split_ds4_prompt_kind("messages_0731_chat"),
+            ("messages", Some("0731_chat"))
+        );
+        assert_eq!(
+            split_ds4_prompt_kind("messages_0731_thinking"),
+            ("messages", Some("0731_thinking"))
+        );
+        assert_eq!(split_ds4_prompt_kind("raw"), ("raw", None));
+        // Unknown prompt_kind falls through as opaque; template stays None.
+        assert_eq!(
+            split_ds4_prompt_kind("something_else"),
+            ("something_else", None)
+        );
+    }
+
+    #[test]
+    fn request_stats_parse_build_dirty_matches_env_convention() {
+        // env!("QWEN_BUILD_DIRTY") is "0" or "1" today; be liberal about
+        // representations in either direction to survive future formatting.
+        assert!(!parse_build_dirty("0"));
+        assert!(!parse_build_dirty(""));
+        assert!(!parse_build_dirty("false"));
+        assert!(!parse_build_dirty("FALSE"));
+        assert!(!parse_build_dirty("no"));
+        assert!(parse_build_dirty("1"));
+        assert!(parse_build_dirty("true"));
+        assert!(parse_build_dirty("yes"));
+        // Anything else defaults to dirty=true to bias toward "assume unstable"
+        assert!(parse_build_dirty("dirty"));
     }
 }

@@ -664,26 +664,59 @@ long-prompt discriminators. Default the batched path with
 `QWEN_DSV4_PACKED_INDEXER_BATCHED_ROPE=0` as the scalar rollback. This removes
 linear dispatch growth but does not independently reopen N=4,096.
 
+The retained F32 Q8 Q-B matrix now defaults on for complete N=2,048 chunks on
+the qualified Apple M4 Max/current-asset profile. Before-attention GPU falls
+`21,571.387 -> 5,945.840 ms`, pre-expert GPU falls 20.77%, and ordinary 8K wall
+moves `106,576.900 -> 91,647.479 ms`, or 14.01%. Prefill rises from 76.87 to
+89.39 token/s. Three clean current-lineage long-prompt tasks reproduce every
+incumbent generated ID and requested value, including the ledger's correct
+2,578 total. This supersedes the earlier HOLD: its pre-compressor and
+pre-online-attention candidate missed that total, while the promoted numerical
+bundle restores it exactly. Automatic scope remains tied to the measured
+device, 1,328 tensors, 104,202,502,492 source bytes, and a complete N=2,048
+chunk. `QWEN_DSV4_PACKED_Q8_QB=exact` is the rollback; partial or unqualified
+chunks retain exact GEMV under `auto`, while explicit `f32_matrix` remains a
+force mode for full N=2,048 chunks.
+
+Same-GGUF llama.cpp b10297 now supplies the missing external calibration on
+this M4 Max. Warm pp512/2048/4096 rows are 255.64/244.47/224.67 token/s with a
+2,048-token batch and 512-token ubatches. Its deterministic random tokens are
+not identical to the retained native prompt, so treat this as a standard
+schedule floor rather than a paired product ratio. The source and native trace
+agree on the next two gaps: llama.cpp routes all prompt-width Q8 projections
+through dequantizing matrix kernels and keeps MoE compaction plus indirect
+IQ2/IQ3 matrices on GPU; native output projections and routed work still cost
+35.11 and 29.20 seconds respectively on the current 8K candidate trace.
+
 Force-ranked queue:
 
-1. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
-   pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
-   proof, not a binding floor.
-2. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
+1. **Current-lineage Q8 output matrix falsifier.** Reintroduce only the retained
+   F32 `R2C4K64` output A/B schedule on complete N=2,048 chunks. The prior
+   candidate cut its isolated stage about 70%, but failed incumbent-distance
+   gates before the current compressor, online-attention, and batched-RoPE
+   lineage existed. First require an 8K product win and the same direct
+   long-prompt task semantics; do not sweep geometry or privilege incumbent
+   hidden-state distance over task correctness.
+2. **GPU-resident packed MoE scheduling.** The current Q-B candidate leaves
+   29.20 seconds in post-route GPU across the 8K trace. Replace the per-layer
+   CPU route read/bucket/write seam with deterministic expert/token/slot GPU
+   compaction and indirect grouped IQ2/IQ3 matrix work. Preserve unique slot
+   ownership and fixed slot-order reduction; do not build a monolithic FFN.
+3. **Larger chunks only as composition.** Fixed-boundary deletion at N=4,096 is
    only a 2.04% optimistic ceiling on the 8K request. Do not pay a larger scratch
    allocation and new sparse/qualification surface for that alone. Reopen when
    another measured N=4,096 mechanism lets the combined credible net benefit
    clear the existing 2-3% gate after costs.
-3. **Far-context scoring and selection.** Keep the deployed cooperative scorer
+4. **Far-context scoring and selection.** Keep the deployed cooperative scorer
    and radix4 selector while prefill is the larger product deficit. Reopen exact
    Lightning scheduling only for a structurally new design with a credible
    >=0.50 ms terminal saving and <=0.05 ms shallow regression; do not auto-sweep
    R4 or repeat the held R2 packet.
-4. **Bounded multi-group product evidence.** Preserve radix4 as default and the
+5. **Bounded multi-group product evidence.** Preserve radix4 as default and the
    exact 32-group selector as an Apple-M4-Max-only qualified opt-in from 196,608
    through 262,144 reachable visible rows. Reopen default-on only for reusable
    real continuation evidence or material implementation/device drift.
-5. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
+6. **Further HCA tiling.** Defer the heads8/rows16 split-K design while HCA is
    below CSA. Reopen only if later attribution returns HCA to the lead or the
    simpler online recurrence stops scaling on another supported device.
 

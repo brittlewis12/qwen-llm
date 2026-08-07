@@ -1456,6 +1456,13 @@ enum Q8PrecisionProjection {
     F32Matrix,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PackedQ8QbPolicy {
+    Auto,
+    Exact,
+    F32Matrix,
+}
+
 crate::env_flag!(
     default_on packed_q8_compressor_matrix_enabled,
     "QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX"
@@ -1490,21 +1497,44 @@ fn packed_q8_compressor_matrix_for_chunk(
         )
 }
 
-fn parse_packed_q8_qb_projection(
+fn parse_packed_q8_qb_policy(
     value: Option<&str>,
-) -> Result<Q8PrecisionProjection, DeepSeekV4MetalError> {
+) -> Result<PackedQ8QbPolicy, DeepSeekV4MetalError> {
     match value {
-        None | Some("exact") => Ok(Q8PrecisionProjection::Exact),
-        Some("f32_matrix") => Ok(Q8PrecisionProjection::F32Matrix),
+        None | Some("auto") => Ok(PackedQ8QbPolicy::Auto),
+        Some("exact") => Ok(PackedQ8QbPolicy::Exact),
+        Some("f32_matrix") => Ok(PackedQ8QbPolicy::F32Matrix),
         Some(value) => invalid(format!(
-            "QWEN_DSV4_PACKED_Q8_QB must be exact or f32_matrix, got {value:?}"
+            "QWEN_DSV4_PACKED_Q8_QB must be auto, exact, or f32_matrix, got {value:?}"
         )),
     }
 }
 
-fn packed_q8_qb_projection() -> Result<Q8PrecisionProjection, DeepSeekV4MetalError> {
+fn resolve_packed_q8_qb_policy(
+    policy: PackedQ8QbPolicy,
+    profile_qualified: bool,
+) -> Q8PrecisionProjection {
+    match policy {
+        PackedQ8QbPolicy::Auto if profile_qualified => Q8PrecisionProjection::F32Matrix,
+        PackedQ8QbPolicy::Auto | PackedQ8QbPolicy::Exact => Q8PrecisionProjection::Exact,
+        PackedQ8QbPolicy::F32Matrix => Q8PrecisionProjection::F32Matrix,
+    }
+}
+
+fn packed_q8_qb_projection_for_chunk(
+    ctx: &MetalContext,
+    residency: &DeepSeekV4MetalResidency,
+    n_tokens: usize,
+) -> Result<Q8PrecisionProjection, DeepSeekV4MetalError> {
     let value = std::env::var("QWEN_DSV4_PACKED_Q8_QB").ok();
-    parse_packed_q8_qb_projection(value.as_deref())
+    let policy = parse_packed_q8_qb_policy(value.as_deref())?;
+    let profile_qualified = packed_q8_compressor_matrix_scope_qualified(
+        &ctx.device.name().to_string(),
+        residency.report().tensor_count,
+        residency.report().source_bytes,
+        n_tokens,
+    );
+    Ok(resolve_packed_q8_qb_policy(policy, profile_qualified))
 }
 
 impl Q8PrecisionProjection {
@@ -7157,7 +7187,8 @@ impl DeepSeekV4Session {
             ));
         }
         let n_tokens = checked_token_count(token_ids.len())?;
-        let q_b_projection = packed_q8_qb_projection()?;
+        let q_b_projection =
+            packed_q8_qb_projection_for_chunk(ctx, &self.residency, token_ids.len())?;
         let compressor_matrix =
             packed_q8_compressor_matrix_for_chunk(ctx, &self.residency, token_ids.len());
         #[cfg(feature = "dsv4-diagnostics")]
@@ -9014,20 +9045,43 @@ mod tests {
     }
 
     #[test]
-    fn packed_q8_qb_matrix_policy_is_explicit_and_full_chunk_only() {
+    fn packed_q8_qb_matrix_policy_and_scope_are_explicit() {
         assert_eq!(
-            parse_packed_q8_qb_projection(None).unwrap(),
+            parse_packed_q8_qb_policy(None).unwrap(),
+            PackedQ8QbPolicy::Auto
+        );
+        assert_eq!(
+            parse_packed_q8_qb_policy(Some("auto")).unwrap(),
+            PackedQ8QbPolicy::Auto
+        );
+        assert_eq!(
+            parse_packed_q8_qb_policy(Some("exact")).unwrap(),
+            PackedQ8QbPolicy::Exact
+        );
+        assert_eq!(
+            parse_packed_q8_qb_policy(Some("f32_matrix")).unwrap(),
+            PackedQ8QbPolicy::F32Matrix
+        );
+        assert_eq!(
+            resolve_packed_q8_qb_policy(PackedQ8QbPolicy::Auto, true),
+            Q8PrecisionProjection::F32Matrix
+        );
+        assert_eq!(
+            resolve_packed_q8_qb_policy(PackedQ8QbPolicy::Auto, false),
             Q8PrecisionProjection::Exact
         );
         assert_eq!(
-            parse_packed_q8_qb_projection(Some("exact")).unwrap(),
+            resolve_packed_q8_qb_policy(PackedQ8QbPolicy::Exact, true),
             Q8PrecisionProjection::Exact
         );
-        let matrix = parse_packed_q8_qb_projection(Some("f32_matrix")).unwrap();
-        assert_eq!(matrix, Q8PrecisionProjection::F32Matrix);
+        assert_eq!(
+            resolve_packed_q8_qb_policy(PackedQ8QbPolicy::F32Matrix, false),
+            Q8PrecisionProjection::F32Matrix
+        );
+        let matrix = Q8PrecisionProjection::F32Matrix;
         assert!(!matrix.uses_full_chunk_qb_f32(512));
         assert!(matrix.uses_full_chunk_qb_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
-        assert!(parse_packed_q8_qb_projection(Some("half_matrix")).is_err());
+        assert!(parse_packed_q8_qb_policy(Some("half_matrix")).is_err());
     }
 
     #[test]

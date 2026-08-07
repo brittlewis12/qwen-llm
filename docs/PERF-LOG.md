@@ -6,6 +6,65 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-07 - DeepSeek V4 F32 Q8 Q-B Default GO
+
+Status: the F32 Q8 Q-B matrix is now the automatic default for complete
+N=2,048 chunks on the qualified Apple M4 Max/current-asset profile. Set
+`QWEN_DSV4_PACKED_Q8_QB=exact` for the prior GEMV path. `auto` retains
+profile-qualified automatic selection; `f32_matrix` remains an explicit force
+mode.
+
+- The retained `R2C4K64` kernel reconstructs Q8 weights and consumes
+  activations in F32. It replaces one token-axis Q-B GEMV grid per layer with
+  a 16-row by 32-token matrix schedule. Under `auto`, partial chunks and
+  unqualified device/model profiles remain exact; explicit `f32_matrix`
+  intentionally forces full N=2,048 chunks on any otherwise valid profile.
+- On the clean 8K profile, before-attention GPU falls
+  `21,571.387 -> 5,945.840 ms`, or 72.44%. Total pre-expert GPU falls 20.77%,
+  while post-route GPU improves by 196.890 ms rather than creating the gain.
+- Ordinary request wall falls `106,576.900 -> 91,647.479 ms`, saving
+  14,929.421 ms or 14.01%. Prefill rises `76.87 -> 89.39 token/s`; the sampled
+  request independently saves 14.57%.
+- The final-logit vector changes. On clean build `c263f19`, the 9,960-token
+  ledger, 6,092-token structured retrieval, and 7,263-token multilingual
+  retrieval reproduce every incumbent generated ID and requested value. The
+  ledger now returns the correct 2,578 total; both structured tasks retain
+  their exact requested formats.
+- This supersedes the earlier HOLD under a materially changed current
+  numerical lineage. The old pre-compressor/online-attention candidate missed
+  the ledger total, while the current default bundle reproduces it exactly.
+  The stale code-comprehension fixture remains non-authoritative because its
+  retained exact arm already misses its embedded expected source facts.
+
+Decision: default the measured matrix work unit only on the exact qualified
+profile, keep exact GEMV as the automatic fallback and operator rollback, and
+move the now-leading packed output projections to the front of the queue.
+
+## 2026-08-07 - DeepSeek V4 Same-GGUF llama.cpp Prefill Calibration
+
+Status: current llama.cpp b10297 establishes a much higher same-asset Metal
+prefill floor. This is calibration, not a token-identical product comparison.
+
+- On the same Apple M4 Max and 104,202,502,492-byte GGUF payload, warm
+  `llama-bench` reports 255.64/244.47/224.67 token/s at pp512/2048/4096.
+  The binary is clean commit `6a32c29a7`, uses Metal plus Accelerate, a
+  2,048-token batch, and 512-token ubatches.
+- Each row has one measured pass after its own warmup. The complete process
+  takes 60.72 seconds, peaks at 104,499,068,928 bytes RSS, and records no swap
+  or block input operations.
+- `llama-bench` uses deterministic random token IDs, while the native 8K trace
+  uses a retained real prompt and N=2,048 chunks. The rows therefore establish
+  schedule feasibility and a standard external floor, not a strict A/B ratio.
+- Source audit identifies two dominant structural differences: llama.cpp uses
+  dequantizing Q8 matrix kernels above eight prompt columns, and keeps MoE
+  route compaction plus indirect IQ2/IQ3 matrix work on GPU. Native Q-B is now
+  matrix-shaped, but output A/B still consume 35.11 seconds and packed routed
+  work still consumes 29.20 seconds on the current 8K candidate trace.
+
+Decision: the roughly 2.5-3x remaining prefill gap is implementation headroom,
+not model size or attention inevitability. Prioritize output matrices first,
+then GPU-resident expert scheduling; do not use larger chunks as a substitute.
+
 ## 2026-08-06 - DeepSeek V4 Batched Sparse-Query RoPE GO
 
 Status: batched indexer-query RoPE is now the packed sparse-CSA default. Set

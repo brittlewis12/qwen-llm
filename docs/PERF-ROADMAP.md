@@ -587,20 +587,22 @@ moves post-route from 10.530 to 7.218 seconds and the IQ2 cohort from 7.825 to
 
 Force-ranked queue:
 
-1. **Exact cooperative Q8 token tiling.** Close F32 Q-B matrix defaulting: it
-   preserves a 6,092-token structured-retrieval result and saves about 10% with
-   exact BM16 common to both arms, but returns 2,812 instead of the exact arm's
-   correct 2,578 on a 9,960-token five-value ledger aggregation. Audit an exact
-   work-sharing kernel where a token tile shares each Q8 dequantized weight
-   block while every token lane retains the scalar K-order accumulation. Price
-   Q-B first, then transfer only if the same work unit applies to the other
-   dominant Q8 projections.
-2. **Attribute the remaining BM16 cohort.** BM16 cuts the 25 IQ2 layers from
+1. **Attribute the remaining BM16 cohort.** BM16 cuts the 25 IQ2 layers from
    7.825 to 4.542 seconds, but pre-expert work is now 20.368 seconds. Use the
    retained post-route stage instrument to separate gate/up, SwiGLU, down, and
    shared/combine before pricing a 32-route matrix tile that reuses each weight
    dequantization across two route panels. Keep intermediate token counts on
    scalar grouped execution until a crossover is measured.
+2. **Q8 reduction-quality frontier.** Exact token tiles are closed: Q-B is the
+   only improving family, and its best T2 result, `102.626 -> 94.714 ms/layer`,
+   moves less than 1% of the request. Exact matrix leaves work, but rebuilding
+   the incumbent SIMD trees costs 151.656 ms/layer; a low-synchronization form
+   costs 119.300 ms and loses one ULP. The current F32 matrix is faster but
+   failed the five-value ledger task. Before implementation, source-audit one
+   coarser segmented reduction and require a credible >=2% whole-request
+   ceiling. Any candidate must retain the correct structured-retrieval and
+   ledger results that distinguish the exact and current F32 arms. Otherwise
+   close this asset's Q8 arithmetic and move to representation or quant mix.
 3. **External prefill calibration.** Capture opportunistic same-GGUF llama.cpp
    pp512/2048/4096 rows. Treat DwarfStar's different-quant M4 result as existence
    proof, not a binding floor.

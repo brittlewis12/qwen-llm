@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-06 - DeepSeek V4 Exact Q8 Work-Sharing KILL
+
+Status: close exact token-axis Q8 work sharing under the current Q8_0 layout,
+incumbent reduction lineage, and Apple M4 Max execution shape. No exact
+work-sharing prototype remains in production; the separate approximate F32
+matrix opt-in is unchanged.
+
+- Exact token tiles share decoded weights across two, four, or eight tokens
+  while preserving every incumbent output bit in the focused K=64/M=7
+  differential across N=1..33 boundaries and repeat execution. At production
+  N=2,048, Q-B is the only projection family that improves: T2 is best at
+  `102.626 -> 94.714 ms/layer`, while T4/T8 reach 98.690/97.275 ms. Output A,
+  output B, and KV all regress even at T2: 8.817 to 10.784, 108.447 to 113.848,
+  and 4.437 to 5.479 ms/layer.
+- The Q-B T2 saving is about 0.340 seconds across 43 layers, below 1% of the
+  promoted 36.3-second request. Larger token tiles do not improve its ceiling,
+  and the same work unit does not transfer to the other dominant projections.
+- A fresh F32 8x8 matrix operation reproduces each incumbent sequential
+  eight-product Q8 leaf bit for bit across two focused input patterns and all
+  four block segments. Reconstructing both incumbent SIMD reduction levels is
+  exact at K=1,024/M=15 for N=1/7/8/9, but the production geometry costs
+  151.656 versus 102.622 ms/layer after replacing private cross-SIMD barriers.
+- An online 4 KiB-threadgroup variant removes the leaf slab and almost all
+  cross-SIMD synchronization. It still costs 119.300 versus 102.628 ms/layer
+  and differs by one ULP on the focused production-K differential. It is both
+  slower and outside the exact contract.
+
+Decision: remove the prototypes. Exact matrix leaves are not the bottleneck;
+preserving the incumbent reduction lineage consumes more than the matrix work
+sharing saves. Do not retune T2/T4/T8 or the leaf-slab shape. Reopen Q8 prefill
+only for a different representation, a materially coarser reduction boundary
+that clears a quality contract, or changed hardware/compiler behavior.
+
 ## 2026-08-06 - DeepSeek V4 F32 Q8 Q-B Default KILL
 
 Status: keep `QWEN_DSV4_PACKED_Q8_QB=f32_matrix` as an explicit approximate

@@ -2336,8 +2336,15 @@ noise without reducing technical risk. Revisit after S5.
    byte-identical and saves about 10%, but on a 9,960-token ledger task it
    returns 2,812 where exact Q8 correctly computes 2,578. Stop the quality
    battery at that decisive aggregate regression, keep
-   `QWEN_DSV4_PACKED_Q8_QB=f32_matrix` opt-in, and pursue an exact cooperative
-   token tile that shares Q8 dequantization without changing per-token K-order.
+   `QWEN_DSV4_PACKED_Q8_QB=f32_matrix` opt-in. The exact cooperative follow-up
+   is now closed as well. At N=2,048, Q-B is the only improving projection
+   family: T2 is best at 102.626 to 94.714 ms/layer, less than 1% of the
+   promoted request, while T4/T8 also improve and output A/B plus KV regress.
+   Focused F32 8x8 matrix leaves reproduce each scalar eight-product body bit
+   for bit, but exact reconstruction of the incumbent SIMD trees costs 151.656
+   ms/layer. A low-synchronization online form costs 119.300 ms and loses one
+   ULP. Remove both prototypes. Reopen only for a coarser quality-qualified
+   reduction boundary, a different representation, or changed hardware.
 7. Keep the packed before-attention and exact multi-row scorer closures
    explicit. The corrected four-encoder packet remains `HOLD`: its material
    pre-attention interval contains one unowned encoder transition, and Apple M4

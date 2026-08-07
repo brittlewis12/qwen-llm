@@ -55,10 +55,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::LazyLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const CHECKPOINT_STAGED_INTEGRITY_ENV: &str = "QWEN_CHECKPOINT_STAGED_INTEGRITY";
@@ -2065,6 +2067,10 @@ fn main() -> Result<()> {
         )
         .init();
 
+    // Bind the invocation identifier to process start, not to the first
+    // record-emission site. Any record emitted downstream shares this value.
+    LazyLock::force(&INVOCATION_ID);
+
     let matches = Args::command().get_matches();
     let explicit_options = ExplicitCliOptions::from_matches(&matches);
     let args = Args::from_arg_matches(&matches).expect("validated clap arguments");
@@ -2746,6 +2752,13 @@ fn run_deepseek_v4_single_turn(
 ) -> Result<()> {
     validate_deepseek_v4_generation_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
+    // Validate that any requested --request-stats-jsonl destination is
+    // writable BEFORE expensive model load — sidecar telemetry is treated
+    // as mandatory (fatal on write failure), so a bad path should fail fast.
+    if let Some(path) = args.request_stats_jsonl.as_ref() {
+        let _ = open_append_file(path, "request stats jsonl (pre-flight)")?;
+    }
+    let request_start = std::time::Instant::now();
     let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
     let sampling = cli_sampling_config(args)?;
     let arrival_ms = unix_epoch_ms()?;
@@ -3142,32 +3155,29 @@ fn run_deepseek_v4_single_turn(
         append_request_trace(path, arrival_ms, prompt_ids.len(), generation.tokens.len())?;
     }
     if let Some(path) = args.request_stats_jsonl.as_ref() {
-        // invocation_id is process-scoped; for single-turn it's also request-scoped
-        // since only one request runs per process. Matches the pattern used in
-        // append_request_trace elsewhere in this file.
-        let invocation_id = format!("{}-{}", std::process::id(), arrival_ms);
-        let record = build_deepseek_v4_single_turn_stats_record(
-            &invocation_id,
+        // Measure total request wall time at the outer boundary (not the sum
+        // of phase timings, which can miss inter-phase gaps).
+        let total_ms = request_start.elapsed().as_secs_f64() * 1e3;
+        let measured = RequestStatsMeasured {
             prompt_kind,
             prefill_mode,
-            prefill_chunk_tokens,
-            prompt_ids.len(),
-            generation.tokens.len(),
-            generation.transitions,
-            generation.stop_reason,
+            prefill_chunk_cap: prefill_chunk_tokens as u64,
+            input_tokens: prompt_ids.len() as u64,
+            output_tokens: generation.tokens.len() as u64,
+            transitions: generation.transitions as u64,
+            stop_reason: generation.stop_reason,
             tokenizer_ms,
             load_ms,
             prefill_ms,
             prefill_tps,
-            generation.wall_ms,
+            decode_ms: generation.wall_ms,
             decode_tps,
             transition_tps,
-            &generated_ids_sha256,
-        );
-        let mut file = open_append_file(path, "request stats jsonl")?;
-        serde_json::to_writer(&mut file, &record)
-            .context("write DeepSeek V4 single-turn request stats record")?;
-        writeln!(file).context("terminate DeepSeek V4 single-turn request stats line")?;
+            total_ms,
+            output_fingerprint: GeneratedTokenSha256Digest::of(&generation.tokens),
+        };
+        let record = build_deepseek_v4_single_turn_stats_record(&INVOCATION_ID, &measured);
+        append_jsonl_record(path, &record, "request stats jsonl")?;
     }
     Ok(())
 }
@@ -3188,22 +3198,65 @@ fn run_deepseek_v4_single_turn(
 //     invocation-level bookend) may be added later.
 //   * Timing fields are per-request. Process/invocation-level facts (model load
 //     time, binary hashes) live under `diagnostics` or a future invocation record.
+//   * Wire counts are `u64` to remain architecture-independent (usize is not).
+//   * All metric f64 fields are non-negative and finite; sanitized at emission.
+//   * `output_fingerprint.value` is hex-encoded from `[u8; 32]` internally, so
+//     the algorithm identifier and its byte encoding cannot drift apart.
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum RequestStatsStatus {
+    Ok,
+    // Reserved for future error / cancelled records. Kept explicit so schema
+    // consumers see the full status vocabulary from v1.
+    #[allow(dead_code)]
+    Error,
+    #[allow(dead_code)]
+    Cancelled,
+}
+
+/// Envelope-owned finish reason enum, decoupled from the internal `StopReason`
+/// so that adding a new internal variant or renaming does not silently mutate
+/// the wire schema. Exhaustive `From<StopReason>` forces future variants to
+/// be a compile-time decision.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RequestStatsFinishReason {
+    Eos,
+    TokenLimit,
+}
+
+impl From<StopReason> for RequestStatsFinishReason {
+    fn from(reason: StopReason) -> Self {
+        match reason {
+            StopReason::Eos => Self::Eos,
+            StopReason::TokenLimit => Self::TokenLimit,
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
-struct RequestStatsRecord<'a> {
+struct RequestStatsRequestRecord<'a> {
     schema: &'static str,
     schema_version: u32,
     record_type: &'static str,
     invocation_id: &'a str,
     request_index: u32,
-    status: &'static str,
+    status: RequestStatsStatus,
     model: RequestStatsModel<'a>,
     input: RequestStatsInput<'a>,
-    usage: RequestStatsUsage,
-    finish: RequestStatsFinish,
-    timing_ms: RequestStatsTiming,
-    throughput_tps: RequestStatsThroughput,
-    output_fingerprint: RequestStatsOutputFingerprint<'a>,
+    // Success-only fields are optional so future error/cancelled records need
+    // only omit them, without a breaking restructuring.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<RequestStatsUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish: Option<RequestStatsFinish>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timing_ms: Option<RequestStatsTiming>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    throughput_tps: Option<RequestStatsThroughput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_fingerprint: Option<RequestStatsOutputFingerprint>,
     build: RequestStatsBuild,
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostics: Option<RequestStatsDiagnostics>,
@@ -3223,13 +3276,13 @@ struct RequestStatsInput<'a> {
 
 #[derive(Debug, Serialize)]
 struct RequestStatsUsage {
-    input_tokens: usize,
-    output_tokens: usize,
+    input_tokens: u64,
+    output_tokens: u64,
 }
 
 #[derive(Debug, Serialize)]
 struct RequestStatsFinish {
-    reason: StopReason,
+    reason: RequestStatsFinishReason,
 }
 
 #[derive(Debug, Serialize)]
@@ -3247,9 +3300,9 @@ struct RequestStatsThroughput {
 }
 
 #[derive(Debug, Serialize)]
-struct RequestStatsOutputFingerprint<'a> {
+struct RequestStatsOutputFingerprint {
     algorithm: &'static str,
-    value: &'a str,
+    value: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -3268,47 +3321,60 @@ struct RequestStatsDiagnostics {
 struct RequestStatsDeepSeekV4Diagnostics {
     schema_version: u32,
     prefill_mode: &'static str,
-    prefill_chunk_cap: usize,
-    transitions: usize,
+    prefill_chunk_cap: u64,
+    transitions: u64,
     transition_tps: f64,
     load_ms: f64,
 }
 
+/// Case-insensitive parser for the `QWEN_BUILD_DIRTY` build-time env var.
+/// Accepts `0`/`false`/`no` (any case, plus empty) as clean; anything else
+/// is treated as dirty, biasing toward "assume unstable" if the value is
+/// unexpected.
 fn parse_build_dirty(raw: &str) -> bool {
-    !matches!(raw.trim(), "0" | "" | "false" | "FALSE" | "no")
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    !(trimmed.eq_ignore_ascii_case("0")
+        || trimmed.eq_ignore_ascii_case("false")
+        || trimmed.eq_ignore_ascii_case("no"))
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct RequestStatsMeasured {
+    pub prompt_kind: &'static str,
+    pub prefill_mode: &'static str,
+    pub prefill_chunk_cap: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub transitions: u64,
+    pub stop_reason: StopReason,
+    pub tokenizer_ms: f64,
+    pub load_ms: f64,
+    pub prefill_ms: f64,
+    pub prefill_tps: f64,
+    pub decode_ms: f64,
+    pub decode_tps: f64,
+    pub transition_tps: f64,
+    pub total_ms: f64,
+    pub output_fingerprint: GeneratedTokenSha256Digest,
+}
+
 fn build_deepseek_v4_single_turn_stats_record<'a>(
     invocation_id: &'a str,
-    prompt_kind: &'a str,
-    prefill_mode: &'static str,
-    prefill_chunk_cap: usize,
-    prompt_tokens: usize,
-    generated_tokens: usize,
-    transitions: usize,
-    stop_reason: StopReason,
-    tokenizer_ms: f64,
-    load_ms: f64,
-    prefill_ms: f64,
-    prefill_tps: f64,
-    generation_ms: f64,
-    decode_tps: f64,
-    transition_tps: f64,
-    output_fingerprint_value: &'a str,
-) -> RequestStatsRecord<'a> {
+    measured: &RequestStatsMeasured,
+) -> RequestStatsRequestRecord<'a> {
     // input.kind describes representation (raw vs messages); template surfaces
     // the specific chat-template variant when known (e.g., messages_0731_chat
     // -> kind=messages template=0731_chat).
-    let (input_kind, input_template) = split_ds4_prompt_kind(prompt_kind);
-    let total_ms = tokenizer_ms + prefill_ms + generation_ms;
-    RequestStatsRecord {
+    let (input_kind, input_template) = split_ds4_prompt_kind(measured.prompt_kind);
+    RequestStatsRequestRecord {
         schema: "qwen-llm.request-stats",
         schema_version: 1,
         record_type: "request_stats",
         invocation_id,
         request_index: 0,
-        status: "ok",
+        status: RequestStatsStatus::Ok,
         model: RequestStatsModel {
             family: "deepseek_v4",
         },
@@ -3316,27 +3382,27 @@ fn build_deepseek_v4_single_turn_stats_record<'a>(
             kind: input_kind,
             template: input_template,
         },
-        usage: RequestStatsUsage {
-            input_tokens: prompt_tokens,
-            output_tokens: generated_tokens,
-        },
-        finish: RequestStatsFinish {
-            reason: stop_reason,
-        },
-        timing_ms: RequestStatsTiming {
-            total: total_ms,
-            tokenization: tokenizer_ms,
-            prefill: prefill_ms,
-            decode: generation_ms,
-        },
-        throughput_tps: RequestStatsThroughput {
-            prefill: prefill_tps,
-            decode: decode_tps,
-        },
-        output_fingerprint: RequestStatsOutputFingerprint {
+        usage: Some(RequestStatsUsage {
+            input_tokens: measured.input_tokens,
+            output_tokens: measured.output_tokens,
+        }),
+        finish: Some(RequestStatsFinish {
+            reason: measured.stop_reason.into(),
+        }),
+        timing_ms: Some(RequestStatsTiming {
+            total: sanitize_finite_metric(measured.total_ms, "timing_ms.total"),
+            tokenization: sanitize_finite_metric(measured.tokenizer_ms, "timing_ms.tokenization"),
+            prefill: sanitize_finite_metric(measured.prefill_ms, "timing_ms.prefill"),
+            decode: sanitize_finite_metric(measured.decode_ms, "timing_ms.decode"),
+        }),
+        throughput_tps: Some(RequestStatsThroughput {
+            prefill: sanitize_finite_metric(measured.prefill_tps, "throughput_tps.prefill"),
+            decode: sanitize_finite_metric(measured.decode_tps, "throughput_tps.decode"),
+        }),
+        output_fingerprint: Some(RequestStatsOutputFingerprint {
             algorithm: "sha256-qwen-generated-token-ids-v1",
-            value: output_fingerprint_value,
-        },
+            value: measured.output_fingerprint.hex(),
+        }),
         build: RequestStatsBuild {
             commit: env!("QWEN_BUILD_COMMIT"),
             dirty: parse_build_dirty(env!("QWEN_BUILD_DIRTY")),
@@ -3344,26 +3410,43 @@ fn build_deepseek_v4_single_turn_stats_record<'a>(
         diagnostics: Some(RequestStatsDiagnostics {
             deepseek_v4: Some(RequestStatsDeepSeekV4Diagnostics {
                 schema_version: 1,
-                prefill_mode,
-                prefill_chunk_cap,
-                transitions,
-                transition_tps,
-                load_ms,
+                prefill_mode: measured.prefill_mode,
+                prefill_chunk_cap: measured.prefill_chunk_cap,
+                transitions: measured.transitions,
+                transition_tps: sanitize_finite_metric(
+                    measured.transition_tps,
+                    "diagnostics.deepseek_v4.transition_tps",
+                ),
+                load_ms: sanitize_finite_metric(
+                    measured.load_ms,
+                    "diagnostics.deepseek_v4.load_ms",
+                ),
             }),
         }),
     }
 }
 
 /// Split a DeepSeek V4 `prompt_kind` string into (input_kind, template).
+/// The common `input.kind` vocabulary is restricted to `messages`, `raw`, or
+/// `unknown` — new backend labels do NOT expand the common core by accident.
+///
 /// Known values:
 ///   - "messages_0731_chat"     -> ("messages", Some("0731_chat"))
 ///   - "messages_0731_thinking" -> ("messages", Some("0731_thinking"))
 ///   - "raw"                    -> ("raw", None)
+///   - "messages_" or "messages" (empty suffix) -> ("unknown", None)
+///   - anything else            -> ("unknown", None)
 fn split_ds4_prompt_kind(prompt_kind: &str) -> (&str, Option<&str>) {
     if let Some(rest) = prompt_kind.strip_prefix("messages_") {
-        ("messages", Some(rest))
+        if rest.is_empty() {
+            ("unknown", None)
+        } else {
+            ("messages", Some(rest))
+        }
+    } else if prompt_kind == "raw" {
+        ("raw", None)
     } else {
-        (prompt_kind, None)
+        ("unknown", None)
     }
 }
 
@@ -7041,14 +7124,210 @@ fn token_hash_hex(tokens: &[i32]) -> String {
     format!("{hash:016x}")
 }
 
-fn generated_token_sha256(tokens: &[i32]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(b"qwen-generated-token-ids-v1\0");
-    digest.update((tokens.len() as u64).to_le_bytes());
-    for token in tokens {
-        digest.update(token.to_le_bytes());
+/// Type-safe wrapper for the generated-token-ids fingerprint. The only
+/// constructor is `GeneratedTokenSha256Digest::of()`, which runs the
+/// canonical algorithm named by `sha256-qwen-generated-token-ids-v1`. This
+/// prevents the request-stats-jsonl builder from being fed arbitrary
+/// 32-byte values that would emit under the wrong algorithm name.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct GeneratedTokenSha256Digest([u8; 32]);
+
+impl GeneratedTokenSha256Digest {
+    /// Compute the canonical fingerprint over token IDs. Byte layout:
+    /// `domain-separator || length_u64_le || (token_i32_le)*`. See
+    /// `sha256-qwen-generated-token-ids-v1` algorithm identifier.
+    pub(crate) fn of(tokens: &[i32]) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(b"qwen-generated-token-ids-v1\0");
+        digest.update((tokens.len() as u64).to_le_bytes());
+        for token in tokens {
+            digest.update(token.to_le_bytes());
+        }
+        Self(digest.finalize().into())
     }
-    format!("{:x}", digest.finalize())
+
+    pub(crate) fn hex(&self) -> String {
+        hex_encode_bytes(&self.0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+fn generated_token_sha256(tokens: &[i32]) -> String {
+    GeneratedTokenSha256Digest::of(tokens).hex()
+}
+
+fn hex_encode_bytes(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// Per-process invocation identifier: 16 bytes of /dev/urandom entropy
+/// formatted as lowercase hex (matches UUID/ULID uniqueness class without
+/// adding a dep). **Fails closed** if secure entropy is unavailable — better
+/// to refuse to run than to emit records with a weak, potentially colliding
+/// identifier that consumers might trust for cross-run correlation.
+///
+/// Generated on first access; force-init from `main()` to bind the value to
+/// process start rather than record-emission time. Cross-invocation replay
+/// requires this to be stable across all records emitted by one process.
+static INVOCATION_ID: LazyLock<String> = LazyLock::new(|| {
+    generate_invocation_id_from(EntropySource::DevUrandom)
+        .unwrap_or_else(|e| panic!("cannot initialize invocation id: {e}"))
+});
+
+#[derive(Copy, Clone, Debug)]
+enum EntropySource {
+    DevUrandom,
+    #[cfg(test)]
+    Deterministic([u8; 16]),
+}
+
+fn generate_invocation_id_from(source: EntropySource) -> Result<String> {
+    let mut buf = [0u8; 16];
+    match source {
+        EntropySource::DevUrandom => {
+            let mut f = std::fs::File::open("/dev/urandom")
+                .context("open /dev/urandom for invocation id entropy")?;
+            f.read_exact(&mut buf)
+                .context("read 16 bytes from /dev/urandom for invocation id")?;
+        }
+        #[cfg(test)]
+        EntropySource::Deterministic(bytes) => {
+            buf = bytes;
+        }
+    }
+    Ok(hex_encode_bytes(&buf))
+}
+
+/// Append a serialized JSONL record with cooperating-writer integrity:
+///   * The record is fully serialized into a memory buffer first, so a
+///     serialization failure never writes a partial line.
+///   * An advisory exclusive `flock` is held across the tail-repair check,
+///     the write, and the `fsync`. Cooperating processes cannot interleave
+///     with each other. Non-cooperating writers (that ignore flock) are
+///     out of scope.
+///   * If the file already ends with a partial record (does not end with
+///     `\n`), a leading `\n` is prepended to the buffer so the next record
+///     starts on a fresh line — otherwise we would concatenate the new
+///     record onto the abandoned partial one and corrupt that line.
+///   * `sync_data` is invoked after the write, so delayed I/O failures
+///     (e.g. `ENOSPC` on a filesystem with write-back caching) surface as
+///     errors instead of being silently deferred past our success return.
+///     `File::flush` is a no-op on Unix and Windows; `sync_data` is not.
+///   * On write or fsync failure, best-effort rollback truncates the file
+///     back to the original length. Rollback failure is chained into the
+///     returned error rather than silently discarded.
+fn append_jsonl_record<T: Serialize>(path: &Path, record: &T, label: &str) -> Result<()> {
+    let payload =
+        serde_json::to_vec(record).with_context(|| format!("serialize {label} record"))?;
+    let mut file = open_append_file(path, label)?;
+    let fd = file.as_raw_fd();
+    // SAFETY: fd is valid for the duration of `file`; flock(2) accepts any
+    // open file descriptor. LOCK_EX blocks until acquired.
+    let lock_rc = unsafe { libc::flock(fd, libc::LOCK_EX) };
+    if lock_rc != 0 {
+        return Err(anyhow!(
+            "acquire exclusive lock on {label} {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    let unlock = |fd: std::os::unix::io::RawFd| {
+        // SAFETY: fd is valid for the caller-held `file`; LOCK_UN is defined.
+        let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
+    };
+    let original_len = match file.metadata() {
+        Ok(m) => m.len(),
+        Err(e) => {
+            unlock(fd);
+            return Err(anyhow::Error::new(e).context(format!("stat {label} {}", path.display())));
+        }
+    };
+    // Detect a pre-existing partial-record tail (file does not end with '\n').
+    // A crash or non-cooperating writer might have left one behind.
+    let mut buf = Vec::with_capacity(payload.len() + 2);
+    if original_len > 0 {
+        let mut probe = [0u8; 1];
+        let mut probe_file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                unlock(fd);
+                return Err(anyhow::Error::new(e)
+                    .context(format!("reopen {label} {} for tail probe", path.display())));
+            }
+        };
+        // Seek to (original_len - 1) and read one byte.
+        use std::io::Seek;
+        if let Err(e) = probe_file.seek(std::io::SeekFrom::Start(original_len.saturating_sub(1))) {
+            unlock(fd);
+            return Err(anyhow::Error::new(e)
+                .context(format!("seek to tail of {label} {}", path.display())));
+        }
+        match probe_file.read_exact(&mut probe) {
+            Ok(()) if probe[0] != b'\n' => {
+                // Prepend a newline to start our record on a fresh line.
+                buf.push(b'\n');
+            }
+            Ok(()) => {}
+            Err(e) => {
+                unlock(fd);
+                return Err(anyhow::Error::new(e)
+                    .context(format!("read tail of {label} {}", path.display())));
+            }
+        }
+    }
+    buf.extend_from_slice(&payload);
+    buf.push(b'\n');
+    // Perform the write + durability sync. `flush` is a no-op on Unix/Windows
+    // (kept for future non-file writers); `sync_data` forces the OS to surface
+    // deferred I/O errors like ENOSPC before we report success.
+    let write_result = file
+        .write_all(&buf)
+        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_data());
+    if let Err(e) = write_result {
+        // Best-effort rollback. If truncate itself fails, surface both errors
+        // together — silently discarding the truncate failure would let a
+        // corrupt tail persist beyond the reported error.
+        let rollback_err = file.set_len(original_len).err();
+        unlock(fd);
+        let mut chained =
+            anyhow::Error::new(e).context(format!("append {label} record to {}", path.display()));
+        if let Some(re) = rollback_err {
+            chained = chained.context(format!(
+                "rollback truncate also failed for {}: {}",
+                path.display(),
+                re
+            ));
+        }
+        return Err(chained);
+    }
+    unlock(fd);
+    Ok(())
+}
+
+/// Coerce a metric to a well-defined finite JSON representation. Returns 0.0
+/// for non-finite (NaN, ±∞) or negative values. Emits a `tracing::warn` so
+/// callers notice degenerate measurements. Prevents JSON `null` in fields
+/// documented as non-negative f64 (serde_json serializes NaN/∞ as `null`).
+fn sanitize_finite_metric(value: f64, label: &str) -> f64 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        tracing::warn!(
+            metric = label,
+            raw_value = value,
+            "non-finite metric coerced to 0.0 for stats emission"
+        );
+        0.0
+    }
 }
 
 fn open_append_file(path: &Path, label: &str) -> Result<std::fs::File> {
@@ -10830,26 +11109,31 @@ mod tests {
     // or restructuring a field should require a schema_version bump AND
     // updating these tests intentionally.
 
+    fn sample_measured_ok() -> RequestStatsMeasured {
+        RequestStatsMeasured {
+            prompt_kind: "messages_0731_chat",
+            prefill_mode: "layer_major_chunks",
+            prefill_chunk_cap: 4096,
+            input_tokens: 100,
+            output_tokens: 50,
+            transitions: 49,
+            stop_reason: StopReason::Eos,
+            tokenizer_ms: 10.5,
+            load_ms: 40.1,
+            prefill_ms: 1000.0,
+            prefill_tps: 100.0,
+            decode_ms: 2000.0,
+            decode_tps: 25.0,
+            transition_tps: 24.5,
+            total_ms: 3050.6,
+            output_fingerprint: GeneratedTokenSha256Digest::of(&[0i32; 4]),
+        }
+    }
+
     #[test]
     fn request_stats_record_v1_envelope_shape_is_stable() {
-        let record = build_deepseek_v4_single_turn_stats_record(
-            "inv-42-1234567890",
-            "messages_0731_chat",
-            "layer_major_chunks",
-            4096,
-            100,
-            50,
-            49,
-            StopReason::Eos,
-            10.5,
-            40.1,
-            1000.0,
-            100.0,
-            2000.0,
-            25.0,
-            24.5,
-            "deadbeef",
-        );
+        let measured = sample_measured_ok();
+        let record = build_deepseek_v4_single_turn_stats_record("inv-42-1234567890", &measured);
         let json = serde_json::to_value(&record).unwrap();
 
         // Common core
@@ -10867,15 +11151,15 @@ mod tests {
         assert_eq!(json["input"]["kind"], "messages");
         assert_eq!(json["input"]["template"], "0731_chat");
 
-        // Usage (nested for extensibility - cached/reasoning tokens later)
+        // Usage: u64 wire counts
         assert_eq!(json["usage"]["input_tokens"], 100);
         assert_eq!(json["usage"]["output_tokens"], 50);
 
-        // Finish
+        // Finish (envelope enum, not internal StopReason)
         assert_eq!(json["finish"]["reason"], "eos");
 
-        // Timing (all ms, per-request)
-        assert_eq!(json["timing_ms"]["total"], 3010.5);
+        // Timing (all ms, per-request; total is measured at outer boundary)
+        assert_eq!(json["timing_ms"]["total"], 3050.6);
         assert_eq!(json["timing_ms"]["tokenization"], 10.5);
         assert_eq!(json["timing_ms"]["prefill"], 1000.0);
         assert_eq!(json["timing_ms"]["decode"], 2000.0);
@@ -10884,12 +11168,17 @@ mod tests {
         assert_eq!(json["throughput_tps"]["prefill"], 100.0);
         assert_eq!(json["throughput_tps"]["decode"], 25.0);
 
-        // Fingerprint (algorithm identifies encoding, value is hex digest)
+        // Fingerprint: algorithm names encoding, value is hex of the [u8; 32]
         assert_eq!(
             json["output_fingerprint"]["algorithm"],
             "sha256-qwen-generated-token-ids-v1"
         );
-        assert_eq!(json["output_fingerprint"]["value"], "deadbeef");
+        // sample_measured_ok uses GeneratedTokenSha256Digest::of(&[0i32; 4]);
+        // literal digest is pinned by request_stats_fingerprint_matches_literal_known_vector.
+        assert_eq!(
+            json["output_fingerprint"]["value"],
+            "f06d4689226359d0fe3e105fb7d432520d855d8aad664db95596ae9c34d90eca"
+        );
 
         // Build (commit + dirty are compile-time env vars; values vary per build)
         assert!(json["build"]["commit"].is_string());
@@ -10911,7 +11200,7 @@ mod tests {
     }
 
     #[test]
-    fn request_stats_split_ds4_prompt_kind_recognizes_message_templates() {
+    fn request_stats_split_ds4_prompt_kind_restricts_common_kind_vocabulary() {
         assert_eq!(
             split_ds4_prompt_kind("messages_0731_chat"),
             ("messages", Some("0731_chat"))
@@ -10921,26 +11210,296 @@ mod tests {
             ("messages", Some("0731_thinking"))
         );
         assert_eq!(split_ds4_prompt_kind("raw"), ("raw", None));
-        // Unknown prompt_kind falls through as opaque; template stays None.
+        // Empty template suffix collapses to unknown, not "messages" with empty template.
+        assert_eq!(split_ds4_prompt_kind("messages_"), ("unknown", None));
+        // Unknown backend labels do NOT get promoted into the common `input.kind`
+        // vocabulary — they collapse to "unknown".
+        assert_eq!(split_ds4_prompt_kind("something_else"), ("unknown", None));
+        assert_eq!(split_ds4_prompt_kind(""), ("unknown", None));
+    }
+
+    #[test]
+    fn request_stats_parse_build_dirty_is_case_insensitive() {
+        // Any-case zero-ish values are clean
+        for clean in ["0", "", "false", "FALSE", "False", "no", "NO", "No"] {
+            assert!(!parse_build_dirty(clean), "expected {clean:?} to be clean");
+        }
+        // Any-case truthy values are dirty
+        for dirty in ["1", "true", "TRUE", "True", "yes", "YES", "Yes", "dirty"] {
+            assert!(parse_build_dirty(dirty), "expected {dirty:?} to be dirty");
+        }
+    }
+
+    #[test]
+    fn request_stats_finish_reason_covers_all_stop_reasons_exhaustively() {
+        // If a new StopReason variant is added, this match will fail to
+        // compile — forcing a schema decision rather than silent drift.
+        for reason in [StopReason::Eos, StopReason::TokenLimit] {
+            let mapped: RequestStatsFinishReason = reason.into();
+            let serialized = serde_json::to_value(mapped).unwrap();
+            match reason {
+                StopReason::Eos => assert_eq!(serialized, "eos"),
+                StopReason::TokenLimit => assert_eq!(serialized, "token_limit"),
+            }
+        }
+    }
+
+    #[test]
+    fn request_stats_non_finite_metrics_coerced_to_zero() {
+        let mut measured = sample_measured_ok();
+        // Pathological values that would otherwise become JSON `null`.
+        measured.total_ms = f64::NAN;
+        measured.prefill_ms = f64::INFINITY;
+        measured.decode_ms = -0.001;
+        measured.prefill_tps = f64::NAN;
+        measured.decode_tps = f64::NEG_INFINITY;
+        measured.transition_tps = f64::NAN;
+        measured.load_ms = -100.0;
+
+        let record = build_deepseek_v4_single_turn_stats_record("inv-x", &measured);
+        let json = serde_json::to_value(&record).unwrap();
+
+        for (parent, child) in [
+            ("timing_ms", "total"),
+            ("timing_ms", "prefill"),
+            ("timing_ms", "decode"),
+            ("throughput_tps", "prefill"),
+            ("throughput_tps", "decode"),
+        ] {
+            let v = json[parent][child].as_f64().unwrap_or_else(|| {
+                panic!(
+                    "{parent}.{child} was not a JSON number (got {:?})",
+                    json[parent][child]
+                )
+            });
+            assert_eq!(v, 0.0, "{parent}.{child}");
+        }
         assert_eq!(
-            split_ds4_prompt_kind("something_else"),
-            ("something_else", None)
+            json["diagnostics"]["deepseek_v4"]["transition_tps"]
+                .as_f64()
+                .unwrap(),
+            0.0
+        );
+        assert_eq!(
+            json["diagnostics"]["deepseek_v4"]["load_ms"]
+                .as_f64()
+                .unwrap(),
+            0.0
         );
     }
 
     #[test]
-    fn request_stats_parse_build_dirty_matches_env_convention() {
-        // env!("QWEN_BUILD_DIRTY") is "0" or "1" today; be liberal about
-        // representations in either direction to survive future formatting.
-        assert!(!parse_build_dirty("0"));
-        assert!(!parse_build_dirty(""));
-        assert!(!parse_build_dirty("false"));
-        assert!(!parse_build_dirty("FALSE"));
-        assert!(!parse_build_dirty("no"));
-        assert!(parse_build_dirty("1"));
-        assert!(parse_build_dirty("true"));
-        assert!(parse_build_dirty("yes"));
-        // Anything else defaults to dirty=true to bias toward "assume unstable"
-        assert!(parse_build_dirty("dirty"));
+    fn request_stats_fingerprint_matches_literal_known_vector() {
+        // Literal known-vector: `sha256(domain-separator || len_u64_le ||
+        // (token_i32_le)*)` over tokens [1,2,3,4,5] MUST match this exact
+        // hex digest. Changing the hash function, domain separator, length
+        // encoding, or token encoding will produce a different digest and
+        // fail this test — which is the whole point of naming the algorithm
+        // `sha256-qwen-generated-token-ids-v1`.
+        let tokens: [i32; 5] = [1, 2, 3, 4, 5];
+        const EXPECTED_HEX: &str =
+            "7f016c59a05cecd27d3348aedae1275ec5cb5be58aeb3ea599110e4a7ce5b304";
+        let digest = GeneratedTokenSha256Digest::of(&tokens);
+        assert_eq!(digest.hex(), EXPECTED_HEX);
+        assert_eq!(generated_token_sha256(&tokens), EXPECTED_HEX);
+        // And the same digest, wired through the record builder, must land
+        // in output_fingerprint.value byte-identical.
+        let mut measured = sample_measured_ok();
+        measured.output_fingerprint = digest;
+        let record = build_deepseek_v4_single_turn_stats_record("inv-y", &measured);
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["output_fingerprint"]["value"], EXPECTED_HEX);
+    }
+
+    #[test]
+    fn request_stats_hex_encode_bytes_is_lowercase_padded() {
+        assert_eq!(hex_encode_bytes(&[]), "");
+        assert_eq!(hex_encode_bytes(&[0x00, 0x0f, 0xff]), "000fff");
+        assert_eq!(hex_encode_bytes(&[0xab; 4]), "abababab");
+    }
+
+    #[test]
+    fn request_stats_append_jsonl_serializes_one_line_per_record() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "qwen-request-stats-test-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        for i in 0..3u64 {
+            let mut m = sample_measured_ok();
+            m.input_tokens = i;
+            m.output_fingerprint = GeneratedTokenSha256Digest::of(&[i as i32]);
+            let record = build_deepseek_v4_single_turn_stats_record("inv-z", &m);
+            append_jsonl_record(&path, &record, "test stats").unwrap();
+        }
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 3, "expected exactly one line per record");
+        assert!(contents.ends_with('\n'), "file must end with newline");
+        for (i, line) in lines.iter().enumerate() {
+            let json: serde_json::Value = serde_json::from_str(line).expect("valid JSON per line");
+            assert_eq!(json["schema"], "qwen-llm.request-stats");
+            assert_eq!(json["invocation_id"], "inv-z");
+            assert_eq!(json["usage"]["input_tokens"], i);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn request_stats_status_serializes_as_lowercase() {
+        assert_eq!(serde_json::to_value(RequestStatsStatus::Ok).unwrap(), "ok");
+        assert_eq!(
+            serde_json::to_value(RequestStatsStatus::Error).unwrap(),
+            "error"
+        );
+        assert_eq!(
+            serde_json::to_value(RequestStatsStatus::Cancelled).unwrap(),
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn request_stats_success_only_fields_are_optional_for_error_records() {
+        // Verify the envelope structurally supports a future error/cancelled
+        // record without a breaking restructuring: success-only fields all
+        // permit `None` and skip serialization when absent.
+        let record = RequestStatsRequestRecord {
+            schema: "qwen-llm.request-stats",
+            schema_version: 1,
+            record_type: "request_stats",
+            invocation_id: "inv-err",
+            request_index: 0,
+            status: RequestStatsStatus::Error,
+            model: RequestStatsModel {
+                family: "deepseek_v4",
+            },
+            input: RequestStatsInput {
+                kind: "messages",
+                template: Some("0731_chat"),
+            },
+            usage: None,
+            finish: None,
+            timing_ms: None,
+            throughput_tps: None,
+            output_fingerprint: None,
+            build: RequestStatsBuild {
+                commit: "abc",
+                dirty: false,
+            },
+            diagnostics: None,
+        };
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["status"], "error");
+        assert!(json.get("usage").is_none());
+        assert!(json.get("finish").is_none());
+        assert!(json.get("timing_ms").is_none());
+        assert!(json.get("throughput_tps").is_none());
+        assert!(json.get("output_fingerprint").is_none());
+        assert!(json.get("diagnostics").is_none());
+    }
+
+    #[test]
+    fn request_stats_invocation_id_is_stable_and_hex_16_bytes() {
+        // Force init once; every subsequent access must return the same ID.
+        let a = &*INVOCATION_ID;
+        let b = &*INVOCATION_ID;
+        assert_eq!(a, b);
+        // 16 bytes hex-encoded = 32 chars
+        assert_eq!(a.len(), 32, "invocation_id is 16 bytes hex-encoded");
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "invocation_id must be lowercase hex: got {a}"
+        );
+    }
+
+    #[test]
+    fn request_stats_invocation_id_encodes_entropy_bytes_verbatim() {
+        // Deterministic entropy source proves that the encoding is exactly
+        // 16 bytes hex-encoded, in order, lowercase. A constant-string
+        // implementation would fail this test.
+        let bytes: [u8; 16] = [
+            0x00, 0x01, 0x0f, 0x10, 0xab, 0xcd, 0xef, 0x42, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10,
+        ];
+        let id = generate_invocation_id_from(EntropySource::Deterministic(bytes)).unwrap();
+        assert_eq!(id, "00010f10abcdef42fedcba9876543210");
+    }
+
+    #[test]
+    fn request_stats_valid_finite_metrics_pass_through_unchanged() {
+        // Complement to non_finite_metrics_coerced_to_zero: a valid finite
+        // measurement must NOT be zeroed. This catches over-aggressive
+        // sanitization.
+        let measured = sample_measured_ok();
+        let record = build_deepseek_v4_single_turn_stats_record("inv-v", &measured);
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["timing_ms"]["total"], 3050.6);
+        assert_eq!(json["timing_ms"]["tokenization"], 10.5);
+        assert_eq!(json["timing_ms"]["prefill"], 1000.0);
+        assert_eq!(json["timing_ms"]["decode"], 2000.0);
+        assert_eq!(json["throughput_tps"]["prefill"], 100.0);
+        assert_eq!(json["throughput_tps"]["decode"], 25.0);
+        assert_eq!(json["diagnostics"]["deepseek_v4"]["transition_tps"], 24.5);
+        assert_eq!(json["diagnostics"]["deepseek_v4"]["load_ms"], 40.1);
+    }
+
+    #[test]
+    fn request_stats_split_ds4_prompt_kind_rejects_bare_messages() {
+        // Bare "messages" (no underscore + suffix) is not a valid template
+        // marker; it must collapse to "unknown" rather than becoming a
+        // second `input.kind = "messages"` value with no template.
+        assert_eq!(split_ds4_prompt_kind("messages"), ("unknown", None));
+    }
+
+    #[test]
+    fn request_stats_append_jsonl_repairs_partial_prior_tail() {
+        // Pre-seed the file with an unfinished record (no trailing newline).
+        // The next append MUST NOT concatenate its record onto the abandoned
+        // partial one — it must start on a fresh line.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "qwen-request-stats-tail-{}.jsonl",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"{\"partial\":\"orphan_no_newline\"").unwrap();
+
+        let measured = sample_measured_ok();
+        let record = build_deepseek_v4_single_turn_stats_record("inv-tail", &measured);
+        append_jsonl_record(&path, &record, "tail-repair test").unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        // Line 0 is the orphan partial (unchanged); line 1 is our new record.
+        // Critically, NO line combines both, and line 1 must parse as valid JSON.
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected orphan preserved on its own line, our record on the next"
+        );
+        assert_eq!(lines[0], "{\"partial\":\"orphan_no_newline\"");
+        let json: serde_json::Value =
+            serde_json::from_str(lines[1]).expect("appended record must parse as standalone JSON");
+        assert_eq!(json["invocation_id"], "inv-tail");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn request_stats_measured_total_ms_can_diverge_from_phase_sum() {
+        // Prove the outer-boundary total is DECOUPLED from the phase sum
+        // (a synthesized implementation would fail this by matching the
+        // sum exactly).
+        let mut measured = sample_measured_ok();
+        measured.total_ms = 9999.9; // arbitrary value, not the phase sum
+        let record = build_deepseek_v4_single_turn_stats_record("inv-t", &measured);
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["timing_ms"]["total"], 9999.9);
+        // Phase fields must remain independently measured, not derived.
+        assert_eq!(json["timing_ms"]["prefill"], 1000.0);
+        assert_eq!(json["timing_ms"]["decode"], 2000.0);
     }
 }

@@ -6,7 +6,7 @@
 //! gives callers semantic names for those lifetimes without changing the
 //! underlying execution path.
 
-use crate::cache_probe::{available_memory_bytes, probe_fd_residency};
+use crate::cache_probe::{available_memory_bytes, probe_fd_residency, probe_fd_residency_sampled};
 use crate::checkpoint_codec::SNAPSHOT_RECORD_FIXED_BYTES;
 use crate::checkpoint_identity::{
     CheckpointCompatibilityReport, CheckpointIdentityCache, CheckpointIdentityError,
@@ -259,6 +259,18 @@ fn opened_gguf_diagnostic_path(gguf: &GgufFile) -> Result<PathBuf, RuntimeError>
         .ok_or(RuntimeError::EmptyGgufShards)
 }
 
+/// Apply the runtime's established retained-descriptor prefetch policy to an
+/// already-opened GGUF without otherwise constructing a [`Runtime`] model.
+/// Family-specific loaders can reuse the same cold-only residency gate while
+/// retaining ownership of their load topology.
+pub fn prefetch_opened_gguf(gguf: &GgufFile, config: &LoadedModelConfig) -> PrefetchOutcome {
+    apply_prefetch_policy(
+        gguf,
+        config,
+        MetalLoadPrefetchAdvice::PreserveConfiguredPolicy,
+    )
+}
+
 /// Runs the prefetch policy against the freshly-opened GGUF and returns
 /// a per-shard outcome record for observability. On any I/O error we
 /// log via `tracing::warn` and mark the shard as `skipped: true` — a
@@ -358,7 +370,11 @@ fn apply_shard_prefetch(
     // resolves fail-open (proceed with prefetch) rather than skip.
     let need_residency = !matches!(config.prefetch_policy, PrefetchPolicy::Always);
     let residency = if need_residency {
-        match probe_fd_residency(shard.file.as_ref()) {
+        let probe = match config.prefetch_residency_probe {
+            PrefetchResidencyProbe::Full => probe_fd_residency(shard.file.as_ref()),
+            PrefetchResidencyProbe::Sampled => probe_fd_residency_sampled(shard.file.as_ref()),
+        };
+        match probe {
             Ok(r) => {
                 record.pre_resident_fraction = r.resident_fraction();
                 Some(r)
@@ -640,6 +656,13 @@ mod tests {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PrefetchResidencyProbe {
+    #[default]
+    Full,
+    Sampled,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadedModelConfig {
     pub prefix_cache_max_bytes: u64,
@@ -653,6 +676,9 @@ pub struct LoadedModelConfig {
     /// Per-worker scratch buffer size in bytes. Zero uses
     /// [`crate::prefetch::DEFAULT_CHUNK_BYTES`] (16 MiB).
     pub prefetch_chunk_bytes: usize,
+    /// Cache-residency observer used by [`PrefetchPolicy::ColdOnly`]. The
+    /// bounded sampled probe avoids page-linear observer cost on huge shards.
+    pub prefetch_residency_probe: PrefetchResidencyProbe,
     /// Additional telemetry margin above theoretical prefetch + destination
     /// sizes. Zero uses [`DEFAULT_PREFETCH_MIN_HEADROOM_BYTES`] (1 GiB).
     pub prefetch_min_headroom_bytes: u64,
@@ -896,6 +922,7 @@ impl Default for LoadedModelConfig {
                 .expect("DEFAULT_COLD_ONLY_THRESHOLD is a valid fraction"),
             prefetch_workers: 0,
             prefetch_chunk_bytes: 0,
+            prefetch_residency_probe: PrefetchResidencyProbe::Full,
             prefetch_min_headroom_bytes: 0,
         }
     }

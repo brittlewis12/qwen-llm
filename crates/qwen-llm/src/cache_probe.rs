@@ -179,6 +179,80 @@ pub fn probe_fd_residency(file: &File) -> io::Result<ResidencyReport> {
     report
 }
 
+/// Number of evenly distributed windows inspected by the bounded residency
+/// probe. With 64 pages per window this samples 64 MiB on Apple Silicon.
+pub const SAMPLED_RESIDENCY_WINDOWS: usize = 64;
+pub const SAMPLED_RESIDENCY_PAGES_PER_WINDOW: usize = 64;
+
+/// Estimate file-cache residency from bounded, evenly distributed windows.
+///
+/// Full `mincore` is linear in file pages and costs over a second on a 100 GiB
+/// checkpoint. This variant inspects at most 4,096 pages while retaining broad
+/// coverage across each shard. Files no larger than the sample budget still
+/// receive an exact full probe.
+pub fn probe_fd_residency_sampled(file: &File) -> io::Result<ResidencyReport> {
+    let len = file.metadata()?.len() as usize;
+    if len == 0 {
+        return Ok(ResidencyReport {
+            total_pages: 0,
+            resident_pages: 0,
+        });
+    }
+
+    let addr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if addr == libc::MAP_FAILED {
+        return Err(io::Error::last_os_error());
+    }
+    struct Mapping {
+        addr: *mut libc::c_void,
+        len: usize,
+    }
+    impl Drop for Mapping {
+        fn drop(&mut self) {
+            unsafe {
+                libc::munmap(self.addr, self.len);
+            }
+        }
+    }
+    let _mapping = Mapping { addr, len };
+
+    let page = host_page_size();
+    let total_pages = len.div_ceil(page);
+    let sample_budget = SAMPLED_RESIDENCY_WINDOWS * SAMPLED_RESIDENCY_PAGES_PER_WINDOW;
+    if total_pages <= sample_budget {
+        mincore_at(addr, len)
+    } else {
+        let mut sampled_pages = 0usize;
+        let mut resident_pages = 0usize;
+        for window in 0..SAMPLED_RESIDENCY_WINDOWS {
+            let segment_start = window * total_pages / SAMPLED_RESIDENCY_WINDOWS;
+            let segment_end = (window + 1) * total_pages / SAMPLED_RESIDENCY_WINDOWS;
+            let segment_pages = segment_end - segment_start;
+            let window_pages = segment_pages.min(SAMPLED_RESIDENCY_PAGES_PER_WINDOW);
+            let start_page = segment_start + (segment_pages - window_pages) / 2;
+            let byte_start = start_page * page;
+            let byte_len = (window_pages * page).min(len - byte_start);
+            let window_addr = unsafe { addr.cast::<u8>().add(byte_start).cast() };
+            let window_report = mincore_at(window_addr, byte_len)?;
+            sampled_pages += window_report.total_pages;
+            resident_pages += window_report.resident_pages;
+        }
+        Ok(ResidencyReport {
+            total_pages: sampled_pages,
+            resident_pages,
+        })
+    }
+}
+
 fn mincore_at(addr: *mut libc::c_void, len: usize) -> io::Result<ResidencyReport> {
     let page = host_page_size();
     let n_pages = len.div_ceil(page);
@@ -247,6 +321,7 @@ pub fn available_memory_bytes() -> io::Result<u64> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::os::unix::fs::FileExt;
     use std::path::PathBuf;
 
     struct Fixture(PathBuf);
@@ -277,6 +352,44 @@ mod tests {
         }
         f.sync_all().expect("sync");
         Fixture(path)
+    }
+
+    fn make_large_fixture(bytes: usize, tag: &str) -> Fixture {
+        let name = format!(
+            "qwen-cache-probe-{}-{}-{}.bin",
+            std::process::id(),
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(name);
+        let mut file = std::fs::File::create(&path).expect("create large fixture");
+        let chunk = vec![0xA5; 1024 * 1024];
+        let mut written = 0usize;
+        while written < bytes {
+            let count = (bytes - written).min(chunk.len());
+            file.write_all(&chunk[..count])
+                .expect("write large fixture");
+            written += count;
+        }
+        file.sync_all().expect("sync large fixture");
+        Fixture(path)
+    }
+
+    fn warm_prefix(path: &Path, bytes: usize) {
+        let file = std::fs::File::open(path).expect("open warm prefix");
+        let mut scratch = vec![0u8; 1024 * 1024];
+        let mut offset = 0usize;
+        while offset < bytes {
+            let count = (bytes - offset).min(scratch.len());
+            let read = file
+                .read_at(&mut scratch[..count], offset as u64)
+                .expect("read warm prefix");
+            assert_eq!(read, count);
+            offset += read;
+        }
     }
 
     #[test]
@@ -322,5 +435,42 @@ mod tests {
             report.after.resident_pages, 0,
             "invalidate should evict all pages"
         );
+    }
+
+    #[test]
+    fn sampled_probe_is_exact_below_its_budget() {
+        let f = make_fixture(4 * 1024 * 1024, "sampled");
+        let file = std::fs::File::open(&f.0).expect("open");
+        let full = probe_fd_residency(&file).expect("full probe");
+        let sampled = probe_fd_residency_sampled(&file).expect("sampled probe");
+        assert_eq!(sampled.total_pages, full.total_pages);
+        assert_eq!(sampled.resident_pages, full.resident_pages);
+    }
+
+    #[test]
+    fn sampled_probe_tracks_structured_partial_residency_conservatively() {
+        const BYTES: usize = 96 * 1024 * 1024;
+        const AUTO_THRESHOLD: f64 = 0.98;
+        let fixture = make_large_fixture(BYTES, "sampled-partial");
+        for (numerator, denominator) in [(0usize, 1usize), (1, 2), (19, 20), (1, 1)] {
+            invalidate_file_cache(&fixture.0).expect("invalidate partial fixture");
+            warm_prefix(&fixture.0, BYTES * numerator / denominator);
+            let file = std::fs::File::open(&fixture.0).expect("open partial fixture");
+            let full = probe_fd_residency(&file).expect("full partial probe");
+            let sampled = probe_fd_residency_sampled(&file).expect("sampled partial probe");
+            assert!(
+                (sampled.resident_fraction() - full.resident_fraction()).abs() <= 0.03,
+                "sampled {:.3} differs from full {:.3} for {numerator}/{denominator}",
+                sampled.resident_fraction(),
+                full.resident_fraction(),
+            );
+            assert_eq!(
+                sampled.resident_fraction() < AUTO_THRESHOLD,
+                full.resident_fraction() < AUTO_THRESHOLD,
+                "sampled and full decisions differ at {numerator}/{denominator}: sampled={:.3} full={:.3}",
+                sampled.resident_fraction(),
+                full.resident_fraction(),
+            );
+        }
     }
 }

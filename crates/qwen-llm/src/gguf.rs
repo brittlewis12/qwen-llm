@@ -1316,6 +1316,9 @@ fn locate_tensor_data_start(
         / alignment
         * alignment;
     if aligned > mmap.len() as u64 {
+        if model.tensors().is_empty() && p == mmap.len() {
+            return Ok(p64);
+        }
         return Err(GgufError::Decode(format!(
             "aligned header end {aligned} > file size {}",
             mmap.len()
@@ -1517,6 +1520,20 @@ mod tests {
         b
     }
 
+    fn build_unpadded_nonempty_gguf() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        push_string(&mut bytes, "t");
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes
+    }
+
     enum TestKv<'a> {
         U16(&'a str, u16),
         U64(&'a str, u64),
@@ -1597,6 +1614,39 @@ mod tests {
             TestKv::I32(SPLIT_TENSORS_COUNT_KEY, total_tensors),
         ];
         build_test_gguf(&kvs, tensors)
+    }
+
+    fn build_unpadded_empty_split_shard(
+        split_no: u16,
+        split_count: u16,
+        total_tensors: i32,
+    ) -> Vec<u8> {
+        let kvs = [
+            TestKv::U16(SPLIT_NO_KEY, split_no),
+            TestKv::U16(SPLIT_COUNT_KEY, split_count),
+            TestKv::I32(SPLIT_TENSORS_COUNT_KEY, total_tensors),
+        ];
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+        for kv in &kvs {
+            match kv {
+                TestKv::U16(key, value) => {
+                    push_string(&mut bytes, key);
+                    bytes.extend_from_slice(&2u32.to_le_bytes());
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                TestKv::I32(key, value) => {
+                    push_string(&mut bytes, key);
+                    bytes.extend_from_slice(&5u32.to_le_bytes());
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                TestKv::U64(_, _) => unreachable!("split metadata has no u64 values"),
+            }
+        }
+        bytes
     }
 
     fn build_overlapping_gguf() -> Vec<u8> {
@@ -2004,6 +2054,58 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opens_split_gguf_with_unpadded_empty_first_shard() {
+        let dir = temp_split_dir();
+        let first = dir.join("model-00001-of-00002.gguf");
+        let second = dir.join("model-00002-of-00002.gguf");
+        write_file(&first, &build_unpadded_empty_split_shard(0, 2, 1));
+        write_file(
+            &second,
+            &build_split_shard(
+                1,
+                2,
+                1,
+                &[TestTensor {
+                    name: "only",
+                    value: 3.0,
+                }],
+            ),
+        );
+
+        let gguf = GgufFile::open(&first).expect("metadata-only first shard should parse");
+        assert_eq!(gguf.shard_count(), 2);
+        assert_eq!(gguf.tensors.len(), 1);
+        assert_eq!(
+            gguf.slice(gguf.find("only").unwrap()),
+            &3.0f32.to_le_bytes()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unpadded_shard_exception_rejects_partial_padding_and_tensor_tables() {
+        let mut partially_padded = build_unpadded_empty_split_shard(0, 2, 1);
+        partially_padded.push(0);
+        let partial_path = write_temp(&partially_padded);
+        let partial_error =
+            open_one_shard_file(File::open(&partial_path).unwrap(), &partial_path, 0)
+                .err()
+                .expect("partial empty-shard padding must be rejected");
+        assert!(partial_error.to_string().contains("aligned header end"));
+
+        let nonempty_path = write_temp(&build_unpadded_nonempty_gguf());
+        let nonempty_error =
+            open_one_shard_file(File::open(&nonempty_path).unwrap(), &nonempty_path, 0)
+                .err()
+                .expect("nonempty unpadded shard must be rejected");
+        assert!(!nonempty_error.to_string().is_empty());
+
+        let _ = std::fs::remove_file(partial_path);
+        let _ = std::fs::remove_file(nonempty_path);
     }
 
     #[test]

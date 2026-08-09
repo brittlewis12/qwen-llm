@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 K216 Shared/Route Overlap KILL
+
+Status: KILL transfer of K160's exact shared-expert/CPU-route overlap to K216.
+The default-off force path is removed.
+
+- One current-HEAD N=2,048 profile reports `371.3 ms` of warmed CPU route
+  planning and `365.756 ms` of shared-expert GPU work. Summing the smaller term
+  per layer gives an optimistic `348.120 ms` overlap ceiling against a
+  `7,836.138 ms` ordinary wall, enough to authorize the existing schedule.
+- Four fresh children ran control/candidate/candidate/control on the same
+  2,385-token synthetic ramp with one warmup each. Ordinary walls are
+  `13,292.652/14,025.078/13,526.701/13,392.657 ms`. Candidate median is
+  `13,775.890 ms` versus `13,342.654 ms` control: a `433.235 ms` or `3.25%`
+  regression, and the faster candidate remains `134.044 ms` behind the slower
+  control.
+- The changed N=2,048 chunk regresses from a `7,735.350 ms` control median to
+  `7,985.181 ms`, or `249.831 ms` and `3.23%`. Every arm emits the same final
+  logit digest. The schedule is exact but unprofitable on this graph.
+- The same profile identifies the next changed-work-unit target. K216's MXFP4
+  layers 26 and 42 consume `276.819/272.971 ms` command-GPU versus a
+  `73.433 ms` median for the other 41 layers, leaving `402.924 ms` of outlier
+  excess before any claim about how much a grouped MXFP4 implementation removes.
+
+Decision: causal independence and a sum-of-minima ceiling do not price the cost
+of 43 extra command buffers, submission/driver interference, or changed device
+cadence. K160's measured overlap win is asset-specific. Do not retry K216 with
+different enqueue timing; move to a true grouped/batched MXFP4 work unit only
+after isolating the affected expert stages. Adversarial review: cx session
+`019fe83c-1010-7721-9c50-488228e94883`.
+
 ## 2026-08-09 - DeepSeek V4 K216 Raw-KV Matrix Transfer KILL
 
 Status: KILL selective transfer of K160's F32 Q8 raw-KV matrix schedule to

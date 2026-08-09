@@ -1179,6 +1179,15 @@ preregistered FRESH follow-on. K160's isolated-arm materiality is not portable
 authority; require a new asset-specific profile and changed work unit before
 reopening raw-KV matrix ownership.
 
+Shared-expert/CPU-route overlap is also asset-specific. A current N=2,048
+profile prices `371.3 ms` of CPU route work, `365.756 ms` of shared-expert GPU,
+and a `348.120 ms` per-layer sum-of-minima ceiling. The exact K160 schedule still
+regresses K216's 2,385-token median by `433.235 ms` or `3.25%`; the changed full
+chunk itself regresses `249.831 ms` or `3.23%`, with every logit bit preserved.
+Remove the arm and do not retune enqueue timing. The same profile instead finds
+`402.924 ms` of command-GPU excess in MXFP4 layers 26 and 42 relative to the
+other-layer median. That is the next K216 work-unit target, not another overlap.
+
 The local DSpark census and external acceptance calibration are complete. On
 the exact 2,385-token official-chat prompt, llama.cpp N1 at confidence 0.3 moves
 `26.785 -> 30.367 token/s`, accepts 107 of 142 attempted drafts, preserves the
@@ -1213,28 +1222,34 @@ and exact shared-panel precedents are negative or about 1% whole-wall. Reopen
 only with 30-50 ms of independently isolated GPU-work deletion beyond unchanged
 projection arithmetic and a credible path to the complete wall bar.
 
-1. **Keep command ownership closed without GPU-work deletion.** The optimistic
+1. **Price one true grouped/batched K216 MXFP4 expert work unit.** Layers 26 and
+   42 consume `276.819/272.971 ms` command-GPU versus a `73.433 ms` median for
+   the other 41 layers at N=2,048. First isolate gate/up and down ownership and
+   require at least `250 ms` of conservative removable excess. Proceed only with
+   a work unit that replaces row-wise MXFP4 execution, not a dispatch-width
+   sweep; retain the `max(100 ms, 1%)` whole-prompt gate.
+2. **Keep command ownership closed without GPU-work deletion.** The optimistic
    merged-route/indirect ceiling misses 2% after nonphysical full credits. Reopen
    only when a producer/consumer fusion independently deletes roughly 30-50 ms
    of control GPU work while preserving fail-stop mutation ownership.
-2. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
+3. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
    correct two-row causal execution plus measured resident drafter, hidden
    capture, acceptance, and transaction costs fit inside the 61.09 ms complete
    packet budget on the maintained snapshot. Do not adapt the current packed
    path or fund command collapse around its unchanged GPU work.
-3. **Use the singleton stage front end only for a named work deletion.** K160
+4. **Use the singleton stage front end only for a named work deletion.** K160
    wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus llama.cpp's
    39.2 ms. Attention core, prepare, output, routed, and shared are
    11.58/7.68/7.89/10.51/2.98 ms. Routed/shared waves move wall by only
    0.006 ms, and packed online-selected transfer saves `-0.242 ms` GPU. Do not
    resume local rearrangement or kernel sweeps without a structural
    >=2 ms/token deletion.
-4. **Record REAP quality governance before product equivalence claims.** Keep
+5. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,
    add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run
    one full-defaults versus arithmetic-rollbacks logit/top-1 audit. Memory and
    speed do not authorize an asset-quality claim.
-5. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
+6. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
    deep mask and regressed wall; F16 query staging now fails on real nonzero
    history. Reopen low precision only as an F32-authoritative conservative
    filter whose exact refinement, fallback, and merge beat the F32 streaming

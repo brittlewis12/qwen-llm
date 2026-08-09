@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 Exact mHC No-Slab Producer KILL
+
+Status: KILL the exact scale-only plus grouped-Q8 no-slab producer. Remove all
+candidate code. Do not spend another acquisition on cleaner-memory certification
+of the impossible ceiling before a materially different producer exists.
+
+- A scale-only RMS reduction plus scale-aware Q8 projection reproduces the
+  incumbent materialized-normalization `[16384,N] -> [24,N]` output bit-for-bit
+  on a full-width synthetic fixture. The complete K160 prefill likewise retains
+  logits SHA-256
+  `9c6d1e995a9a31edf7101659621dbd9cdf9f7aa0c53b1c0c970721e49f85dc8f`.
+- One group per token reusing each normalized fragment across all 24 output rows
+  regresses ordinary N=2,048 wall to 17.596 s versus a 7.106 s incumbent point.
+  The register-lifetime/serialization trade is decisively wrong-shaped.
+- The sole refinement uses eight rows per group: three groups per token instead
+  of twelve, with eight row accumulators. Its settled candidate samples are
+  7.469/7.625/7.777 s; the following incumbent bracket is
+  7.531/7.547/7.635/7.784 s. It is flat to slightly slower, not a product win.
+- The measurements are dirty-build falsifiers under substantial host drift, not
+  promotion estimates. Their negative margin does not need finer statistics:
+  neither topology captures a useful fraction of the previously measured
+  2.5-3.5% impossible-deletion ceiling.
+
+Read: removing logical normalized-slab rereads does not remove the binding
+physical work. The 128 MiB active slab is evidently cache-friendlier than the
+byte model implied, while wider row ownership increases register pressure and
+serial Q8 work. The impossible ceiling was dominated by deleting RMS/projection
+arithmetic, not merely the intermediate representation. Reopen mHC only for a
+producer that shares or deletes Q8 dequant/dot work or an adjacent consumer—not
+another row-group width, post-dot scale, or clean-host replay of the same premise.
+
 ## 2026-08-09 - DeepSeek V4 K160 mHC Representation-Deletion HOLD
 
 Status: the exact zero-producer ceiling is descriptively above 2%, but the

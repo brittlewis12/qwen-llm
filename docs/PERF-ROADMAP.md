@@ -1075,17 +1075,21 @@ N=2,048 request, while changing final logits. A future mHC candidate must delete
 the 16,384-wide normalized representation and adjacent dispatches rather than
 buying another matrix schedule.
 
-That representation-deletion ceiling is now measured but not certified. A
-clean `700522e` C/A/P/Z campaign deletes only the 86 normalization/projection
-pairs and preserves every endpoint bit. Its conservative wall CLEAR lower95 is
-3.0033%, union-GPU lower95 is 2.3232%, all six wall sextets exceed 2%, and raw
-arm stationarity stays below 1.15%. The mechanical result nevertheless HOLDs on
-the sole validity failure: swap grows 12.06 GB, compressor occupancy grows
-1,379,307 pages, and 848,692 swapouts occur across the campaign. This is strong
-contributive evidence, not authority for a producer or exact chargeback. One
-standalone cleaner-memory replication may preserve the complete scientific
-design while strengthening prospective host admission and adding VM snapshots
-immediately around timing; do not pool or replace v1.
+That representation-deletion ceiling is measured but not certified. A clean
+`700522e` C/A/P/Z campaign deletes only the 86 normalization/projection pairs
+and preserves every endpoint bit. Its conservative wall CLEAR lower95 is
+3.0033%, union-GPU lower95 is 2.3232%, and all six wall sextets exceed 2%, but
+severe campaign-wide VM pressure makes the formal result HOLD.
+
+The contributive ceiling funded one bounded exact producer falsifier rather than
+another certification campaign. Scale-only RMS plus scale-aware Q8 is bitwise,
+but grouping all 24 rows regresses N=2,048 wall from 7.106 to 17.596 seconds;
+the sole eight-row refinement is flat to slightly slower against a following
+incumbent bracket. Logical slab-traffic deletion is not the physical mechanism:
+row grouping trades cache-friendly reads for register pressure and serial Q8
+work. Close mHC until a producer shares or deletes dequant/dot arithmetic or an
+adjacent consumer. Do not rerun the same ceiling, sweep row widths, or move the
+RMS scale after the dot.
 
 The larger token-axis defect does clear. Q-A and raw-KV were still rereading
 their Q8 matrices independently for every prompt token while the neighboring
@@ -1168,36 +1172,30 @@ wrapping, not DSpark or speculative decoding generally.
 
 Force-ranked queue:
 
-1. **Certify mHC deletion in a clean memory envelope.** The v1 impossible
-   ceiling is descriptively clear but formally HOLDs on severe VM pressure.
-   Freeze one standalone replication with unchanged arms, schedule, estimators,
-   and gates; require prospective low-swap/compressor admission plus timing-local
-   VM snapshots. Only an independently valid CLEAR may authorize an exact
-   RMS-scale/residual-aware 24-row chargeback. Do not build the producer first.
-2. **Pair compressor ownership only if it deletes work.** The 124 compressor
+1. **Pair compressor ownership only if it deletes work.** The 124 compressor
    projections already use llama-lineage half matrices. A candidate must reuse
    normalized input or decoded panels across KV/gate and remove dispatch or
    staging work; another tile is not a changed premise.
-3. **Keep command ownership closed without GPU-work deletion.** The optimistic
+2. **Keep command ownership closed without GPU-work deletion.** The optimistic
    merged-route/indirect ceiling misses 2% after nonphysical full credits. Reopen
    only when a producer/consumer fusion independently deletes roughly 30-50 ms
    of control GPU work while preserving fail-stop mutation ownership.
-4. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
+3. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
    correct two-row causal execution plus measured resident drafter, hidden
    capture, acceptance, and transaction costs fit inside the 61.09 ms complete
    packet budget on the maintained snapshot. Do not adapt the current packed
    path or fund command collapse around its unchanged GPU work.
-5. **Use the singleton stage front end only for a named general-decode lever.**
+4. **Use the singleton stage front end only for a named general-decode lever.**
    K160 wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus
    llama.cpp's 39.2 ms. Attention core, prepare, output, routed, and shared are
    11.58/7.68/7.89/10.51/2.98 ms; do not resume local kernel sweeps without a
    structural >=2 ms/token deletion.
-6. **Record REAP quality governance before product equivalence claims.** Keep
+5. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,
    add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run
    one full-defaults versus arithmetic-rollbacks logit/top-1 audit. Memory and
    speed do not authorize an asset-quality claim.
-7. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
+6. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
    deep mask and regressed wall; F16 query staging now fails on real nonzero
    history. Reopen low precision only as an F32-authoritative conservative
    filter whose exact refinement, fallback, and merge beat the F32 streaming

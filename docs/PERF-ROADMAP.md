@@ -1170,6 +1170,17 @@ by 4.16x before target decisions, hidden capture, the three-stage drafter,
 acceptance, or rollback. This KILLs packed-prefill reuse and command-only
 wrapping, not DSpark or speculative decoding generally.
 
+Singleton routed/shared dependency waves also close before a product packet.
+One loaded K160 residency alternated the serial schedule and an exact wave
+schedule from the same restored state. Overlapping routed Q3_K gate/up with
+shared Q8 gate/up, then routed Q4_K down with shared Q8 down, saves only
+`0.267 ms/token` paired-median command-GPU and `0.006 ms/token` wall against a
+`1.0 ms` screening gate. All output and causal-state bits match. The 2.98 ms
+shared stage is therefore not free overlap headroom: unchanged routed and shared
+projections contend for the same execution resources, while added encoder
+boundaries consume the residual. Reopen this pocket only with dispatch, byte, or
+arithmetic deletion.
+
 Force-ranked queue:
 
 Compressor pairing also closes at accounting. The 124 projections already use
@@ -1190,10 +1201,11 @@ projection arithmetic and a credible path to the complete wall bar.
    capture, acceptance, and transaction costs fit inside the 61.09 ms complete
    packet budget on the maintained snapshot. Do not adapt the current packed
    path or fund command collapse around its unchanged GPU work.
-3. **Use the singleton stage front end only for a named general-decode lever.**
-   K160 wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus
-   llama.cpp's 39.2 ms. Attention core, prepare, output, routed, and shared are
-   11.58/7.68/7.89/10.51/2.98 ms; do not resume local kernel sweeps without a
+3. **Use the singleton stage front end only for a named work deletion.** K160
+   wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus llama.cpp's
+   39.2 ms. Attention core, prepare, output, routed, and shared are
+   11.58/7.68/7.89/10.51/2.98 ms. Routed/shared waves move wall by only
+   0.006 ms; do not resume local rearrangement or kernel sweeps without a
    structural >=2 ms/token deletion.
 4. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,

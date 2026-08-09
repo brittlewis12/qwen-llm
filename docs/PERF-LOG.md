@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 K160 Singleton Dependency-Wave KILL
+
+Status: KILL concurrent routed/shared projection waves for K160 singleton
+decode. This bounded spike has authority only for the tested dependency-wave
+schedule. All candidate code is removed.
+
+- The exact K160 arm keeps serial route production and combine, overlaps routed
+  Q3_K gate/up with shared Q8 gate/up, executes both SwiGLU operations serially,
+  then overlaps routed Q4_K down with shared Q8 down. Tracked Metal resources and
+  the production one-command whole-token path remain authoritative.
+- One loaded 89.9 GiB residency alternated control/candidate/candidate/control
+  from the same restored position-128 causal state. Four paired blocks report a
+  median `0.267 ms/token` command-GPU saving and `0.006 ms/token` wall saving,
+  below the `1.0 ms` screening gate on both endpoints.
+- Per-block GPU savings are `-1.540/1.120/-0.364/0.899 ms`; wall savings are
+  `-1.197/0.922/-0.545/0.557 ms`. The unstable sign and zero wall movement reject
+  further timing rather than motivating a larger packet.
+- Control and candidate logits, final hidden state, and complete causal snapshot
+  are bit-identical. The mechanism is correctly scheduled but not useful.
+
+Decision: the measured 2.98 ms shared-expert stage is not composable overlap
+headroom. Routed and shared projections compete for the same GPU resources, and
+extra encoder boundaries consume the residual. Reopen only for a work unit that
+deletes dispatches, bytes, or arithmetic—not another concurrent arrangement of
+the unchanged routed/shared projections.
+
 ## 2026-08-09 - Serial Direct-to-Session `read_at` Spike KILL
 
 Status: KILL the serial positional-read implementation. This bounded local spike

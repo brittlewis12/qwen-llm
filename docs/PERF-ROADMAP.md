@@ -1188,6 +1188,15 @@ Remove the arm and do not retune enqueue timing. The same profile instead finds
 `402.924 ms` of command-GPU excess in MXFP4 layers 26 and 42 relative to the
 other-layer median. That is the next K216 work-unit target, not another overlap.
 
+The cheapest causal MXFP4 candidate then fails. An exact 2D batched-GEMV body
+reduces 24,576 row dispatches to 326 bucket dispatches while preserving all
+25,165,824 threadgroups, dot products, and final-logit bits. K216 request median
+regresses by `739.232 ms` or `5.50%`; the changed full chunk regresses by
+`443.283 ms` or `5.69%`. The outlier is therefore not removable launch count.
+Close batching and grid sweeps. A future MXFP4 branch must create real
+cross-column tile reuse and clear a production-shape primitive gate before
+another full-model arm.
+
 The local DSpark census and external acceptance calibration are complete. On
 the exact 2,385-token official-chat prompt, llama.cpp N1 at confidence 0.3 moves
 `26.785 -> 30.367 token/s`, accepts 107 of 142 attempted drafts, preserves the
@@ -1222,12 +1231,12 @@ and exact shared-panel precedents are negative or about 1% whole-wall. Reopen
 only with 30-50 ms of independently isolated GPU-work deletion beyond unchanged
 projection arithmetic and a credible path to the complete wall bar.
 
-1. **Price one true grouped/batched K216 MXFP4 expert work unit.** Layers 26 and
-   42 consume `276.819/272.971 ms` command-GPU versus a `73.433 ms` median for
-   the other 41 layers at N=2,048. First isolate gate/up and down ownership and
-   require at least `250 ms` of conservative removable excess. Proceed only with
-   a work unit that replaces row-wise MXFP4 execution, not a dispatch-width
-   sweep; retain the `max(100 ms, 1%)` whole-prompt gate.
+1. **Price a true K216 MXFP4 matrix tile, not launch aggregation.** Layers 26
+   and 42 retain `402.924 ms` of complete-layer excess, but exact 2D batching
+   regresses the changed chunk by `443.283 ms`. Reopen only with cross-column
+   weight/activation reuse and a production K=2,048/M=4,096 primitive saving
+   large enough to retain at least `max(100 ms, 1%)` after replacement cost and
+   numerical validation. Do not sweep the failed GEMV grid.
 2. **Keep command ownership closed without GPU-work deletion.** The optimistic
    merged-route/indirect ceiling misses 2% after nonphysical full credits. Reopen
    only when a producer/consumer fusion independently deletes roughly 30-50 ms

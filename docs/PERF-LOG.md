@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 K216 Batched MXFP4 GEMV KILL
+
+Status: KILL exact 2D batching of K216's row-wise MXFP4 routed-down GEMVs. All
+candidate code is removed.
+
+- The bounded arm leaves the incumbent scalar kernel untouched and clones its
+  block traversal, nibble decode, F32 accumulation, and `simd_sum` exactly. Only
+  grid Y and activation/output column offsets are added. Model-free batches
+  1/2/3/31/32/33/127/128/129 match repeated GEMV bit for bit with weight,
+  activation, output, and guard bytes intact.
+- On the full N=2,048 K216 chunk, the candidate replaces 24,576 row dispatches
+  with 326 expert-bucket dispatches and covers exactly 12,288 columns in each of
+  the two MXFP4 layers. It still executes the same 25,165,824 threadgroups and
+  every incumbent dot product.
+- Four fresh children run control/candidate/candidate/control at 2,385 tokens.
+  Walls are `13,331.673/14,200.884/14,160.883/13,551.631 ms`. Candidate median
+  is `14,180.883 ms` versus `13,441.652 ms` control: a `739.232 ms` or `5.50%`
+  regression, with the faster candidate `609.252 ms` behind the slower control.
+- The changed N=2,048 chunk regresses from `7,785.591` to `8,228.873 ms` at
+  median, or `443.283 ms` and `5.69%`. All four final-logit digests are identical.
+
+Decision: dispatch aggregation alone does not address the MXFP4 outlier. A huge
+2D grid preserves all threadgroups and arithmetic while worsening scheduling,
+cache behavior, or device cadence; this screen does not isolate which. Do not
+sweep grid geometry or add another exact batched-GEMV wrapper. Reopen only for a
+true matrix/tile work unit that creates cross-column reuse and first demonstrates
+a large production-shape primitive saving. Adversarial review: cx session
+`019fe83c-1010-7721-9c50-488228e94883`.
+
 ## 2026-08-09 - DeepSeek V4 K216 Shared/Route Overlap KILL
 
 Status: KILL transfer of K160's exact shared-expert/CPU-route overlap to K216.

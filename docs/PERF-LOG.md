@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - Serial Direct-to-Session `read_at` Spike KILL
+
+Status: KILL the serial positional-read implementation. This bounded local spike
+has screening authority only for serial `read_at` placement and no broader
+direct-restore or product authority. All candidate code is removed.
+
+- A phase split on one first-completed `581,740,008`-byte 27B pending checkpoint
+  measured warm incumbent lookup at `285.623/278.115 ms` and arena-to-session
+  application at `160.876/201.160 ms`. The incumbent apply phase was real and
+  exceeded the `60 ms` gate in isolation; it did not establish an equivalent net
+  saving.
+- The candidate parsed and bounded the full record, read 128 state spans directly
+  into independent Shared session buffers, hashed canonical wire order, retained
+  namespace and inode checks, and quarantined failures before session adoption.
+  Its first two restore totals were `448.2/582.4 ms`, versus the two preceding
+  incumbent observations at `472.2/504.4 ms`. The first direct run was
+  `24.0-56.2 ms` lower; the second was `78.0-110.2 ms` higher.
+- Direct lookup added `126.850/270.882 ms` over incumbent lookup, consistent with
+  destination page wiring and scattered population consuming the removed
+  memcpy. Under concurrent pressure, descriptive restore totals ranged roughly
+  `1.2-1.6 s`; they were not pooled and the sign remained unstable.
+- A 16-token seeded continuation was byte-identical between paths, stdout SHA-256
+  `4a4d03a7164b60a1f6dcdab6f171e58c396b48729300c6458197b06634bb90eb`.
+
+Decision: remove the 834-line candidate and the active queue item. Do not schedule
+a `preadv`-only follow-on: this spike did not isolate syscall overhead and gives
+no evidence that aggregation would recover the `60 ms` gate. Reopen only for a
+materially different population/hash organization or when restore itself is a
+measured product bottleneck large enough to justify the quarantine surface.
+
 ## 2026-08-09 - Recovered v0.664 LM-Head Screening KILL
 
 Status: the already-consumed clean `9f14e5c` acquisition seals

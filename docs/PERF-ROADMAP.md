@@ -2170,13 +2170,17 @@ identity-entry policy separately before changing either contract.
 The restore path also has one changed premise. It decodes and hashes the full
 record into CPU arenas, then copies those arenas into independent Shared session
 buffers. A quarantined positional-vector-read path could populate a fresh
-session directly and hash the canonical bytes before any GPU use. Cross-packet,
-non-causal subtraction suggests only a rough `60-80 ms` optimistic screening
-band. The measured authorities are `330.6-335.6 ms` total restore and
-`17.4/18.1 ms` from removing staged snapshot allocation/population; neither
-measures direct-to-session saving. Keep it below the fresh queue and discard the
-complete candidate session on any short read, shape, EOF, inode, or digest
-failure.
+session directly and hash the canonical bytes before any GPU use. A bounded
+serial `read_at` spike now measures the missing causal terms on a
+first-completed `581,740,008`-byte 27B checkpoint. Incumbent warm lookup was
+`285.623/278.115 ms`; applying the decoded arenas cost `160.876/201.160 ms`.
+Direct placement nevertheless reached only `448.2/582.4 ms` total versus the
+two preceding incumbent observations at `472.2/504.4 ms`. The first direct run
+was `24.0-56.2 ms` lower; the second was `78.0-110.2 ms` higher. Direct lookup
+added `126.850/270.882 ms`, consistent with destination page wiring and scattered
+population consuming the removed memcpy. The seeded 16-token continuation
+remained byte-identical. Close serial direct placement below the `60 ms` gate and
+retain the current restore.
 
 Two narrow follow-ons survive. Replace the misleading
 `has_managed_blobs` accounting scan only with a separately documented may-exist
@@ -2201,14 +2205,12 @@ nonselective. Do not build a production screener or retune survivor machinery.
 Reopen only for a materially tighter certificate with charged traffic below the
 head bytes it avoids, or changed model/head geometry.
 
-1. **Direct-to-session checkpoint-restore floor**: this is exact process-cold
-   continuation, not fresh-prompt acceleration. Preregister `>=60 ms` restore
-   saving on the frozen `582,854,188`-byte record. Populate a disposable session
-   through checked positional reads, hash canonical wire order before GPU use,
-   and discard the whole candidate on any short read, EOF, shape, inode, or
-   digest failure. The current `60-80 ms` band is non-causal sizing, not evidence.
-   Belief medium, prize bounded, difficulty M.
-2. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
+Serial direct-to-session checkpoint restore is closed. Do not retune syscall
+count or schedule a `preadv`-only follow-on; this spike did not isolate syscall
+overhead or show that aggregation could recover the gate. Reopen only for a
+materially different population/hash organization or changed product importance.
+
+1. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
    sole packet unsealed before the first durable child launch. The no-payload
    headroom probe passed, but ordered hashing of all three shards followed by a
    global full-residency check found shard 1 nonresident. A post-stop diagnostic
@@ -2230,7 +2232,7 @@ head bytes it avoids, or changed model/head geometry.
    packet supplies no native default, runtime loader, product, or mechanism
    authority.
 
-3. **High-ceiling structural options**: true-long attention needs a source-free
+2. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different
@@ -2240,13 +2242,12 @@ Dense GPU-greedy deconfounding remains a separate diagnostic-only question that
 v0.652 neither answers nor closes; it is intentionally deprioritized below the
 active queue on leverage.
 
-Checkpoint durability and the may-exist probe may run as CPU-only work without
-displacing items 1-4. v0.660 consumes the sole sampled-product timing packet and
-completes its no-new-performance policy review; no sampled-product work remains.
-A direct-restore codec/population floor is CPU-only only while it issues no GPU
-command; product continuation remains serialized and reuse-only. `MTLIO` is a
-conditional fresh-load population primitive whose timed floor remains
-serialized; without a live A10B baseline it does not preempt the active queue.
+Checkpoint durability and the may-exist probe remain lifecycle work below the
+material inference queue. v0.660 consumes the sole sampled-product timing packet
+and completes its no-new-performance policy review; no sampled-product work
+remains. Serial direct restore is closed. `MTLIO` is a conditional fresh-load
+population primitive whose timed floor remains serialized; without a live A10B
+baseline it does not preempt the active queue.
 
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric
@@ -2257,7 +2258,7 @@ need new independent cases. Adaptive MoE top-k also falls below the active queue
 router mass is diffuse and ideal k8-to-k6 removal is only about `4.55%` before
 overhead or quality loss. v0.655 clears only the exact response-shape direct-row
 primitive and one A3B integrated packet; generic norm-certified lm-head
-screening remains a separate lane.
+screening is closed by v0.664.
 
 Blocked cold follow-ons remain conditional. v0.602 satisfies the first
 prerequisite for async retained-to-copied promotion, but command-buffer-safe
@@ -2367,9 +2368,11 @@ control. It is no longer an active experiment; keep `decode` as the default.
   constructing destination spans. Retain the validated descriptor, handle
   positional-vector short reads, `EINTR`, `IOV_MAX`, EOF, and section boundaries,
   then hash in canonical wire order before GPU use. Poison and discard the whole
-  candidate session on failure. The first floor is disposable-only and disables
-  RAM-prefix promotion. Preregister a material wall gate; use `60-80 ms` only as
-  rough non-causal sizing, not measured authority or a hard ceiling.
+  candidate session on failure. The serial direct-placement spike preserves this
+  contract and exact continuation but misses the `60 ms` wall gate as destination
+  population offsets the removed copy. Keep the current arena decoder. Reopen
+  only for a materially different population/hash organization; this spike gives
+  no evidence that `preadv` alone could recover the gate.
 - **Checkpoint existence hint**: a short-circuit may-exist probe is not a store
   audit. It may skip later foreign-entry or I/O discovery after a valid hit. Keep
   complete scans for byte accounting, eviction, publication, cleanup, and any

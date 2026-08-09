@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 Compressor-Pair Accounting KILL
+
+Status: KILL implementation of a pair-only KV/gate compressor kernel. Existing
+evidence does not support the >=2% whole-prefill bar.
+
+- The 41 attention-KV, 41 attention-gate, 21 indexer-KV, and 21 indexer-gate
+  projections form 62 natural pairs, but all 124 already use the promoted Q8
+  matrix work unit. Its earlier 4.03% exact-GEMV-to-matrix gain is banked work,
+  not residual headroom.
+- One normalized F32 input is already shared across the layer's projections.
+  Pairing can reuse cached activation tiles and remove 62 dispatches, but KV and
+  gate weights, Q8 decode, dot products, accumulation, and outputs remain
+  distinct. Producer/consumer fusion would be a larger changed premise.
+- K160 N=2,048 needs roughly 147 ms for 2% against the current 7.35 s ordinary
+  anchor. No committed profile attributes that much removable pair work; the
+  containing before-attention stage is not a causal ceiling. Prior exact paired
+  IQ2 activation sharing regressed, while another shared-panel result moved
+  whole wall only 1.07%.
+
+Decision: do not build or sweep a paired compressor kernel. Reopen only if an
+existing trace or materially different producer/consumer design isolates at
+least 30-50 ms of deleted GPU work beyond unchanged projection arithmetic, with
+a credible path to the complete 147 ms wall bar.
+
 ## 2026-08-09 - DeepSeek V4 Exact mHC No-Slab Producer KILL
 
 Status: KILL the exact scale-only plus grouped-Q8 no-slab producer. Remove all

@@ -1172,30 +1172,35 @@ wrapping, not DSpark or speculative decoding generally.
 
 Force-ranked queue:
 
-1. **Pair compressor ownership only if it deletes work.** The 124 compressor
-   projections already use llama-lineage half matrices. A candidate must reuse
-   normalized input or decoded panels across KV/gate and remove dispatch or
-   staging work; another tile is not a changed premise.
-2. **Keep command ownership closed without GPU-work deletion.** The optimistic
+Compressor pairing also closes at accounting. The 124 projections already use
+the promoted matrix path and one shared normalized input. Sixty-two KV/gate
+pairs retain distinct weights, Q8 decode, dots, accumulations, and outputs; only
+cached activation staging and dispatches are plainly shareable. No existing
+profile attributes the roughly 147 ms required for 2% to removable pair work,
+and exact shared-panel precedents are negative or about 1% whole-wall. Reopen
+only with 30-50 ms of independently isolated GPU-work deletion beyond unchanged
+projection arithmetic and a credible path to the complete wall bar.
+
+1. **Keep command ownership closed without GPU-work deletion.** The optimistic
    merged-route/indirect ceiling misses 2% after nonphysical full credits. Reopen
    only when a producer/consumer fusion independently deletes roughly 30-50 ms
    of control GPU work while preserving fail-stop mutation ownership.
-3. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
+2. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
    correct two-row causal execution plus measured resident drafter, hidden
    capture, acceptance, and transaction costs fit inside the 61.09 ms complete
    packet budget on the maintained snapshot. Do not adapt the current packed
    path or fund command collapse around its unchanged GPU work.
-4. **Use the singleton stage front end only for a named general-decode lever.**
+3. **Use the singleton stage front end only for a named general-decode lever.**
    K160 wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus
    llama.cpp's 39.2 ms. Attention core, prepare, output, routed, and shared are
    11.58/7.68/7.89/10.51/2.98 ms; do not resume local kernel sweeps without a
    structural >=2 ms/token deletion.
-5. **Record REAP quality governance before product equivalence claims.** Keep
+4. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,
    add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run
    one full-defaults versus arithmetic-rollbacks logit/top-1 audit. Memory and
    speed do not authorize an asset-quality claim.
-6. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
+5. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
    deep mask and regressed wall; F16 query staging now fails on real nonzero
    history. Reopen low precision only as an F32-authoritative conservative
    filter whose exact refinement, fallback, and merge beat the F32 streaming

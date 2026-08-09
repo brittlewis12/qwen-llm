@@ -1169,6 +1169,16 @@ prefill moves `89.62 -> 168.46-169.33 token/s`, while 64-token decode reaches
 21.70 token/s; the 6,642-token row is 192.27/21.60 prefill/decode token/s. This
 makes K216 performance-viable and leaves its asset-quality comparison open.
 
+K160's raw-KV matrix policy does not transfer directly. A default-off K216 arm
+selects its 43 Q8_0 raw-KV projections while leaving all Q-A projections and the
+337-token tail on the incumbent path. Fresh-child control/candidate/candidate/
+control walls are `13,493.525/13,596.330/13,627.882/13,353.784 ms`; candidate
+median regresses by `188.452 ms` or `1.40%`, and the changed N=2,048 chunk
+regresses by `164.559 ms` or `2.11%`. Remove the arm and do not run the
+preregistered FRESH follow-on. K160's isolated-arm materiality is not portable
+authority; require a new asset-specific profile and changed work unit before
+reopening raw-KV matrix ownership.
+
 The local DSpark census and external acceptance calibration are complete. On
 the exact 2,385-token official-chat prompt, llama.cpp N1 at confidence 0.3 moves
 `26.785 -> 30.367 token/s`, accepts 107 of 142 attempted drafts, preserves the

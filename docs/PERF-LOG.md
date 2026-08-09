@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 K216 Raw-KV Matrix Transfer KILL
+
+Status: KILL selective transfer of K160's F32 Q8 raw-KV matrix schedule to
+K216. This dirty-tree screen has transfer authority only. The force path is
+removed, and FRESH was not run.
+
+- K216 has Q8_0 `attn_kv` weights in all 43 layers but Q6_K `attn_q_a` in 42
+  layers. The default-off arm therefore intersected the existing `both` policy
+  with asset capability, admitted exactly 43 raw-KV and zero Q-A matrix calls,
+  audited every selected dtype before session mutation, and left the 337-token
+  tail on the incumbent token-axis path.
+- Four fresh children ran control/candidate/candidate/control on the same
+  2,385-token synthetic ramp with one warmup each. Ordinary walls are
+  `13,493.525/13,596.330/13,627.882/13,353.784 ms`. Candidate median is
+  `13,612.106 ms` versus `13,423.654 ms` control: a `188.452 ms` or `1.40%`
+  regression, with both candidates slower than both controls.
+- The changed N=2,048 chunk regresses from a `7,785.153 ms` control median to
+  `7,949.712 ms`, or `164.559 ms` and `2.11%`. Candidate logits are repeatable
+  but differ from control, as expected for the previously accepted numerical
+  matrix schedule. The endpoint gate failed before sampled attribution or an
+  integrated behavior check.
+
+Decision: K160's combined gain and qualitative note that each isolated arm was
+material do not authorize raw-KV transfer across compact assets. The existing
+matrix work unit is not universally faster at this shape once the complete
+K216 graph is charged. Do not run FRESH or reopen with more samples; require a
+new asset-specific profile and changed work-unit premise. Adversarial review:
+cx session `019fe83c-1010-7721-9c50-488228e94883`.
+
 ## 2026-08-09 - DeepSeek V4 Singleton Online-Selected Transfer KILL
 
 Status: KILL the packed online-direct selected-CSA body as a singleton decode

@@ -3,6 +3,12 @@
 Status: preregistration. Parent source is `bbfcca8`. No oracle implementation
 or timing result exists yet.
 
+Passive-timing clarification: implementation review exposed that retaining all
+completed command objects until request end would change their ordinary
+lifetime. Before any model execution or timing observation, this packet instead
+freezes immediate scalar reads after the wait that proves each command complete.
+Those common observer reads remain charged inside every A/P/Z wall sample.
+
 ## Question
 
 Can deleting the F32 `[16384,N]` normalized mHC slab and its only consumer
@@ -112,11 +118,20 @@ forbidden inside timed runs.
 
 ## Passive GPU Timing
 
-Add a collector that only reads each ordinary command's
-`GPUStartTime`/`GPUEndTime` after its existing wait. It must not create a stage
-recorder, split an encoder, set trace mode, or participate in any topology
-decision. An untimed on/off proof must show identical command and encoder
-structure.
+Preallocate the complete scalar interval ledger before timing. After each
+ordinary command's existing wait, read status, error,
+`GPUStartTime`/`GPUEndTime`, and append without allocation. A shared-overlap
+command remains reachable through its incumbent `CommittedPackedCommand` until
+the later expert command on the same queue completes; read its scalars then
+without extending that ordinary lifetime or adding another wait. These reads
+stay inside the common wall interval and may not be subtracted.
+
+The collector must not acquire command ownership, extend any command object's
+ordinary lifetime, create a stage recorder, split an encoder, set trace mode, or
+participate in any topology decision. An untimed on/off proof must show
+identical command and encoder structure. Every command must report completed
+status, no error, finite positive duration, and the exact frozen per-layer
+submission order.
 
 Record pre-expert, expert, and shared-overlap command intervals separately.
 Report raw summed duration and the union of all intervals. Define
@@ -160,11 +175,12 @@ No observation is shared across sextets. There is no early stop, retry,
 replacement, filtering, outlier exclusion, or reordered run. Any failed arm
 returns `HOLD` with no authority.
 
-Timing begins immediately before packed execution and ends after normal loaded
-completion. Immediately afterward, read passive timestamps, copy the fixed-size
-endpoint evidence in one frozen order without another GPU command, drain the
-queue, and destroy the session. No snapshot export, continuation, oracle hash,
-or other GPU correctness work occurs between timed observations.
+Timing begins immediately before token staging and packed execution. It includes
+the common passive scalar reads and ends after the final command evidence and
+normal loaded completion. Immediately afterward, copy the fixed-size endpoint
+evidence in one frozen order without another GPU command, drain the queue, and
+destroy the session. No snapshot export, continuation, oracle hash, or other GPU
+correctness work occurs between timed observations.
 
 For sextet `i`, define means over its two observations:
 

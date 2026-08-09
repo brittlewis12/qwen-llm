@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 K160 mHC Representation-Deletion HOLD
+
+Status: the exact zero-producer ceiling is descriptively above 2%, but the
+canonical v1 result is `HOLD`, authority `none`, because severe campaign-wide
+VM pressure is the sole validity failure. No mHC producer or chargeback is
+authorized.
+
+- A sealed dual-capture oracle replays all 86 exact `[24,2048]` mHC function
+  outputs. A/P/Z preserve fresh sessions, allocations, command placement,
+  controls, collapse, posts, routing, experts, and endpoint bits; Z deletes only
+  86 tagged RMSNorm and 86 tagged Q8 projection dispatches.
+- Two pre-acquisition launches stopped before C0 and observed no arm timing.
+  Their allocation census first exposed a hard-coded 256-row router inventory
+  on K160, then an invalid assumption that named planner order must match Rust
+  constructor order. The repaired gate compares exact allocation footprints and
+  retains actual order for cross-arm identity.
+- The clean `700522e` acquisition completes all 36 fixed observations. Wall
+  CLEAR mean/lower95 are 3.5092%/3.0033%; union-GPU CLEAR mean/lower95 are
+  2.4826%/2.3232%. Every conservative wall sextet exceeds 2%, both wall/GPU
+  block medians are positive, and A/P/Z stationarity is 0.80-1.14%.
+- Every build, parent, model, token, policy, capture, endpoint, continuation,
+  topology, allocation, oracle, power, pipeline, and host gate passes. The sole
+  failure is `vm_pressure`: swap grows 12.06 GB, compressor storage 2,247,056
+  pages, occupancy 1,379,307 pages, swapouts 848,692, and pageouts 1,145.
+
+Decision: retain the result as strong contributive evidence only. A separately
+frozen cleaner-memory replication may keep the arms, schedule, estimators, and
+gates while adding prospective low-pressure host admission and timing-local VM
+snapshots. Analyze it standalone; do not pool or replace v1. Durable compact
+evidence: `docs/bench/2026-08-09-dsv4-k160-mhc-delete-v1/result-summary.json`.
+Raw report SHA-256: `8449300b...f4c0292`. Adversarial review: cx sessions
+`019fe712-ffed-7a30-b58a-709a39462762`,
+`019fe734-fdff-7f31-93a9-e5616781a009`, and
+`019fe74a-c183-7520-8f3a-fb01c53d28e3`.
+
 ## 2026-08-08 - DeepSeek V4 Duplicate Hash-Route Contract Fix
 
 Status: packed compact GPU routing now preserves duplicate hash-map expert

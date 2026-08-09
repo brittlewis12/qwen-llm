@@ -1,10 +1,10 @@
 # DeepSeek V4 K160 mHC Representation-Deletion Ceiling
 
-Status: implementation in progress. The packet was frozen at `0b4c62d` and its
-passive timing clarified at `9b0307d` before model or timing observations. The
-engine oracle and campaign substrate now exist. An independent arithmetic-parent
-endpoint was acquired before experimental timing; no C/A/P/Z acquisition or
-result exists.
+Status: canonical v1 acquisition complete at clean commit `700522e`. The
+mechanical result is `HOLD`, authority `none`, because severe campaign-wide VM
+pressure is the sole validity failure. Every non-VM gate passes and the
+descriptive ceiling clears 2%, but this packet authorizes no chargeback,
+producer, or performance claim.
 
 Passive-timing clarification: implementation review exposed that retaining all
 completed command objects until request end would change their ordinary
@@ -69,6 +69,41 @@ fail closed. The second launch likewise observed no C/A/P/Z execution or timing.
 Named plan entries remain pricing labels rather than runtime buffer identities;
 the normalized scratch's semantic presence is established separately by source,
 site/dispatch ledgers, and bitwise endpoint correctness.
+
+## Result — HOLD
+
+The canonical acquisition completed at `2026-08-09T16:03:05Z` from clean
+release commit `700522e9b709b9d343e285390d21b8c8a7bc0758`. The raw 18 MiB
+report remains under `target/profiles/dsv4-k160-mhc-delete-v1/report.json` with
+SHA-256
+`8449300b7242154a3bc50ca59bea64c06a91bbe5730f99eea0f75f164f4c0292`.
+`result-summary.json` retains the complete 36-arm timing series and compact
+decision evidence in Git.
+
+- Wall CLEAR mean is 3.5092%, with one-sided lower95 3.0033%; wall block
+  medians are 3.0142% and 3.9375%.
+- Union-GPU CLEAR mean is 2.4826% of A wall, with lower95 2.3232%; GPU block
+  medians are 2.5113% and 2.6048%.
+- All six conservative wall effects exceed 2%. A/P/Z raw-arm stationarity is
+  1.1448% / 0.9088% / 0.7980%, below the frozen 5% gate.
+- C/A/P contain the same 1,994 dispatches and 129 serial commands. Z retains
+  all commands and removes exactly the 86 tagged RMSNorm plus 86 tagged Q8
+  projection rows. Every endpoint, continuation, oracle, allocation, parent,
+  build, power, and pipeline gate passes.
+
+The sole failure is not marginal. Across the full campaign, swap grows by
+12,059,347,517 bytes, compressor storage by 2,247,056 16 KiB pages, compressor
+occupancy by 1,379,307 pages, swapouts by 848,692, and pageouts by 1,145. That
+window includes load, capture, preflight, correctness, warm-up, and timing, so
+it cannot localize pressure by arm or prove it common-mode. Low block drift and
+six positive effects are strong contributive evidence, not a substitute for the
+preregistered validity-first rule.
+
+An independent cleaner-memory replication is legitimate only as a new study:
+disclose this favorable HOLD, keep arms/schedule/estimators/gates fixed, add
+prospective low-pressure host admission plus VM snapshots immediately around
+the timed loop, permit one complete acquisition, and analyze it standalone.
+Do not pool, replace, or relabel this v1 result.
 
 ## Question
 

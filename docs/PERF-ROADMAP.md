@@ -1075,6 +1075,18 @@ N=2,048 request, while changing final logits. A future mHC candidate must delete
 the 16,384-wide normalized representation and adjacent dispatches rather than
 buying another matrix schedule.
 
+That representation-deletion ceiling is now measured but not certified. A
+clean `700522e` C/A/P/Z campaign deletes only the 86 normalization/projection
+pairs and preserves every endpoint bit. Its conservative wall CLEAR lower95 is
+3.0033%, union-GPU lower95 is 2.3232%, all six wall sextets exceed 2%, and raw
+arm stationarity stays below 1.15%. The mechanical result nevertheless HOLDs on
+the sole validity failure: swap grows 12.06 GB, compressor occupancy grows
+1,379,307 pages, and 848,692 swapouts occur across the campaign. This is strong
+contributive evidence, not authority for a producer or exact chargeback. One
+standalone cleaner-memory replication may preserve the complete scientific
+design while strengthening prospective host admission and adding VM snapshots
+immediately around timing; do not pool or replace v1.
+
 The larger token-axis defect does clear. Q-A and raw-KV were still rereading
 their Q8 matrices independently for every prompt token while the neighboring
 Q-B, output, shared, and compressor projections owned full-chunk matrices.
@@ -1156,10 +1168,12 @@ wrapping, not DSpark or speculative decoding generally.
 
 Force-ranked queue:
 
-1. **Delete the mHC normalized representation.** Direct half-matrix substitution
-   is KILLed. The next falsifier must replace the `[16384,N]` normalized slab
-   with an exact RMS-scale/residual-aware 24-row projection work unit, preserve
-   F32 rounding and control/collapse order, and clear the 2% whole-request gate.
+1. **Certify mHC deletion in a clean memory envelope.** The v1 impossible
+   ceiling is descriptively clear but formally HOLDs on severe VM pressure.
+   Freeze one standalone replication with unchanged arms, schedule, estimators,
+   and gates; require prospective low-swap/compressor admission plus timing-local
+   VM snapshots. Only an independently valid CLEAR may authorize an exact
+   RMS-scale/residual-aware 24-row chargeback. Do not build the producer first.
 2. **Pair compressor ownership only if it deletes work.** The 124 compressor
    projections already use llama-lineage half matrices. A candidate must reuse
    normalized input or decoded panels across KV/gate and remove dispatch or

@@ -557,7 +557,7 @@ impl DeepSeekV4CensusV1 {
             ));
         }
         if self.shards.len() != self.totals.shard_count as usize
-            || self.totals.shard_count != 4
+            || !matches!(self.totals.shard_count, 3 | 4)
             || self.totals.tensor_count != 1_328
             || self.layers.len() != 43
             || self.roles.len() != DeepSeekV4TensorRole::ALL.len()

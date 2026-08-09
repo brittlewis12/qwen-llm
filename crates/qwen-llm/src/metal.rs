@@ -5215,47 +5215,140 @@ pub fn encode_mat_mat_f32_router_e8p32(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MetalError> {
+    encode_mat_mat_f32_router_e8p32_kernel(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        "mat_mat_f32_router_e8p32",
+        "kernel_mat_mat_f32_f32_router_e8p32",
+        true,
+    )
+}
+
+pub fn encode_mat_mat_f32_router_e8p32_strict(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+) -> Result<(), MetalError> {
+    encode_mat_mat_f32_router_e8p32_kernel(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        n_query,
+        "mat_mat_f32_router_e8p32_strict",
+        "kernel_mat_mat_f32_f32_router_e8p32_strict",
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_mat_mat_f32_router_e8p32_kernel(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_query: usize,
+    error_name: &'static str,
+    kernel_name: &'static str,
+    require_float4_input: bool,
+) -> Result<(), MetalError> {
+    if n_in == 0
+        || n_out == 0
+        || n_query == 0
+        || u32::try_from(n_in).is_err()
+        || u32::try_from(n_out).is_err()
+        || u32::try_from(n_query).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: error_name,
+            detail: format!(
+                "dimensions must be nonzero u32 values, got n_in={n_in} n_out={n_out} n_query={n_query}"
+            ),
+        });
+    }
+    let expected_weight = n_in
+        .checked_mul(n_out)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: error_name,
+            detail: format!("weight element count overflows for n_in={n_in} n_out={n_out}"),
+        })?;
+    let expected_x = n_query
+        .checked_mul(n_in)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: error_name,
+            detail: format!("input element count overflows for n_query={n_query} n_in={n_in}"),
+        })?;
+    let expected_y = n_query
+        .checked_mul(n_out)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: error_name,
+            detail: format!("output element count overflows for n_query={n_query} n_out={n_out}"),
+        })?;
     if weight.dtype != GgmlType::F32 {
         return Err(MetalError::BadShape {
-            kernel: "mat_mat_f32_router_e8p32",
+            kernel: error_name,
             detail: format!("weight.dtype = {:?}, expected F32", weight.dtype),
         });
     }
     if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
         return Err(MetalError::BadShape {
-            kernel: "mat_mat_f32_router_e8p32",
+            kernel: error_name,
             detail: format!("x/y expected F32, got {:?}/{:?}", x.dtype, y.dtype),
         });
     }
-    if !n_in.is_multiple_of(4) || !n_out.is_multiple_of(8) {
+    if (require_float4_input && !n_in.is_multiple_of(4)) || !n_out.is_multiple_of(8) {
         return Err(MetalError::BadShape {
-            kernel: "mat_mat_f32_router_e8p32",
+            kernel: error_name,
             detail: format!(
-                "expected n_in % 4 == 0 and n_out % 8 == 0, got n_in={n_in} n_out={n_out}"
+                "expected compatible n_in and n_out % 8 == 0, got n_in={n_in} n_out={n_out}"
             ),
         });
     }
-    if x.n_elements() as usize != n_query * n_in {
+    if weight.n_elements() as usize != expected_weight {
         return Err(MetalError::BadShape {
-            kernel: "mat_mat_f32_router_e8p32",
+            kernel: error_name,
             detail: format!(
-                "x.n_elements={} != n_query*n_in={}",
+                "weight.n_elements={} != n_in*n_out={expected_weight}",
+                weight.n_elements()
+            ),
+        });
+    }
+    if x.n_elements() as usize != expected_x {
+        return Err(MetalError::BadShape {
+            kernel: error_name,
+            detail: format!(
+                "x.n_elements={} != n_query*n_in={expected_x}",
                 x.n_elements(),
-                n_query * n_in
             ),
         });
     }
-    if y.n_elements() as usize != n_out * n_query {
+    if y.n_elements() as usize != expected_y {
         return Err(MetalError::BadShape {
-            kernel: "mat_mat_f32_router_e8p32",
+            kernel: error_name,
             detail: format!(
-                "y.n_elements={} != n_out*n_query={}",
+                "y.n_elements={} != n_out*n_query={expected_y}",
                 y.n_elements(),
-                n_out * n_query
             ),
         });
     }
-    let pso = ctx.pipeline("kernel_mat_mat_f32_f32_router_e8p32")?;
+    let pso = ctx.pipeline(kernel_name)?;
     enc.set_pipeline(&pso);
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -22463,6 +22556,85 @@ mod tests {
                 .fold(0f32, f32::max);
             eprintln!("[mat_vec n_in={n_in} n_out={n_out}] max|Δ|={max_abs:.2e}");
             assert!(max_abs < 1e-3);
+        }
+    }
+
+    #[test]
+    fn mat_mat_f32_router_e8p32_strict_matches_generic_bits() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        let n_in = 4096usize;
+        let n_out = 160usize;
+        let mut state = 0x8b8b_8b8b_u32;
+        let mut sample = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            ((state >> 8) as f32 * (1.0 / 16_777_216.0) - 0.5) * 0.25
+        };
+        let weight = (0..n_in * n_out).map(|_| sample()).collect::<Vec<_>>();
+        let weight_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&weight),
+            vec![n_in as u64, n_out as u64],
+            GgmlType::F32,
+        )
+        .expect("weight tensor");
+        let short_weight = MetalTensor::zeros_f32(&ctx, vec![(n_in * n_out - 1) as u64])
+            .expect("short weight tensor");
+        let validation_x =
+            MetalTensor::zeros_f32(&ctx, vec![n_in as u64]).expect("validation input");
+        let validation_y =
+            MetalTensor::zeros_f32(&ctx, vec![n_out as u64]).expect("validation output");
+        let command = ctx.queue.commandBuffer().expect("validation command");
+        let encoder = KernelEncoder::begin(&command);
+        assert!(
+            encode_mat_mat_f32_router_e8p32_strict(
+                &ctx,
+                &encoder,
+                &short_weight,
+                &validation_x,
+                &validation_y,
+                n_in,
+                n_out,
+                1,
+            )
+            .is_err()
+        );
+        encoder.end();
+
+        for n_query in [1usize, 32, 128, 2048, 4096] {
+            let x = (0..n_in * n_query).map(|_| sample()).collect::<Vec<_>>();
+            let x_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&x),
+                vec![n_query as u64, n_in as u64],
+                GgmlType::F32,
+            )
+            .expect("input tensor");
+            let generic = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64])
+                .expect("generic output");
+            let strict = MetalTensor::zeros_f32(&ctx, vec![n_out as u64, n_query as u64])
+                .expect("strict output");
+            one_shot(&ctx, |enc| {
+                encode_mat_mat_f32(&ctx, enc, &weight_t, &x_t, &generic, n_in, n_out, n_query)?;
+                encode_mat_mat_f32_router_e8p32_strict(
+                    &ctx, enc, &weight_t, &x_t, &strict, n_in, n_out, n_query,
+                )
+            })
+            .expect("router differential");
+
+            let generic = read_back_f32(&generic.buffer, n_out * n_query);
+            let strict = read_back_f32(&strict.buffer, n_out * n_query);
+            if let Some((index, (expected, actual))) = generic
+                .iter()
+                .zip(&strict)
+                .enumerate()
+                .find(|(_, (expected, actual))| expected.to_bits() != actual.to_bits())
+            {
+                panic!(
+                    "n_query={n_query} output {index} differs: generic={expected:?} strict={actual:?}"
+                );
+            }
         }
     }
 

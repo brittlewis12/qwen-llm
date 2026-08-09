@@ -6,7 +6,7 @@ pub const LAYER_COUNT: usize = 43;
 pub const CSA_LAYER_COUNT: usize = 21;
 pub const CSA_TOP_K: usize = 512;
 pub const ROUTE_TOP_K: usize = 6;
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const FP4_SHADOW_SCHEMA_VERSION: u32 = 1;
 pub(crate) const FIRST_SPARSE_CSA_POSITION: u32 = (CSA_TOP_K as u32) * 4 + 3;
 
@@ -43,6 +43,7 @@ pub struct DeepSeekV4RouteDecision {
 pub struct DeepSeekV4DecisionLayer {
     pub layer: u32,
     pub csa: Option<DeepSeekV4CsaDecision>,
+    pub indexer_head_weights: Vec<f32>,
     pub route: DeepSeekV4RouteDecision,
 }
 
@@ -636,6 +637,7 @@ impl DeepSeekV4DecisionCapture {
         &mut self,
         layer: usize,
         csa: Option<DeepSeekV4CsaDecision>,
+        indexer_head_weights: Vec<f32>,
         route: DeepSeekV4RouteDecision,
     ) -> Result<(), DeepSeekV4DiagnosticsError> {
         let CaptureState::Capturing { layers, .. } = &mut self.state else {
@@ -652,11 +654,30 @@ impl DeepSeekV4DecisionCapture {
                 "layer {layer} CSA decision presence does not match Flash-0731 geometry"
             )));
         }
+        if csa.is_some() {
+            if indexer_head_weights.len() != 64 {
+                return Err(DeepSeekV4DiagnosticsError::Shape(format!(
+                    "layer {layer} captured {} indexer head weights, expected 64",
+                    indexer_head_weights.len()
+                )));
+            }
+            if indexer_head_weights
+                .iter()
+                .any(|weight| !weight.is_finite())
+            {
+                return Err(DeepSeekV4DiagnosticsError::NonFinite("indexer head weight"));
+            }
+        } else if !indexer_head_weights.is_empty() {
+            return Err(DeepSeekV4DiagnosticsError::Shape(format!(
+                "non-CSA layer {layer} captured indexer head weights"
+            )));
+        }
         validate_csa(csa.as_ref())?;
         validate_route(&route)?;
         layers.push(DeepSeekV4DecisionLayer {
             layer: layer as u32,
             csa,
+            indexer_head_weights,
             route,
         });
         Ok(())
@@ -711,6 +732,14 @@ impl DeepSeekV4DecisionCapture {
             }
             CaptureState::Taken => Err(DeepSeekV4DiagnosticsError::DuplicateCapture),
         }
+    }
+
+    pub(crate) fn take_and_reset(
+        &mut self,
+    ) -> Result<DeepSeekV4DecisionTranscript, DeepSeekV4DiagnosticsError> {
+        let transcript = self.take()?;
+        self.state = CaptureState::Idle;
+        Ok(transcript)
     }
 
     fn incomplete_error(&self) -> DeepSeekV4DiagnosticsError {
@@ -1090,6 +1119,14 @@ mod tests {
         }
     }
 
+    fn indexer_head_weights(layer: usize) -> Vec<f32> {
+        if is_csa_layer(layer) {
+            vec![1.0; 64]
+        } else {
+            Vec::new()
+        }
+    }
+
     fn csa() -> DeepSeekV4CsaDecision {
         build_csa_decision(
             (0..513).map(|row| row as f32).collect(),
@@ -1202,7 +1239,7 @@ mod tests {
                 operation: "restore a snapshot"
             }
         );
-        capture.capture_layer(0, None, route()).unwrap();
+        capture.capture_layer(0, None, Vec::new(), route()).unwrap();
         assert_eq!(
             capture.take().unwrap_err(),
             DeepSeekV4DiagnosticsError::Incomplete {
@@ -1219,7 +1256,9 @@ mod tests {
         capture.begin_forward(TEST_POSITION).unwrap();
         for layer in 0..LAYER_COUNT {
             let csa = is_csa_layer(layer).then(csa);
-            capture.capture_layer(layer, csa, route()).unwrap();
+            capture
+                .capture_layer(layer, csa, indexer_head_weights(layer), route())
+                .unwrap();
         }
         capture.finish().unwrap();
         capture
@@ -1245,6 +1284,27 @@ mod tests {
             capture.take().unwrap_err(),
             DeepSeekV4DiagnosticsError::DuplicateCapture
         );
+    }
+
+    #[test]
+    fn reusable_take_supports_consecutive_decision_windows() {
+        let mut capture = DeepSeekV4DecisionCapture::default();
+        for position in [TEST_POSITION, TEST_POSITION + 1] {
+            capture.arm(position).unwrap();
+            capture.begin_forward(position).unwrap();
+            for layer in 0..LAYER_COUNT {
+                capture
+                    .capture_layer(
+                        layer,
+                        is_csa_layer(layer).then(csa),
+                        indexer_head_weights(layer),
+                        route(),
+                    )
+                    .unwrap();
+            }
+            capture.finish().unwrap();
+            assert_eq!(capture.take_and_reset().unwrap().position, position);
+        }
     }
 
     #[test]

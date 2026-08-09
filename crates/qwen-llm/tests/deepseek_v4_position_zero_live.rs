@@ -17,7 +17,9 @@ use qwen_llm::deepseek_v4_metal::{
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{MetalContext, kernel_trace_begin, kernel_trace_snapshot};
 use sha2::{Digest, Sha256};
-use std::io::{Cursor, Read};
+use std::io::Cursor;
+#[cfg(feature = "dsv4-diagnostics")]
+use std::io::Read;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "dsv4-diagnostics")]
 use std::process::Command;
@@ -27,6 +29,7 @@ use std::time::Instant;
 use objc2_metal::MTLDevice;
 
 const DEFAULT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
+#[cfg(feature = "dsv4-diagnostics")]
 const DEFAULT_CURRENT_MODEL: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
 const DEFAULT_DURABLE_SNAPSHOT: &str = "target/dsv4-position1024.ds4c";
 const DEFAULT_DURABLE_POSITION_2048_SNAPSHOT: &str = "target/dsv4-position2048.ds4c";
@@ -40,6 +43,7 @@ const ORACLE_BYTES: &[u8] = include_bytes!("fixtures/deepseek_v4_token35_positio
 const ORACLE_MANIFEST: &str = include_str!("fixtures/deepseek_v4_token35_position0_b10222.json");
 const LEGACY_CENSUS_MANIFEST: &str =
     include_str!("fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_census_v1.json");
+#[cfg(feature = "dsv4-diagnostics")]
 const CURRENT_CENSUS_MANIFEST: &str =
     include_str!("fixtures/deepseek_v4_flash_0731_ud_iq3_xxs_current_2026_08_04_census_v1.json");
 const POSITION_ONE_ORACLE_BYTES: &[u8] =

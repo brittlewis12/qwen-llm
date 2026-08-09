@@ -1732,10 +1732,9 @@ impl DeepSeekV4Session {
         self.sparse_csa.multigroup_selector_telemetry()
     }
 
-    /// Enables the exact multi-group sparse selector for its measured
-    /// far-context crossover band. The experiment is off by default, must be
-    /// sealed before the first token, and never changes packed prefill or
-    /// ineligible singleton positions.
+    /// Explicitly seals the exact multi-group sparse selector for its measured
+    /// far-context crossover band. Production already selects that band on the
+    /// qualified device; this retains the diagnostics policy surface.
     #[doc(hidden)]
     pub fn enable_multigroup_selector_experiment(&mut self) -> Result<(), DeepSeekV4MetalError> {
         let position = self.phase.ready_position()?;
@@ -1745,6 +1744,17 @@ impl DeepSeekV4Session {
             ));
         }
         self.sparse_csa.enable_multigroup_selector_experiment()
+    }
+
+    #[doc(hidden)]
+    pub fn disable_multigroup_selector(&mut self) -> Result<(), DeepSeekV4MetalError> {
+        let position = self.phase.ready_position()?;
+        if position != 0 {
+            return invalid(format!(
+                "DeepSeek V4 multi-group selector must be disabled at position zero, got {position}"
+            ));
+        }
+        self.sparse_csa.disable_multigroup_selector()
     }
 
     /// Enables exact post-Hadamard FP4 lineage capture for a diagnostics-only
@@ -1894,6 +1904,15 @@ impl DeepSeekV4Session {
         &mut self,
     ) -> Result<DeepSeekV4DecisionTranscript, DeepSeekV4MetalError> {
         Ok(self.decision_diagnostics.take()?)
+    }
+
+    /// Takes a complete transcript and returns the diagnostics capture to idle
+    /// for the next consecutive-token observation window.
+    #[cfg(feature = "dsv4-diagnostics")]
+    pub fn take_decision_transcript_and_reset(
+        &mut self,
+    ) -> Result<DeepSeekV4DecisionTranscript, DeepSeekV4MetalError> {
+        Ok(self.decision_diagnostics.take_and_reset()?)
     }
 
     pub fn cache_contract(&self) -> DeepSeekV4AttentionCacheContract {
@@ -2911,26 +2930,36 @@ impl DeepSeekV4Session {
             }
 
             #[cfg(feature = "dsv4-diagnostics")]
-            let csa_decision = if self.decision_diagnostics.is_capturing()
+            let (csa_decision, indexer_head_weights) = if self.decision_diagnostics.is_capturing()
                 && self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
             {
                 let rows = self.compressor_frontiers.csa_rows(layer, position)?;
                 match rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
-                    Some(rows) => Some(
-                        self.sparse_csa
-                            .capture_decision(rows.count, &selection_record)?,
+                    Some(rows) => (
+                        Some(
+                            self.sparse_csa
+                                .capture_decision(rows.count, &selection_record)?,
+                        ),
+                        host_read_f32(
+                            &self.sparse_csa.head_weights,
+                            "diagnostic sparse CSA head weights",
+                        )?,
                     ),
-                    None => None,
+                    None => (None, Vec::new()),
                 }
             } else {
-                None
+                (None, Vec::new())
             };
 
             #[cfg(feature = "dsv4-diagnostics")]
             if self.decision_diagnostics.is_capturing() {
                 let route = self.moe.capture_route_decision(&route_record)?;
-                self.decision_diagnostics
-                    .capture_layer(layer, csa_decision, route)?;
+                self.decision_diagnostics.capture_layer(
+                    layer,
+                    csa_decision,
+                    indexer_head_weights,
+                    route,
+                )?;
             }
 
             #[cfg(feature = "dsv4-diagnostics")]
@@ -3321,7 +3350,7 @@ fn validate_session_config(config: &DeepSeekV4Config) -> Result<(), DeepSeekV4Me
     }
     if !flash_0731_expert_count_supported(config.expert_count) {
         return invalid(format!(
-            "native session supports Flash-0731 expert counts 160 and 256, got {}",
+            "native session supports Flash-0731 expert counts 160, 216, and 256, got {}",
             config.expert_count
         ));
     }
@@ -5147,6 +5176,12 @@ const DEEPSEEK_V4_MULTIGROUP_SELECTOR_STATE_WORDS: usize = 10;
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_DIGITS: usize = 8;
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_PLAN_WORDS: usize = 5;
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_GROUPS: usize = 32;
+#[cfg(not(test))]
+const DEEPSEEK_V4_F16_MATRIX_SCORER_MIN_VISIBLE_ROWS: usize = 16_384;
+#[cfg(not(test))]
+const DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE: &str = "Apple M4 Max";
+#[cfg(not(test))]
+const DEEPSEEK_V4_F16_MATRIX_SCORER_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 #[doc(hidden)]
 pub const DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS: usize = 196_608;
 #[doc(hidden)]
@@ -5165,9 +5200,22 @@ fn deepseek_v4_multigroup_selector_eligible(capacity_rows: usize, visible_rows: 
         && visible_rows >= capacity_rows - capacity_rows / 4
 }
 
+#[cfg(not(test))]
+crate::env_flag!(
+    default_on deepseek_v4_multigroup_selector_enabled,
+    "QWEN_DSV4_MULTIGROUP_SELECTOR"
+);
+
+#[cfg(not(test))]
+crate::env_flag!(
+    default_off deepseek_v4_f16_matrix_scorer_enabled,
+    "QWEN_DSV4_LIGHTNING_F16_MATRIX"
+);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DeepSeekV4SparseSelectorMode {
     Radix4,
+    MultigroupProduction,
     MultigroupExperimental,
 }
 
@@ -5323,6 +5371,7 @@ impl DeepSeekV4MultigroupSelectorScratch {
 struct DeepSeekV4SparseCsaScratch {
     capacity_rows: usize,
     index_queries: MetalTensor,
+    matrix_queries_f16: MetalTensor,
     head_weights: MetalTensor,
     visible_counts: MetalTensor,
     scores: MetalTensor,
@@ -5344,6 +5393,7 @@ struct DeepSeekV4SparseCsaScratch {
 enum DeepSeekV4IndexerScoreTestPolicy {
     Production,
     ScalarOracle,
+    MatrixF16,
 }
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -5362,9 +5412,24 @@ impl DeepSeekV4SparseCsaScratch {
                 "sparse CSA scratch capacity {capacity_rows} is not an aligned top-k superset"
             ));
         }
+        let multigroup = deepseek_v4_multigroup_selector_capacity_supported(capacity_rows)
+            .then(|| DeepSeekV4MultigroupSelectorScratch::new(ctx, capacity_rows))
+            .transpose()?;
+        #[cfg(test)]
+        let selector_mode = DeepSeekV4SparseSelectorMode::Radix4;
+        #[cfg(not(test))]
+        let selector_mode = if multigroup.is_some()
+            && ctx.device.name().to_string() == DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE
+            && deepseek_v4_multigroup_selector_enabled()
+        {
+            DeepSeekV4SparseSelectorMode::MultigroupProduction
+        } else {
+            DeepSeekV4SparseSelectorMode::Radix4
+        };
         Ok(Self {
             capacity_rows,
             index_queries: MetalTensor::zeros_f32(ctx, vec![128, 64, 1])?,
+            matrix_queries_f16: MetalTensor::zeros_f16(ctx, vec![128, 64, 1])?,
             head_weights: MetalTensor::zeros_f32(ctx, vec![64, 1])?,
             visible_counts: MetalTensor::zeros_i32(ctx, vec![1])?,
             scores: MetalTensor::zeros_f32(ctx, vec![capacity_rows as u64, 1])?,
@@ -5372,10 +5437,8 @@ impl DeepSeekV4SparseCsaScratch {
             cache_order_ids: MetalTensor::zeros_i32(ctx, vec![DEEPSEEK_V4_CSA_TOP_K as u64, 1])?,
             selected_counts: MetalTensor::zeros_i32(ctx, vec![1])?,
             status: MetalTensor::zeros_i32(ctx, vec![1])?,
-            selector_mode: DeepSeekV4SparseSelectorMode::Radix4,
-            multigroup: deepseek_v4_multigroup_selector_capacity_supported(capacity_rows)
-                .then(|| DeepSeekV4MultigroupSelectorScratch::new(ctx, capacity_rows))
-                .transpose()?,
+            selector_mode,
+            multigroup,
             multigroup_invocations: DeepSeekV4MultigroupSelectorInvocationCounters::default(),
             #[cfg(test)]
             score_test_policy: DeepSeekV4IndexerScoreTestPolicy::Production,
@@ -5385,7 +5448,7 @@ impl DeepSeekV4SparseCsaScratch {
     }
 
     fn enable_multigroup_selector_experiment(&mut self) -> Result<(), DeepSeekV4MetalError> {
-        if self.selector_mode != DeepSeekV4SparseSelectorMode::Radix4 {
+        if self.selector_mode == DeepSeekV4SparseSelectorMode::MultigroupExperimental {
             return invalid("DeepSeek V4 sparse selector experiment is already sealed");
         }
         if self.multigroup.is_none() {
@@ -5395,6 +5458,14 @@ impl DeepSeekV4SparseCsaScratch {
             ));
         }
         self.selector_mode = DeepSeekV4SparseSelectorMode::MultigroupExperimental;
+        Ok(())
+    }
+
+    fn disable_multigroup_selector(&mut self) -> Result<(), DeepSeekV4MetalError> {
+        if self.selector_mode == DeepSeekV4SparseSelectorMode::MultigroupExperimental {
+            return invalid("DeepSeek V4 sparse selector experiment is already sealed");
+        }
+        self.selector_mode = DeepSeekV4SparseSelectorMode::Radix4;
         Ok(())
     }
 
@@ -5421,6 +5492,20 @@ impl DeepSeekV4SparseCsaScratch {
         #[cfg(not(test))]
         {
             false
+        }
+    }
+
+    fn use_f16_matrix_score(&self, ctx: &MetalContext, visible_rows: usize) -> bool {
+        #[cfg(test)]
+        {
+            let _ = (ctx, visible_rows);
+            self.score_test_policy == DeepSeekV4IndexerScoreTestPolicy::MatrixF16
+        }
+        #[cfg(not(test))]
+        {
+            visible_rows >= DEEPSEEK_V4_F16_MATRIX_SCORER_MIN_VISIBLE_ROWS
+                && ctx.device.name().to_string() == DEEPSEEK_V4_F16_MATRIX_SCORER_QUALIFIED_DEVICE
+                && deepseek_v4_f16_matrix_scorer_enabled()
         }
     }
 
@@ -5559,20 +5644,54 @@ impl DeepSeekV4SparseCsaScratch {
         rows: DeepSeekV4CsaRows<'_>,
         record: &DeepSeekV4SelectionRecord,
     ) -> Result<(), DeepSeekV4MetalError> {
-        encode_lightning_indexer_scores_f16_with_policy(
-            ctx,
-            enc,
-            &self.index_queries,
-            &self.head_weights,
-            rows.indexer_cache,
-            &record.visible_count,
-            &self.scores,
-            64,
-            128,
-            rows.capacity_rows,
-            1,
-            self.force_scalar_score_kernel(),
-        )?;
+        if self.use_f16_matrix_score(ctx, rows.count) {
+            #[cfg(not(test))]
+            {
+                static REPORTED: std::sync::Once = std::sync::Once::new();
+                REPORTED.call_once(|| {
+                    eprintln!(
+                        "deepseek_v4: forced F16-staged Lightning matrix scorer active for far singleton rows; disable=QWEN_DSV4_LIGHTNING_F16_MATRIX=0"
+                    );
+                });
+            }
+            encode_scatter_offset_f32_to_f16(
+                ctx,
+                enc,
+                &self.index_queries,
+                &self.matrix_queries_f16,
+                0,
+                64 * 128,
+            )?;
+            encode_lightning_indexer_scores_f16_matrix(
+                ctx,
+                enc,
+                &self.matrix_queries_f16,
+                &self.head_weights,
+                rows.indexer_cache,
+                &record.visible_count,
+                &self.scores,
+                64,
+                128,
+                rows.capacity_rows,
+                rows.count,
+                1,
+            )?;
+        } else {
+            encode_lightning_indexer_scores_f16_with_policy(
+                ctx,
+                enc,
+                &self.index_queries,
+                &self.head_weights,
+                rows.indexer_cache,
+                &record.visible_count,
+                &self.scores,
+                64,
+                128,
+                rows.capacity_rows,
+                1,
+                self.force_scalar_score_kernel(),
+            )?;
+        }
         self.encode_scored_rows(ctx, enc, rows.capacity_rows, rows.count, record)
     }
 
@@ -5584,9 +5703,17 @@ impl DeepSeekV4SparseCsaScratch {
         visible_rows: usize,
         record: &DeepSeekV4SelectionRecord,
     ) -> Result<(), DeepSeekV4MetalError> {
-        if self.selector_mode == DeepSeekV4SparseSelectorMode::MultigroupExperimental
+        if self.selector_mode != DeepSeekV4SparseSelectorMode::Radix4
             && deepseek_v4_multigroup_selector_eligible(capacity_rows, visible_rows)
         {
+            if self.selector_mode == DeepSeekV4SparseSelectorMode::MultigroupProduction {
+                static REPORTED: std::sync::Once = std::sync::Once::new();
+                REPORTED.call_once(|| {
+                    eprintln!(
+                        "deepseek_v4: exact multi-group selector owns the qualified far-context band; rollback=QWEN_DSV4_MULTIGROUP_SELECTOR=0"
+                    );
+                });
+            }
             let next_invocations = self.multigroup_invocations.next_multigroup()?;
             self.multigroup
                 .as_ref()
@@ -5610,8 +5737,7 @@ impl DeepSeekV4SparseCsaScratch {
                 .commit_multigroup(next_invocations);
             return Ok(());
         }
-        let next_ineligible = (self.selector_mode
-            == DeepSeekV4SparseSelectorMode::MultigroupExperimental)
+        let next_ineligible = (self.selector_mode != DeepSeekV4SparseSelectorMode::Radix4)
             .then(|| self.multigroup_invocations.next_ineligible_radix4())
             .transpose()?;
         encode_select_top_k_f32_with_policy(
@@ -5776,6 +5902,8 @@ pub struct DeepSeekV4PositionZeroAttentionScratch {
     kv: MetalTensor,
     cached_kv: MetalTensor,
     attention: MetalTensor,
+    hca_partial_output: MetalTensor,
+    hca_partial_ml: MetalTensor,
     low_rank: MetalTensor,
     output: MetalTensor,
     head_norm_ones: MetalTensor,
@@ -5787,6 +5915,8 @@ pub struct DeepSeekV4PositionZeroAttentionScratch {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DeepSeekV4HcaTestPolicy {
     Production,
+    #[cfg(feature = "dsv4-diagnostics")]
+    GroupedOnline,
     LegacyTiled,
 }
 
@@ -5813,6 +5943,22 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             attention: MetalTensor::zeros_f32(
                 ctx,
                 vec![config.head_dim as u64, config.head_count as u64],
+            )?,
+            hca_partial_output: MetalTensor::zeros_f32(
+                ctx,
+                vec![
+                    config.head_dim as u64,
+                    config.head_count as u64,
+                    DEEPSEEK_V4_SPLITK_HCA_PARTITIONS as u64,
+                ],
+            )?,
+            hca_partial_ml: MetalTensor::zeros_f32(
+                ctx,
+                vec![
+                    2,
+                    config.head_count as u64,
+                    DEEPSEEK_V4_SPLITK_HCA_PARTITIONS as u64,
+                ],
             )?,
             low_rank: MetalTensor::zeros_f32(ctx, vec![dims.low_rank_width as u64])?,
             output: MetalTensor::zeros_f32(ctx, vec![config.hidden_size as u64])?,
@@ -5871,7 +6017,7 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         &self.output
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
     fn set_hca_test_policy(&mut self, policy: DeepSeekV4HcaTestPolicy) {
         self.hca_test_policy = policy;
     }
@@ -5879,11 +6025,35 @@ impl DeepSeekV4PositionZeroAttentionScratch {
     fn use_online_hca(&self) -> bool {
         #[cfg(test)]
         {
-            self.hca_test_policy == DeepSeekV4HcaTestPolicy::Production
+            self.hca_test_policy != DeepSeekV4HcaTestPolicy::LegacyTiled
         }
         #[cfg(not(test))]
         {
             true
+        }
+    }
+
+    fn use_splitk_hca(&self, ctx: &MetalContext) -> bool {
+        #[cfg(test)]
+        {
+            let _ = ctx;
+            self.hca_test_policy == DeepSeekV4HcaTestPolicy::Production
+        }
+        #[cfg(not(test))]
+        {
+            ctx.device.name().to_string() == DEEPSEEK_V4_LONG_HCA_QUALIFIED_DEVICE
+        }
+    }
+
+    fn use_grouped_long_hca(&self, ctx: &MetalContext) -> bool {
+        #[cfg(test)]
+        {
+            let _ = ctx;
+            true
+        }
+        #[cfg(not(test))]
+        {
+            ctx.device.name().to_string() == DEEPSEEK_V4_LONG_HCA_QUALIFIED_DEVICE
         }
     }
 
@@ -6181,32 +6351,79 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                 .attention
                 .view_subrange(0, vec![dims.query_width as u64, 1]);
             if self.use_online_hca() {
-                let direct_load = deepseek_v4_online_direct_load_enabled();
-                if direct_load {
+                if self.use_splitk_hca(ctx) && deepseek_v4_splitk_hca_enabled() {
                     static REPORTED: std::sync::Once = std::sync::Once::new();
                     REPORTED.call_once(|| {
                         eprintln!(
-                            "deepseek_v4: online HCA loads rows directly; rollback=QWEN_DSV4_ONLINE_DIRECT_LOAD=0"
+                            "deepseek_v4: grouped split-K HCA runs eight independent history partitions; rollback=QWEN_DSV4_SPLITK_HCA=0"
                         );
                     });
+                    encode_grouped_splitk_hca_f16(
+                        ctx,
+                        enc,
+                        &queries,
+                        raw_cache,
+                        raw_cache,
+                        DeepSeekV4RawCacheLayout::Ring,
+                        rows,
+                        sinks,
+                        &self.hca_partial_output,
+                        &self.hca_partial_ml,
+                        &output,
+                        position,
+                        DEEPSEEK_V4_SPLITK_HCA_PARTITIONS,
+                        c,
+                    )?;
+                } else if self.use_grouped_long_hca(ctx) && deepseek_v4_grouped_long_hca_enabled() {
+                    static REPORTED: std::sync::Once = std::sync::Once::new();
+                    REPORTED.call_once(|| {
+                        eprintln!(
+                            "deepseek_v4: grouped online HCA shares long-history rows across eight heads; rollback=QWEN_DSV4_GROUPED_LONG_HCA=0"
+                        );
+                    });
+                    encode_grouped_online_dense_sink_attention_f16(
+                        ctx,
+                        enc,
+                        &queries,
+                        raw_cache,
+                        raw_cache,
+                        DeepSeekV4RawCacheLayout::Ring,
+                        Some(rows),
+                        sinks,
+                        &output,
+                        kind,
+                        position,
+                        1,
+                        c,
+                    )?;
+                } else {
+                    let direct_load = deepseek_v4_online_direct_load_enabled();
+                    if direct_load {
+                        static REPORTED: std::sync::Once = std::sync::Once::new();
+                        REPORTED.call_once(|| {
+                            eprintln!(
+                                "deepseek_v4: online HCA loads rows directly; rollback=QWEN_DSV4_ONLINE_DIRECT_LOAD=0"
+                            );
+                        });
+                    }
+                    encode_online_dense_sink_attention_f16(
+                        ctx,
+                        enc,
+                        &queries,
+                        raw_cache,
+                        raw_cache,
+                        DeepSeekV4RawCacheLayout::Ring,
+                        rows,
+                        sinks,
+                        &output,
+                        position,
+                        0,
+                        1,
+                        128,
+                        direct_load,
+                        c,
+                    )?;
                 }
-                encode_online_dense_sink_attention_f16(
-                    ctx,
-                    enc,
-                    &queries,
-                    raw_cache,
-                    raw_cache,
-                    DeepSeekV4RawCacheLayout::Ring,
-                    rows,
-                    sinks,
-                    &output,
-                    position,
-                    0,
-                    1,
-                    128,
-                    direct_load,
-                    c,
-                )?;
             } else {
                 encode_tiled_dense_sink_attention_f16(
                     ctx,
@@ -7794,40 +8011,69 @@ impl DeepSeekV4MoeScratch {
             c.expert_count,
             "all-slot routed down bank",
         )?;
-        if gate_bank.dtype == GgmlType::Q3_K
-            && up_bank.dtype == GgmlType::Q3_K
-            && down_bank.dtype == GgmlType::Q4_K
-        {
+        if deepseek_v4_all_slots_q3q4_scope_qualified(
+            &ctx.device.name().to_string(),
+            c,
+            gate_bank.dtype,
+            up_bank.dtype,
+            down_bank.dtype,
+        ) {
+            if !deepseek_v4_all_slots_q3q4_enabled() {
+                return self.encode_routed_experts_indexed_from_record(
+                    ctx,
+                    enc,
+                    gate_bank,
+                    up_bank,
+                    down_bank,
+                    expert_clamp,
+                    record,
+                );
+            }
+            if deepseek_v4_all_slots_q3q4_fast_enabled() {
+                static REPORTED_FAST: std::sync::Once = std::sync::Once::new();
+                REPORTED_FAST.call_once(|| {
+                    eprintln!(
+                        "deepseek_v4: fast all-slot Q3_K/Q4_K routed experts active for K160 REAP; arithmetic rollback=QWEN_DSV4_ALL_SLOTS_Q3Q4_FAST=0 serial rollback=QWEN_DSV4_ALL_SLOTS_Q3Q4=0"
+                    );
+                });
+                return self.encode_routed_experts_all_slots_q3q4_fast_from_record(
+                    ctx,
+                    enc,
+                    gate_bank,
+                    up_bank,
+                    down_bank,
+                    expert_clamp,
+                    record,
+                );
+            }
             static REPORTED: std::sync::Once = std::sync::Once::new();
             REPORTED.call_once(|| {
                 eprintln!(
-                    "deepseek_v4: native indexed Q3_K/Q4_K routed experts active for K160 REAP"
+                    "deepseek_v4: all-slot Q3_K/Q4_K routed experts active for K160 REAP; rollback=QWEN_DSV4_ALL_SLOTS_Q3Q4=0"
                 );
             });
-            return self.encode_routed_experts_indexed_from_record(
-                ctx,
-                enc,
-                gate_bank,
-                up_bank,
-                down_bank,
-                expert_clamp,
-                record,
-            );
         }
         if gate_bank.dtype != up_bank.dtype
             || !matches!(
                 gate_bank.dtype,
-                GgmlType::IQ2_XS | GgmlType::IQ2_S | GgmlType::IQ3_XXS | GgmlType::IQ3_S
+                GgmlType::IQ2_XS
+                    | GgmlType::IQ2_S
+                    | GgmlType::IQ3_XXS
+                    | GgmlType::IQ3_S
+                    | GgmlType::Q3_K
             )
         {
             return invalid(format!(
-                "all-slot routed gate/up require matching IQ2_XS, IQ2_S, IQ3_XXS, or IQ3_S storage, got {:?}/{:?}",
+                "all-slot routed gate/up require matching IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, or Q3_K storage, got {:?}/{:?}",
                 gate_bank.dtype, up_bank.dtype
             ));
         }
-        if !matches!(down_bank.dtype, GgmlType::IQ3_XXS | GgmlType::MXFP4) {
+        if !matches!(
+            down_bank.dtype,
+            GgmlType::IQ3_XXS | GgmlType::MXFP4 | GgmlType::Q4_K
+        ) {
             return invalid(format!(
-                "all-slot routed down requires IQ3_XXS or MXFP4 storage, got {:?}",
+                "all-slot routed down requires IQ3_XXS, MXFP4, or Q4_K storage, got {:?}",
                 down_bank.dtype
             ));
         }
@@ -7836,11 +8082,13 @@ impl DeepSeekV4MoeScratch {
             GgmlType::IQ2_S => "kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast",
             GgmlType::IQ3_XXS => "kernel_deepseek_v4_all_slots_swiglu_iq3_xxs_f32_fast",
             GgmlType::IQ3_S => "kernel_deepseek_v4_all_slots_swiglu_iq3_s_f32_fast",
+            GgmlType::Q3_K => "kernel_deepseek_v4_all_slots_swiglu_q3_K_f32",
             _ => unreachable!("gate/up dtype was validated above"),
         };
         let (down_kernel, down_threads) = match down_bank.dtype {
             GgmlType::IQ3_XXS => ("kernel_deepseek_v4_all_slots_down_iq3_xxs_f32_fast", 64),
             GgmlType::MXFP4 => ("kernel_deepseek_v4_all_slots_down_mxfp4_f32", 128),
+            GgmlType::Q4_K => ("kernel_deepseek_v4_all_slots_down_q4_K_f32", 64),
             _ => unreachable!("down dtype was validated above"),
         };
         validate_deepseek_v4_all_slot_pipeline(ctx, gate_kernel, 64, 64)?;
@@ -7860,6 +8108,76 @@ impl DeepSeekV4MoeScratch {
             expert_clamp,
         )?;
         encode_ds4_all_slots_down(
+            ctx,
+            enc,
+            down_bank,
+            &self.routed_inner,
+            &record.expert_ids,
+            &record.status,
+            &self.expert_outputs,
+            c.ffn_size,
+            c.hidden_size,
+            c.expert_count,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_routed_experts_all_slots_q3q4_fast_from_record(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        gate_bank: &MetalTensor,
+        up_bank: &MetalTensor,
+        down_bank: &MetalTensor,
+        expert_clamp: f32,
+        record: &DeepSeekV4RouteRecord,
+    ) -> Result<(), DeepSeekV4MetalError> {
+        require_serial(enc, "DeepSeek V4 fast all-slot Q3_K/Q4_K routed experts")?;
+        let c = self.config;
+        record.validate(c)?;
+        if c.ffn_size > c.hidden_size {
+            return invalid(format!(
+                "fast all-slot Q3_K/Q4_K requires FFN width {} <= hidden width {} for the up-projection scratch alias",
+                c.ffn_size, c.hidden_size
+            ));
+        }
+        let up_scratch = self.expert_outputs.view_subrange(
+            0,
+            vec![c.ffn_size as u64, DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
+        );
+        encode_ds4_all_slots_q3_k_fast(
+            ctx,
+            enc,
+            gate_bank,
+            &self.normalized_input,
+            &record.expert_ids,
+            &record.status,
+            &self.routed_inner,
+            c.hidden_size,
+            c.ffn_size,
+            c.expert_count,
+        )?;
+        encode_ds4_all_slots_q3_k_fast(
+            ctx,
+            enc,
+            up_bank,
+            &self.normalized_input,
+            &record.expert_ids,
+            &record.status,
+            &up_scratch,
+            c.hidden_size,
+            c.ffn_size,
+            c.expert_count,
+        )?;
+        let routed_elements = c.ffn_size.checked_mul(c.top_k).ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid("fast all-slot routed width overflow".into())
+        })?;
+        let gate = self
+            .routed_inner
+            .view_subrange(0, vec![routed_elements as u64]);
+        let up = up_scratch.view_subrange(0, vec![routed_elements as u64]);
+        encode_ds4_clamped_swiglu(ctx, enc, &gate, &up, &gate, expert_clamp)?;
+        encode_ds4_all_slots_q4_k_fast(
             ctx,
             enc,
             down_bank,
@@ -8065,6 +8383,37 @@ impl DeepSeekV4MoeScratch {
         }
         Ok(())
     }
+}
+
+crate::env_flag!(
+    default_on deepseek_v4_all_slots_q3q4_enabled,
+    "QWEN_DSV4_ALL_SLOTS_Q3Q4"
+);
+
+crate::env_flag!(
+    default_on deepseek_v4_all_slots_q3q4_fast_enabled,
+    "QWEN_DSV4_ALL_SLOTS_Q3Q4_FAST"
+);
+
+const DEEPSEEK_V4_ALL_SLOTS_Q3Q4_QUALIFIED_DEVICE: &str = "Apple M4 Max";
+const DEEPSEEK_V4_ALL_SLOTS_Q3Q4_EXPERT_COUNT: usize = 160;
+const DEEPSEEK_V4_ALL_SLOTS_Q3Q4_FFN_SIZE: usize = 2_048;
+
+fn deepseek_v4_all_slots_q3q4_scope_qualified(
+    device_name: &str,
+    config: DeepSeekV4MoeConfig,
+    gate_dtype: GgmlType,
+    up_dtype: GgmlType,
+    down_dtype: GgmlType,
+) -> bool {
+    device_name == DEEPSEEK_V4_ALL_SLOTS_Q3Q4_QUALIFIED_DEVICE
+        && config.hidden_size == DEEPSEEK_V4_HIDDEN_SIZE
+        && config.ffn_size == DEEPSEEK_V4_ALL_SLOTS_Q3Q4_FFN_SIZE
+        && config.expert_count == DEEPSEEK_V4_ALL_SLOTS_Q3Q4_EXPERT_COUNT
+        && config.top_k == DEEPSEEK_V4_ROUTE_MAX_TOP_K
+        && gate_dtype == GgmlType::Q3_K
+        && up_dtype == GgmlType::Q3_K
+        && down_dtype == GgmlType::Q4_K
 }
 
 fn validate_deepseek_v4_route_pipeline_geometry(
@@ -8304,6 +8653,7 @@ fn encode_ds4_all_slots_gate_up_swiglu(
         GgmlType::IQ2_S => "kernel_deepseek_v4_all_slots_swiglu_iq2_s_f32_fast",
         GgmlType::IQ3_XXS => "kernel_deepseek_v4_all_slots_swiglu_iq3_xxs_f32_fast",
         GgmlType::IQ3_S => "kernel_deepseek_v4_all_slots_swiglu_iq3_s_f32_fast",
+        GgmlType::Q3_K => "kernel_deepseek_v4_all_slots_swiglu_q3_K_f32",
         dtype => return invalid(format!("{NAME} does not support {dtype:?}")),
     };
     if !n_in.is_multiple_of(256) {
@@ -8404,6 +8754,7 @@ fn encode_ds4_all_slots_down(
             256,
         ),
         GgmlType::MXFP4 => ("kernel_deepseek_v4_all_slots_down_mxfp4_f32", 4, 128, 32),
+        GgmlType::Q4_K => ("kernel_deepseek_v4_all_slots_down_q4_K_f32", 4, 64, 256),
         dtype => return invalid(format!("{NAME} does not support {dtype:?}")),
     };
     if !n_in.is_multiple_of(block_size) {
@@ -8459,6 +8810,165 @@ fn encode_ds4_all_slots_down(
         },
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_ds4_all_slots_q3_k_fast(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    expert_ids: &MetalTensor,
+    route_status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    expert_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const NAME: &str = "DeepSeek V4 fast all-slot Q3_K projection";
+    require_serial(enc, NAME)?;
+    if bank.dtype != GgmlType::Q3_K {
+        return invalid(format!("{NAME} requires Q3_K, got {:?}", bank.dtype));
+    }
+    validate_expert_bank(bank, n_in, n_out, expert_count, NAME)?;
+    validate_f32(input, &[n_in as u64], false, &format!("{NAME} input"))?;
+    validate_i32(
+        expert_ids,
+        &[DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
+        false,
+        &format!("{NAME} expert IDs"),
+    )?;
+    validate_i32(route_status, &[1], false, &format!("{NAME} route status"))?;
+    validate_f32(
+        output,
+        &[n_out as u64, DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
+        true,
+        &format!("{NAME} output"),
+    )?;
+    if !n_in.is_multiple_of(256) {
+        return invalid(format!("{NAME} input width {n_in} is not divisible by 256"));
+    }
+    let args = deepseek_v4_all_slots_args(n_in, n_out, expert_count, 0.0, NAME)?;
+    let kernel = "kernel_deepseek_v4_all_slots_mat_vec_q3_K_f32_fast";
+    let pso = ctx.pipeline(kernel)?;
+    validate_deepseek_v4_all_slot_pipeline(ctx, kernel, 64, 0)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, bank);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, expert_ids);
+    enc.set_tensor(4, route_status);
+    enc.set_tensor(5, output);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(4),
+            height: DEEPSEEK_V4_ROUTE_MAX_TOP_K,
+            depth: 1,
+        },
+        MTLSize {
+            width: 64,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_ds4_all_slots_q4_k_fast(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    bank: &MetalTensor,
+    input: &MetalTensor,
+    expert_ids: &MetalTensor,
+    route_status: &MetalTensor,
+    output: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    expert_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    const NAME: &str = "DeepSeek V4 fast all-slot Q4_K projection";
+    require_serial(enc, NAME)?;
+    if bank.dtype != GgmlType::Q4_K {
+        return invalid(format!("{NAME} requires Q4_K, got {:?}", bank.dtype));
+    }
+    validate_expert_bank(bank, n_in, n_out, expert_count, NAME)?;
+    validate_f32(
+        input,
+        &[n_in as u64, DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
+        false,
+        &format!("{NAME} input"),
+    )?;
+    validate_i32(
+        expert_ids,
+        &[DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
+        false,
+        &format!("{NAME} expert IDs"),
+    )?;
+    validate_i32(route_status, &[1], false, &format!("{NAME} route status"))?;
+    validate_f32(
+        output,
+        &[n_out as u64, DEEPSEEK_V4_ROUTE_MAX_TOP_K as u64],
+        true,
+        &format!("{NAME} output"),
+    )?;
+    if !n_in.is_multiple_of(256) {
+        return invalid(format!("{NAME} input width {n_in} is not divisible by 256"));
+    }
+    let args = deepseek_v4_all_slots_args(n_in, n_out, expert_count, 0.0, NAME)?;
+    let kernel = "kernel_deepseek_v4_all_slots_mat_vec_q4_K_f32_fast";
+    let pso = ctx.pipeline(kernel)?;
+    validate_deepseek_v4_all_slot_pipeline(ctx, kernel, 64, 0)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, bank);
+    enc.set_tensor(2, input);
+    enc.set_tensor(3, expert_ids);
+    enc.set_tensor(4, route_status);
+    enc.set_tensor(5, output);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(4),
+            height: DEEPSEEK_V4_ROUTE_MAX_TOP_K,
+            depth: 1,
+        },
+        MTLSize {
+            width: 64,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DeepSeekV4AllSlotsArgs {
+    n_in: u32,
+    n_out: u32,
+    n_expert: u32,
+    top_k: u32,
+    clamp: f32,
+}
+
+fn deepseek_v4_all_slots_args(
+    n_in: usize,
+    n_out: usize,
+    expert_count: usize,
+    clamp: f32,
+    name: &str,
+) -> Result<DeepSeekV4AllSlotsArgs, DeepSeekV4MetalError> {
+    Ok(DeepSeekV4AllSlotsArgs {
+        n_in: u32::try_from(n_in)
+            .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{name} n_in exceeds u32")))?,
+        n_out: u32::try_from(n_out)
+            .map_err(|_| DeepSeekV4MetalError::Invalid(format!("{name} n_out exceeds u32")))?,
+        n_expert: u32::try_from(expert_count).map_err(|_| {
+            DeepSeekV4MetalError::Invalid(format!("{name} expert count exceeds u32"))
+        })?,
+        top_k: DEEPSEEK_V4_ROUTE_MAX_TOP_K as u32,
+        clamp,
+    })
 }
 
 fn encode_ds4_clamped_swiglu(
@@ -9382,6 +9892,9 @@ fn validate_raw_attention_caches(
 const DEEPSEEK_V4_GROUPED_DENSE_HEADS: usize = 8;
 const DEEPSEEK_V4_GROUPED_DENSE_THREADS: usize = 256;
 const DEEPSEEK_V4_GROUPED_DENSE_STAGED_ROWS: usize = 16;
+const DEEPSEEK_V4_SPLITK_HCA_PARTITIONS: usize = 8;
+#[cfg(not(test))]
+const DEEPSEEK_V4_LONG_HCA_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const DEEPSEEK_V4_GROUPED_DENSE_THREADGROUP_BYTES: usize = DEEPSEEK_V4_GROUPED_DENSE_STAGED_ROWS
     * DEEPSEEK_V4_HCA_TILE_ROWS
     * std::mem::size_of::<half::f16>();
@@ -9461,6 +9974,166 @@ fn encode_grouped_online_dense_sink_attention_f16(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn encode_grouped_splitk_hca_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    queries: &MetalTensor,
+    raw_cache: &MetalTensor,
+    raw_cache_before_chunk: &MetalTensor,
+    raw_cache_layout: DeepSeekV4RawCacheLayout,
+    compressed: DeepSeekV4PublishedRows<'_>,
+    sinks: &MetalTensor,
+    partial_output: &MetalTensor,
+    partial_ml: &MetalTensor,
+    output: &MetalTensor,
+    position: u32,
+    partitions: usize,
+    config: DeepSeekV4PositionZeroAttentionConfig,
+) -> Result<(), DeepSeekV4MetalError> {
+    const MAX_PARTITIONS: usize = 16;
+    require_serial(enc, "deepseek_v4_grouped_splitk_hca_f16")?;
+    validate_deepseek_v4_online_hca_request_geometry(config, 128, 1, 0, 1)?;
+    if raw_cache_layout != DeepSeekV4RawCacheLayout::Ring {
+        return invalid("grouped split-K HCA requires the singleton ring raw cache");
+    }
+    if !matches!(partitions, 4 | 8 | 16) {
+        return invalid("grouped split-K HCA requires 4, 8, or 16 partitions");
+    }
+    let query_width = checked_mul(
+        config.head_count,
+        config.head_dim,
+        "split-K HCA query width",
+    )?;
+    validate_f32(
+        queries,
+        &[query_width as u64, 1],
+        false,
+        "split-K HCA queries",
+    )?;
+    validate_raw_attention_caches(
+        raw_cache,
+        raw_cache_before_chunk,
+        raw_cache_layout,
+        config.head_dim,
+        1,
+        "split-K HCA",
+    )?;
+    validate_f16(
+        compressed.cache,
+        &[config.head_dim as u64, compressed.capacity_rows as u64],
+        false,
+        "split-K HCA compressed cache",
+    )?;
+    validate_f32(
+        sinks,
+        &[config.head_count as u64],
+        false,
+        "split-K HCA sinks",
+    )?;
+    validate_f32(
+        partial_output,
+        &[
+            config.head_dim as u64,
+            config.head_count as u64,
+            partitions as u64,
+        ],
+        true,
+        "split-K HCA partial output",
+    )?;
+    validate_f32(
+        partial_ml,
+        &[2, config.head_count as u64, partitions as u64],
+        true,
+        "split-K HCA partial max/mass",
+    )?;
+    validate_f32(output, &[query_width as u64, 1], true, "split-K HCA output")?;
+    let expected_rows = (position as usize + 1) / 128;
+    if compressed.count != expected_rows || compressed.count > compressed.capacity_rows {
+        return invalid(format!(
+            "split-K HCA expected {expected_rows} compressed rows, got {}/{}",
+            compressed.count, compressed.capacity_rows
+        ));
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        head_count: u32,
+        head_dim: u32,
+        compression_ratio: u32,
+        start_position: u32,
+        window: u32,
+        raw_cache_is_chunk: u32,
+        partitions: u32,
+        scale: f32,
+    }
+    let args = Args {
+        head_count: config.head_count as u32,
+        head_dim: config.head_dim as u32,
+        compression_ratio: 128,
+        start_position: position,
+        window: DEEPSEEK_V4_LOCAL_WINDOW as u32,
+        raw_cache_is_chunk: raw_cache_layout.is_chunk(),
+        partitions: partitions as u32,
+        scale: 1.0 / (config.head_dim as f32).sqrt(),
+    };
+
+    let main = ctx.pipeline("kernel_deepseek_v4_grouped_splitk_hca_main_f16")?;
+    if main.threadExecutionWidth() != 32
+        || main.maxTotalThreadsPerThreadgroup() < DEEPSEEK_V4_GROUPED_DENSE_THREADS
+        || ctx.device.maxThreadgroupMemoryLength() < DEEPSEEK_V4_GROUPED_DENSE_THREADGROUP_BYTES
+    {
+        return invalid("grouped split-K HCA main pipeline does not support its launch geometry");
+    }
+    enc.set_pipeline(&main);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, queries);
+    enc.set_tensor(2, raw_cache);
+    enc.set_tensor(3, raw_cache_before_chunk);
+    enc.set_tensor(4, compressed.cache);
+    enc.set_tensor(5, partial_output);
+    enc.set_tensor(6, partial_ml);
+    enc.set_threadgroup_memory(0, DEEPSEEK_V4_GROUPED_DENSE_THREADGROUP_BYTES);
+    enc.dispatch(
+        MTLSize {
+            width: 1,
+            height: config.head_count / DEEPSEEK_V4_GROUPED_DENSE_HEADS,
+            depth: partitions,
+        },
+        MTLSize {
+            width: 32,
+            height: DEEPSEEK_V4_GROUPED_DENSE_HEADS,
+            depth: 1,
+        },
+    );
+
+    let reduce = ctx.pipeline("kernel_deepseek_v4_grouped_splitk_hca_reduce_f32")?;
+    if reduce.threadExecutionWidth() != 32 || reduce.maxTotalThreadsPerThreadgroup() < 32 {
+        return invalid("grouped split-K HCA reducer does not support one SIMDgroup");
+    }
+    enc.set_pipeline(&reduce);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, partial_output);
+    enc.set_tensor(2, partial_ml);
+    enc.set_tensor(3, sinks);
+    enc.set_tensor(4, output);
+    enc.set_threadgroup_memory(0, MAX_PARTITIONS * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: config.head_count,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn encode_dense_sink_attention_f16_with_kernel(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -9526,6 +10199,10 @@ fn encode_dense_sink_attention_f16_with_kernel(
         DeepSeekV4MetalError::Invalid("cooperative dense position overflow".into())
     })?;
     let expected_rows = (end_position as usize).checked_div(ratio).unwrap_or(0);
+    let grouped_long_hca = kernel == DeepSeekV4DenseAttentionKernel::GroupedOnline
+        && kind == AttentionKind::HeavilyCompressed
+        && raw_cache_layout == DeepSeekV4RawCacheLayout::Ring
+        && token_count == 1;
     let compressed_cache = match compressed {
         None if expected_rows == 0 => raw_cache,
         Some(rows) if rows.count == expected_rows => {
@@ -9535,7 +10212,9 @@ fn encode_dense_sink_attention_f16_with_kernel(
                 false,
                 "cooperative dense compressed cache",
             )?;
-            if expected_rows > DEEPSEEK_V4_CSA_TOP_K || expected_rows > rows.capacity_rows {
+            if expected_rows > rows.capacity_rows
+                || (!grouped_long_hca && expected_rows > DEEPSEEK_V4_CSA_TOP_K)
+            {
                 return invalid(format!(
                     "cooperative dense attention cannot consume {expected_rows} rows from capacity {}",
                     rows.capacity_rows
@@ -9554,7 +10233,9 @@ fn encode_dense_sink_attention_f16_with_kernel(
     let maximum_rows = final_raw_rows
         .checked_add(expected_rows)
         .ok_or_else(|| DeepSeekV4MetalError::Invalid("cooperative dense row overflow".into()))?;
-    if maximum_rows == 0 || maximum_rows > DEEPSEEK_V4_LOCAL_WINDOW + DEEPSEEK_V4_CSA_TOP_K {
+    if maximum_rows == 0
+        || (!grouped_long_hca && maximum_rows > DEEPSEEK_V4_LOCAL_WINDOW + DEEPSEEK_V4_CSA_TOP_K)
+    {
         return invalid(format!(
             "cooperative dense attention row count {maximum_rows} is out of range"
         ));
@@ -9667,6 +10348,16 @@ const DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES: usize =
 crate::env_flag!(
     default_on deepseek_v4_online_direct_load_enabled,
     "QWEN_DSV4_ONLINE_DIRECT_LOAD"
+);
+
+crate::env_flag!(
+    default_on deepseek_v4_grouped_long_hca_enabled,
+    "QWEN_DSV4_GROUPED_LONG_HCA"
+);
+
+crate::env_flag!(
+    default_on deepseek_v4_splitk_hca_enabled,
+    "QWEN_DSV4_SPLITK_HCA"
 );
 
 fn validate_deepseek_v4_online_hca_request_geometry(
@@ -10719,9 +11410,8 @@ fn encode_lightning_indexer_scores_f16_with_limit_and_kernel(
     Ok(())
 }
 
-#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
-fn encode_lightning_indexer_scores_f16_matrix_ceiling(
+fn encode_lightning_indexer_scores_f16_matrix(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     queries: &MetalTensor,
@@ -10732,6 +11422,7 @@ fn encode_lightning_indexer_scores_f16_matrix_ceiling(
     head_count: usize,
     head_dim: usize,
     row_capacity: usize,
+    max_dispatched_rows: usize,
     query_count: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
     const KERNEL: &str = "kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling";
@@ -10742,11 +11433,17 @@ fn encode_lightning_indexer_scores_f16_matrix_ceiling(
     }
     for (name, value) in [
         ("indexer row capacity", row_capacity),
+        ("indexer maximum dispatched rows", max_dispatched_rows),
         ("indexer query count", query_count),
     ] {
         if value == 0 || u32::try_from(value).is_err() {
             return invalid(format!("{name} must be nonzero and fit u32"));
         }
+    }
+    if max_dispatched_rows > row_capacity {
+        return invalid(format!(
+            "matrix-ceiling indexer maximum dispatched rows {max_dispatched_rows} exceed row capacity {row_capacity}"
+        ));
     }
     validate_lightning_indexer_score_offsets(head_count, head_dim, row_capacity, query_count)?;
     validate_f16(
@@ -10815,7 +11512,7 @@ fn encode_lightning_indexer_scores_f16_matrix_ceiling(
     enc.set_threadgroup_memory(1, 8 * 64 * std::mem::size_of::<f32>());
     enc.dispatch(
         MTLSize {
-            width: row_capacity.div_ceil(8),
+            width: max_dispatched_rows.div_ceil(8),
             height: query_count,
             depth: 1,
         },
@@ -11552,6 +12249,7 @@ fn validate_tiled_f32_lightning_score_geometry(
     Ok(())
 }
 
+#[cfg(any(test, feature = "dsv4-diagnostics"))]
 #[allow(clippy::too_many_arguments)]
 fn encode_select_top_k_f32(
     ctx: &MetalContext,
@@ -12270,6 +12968,119 @@ fn encode_select_top_k_f32_with_policy(
             },
         );
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg_attr(feature = "dsv4-diagnostics", allow(dead_code))]
+fn encode_select_top_k_radix4_ids_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    scores: &MetalTensor,
+    visible_counts: &MetalTensor,
+    cache_order_ids: &MetalTensor,
+    selected_counts: &MetalTensor,
+    status: &MetalTensor,
+    row_capacity: usize,
+    max_visible_rows: usize,
+    top_k: usize,
+    query_count: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    if row_capacity == 0
+        || max_visible_rows <= top_k
+        || max_visible_rows > row_capacity
+        || top_k == 0
+        || top_k > row_capacity
+        || query_count == 0
+        || [row_capacity, top_k, query_count]
+            .into_iter()
+            .any(|value| u32::try_from(value).is_err())
+    {
+        return invalid("maskless radix4 selector requires parallel selection geometry");
+    }
+    let score_elements = checked_mul(
+        row_capacity,
+        query_count,
+        "maskless radix4 selector score elements",
+    )?;
+    let id_elements = checked_mul(top_k, query_count, "maskless radix4 selector ID elements")?;
+    if u32::try_from(score_elements).is_err() || u32::try_from(id_elements).is_err() {
+        return invalid("maskless radix4 selector buffer offsets exceed u32");
+    }
+    validate_f32(
+        scores,
+        &[row_capacity as u64, query_count as u64],
+        false,
+        "maskless radix4 selector scores",
+    )?;
+    validate_i32(
+        visible_counts,
+        &[query_count as u64],
+        false,
+        "maskless radix4 selector visible counts",
+    )?;
+    validate_i32(
+        cache_order_ids,
+        &[top_k as u64, query_count as u64],
+        true,
+        "maskless radix4 selector cache-order IDs",
+    )?;
+    validate_i32(
+        selected_counts,
+        &[query_count as u64],
+        true,
+        "maskless radix4 selector counts",
+    )?;
+    validate_i32(
+        status,
+        &[query_count as u64],
+        true,
+        "maskless radix4 selector status",
+    )?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        row_capacity: u32,
+        top_k: u32,
+        query_count: u32,
+        emit_ranked: u32,
+    }
+    let pso = ctx.pipeline("kernel_deepseek_v4_select_top_k_radix4_ids_f32")?;
+    validate_parallel_selector_pipeline(
+        pso.threadExecutionWidth(),
+        pso.maxTotalThreadsPerThreadgroup(),
+    )?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            row_capacity: row_capacity as u32,
+            top_k: top_k as u32,
+            query_count: query_count as u32,
+            emit_ranked: 0,
+        },
+    );
+    enc.set_tensor(1, scores);
+    enc.set_tensor(2, visible_counts);
+    enc.set_tensor(3, cache_order_ids);
+    enc.set_tensor(4, selected_counts);
+    enc.set_tensor(5, status);
+    const THREADGROUP_WIDTH: usize = 256;
+    enc.set_threadgroup_memory(0, THREADGROUP_WIDTH * std::mem::size_of::<u32>());
+    enc.set_threadgroup_memory(1, THREADGROUP_WIDTH * std::mem::size_of::<u32>());
+    enc.dispatch(
+        MTLSize {
+            width: query_count,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: THREADGROUP_WIDTH,
+            height: 1,
+            depth: 1,
+        },
+    );
     Ok(())
 }
 
@@ -13511,6 +14322,30 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
     )?;
     push_session_allocation(
         &mut requests,
+        "attention.hca_partial_output",
+        checked_mul(
+            attention_dims.query_width,
+            DEEPSEEK_V4_SPLITK_HCA_PARTITIONS,
+            "split-K HCA partial output elements",
+        )?,
+        f32_bytes,
+    )?;
+    push_session_allocation(
+        &mut requests,
+        "attention.hca_partial_ml",
+        checked_mul(
+            checked_mul(
+                2,
+                attention.head_count,
+                "split-K HCA max/mass per partition",
+            )?,
+            DEEPSEEK_V4_SPLITK_HCA_PARTITIONS,
+            "split-K HCA partial max/mass elements",
+        )?,
+        f32_bytes,
+    )?;
+    push_session_allocation(
+        &mut requests,
         "attention.low_rank",
         attention_dims.low_rank_width,
         f32_bytes,
@@ -13532,6 +14367,12 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
         "sparse_csa.index_queries",
         64 * 128,
         f32_bytes,
+    )?;
+    push_session_allocation(
+        &mut requests,
+        "sparse_csa.matrix_queries_f16",
+        64 * 128,
+        f16_bytes,
     )?;
     push_session_allocation(&mut requests, "sparse_csa.head_weights", 64, f32_bytes)?;
     push_session_allocation(&mut requests, "sparse_csa.visible_counts", 1, i32_bytes)?;
@@ -17373,14 +18214,14 @@ mod tests {
         };
         assert_eq!(
             requests.len(),
-            548 + diagnostics_allocations + packed_route_allocations
+            551 + diagnostics_allocations + packed_route_allocations
         );
         assert_eq!(
             requests
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            4_352_846_788 + diagnostics_logical + packed_route_logical
+            4_353_915_844 + diagnostics_logical + packed_route_logical
         );
         let names = requests
             .iter()
@@ -17469,7 +18310,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            20_103_047_276 + promoted_diagnostics_logical + packed_route_logical
+            20_104_116_332 + promoted_diagnostics_logical + packed_route_logical
         );
         assert_eq!(
             promoted
@@ -17594,17 +18435,14 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "dsv4-diagnostics")]
     #[test]
-    #[ignore = "requires the local 95.93 GiB DS4 fixture and a full-context session allocation"]
-    fn native_synthetic_terminal_state_profiles_cold_and_warm_tokens() {
+    #[ignore = "requires the current DS4 asset and a full-context session allocation"]
+    fn splitk_hca_profiles_current_synthetic_terminal_tokens() {
         const START_POSITION: u32 = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY as u32 - 2;
         const TERMINAL_POSITION: u32 = START_POSITION + 1;
         const FORWARD_LIMIT: usize = DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY;
         const TOKEN_ID: u32 = 35;
-        const LEGACY_LOGITS_SHA256: &str =
-            "4c54019668cb815036bd823ddee2c4156f481a48138b35896899d758184587be";
-        const ONLINE_LOGITS_SHA256: &str =
-            "c6a6075667623b0127d3b18383c5f4e11b136502ab53163d0d8b9edde3cb244c";
 
         struct Evidence {
             preterminal: DeepSeekV4WholeTokenProfile,
@@ -17652,10 +18490,12 @@ mod tests {
         fn execute(
             ctx: &MetalContext,
             residency: DeepSeekV4MetalResidency,
+            score_policy: DeepSeekV4IndexerScoreTestPolicy,
             policy: DeepSeekV4HcaTestPolicy,
         ) -> (DeepSeekV4MetalResidency, Evidence) {
             let mut session = DeepSeekV4Session::new(ctx, residency)
                 .expect("construct terminal synthetic session");
+            session.sparse_csa.set_score_test_policy(score_policy);
             session.attention.set_hca_test_policy(policy);
             initialize_zero_synthetic_causal_state(&session);
             session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
@@ -17686,16 +18526,16 @@ mod tests {
             (session.residency, evidence)
         }
 
-        let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
+        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::PathBuf::from(
-                    "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
                 )
             });
         assert!(model_path.exists(), "missing DS4 model");
         let ctx = MetalContext::new().expect("create Metal context");
-        let gguf = open_pinned_legacy_gguf(&model_path);
+        let (gguf, _) = open_pinned_current_gguf(&model_path);
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
             .expect("plan terminal synthetic session");
         assert_eq!(plan.session_capacity().csa_physical_rows(), 262_144);
@@ -17707,73 +18547,151 @@ mod tests {
             .expect("realize terminal synthetic residency")
             .into_residency();
         let mut residency = residency;
-        let mut online_hash = None;
+        let mut splitk_hash = None;
         for packet in 0..2 {
-            let legacy_before;
-            (residency, legacy_before) =
-                execute(&ctx, residency, DeepSeekV4HcaTestPolicy::LegacyTiled);
-            let online;
-            (residency, online) = execute(&ctx, residency, DeepSeekV4HcaTestPolicy::Production);
-            let legacy_after;
-            (residency, legacy_after) =
-                execute(&ctx, residency, DeepSeekV4HcaTestPolicy::LegacyTiled);
-            for legacy in [&legacy_before, &legacy_after] {
-                assert_eq!(legacy.logits_sha256, LEGACY_LOGITS_SHA256);
+            let grouped_before;
+            (residency, grouped_before) = execute(
+                &ctx,
+                residency,
+                DeepSeekV4IndexerScoreTestPolicy::Production,
+                DeepSeekV4HcaTestPolicy::GroupedOnline,
+            );
+            let splitk;
+            (residency, splitk) = execute(
+                &ctx,
+                residency,
+                DeepSeekV4IndexerScoreTestPolicy::Production,
+                DeepSeekV4HcaTestPolicy::Production,
+            );
+            let grouped_after;
+            (residency, grouped_after) = execute(
+                &ctx,
+                residency,
+                DeepSeekV4IndexerScoreTestPolicy::Production,
+                DeepSeekV4HcaTestPolicy::GroupedOnline,
+            );
+            assert_eq!(grouped_before.logits_sha256, grouped_after.logits_sha256);
+            match &splitk_hash {
+                Some(expected) => assert_eq!(&splitk.logits_sha256, expected),
+                None => splitk_hash = Some(splitk.logits_sha256.clone()),
             }
-            match &online_hash {
-                Some(expected) => assert_eq!(&online.logits_sha256, expected),
-                None => online_hash = Some(online.logits_sha256.clone()),
-            }
-            assert_eq!(online.logits_sha256, ONLINE_LOGITS_SHA256);
-            let (cosine, relative_rms) = logit_metrics(&online.logits, &legacy_before.logits);
-            assert_eq!(argmax(&online.logits), argmax(&legacy_before.logits));
+            let (cosine, relative_rms) = logit_metrics(&splitk.logits, &grouped_before.logits);
+            assert_eq!(argmax(&splitk.logits), argmax(&grouped_before.logits));
             assert!(cosine >= 0.999_99, "terminal cosine {cosine}");
             assert!(
                 relative_rms <= 0.005,
                 "terminal relative RMS {relative_rms}"
             );
 
-            let legacy_gpu_midpoint = (legacy_before.terminal.command_gpu_ms
-                + legacy_after.terminal.command_gpu_ms)
+            let grouped_gpu_midpoint = (grouped_before.terminal.command_gpu_ms
+                + grouped_after.terminal.command_gpu_ms)
                 * 0.5;
-            let legacy_wall_midpoint = (legacy_before.terminal.forward_wall_ms
-                + legacy_after.terminal.forward_wall_ms)
+            let grouped_wall_midpoint = (grouped_before.terminal.forward_wall_ms
+                + grouped_after.terminal.forward_wall_ms)
                 * 0.5;
-            let legacy_outside_midpoint = (legacy_before.terminal.outside_gpu_ms()
-                + legacy_after.terminal.outside_gpu_ms())
+            let grouped_outside_midpoint = (grouped_before.terminal.outside_gpu_ms()
+                + grouped_after.terminal.outside_gpu_ms())
                 * 0.5;
-            let gpu_savings = legacy_gpu_midpoint - online.terminal.command_gpu_ms;
-            let wall_savings = legacy_wall_midpoint - online.terminal.forward_wall_ms;
+            let gpu_savings = grouped_gpu_midpoint - splitk.terminal.command_gpu_ms;
+            let wall_savings = grouped_wall_midpoint - splitk.terminal.forward_wall_ms;
             assert!(
-                gpu_savings >= 12.0,
+                gpu_savings >= 35.0,
                 "packet {packet} GPU savings {gpu_savings:.3} ms"
             );
             assert!(
-                wall_savings >= 9.0,
+                wall_savings >= 30.0,
                 "packet {packet} wall savings {wall_savings:.3} ms"
             );
             assert!(
-                online.terminal.outside_gpu_ms() <= legacy_outside_midpoint + 1.0,
+                splitk.terminal.outside_gpu_ms() <= grouped_outside_midpoint + 1.0,
                 "packet {packet} outside-GPU regression"
             );
             eprintln!(
-                "deepseek_v4 online_hca_terminal packet={packet} legacy_before_preterminal_gpu_ms={:.3} legacy_before_preterminal_wall_ms={:.3} online_preterminal_gpu_ms={:.3} online_preterminal_wall_ms={:.3} legacy_after_preterminal_gpu_ms={:.3} legacy_after_preterminal_wall_ms={:.3} legacy_before_terminal_gpu_ms={:.3} online_terminal_gpu_ms={:.3} legacy_after_terminal_gpu_ms={:.3} gpu_savings_ms={gpu_savings:.3} legacy_before_terminal_wall_ms={:.3} online_terminal_wall_ms={:.3} legacy_after_terminal_wall_ms={:.3} wall_savings_ms={wall_savings:.3} legacy_outside_midpoint_ms={legacy_outside_midpoint:.3} online_outside_gpu_ms={:.3} argmax={} cosine={cosine:.9} rel_rms={relative_rms:.9} legacy_logits_sha256={} online_logits_sha256={}",
-                legacy_before.preterminal.command_gpu_ms,
-                legacy_before.preterminal.forward_wall_ms,
-                online.preterminal.command_gpu_ms,
-                online.preterminal.forward_wall_ms,
-                legacy_after.preterminal.command_gpu_ms,
-                legacy_after.preterminal.forward_wall_ms,
-                legacy_before.terminal.command_gpu_ms,
-                online.terminal.command_gpu_ms,
-                legacy_after.terminal.command_gpu_ms,
-                legacy_before.terminal.forward_wall_ms,
-                online.terminal.forward_wall_ms,
-                legacy_after.terminal.forward_wall_ms,
-                online.terminal.outside_gpu_ms(),
-                argmax(&online.logits),
-                legacy_before.logits_sha256,
-                online.logits_sha256,
+                "deepseek_v4 splitk_hca_terminal packet={packet} grouped_before_preterminal_gpu_ms={:.3} grouped_before_preterminal_wall_ms={:.3} splitk_preterminal_gpu_ms={:.3} splitk_preterminal_wall_ms={:.3} grouped_after_preterminal_gpu_ms={:.3} grouped_after_preterminal_wall_ms={:.3} grouped_before_terminal_gpu_ms={:.3} splitk_terminal_gpu_ms={:.3} grouped_after_terminal_gpu_ms={:.3} gpu_savings_ms={gpu_savings:.3} grouped_before_terminal_wall_ms={:.3} splitk_terminal_wall_ms={:.3} grouped_after_terminal_wall_ms={:.3} wall_savings_ms={wall_savings:.3} grouped_outside_midpoint_ms={grouped_outside_midpoint:.3} splitk_outside_gpu_ms={:.3} argmax={} cosine={cosine:.9} rel_rms={relative_rms:.9} grouped_logits_sha256={} splitk_logits_sha256={}",
+                grouped_before.preterminal.command_gpu_ms,
+                grouped_before.preterminal.forward_wall_ms,
+                splitk.preterminal.command_gpu_ms,
+                splitk.preterminal.forward_wall_ms,
+                grouped_after.preterminal.command_gpu_ms,
+                grouped_after.preterminal.forward_wall_ms,
+                grouped_before.terminal.command_gpu_ms,
+                splitk.terminal.command_gpu_ms,
+                grouped_after.terminal.command_gpu_ms,
+                grouped_before.terminal.forward_wall_ms,
+                splitk.terminal.forward_wall_ms,
+                grouped_after.terminal.forward_wall_ms,
+                splitk.terminal.outside_gpu_ms(),
+                argmax(&splitk.logits),
+                grouped_before.logits_sha256,
+                splitk.logits_sha256,
+            );
+        }
+
+        let mut matrix_hash = None;
+        for packet in 0..2 {
+            let control_before;
+            (residency, control_before) = execute(
+                &ctx,
+                residency,
+                DeepSeekV4IndexerScoreTestPolicy::Production,
+                DeepSeekV4HcaTestPolicy::Production,
+            );
+            let matrix;
+            (residency, matrix) = execute(
+                &ctx,
+                residency,
+                DeepSeekV4IndexerScoreTestPolicy::MatrixF16,
+                DeepSeekV4HcaTestPolicy::Production,
+            );
+            let control_after;
+            (residency, control_after) = execute(
+                &ctx,
+                residency,
+                DeepSeekV4IndexerScoreTestPolicy::Production,
+                DeepSeekV4HcaTestPolicy::Production,
+            );
+            assert_eq!(control_before.logits_sha256, control_after.logits_sha256);
+            match &matrix_hash {
+                Some(expected) => assert_eq!(&matrix.logits_sha256, expected),
+                None => matrix_hash = Some(matrix.logits_sha256.clone()),
+            }
+            let (cosine, relative_rms) = logit_metrics(&matrix.logits, &control_before.logits);
+            assert_eq!(argmax(&matrix.logits), argmax(&control_before.logits));
+            assert!(cosine >= 0.999_99, "terminal score cosine {cosine}");
+            assert!(
+                relative_rms <= 0.005,
+                "terminal score relative RMS {relative_rms}"
+            );
+            let control_gpu_midpoint = (control_before.terminal.command_gpu_ms
+                + control_after.terminal.command_gpu_ms)
+                * 0.5;
+            let control_wall_midpoint = (control_before.terminal.forward_wall_ms
+                + control_after.terminal.forward_wall_ms)
+                * 0.5;
+            let gpu_savings = control_gpu_midpoint - matrix.terminal.command_gpu_ms;
+            let wall_savings = control_wall_midpoint - matrix.terminal.forward_wall_ms;
+            assert!(
+                gpu_savings >= 20.0,
+                "packet {packet} F16 matrix scorer GPU savings {gpu_savings:.3} ms"
+            );
+            assert!(
+                wall_savings >= 18.0,
+                "packet {packet} F16 matrix scorer wall savings {wall_savings:.3} ms"
+            );
+            eprintln!(
+                "deepseek_v4 lightning_f16_matrix_terminal packet={packet} control_before_preterminal_gpu_ms={:.3} matrix_preterminal_gpu_ms={:.3} control_after_preterminal_gpu_ms={:.3} control_before_terminal_gpu_ms={:.3} matrix_terminal_gpu_ms={:.3} control_after_terminal_gpu_ms={:.3} gpu_savings_ms={gpu_savings:.3} control_before_terminal_wall_ms={:.3} matrix_terminal_wall_ms={:.3} control_after_terminal_wall_ms={:.3} wall_savings_ms={wall_savings:.3} argmax={} cosine={cosine:.9} rel_rms={relative_rms:.9} control_logits_sha256={} matrix_logits_sha256={}",
+                control_before.preterminal.command_gpu_ms,
+                matrix.preterminal.command_gpu_ms,
+                control_after.preterminal.command_gpu_ms,
+                control_before.terminal.command_gpu_ms,
+                matrix.terminal.command_gpu_ms,
+                control_after.terminal.command_gpu_ms,
+                control_before.terminal.forward_wall_ms,
+                matrix.terminal.forward_wall_ms,
+                control_after.terminal.forward_wall_ms,
+                argmax(&matrix.logits),
+                control_before.logits_sha256,
+                matrix.logits_sha256,
             );
         }
     }
@@ -17966,9 +18884,10 @@ mod tests {
         let legacy;
         (residency, legacy) = execute(&ctx, residency, DeepSeekV4HcaTestPolicy::LegacyTiled);
         let online_first;
-        (residency, online_first) = execute(&ctx, residency, DeepSeekV4HcaTestPolicy::Production);
+        (residency, online_first) =
+            execute(&ctx, residency, DeepSeekV4HcaTestPolicy::GroupedOnline);
         let online_second;
-        (_, online_second) = execute(&ctx, residency, DeepSeekV4HcaTestPolicy::Production);
+        (_, online_second) = execute(&ctx, residency, DeepSeekV4HcaTestPolicy::GroupedOnline);
 
         assert_eq!(legacy.logits_sha256, LEGACY_LOGITS_SHA256);
         assert_eq!(online_first.logits_sha256, ONLINE_LOGITS_SHA256);
@@ -18294,19 +19213,11 @@ mod tests {
 
     #[cfg(feature = "dsv4-diagnostics")]
     #[test]
-    #[ignore = "requires the local 95.93 GiB DS4 fixture and executes a focused HCA differential"]
-    fn online_hca_preserves_real_weight_boundary_decisions() {
+    #[ignore = "requires the current DS4 asset and executes focused far-context differentials"]
+    fn current_weight_boundary_optimization_differentials() {
         const POSITION: u32 = 65_663;
         const FORWARD_LIMIT: usize = POSITION as usize + 1;
         const TOKEN_ID: u32 = 35;
-        const LEGACY_LOGITS_SHA256: &str =
-            "1c0f5e0475314e693bfe0664b5454a2ece26d9a5913f9a5218cdf39da59582d4";
-        const LEGACY_CAUSAL_SHA256: &str =
-            "03f15887db83e4baf0ad5ba66f95b3e2a7fe461858d92aebe9f0b3009f83254e";
-        const ONLINE_LOGITS_SHA256: &str =
-            "92895a69787cc972880626ef391517236e4ee6d984c52113645d1d0e42824938";
-        const ONLINE_CAUSAL_SHA256: &str =
-            "1de21e0e3bfb6e16fa847879b298af85d21997ae9d992e13166116ea42b94c76";
 
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
         enum RunMode {
@@ -18398,15 +19309,15 @@ mod tests {
         fn execute(
             ctx: &MetalContext,
             residency: DeepSeekV4MetalResidency,
+            model_content_id: DeepSeekV4ModelContentId,
+            score_policy: DeepSeekV4IndexerScoreTestPolicy,
             policy: DeepSeekV4HcaTestPolicy,
             mode: RunMode,
         ) -> (DeepSeekV4MetalResidency, Evidence) {
-            let mut session = DeepSeekV4Session::new_with_model_content_id(
-                ctx,
-                residency,
-                DeepSeekV4ModelContentId::new([0x65; 32]),
-            )
-            .expect("construct online HCA boundary session");
+            let mut session =
+                DeepSeekV4Session::new_with_model_content_id(ctx, residency, model_content_id)
+                    .expect("construct online HCA boundary session");
+            session.sparse_csa.set_score_test_policy(score_policy);
             session.attention.set_hca_test_policy(policy);
             initialize_zero_synthetic_causal_state(&session);
             session.phase = DeepSeekV4SessionPhase::ReadyWithoutObservation {
@@ -18469,16 +19380,16 @@ mod tests {
             (session.residency, evidence)
         }
 
-        let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
+        let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| {
                 std::path::PathBuf::from(
-                    "/Users/tito/models/deepseek-v4-flash-0731-old/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
+                    "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf",
                 )
             });
         assert!(model_path.exists(), "missing DS4 model");
         let ctx = MetalContext::new().expect("create Metal context");
-        let gguf = open_pinned_legacy_gguf(&model_path);
+        let (gguf, model_content_id) = open_pinned_current_gguf(&model_path);
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, FORWARD_LIMIT)
             .expect("plan online HCA boundary session");
         let admitted = plan
@@ -18491,6 +19402,8 @@ mod tests {
         (residency, _) = execute(
             &ctx,
             residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Timed,
         );
@@ -18498,6 +19411,8 @@ mod tests {
         (residency, legacy_first) = execute(
             &ctx,
             residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Timed,
         );
@@ -18505,6 +19420,8 @@ mod tests {
         (residency, online) = execute(
             &ctx,
             residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4HcaTestPolicy::Production,
             RunMode::Timed,
         );
@@ -18512,12 +19429,12 @@ mod tests {
         (residency, legacy_second) = execute(
             &ctx,
             residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Timed,
         );
-        for legacy in [&legacy_first, &legacy_second] {
-            assert_eq!(legacy.logits_sha256, LEGACY_LOGITS_SHA256);
-        }
+        assert_eq!(legacy_first.logits_sha256, legacy_second.logits_sha256);
         let (cosine, relative_rms) = assert_logit_envelope(&online.logits, &legacy_first.logits);
         let legacy_gpu_midpoint =
             (legacy_first.command_gpu_ms.unwrap() + legacy_second.command_gpu_ms.unwrap()) * 0.5;
@@ -18530,27 +19447,22 @@ mod tests {
         (residency, legacy_transcript) = execute(
             &ctx,
             residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4HcaTestPolicy::LegacyTiled,
             RunMode::Transcript,
         );
         let online_transcript;
-        (_, online_transcript) = execute(
+        (residency, online_transcript) = execute(
             &ctx,
             residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
             DeepSeekV4HcaTestPolicy::Production,
             RunMode::Transcript,
         );
-        assert_eq!(legacy_transcript.logits_sha256, LEGACY_LOGITS_SHA256);
-        assert_eq!(
-            digest_hex(&legacy_transcript.causal_digest.unwrap()),
-            LEGACY_CAUSAL_SHA256
-        );
+        assert_eq!(legacy_transcript.logits_sha256, legacy_first.logits_sha256);
         assert_eq!(online_transcript.logits_sha256, online.logits_sha256);
-        assert_eq!(online.logits_sha256, ONLINE_LOGITS_SHA256);
-        assert_eq!(
-            digest_hex(&online_transcript.causal_digest.unwrap()),
-            ONLINE_CAUSAL_SHA256
-        );
         assert_logit_envelope(&online_transcript.logits, &legacy_transcript.logits);
         assert_consumed_decisions(
             online_transcript.transcript.as_ref().unwrap(),
@@ -18570,6 +19482,117 @@ mod tests {
             online.logits_sha256,
             digest_hex(&legacy_transcript.causal_digest.unwrap()),
             digest_hex(&online_transcript.causal_digest.unwrap()),
+        );
+
+        (residency, _) = execute(
+            &ctx,
+            residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
+            DeepSeekV4HcaTestPolicy::Production,
+            RunMode::Timed,
+        );
+        let score_control_first;
+        (residency, score_control_first) = execute(
+            &ctx,
+            residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
+            DeepSeekV4HcaTestPolicy::Production,
+            RunMode::Timed,
+        );
+        let score_matrix;
+        (residency, score_matrix) = execute(
+            &ctx,
+            residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::MatrixF16,
+            DeepSeekV4HcaTestPolicy::Production,
+            RunMode::Timed,
+        );
+        let score_control_second;
+        (residency, score_control_second) = execute(
+            &ctx,
+            residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
+            DeepSeekV4HcaTestPolicy::Production,
+            RunMode::Timed,
+        );
+        assert_eq!(
+            score_control_first.logits_sha256,
+            score_control_second.logits_sha256
+        );
+        assert_eq!(
+            score_matrix.logits_sha256, score_control_first.logits_sha256,
+            "F16 score arithmetic is unconsumed when selected IDs are unchanged"
+        );
+        let (score_cosine, score_relative_rms) =
+            assert_logit_envelope(&score_matrix.logits, &score_control_first.logits);
+        let score_control_gpu_midpoint = (score_control_first.command_gpu_ms.unwrap()
+            + score_control_second.command_gpu_ms.unwrap())
+            * 0.5;
+        let score_control_wall_midpoint =
+            (score_control_first.wall_ms.unwrap() + score_control_second.wall_ms.unwrap()) * 0.5;
+        let score_gpu_savings = score_control_gpu_midpoint - score_matrix.command_gpu_ms.unwrap();
+        let score_wall_savings = score_control_wall_midpoint - score_matrix.wall_ms.unwrap();
+
+        let score_control_transcript;
+        (residency, score_control_transcript) = execute(
+            &ctx,
+            residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::Production,
+            DeepSeekV4HcaTestPolicy::Production,
+            RunMode::Transcript,
+        );
+        let score_matrix_transcript;
+        (_, score_matrix_transcript) = execute(
+            &ctx,
+            residency,
+            model_content_id,
+            DeepSeekV4IndexerScoreTestPolicy::MatrixF16,
+            DeepSeekV4HcaTestPolicy::Production,
+            RunMode::Transcript,
+        );
+        assert_consumed_decisions(
+            score_matrix_transcript.transcript.as_ref().unwrap(),
+            score_control_transcript.transcript.as_ref().unwrap(),
+        );
+        assert_eq!(
+            score_matrix_transcript.logits_sha256,
+            score_control_transcript.logits_sha256
+        );
+        assert_logit_envelope(
+            &score_matrix_transcript.logits,
+            &score_control_transcript.logits,
+        );
+        assert_eq!(
+            score_matrix_transcript.causal_digest, score_control_transcript.causal_digest,
+            "score arithmetic cannot change causal state when consumed IDs are unchanged"
+        );
+        assert!(
+            score_gpu_savings >= 1.5,
+            "F16 matrix scorer GPU savings {score_gpu_savings:.3} ms"
+        );
+        assert!(
+            score_wall_savings >= 1.0,
+            "F16 matrix scorer wall savings {score_wall_savings:.3} ms"
+        );
+        eprintln!(
+            "deepseek_v4 lightning_f16_matrix_boundary position={POSITION} visible_rows={} control_before_gpu_ms={:.3} matrix_gpu_ms={:.3} control_after_gpu_ms={:.3} gpu_savings_ms={score_gpu_savings:.3} control_before_wall_ms={:.3} matrix_wall_ms={:.3} control_after_wall_ms={:.3} wall_savings_ms={score_wall_savings:.3} argmax={} cosine={score_cosine:.9} rel_rms={score_relative_rms:.9} control_logits_sha256={} matrix_logits_sha256={} control_causal_sha256={} matrix_causal_sha256={}",
+            (POSITION as usize + 1) / 4,
+            score_control_first.command_gpu_ms.unwrap(),
+            score_matrix.command_gpu_ms.unwrap(),
+            score_control_second.command_gpu_ms.unwrap(),
+            score_control_first.wall_ms.unwrap(),
+            score_matrix.wall_ms.unwrap(),
+            score_control_second.wall_ms.unwrap(),
+            argmax(&score_matrix.logits),
+            score_control_first.logits_sha256,
+            score_matrix.logits_sha256,
+            digest_hex(&score_control_transcript.causal_digest.unwrap()),
+            digest_hex(&score_matrix_transcript.causal_digest.unwrap()),
         );
     }
 
@@ -22644,6 +23667,13 @@ mod tests {
             let online_repeat =
                 MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
             let direct = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
+            let grouped = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
+            let split8 = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
+            let split8_repeat =
+                MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1]).unwrap();
+            let split8_partial =
+                MetalTensor::zeros_f32(&ctx, vec![HEAD_DIM as u64, HEADS as u64, 8]).unwrap();
+            let split8_ml = MetalTensor::zeros_f32(&ctx, vec![2, HEADS as u64, 8]).unwrap();
             let rows = DeepSeekV4PublishedRows {
                 cache: &compressed_cache,
                 count,
@@ -22706,6 +23736,41 @@ mod tests {
                 config,
             )
             .unwrap();
+            encode_grouped_online_dense_sink_attention_f16(
+                &ctx,
+                &encoder,
+                &query_tensor,
+                &current_raw,
+                &preserved_raw,
+                DeepSeekV4RawCacheLayout::Ring,
+                Some(rows),
+                &sinks,
+                &grouped,
+                AttentionKind::HeavilyCompressed,
+                position as u32,
+                1,
+                config,
+            )
+            .unwrap();
+            for output in [&split8, &split8_repeat] {
+                encode_grouped_splitk_hca_f16(
+                    &ctx,
+                    &encoder,
+                    &query_tensor,
+                    &current_raw,
+                    &preserved_raw,
+                    DeepSeekV4RawCacheLayout::Ring,
+                    rows,
+                    &sinks,
+                    &split8_partial,
+                    &split8_ml,
+                    output,
+                    position as u32,
+                    8,
+                    config,
+                )
+                .unwrap();
+            }
             encoder.end();
             command.commit();
             command.waitUntilCompleted();
@@ -22738,6 +23803,29 @@ mod tests {
                     .collect::<Vec<_>>(),
                 "{count}-row direct HCA changed the online recurrence"
             );
+            assert_eq!(
+                online
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                read_f32(&grouped)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{count}-row grouped HCA changed the online recurrence"
+            );
+            let split8 = read_f32(&split8);
+            assert_eq!(
+                split8
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                read_f32(&split8_repeat)
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{count}-row split-K HCA is not bit-stable"
+            );
             assert_close(
                 &format!("{count}-row legacy HCA head zero"),
                 &legacy[..HEAD_DIM],
@@ -22745,6 +23833,7 @@ mod tests {
                 8e-5,
             );
             assert_envelope(&format!("online HCA rows={count}"), &online, &legacy);
+            assert_envelope(&format!("split8 HCA rows={count}"), &split8, &legacy);
             assert_envelope(
                 &format!("online HCA CPU head zero rows={count}"),
                 &online[..HEAD_DIM],
@@ -25605,6 +26694,33 @@ mod tests {
         let radix4 = run(true);
         assert_eq!(second, first);
         assert_eq!(radix4, first);
+        let maskless_ids =
+            MetalTensor::zeros_i32(&ctx, vec![TOP_K as u64, QUERIES as u64]).unwrap();
+        let maskless_counts = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let maskless_status = MetalTensor::zeros_i32(&ctx, vec![QUERIES as u64]).unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_select_top_k_radix4_ids_f32(
+            &ctx,
+            &encoder,
+            &scores,
+            &visible_counts,
+            &maskless_ids,
+            &maskless_counts,
+            &maskless_status,
+            CAPACITY,
+            CAPACITY,
+            TOP_K,
+            QUERIES,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        assert_eq!(read_i32(&maskless_ids), radix4.2);
+        assert_eq!(read_i32(&maskless_counts), radix4.3);
+        assert_eq!(read_i32(&maskless_status), radix4.4);
         let (actual_mask, actual_ranked, actual_cache_order, actual_counts, actual_status) = first;
 
         for query in 0..QUERIES {
@@ -27478,7 +28594,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![TOP_K as u64, TOKENS as u64],
         );
-        let selected_counts = offset_i32(&ctx, &vec![TOP_K as i32; TOKENS], vec![TOKENS as u64]);
+        let selected_counts = offset_i32(&ctx, &[TOP_K as i32; TOKENS], vec![TOKENS as u64]);
         let visible_counts = offset_i32(&ctx, &[512, 512, 512, 513], vec![TOKENS as u64]);
         let sinks = offset_f32(
             &ctx,
@@ -29304,7 +30420,7 @@ mod tests {
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
         for output in [&first, &second] {
-            encode_lightning_indexer_scores_f16_matrix_ceiling(
+            encode_lightning_indexer_scores_f16_matrix(
                 &ctx,
                 &encoder,
                 &queries,
@@ -29314,6 +30430,7 @@ mod tests {
                 output,
                 HEADS,
                 DIM,
+                ROWS,
                 ROWS,
                 QUERIES,
             )
@@ -29422,7 +30539,7 @@ mod tests {
 
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
-        encode_lightning_indexer_scores_f16_matrix_ceiling(
+        encode_lightning_indexer_scores_f16_matrix(
             &ctx,
             &encoder,
             &queries,
@@ -29432,6 +30549,7 @@ mod tests {
             &scores,
             HEADS,
             DIM,
+            ROWS,
             ROWS,
             QUERIES,
         )
@@ -29519,7 +30637,7 @@ mod tests {
         let command = ctx.queue.commandBuffer().unwrap();
         let encoder = KernelEncoder::begin(&command);
         for output in [&first, &second] {
-            encode_lightning_indexer_scores_f16_matrix_ceiling(
+            encode_lightning_indexer_scores_f16_matrix(
                 &ctx,
                 &encoder,
                 &queries,
@@ -29529,6 +30647,7 @@ mod tests {
                 output,
                 HEADS,
                 DIM,
+                ROWS,
                 ROWS,
                 QUERIES,
             )
@@ -29575,6 +30694,68 @@ mod tests {
     }
 
     #[test]
+    fn matrix_lightning_scorer_bounds_dispatch_to_visible_prefix() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEADS: usize = 64;
+        const DIM: usize = 128;
+        const CAPACITY: usize = 17;
+        const DISPATCHED: usize = 9;
+        const PADDED_DISPATCH: usize = DISPATCHED.next_multiple_of(8);
+        const SENTINEL: f32 = 123.0;
+
+        let queries = offset_f16(
+            &ctx,
+            &vec![0.0; HEADS * DIM],
+            vec![DIM as u64, HEADS as u64, 1],
+        );
+        let head_weights = offset_f32(&ctx, &vec![0.0; HEADS], vec![HEADS as u64, 1]);
+        let keys = offset_f16(
+            &ctx,
+            &vec![0.0; CAPACITY * DIM],
+            vec![DIM as u64, CAPACITY as u64],
+        );
+        let visible_counts = offset_i32(&ctx, &[DISPATCHED as i32], vec![1]);
+        let scores = offset_f32(&ctx, &[SENTINEL; CAPACITY], vec![CAPACITY as u64, 1]);
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_lightning_indexer_scores_f16_matrix(
+            &ctx,
+            &encoder,
+            &queries,
+            &head_weights,
+            &keys,
+            &visible_counts,
+            &scores,
+            HEADS,
+            DIM,
+            CAPACITY,
+            DISPATCHED,
+            1,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+
+        let scores = read_f32(&scores);
+        assert!(scores[..DISPATCHED].iter().all(|&score| score == 0.0));
+        assert!(
+            scores[DISPATCHED..PADDED_DISPATCH]
+                .iter()
+                .all(|&score| score == f32::NEG_INFINITY)
+        );
+        assert!(
+            scores[PADDED_DISPATCH..]
+                .iter()
+                .all(|&score| score == SENTINEL)
+        );
+    }
+
+    #[test]
     #[ignore = "focused production-shape matrix-ceiling profiler; run explicitly with --nocapture"]
     fn profile_lightning_matrix_ceiling_at_far_context() {
         let Some(ctx) = metal_context() else {
@@ -29613,21 +30794,50 @@ mod tests {
             (median, p95)
         }
 
+        fn stable_top_k(scores: &[f32], top_k: usize) -> (Vec<usize>, f32) {
+            let mut ranked = (0..scores.len()).collect::<Vec<_>>();
+            ranked.sort_unstable_by(|&left, &right| {
+                scores[right]
+                    .total_cmp(&scores[left])
+                    .then_with(|| left.cmp(&right))
+            });
+            let margin = scores[ranked[top_k - 1]] - scores[ranked[top_k]];
+            let mut selected = ranked[..top_k].to_vec();
+            selected.sort_unstable();
+            (selected, margin)
+        }
+
+        fn centered_splitmix(index: usize, seed: u64) -> f32 {
+            let mut value = (index as u64).wrapping_add(seed);
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^= value >> 31;
+            let unit = (value >> 40) as f32 / (1u32 << 24) as f32;
+            (unit - 0.5) * 0.08
+        }
+
         let query_values = (0..HEADS * DIM)
-            .map(|index| ((index * 17 + 3) % 113) as f32 * 0.0007 - 0.037)
+            .map(|index| centered_splitmix(index, 0x1234_5678_9abc_def0))
             .collect::<Vec<_>>();
         let queries = offset_f32(&ctx, &query_values, vec![DIM as u64, HEADS as u64, 1]);
         let queries_f16 = MetalTensor::zeros_f16(&ctx, vec![DIM as u64, HEADS as u64, 1])
             .expect("allocate matrix-ceiling F16 queries");
         let scale = 1.0 / ((HEADS * DIM) as f32).sqrt();
-        let head_weights = offset_f32(&ctx, &vec![scale; HEADS], vec![HEADS as u64, 1]);
+        let head_weight_values = (0..HEADS)
+            .map(|head| {
+                let signed = (head * 17 % 29) as f32 - 14.0;
+                signed * scale / 14.0
+            })
+            .collect::<Vec<_>>();
+        let negative_head_weights = head_weight_values
+            .iter()
+            .filter(|&&weight| weight < 0.0)
+            .count();
+        let head_weights = offset_f32(&ctx, &head_weight_values, vec![HEADS as u64, 1]);
         let keys = {
             let bits = (0..MAX_ROWS * DIM)
                 .map(|index| {
-                    let row = index / DIM;
-                    let dimension = index % DIM;
-                    let tag = (row * 13 + dimension * 7 + row / 251) % 257;
-                    half::f16::from_f32((tag as f32 - 128.0) * 0.0002).to_bits()
+                    half::f16::from_f32(centered_splitmix(index, 0xfedc_ba98_7654_3210)).to_bits()
                 })
                 .collect::<Vec<_>>();
             MetalTensor::from_bytes(
@@ -29675,7 +30885,7 @@ mod tests {
                 )
             };
             let matrix = |encoder: &KernelEncoder| {
-                encode_lightning_indexer_scores_f16_matrix_ceiling(
+                encode_lightning_indexer_scores_f16_matrix(
                     &ctx,
                     encoder,
                     &queries_f16,
@@ -29685,6 +30895,7 @@ mod tests {
                     &matrix_score_rows,
                     HEADS,
                     DIM,
+                    row_count,
                     row_count,
                     1,
                 )
@@ -29730,9 +30941,15 @@ mod tests {
                 .zip(&matrix_values)
                 .map(|(current, matrix)| (current - matrix).abs())
                 .fold(0.0f32, f32::max);
+            let (current_ids, current_cutoff_margin) = stable_top_k(&current_values, 512);
+            let (matrix_ids, matrix_cutoff_margin) = stable_top_k(&matrix_values, 512);
+            let selected_exchanges = current_ids
+                .iter()
+                .filter(|current| matrix_ids.binary_search(current).is_err())
+                .count();
 
             eprintln!(
-                "deepseek_v4 matrix_ceiling rows={row_count} token_equivalent={} current_before_ms={current_before_ms:.3} current_before_p95_ms={current_before_p95_ms:.3} matrix_ms={matrix_ms:.3} matrix_p95_ms={matrix_p95_ms:.3} current_after_ms={current_after_ms:.3} current_after_p95_ms={current_after_p95_ms:.3} saving_ms={saving_ms:.3} query_conversion_ms={query_conversion_ms:.4} query_conversion_p95_ms={query_conversion_p95_ms:.4} max_abs={max_abs:.9} rel_rms={relative_rms:.9}",
+                "deepseek_v4 matrix_ceiling rows={row_count} token_equivalent={} current_before_ms={current_before_ms:.3} current_before_p95_ms={current_before_p95_ms:.3} matrix_ms={matrix_ms:.3} matrix_p95_ms={matrix_p95_ms:.3} current_after_ms={current_after_ms:.3} current_after_p95_ms={current_after_p95_ms:.3} saving_ms={saving_ms:.3} query_conversion_ms={query_conversion_ms:.4} query_conversion_p95_ms={query_conversion_p95_ms:.4} negative_head_weights={negative_head_weights} max_abs={max_abs:.9} rel_rms={relative_rms:.9} selected_exchanges={selected_exchanges} current_cutoff_margin={current_cutoff_margin:.9} matrix_cutoff_margin={matrix_cutoff_margin:.9}",
                 row_count * 4,
             );
             eprintln!(
@@ -30758,6 +31975,26 @@ mod tests {
             .expect("allocate online HCA profile output");
         let direct_output = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1])
             .expect("allocate direct HCA profile output");
+        let grouped_output = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1])
+            .expect("allocate grouped HCA profile output");
+        let split4_output = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1])
+            .expect("allocate split4 HCA profile output");
+        let split4_partial = MetalTensor::zeros_f32(&ctx, vec![HEAD_DIM as u64, HEADS as u64, 4])
+            .expect("allocate split4 HCA partial output");
+        let split4_ml = MetalTensor::zeros_f32(&ctx, vec![2, HEADS as u64, 4])
+            .expect("allocate split4 HCA partial max/mass");
+        let split8_output = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1])
+            .expect("allocate split8 HCA profile output");
+        let split8_partial = MetalTensor::zeros_f32(&ctx, vec![HEAD_DIM as u64, HEADS as u64, 8])
+            .expect("allocate split8 HCA partial output");
+        let split8_ml = MetalTensor::zeros_f32(&ctx, vec![2, HEADS as u64, 8])
+            .expect("allocate split8 HCA partial max/mass");
+        let split16_output = MetalTensor::zeros_f32(&ctx, vec![(HEADS * HEAD_DIM) as u64, 1])
+            .expect("allocate split16 HCA profile output");
+        let split16_partial = MetalTensor::zeros_f32(&ctx, vec![HEAD_DIM as u64, HEADS as u64, 16])
+            .expect("allocate split16 HCA partial output");
+        let split16_ml = MetalTensor::zeros_f32(&ctx, vec![2, HEADS as u64, 16])
+            .expect("allocate split16 HCA partial max/mass");
 
         for count in [513usize, 2_048, CAPACITY] {
             let position = u32::try_from(count * 128 - 1).unwrap();
@@ -30829,9 +32066,100 @@ mod tests {
                     config,
                 )
             };
+            let grouped = |encoder: &KernelEncoder| {
+                encode_grouped_online_dense_sink_attention_f16(
+                    &ctx,
+                    encoder,
+                    &queries,
+                    &raw_cache,
+                    &preserved_raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
+                    Some(DeepSeekV4PublishedRows {
+                        cache: &compressed_cache,
+                        count,
+                        capacity_rows: CAPACITY,
+                    }),
+                    &sinks,
+                    &grouped_output,
+                    AttentionKind::HeavilyCompressed,
+                    position,
+                    1,
+                    config,
+                )
+            };
+            let split4 = |encoder: &KernelEncoder| {
+                encode_grouped_splitk_hca_f16(
+                    &ctx,
+                    encoder,
+                    &queries,
+                    &raw_cache,
+                    &preserved_raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
+                    DeepSeekV4PublishedRows {
+                        cache: &compressed_cache,
+                        count,
+                        capacity_rows: CAPACITY,
+                    },
+                    &sinks,
+                    &split4_partial,
+                    &split4_ml,
+                    &split4_output,
+                    position,
+                    4,
+                    config,
+                )
+            };
+            let split8 = |encoder: &KernelEncoder| {
+                encode_grouped_splitk_hca_f16(
+                    &ctx,
+                    encoder,
+                    &queries,
+                    &raw_cache,
+                    &preserved_raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
+                    DeepSeekV4PublishedRows {
+                        cache: &compressed_cache,
+                        count,
+                        capacity_rows: CAPACITY,
+                    },
+                    &sinks,
+                    &split8_partial,
+                    &split8_ml,
+                    &split8_output,
+                    position,
+                    8,
+                    config,
+                )
+            };
+            let split16 = |encoder: &KernelEncoder| {
+                encode_grouped_splitk_hca_f16(
+                    &ctx,
+                    encoder,
+                    &queries,
+                    &raw_cache,
+                    &preserved_raw_cache,
+                    DeepSeekV4RawCacheLayout::Ring,
+                    DeepSeekV4PublishedRows {
+                        cache: &compressed_cache,
+                        count,
+                        capacity_rows: CAPACITY,
+                    },
+                    &sinks,
+                    &split16_partial,
+                    &split16_ml,
+                    &split16_output,
+                    position,
+                    16,
+                    config,
+                )
+            };
             let (before_samples, before_ms, before_p95_ms) = profile_arm(&ctx, legacy);
             let (online_samples, online_ms, online_p95_ms) = profile_arm(&ctx, online);
             let (direct_samples, direct_ms, direct_p95_ms) = profile_arm(&ctx, direct);
+            let (grouped_samples, grouped_ms, grouped_p95_ms) = profile_arm(&ctx, grouped);
+            let (split4_samples, split4_ms, split4_p95_ms) = profile_arm(&ctx, split4);
+            let (split8_samples, split8_ms, split8_p95_ms) = profile_arm(&ctx, split8);
+            let (split16_samples, split16_ms, split16_p95_ms) = profile_arm(&ctx, split16);
             let (online_after_samples, online_after_ms, online_after_p95_ms) =
                 profile_arm(&ctx, online);
             let (after_samples, after_ms, after_p95_ms) = profile_arm(&ctx, legacy);
@@ -30840,6 +32168,10 @@ mod tests {
             let online_values = read_f32(&online_output);
             assert!(online_values.iter().all(|value| value.is_finite()));
             let direct_values = read_f32(&direct_output);
+            let grouped_values = read_f32(&grouped_output);
+            let split4_values = read_f32(&split4_output);
+            let split8_values = read_f32(&split8_output);
+            let split16_values = read_f32(&split16_output);
             assert_eq!(
                 direct_values
                     .iter()
@@ -30850,6 +32182,35 @@ mod tests {
                     .map(|value| value.to_bits())
                     .collect::<Vec<_>>(),
                 "{count}-row direct HCA changed online output"
+            );
+            assert_eq!(
+                grouped_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                online_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{count}-row grouped HCA changed online output"
+            );
+            assert_close(
+                &format!("{count}-row split4 HCA"),
+                &split4_values,
+                &output_values,
+                8e-5,
+            );
+            assert_close(
+                &format!("{count}-row split8 HCA"),
+                &split8_values,
+                &output_values,
+                8e-5,
+            );
+            assert_close(
+                &format!("{count}-row split16 HCA"),
+                &split16_values,
+                &output_values,
+                8e-5,
             );
             let mut dot = 0.0f64;
             let mut online_norm = 0.0f64;
@@ -30871,7 +32232,7 @@ mod tests {
             let saving_ms = baseline_midpoint_ms - online_ms;
             let direct_saving_ms = (online_ms + online_after_ms) * 0.5 - direct_ms;
             eprintln!(
-                "deepseek_v4 tiled_hca_profile rows={count} token_equivalent={} legacy_before_ms={before_ms:.3} legacy_before_p95_ms={before_p95_ms:.3} online_before_ms={online_ms:.3} online_before_p95_ms={online_p95_ms:.3} direct_ms={direct_ms:.3} direct_p95_ms={direct_p95_ms:.3} online_after_ms={online_after_ms:.3} online_after_p95_ms={online_after_p95_ms:.3} direct_saving_ms={direct_saving_ms:.3} legacy_after_ms={after_ms:.3} legacy_after_p95_ms={after_p95_ms:.3} saving_ms={saving_ms:.3} online_cosine={cosine:.9} online_rel_rms={relative_rms:.9} online_max_scaled={max_scaled_error:.9} legacy_before_samples_ms={before_samples:?} online_before_samples_ms={online_samples:?} direct_samples_ms={direct_samples:?} online_after_samples_ms={online_after_samples:?} legacy_after_samples_ms={after_samples:?}",
+                "deepseek_v4 tiled_hca_profile rows={count} token_equivalent={} legacy_before_ms={before_ms:.3} legacy_before_p95_ms={before_p95_ms:.3} online_before_ms={online_ms:.3} online_before_p95_ms={online_p95_ms:.3} direct_ms={direct_ms:.3} direct_p95_ms={direct_p95_ms:.3} grouped_ms={grouped_ms:.3} grouped_p95_ms={grouped_p95_ms:.3} split4_ms={split4_ms:.3} split4_p95_ms={split4_p95_ms:.3} split8_ms={split8_ms:.3} split8_p95_ms={split8_p95_ms:.3} split16_ms={split16_ms:.3} split16_p95_ms={split16_p95_ms:.3} online_after_ms={online_after_ms:.3} online_after_p95_ms={online_after_p95_ms:.3} direct_saving_ms={direct_saving_ms:.3} legacy_after_ms={after_ms:.3} legacy_after_p95_ms={after_p95_ms:.3} saving_ms={saving_ms:.3} online_cosine={cosine:.9} online_rel_rms={relative_rms:.9} online_max_scaled={max_scaled_error:.9} legacy_before_samples_ms={before_samples:?} online_before_samples_ms={online_samples:?} direct_samples_ms={direct_samples:?} grouped_samples_ms={grouped_samples:?} split4_samples_ms={split4_samples:?} split8_samples_ms={split8_samples:?} split16_samples_ms={split16_samples:?} online_after_samples_ms={online_after_samples:?} legacy_after_samples_ms={after_samples:?}",
                 count * 128,
             );
             assert!(max_scaled_error <= 8e-5, "{count}-row scaled error");
@@ -31402,6 +32763,60 @@ mod tests {
         let inner =
             crate::deepseek_v4_oracle::clamped_swiglu(&gate, &up, clamp).expect("SwiGLU oracle");
         mat_vec(down, ffn, hidden, &inner).expect("down oracle")
+    }
+
+    #[test]
+    fn all_slot_q3q4_fast_scope_is_exactly_k160_m4() {
+        let qualified = DeepSeekV4MoeConfig {
+            hidden_size: DEEPSEEK_V4_HIDDEN_SIZE,
+            ffn_size: DEEPSEEK_V4_ALL_SLOTS_Q3Q4_FFN_SIZE,
+            expert_count: DEEPSEEK_V4_ALL_SLOTS_Q3Q4_EXPERT_COUNT,
+            top_k: DEEPSEEK_V4_ROUTE_MAX_TOP_K,
+            routed_scale: 1.0,
+        };
+        assert!(deepseek_v4_all_slots_q3q4_scope_qualified(
+            DEEPSEEK_V4_ALL_SLOTS_Q3Q4_QUALIFIED_DEVICE,
+            qualified,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        for config in [
+            DeepSeekV4MoeConfig {
+                expert_count: 256,
+                ..qualified
+            },
+            DeepSeekV4MoeConfig {
+                ffn_size: 4_096,
+                ..qualified
+            },
+            DeepSeekV4MoeConfig {
+                top_k: 5,
+                ..qualified
+            },
+        ] {
+            assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
+                DEEPSEEK_V4_ALL_SLOTS_Q3Q4_QUALIFIED_DEVICE,
+                config,
+                GgmlType::Q3_K,
+                GgmlType::Q3_K,
+                GgmlType::Q4_K,
+            ));
+        }
+        assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
+            "Apple M3 Max",
+            qualified,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        assert!(!deepseek_v4_all_slots_q3q4_scope_qualified(
+            DEEPSEEK_V4_ALL_SLOTS_Q3Q4_QUALIFIED_DEVICE,
+            qualified,
+            GgmlType::IQ3_XXS,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
     }
 
     #[test]
@@ -32699,6 +34114,29 @@ mod tests {
                     for byte in 1..block_bytes {
                         payload[start + byte] = (block * 29 + byte * 17 + seed * 11 + 7) as u8;
                     }
+                } else if dtype == GgmlType::Q3_K {
+                    for byte in 0..block_bytes - 2 {
+                        payload[start + byte] = (block * 31 + byte * 13 + seed * 19 + 5) as u8;
+                    }
+                    payload[start + block_bytes - 2..start + block_bytes].copy_from_slice(
+                        &half::f16::from_f32(0.0078125 * (1 + (block + seed) % 7) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                } else if dtype == GgmlType::Q4_K {
+                    payload[start..start + 2].copy_from_slice(
+                        &half::f16::from_f32(0.0078125 * (1 + (block + seed) % 7) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                    payload[start + 2..start + 4].copy_from_slice(
+                        &half::f16::from_f32(0.00390625 * (1 + (block + seed) % 5) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                    for byte in 4..block_bytes {
+                        payload[start + byte] = (block * 31 + byte * 13 + seed * 19 + 5) as u8;
+                    }
                 } else {
                     payload[start..start + 2].copy_from_slice(
                         &half::f16::from_f32(0.0078125 * (1 + (block + seed) % 7) as f32)
@@ -32758,6 +34196,7 @@ mod tests {
             (GgmlType::IQ3_XXS, GgmlType::MXFP4),
             (GgmlType::IQ3_S, GgmlType::IQ3_XXS),
             (GgmlType::IQ3_S, GgmlType::MXFP4),
+            (GgmlType::Q3_K, GgmlType::Q4_K),
         ] {
             let gate_bank = make_bank(gate_dtype, H, F, 1);
             let up_bank = make_bank(gate_dtype, H, F, 3);
@@ -32837,16 +34276,31 @@ mod tests {
                 "{gate_dtype:?}/{down_dtype:?} all-slot command failed: {:?}",
                 command.error()
             );
-            assert_eq!(
-                bits(scratch.routed_inner()),
-                bits(&expected_inner),
-                "{gate_dtype:?}/{down_dtype:?} fused activation changed bits"
-            );
-            assert_eq!(
-                bits(scratch.expert_outputs()),
-                bits(&expected_output),
-                "{gate_dtype:?}/{down_dtype:?} all-slot down changed bits"
-            );
+            if gate_dtype == GgmlType::Q3_K {
+                assert_close(
+                    "Q3_K all-slot activation",
+                    &read_f32(scratch.routed_inner()),
+                    &read_f32(&expected_inner),
+                    5e-4,
+                );
+                assert_close(
+                    "Q3_K/Q4_K all-slot output",
+                    &read_f32(scratch.expert_outputs()),
+                    &read_f32(&expected_output),
+                    1e-3,
+                );
+            } else {
+                assert_eq!(
+                    bits(scratch.routed_inner()),
+                    bits(&expected_inner),
+                    "{gate_dtype:?}/{down_dtype:?} fused activation changed bits"
+                );
+                assert_eq!(
+                    bits(scratch.expert_outputs()),
+                    bits(&expected_output),
+                    "{gate_dtype:?}/{down_dtype:?} all-slot down changed bits"
+                );
+            }
         }
 
         let gate_bank = make_bank(GgmlType::IQ2_S, H, F, 1);
@@ -32927,7 +34381,7 @@ mod tests {
                 &ctx, &encoder, &gate_bank, &up_bank, &gate_bank, CLAMP,
             )
             .unwrap_err();
-        assert!(down_error.to_string().contains("IQ3_XXS or MXFP4"));
+        assert!(down_error.to_string().contains("IQ3_XXS, MXFP4, or Q4_K"));
         encoder.end();
 
         let short_scratch =
@@ -33089,6 +34543,8 @@ mod tests {
             (GgmlType::IQ3_S, 4_096, 2_048, "gate_up_iq3_s"),
             (GgmlType::IQ3_XXS, 2_048, 4_096, "down_iq3_xxs"),
             (GgmlType::MXFP4, 2_048, 4_096, "down_mxfp4"),
+            (GgmlType::Q3_K, 4_096, 2_048, "gate_up_q3_k"),
+            (GgmlType::Q4_K, 2_048, 4_096, "down_q4_k"),
         ] {
             let (block_elements, block_bytes) = ggml_type_layout(dtype).unwrap();
             let bank_bytes =
@@ -33209,6 +34665,29 @@ mod tests {
                     for byte in 1..block_bytes {
                         payload[start + byte] = (block * 29 + byte * 17 + seed * 11 + 7) as u8;
                     }
+                } else if dtype == GgmlType::Q3_K {
+                    for byte in 0..block_bytes - 2 {
+                        payload[start + byte] = (block * 31 + byte * 13 + seed * 19 + 5) as u8;
+                    }
+                    payload[start + block_bytes - 2..start + block_bytes].copy_from_slice(
+                        &half::f16::from_f32(0.0078125 * (1 + (block + seed) % 7) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                } else if dtype == GgmlType::Q4_K {
+                    payload[start..start + 2].copy_from_slice(
+                        &half::f16::from_f32(0.0078125 * (1 + (block + seed) % 7) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                    payload[start + 2..start + 4].copy_from_slice(
+                        &half::f16::from_f32(0.00390625 * (1 + (block + seed) % 5) as f32)
+                            .to_bits()
+                            .to_le_bytes(),
+                    );
+                    for byte in 4..block_bytes {
+                        payload[start + byte] = (block * 31 + byte * 13 + seed * 19 + 5) as u8;
+                    }
                 } else {
                     payload[start..start + 2].copy_from_slice(
                         &half::f16::from_f32(0.0078125 * (1 + (block + seed) % 7) as f32)
@@ -33260,6 +34739,7 @@ mod tests {
             (GgmlType::IQ2_S, GgmlType::MXFP4, "iq2_mxfp4"),
             (GgmlType::IQ3_S, GgmlType::IQ3_XXS, "iq3s_iq3xxs"),
             (GgmlType::IQ3_S, GgmlType::MXFP4, "iq3s_mxfp4"),
+            (GgmlType::Q3_K, GgmlType::Q4_K, "q3k_q4k"),
         ] {
             let gate_bank = make_bank(gate_dtype, H, F, 1);
             let up_bank = make_bank(gate_dtype, H, F, 3);
@@ -33313,9 +34793,19 @@ mod tests {
                 })
             };
             let serial_before_ms = serial();
+            let serial_values = read_f32(scratch.expert_outputs());
             let serial_bits = bits(scratch.expert_outputs());
             let all_slot_ms = all_slot();
-            assert_eq!(bits(scratch.expert_outputs()), serial_bits, "{label}");
+            if gate_dtype == GgmlType::Q3_K {
+                assert_close(
+                    label,
+                    &read_f32(scratch.expert_outputs()),
+                    &serial_values,
+                    1e-3,
+                );
+            } else {
+                assert_eq!(bits(scratch.expert_outputs()), serial_bits, "{label}");
+            }
             let all_slot_repeat_ms = all_slot();
             let gate_up_ms = gate_up();
             let gate_up_repeat_ms = gate_up();

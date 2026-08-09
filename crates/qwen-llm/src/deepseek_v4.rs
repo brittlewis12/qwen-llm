@@ -11,11 +11,14 @@ use std::collections::HashSet;
 const ARCHITECTURE: &str = "deepseek4";
 const FLASH_0731_FULL_EXPERT_COUNT: u32 = 256;
 const FLASH_0731_REAP_K160_EXPERT_COUNT: u32 = 160;
+const FLASH_0731_REAP_K216_EXPERT_COUNT: u32 = 216;
 
 pub(crate) fn flash_0731_expert_count_supported(expert_count: u32) -> bool {
     matches!(
         expert_count,
-        FLASH_0731_FULL_EXPERT_COUNT | FLASH_0731_REAP_K160_EXPERT_COUNT
+        FLASH_0731_FULL_EXPERT_COUNT
+            | FLASH_0731_REAP_K160_EXPERT_COUNT
+            | FLASH_0731_REAP_K216_EXPERT_COUNT
     )
 }
 
@@ -492,7 +495,7 @@ impl DeepSeekV4Config {
         if !flash_0731_expert_count_supported(self.expert_count) {
             return Err(DeepSeekV4Error::ProfileMismatch {
                 field: "expert_count",
-                expected: "160 or 256".into(),
+                expected: "160, 216, or 256".into(),
                 actual: self.expert_count.to_string(),
             });
         }
@@ -1502,10 +1505,12 @@ pub(crate) fn flash_0731_config_fixture() -> DeepSeekV4Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deepseek_v4_census::DeepSeekV4CensusV1;
     use std::path::Path;
 
     const DS4_0731_CURRENT: &str = "/Users/tito/models/deepseek-v4-flash-0731/UD-IQ3_XXS/DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf";
     const DS4_0731_REAP_K160: &str = "/Users/tito/models/deepseek-v4-flash-0731-reap-k160/DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf";
+    const DS4_0731_REAP_K216: &str = "/Users/tito/models/deepseek-v4-flash-0731-reap-k216/DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf";
 
     #[test]
     fn compression_ratios_are_closed() {
@@ -1558,8 +1563,14 @@ mod tests {
             .validate_flash_0731_profile()
             .expect("valid K160 REAP profile");
 
+        let mut reap_k216 = config.clone();
+        reap_k216.expert_count = 216;
+        reap_k216
+            .validate_flash_0731_profile()
+            .expect("valid K216 REAP profile");
+
         let mut unsupported_experts = config.clone();
-        unsupported_experts.expert_count = 159;
+        unsupported_experts.expert_count = 200;
         assert!(unsupported_experts.validate_flash_0731_profile().is_err());
 
         let mut wrong_schedule = config;
@@ -1649,6 +1660,67 @@ mod tests {
         assert_eq!(model.output.dtype, GgmlType::Q8_0);
         assert_eq!(model.blocks[0].moe.gate_experts.dtype, GgmlType::Q3_K);
         assert_eq!(model.blocks[0].moe.down_experts.dtype, GgmlType::Q4_K);
+        assert_eq!(model.source_tensor_count, 1_328);
+    }
+
+    #[test]
+    #[ignore = "requires the local DeepSeek V4 Flash-0731 REAP K216 fixture"]
+    fn live_0731_reap_k216_schema_binds_every_tensor() {
+        assert!(
+            Path::new(DS4_0731_REAP_K216).exists(),
+            "missing K216 REAP fixture"
+        );
+        let gguf = GgufFile::open(DS4_0731_REAP_K216).expect("open K216 REAP fixture");
+        let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf).expect("bind K216 REAP fixture");
+        let census =
+            DeepSeekV4CensusV1::from_gguf_flash_0731(&gguf).expect("census K216 REAP fixture");
+        assert_eq!(gguf.shard_count(), 3);
+        assert_eq!(census.totals.shard_count, 3);
+        assert_eq!(census.totals.tensor_count, 1_328);
+        assert_eq!(census.totals.tensor_bytes, 89_060_075_612);
+        assert_eq!(
+            gguf.tensors
+                .iter()
+                .map(|tensor| tensor.n_bytes)
+                .sum::<u64>(),
+            89_060_075_612
+        );
+        assert_eq!(model.config.expert_count, 216);
+        assert_eq!(model.config.swiglu_clamp_experts, vec![10.0; 43]);
+        assert_eq!(model.config.swiglu_clamp_shared, vec![10.0; 43]);
+        assert_eq!(model.token_embedding.dtype, GgmlType::Q6_K);
+        assert_eq!(model.output.dtype, GgmlType::Q6_K);
+        assert_eq!(model.blocks[0].moe.gate_experts.dtype, GgmlType::IQ2_XS);
+        assert_eq!(model.blocks[0].moe.down_experts.dtype, GgmlType::IQ3_XXS);
+        assert_eq!(model.blocks[42].moe.gate_experts.dtype, GgmlType::IQ3_XXS);
+        assert_eq!(model.blocks[42].moe.down_experts.dtype, GgmlType::MXFP4);
+        let cohort_count = |gate, up, down| {
+            model
+                .blocks
+                .iter()
+                .filter(|block| {
+                    block.moe.gate_experts.dtype == gate
+                        && block.moe.up_experts.dtype == up
+                        && block.moe.down_experts.dtype == down
+                })
+                .count()
+        };
+        assert_eq!(
+            cohort_count(GgmlType::IQ2_XS, GgmlType::IQ2_XS, GgmlType::IQ3_XXS),
+            25
+        );
+        assert_eq!(
+            cohort_count(GgmlType::IQ3_XXS, GgmlType::IQ3_XXS, GgmlType::IQ3_XXS,),
+            16
+        );
+        assert_eq!(
+            cohort_count(GgmlType::IQ3_S, GgmlType::IQ3_S, GgmlType::MXFP4),
+            1
+        );
+        assert_eq!(
+            cohort_count(GgmlType::IQ3_XXS, GgmlType::IQ3_XXS, GgmlType::MXFP4),
+            1
+        );
         assert_eq!(model.source_tensor_count, 1_328);
     }
 }

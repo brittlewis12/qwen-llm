@@ -1950,6 +1950,283 @@ kernel void kernel_deepseek_v4_indexed_mat_vec_q4_K_f32(
     }
 }
 
+kernel void kernel_deepseek_v4_all_slots_swiglu_q3_K_f32(
+        constant ds4_all_slots_args & args [[buffer(0)]],
+        device const block_q3_k_local * gate_weight [[buffer(1)]],
+        device const block_q3_k_local * up_weight [[buffer(2)]],
+        device const float * x [[buffer(3)]],
+        device const int * expert_ids [[buffer(4)]],
+        device const int * route_status [[buffer(5)]],
+        device float * inner [[buffer(6)]],
+        threadgroup float * totals [[threadgroup(0)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const short NR0 = 4;
+    const short NSG = 2;
+    const uint slot = tgpig.y;
+    const uint first_row = (tgpig.x * NSG + uint(sgitg)) * NR0;
+    const int expert = slot < args.top_k ? expert_ids[slot] : -1;
+    const bool valid = slot < args.top_k && route_status[0] == 1
+        && expert >= 0 && uint(expert) < args.n_expert;
+    float gate_sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float up_sumf[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    if (valid && first_row < args.n_out) {
+        const uint nb = args.n_in / 256u;
+        const ulong expert_stride = (ulong)args.n_out * nb;
+        device const block_q3_k_local * gate_expert = gate_weight
+            + (ulong)expert * expert_stride;
+        device const block_q3_k_local * up_expert = up_weight
+            + (ulong)expert * expert_stride;
+        for (uint block = 0; block < nb; ++block) {
+            const uint input_base = block * 256u;
+            for (short row = 0; row < NR0; ++row) {
+                const uint out_row = first_row + uint(row);
+                if (out_row >= args.n_out) continue;
+                device const block_q3_k_local & gate_weights =
+                    gate_expert[(ulong)out_row * nb + block];
+                device const block_q3_k_local & up_weights =
+                    up_expert[(ulong)out_row * nb + block];
+                for (uint element = uint(tiisg); element < 256u; element += 32u) {
+                    const float input = x[input_base + element];
+                    gate_sumf[row] += deq_q3_k(gate_weights, element) * input;
+                    up_sumf[row] += deq_q3_k(up_weights, element) * input;
+                }
+            }
+        }
+    }
+
+    for (short row = 0; row < NR0; ++row) {
+        const uint local_row = uint(sgitg) * uint(NR0) + uint(row);
+        const float gate_total = simd_sum(gate_sumf[row]);
+        const float up_total = simd_sum(up_sumf[row]);
+        if (tiisg == 0) {
+            totals[local_row] = gate_total;
+            totals[8u + local_row] = up_total;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tiisg == 0) {
+        for (short row = 0; row < NR0; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+            const uint local_row = uint(sgitg) * uint(NR0) + uint(row);
+            const float gate = totals[local_row];
+            const float up = totals[8u + local_row];
+            const float clamped_gate = min(gate, args.clamp);
+            const float clamped_up = clamp(up, -args.clamp, args.clamp);
+            inner[(ulong)slot * args.n_out + out_row] = valid
+                ? clamped_gate / (1.0f + exp(-clamped_gate)) * clamped_up
+                : 0.0f;
+        }
+    }
+}
+
+kernel void kernel_deepseek_v4_all_slots_down_q4_K_f32(
+        constant ds4_all_slots_args & args [[buffer(0)]],
+        device const block_q4_k_local * weight [[buffer(1)]],
+        device const float * inner [[buffer(2)]],
+        device const int * expert_ids [[buffer(3)]],
+        device const int * route_status [[buffer(4)]],
+        device float * y [[buffer(5)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const short NR0 = 2;
+    const short NSG = 2;
+    const uint slot = tgpig.y;
+    const uint first_row = (tgpig.x * NSG + uint(sgitg)) * NR0;
+    if (first_row >= args.n_out) return;
+    const int expert = slot < args.top_k ? expert_ids[slot] : -1;
+    if (slot >= args.top_k || route_status[0] != 1
+            || expert < 0 || uint(expert) >= args.n_expert) {
+        if (tiisg == 0) {
+            for (short row = 0; row < NR0; ++row) {
+                const uint out_row = first_row + uint(row);
+                if (out_row < args.n_out) {
+                    y[(ulong)slot * args.n_out + out_row] = 0.0f;
+                }
+            }
+        }
+        return;
+    }
+
+    const uint nb = args.n_in / 256u;
+    const ulong expert_stride = (ulong)args.n_out * nb;
+    device const block_q4_k_local * expert_weight = weight
+        + (ulong)expert * expert_stride;
+    device const float * x = inner + (ulong)slot * args.n_in;
+    float sumf[2] = {0.0f, 0.0f};
+    for (uint block = 0; block < nb; ++block) {
+        const uint input_base = block * 256u;
+        for (short row = 0; row < NR0; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+            device const block_q4_k_local & weights =
+                expert_weight[(ulong)out_row * nb + block];
+            for (uint element = uint(tiisg); element < 256u; element += 32u) {
+                sumf[row] += deq_q4_k(weights, element) * x[input_base + element];
+            }
+        }
+    }
+
+    for (short row = 0; row < NR0; ++row) {
+        const uint out_row = first_row + uint(row);
+        if (out_row >= args.n_out) continue;
+        const float total = simd_sum(sumf[row]);
+        if (tiisg == 0) y[(ulong)slot * args.n_out + out_row] = total;
+    }
+}
+
+kernel void kernel_deepseek_v4_all_slots_mat_vec_q3_K_f32_fast(
+        constant ds4_all_slots_args & args [[buffer(0)]],
+        device const block_q3_k_local * weight [[buffer(1)]],
+        device const float * x [[buffer(2)]],
+        device const int * expert_ids [[buffer(3)]],
+        device const int * route_status [[buffer(4)]],
+        device float * y [[buffer(5)]],
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    const short NR0 = 2;
+    const short NSG = 2;
+    const uint slot = tgpig.y;
+    const uint first_row = (tgpig.x * NSG + uint(sgitg)) * NR0;
+    if (first_row >= args.n_out) return;
+    const int expert = slot < args.top_k ? expert_ids[slot] : -1;
+    if (slot >= args.top_k || route_status[0] != 1
+            || expert < 0 || uint(expert) >= args.n_expert) {
+        if (tiisg == 0) {
+            for (short row = 0; row < NR0; ++row) {
+                const uint out_row = first_row + uint(row);
+                if (out_row < args.n_out) {
+                    y[(ulong)slot * args.n_out + out_row] = 0.0f;
+                }
+            }
+        }
+        return;
+    }
+
+    const uint nb = args.n_in / 256u;
+    const ulong expert_stride = (ulong)args.n_out * nb;
+    device const block_q3_k_local * expert_weight = weight
+        + (ulong)expert * expert_stride;
+    const short tid = tiisg / 4;
+    const short ix = tiisg % 4;
+    const short ip = tid / 4;
+    const short il = 2 * ((tid % 4) / 2);
+    const short ir = tid % 2;
+    const short l0 = 8 * ir;
+
+    const ushort4 mm[4] = {
+        ushort4(0x0001, 0x0100, 0x0002, 0x0200),
+        ushort4(0x0004, 0x0400, 0x0008, 0x0800),
+        ushort4(0x0010, 0x1000, 0x0020, 0x2000),
+        ushort4(0x0040, 0x4000, 0x0080, 0x8000),
+    };
+    const uint4 qm[2] = {
+        uint4(0x0003, 0x0300, 0x000c, 0x0c00),
+        uint4(0x0030, 0x3000, 0x00c0, 0xc000),
+    };
+
+    const ushort4 hm = mm[2 * ip + il / 2];
+    const short shift = 2 * il;
+    const float v1 = il == 0 ? 4.0f : 64.0f;
+    const float v2 = 4.0f * v1;
+    const uint s_shift1 = 4u * uint(ip);
+    const uint s_shift2 = s_shift1 + uint(il);
+    const short q_offset = 32 * ip + l0;
+    const short y_offset = 128 * ip + 32 * il + l0;
+
+    device const float * y1 = x + uint(ix) * 256u + uint(y_offset);
+    uint scales32;
+    uint aux32;
+    thread ushort * scales16 = (thread ushort *)&scales32;
+    float sumf1[2] = {0.0f, 0.0f};
+    float sumf2[2] = {0.0f, 0.0f};
+
+    for (uint ib = uint(ix); ib < nb; ib += 4u) {
+        float yl[32];
+        for (short l = 0; l < 8; ++l) {
+            yl[l +  0] = y1[l +  0];
+            yl[l +  8] = y1[l + 16];
+            yl[l + 16] = y1[l + 32];
+            yl[l + 24] = y1[l + 48];
+        }
+
+        for (short row = 0; row < NR0; ++row) {
+            const uint out_row = first_row + uint(row);
+            if (out_row >= args.n_out) continue;
+            device const block_q3_k_local & b =
+                expert_weight[(ulong)out_row * nb + ib];
+            device const ushort * q = (device const ushort *)(b.qs + q_offset);
+            device const ushort * h = (device const ushort *)(b.hmask + l0);
+            device const ushort * a = (device const ushort *)(b.scales);
+            const float d_all = float(b.d);
+
+            scales16[0] = a[4];
+            scales16[1] = a[5];
+            aux32 = ((scales32 >> s_shift2) << 4) & 0x30303030u;
+            scales16[0] = a[il + 0];
+            scales16[1] = a[il + 1];
+            scales32 = ((scales32 >> s_shift1) & 0x0f0f0f0fu) | aux32;
+
+            float s1 = 0.0f;
+            float s2 = 0.0f;
+            float s3 = 0.0f;
+            float s4 = 0.0f;
+            float s5 = 0.0f;
+            float s6 = 0.0f;
+            for (short l = 0; l < 8; l += 2) {
+                const uint qs = uint(q[l / 2]);
+                const uint hs = uint(h[l / 2]);
+                s1 += yl[l +  0] * float(qs & qm[il / 2][0]);
+                s2 += yl[l +  1] * float(qs & qm[il / 2][1]);
+                s3 += ((hs & uint(hm[0])) != 0u ? 0.0f : yl[l +  0])
+                    + ((hs & uint(hm[1])) != 0u ? 0.0f : yl[l +  1]);
+                s4 += yl[l + 16] * float(qs & qm[il / 2][2]);
+                s5 += yl[l + 17] * float(qs & qm[il / 2][3]);
+                s6 += ((hs & uint(hm[2])) != 0u ? 0.0f : yl[l + 16])
+                    + ((hs & uint(hm[3])) != 0u ? 0.0f : yl[l + 17]);
+            }
+            float d1 = d_all * (s1 + (1.0f / 256.0f) * s2 - s3 * v1);
+            float d2 = d_all * (s4 + (1.0f / 256.0f) * s5 - s6 * v2);
+            sumf1[row] += d1 * (float((scales32 >>  0) & 0xffu) - 32.0f);
+            sumf2[row] += d2 * (float((scales32 >> 16) & 0xffu) - 32.0f);
+
+            s1 = s2 = s3 = s4 = s5 = s6 = 0.0f;
+            for (short l = 0; l < 8; l += 2) {
+                const uint qs = uint(q[l / 2 + 8]);
+                const uint hs = uint(h[l / 2 + 8]);
+                s1 += yl[l +  8] * float(qs & qm[il / 2][0]);
+                s2 += yl[l +  9] * float(qs & qm[il / 2][1]);
+                s3 += ((hs & uint(hm[0])) != 0u ? 0.0f : yl[l +  8])
+                    + ((hs & uint(hm[1])) != 0u ? 0.0f : yl[l +  9]);
+                s4 += yl[l + 24] * float(qs & qm[il / 2][2]);
+                s5 += yl[l + 25] * float(qs & qm[il / 2][3]);
+                s6 += ((hs & uint(hm[2])) != 0u ? 0.0f : yl[l + 24])
+                    + ((hs & uint(hm[3])) != 0u ? 0.0f : yl[l + 25]);
+            }
+            d1 = d_all * (s1 + (1.0f / 256.0f) * s2 - s3 * v1);
+            d2 = d_all * (s4 + (1.0f / 256.0f) * s5 - s6 * v2);
+            sumf1[row] += d1 * (float((scales32 >>  8) & 0xffu) - 32.0f);
+            sumf2[row] += d2 * (float((scales32 >> 24) & 0xffu) - 32.0f);
+        }
+        y1 += 4u * 256u;
+    }
+
+    for (short row = 0; row < NR0; ++row) {
+        const uint out_row = first_row + uint(row);
+        if (out_row >= args.n_out) continue;
+        const float row_sum = (sumf1[row] + 0.25f * sumf2[row])
+            / float(1u << uint(shift));
+        const float total = simd_sum(row_sum);
+        if (tiisg == 0) y[(ulong)slot * args.n_out + out_row] = total;
+    }
+}
+
 kernel void kernel_deepseek_v4_all_slots_swiglu_iq2_xs_f32_fast(
         constant ds4_all_slots_args & args [[buffer(0)]],
         device const uchar * gate_weight [[buffer(1)]],
@@ -2982,6 +3259,7 @@ kernel void kernel_mat_mat_f32_f32(
         threadgroup  float   * wtile  [[threadgroup(0)]],
         uint2 tgpig [[threadgroup_position_in_grid]],
         ushort tiisg [[thread_index_in_simdgroup]]) {
+#pragma METAL fp math_mode(safe)
     const uint row = tgpig.x;
     const uint q = tgpig.y * 32u + tiisg;
     if (row >= args.n_out) return;
@@ -3664,6 +3942,62 @@ kernel void kernel_mat_mat_f32_f32_router_e8p32(
         acc5 += weight[(ulong)(row0 + 5u) * args.n_in + i] * xv;
         acc6 += weight[(ulong)(row0 + 6u) * args.n_in + i] * xv;
         acc7 += weight[(ulong)(row0 + 7u) * args.n_in + i] * xv;
+    }
+
+    const ulong out_base = (ulong)q * args.n_out + row0;
+    y[out_base + 0u] = acc0;
+    y[out_base + 1u] = acc1;
+    y[out_base + 2u] = acc2;
+    y[out_base + 3u] = acc3;
+    y[out_base + 4u] = acc4;
+    y[out_base + 5u] = acc5;
+    y[out_base + 6u] = acc6;
+    y[out_base + 7u] = acc7;
+}
+
+// Keeps the scalar K traversal and accumulation order of
+// kernel_mat_mat_f32_f32 while sharing each activation load across 8 rows.
+kernel void kernel_mat_mat_f32_f32_router_e8p32_strict(
+        constant mat_mat_args & args [[buffer(0)]],
+        device const float   * weight [[buffer(1)]], // [n_in, n_out]
+        device const float   * x      [[buffer(2)]], // [n_query, n_in] row-major
+        device       float   * y      [[buffer(3)]], // [n_out, n_query] col-major
+        uint2 tgpig [[threadgroup_position_in_grid]],
+        ushort tid [[thread_index_in_threadgroup]]) {
+#pragma METAL fp math_mode(safe)
+    const uint row0 = tgpig.x * 8u;
+    const uint q = tgpig.y * 32u + tid;
+    if (q >= args.n_query) return;
+
+    device const float * x_row = x + (ulong)q * args.n_in;
+    device const float * w0 = weight + (ulong)(row0 + 0u) * args.n_in;
+    device const float * w1 = weight + (ulong)(row0 + 1u) * args.n_in;
+    device const float * w2 = weight + (ulong)(row0 + 2u) * args.n_in;
+    device const float * w3 = weight + (ulong)(row0 + 3u) * args.n_in;
+    device const float * w4 = weight + (ulong)(row0 + 4u) * args.n_in;
+    device const float * w5 = weight + (ulong)(row0 + 5u) * args.n_in;
+    device const float * w6 = weight + (ulong)(row0 + 6u) * args.n_in;
+    device const float * w7 = weight + (ulong)(row0 + 7u) * args.n_in;
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    float acc4 = 0.0f;
+    float acc5 = 0.0f;
+    float acc6 = 0.0f;
+    float acc7 = 0.0f;
+
+    for (uint i = 0; i < args.n_in; ++i) {
+        const float xv = x_row[i];
+        acc0 += xv * w0[i];
+        acc1 += xv * w1[i];
+        acc2 += xv * w2[i];
+        acc3 += xv * w3[i];
+        acc4 += xv * w4[i];
+        acc5 += xv * w5[i];
+        acc6 += xv * w6[i];
+        acc7 += xv * w7[i];
     }
 
     const ulong out_base = (ulong)q * args.n_out + row0;

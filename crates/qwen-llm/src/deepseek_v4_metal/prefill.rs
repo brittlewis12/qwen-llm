@@ -504,6 +504,7 @@ struct PrefillSparseCsaScratch {
     head_weights: MetalTensor,
     visible_counts: MetalTensor,
     scores: MetalTensor,
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     selected_mask: MetalTensor,
     cache_order_ids: MetalTensor,
     selected_counts: MetalTensor,
@@ -651,6 +652,7 @@ impl DeepSeekV4PrefillScratch {
                     head_weights: MetalTensor::zeros_f32(ctx, vec![INDEXER_HEAD_COUNT as u64, n])?,
                     visible_counts: MetalTensor::zeros_i32(ctx, vec![n])?,
                     scores: MetalTensor::zeros_f32(ctx, vec![csa_capacity_rows as u64, n])?,
+                    #[cfg(any(test, feature = "dsv4-diagnostics"))]
                     selected_mask: MetalTensor::zeros_i32(ctx, vec![csa_capacity_rows as u64, n])?,
                     cache_order_ids: MetalTensor::zeros_i32(
                         ctx,
@@ -864,17 +866,17 @@ pub(super) fn append_session_allocation_requests(
         f32_bytes,
     )?;
     push("attention.sparse_csa.visible_counts", n, i32_bytes)?;
-    for name in ["scores", "selected_mask"] {
-        push(
-            &format!("attention.sparse_csa.{name}"),
-            checked_mul(n, csa_capacity_rows, "packed sparse row scratch")?,
-            if name == "scores" {
-                f32_bytes
-            } else {
-                i32_bytes
-            },
-        )?;
-    }
+    push(
+        "attention.sparse_csa.scores",
+        checked_mul(n, csa_capacity_rows, "packed sparse score scratch")?,
+        f32_bytes,
+    )?;
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
+    push(
+        "attention.sparse_csa.selected_mask",
+        checked_mul(n, csa_capacity_rows, "packed sparse selection mask")?,
+        i32_bytes,
+    )?;
     push(
         "attention.sparse_csa.cache_order_ids",
         checked_mul(n, DEEPSEEK_V4_CSA_TOP_K, "packed sparse selected IDs")?,
@@ -1814,10 +1816,106 @@ crate::env_flag!(
     default_on packed_q8_shared_matrix_enabled,
     "QWEN_DSV4_PACKED_Q8_SHARED_MATRIX"
 );
+fn parse_packed_router_e8p32_strict_env(value: Option<&str>) -> Result<bool, ()> {
+    let Some(value) = value else {
+        return Ok(true);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(()),
+    }
+}
+
+fn packed_router_e8p32_strict_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var_os("QWEN_DSV4_PACKED_ROUTER_E8P32_STRICT") {
+        None => true,
+        Some(value) => {
+            let parsed = value
+                .to_str()
+                .ok_or(())
+                .and_then(|value| parse_packed_router_e8p32_strict_env(Some(value)));
+            match parsed {
+                Ok(enabled) => enabled,
+                Err(()) => {
+                    eprintln!(
+                        "deepseek_v4: invalid QWEN_DSV4_PACKED_ROUTER_E8P32_STRICT value; disabling exact E8 router"
+                    );
+                    false
+                }
+            }
+        }
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PackedQaKvMatrixMode {
+    Off,
+    Qa,
+    Kv,
+    Both,
+}
+
+impl PackedQaKvMatrixMode {
+    fn qa(self) -> bool {
+        matches!(self, Self::Qa | Self::Both)
+    }
+
+    fn kv(self) -> bool {
+        matches!(self, Self::Kv | Self::Both)
+    }
+}
+
+fn parse_packed_q8_qa_kv_matrix_mode(value: Option<&str>) -> Result<PackedQaKvMatrixMode, ()> {
+    let Some(value) = value else {
+        return Ok(PackedQaKvMatrixMode::Both);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "no" | "off" => Ok(PackedQaKvMatrixMode::Off),
+        "qa" => Ok(PackedQaKvMatrixMode::Qa),
+        "kv" => Ok(PackedQaKvMatrixMode::Kv),
+        "1" | "true" | "yes" | "on" | "both" => Ok(PackedQaKvMatrixMode::Both),
+        _ => Err(()),
+    }
+}
+
+fn packed_q8_qa_kv_matrix_mode() -> PackedQaKvMatrixMode {
+    static MODE: std::sync::OnceLock<PackedQaKvMatrixMode> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        let value = std::env::var_os("QWEN_DSV4_PACKED_Q8_QA_KV_MATRIX");
+        let parsed = match value.as_deref() {
+            None => parse_packed_q8_qa_kv_matrix_mode(None),
+            Some(value) => value
+                .to_str()
+                .ok_or(())
+                .and_then(|value| parse_packed_q8_qa_kv_matrix_mode(Some(value))),
+        };
+        match parsed {
+            Ok(mode) => mode,
+            Err(()) => {
+                eprintln!(
+                    "deepseek_v4: invalid QWEN_DSV4_PACKED_Q8_QA_KV_MATRIX value; disabling Q-A/raw-KV matrix policy"
+                );
+                PackedQaKvMatrixMode::Off
+            }
+        }
+    })
+}
 
 const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE: &str = "Apple M4 Max";
 const PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES: u64 = 104_202_502_492;
 const PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES: u64 = 89_920_886_108;
+const PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES: u64 = 89_060_075_612;
+
+fn packed_q8_matrix_asset_qualified(source_bytes: u64, expert_count: usize) -> bool {
+    matches!(
+        (source_bytes, expert_count),
+        (PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES, 256)
+            | (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160)
+            | (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216)
+    )
+}
 
 fn packed_q8_matrix_chunk_qualified(n_tokens: usize) -> bool {
     matches!(
@@ -1826,26 +1924,52 @@ fn packed_q8_matrix_chunk_qualified(n_tokens: usize) -> bool {
     )
 }
 
+fn packed_router_e8p32_scope_qualified(
+    device_name: &str,
+    tensor_count: usize,
+    source_bytes: u64,
+    expert_count: usize,
+    n_tokens: usize,
+) -> bool {
+    device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
+        && tensor_count == 1_328
+        && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
+        && expert_count == 160
+        && packed_q8_matrix_chunk_qualified(n_tokens)
+}
+
+fn packed_q8_qa_kv_matrix_scope_qualified(
+    device_name: &str,
+    tensor_count: usize,
+    source_bytes: u64,
+    expert_count: usize,
+    n_tokens: usize,
+) -> bool {
+    device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
+        && tensor_count == 1_328
+        && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
+        && expert_count == 160
+        && packed_q8_matrix_chunk_qualified(n_tokens)
+}
+
 fn packed_q8_compressor_matrix_scope_qualified(
     device_name: &str,
     tensor_count: usize,
     source_bytes: u64,
+    expert_count: usize,
     n_tokens: usize,
 ) -> bool {
     packed_q8_matrix_chunk_qualified(n_tokens)
         && device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
         && tensor_count == 1_328
-        && matches!(
-            source_bytes,
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES
-                | PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
-        )
+        && packed_q8_matrix_asset_qualified(source_bytes, expert_count)
 }
 
 fn packed_indexer_q_matrix_scope_qualified(
     device_name: &str,
     tensor_count: usize,
     source_bytes: u64,
+    expert_count: usize,
     n_tokens: usize,
 ) -> bool {
     n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS
@@ -1853,6 +1977,7 @@ fn packed_indexer_q_matrix_scope_qualified(
             device_name,
             tensor_count,
             source_bytes,
+            expert_count,
             n_tokens,
         )
 }
@@ -1867,6 +1992,7 @@ fn packed_q8_compressor_matrix_for_chunk(
             &ctx.device.name().to_string(),
             residency.report().tensor_count,
             residency.report().source_bytes,
+            residency.config().expert_count as usize,
             n_tokens,
         )
 }
@@ -1881,6 +2007,7 @@ fn packed_q8_shared_matrix_for_chunk(
             &ctx.device.name().to_string(),
             residency.report().tensor_count,
             residency.report().source_bytes,
+            residency.config().expert_count as usize,
             n_tokens,
         )
 }
@@ -1924,6 +2051,7 @@ fn packed_q8_output_projection_for_chunk(
         &ctx.device.name().to_string(),
         residency.report().tensor_count,
         residency.report().source_bytes,
+        residency.config().expert_count as usize,
         n_tokens,
     );
     Ok(resolve_packed_q8_matrix_policy(policy, profile_qualified))
@@ -1952,6 +2080,7 @@ fn packed_q8_qb_projection_for_chunk(
         &ctx.device.name().to_string(),
         residency.report().tensor_count,
         residency.report().source_bytes,
+        residency.config().expert_count as usize,
         n_tokens,
     );
     Ok(resolve_packed_q8_matrix_policy(policy, profile_qualified))
@@ -1984,6 +2113,7 @@ struct PackedSparseCsaViews {
     index_queries: MetalTensor,
     head_weights: MetalTensor,
     scores: MetalTensor,
+    #[cfg(any(test, feature = "dsv4-diagnostics"))]
     selected_mask: MetalTensor,
     status: MetalTensor,
 }
@@ -2216,6 +2346,7 @@ impl PrefillSparseCsaScratch {
             vec![rows.capacity_rows as u64, query_count as u64],
             "packed sparse scores",
         )?;
+        #[cfg(any(test, feature = "dsv4-diagnostics"))]
         let selected_mask = i32_prefix(
             &self.selected_mask,
             vec![rows.capacity_rows as u64, query_count as u64],
@@ -2387,6 +2518,7 @@ impl PrefillSparseCsaScratch {
             index_queries,
             head_weights,
             scores,
+            #[cfg(any(test, feature = "dsv4-diagnostics"))]
             selected_mask,
             status,
         })
@@ -2461,6 +2593,7 @@ impl PrefillSparseCsaScratch {
         rows: DeepSeekV4CsaRows<'_>,
         prepared: &PackedSparseCsaViews,
     ) -> Result<(), DeepSeekV4MetalError> {
+        #[cfg(any(test, feature = "dsv4-diagnostics"))]
         encode_select_top_k_f32(
             ctx,
             enc,
@@ -2475,7 +2608,22 @@ impl PrefillSparseCsaScratch {
             rows.count,
             DEEPSEEK_V4_CSA_TOP_K,
             prepared.query_count,
-        )
+        )?;
+        #[cfg(not(any(test, feature = "dsv4-diagnostics")))]
+        encode_select_top_k_radix4_ids_f32(
+            ctx,
+            enc,
+            &prepared.scores,
+            &prepared.visible_counts,
+            &prepared.cache_order_ids,
+            &prepared.selected_counts,
+            &prepared.status,
+            rows.capacity_rows,
+            rows.count,
+            DEEPSEEK_V4_CSA_TOP_K,
+            prepared.query_count,
+        )?;
+        Ok(())
     }
 
     fn validate_completed(&self, query_count: usize) -> Result<(), DeepSeekV4MetalError> {
@@ -2522,6 +2670,7 @@ impl PrefillAttentionScratch {
         n_tokens: usize,
         rms_eps: f32,
         q_b_projection: Q8PrecisionProjection,
+        q_a_kv_matrix: PackedQaKvMatrixMode,
     ) -> Result<PackedAttentionViews, DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_attention_prepare_batch")?;
         checked_token_count(n_tokens)?;
@@ -2603,17 +2752,30 @@ impl PrefillAttentionScratch {
             config.hidden_size,
             rms_eps,
         )?;
-        encode_batch_projection(
-            ctx,
-            enc,
-            q_a,
-            &normalized_input,
-            &q_lora_raw,
-            config.hidden_size,
-            config.q_lora_rank,
-            n_tokens,
-            "packed Q A",
-        )?;
+        if q_a_kv_matrix.qa() {
+            encode_q8_f32_mma_r2c16k64(
+                ctx,
+                enc,
+                q_a,
+                &normalized_input,
+                &q_lora_raw,
+                config.hidden_size,
+                config.q_lora_rank,
+                n_tokens,
+            )?;
+        } else {
+            encode_batch_projection(
+                ctx,
+                enc,
+                q_a,
+                &normalized_input,
+                &q_lora_raw,
+                config.hidden_size,
+                config.q_lora_rank,
+                n_tokens,
+                "packed Q A",
+            )?;
+        }
         encode_rms_norm_batched_f32(
             ctx,
             enc,
@@ -2671,17 +2833,30 @@ impl PrefillAttentionScratch {
             config.head_dim,
             rms_eps,
         )?;
-        encode_state_batch_projection(
-            ctx,
-            enc,
-            kv_weight,
-            &normalized_input,
-            &kv_raw,
-            config.hidden_size,
-            config.head_dim,
-            n_tokens,
-            "packed KV",
-        )?;
+        if q_a_kv_matrix.kv() {
+            encode_q8_f32_mma_r2c16k64(
+                ctx,
+                enc,
+                kv_weight,
+                &normalized_input,
+                &kv_raw,
+                config.hidden_size,
+                config.head_dim,
+                n_tokens,
+            )?;
+        } else {
+            encode_state_batch_projection(
+                ctx,
+                enc,
+                kv_weight,
+                &normalized_input,
+                &kv_raw,
+                config.hidden_size,
+                config.head_dim,
+                n_tokens,
+                "packed KV",
+            )?;
+        }
         encode_rms_norm_batched_f32(
             ctx,
             enc,
@@ -3761,8 +3936,8 @@ fn encode_packed_grouped_swiglu_iq2_xs_f32(
     clamp: f32,
 ) -> Result<(), DeepSeekV4MetalError> {
     require_serial(enc, "packed grouped IQ2_XS gate/up")?;
+    validate_packed_expert_count(expert_count)?;
     if !hidden.is_multiple_of(256)
-        || expert_count != MOE_EXPERT_COUNT
         || top_k != MOE_TOP_K
         || gate_bank.dtype != GgmlType::IQ2_XS
         || up_bank.dtype != GgmlType::IQ2_XS
@@ -3870,12 +4045,12 @@ fn encode_packed_grouped_down_iq3_xxs_f32(
     n_tokens: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
     require_serial(enc, "packed grouped IQ3_XXS down")?;
+    validate_packed_expert_count(expert_count)?;
     if !crate::metal::matmat_iq3_xxs_mm_is_enabled() {
         return invalid("packed grouped IQ3_XXS down requires the SIMD-matrix policy");
     }
     if !n_in.is_multiple_of(256)
         || !n_out.is_multiple_of(64)
-        || expert_count != MOE_EXPERT_COUNT
         || top_k != MOE_TOP_K
         || down_bank.dtype != GgmlType::IQ3_XXS
     {
@@ -4019,9 +4194,9 @@ fn encode_packed_grouped_mapped_iq2_xs_f32_matrix(
         ),
     };
     require_serial(enc, label)?;
+    validate_packed_expert_count(expert_count)?;
     if !n_in.is_multiple_of(256)
         || !n_out.is_multiple_of(tile_rows)
-        || expert_count != MOE_EXPERT_COUNT
         || top_k != MOE_TOP_K
         || source_count == 0
         || destination_count == 0
@@ -4319,12 +4494,12 @@ fn encode_packed_grouped_mapped_iq3_xxs_f32_plan(
     destination_count: usize,
 ) -> Result<(), DeepSeekV4MetalError> {
     require_serial(enc, "packed grouped mapped IQ3_XXS projection")?;
+    validate_packed_expert_count(expert_count)?;
     if !crate::metal::matmat_iq3_xxs_mm_is_enabled() {
         return invalid("packed grouped mapped IQ3_XXS requires the SIMD-matrix policy");
     }
     if !n_in.is_multiple_of(256)
         || !n_out.is_multiple_of(64)
-        || expert_count != MOE_EXPERT_COUNT
         || top_k != MOE_TOP_K
         || source_count == 0
         || destination_count == 0
@@ -4574,13 +4749,13 @@ fn encode_packed_grouped_mapped_swiglu_iq3_xxs_f32(
     clamp: f32,
 ) -> Result<(), DeepSeekV4MetalError> {
     require_serial(enc, "packed grouped mapped IQ3_XXS gate/up/SwiGLU")?;
+    validate_packed_expert_count(expert_count)?;
     if !crate::metal::matmat_iq3_xxs_mm_is_enabled() {
         return invalid("packed grouped mapped IQ3_XXS SwiGLU requires the SIMD-matrix policy");
     }
     if !n_in.is_multiple_of(256)
         || !n_out.is_multiple_of(64)
         || n_in != 2 * n_out
-        || expert_count != MOE_EXPERT_COUNT
         || top_k != MOE_TOP_K
         || source_count == 0
         || destination_count == 0
@@ -4895,6 +5070,11 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
+    default_on packed_shared_route_overlap_enabled,
+    "QWEN_DSV4_PACKED_SHARED_ROUTE_OVERLAP"
+);
+
+crate::env_flag!(
     default_off packed_gpu_route_iq3_enabled,
     "QWEN_DSV4_PACKED_GPU_ROUTE_IQ3"
 );
@@ -5015,6 +5195,10 @@ fn packed_grouped_expert_scope(
         ));
     }
     Ok(false)
+}
+
+fn packed_grouped_iq_expert_count_qualified(expert_count: usize) -> bool {
+    matches!(expert_count, 216 | MOE_EXPERT_COUNT)
 }
 
 fn packed_grouped_expert_policy(
@@ -5640,8 +5824,8 @@ const PACKED_BM16_POST_ROUTE_STAGE_KINDS: [PackedPostRouteStageKind; 6] = [
 ];
 
 #[cfg(feature = "dsv4-diagnostics")]
-fn packed_post_route_stage_kinds(bm16: bool) -> &'static [PackedPostRouteStageKind] {
-    if bm16 {
+fn packed_post_route_stage_kinds(split_routed: bool) -> &'static [PackedPostRouteStageKind] {
+    if split_routed {
         &PACKED_BM16_POST_ROUTE_STAGE_KINDS
     } else {
         &PACKED_POST_ROUTE_STAGE_KINDS
@@ -5770,6 +5954,8 @@ pub struct PackedPostRouteLayerMetadata {
     pub bucket_count: usize,
     pub expert_counts: [u16; MOE_EXPERT_COUNT],
     pub route_expert_ids: Vec<u16>,
+    pub route_weight_bits: Vec<u32>,
+    pub grouped_q3q4: bool,
     pub grouped_iq2: bool,
     pub grouped_iq3: bool,
     pub bm16: bool,
@@ -6101,7 +6287,9 @@ impl PackedPostRouteStageRecorder {
         }
         let expected_records = metadata
             .iter()
-            .map(|metadata| packed_post_route_stage_kinds(metadata.bm16).len())
+            .map(|metadata| {
+                packed_post_route_stage_kinds(metadata.bm16 || metadata.grouped_q3q4).len()
+            })
             .sum::<usize>();
         let expected_samples = expected_records * 2;
         if self.records.len() != expected_records || self.next_sample != expected_samples {
@@ -6118,7 +6306,8 @@ impl PackedPostRouteStageRecorder {
         let mut sampled_layers = Vec::with_capacity(DEEPSEEK_V4_LAYER_COUNT);
         let mut record_cursor = 0usize;
         for (layer, &duration) in command_gpu_ms.iter().enumerate() {
-            let expected_kinds = packed_post_route_stage_kinds(metadata[layer].bm16);
+            let expected_kinds =
+                packed_post_route_stage_kinds(metadata[layer].bm16 || metadata[layer].grouped_q3q4);
             let record_end = record_cursor + expected_kinds.len();
             let records = &self.records[record_cursor..record_end];
             sampled_layers.push(resolve_packed_post_route_layer_stage_samples(
@@ -6147,7 +6336,7 @@ struct PackedPostRouteLayerEncoder<'a> {
     #[cfg(feature = "dsv4-diagnostics")]
     sampled: bool,
     #[cfg(feature = "dsv4-diagnostics")]
-    split_bm16: bool,
+    split_routed: bool,
     #[cfg(feature = "dsv4-diagnostics")]
     recorder: Option<&'a mut PackedPostRouteStageRecorder>,
     encoder: Option<KernelEncoder>,
@@ -6158,7 +6347,7 @@ impl<'a> PackedPostRouteLayerEncoder<'a> {
     fn begin(
         command: &'a Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         layer: usize,
-        split_bm16: bool,
+        split_routed: bool,
         mut recorder: Option<&'a mut PackedPostRouteStageRecorder>,
     ) -> Result<Self, DeepSeekV4MetalError> {
         let sampled = recorder.as_deref().is_some_and(|recorder| recorder.sampled);
@@ -6166,7 +6355,7 @@ impl<'a> PackedPostRouteLayerEncoder<'a> {
             recorder.as_deref_mut().unwrap().begin_encoder(
                 command,
                 layer,
-                if split_bm16 {
+                if split_routed {
                     PackedPostRouteStageKind::RoutedGateUp
                 } else {
                     PackedPostRouteStageKind::RoutedExperts
@@ -6179,7 +6368,7 @@ impl<'a> PackedPostRouteLayerEncoder<'a> {
             _command: command,
             layer,
             sampled,
-            split_bm16,
+            split_routed,
             recorder,
             encoder: Some(encoder),
         })
@@ -6218,13 +6407,28 @@ impl<'a> PackedPostRouteLayerEncoder<'a> {
 
     #[cfg(feature = "dsv4-diagnostics")]
     fn splits_bm16_stages(&self) -> bool {
-        self.sampled && self.split_bm16
+        self.sampled && self.split_routed
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    fn splits_routed_stages(&self) -> bool {
+        self.sampled && self.split_routed
     }
 
     fn end(mut self) {
         if let Some(encoder) = self.encoder.take() {
             encoder.end();
         }
+    }
+}
+
+struct CommittedPackedCommand {
+    command: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+}
+
+impl Drop for CommittedPackedCommand {
+    fn drop(&mut self) {
+        self.command.waitUntilCompleted();
     }
 }
 
@@ -6521,6 +6725,131 @@ impl PrefillMoeScratch {
             ));
         }
         Ok(schedule)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_shared_expert(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        normalized_input: &MetalTensor,
+        shared_gate: &MetalTensor,
+        shared_up: &MetalTensor,
+        shared_down: &MetalTensor,
+        shared_matrix: bool,
+        shared_clamp: f32,
+        n_tokens: usize,
+    ) -> Result<MetalTensor, DeepSeekV4MetalError> {
+        require_serial(enc, "deepseek_v4_shared_expert_batch")?;
+        checked_token_count(n_tokens)?;
+        if !shared_clamp.is_finite() || shared_clamp <= 0.0 {
+            return invalid("packed shared-expert clamp must be finite and positive");
+        }
+        let gate = f32_prefix(
+            &self.gate,
+            vec![MOE_FFN_SIZE as u64, n_tokens as u64],
+            "packed shared gate",
+        )?;
+        let up = f32_prefix(
+            &self.up,
+            vec![MOE_FFN_SIZE as u64, n_tokens as u64],
+            "packed shared up",
+        )?;
+        let inner = f32_prefix(
+            &self.inner,
+            vec![MOE_FFN_SIZE as u64, n_tokens as u64],
+            "packed shared inner",
+        )?;
+        let shared_output = f32_prefix(
+            &self.shared_output,
+            vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, n_tokens as u64],
+            "packed shared output",
+        )?;
+        if shared_matrix && !packed_q8_matrix_chunk_qualified(n_tokens) {
+            return invalid("packed shared Q8 matrix policy reached an unsupported chunk");
+        }
+        if shared_matrix && shared_gate.dtype == GgmlType::Q8_0 {
+            encode_q8_f32_mma_r2c16k64(
+                ctx,
+                enc,
+                shared_gate,
+                normalized_input,
+                &gate,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                MOE_FFN_SIZE,
+                n_tokens,
+            )?;
+        } else {
+            encode_batch_projection(
+                ctx,
+                enc,
+                shared_gate,
+                normalized_input,
+                &gate,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                MOE_FFN_SIZE,
+                n_tokens,
+                "packed shared gate",
+            )?;
+        }
+        if shared_matrix && shared_up.dtype == GgmlType::Q8_0 {
+            encode_q8_f32_mma_r2c16k64(
+                ctx,
+                enc,
+                shared_up,
+                normalized_input,
+                &up,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                MOE_FFN_SIZE,
+                n_tokens,
+            )?;
+        } else {
+            encode_batch_projection(
+                ctx,
+                enc,
+                shared_up,
+                normalized_input,
+                &up,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                MOE_FFN_SIZE,
+                n_tokens,
+                "packed shared up",
+            )?;
+        }
+        let flat_len = checked_mul(n_tokens, MOE_FFN_SIZE, "packed shared SwiGLU")?;
+        encode_ds4_clamped_swiglu(
+            ctx,
+            enc,
+            &gate.view_subrange(0, vec![flat_len as u64]),
+            &up.view_subrange(0, vec![flat_len as u64]),
+            &inner.view_subrange(0, vec![flat_len as u64]),
+            shared_clamp,
+        )?;
+        if shared_matrix && shared_down.dtype == GgmlType::Q8_0 {
+            encode_q8_f32_mma_r2c16k64(
+                ctx,
+                enc,
+                shared_down,
+                &inner,
+                &shared_output,
+                MOE_FFN_SIZE,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                n_tokens,
+            )?;
+        } else {
+            encode_batch_projection(
+                ctx,
+                enc,
+                shared_down,
+                &inner,
+                &shared_output,
+                MOE_FFN_SIZE,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                n_tokens,
+                "packed shared down",
+            )?;
+        }
+        Ok(shared_output)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6885,6 +7214,7 @@ impl PrefillMoeScratch {
         hash_map: Option<&MetalTensor>,
         n_tokens: usize,
         rms_eps: f32,
+        router_e8p32_strict: bool,
     ) -> Result<PackedMoeViews, DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_moe_router_batch")?;
         checked_token_count(n_tokens)?;
@@ -6921,17 +7251,37 @@ impl PrefillMoeScratch {
             DEEPSEEK_V4_HIDDEN_SIZE,
             rms_eps,
         )?;
-        encode_batch_projection(
-            ctx,
-            enc,
-            gate_inp,
-            &normalized_input,
-            &logits,
-            DEEPSEEK_V4_HIDDEN_SIZE,
-            self.expert_count,
-            n_tokens,
-            "packed MoE router",
-        )?;
+        if router_e8p32_strict && gate_inp.dtype == GgmlType::F32 {
+            crate::metal::encode_mat_mat_f32_router_e8p32_strict(
+                ctx,
+                enc,
+                gate_inp,
+                &normalized_input,
+                &logits,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                self.expert_count,
+                n_tokens,
+            )
+            .map_err(DeepSeekV4MetalError::Metal)?;
+            static REPORTED: std::sync::Once = std::sync::Once::new();
+            REPORTED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: strict-order E8P32 packed router active for K160 N={n_tokens}; rollback=QWEN_DSV4_PACKED_ROUTER_E8P32_STRICT=0"
+                );
+            });
+        } else {
+            encode_batch_projection(
+                ctx,
+                enc,
+                gate_inp,
+                &normalized_input,
+                &logits,
+                DEEPSEEK_V4_HIDDEN_SIZE,
+                self.expert_count,
+                n_tokens,
+                "packed MoE router",
+            )?;
+        }
         let hash_ids = if let Some(hash_map) = hash_map {
             let hash_ids = i32_prefix(
                 &self.hash_ids,
@@ -7118,6 +7468,7 @@ impl PrefillMoeScratch {
         expert_policy: PackedExpertPolicy,
         grouped_q3q4_qualified: bool,
         shared_matrix: bool,
+        shared_precomputed: bool,
         expert_clamp: f32,
         shared_clamp: f32,
         n_tokens: usize,
@@ -7220,6 +7571,10 @@ impl PrefillMoeScratch {
                     route_count,
                 )?;
             }
+            #[cfg(feature = "dsv4-diagnostics")]
+            if enc.splits_routed_stages() {
+                enc.boundary(PackedPostRouteStageKind::RoutedSwiGlu)?;
+            }
             let projected_elements = checked_mul(
                 MOE_FFN_SIZE,
                 route_count,
@@ -7233,6 +7588,10 @@ impl PrefillMoeScratch {
                 &grouped_inner.view_subrange(0, vec![projected_elements as u64]),
                 expert_clamp,
             )?;
+            #[cfg(feature = "dsv4-diagnostics")]
+            if enc.splits_routed_stages() {
+                enc.boundary(PackedPostRouteStageKind::RoutedDown)?;
+            }
             encode_packed_grouped_mapped_k_block_f32_plan(
                 ctx,
                 enc,
@@ -7338,7 +7697,7 @@ impl PrefillMoeScratch {
                             projection,
                             DEEPSEEK_V4_HIDDEN_SIZE,
                             MOE_FFN_SIZE,
-                            MOE_EXPERT_COUNT,
+                            self.expert_count,
                             MOE_TOP_K,
                             n_tokens,
                             n_tokens,
@@ -7376,7 +7735,7 @@ impl PrefillMoeScratch {
                         &grouped_inner,
                         DEEPSEEK_V4_HIDDEN_SIZE,
                         MOE_FFN_SIZE,
-                        MOE_EXPERT_COUNT,
+                        self.expert_count,
                         MOE_TOP_K,
                         n_tokens,
                         n_tokens,
@@ -7400,7 +7759,7 @@ impl PrefillMoeScratch {
                     &grouped_inner,
                     DEEPSEEK_V4_HIDDEN_SIZE,
                     MOE_FFN_SIZE,
-                    MOE_EXPERT_COUNT,
+                    self.expert_count,
                     MOE_TOP_K,
                     n_tokens,
                     n_tokens,
@@ -7424,7 +7783,7 @@ impl PrefillMoeScratch {
                     &grouped_inner,
                     DEEPSEEK_V4_HIDDEN_SIZE,
                     MOE_FFN_SIZE,
-                    MOE_EXPERT_COUNT,
+                    self.expert_count,
                     MOE_TOP_K,
                     n_tokens,
                     expert_clamp,
@@ -7440,7 +7799,7 @@ impl PrefillMoeScratch {
                 &expert_outputs,
                 MOE_FFN_SIZE,
                 DEEPSEEK_V4_HIDDEN_SIZE,
-                MOE_EXPERT_COUNT,
+                self.expert_count,
                 MOE_TOP_K,
                 n_tokens,
             )?;
@@ -7507,7 +7866,7 @@ impl PrefillMoeScratch {
                 &grouped_inner,
                 DEEPSEEK_V4_HIDDEN_SIZE,
                 MOE_FFN_SIZE,
-                MOE_EXPERT_COUNT,
+                self.expert_count,
                 MOE_TOP_K,
                 n_tokens,
                 expert_clamp,
@@ -7691,113 +8050,27 @@ impl PrefillMoeScratch {
             }
         }
 
-        #[cfg(feature = "dsv4-diagnostics")]
-        enc.boundary(PackedPostRouteStageKind::SharedExpert)?;
-
-        let gate = f32_prefix(
-            &self.gate,
-            vec![MOE_FFN_SIZE as u64, n_tokens as u64],
-            "packed shared gate",
-        )?;
-        let up = f32_prefix(
-            &self.up,
-            vec![MOE_FFN_SIZE as u64, n_tokens as u64],
-            "packed shared up",
-        )?;
-        let inner = f32_prefix(
-            &self.inner,
-            vec![MOE_FFN_SIZE as u64, n_tokens as u64],
-            "packed shared inner",
-        )?;
-        let shared_output = f32_prefix(
-            &self.shared_output,
-            vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, n_tokens as u64],
-            "packed shared output",
-        )?;
-        if shared_matrix && !packed_q8_matrix_chunk_qualified(n_tokens) {
-            return invalid("packed shared Q8 matrix policy reached an unsupported chunk");
-        }
-        if shared_matrix && shared_gate.dtype == GgmlType::Q8_0 {
-            encode_q8_f32_mma_r2c16k64(
+        let shared_output = if shared_precomputed {
+            f32_prefix(
+                &self.shared_output,
+                vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, n_tokens as u64],
+                "packed precomputed shared output",
+            )?
+        } else {
+            #[cfg(feature = "dsv4-diagnostics")]
+            enc.boundary(PackedPostRouteStageKind::SharedExpert)?;
+            self.encode_shared_expert(
                 ctx,
                 enc,
+                normalized_input,
                 shared_gate,
-                normalized_input,
-                &gate,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                MOE_FFN_SIZE,
-                n_tokens,
-            )?;
-        } else {
-            encode_batch_projection(
-                ctx,
-                enc,
-                shared_gate,
-                normalized_input,
-                &gate,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                MOE_FFN_SIZE,
-                n_tokens,
-                "packed shared gate",
-            )?;
-        }
-        if shared_matrix && shared_up.dtype == GgmlType::Q8_0 {
-            encode_q8_f32_mma_r2c16k64(
-                ctx,
-                enc,
                 shared_up,
-                normalized_input,
-                &up,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                MOE_FFN_SIZE,
-                n_tokens,
-            )?;
-        } else {
-            encode_batch_projection(
-                ctx,
-                enc,
-                shared_up,
-                normalized_input,
-                &up,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                MOE_FFN_SIZE,
-                n_tokens,
-                "packed shared up",
-            )?;
-        }
-        let flat_len = checked_mul(n_tokens, MOE_FFN_SIZE, "packed shared SwiGLU")?;
-        encode_ds4_clamped_swiglu(
-            ctx,
-            enc,
-            &gate.view_subrange(0, vec![flat_len as u64]),
-            &up.view_subrange(0, vec![flat_len as u64]),
-            &inner.view_subrange(0, vec![flat_len as u64]),
-            shared_clamp,
-        )?;
-        if shared_matrix && shared_down.dtype == GgmlType::Q8_0 {
-            encode_q8_f32_mma_r2c16k64(
-                ctx,
-                enc,
                 shared_down,
-                &inner,
-                &shared_output,
-                MOE_FFN_SIZE,
-                DEEPSEEK_V4_HIDDEN_SIZE,
+                shared_matrix,
+                shared_clamp,
                 n_tokens,
-            )?;
-        } else {
-            encode_batch_projection(
-                ctx,
-                enc,
-                shared_down,
-                &inner,
-                &shared_output,
-                MOE_FFN_SIZE,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                n_tokens,
-                "packed shared down",
-            )?;
-        }
+            )?
+        };
 
         #[cfg(feature = "dsv4-diagnostics")]
         enc.boundary(PackedPostRouteStageKind::ExpertCombine)?;
@@ -8498,13 +8771,14 @@ impl DeepSeekV4Session {
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
         let grouped_mode = packed_grouped_expert_mode();
-        let expert_policy = if self.prefill.moe.expert_count == MOE_EXPERT_COUNT
-            && packed_grouped_expert_scope(grouped_mode, token_ids.len())?
-        {
-            packed_grouped_expert_policy(ctx, token_ids.len())?
-        } else {
-            PackedExpertPolicy::Current
-        };
+        let expert_policy =
+            if packed_grouped_iq_expert_count_qualified(self.prefill.moe.expert_count)
+                && packed_grouped_expert_scope(grouped_mode, token_ids.len())?
+            {
+                packed_grouped_expert_policy(ctx, token_ids.len())?
+            } else {
+                PackedExpertPolicy::Current
+            };
         self.execute_packed_tokens_with_progress_policy(
             ctx,
             token_ids,
@@ -8548,27 +8822,31 @@ impl DeepSeekV4Session {
             ));
         }
         let n_tokens = checked_token_count(token_ids.len())?;
+        let device_name = ctx.device.name().to_string();
+        let residency_tensor_count = self.residency.report().tensor_count;
+        let residency_source_bytes = self.residency.report().source_bytes;
+        let expert_count = self.prefill.moe.expert_count;
         let route_policy = if route_policy == PackedRoutePolicy::Cpu
-            && self.prefill.moe.expert_count == MOE_EXPERT_COUNT
+            && expert_count == MOE_EXPERT_COUNT
             && packed_gpu_route_compact_enabled()
             && token_ids.len() <= PACKED_GPU_ROUTE_MAX_TOKENS
             && packed_q8_compressor_matrix_scope_qualified(
-                &ctx.device.name().to_string(),
-                self.residency.report().tensor_count,
-                self.residency.report().source_bytes,
+                &device_name,
+                residency_tensor_count,
+                residency_source_bytes,
+                expert_count,
                 token_ids.len(),
             ) {
             PackedRoutePolicy::GpuCompact
         } else {
             route_policy
         };
-        let expert_policy = if self.prefill.moe.expert_count != MOE_EXPERT_COUNT {
-            PackedExpertPolicy::Current
-        } else if packed_grouped_iq3_enabled() && packed_grouped_iq3_candidate_supported(ctx) {
-            expert_policy.with_iq3_target()
-        } else {
-            expert_policy
-        };
+        let expert_policy =
+            if packed_grouped_iq3_enabled() && packed_grouped_iq3_candidate_supported(ctx) {
+                expert_policy.with_iq3_target()
+            } else {
+                expert_policy
+            };
         if self.prefill.moe.expert_count != MOE_EXPERT_COUNT {
             static REPORTED: std::sync::Once = std::sync::Once::new();
             REPORTED.call_once(|| {
@@ -8585,11 +8863,31 @@ impl DeepSeekV4Session {
             packed_q8_compressor_matrix_for_chunk(ctx, &self.residency, token_ids.len());
         let shared_matrix =
             packed_q8_shared_matrix_for_chunk(ctx, &self.residency, token_ids.len());
+        let router_e8p32_strict = packed_router_e8p32_strict_enabled()
+            && packed_router_e8p32_scope_qualified(
+                &device_name,
+                residency_tensor_count,
+                residency_source_bytes,
+                expert_count,
+                token_ids.len(),
+            );
+        let q_a_kv_matrix = if packed_q8_qa_kv_matrix_scope_qualified(
+            &device_name,
+            residency_tensor_count,
+            residency_source_bytes,
+            expert_count,
+            token_ids.len(),
+        ) {
+            packed_q8_qa_kv_matrix_mode()
+        } else {
+            PackedQaKvMatrixMode::Off
+        };
         let indexer_q_matrix = packed_indexer_q_matrix_enabled()
             && packed_indexer_q_matrix_scope_qualified(
-                &ctx.device.name().to_string(),
-                self.residency.report().tensor_count,
-                self.residency.report().source_bytes,
+                &device_name,
+                residency_tensor_count,
+                residency_source_bytes,
+                expert_count,
                 token_ids.len(),
             );
         #[cfg(feature = "dsv4-diagnostics")]
@@ -8659,6 +8957,8 @@ impl DeepSeekV4Session {
             output_projection,
             compressor_matrix,
             shared_matrix,
+            router_e8p32_strict,
+            q_a_kv_matrix,
             indexer_q_matrix,
             #[cfg(feature = "dsv4-diagnostics")]
             stage_recorder,
@@ -8690,6 +8990,8 @@ impl DeepSeekV4Session {
         output_projection: Q8PrecisionProjection,
         compressor_matrix: bool,
         shared_matrix: bool,
+        router_e8p32_strict: bool,
+        q_a_kv_matrix: PackedQaKvMatrixMode,
         indexer_q_matrix: bool,
         #[cfg(feature = "dsv4-diagnostics")] mut stage_recorder: Option<
             &mut PackedPrefillStageRecorder,
@@ -8700,6 +9002,10 @@ impl DeepSeekV4Session {
         layer_completed: &mut impl FnMut(usize),
     ) -> Result<(), DeepSeekV4MetalError> {
         let n_tokens = token_ids.len();
+        let device_name = ctx.device.name().to_string();
+        let residency_tensor_count = self.residency.report().tensor_count;
+        let residency_source_bytes = self.residency.report().source_bytes;
+        let expert_count = self.prefill.moe.expert_count;
         if packed_grouped_dense_attention_enabled() {
             static REPORTED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
@@ -8733,6 +9039,15 @@ impl DeepSeekV4Session {
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
                     "deepseek_v4: wide F32 Q8 sparse-indexer Q matrix active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_INDEXER_Q_MATRIX=0"
+                );
+            }
+        }
+        if q_a_kv_matrix != PackedQaKvMatrixMode::Off {
+            static REPORTED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "deepseek_v4: F32 Q8 Q-A/raw-KV matrix mode={q_a_kv_matrix:?} active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QA_KV_MATRIX=0"
                 );
             }
         }
@@ -8915,6 +9230,37 @@ impl DeepSeekV4Session {
                 && !self.fp4_selection_mode.is_counterfactual();
             #[cfg(not(feature = "dsv4-diagnostics"))]
             let merge_gpu_route = compact_gpu_route;
+            #[cfg(feature = "dsv4-diagnostics")]
+            let overlap_shared_route = packed_shared_route_overlap_enabled()
+                && route_policy == PackedRoutePolicy::Cpu
+                && packed_grouped_q3q4_scope_qualified(
+                    &device_name,
+                    residency_tensor_count,
+                    residency_source_bytes,
+                    expert_count,
+                    n_tokens,
+                    routed_gate_dtype,
+                    routed_up_dtype,
+                    routed_down_dtype,
+                )
+                && !trace_layers
+                && stage_recorder.is_none()
+                && post_route_stage_recorder.is_none()
+                && !self.fp4_shadow_diagnostics.is_capturing()
+                && !self.fp4_selection_mode.is_counterfactual();
+            #[cfg(not(feature = "dsv4-diagnostics"))]
+            let overlap_shared_route = packed_shared_route_overlap_enabled()
+                && route_policy == PackedRoutePolicy::Cpu
+                && packed_grouped_q3q4_scope_qualified(
+                    &device_name,
+                    residency_tensor_count,
+                    residency_source_bytes,
+                    expert_count,
+                    n_tokens,
+                    routed_gate_dtype,
+                    routed_up_dtype,
+                    routed_down_dtype,
+                );
             let gpu_route_generation = if compact_gpu_route
                 || (route_policy.uses_gpu() && route_policy != PackedRoutePolicy::GpuCompact)
             {
@@ -8993,6 +9339,7 @@ impl DeepSeekV4Session {
                     n_tokens,
                     rms_eps,
                     q_b_projection,
+                    q_a_kv_matrix,
                 )?;
 
                 let compressor = self.prefill.compressor.encode_layer_projections(
@@ -9426,6 +9773,7 @@ impl DeepSeekV4Session {
                     hash_map,
                     n_tokens,
                     rms_eps,
+                    router_e8p32_strict,
                 )?;
                 if let Some(generation) = gpu_route_generation {
                     let source = if hash_map.is_some() {
@@ -9522,6 +9870,41 @@ impl DeepSeekV4Session {
             };
             let pre_expert_post_seconds = pre_expert_seconds - pre_expert_command_seconds;
 
+            let shared_overlap_command = if overlap_shared_route {
+                let shared_command = ctx.queue.commandBuffer().ok_or_else(|| {
+                    DeepSeekV4MetalError::Invalid(format!(
+                        "failed to allocate packed layer {layer} shared-expert command buffer"
+                    ))
+                })?;
+                let shared_encoder = KernelEncoder::begin(&shared_command);
+                let shared_result = self.prefill.moe.encode_shared_expert(
+                    ctx,
+                    &shared_encoder,
+                    &moe_views.normalized_input,
+                    self.layer_tensor(layer, "ffn_gate_shexp.weight")?,
+                    self.layer_tensor(layer, "ffn_up_shexp.weight")?,
+                    self.layer_tensor(layer, "ffn_down_shexp.weight")?,
+                    shared_matrix,
+                    self.residency.config().swiglu_clamp_shared[layer],
+                    n_tokens,
+                );
+                shared_encoder.end();
+                shared_result?;
+                shared_command.commit();
+                let shared_command = CommittedPackedCommand {
+                    command: shared_command,
+                };
+                static REPORTED: std::sync::Once = std::sync::Once::new();
+                REPORTED.call_once(|| {
+                    eprintln!(
+                        "deepseek_v4: shared expert overlaps CPU route planning for full K160 chunks; rollback=QWEN_DSV4_PACKED_SHARED_ROUTE_OVERLAP=0"
+                    );
+                });
+                Some(shared_command)
+            } else {
+                None
+            };
+
             let route_started = trace_layers.then(std::time::Instant::now);
             let mut schedule = if merge_gpu_route {
                 Vec::new()
@@ -9616,6 +9999,18 @@ impl DeepSeekV4Session {
             let shared_gate = self.layer_tensor(layer, "ffn_gate_shexp.weight")?;
             let shared_up = self.layer_tensor(layer, "ffn_up_shexp.weight")?;
             let shared_down = self.layer_tensor(layer, "ffn_down_shexp.weight")?;
+            let grouped_q3q4_qualified = packed_grouped_q3q4_enabled()
+                && packed_grouped_q3q4_scope_qualified(
+                    &ctx.device.name().to_string(),
+                    self.residency.report().tensor_count,
+                    self.residency.report().source_bytes,
+                    self.prefill.moe.expert_count,
+                    n_tokens,
+                    routed_gate.dtype,
+                    routed_up.dtype,
+                    routed_down.dtype,
+                )
+                && packed_grouped_q3q4_candidate_supported(ctx);
             #[cfg(feature = "dsv4-diagnostics")]
             if let Some(recorder) = post_route_stage_recorder.as_deref_mut() {
                 let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed metadata routes")?;
@@ -9627,6 +10022,17 @@ impl DeepSeekV4Session {
                     )?,
                     "packed metadata expert IDs",
                 )?;
+                let route_weight_bits = host_read_f32(
+                    &f32_prefix(
+                        &self.prefill.moe.weights,
+                        vec![route_count as u64],
+                        "packed metadata route weights",
+                    )?,
+                    "packed metadata route weights",
+                )?
+                .into_iter()
+                .map(f32::to_bits)
+                .collect();
                 let bucket_rows = host_read_i32(
                     &i32_prefix(
                         &self.prefill.moe.bucket_rows,
@@ -9672,6 +10078,8 @@ impl DeepSeekV4Session {
                         &bucket_slots,
                         &schedule,
                     )?,
+                    route_weight_bits,
+                    grouped_q3q4: grouped_q3q4_qualified,
                     grouped_iq2,
                     grouped_iq3,
                     bm16: grouped_iq2 && expert_policy.uses_iq2_mma16(n_tokens),
@@ -9692,26 +10100,16 @@ impl DeepSeekV4Session {
             let mut encoder = PackedPostRouteLayerEncoder::begin(
                 expert_command,
                 layer,
-                expert_policy.uses_iq2_mma16(n_tokens)
-                    && routed_gate.dtype == GgmlType::IQ2_XS
-                    && routed_up.dtype == GgmlType::IQ2_XS
-                    && routed_down.dtype == GgmlType::IQ3_XXS
-                    && packed_grouped_expert_kernels_supported(ctx),
+                grouped_q3q4_qualified
+                    || (expert_policy.uses_iq2_mma16(n_tokens)
+                        && routed_gate.dtype == GgmlType::IQ2_XS
+                        && routed_up.dtype == GgmlType::IQ2_XS
+                        && routed_down.dtype == GgmlType::IQ3_XXS
+                        && packed_grouped_expert_kernels_supported(ctx)),
                 post_route_stage_recorder.as_deref_mut(),
             )?;
             #[cfg(not(feature = "dsv4-diagnostics"))]
             let mut encoder = PackedPostRouteLayerEncoder::begin(expert_command)?;
-            let grouped_q3q4_qualified = packed_grouped_q3q4_enabled()
-                && packed_grouped_q3q4_scope_qualified(
-                    &ctx.device.name().to_string(),
-                    self.residency.report().tensor_count,
-                    self.residency.report().source_bytes,
-                    self.prefill.moe.expert_count,
-                    n_tokens,
-                    routed_gate.dtype,
-                    routed_up.dtype,
-                    routed_down.dtype,
-                );
             let expert_result = (|| {
                 let moe_output = self.prefill.moe.encode_experts(
                     ctx,
@@ -9728,6 +10126,7 @@ impl DeepSeekV4Session {
                     expert_policy,
                     grouped_q3q4_qualified,
                     shared_matrix,
+                    shared_overlap_command.is_some(),
                     self.residency.config().swiglu_clamp_experts[layer],
                     self.residency.config().swiglu_clamp_shared[layer],
                     n_tokens,
@@ -9794,6 +10193,13 @@ impl DeepSeekV4Session {
             let post_route_wait_seconds = post_route_wait_started
                 .as_ref()
                 .map_or(0.0, |started| started.elapsed().as_secs_f64());
+            if let Some(shared_command) = &shared_overlap_command
+                && let Some(error) = shared_command.command.error()
+            {
+                return invalid(format!(
+                    "packed layer {layer} shared-expert command failed: {error:?}"
+                ));
+            }
             if let Some(error) = expert_command.error() {
                 return invalid(format!("packed layer {layer} command failed: {error:?}"));
             }
@@ -10748,6 +11154,10 @@ mod tests {
         );
         assert!(gpu_compact.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS));
         assert!(gpu_compact.uses_iq3_target());
+        assert!(packed_grouped_iq_expert_count_qualified(216));
+        assert!(packed_grouped_iq_expert_count_qualified(MOE_EXPERT_COUNT));
+        assert!(!packed_grouped_iq_expert_count_qualified(160));
+        assert!(!packed_grouped_iq_expert_count_qualified(200));
         assert!(
             packed_grouped_expert_scope(
                 PackedGroupedExpertMode::Auto,
@@ -10870,7 +11280,6 @@ mod tests {
             parse_packed_q8_output_policy(Some("wide_f32_matrix")).unwrap(),
             PackedQ8MatrixPolicy::WideF32Matrix
         );
-        assert!(parse_packed_q8_output_policy(Some("half_matrix")).is_err());
         assert_eq!(
             resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true),
             Q8PrecisionProjection::WideF32Matrix
@@ -10883,60 +11292,203 @@ mod tests {
         assert!(!matrix.uses_full_chunk_f32(512));
         assert!(matrix.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
         assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
+        assert!(parse_packed_q8_output_policy(Some("half_matrix")).is_err());
     }
 
     #[test]
     fn packed_q8_compressor_matrix_scope_is_exact() {
-        let qualified = |device, tensors, bytes, tokens| {
-            packed_q8_compressor_matrix_scope_qualified(device, tensors, bytes, tokens)
+        let qualified = |device, tensors, bytes, experts, tokens| {
+            packed_q8_compressor_matrix_scope_qualified(device, tensors, bytes, experts, tokens)
         };
         assert!(qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            256,
             PACKED_MATRIX_MIN_TOKENS,
         ));
         assert!(qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            256,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
         assert!(qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
             PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
         assert!(!qualified(
             "Apple M3 Max",
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            256,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_327,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            256,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES - 1,
+            256,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES - 1,
+            160,
             PACKED_MATRIX_MIN_TOKENS,
         ));
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES - 1,
+            216,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            256,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS - 1,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            256,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+    }
+
+    #[test]
+    fn packed_router_e8p32_scope_is_exactly_k160_m4() {
+        assert_eq!(parse_packed_router_e8p32_strict_env(None), Ok(true));
+        for value in ["1", "true", "TRUE", " yes ", "On"] {
+            assert_eq!(parse_packed_router_e8p32_strict_env(Some(value)), Ok(true));
+        }
+        for value in ["0", "false", "FALSE", " no ", "Off"] {
+            assert_eq!(parse_packed_router_e8p32_strict_env(Some(value)), Ok(false));
+        }
+        for value in ["", "ture", "2"] {
+            assert!(parse_packed_router_e8p32_strict_env(Some(value)).is_err());
+        }
+        let qualified = |device, tensors, bytes, experts, tokens| {
+            packed_router_e8p32_scope_qualified(device, tensors, bytes, experts, tokens)
+        };
+        for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+            assert!(qualified(
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+                tokens,
+            ));
+        }
+        assert!(!qualified(
+            "Apple M3 Max",
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_327,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES - 1,
+            160,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            216,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_MATRIX_MIN_TOKENS - 1,
+        ));
+    }
+
+    #[test]
+    fn packed_q8_qa_kv_matrix_policy_is_scoped_and_fail_closed() {
+        assert_eq!(
+            parse_packed_q8_qa_kv_matrix_mode(None),
+            Ok(PackedQaKvMatrixMode::Both)
+        );
+        for (value, expected) in [
+            ("off", PackedQaKvMatrixMode::Off),
+            ("qa", PackedQaKvMatrixMode::Qa),
+            ("kv", PackedQaKvMatrixMode::Kv),
+            ("both", PackedQaKvMatrixMode::Both),
+            (" TRUE ", PackedQaKvMatrixMode::Both),
+        ] {
+            assert_eq!(parse_packed_q8_qa_kv_matrix_mode(Some(value)), Ok(expected));
+        }
+        assert!(parse_packed_q8_qa_kv_matrix_mode(Some("qk")).is_err());
+
+        let qualified = |device, tensors, bytes, experts, tokens| {
+            packed_q8_qa_kv_matrix_scope_qualified(device, tensors, bytes, experts, tokens)
+        };
+        for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+            assert!(qualified(
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+                tokens,
+            ));
+        }
+        assert!(!qualified(
+            "Apple M3 Max",
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_MATRIX_MIN_TOKENS - 1,
         ));
     }
 
@@ -10964,6 +11516,16 @@ mod tests {
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             256,
+            PACKED_MATRIX_MIN_TOKENS,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
             PACKED_MATRIX_MIN_TOKENS,
             GgmlType::Q3_K,
             GgmlType::Q3_K,
@@ -11023,37 +11585,49 @@ mod tests {
 
     #[test]
     fn packed_indexer_q_matrix_scope_is_4096_only() {
-        let qualified = |device, tensors, bytes, tokens| {
-            packed_indexer_q_matrix_scope_qualified(device, tensors, bytes, tokens)
+        let qualified = |device, tensors, bytes, experts, tokens| {
+            packed_indexer_q_matrix_scope_qualified(device, tensors, bytes, experts, tokens)
         };
         assert!(qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            256,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
         assert!(qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            256,
             PACKED_MATRIX_MIN_TOKENS,
         ));
         assert!(!qualified(
             "Apple M3 Max",
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            256,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES + 1,
+            256,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
     }
@@ -12169,7 +12743,7 @@ mod tests {
             return;
         };
         const M: usize = 32;
-        const N: usize = 128;
+        const N: usize = 256;
 
         fn submit(
             ctx: &MetalContext,
@@ -12206,7 +12780,6 @@ mod tests {
                     encode_q8_f32_mma_r2c16k64(&ctx, encoder, &weight, &input, output, k, M, N)
                 });
             }
-
             let bits = |tensor: &MetalTensor, label| {
                 host_read_f32(tensor, label)
                     .unwrap()
@@ -12759,7 +13332,7 @@ mod tests {
         };
         const H: usize = 256;
         const F: usize = 256;
-        const E: usize = MOE_EXPERT_COUNT;
+        const E: usize = 216;
         const K: usize = MOE_TOP_K;
         const CLAMP: f32 = 0.25;
 
@@ -12771,7 +13344,8 @@ mod tests {
                 .unwrap();
 
         for n_tokens in [1, 12, 31, 32, 33, 64, 128, 2_048] {
-            let (_expert_ids, rows, slots, schedule) = grouped_test_schedule(n_tokens);
+            let (_expert_ids, rows, slots, schedule) =
+                grouped_test_schedule_for_experts(n_tokens, E);
             let grouped_plan =
                 PackedGroupedExpertPlan::new(n_tokens, &schedule, Some(&tile_buffer)).unwrap();
             let input_values = (0..n_tokens * H)
@@ -13042,7 +13616,7 @@ mod tests {
         };
         const H: usize = 256;
         const F: usize = 256;
-        const E: usize = MOE_EXPERT_COUNT;
+        const E: usize = 216;
         const K: usize = MOE_TOP_K;
         const CLAMP: f32 = 0.25;
 
@@ -13081,7 +13655,8 @@ mod tests {
                 .unwrap();
         for n_tokens in [1, 12, 15, 16, 17, 31, 32, 33, 64, 128, 2_048, 4_096] {
             let route_count = n_tokens * K;
-            let (_expert_ids, rows, slots, schedule) = grouped_test_schedule(n_tokens);
+            let (_expert_ids, rows, slots, schedule) =
+                grouped_test_schedule_for_experts(n_tokens, E);
             let grouped_plan =
                 PackedGroupedExpertPlan::new(n_tokens, &schedule, Some(&grouped_tile_buffer))
                     .unwrap();
@@ -13974,7 +14549,7 @@ mod tests {
         );
         const H: usize = 512;
         const F: usize = 256;
-        const E: usize = MOE_EXPERT_COUNT;
+        const E: usize = 216;
         const K: usize = MOE_TOP_K;
         const CLAMP: f32 = 0.25;
 
@@ -13999,7 +14574,8 @@ mod tests {
 
         for n_tokens in [1, 12, 31, 32, 33, 64, 128] {
             let route_count = n_tokens * K;
-            let (_expert_ids, rows, slots, schedule) = grouped_test_schedule(n_tokens);
+            let (_expert_ids, rows, slots, schedule) =
+                grouped_test_schedule_for_experts(n_tokens, E);
             let input_values = (0..n_tokens * H)
                 .map(|index| ((index * 43 + 11) % 263) as f32 * 0.001 - 0.125)
                 .collect::<Vec<_>>();
@@ -16457,14 +17033,26 @@ mod tests {
             MOE_EXPERT_COUNT,
         )
         .unwrap();
-        host_write_f32(
+        let production_logits = f32_prefix(
             &production.moe.logits,
+            vec![MOE_EXPERT_COUNT as u64, PACKED_GPU_ROUTE_MAX_TOKENS as u64],
+            "production packed GPU route logits fixture",
+        )
+        .unwrap();
+        host_write_f32(
+            &production_logits,
             &fixture.logits,
             "production packed GPU route logits",
         )
         .unwrap();
-        host_write_i32(
+        let production_token_ids = i32_prefix(
             &production.token_ids,
+            vec![PACKED_GPU_ROUTE_MAX_TOKENS as u64],
+            "production packed GPU route token fixture",
+        )
+        .unwrap();
+        host_write_i32(
+            &production_token_ids,
             &fixture.token_ids,
             "production packed GPU route token IDs",
         )

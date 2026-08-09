@@ -942,6 +942,17 @@ struct ds4_packed_attention_args {
     float scale;
 };
 
+struct ds4_splitk_hca_args {
+    uint head_count;
+    uint head_dim;
+    uint compression_ratio;
+    uint start_position;
+    uint window;
+    uint raw_cache_is_chunk;
+    uint partitions;
+    float scale;
+};
+
 struct ds4_tiled_dense_attention_args {
     uint head_count;
     uint head_dim;
@@ -1561,6 +1572,169 @@ kernel void kernel_deepseek_v4_grouped_online_dense_sink_attention_f16(
     output4[lane + 32u] = o1 * inverse;
     output4[lane + 64u] = o2 * inverse;
     output4[lane + 96u] = o3 * inverse;
+}
+
+[[max_total_threads_per_threadgroup(256)]]
+kernel void kernel_deepseek_v4_grouped_splitk_hca_main_f16(
+        constant ds4_splitk_hca_args & args [[buffer(0)]],
+        device const float * queries [[buffer(1)]],
+        device const half * raw_cache [[buffer(2)]],
+        device const half * preserved_raw_cache [[buffer(3)]],
+        device const half * compressed_cache [[buffer(4)]],
+        device float * partial_output [[buffer(5)]],
+        device float * partial_ml [[buffer(6)]],
+        threadgroup half4 * staged [[threadgroup(0)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort tid_u [[thread_index_in_threadgroup]],
+        ushort lane_u [[thread_index_in_simdgroup]],
+        ushort simdgroup_u [[simdgroup_index_in_threadgroup]]) {
+    constexpr uint grouped_heads = 8u;
+    constexpr uint staged_rows = 16u;
+    constexpr uint row_vectors = 128u;
+    const uint partition = group.z;
+    if (group.x != 0u || partition >= args.partitions
+            || args.head_count != 64u || args.head_dim != 512u) return;
+
+    const uint tid = uint(tid_u);
+    const uint lane = uint(lane_u);
+    const uint head = group.y * grouped_heads + uint(simdgroup_u);
+    const uint visible_end = args.start_position + 1u;
+    const uint raw_count = min(visible_end, args.window);
+    const uint raw_start = visible_end - raw_count;
+    const uint compressed_count = visible_end / args.compression_ratio;
+    const uint row_count = raw_count + compressed_count;
+    const uint partition_begin = uint((ulong(row_count) * partition) / args.partitions);
+    const uint partition_end = uint((ulong(row_count) * (partition + 1u)) / args.partitions);
+    const uint query_start = head * args.head_dim;
+    device const float4 * query4 = (device const float4 *)(queries + query_start);
+    const float4 q0 = query4[lane];
+    const float4 q1 = query4[lane + 32u];
+    const float4 q2 = query4[lane + 64u];
+    const float4 q3 = query4[lane + 96u];
+
+    float maximum = -INFINITY;
+    float denominator = 0.0f;
+    float4 o0 = 0.0f;
+    float4 o1 = 0.0f;
+    float4 o2 = 0.0f;
+    float4 o3 = 0.0f;
+
+    for (uint base = partition_begin; base < partition_end; base += staged_rows) {
+        const uint rows = min(staged_rows, partition_end - base);
+        for (uint offset = tid; offset < rows * row_vectors; offset += 256u) {
+            const uint staged_row = offset / row_vectors;
+            const uint vector = offset - staged_row * row_vectors;
+            const uint attention_row = base + staged_row;
+            const bool compressed = attention_row >= raw_count;
+            const uint row = compressed ? attention_row - raw_count : attention_row;
+            const uint logical_position = raw_start + row;
+            const bool preserved = !compressed
+                && args.raw_cache_is_chunk != 0u
+                && logical_position < args.start_position;
+            device const half * cache = compressed
+                ? compressed_cache
+                : (preserved ? preserved_raw_cache : raw_cache);
+            const uint cache_start = compressed
+                ? row * args.head_dim
+                : (args.raw_cache_is_chunk == 0u || preserved
+                    ? (logical_position % args.window) * args.head_dim
+                    : (logical_position - args.start_position) * args.head_dim);
+            staged[offset] = ((device const half4 *)(cache + cache_start))[vector];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint staged_row = 0u; staged_row < rows; ++staged_row) {
+            threadgroup const half4 * row = staged + staged_row * row_vectors;
+            const half4 h0 = row[lane];
+            const half4 h1 = row[lane + 32u];
+            const half4 h2 = row[lane + 64u];
+            const half4 h3 = row[lane + 96u];
+            const float score = simd_sum(
+                dot(q0, float4(h0)) +
+                dot(q1, float4(h1)) +
+                dot(q2, float4(h2)) +
+                dot(q3, float4(h3))) * args.scale;
+
+            if (score > maximum) {
+                const float previous_scale = exp(maximum - score);
+                denominator = denominator * previous_scale + 1.0f;
+                o0 = o0 * previous_scale + float4(h0);
+                o1 = o1 * previous_scale + float4(h1);
+                o2 = o2 * previous_scale + float4(h2);
+                o3 = o3 * previous_scale + float4(h3);
+                maximum = score;
+            } else {
+                const float row_scale = exp(score - maximum);
+                denominator += row_scale;
+                o0 += float4(h0) * row_scale;
+                o1 += float4(h1) * row_scale;
+                o2 += float4(h2) * row_scale;
+                o3 += float4(h3) * row_scale;
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    const ulong partial_head = ulong(partition) * args.head_count + head;
+    device float4 * output4 = (device float4 *)(
+        partial_output + partial_head * args.head_dim);
+    output4[lane] = o0;
+    output4[lane + 32u] = o1;
+    output4[lane + 64u] = o2;
+    output4[lane + 96u] = o3;
+    if (lane == 0u) {
+        device float * ml = partial_ml + partial_head * 2u;
+        ml[0] = maximum;
+        ml[1] = denominator;
+    }
+}
+
+[[max_total_threads_per_threadgroup(32)]]
+kernel void kernel_deepseek_v4_grouped_splitk_hca_reduce_f32(
+        constant ds4_splitk_hca_args & args [[buffer(0)]],
+        device const float * partial_output [[buffer(1)]],
+        device const float * partial_ml [[buffer(2)]],
+        device const float * sinks [[buffer(3)]],
+        device float * output [[buffer(4)]],
+        threadgroup float * factors [[threadgroup(0)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        ushort lane_u [[thread_index_in_simdgroup]]) {
+    const uint head = group.x;
+    const uint lane = uint(lane_u);
+    if (head >= args.head_count || args.head_dim != 512u) return;
+
+    float partition_max = -INFINITY;
+    float partition_mass = 0.0f;
+    if (lane < args.partitions) {
+        const ulong ml_offset = (ulong(lane) * args.head_count + head) * 2u;
+        partition_max = partial_ml[ml_offset];
+        partition_mass = partial_ml[ml_offset + 1u];
+    }
+    const float global_max = max(sinks[head], simd_max(partition_max));
+    float factor = 0.0f;
+    float mass = 0.0f;
+    if (lane < args.partitions) {
+        if (partition_mass > 0.0f) {
+            factor = exp(partition_max - global_max);
+            mass = partition_mass * factor;
+        }
+        factors[lane] = factor;
+    }
+    const float denominator = exp(sinks[head] - global_max) + simd_sum(mass);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float inverse = 1.0f / denominator;
+    device float4 * output4 = (device float4 *)(output + ulong(head) * args.head_dim);
+    for (uint vector = lane; vector < 128u; vector += 32u) {
+        float4 value = 0.0f;
+        for (uint partition = 0u; partition < args.partitions; ++partition) {
+            const ulong partial_head = ulong(partition) * args.head_count + head;
+            device const float4 * partial4 = (device const float4 *)(
+                partial_output + partial_head * args.head_dim);
+            value += partial4[vector] * factors[partition];
+        }
+        output4[vector] = value * inverse;
+    }
 }
 
 kernel void kernel_deepseek_v4_tiled_dense_sink_attention_f16(
@@ -2786,10 +2960,9 @@ kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_tiled_f32(
     }
 }
 
-// Optimistic schedule-ceiling probe for the packed-indexer lane. Queries are
-// rounded to F16 once outside this kernel; eight simdgroups compute the 64x8
-// head/row dot tile with matrix instructions. This is not the official FP4
-// numerical contract and is never selected by production.
+// Queries are rounded to F16 once outside this kernel; eight simdgroups compute
+// the 64x8 head/row dot tile with matrix instructions and retain F32 head-weight
+// reduction. This is distinct from the official FP4 numerical contract.
 [[max_total_threads_per_threadgroup(256)]]
 kernel void kernel_deepseek_v4_lightning_indexer_scores_f16_matrix_ceiling(
         constant ds4_indexer_score_args & args [[buffer(0)]],
@@ -3734,7 +3907,7 @@ kernel void kernel_deepseek_v4_select_top_k_multigroup_publish_f32(
     }
 }
 
-template <bool Radix4>
+template <bool Radix4, bool EmitMask>
 __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
         constant ds4_indexer_select_args & args,
         device const float * scores,
@@ -3761,8 +3934,10 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
     const uint visible = geometry_valid ? uint(visible_i) : 0u;
     const uint selected_count = min(visible, args.top_k);
 
-    for (uint row = lane; row < args.row_capacity; row += width) {
-        selected_mask[mask_base + row] = 0;
+    if (EmitMask) {
+        for (uint row = lane; row < args.row_capacity; row += width) {
+            selected_mask[mask_base + row] = 0;
+        }
     }
     for (uint slot = lane; slot < args.top_k; slot += width) {
         if (args.emit_ranked != 0u) ranked_ids[ids_base + slot] = -1;
@@ -3793,8 +3968,10 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
     int error = int(shared[0]);
 
     if (error != 0) {
-        for (uint row = lane; row < args.row_capacity; row += width) {
-            selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
+        if (EmitMask) {
+            for (uint row = lane; row < args.row_capacity; row += width) {
+                selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
+            }
         }
         for (uint slot = lane; slot < args.top_k; slot += width) {
             const int id = slot < selected_count ? int(slot) : -1;
@@ -3893,8 +4070,10 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
         }
     }
     if (error != 0) {
-        for (uint row = lane; row < args.row_capacity; row += width) {
-            selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
+        if (EmitMask) {
+            for (uint row = lane; row < args.row_capacity; row += width) {
+                selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
+            }
         }
         for (uint slot = lane; slot < args.top_k; slot += width) {
             const int id = slot < selected_count ? int(slot) : -1;
@@ -3959,8 +4138,10 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     error = int(shared[1]);
     if (error != 0) {
-        for (uint row = lane; row < args.row_capacity; row += width) {
-            selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
+        if (EmitMask) {
+            for (uint row = lane; row < args.row_capacity; row += width) {
+                selected_mask[mask_base + row] = row < selected_count ? 1 : 0;
+            }
         }
         for (uint slot = lane; slot < args.top_k; slot += width) {
             const int id = slot < selected_count ? int(slot) : -1;
@@ -3984,7 +4165,7 @@ __attribute__((always_inline)) inline void ds4_select_top_k_parallel_impl(
             || (at_threshold && equal_before + local_equal_seen < threshold_take);
         if (at_threshold) ++local_equal_seen;
         if (!selected) continue;
-        selected_mask[mask_base + row] = 1;
+        if (EmitMask) selected_mask[mask_base + row] = 1;
         cache_order_ids[ids_base + output_slot] = int(row);
         ++output_slot;
     }
@@ -4040,7 +4221,7 @@ kernel void kernel_deepseek_v4_select_top_k_parallel_f32(
         uint width [[threads_per_threadgroup]],
         ushort simdgroup [[simdgroup_index_in_threadgroup]],
         ushort simd_lane [[thread_index_in_simdgroup]]) {
-    ds4_select_top_k_parallel_impl<false>(
+    ds4_select_top_k_parallel_impl<false, true>(
         args, scores, visible_counts, selected_mask, ranked_ids,
         cache_order_ids, selected_counts, status, lane_scratch, shared,
         lane, query, width, simdgroup, simd_lane);
@@ -4062,8 +4243,28 @@ kernel void kernel_deepseek_v4_select_top_k_radix4_f32(
         uint width [[threads_per_threadgroup]],
         ushort simdgroup [[simdgroup_index_in_threadgroup]],
         ushort simd_lane [[thread_index_in_simdgroup]]) {
-    ds4_select_top_k_parallel_impl<true>(
+    ds4_select_top_k_parallel_impl<true, true>(
         args, scores, visible_counts, selected_mask, ranked_ids,
+        cache_order_ids, selected_counts, status, lane_scratch, shared,
+        lane, query, width, simdgroup, simd_lane);
+}
+
+kernel void kernel_deepseek_v4_select_top_k_radix4_ids_f32(
+        constant ds4_indexer_select_args & args [[buffer(0)]],
+        device const float * scores [[buffer(1)]],
+        device const int * visible_counts [[buffer(2)]],
+        device int * cache_order_ids [[buffer(3)]],
+        device int * selected_counts [[buffer(4)]],
+        device int * status [[buffer(5)]],
+        threadgroup uint * lane_scratch [[threadgroup(0)]],
+        threadgroup uint * shared [[threadgroup(1)]],
+        uint lane [[thread_index_in_threadgroup]],
+        uint query [[threadgroup_position_in_grid]],
+        uint width [[threads_per_threadgroup]],
+        ushort simdgroup [[simdgroup_index_in_threadgroup]],
+        ushort simd_lane [[thread_index_in_simdgroup]]) {
+    ds4_select_top_k_parallel_impl<true, false>(
+        args, scores, visible_counts, cache_order_ids, cache_order_ids,
         cache_order_ids, selected_counts, status, lane_scratch, shared,
         lane, query, width, simdgroup, simd_lane);
 }

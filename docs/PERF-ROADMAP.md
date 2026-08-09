@@ -937,6 +937,17 @@ One same-binary warm K160 product pair moves the 2,385-token prompt from
 13,249 to 13,111 ms (`180.01 -> 181.90 token/s`) with the same generated-ID
 digest. Default the deletion with `QWEN_DSV4_ONLINE_DIRECT_LOAD=0` as rollback.
 
+That direct-load result does not authorize the same online body for singleton
+selected CSA. A default-off FRESH transfer alternates both paths from one
+restored position-65,663 state. Paired command-GPU savings are
+`1.288/-0.694/-1.757/0.210 ms`, median `-0.242 ms`, with only two of four wins
+against a `2.0 ms` gate. Model-free online/direct numerical checks pass, but the
+integrated packed-to-singleton projection does not. The cited
+`0.233 -> 0.200 ms/layer` is staged-online to direct-online, not legacy
+singleton to online-direct. Remove the arm and keep singleton CSA on the
+cooperative body until a changed work unit establishes a new whole-token
+ceiling.
+
 The existing eight-head grouped online kernel also transfers exactly to long
 singleton HCA. Direct/grouped timings are `0.326/0.324 ms` at 513 rows,
 `0.790/0.668 ms` at 2,048 rows, and `2.994/2.542 ms` at 8,192 rows. Outputs are
@@ -1205,8 +1216,9 @@ projection arithmetic and a credible path to the complete wall bar.
    wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus llama.cpp's
    39.2 ms. Attention core, prepare, output, routed, and shared are
    11.58/7.68/7.89/10.51/2.98 ms. Routed/shared waves move wall by only
-   0.006 ms; do not resume local rearrangement or kernel sweeps without a
-   structural >=2 ms/token deletion.
+   0.006 ms, and packed online-selected transfer saves `-0.242 ms` GPU. Do not
+   resume local rearrangement or kernel sweeps without a structural
+   >=2 ms/token deletion.
 4. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,
    add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run

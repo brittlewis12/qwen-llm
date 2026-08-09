@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 Singleton Online-Selected Transfer KILL
+
+Status: KILL the packed online-direct selected-CSA body as a singleton decode
+replacement. This bounded FRESH-asset spike has transfer-screening authority
+only. All candidate code is removed.
+
+- The default-off arm changes only singleton sparse-CSA attention from the
+  width-640 cooperative body to the existing 32-lane online body with direct F16
+  row loads. Selection, cache-order IDs, raw-ring and compressed-cache layouts,
+  sinks, outputs, and failure checks are unchanged.
+- Existing production-shape differentials pass: direct and staged online outputs
+  are bit-identical, while online-direct stays within `9.04e-7` relative RMS of
+  legacy at positions 2,051/2,052/3,071.
+- One loaded 97.05 GiB FRESH residency alternated
+  legacy/online/online/legacy from the same restored synthetic position-65,663
+  state. Four paired GPU savings are `1.288/-0.694/-1.757/0.210 ms`; their median
+  is `-0.242 ms`, and the candidate wins only two of four blocks against a
+  `2.0 ms` gate.
+- Paired wall savings are `342.783/-363.979/-0.394/-2.236 ms`, median
+  `-1.315 ms`, with one of four wins. Large diagnostics/VM wall outliers make
+  that endpoint descriptive only; the command-GPU result independently rejects
+  the transfer. The separate integrated transcript phase did not run after the
+  performance gate failed.
+
+Decision: the additive projection was wrong. The recorded
+`0.233 -> 0.200 ms/layer` direct-load result compares staged online with direct
+online; it is not evidence that replacing singleton cooperative ownership saves
+`0.123 ms/layer`. Packed online attention's large win also belongs to the
+many-query packed schedule. Do not reopen this transfer with more samples,
+`exp2`, or another direct-load toggle; require a changed singleton CSA work unit
+with a new integrated ceiling.
+
 ## 2026-08-09 - DeepSeek V4 K160 Singleton Dependency-Wave KILL
 
 Status: KILL concurrent routed/shared projection waves for K160 singleton

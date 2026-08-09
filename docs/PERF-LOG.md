@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 FRESH MXFP4 Matrix Default GO
+
+Status: the promoted MXFP4 F32 matrix tile now also defaults on complete
+N=4,096 chunks for the exact FRESH asset. K216 remains N=2,048-only; set
+`QWEN_DSV4_PACKED_MXFP4_MATRIX=0` to restore scalar GEMV on either cell.
+
+- Current-default attribution finds FRESH layers 26 and 42 at
+  `550.815/535.364 ms` command-GPU, with `525.089/511.884 ms` in routed experts.
+  The other 41 layers center near 145 ms. K160's 43 uniform Q3_K/Q3_K/Q4_K
+  layers have no analogous dtype or layer cliff.
+- The unchanged tile moves layer-26 routed experts `525.089 -> 167.483 ms` and
+  layer 42 `511.884 -> 160.357 ms`, deleting `709.132 ms` directly. Post-route
+  GPU independently falls `6,953.555 -> 6,254.260 ms`, saving `699.296 ms`,
+  despite a visible `406.972 ms` sampled encoder gap at candidate layer 42.
+- Synthetic controls repeat final-logit SHA-256 `c7031a2a...7e1f`; candidates
+  repeat `3003c37d...a092`. Both qualified chunks report layer-26/layer-42
+  matrix ownership and scalar small-bucket remainders; the tail reports none.
+- Ordinary A/B/B/A walls are `20,499.510/18,466.013/17,095.582/18,137.508 ms`.
+  Median moves `19,318.509 -> 17,780.797 ms`, but the 12.0% control and 7.7%
+  candidate spans overlap. This is directional corroboration, not authority for
+  a 7.96% product-speed claim.
+- An 8,429-token official-chat audit exercises two N=4,096 chunks plus a scalar
+  tail. The top-eight first-token order and all 64 greedy IDs remain identical;
+  the top margin stays `2.668 -> 2.665`. Numerical propagation changes 72/189
+  downstream route hashes and 16 cutoff-sensitive selected sets. Every arm-local
+  cutoff margin is positive, and all selected counts and statuses remain valid.
+
+Decision: extend the already-qualified numerical work unit only to the exact
+Apple M4 Max, 1,328-tensor, 104,202,502,492-byte FRESH/E=256/N=4,096 tuple.
+Claim the 699-709 ms routed/post-route GPU deletion, not the noisy ordinary-wall
+ratio. Other chunks and assets retain scalar execution. Raw artifacts are under
+`target/profiles/dsv4-current-asset-stage-refresh-56a10b8`.
+Adversarial review: cx session `019fe83c-1010-7721-9c50-488228e94883`.
+
 ## 2026-08-09 - DeepSeek V4 K216 MXFP4 Matrix Default GO
 
 Status: K216's two MXFP4 routed-down layers now use a four-SIMDgroup F32

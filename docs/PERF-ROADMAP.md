@@ -1206,6 +1206,16 @@ expected downstream route and two cutoff-sensitive selected-set changes. Default
 only for the authenticated M4 Max/K216/E=216/N=2,048 profile; retain scalar
 buckets below 16 and `QWEN_DSV4_PACKED_MXFP4_MATRIX=0` rollback.
 
+Fresh attribution then authorizes one exact transfer rather than a quant-wide
+widening. FRESH layers 26 and 42 retain `525.089/511.884 ms` of routed-expert
+GPU at N=4,096. The unchanged tile reduces them to `167.483/160.357 ms`, deleting
+`709.132 ms` directly; post-route GPU independently saves `699.296 ms`. Ordinary
+A/B/B/A medians move `19,318.509 -> 17,780.797 ms`, but broad overlapping spans
+make that ratio corroborating only. An 8,429-token official-chat audit exercises
+two qualified chunks plus a scalar tail and preserves all 64 greedy IDs and the
+top-eight first-token order. Default only for the exact M4 Max/FRESH/E=256/N=4,096
+tuple with the existing `=0` rollback.
+
 The local DSpark census and external acceptance calibration are complete. On
 the exact 2,385-token official-chat prompt, llama.cpp N1 at confidence 0.3 moves
 `26.785 -> 30.367 token/s`, accepts 107 of 142 attempted drafts, preserves the
@@ -1240,11 +1250,13 @@ and exact shared-panel precedents are negative or about 1% whole-wall. Reopen
 only with 30-50 ms of independently isolated GPU-work deletion beyond unchanged
 projection arithmetic and a credible path to the complete wall bar.
 
-1. **Refresh attribution before transferring the K216 win.** FRESH shares two
-   MXFP4-down layers but executes its leading cells at N=4,096; K160 has no
-   MXFP4 surface. Capture one current-default FRESH N=4,096 and K160 N=2,048
-   profile, then rank each asset by measured stage excess. Do not widen the
-   K216 policy or infer a shared next kernel from quant names alone.
+1. **Require a physical routed gate/up deletion before implementation.** After
+   the MXFP4 repair, FRESH and K160 still spend about `1,833` and `1,877 ms` in
+   routed gate/up, but neither profile exposes a broken layer or shared quant
+   work unit. Advance only a cohort-wide design that first demonstrates roughly
+   150-200 ms of fewer weight decodes, routed assignments, or intermediate
+   publication. Do not reopen paired gate/up staging, tile geometry, or command
+   rearrangement from the subtotal alone.
 2. **Keep command ownership closed without GPU-work deletion.** The optimistic
    merged-route/indirect ceiling misses 2% after nonphysical full credits. Reopen
    only when a producer/consumer fusion independently deletes roughly 30-50 ms

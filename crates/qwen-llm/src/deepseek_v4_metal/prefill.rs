@@ -6084,9 +6084,18 @@ fn packed_mxfp4_matrix_scope_qualified(
 ) -> bool {
     device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
         && tensor_count == 1_328
-        && source_bytes == PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES
-        && expert_count == 216
-        && n_tokens == PACKED_MATRIX_MIN_TOKENS
+        && matches!(
+            (source_bytes, expert_count, n_tokens),
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+                MOE_EXPERT_COUNT,
+                DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            ) | (
+                PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+                216,
+                PACKED_MATRIX_MIN_TOKENS,
+            )
+        )
 }
 
 #[cfg(test)]
@@ -13316,10 +13325,17 @@ mod tests {
     }
 
     #[test]
-    fn packed_mxfp4_matrix_scope_is_exactly_k216_n2048_m4() {
+    fn packed_mxfp4_matrix_scope_is_exactly_fresh_n4096_or_k216_n2048() {
         let qualified = |device, tensors, bytes, experts, tokens| {
             packed_mxfp4_matrix_scope_qualified(device, tensors, bytes, experts, tokens)
         };
+        assert!(qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            MOE_EXPERT_COUNT,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
         assert!(qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
@@ -13359,6 +13375,20 @@ mod tests {
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            MOE_EXPERT_COUNT,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
             216,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));

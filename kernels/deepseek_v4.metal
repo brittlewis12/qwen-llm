@@ -51,7 +51,6 @@ constant int DS4_ROUTE_NONFINITE_LOGIT = -1;
 constant int DS4_ROUTE_NONFINITE_BIAS = -2;
 constant int DS4_ROUTE_INVALID_TOKEN = -3;
 constant int DS4_ROUTE_INVALID_EXPERT = -4;
-constant int DS4_ROUTE_DUPLICATE_EXPERT = -5;
 constant int DS4_ROUTE_NONFINITE_WEIGHT = -6;
 
 constant int DS4_PACKED_ROUTE_STALE_ROUTE = -101;
@@ -443,18 +442,6 @@ kernel void kernel_deepseek_v4_packed_route_hash(
             );
             return;
         }
-        for (uint prior = 0; prior < slot; ++prior) {
-            if (selected[prior] == expert) {
-                ds4_packed_route_finish(
-                    args,
-                    generations,
-                    status,
-                    token,
-                    DS4_ROUTE_DUPLICATE_EXPERT
-                );
-                return;
-            }
-        }
         selected[slot] = expert;
         selected_weights[slot]
             = ds4_router_score_exact(logits[logits_base + uint(expert)]);
@@ -538,9 +525,6 @@ kernel void kernel_deepseek_v4_packed_route_compact(
             const int expert = expert_ids[base + slot];
             if (expert < 0 || uint(expert) >= args.expert_count) {
                 local_error = 1u;
-            }
-            for (uint prior = 0u; prior < slot; ++prior) {
-                if (expert_ids[base + prior] == expert) local_error = 1u;
             }
             const float weight = weights[base + slot];
             if (!isfinite(weight) || weight < 0.0f) local_error = 1u;

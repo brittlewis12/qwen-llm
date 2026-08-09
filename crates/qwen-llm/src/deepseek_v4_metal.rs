@@ -69,7 +69,6 @@ const DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_LOGIT: i32 = -1;
 const DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_BIAS: i32 = -2;
 const DEEPSEEK_V4_ROUTE_STATUS_INVALID_TOKEN: i32 = -3;
 const DEEPSEEK_V4_ROUTE_STATUS_INVALID_EXPERT: i32 = -4;
-const DEEPSEEK_V4_ROUTE_STATUS_DUPLICATE_EXPERT: i32 = -5;
 const DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_WEIGHT: i32 = -6;
 const DEEPSEEK_V4_ROUTE_MAX_EXPERTS: usize = 256;
 const DEEPSEEK_V4_ROUTE_MAX_TOP_K: usize = 6;
@@ -8474,7 +8473,6 @@ fn deepseek_v4_route_status_name(status: i32) -> &'static str {
         DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_BIAS => "non-finite bias or corrected score",
         DEEPSEEK_V4_ROUTE_STATUS_INVALID_TOKEN => "invalid hash token",
         DEEPSEEK_V4_ROUTE_STATUS_INVALID_EXPERT => "invalid hash expert",
-        DEEPSEEK_V4_ROUTE_STATUS_DUPLICATE_EXPERT => "duplicate hash expert",
         DEEPSEEK_V4_ROUTE_STATUS_NONFINITE_WEIGHT => "non-finite normalized weight",
         _ => "unknown",
     }

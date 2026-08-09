@@ -6,6 +6,34 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-08 - DeepSeek V4 Duplicate Hash-Route Contract Fix
+
+Status: packed compact GPU routing now preserves duplicate hash-map expert
+slots as independent weighted routes, matching the schema, singleton GPU, and
+CPU packed contracts. This is a correctness repair, not a throughput claim or
+scope widening.
+
+- The packed hash producer and compactor had rejected repeated expert IDs even
+  though a hash row may legally assign the same expert to multiple slots. The
+  compact storage was already route-count-sized and retained distinct global
+  slots; only uniqueness and per-expert `count <= N` assumptions were wrong.
+- Per-expert counts and IQ2 tile plans now admit up to `N * top_k` routes while
+  preserving token/slot order. Invalid IDs, stale generations, failed route
+  status, non-finite weights, route coverage, and descriptor bounds remain
+  fail-closed.
+- Model-free Metal proofs cover all six slots routed to one expert through the
+  producer, compactor, IQ2 gate/up, SwiGLU, IQ3 down, and weighted sum. A second
+  proof concentrates all 12,288 routes at `N=2,048` on one expert and checks
+  counts, complete slot order, descriptors, and padding.
+- The legacy test-only dense GPU schedule remains a unique-route corruption
+  oracle because its storage is only `N` slots per expert. Duplicate-bearing
+  diagnostics select pinned CPU routing before mutation; unique historical
+  packets retain their prior GPU path and generation identity.
+
+Decision: retain compact duplicate support and the focused contract tests. No
+model timing or product-performance authority is claimed. Adversarial review:
+cx session `019fe486-09ad-7983-9d1e-2124ec84c5d2`, final clean review.
+
 ## 2026-08-08 - DeepSeek V4 K160 Exact E8 Router GO
 
 Status: full N=2,048/4,096 K160 chunks now default to an exact eight-expert

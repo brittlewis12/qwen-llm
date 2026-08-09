@@ -3889,7 +3889,6 @@ fn packed_grouped_iq2_mma16_tiles(
             || previous_expert.is_some_and(|expert| bucket.expert <= expert)
             || bucket.start != cursor
             || bucket.len == 0
-            || bucket.len > n_tokens
         {
             return invalid("packed IQ2 MMA schedule has invalid bucket geometry");
         }
@@ -6451,6 +6450,8 @@ enum PackedRouteSource<'a> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PackedRoutePolicy {
     Cpu,
+    #[cfg(all(test, feature = "dsv4-diagnostics"))]
+    CpuNoCompactPromotion,
     GpuCompact,
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
     GpuExperimental,
@@ -6462,12 +6463,92 @@ impl PackedRoutePolicy {
     fn uses_gpu(self) -> bool {
         match self {
             Self::Cpu => false,
+            #[cfg(all(test, feature = "dsv4-diagnostics"))]
+            Self::CpuNoCompactPromotion => false,
             Self::GpuCompact => true,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
             Self::GpuExperimental => true,
             #[cfg(all(test, feature = "dsv4-diagnostics"))]
             Self::GpuExperimentalCpuWeights => true,
         }
+    }
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+fn packed_hash_route_has_duplicate_slots(
+    token_ids: &[u32],
+    token_to_expert: &MetalTensor,
+    expert_count: usize,
+) -> Result<bool, DeepSeekV4MetalError> {
+    validate_i32_bank(
+        token_to_expert,
+        MOE_TOP_K,
+        "packed diagnostic hash route map",
+    )?;
+    validate_packed_expert_count(expert_count)?;
+    let vocab_size = usize::try_from(token_to_expert.shape[1]).map_err(|_| {
+        DeepSeekV4MetalError::Invalid("packed diagnostic hash vocabulary exceeds usize".into())
+    })?;
+    // Bound validation above and immutable Shared model storage make selected
+    // row reads safe without copying the complete multi-megabyte hash map into
+    // the timing-sensitive diagnostic packet.
+    let map = unsafe {
+        let pointer = token_to_expert
+            .buffer
+            .contents()
+            .as_ptr()
+            .cast::<u8>()
+            .add(token_to_expert.offset as usize)
+            .cast::<i32>();
+        std::slice::from_raw_parts(pointer, token_to_expert.n_elements() as usize)
+    };
+    for (token_index, &token_id) in token_ids.iter().enumerate() {
+        let token_id = usize::try_from(token_id).map_err(|_| {
+            DeepSeekV4MetalError::Invalid(format!(
+                "packed diagnostic token {token_index} exceeds usize"
+            ))
+        })?;
+        if token_id >= vocab_size {
+            return invalid(format!(
+                "packed diagnostic token {token_index} id {token_id} exceeds {vocab_size}"
+            ));
+        }
+        let start = checked_mul(token_id, MOE_TOP_K, "packed diagnostic hash row")?;
+        let mut seen = [false; MOE_EXPERT_COUNT];
+        for slot in 0..MOE_TOP_K {
+            let expert = usize::try_from(map[start + slot]).map_err(|_| {
+                DeepSeekV4MetalError::Invalid(format!(
+                    "packed diagnostic token {token_index} slot {slot} has a negative expert"
+                ))
+            })?;
+            if expert >= expert_count {
+                return invalid(format!(concat!(
+                    "packed diagnostic token {token_index} slot {slot} ",
+                    "expert {expert} exceeds {expert_count}"
+                )));
+            }
+            if std::mem::replace(&mut seen[expert], true) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(all(test, feature = "dsv4-diagnostics"))]
+fn packed_diagnostic_route_policy(
+    gpu_route: bool,
+    preserve_cpu_weights: bool,
+    duplicate_hash_routes: bool,
+) -> Result<PackedRoutePolicy, DeepSeekV4MetalError> {
+    if duplicate_hash_routes {
+        return Ok(PackedRoutePolicy::CpuNoCompactPromotion);
+    }
+    match (gpu_route, preserve_cpu_weights) {
+        (false, false) => Ok(PackedRoutePolicy::Cpu),
+        (true, false) => Ok(PackedRoutePolicy::GpuExperimental),
+        (true, true) => Ok(PackedRoutePolicy::GpuExperimentalCpuWeights),
+        (false, true) => invalid("packed route cannot preserve CPU weights without GPU scheduling"),
     }
 }
 
@@ -6659,6 +6740,7 @@ impl PrefillMoeScratch {
         n_tokens: usize,
         generation: NonZeroU32,
     ) -> Result<Vec<ExpertBucket>, DeepSeekV4MetalError> {
+        let route_count = checked_mul(n_tokens, MOE_TOP_K, "packed compact route count")?;
         let header = host_read_i32(
             &self.gpu_route.compact_header,
             "packed compact route header",
@@ -6667,7 +6749,7 @@ impl PrefillMoeScratch {
         if header.len() != PACKED_COMPACT_ROUTE_HEADER_WIDTH
             || header[0] != generation.get() as i32
             || header[1] != PACKED_COMPACT_ROUTE_STATUS_READY
-            || header[2] != (n_tokens * MOE_TOP_K) as i32
+            || header[2] != route_count as i32
             || header[3] < 0
             || header[3] as usize > MOE_EXPERT_COUNT
             || header[4] < 0
@@ -6696,9 +6778,9 @@ impl PrefillMoeScratch {
                     "packed compact expert {expert} has negative count"
                 ))
             })?;
-            if count > n_tokens {
+            if count > route_count {
                 return invalid(format!(
-                    "packed compact expert {expert} count {count} exceeds N={n_tokens}"
+                    "packed compact expert {expert} count {count} exceeds {route_count} routes"
                 ));
             }
             if count != 0 {
@@ -6714,7 +6796,7 @@ impl PrefillMoeScratch {
                 DeepSeekV4MetalError::Invalid("packed compact route count overflow".into())
             })?;
         }
-        if cursor != n_tokens * MOE_TOP_K
+        if cursor != route_count
             || schedule.len() != header[3] as usize
             || tile16_count != header[4] as usize
             || tile32_count != header[5] as usize
@@ -8649,14 +8731,18 @@ impl DeepSeekV4Session {
         gpu_route: bool,
         preserve_cpu_weights: bool,
     ) -> Result<(), DeepSeekV4MetalError> {
-        let route_policy = match (gpu_route, preserve_cpu_weights) {
-            (false, false) => PackedRoutePolicy::Cpu,
-            (true, false) => PackedRoutePolicy::GpuExperimental,
-            (true, true) => PackedRoutePolicy::GpuExperimentalCpuWeights,
-            (false, true) => {
-                return invalid("packed route cannot preserve CPU weights without GPU scheduling");
+        let mut duplicate_hash_routes = false;
+        if gpu_route {
+            for layer in 0..self.residency.config().hash_layer_count as usize {
+                duplicate_hash_routes |= packed_hash_route_has_duplicate_slots(
+                    token_ids,
+                    self.layer_tensor(layer, "ffn_gate_tid2eid.weight")?,
+                    self.prefill.moe.expert_count,
+                )?;
             }
-        };
+        }
+        let route_policy =
+            packed_diagnostic_route_policy(gpu_route, preserve_cpu_weights, duplicate_hash_routes)?;
         self.execute_packed_tokens_with_progress_policy(
             ctx,
             token_ids,
@@ -10640,6 +10726,12 @@ mod tests {
 
         validate_packed_expert_schedule(n_tokens, E, &expert_ids, &rows, &slots, &schedule)
             .unwrap();
+        let iq2_tiles = packed_grouped_iq2_mma16_tiles(n_tokens, &schedule).unwrap();
+        assert!(
+            iq2_tiles
+                .iter()
+                .any(|tile| tile.expert == 0 && tile.count == 3)
+        );
         assert_eq!(schedule.last().unwrap().expert, E - 1);
         assert!(
             validate_packed_expert_schedule(
@@ -16370,25 +16462,28 @@ mod tests {
         expert_ids: &[i32],
         n_tokens: usize,
     ) -> (Vec<i32>, Vec<i32>, Vec<i32>, Vec<ExpertBucket>) {
-        let (counts, dense_slots) = expected_packed_schedule(expert_ids, n_tokens);
+        assert_eq!(expert_ids.len(), n_tokens * MOE_TOP_K);
+        let mut counts = vec![0; MOE_EXPERT_COUNT];
         let mut rows = Vec::with_capacity(n_tokens * MOE_TOP_K);
         let mut slots = Vec::with_capacity(n_tokens * MOE_TOP_K);
         let mut buckets = Vec::new();
-        for (expert, &count) in counts.iter().enumerate() {
-            let count = count as usize;
-            if count == 0 {
-                continue;
-            }
+        for expert in 0..MOE_EXPERT_COUNT {
             let start = slots.len();
-            for &slot in &dense_slots[expert * n_tokens..expert * n_tokens + count] {
-                rows.push(slot / MOE_TOP_K as i32);
-                slots.push(slot);
+            for (slot, &routed_expert) in expert_ids.iter().enumerate() {
+                if routed_expert == expert as i32 {
+                    rows.push((slot / MOE_TOP_K) as i32);
+                    slots.push(slot as i32);
+                }
             }
-            buckets.push(ExpertBucket {
-                expert,
-                start,
-                len: count,
-            });
+            let count = slots.len() - start;
+            counts[expert] = count as i32;
+            if count != 0 {
+                buckets.push(ExpertBucket {
+                    expert,
+                    start,
+                    len: count,
+                });
+            }
         }
         (counts, rows, slots, buckets)
     }
@@ -16680,6 +16775,299 @@ mod tests {
     }
 
     #[test]
+    fn packed_duplicate_hash_routes_flow_through_grouped_experts_and_sum() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        const H: usize = 256;
+        const F: usize = 256;
+        const E: usize = MOE_EXPERT_COUNT;
+        const N: usize = 1;
+        const EXPERT: usize = 7;
+        const CLAMP: f32 = 0.25;
+        let fixture = PackedRouteFixture::new(&ctx);
+        let duplicate_map_values = vec![EXPERT as i32; MOE_TOP_K];
+        let duplicate_map = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&duplicate_map_values),
+            vec![MOE_TOP_K as u64, 1],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let generation = fixture.generations.take().unwrap();
+        let route_command = ctx.queue.commandBuffer().unwrap();
+        let route_encoder = KernelEncoder::begin(&route_command);
+        fixture
+            .scratch
+            .encode_hash(&ctx, &route_encoder, &duplicate_map, N, N, generation)
+            .unwrap();
+        fixture
+            .scratch
+            .encode_compact(&ctx, &route_encoder, N, generation)
+            .unwrap();
+        route_encoder.end();
+        route_command.commit();
+        route_command.waitUntilCompleted();
+        assert!(route_command.error().is_none());
+
+        let route_count = N * MOE_TOP_K;
+        let compact = fixture.scratch.capture_compact(N);
+        assert_eq!(
+            compact.header,
+            vec![
+                generation.get() as i32,
+                PACKED_COMPACT_ROUTE_STATUS_READY,
+                route_count as i32,
+                1,
+                1,
+                1,
+                packed_route_compact_completion(generation.get(), N) as i32,
+                N as i32,
+            ]
+        );
+        assert_eq!(compact.expert_ids, duplicate_map_values);
+        assert_eq!(compact.rows, vec![0; route_count]);
+        assert_eq!(compact.slots, (0..route_count as i32).collect::<Vec<_>>());
+        assert_eq!(compact.tiles16[..3], [EXPERT as i32, 0, route_count as i32]);
+        assert_eq!(compact.tiles32[..3], [EXPERT as i32, 0, route_count as i32]);
+        let rows = i32_prefix(
+            &fixture.scratch.compact_rows,
+            vec![route_count as u64],
+            "duplicate grouped source rows",
+        )
+        .unwrap();
+        let slots = i32_prefix(
+            &fixture.scratch.compact_slots,
+            vec![route_count as u64],
+            "duplicate grouped destination slots",
+        )
+        .unwrap();
+        let tiles16 = i32_prefix(
+            &fixture.scratch.compact_tiles16,
+            vec![3],
+            "duplicate grouped 16-row tile",
+        )
+        .unwrap();
+        let tiles32 = i32_prefix(
+            &fixture.scratch.compact_tiles32,
+            vec![3],
+            "duplicate grouped 32-row tile",
+        )
+        .unwrap();
+        let plan16 = PackedGroupedExpertPlan::from_device(&tiles16, 1).unwrap();
+        let plan32 = PackedGroupedExpertPlan::from_device(&tiles32, 1).unwrap();
+        let gate_bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, H, F, E, 211);
+        let up_bank = grouped_test_bank(&ctx, GgmlType::IQ2_XS, H, F, E, 223);
+        let down_bank = grouped_test_bank(&ctx, GgmlType::IQ3_XXS, F, H, E, 227);
+        let input_values = (0..H)
+            .map(|index| ((index * 41 + 17) % 251) as f32 * 0.001 - 0.125)
+            .collect::<Vec<_>>();
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&input_values),
+            vec![H as u64, N as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let gate = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], f32::NAN);
+        let up = grouped_guarded_f32(&ctx, vec![F as u64, route_count as u64], f32::NAN);
+        let inner = grouped_guarded_f32(&ctx, vec![F as u64, MOE_TOP_K as u64, N as u64], f32::NAN);
+        let expert_outputs =
+            grouped_guarded_f32(&ctx, vec![H as u64, MOE_TOP_K as u64, N as u64], f32::NAN);
+        let routed_output = grouped_guarded_f32(&ctx, vec![H as u64, N as u64], f32::NAN);
+        let weights = f32_prefix(
+            &fixture.scratch.weights,
+            vec![MOE_TOP_K as u64, N as u64],
+            "duplicate grouped route weights",
+        )
+        .unwrap();
+
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        encode_packed_grouped_mapped_iq2_xs_swiglu_f32_matrix(
+            &ctx,
+            &encoder,
+            &gate_bank,
+            &up_bank,
+            &input,
+            &rows,
+            &slots,
+            &plan16,
+            &gate,
+            &up,
+            &inner,
+            H,
+            F,
+            E,
+            MOE_TOP_K,
+            N,
+            N,
+            route_count,
+            CLAMP,
+            PackedIq2MatrixWorkUnit::Mma16,
+        )
+        .unwrap();
+        encode_packed_grouped_down_iq3_xxs_f32(
+            &ctx,
+            &encoder,
+            &down_bank,
+            &inner,
+            &slots,
+            &plan32,
+            &expert_outputs,
+            F,
+            H,
+            E,
+            MOE_TOP_K,
+            N,
+        )
+        .unwrap();
+        crate::metal::encode_moe_weighted_sum_packed_f32(
+            &ctx,
+            &encoder,
+            &expert_outputs,
+            &weights,
+            &routed_output,
+            H,
+            MOE_TOP_K,
+            N,
+        )
+        .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none(), "{:?}", command.error());
+
+        let gate_values = host_read_f32(&gate, "duplicate grouped gate").unwrap();
+        let up_values = host_read_f32(&up, "duplicate grouped up").unwrap();
+        let inner_values = host_read_f32(&inner, "duplicate grouped inner").unwrap();
+        let expert_values =
+            host_read_f32(&expert_outputs, "duplicate grouped expert outputs").unwrap();
+        let weight_values = host_read_f32(&weights, "duplicate grouped weights").unwrap();
+        let routed_values =
+            host_read_f32(&routed_output, "duplicate grouped routed output").unwrap();
+        for (label, values) in [
+            ("gate", &gate_values),
+            ("up", &up_values),
+            ("inner", &inner_values),
+            ("expert output", &expert_values),
+            ("routed output", &routed_values),
+        ] {
+            assert!(
+                values.iter().all(|value| value.is_finite()),
+                "duplicate grouped {label} retained an unwritten value"
+            );
+        }
+        assert!(
+            weight_values
+                .iter()
+                .all(|weight| weight.is_finite() && *weight > 0.0)
+        );
+        assert!((weight_values.iter().sum::<f32>() - 1.5).abs() <= 1e-5);
+        for slot in 1..MOE_TOP_K {
+            assert_eq!(
+                expert_values[slot * H..(slot + 1) * H]
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expert_values[..H]
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>()
+            );
+        }
+        for column in 0..H {
+            let expected = (0..MOE_TOP_K).fold(0.0f32, |sum, slot| {
+                sum + weight_values[slot] * expert_values[slot * H + column]
+            });
+            let allowed = 1e-5 * expected.abs().max(1.0);
+            assert!((routed_values[column] - expected).abs() <= allowed);
+        }
+        for (label, tensor) in [
+            ("duplicate grouped gate", &gate),
+            ("duplicate grouped up", &up),
+            ("duplicate grouped inner", &inner),
+            ("duplicate grouped expert outputs", &expert_outputs),
+            ("duplicate grouped routed output", &routed_output),
+        ] {
+            assert_grouped_guards(label, tensor);
+        }
+    }
+
+    #[test]
+    fn packed_gpu_route_compaction_handles_maximum_concentrated_count() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        const EXPERT: usize = 7;
+        let fixture = PackedRouteFixture::new(&ctx);
+        let n_tokens = PACKED_GPU_ROUTE_MAX_TOKENS;
+        let route_count = n_tokens * MOE_TOP_K;
+        let duplicate_map_values = vec![EXPERT as i32; route_count];
+        let duplicate_map = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&duplicate_map_values),
+            vec![MOE_TOP_K as u64, n_tokens as u64],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let generation = fixture.generations.take().unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        fixture
+            .scratch
+            .encode_hash(
+                &ctx,
+                &encoder,
+                &duplicate_map,
+                n_tokens,
+                n_tokens,
+                generation,
+            )
+            .unwrap();
+        fixture
+            .scratch
+            .encode_compact(&ctx, &encoder, n_tokens, generation)
+            .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+        let capture = fixture.scratch.capture_compact(n_tokens);
+        let schedule = vec![ExpertBucket {
+            expert: EXPERT,
+            start: 0,
+            len: route_count,
+        }];
+        let tiles32 = packed_grouped_expert_tiles(n_tokens, &schedule).unwrap();
+        let tiles16 = packed_grouped_iq2_mma16_tiles(n_tokens, &schedule).unwrap();
+        assert_eq!(capture.header[1], PACKED_COMPACT_ROUTE_STATUS_READY);
+        assert_eq!(capture.header[2], route_count as i32);
+        assert_eq!(capture.header[3], 1);
+        assert_eq!(capture.header[4], tiles16.len() as i32);
+        assert_eq!(capture.header[5], tiles32.len() as i32);
+        assert_eq!(capture.counts[EXPERT], route_count as i32);
+        assert!(
+            capture
+                .counts
+                .iter()
+                .enumerate()
+                .all(|(expert, &count)| { expert == EXPERT || count == 0 })
+        );
+        assert_eq!(capture.rows[0], 0);
+        assert_eq!(capture.rows[route_count - 1], (n_tokens - 1) as i32);
+        assert_eq!(capture.slots, (0..route_count as i32).collect::<Vec<_>>());
+        assert_eq!(
+            capture.tiles32,
+            padded_tile_words(&tiles32, PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS)
+        );
+        assert_eq!(
+            capture.tiles16,
+            padded_tile_words(&tiles16, PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS)
+        );
+    }
+
+    #[test]
     fn packed_gpu_route_compaction_rejects_invalid_late_tokens() {
         let Ok(ctx) = MetalContext::new() else {
             return;
@@ -16768,9 +17156,9 @@ mod tests {
 
         let next_generation = fixture.generations.next.get() as i32;
         let valid_generations = vec![next_generation; n_tokens];
-        let mut duplicate_ids = valid_ids.clone();
-        duplicate_ids[400 * MOE_TOP_K + 1] = duplicate_ids[400 * MOE_TOP_K];
-        run(&duplicate_ids, &valid_weights, &valid_generations, &ready);
+        let mut invalid_ids = valid_ids.clone();
+        invalid_ids[400 * MOE_TOP_K + 1] = MOE_EXPERT_COUNT as i32;
+        run(&invalid_ids, &valid_weights, &valid_generations, &ready);
 
         let next_generation = fixture.generations.next.get() as i32;
         let valid_generations = vec![next_generation; n_tokens];
@@ -16796,6 +17184,51 @@ mod tests {
         );
         validate_packed_route_policy_scope(PackedRoutePolicy::Cpu, DEEPSEEK_V4_PREFILL_MAX_TOKENS)
             .unwrap();
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn packed_diagnostic_hash_route_detects_duplicate_slots_before_mutation() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let unique = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[0i32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
+            vec![MOE_TOP_K as u64, 2],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let duplicate = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&[0i32, 1, 2, 3, 4, 5, 6, 6, 8, 9, 10, 11]),
+            vec![MOE_TOP_K as u64, 2],
+            GgmlType::I32,
+        )
+        .unwrap();
+        assert!(
+            !packed_hash_route_has_duplicate_slots(&[0, 1], &unique, MOE_EXPERT_COUNT,).unwrap()
+        );
+        assert!(
+            packed_hash_route_has_duplicate_slots(&[0, 1], &duplicate, MOE_EXPERT_COUNT,).unwrap()
+        );
+        assert_eq!(
+            packed_diagnostic_route_policy(true, false, true).unwrap(),
+            PackedRoutePolicy::CpuNoCompactPromotion
+        );
+        assert_eq!(
+            packed_diagnostic_route_policy(true, true, true).unwrap(),
+            PackedRoutePolicy::CpuNoCompactPromotion
+        );
+        assert_eq!(
+            packed_diagnostic_route_policy(true, false, false).unwrap(),
+            PackedRoutePolicy::GpuExperimental
+        );
+        assert_eq!(
+            packed_diagnostic_route_policy(true, true, false).unwrap(),
+            PackedRoutePolicy::GpuExperimentalCpuWeights
+        );
+        assert!(packed_diagnostic_route_policy(false, true, false).is_err());
     }
 
     #[test]
@@ -17173,6 +17606,127 @@ mod tests {
             );
         }
 
+        let n_tokens = 1;
+        let duplicate_expert = 7usize;
+        let duplicate_map_values = vec![duplicate_expert as i32; MOE_TOP_K];
+        let duplicate_map = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&duplicate_map_values),
+            vec![MOE_TOP_K as u64, 1],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let logits = f32_prefix(
+            &production.moe.logits,
+            vec![MOE_EXPERT_COUNT as u64, n_tokens as u64],
+            "duplicate packed GPU route logits",
+        )
+        .unwrap();
+        let normalized_input = f32_prefix(
+            &production.moe.normalized_input,
+            vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, n_tokens as u64],
+            "duplicate packed GPU route normalized input",
+        )
+        .unwrap();
+        let token_ids = i32_prefix(
+            &production.token_ids,
+            vec![n_tokens as u64],
+            "duplicate packed GPU route tokens",
+        )
+        .unwrap();
+        let views = PackedMoeViews {
+            normalized_input,
+            logits,
+            hash_ids: None,
+        };
+        let generation = production.moe.take_gpu_route_generation().unwrap();
+        let command = ctx.queue.commandBuffer().unwrap();
+        let encoder = KernelEncoder::begin(&command);
+        production
+            .moe
+            .encode_gpu_route_compact(
+                &ctx,
+                &encoder,
+                &views,
+                PackedRouteSource::Hash,
+                &token_ids,
+                Some(&duplicate_map),
+                n_tokens,
+                1.5,
+                generation,
+            )
+            .unwrap();
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+
+        let schedule = production
+            .moe
+            .capture_gpu_compact_schedule(n_tokens, generation)
+            .unwrap();
+        assert_eq!(schedule.len(), 1);
+        assert_eq!(
+            (schedule[0].expert, schedule[0].start, schedule[0].len),
+            (duplicate_expert, 0, MOE_TOP_K)
+        );
+        let mut actual_ids =
+            host_read_i32(&production.moe.expert_ids, "duplicate packed route IDs").unwrap();
+        let mut actual_weights =
+            host_read_f32(&production.moe.weights, "duplicate packed route weights").unwrap();
+        actual_ids.truncate(MOE_TOP_K);
+        actual_weights.truncate(MOE_TOP_K);
+        assert_eq!(actual_ids, duplicate_map_values);
+        let scores =
+            crate::deepseek_v4_oracle::sqrt_softplus_scores(&fixture.logits[..MOE_EXPERT_COUNT])
+                .unwrap();
+        let expected =
+            crate::deepseek_v4_oracle::hash_route(&scores, &[duplicate_expert; MOE_TOP_K], 1.5)
+                .unwrap();
+        for (&actual, &expected) in actual_weights.iter().zip(&expected.weights) {
+            assert!((actual - expected).abs() <= 1e-4 * expected.abs().max(1.0));
+        }
+        let mut expected_counts = vec![0; MOE_EXPERT_COUNT];
+        expected_counts[duplicate_expert] = MOE_TOP_K as i32;
+        assert_eq!(
+            host_read_i32(
+                &production.moe.gpu_route.counts,
+                "duplicate packed route counts"
+            )
+            .unwrap(),
+            expected_counts
+        );
+        let mut actual_rows =
+            host_read_i32(&production.moe.bucket_rows, "duplicate packed route rows").unwrap();
+        let mut actual_slots =
+            host_read_i32(&production.moe.bucket_slots, "duplicate packed route slots").unwrap();
+        actual_rows.truncate(MOE_TOP_K);
+        actual_slots.truncate(MOE_TOP_K);
+        assert_eq!(actual_rows, vec![0; MOE_TOP_K]);
+        assert_eq!(actual_slots, (0..MOE_TOP_K as i32).collect::<Vec<_>>());
+        let expected_tiles32 = packed_grouped_expert_tiles(n_tokens, &schedule).unwrap();
+        let expected_tiles16 = packed_grouped_iq2_mma16_tiles(n_tokens, &schedule).unwrap();
+        assert_eq!(expected_tiles32.len(), 1);
+        assert_eq!(expected_tiles16.len(), 1);
+        assert_eq!(expected_tiles32[0].count, MOE_TOP_K as u32);
+        assert_eq!(expected_tiles16[0].count, MOE_TOP_K as u32);
+        assert_eq!(
+            host_read_i32(
+                &production.moe.grouped_tiles,
+                "duplicate packed route 32-row tiles",
+            )
+            .unwrap(),
+            padded_tile_words(&expected_tiles32, PACKED_GROUPED_EXPERT_DESCRIPTOR_WORDS)
+        );
+        assert_eq!(
+            host_read_i32(
+                &production.moe.grouped_iq2_mma16_tiles,
+                "duplicate packed route 16-row tiles",
+            )
+            .unwrap(),
+            padded_tile_words(&expected_tiles16, PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS,)
+        );
+
         production.moe.gpu_route.next_generation.set(u32::MAX);
         assert!(
             production
@@ -17482,27 +18036,25 @@ mod tests {
         )
         .unwrap();
 
-        for (map, expected_status) in [
-            (
-                vec![-1, 1, 2, 3, 4, 5],
-                DEEPSEEK_V4_ROUTE_STATUS_INVALID_EXPERT,
-            ),
-            (
-                vec![0, 0, 2, 3, 4, 5],
-                DEEPSEEK_V4_ROUTE_STATUS_DUPLICATE_EXPERT,
-            ),
-        ] {
-            let map = MetalTensor::from_bytes(
-                &ctx,
-                bytemuck::cast_slice(&map),
-                vec![MOE_TOP_K as u64, 1],
-                GgmlType::I32,
-            )
-            .unwrap();
-            let failed = run_pipeline(PackedRouteMicroproofSource::Hash, &fixture.bias, &map, 1);
-            assert_eq!(failed.route_status[0], expected_status);
-            assert_packed_route_failure(&failed, 1, PACKED_ROUTE_FAILED_ROUTE, 0);
-        }
+        let invalid_map = vec![-1, 1, 2, 3, 4, 5];
+        let invalid_map = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&invalid_map),
+            vec![MOE_TOP_K as u64, 1],
+            GgmlType::I32,
+        )
+        .unwrap();
+        let failed = run_pipeline(
+            PackedRouteMicroproofSource::Hash,
+            &fixture.bias,
+            &invalid_map,
+            1,
+        );
+        assert_eq!(
+            failed.route_status[0],
+            DEEPSEEK_V4_ROUTE_STATUS_INVALID_EXPERT
+        );
+        assert_packed_route_failure(&failed, 1, PACKED_ROUTE_FAILED_ROUTE, 0);
 
         write_raw_f32(&fixture.scratch.logits, &nonfinite_logits);
         let failed = run_pipeline(

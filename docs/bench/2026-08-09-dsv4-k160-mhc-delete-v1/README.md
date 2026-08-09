@@ -1,7 +1,8 @@
 # DeepSeek V4 K160 mHC Representation-Deletion Ceiling
 
-Status: preregistration. Parent source is `bbfcca8`. No oracle implementation
-or timing result exists yet.
+Status: implementation in progress. The packet was frozen at `0b4c62d` and its
+passive timing clarified at `9b0307d` before model or timing observations. The
+engine oracle substrate now exists; no canonical acquisition or result exists.
 
 Passive-timing clarification: implementation review exposed that retaining all
 completed command objects until request end would change their ordinary

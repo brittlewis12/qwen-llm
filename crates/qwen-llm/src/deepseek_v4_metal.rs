@@ -10,10 +10,14 @@ mod prefill;
 
 #[cfg(feature = "dsv4-diagnostics")]
 pub use prefill::{
+    DeepSeekV4MhcBufferRole, DeepSeekV4MhcCommandInterval, DeepSeekV4MhcCommandKind,
+    DeepSeekV4MhcDeleteArm, DeepSeekV4MhcDeleteProfile, DeepSeekV4MhcEndpointEvidence,
+    DeepSeekV4MhcExecutionKind, DeepSeekV4MhcOracle, DeepSeekV4MhcOracleIdentity,
+    DeepSeekV4MhcSiteKind, DeepSeekV4MhcSiteRecord, DeepSeekV4MhcVerifiedCapture,
     PackedChunkProfile, PackedPostRouteLayerMetadata, PackedPostRouteSampledLayerProfile,
     PackedPostRouteStageKind, PackedPostRouteStageProfile, PackedPostRouteStageTiming,
     PackedPrefillSampledLayerProfile, PackedPrefillStageKind, PackedPrefillStageProfile,
-    PackedPrefillStageTiming, PackedPrefillStageTransition,
+    PackedPrefillStageTiming, PackedPrefillStageTransition, seal_mhc_delete_oracle_pair,
 };
 mod snapshot;
 
@@ -50,6 +54,8 @@ use crate::metal::{
 use crate::tensor::{GgmlType, ggml_type_layout};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+#[cfg(feature = "dsv4-diagnostics")]
+use objc2_metal::MTLCommandBufferStatus;
 use objc2_metal::{
     MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLSize,
 };
@@ -1925,6 +1931,16 @@ impl DeepSeekV4Session {
     /// Copy completed logits out of shared Metal storage.
     pub fn copy_logits_f32(&self) -> Result<Vec<f32>, DeepSeekV4MetalError> {
         host_read_f32(self.logits()?, "completed DeepSeek V4 logits")
+    }
+
+    /// Copy the completed normalized hidden state out of shared Metal storage.
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[doc(hidden)]
+    pub fn copy_final_normalized_hidden_f32(&self) -> Result<Vec<f32>, DeepSeekV4MetalError> {
+        host_read_f32(
+            self.final_normalized_hidden()?,
+            "completed DeepSeek V4 final normalized hidden",
+        )
     }
 
     /// Compatibility entry point for the original position-zero differential.

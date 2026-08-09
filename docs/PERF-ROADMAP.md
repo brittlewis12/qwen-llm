@@ -2193,27 +2193,22 @@ default-off exact-profile switch. The generation gate clears by only `0.002899`
 percentage points, so do not claim robust per-run `>=5%`, uniform TTFT
 nonregression, default admission, broader transfer, or another timing packet.
 
-1. **Generic certified lm-head screening oracle**: v0.663 is sealed authenticated
-   `INVALID` with no mechanism observation. Parser, dual-name identity, complete
-   model/head authentication, resident loading, tokenizer construction, and
-   prompt bytes cleared. The oracle then compared a domain-prefixed token digest
-   against production's frozen raw-i32le digest. Run only the preregistered
-   v0.664 shared prompt-digest repair under a new root, preserving every
-   screening gate. In the frozen integrated cell, v0.656's compact tail
-   removes `14.197064 ms` of transition-command wall, while v0.655 supplies
-   isolated primitive authority.
-   Every capture must prune `>=80%` of rows while charging `<=30%` of baseline
-   bytes. A production successor must remove about 70% of charged head wall and
-   project `>=5%` whole-token saving after all screening work. This is exact
-   argmax and greedy-only. Belief medium-low, prize medium, difficulty M-H.
-2. **Direct-to-session checkpoint-restore floor**: this is exact process-cold
+Generic certified lm-head screening is now closed. The consumed clean v0.664
+oracle prunes zero of 248,319 competitors at all six captures and charges about
+431.1 MB per capture against a 417.2 MB complete head and 125.2 MB gate. Exact
+validation confirms every unique winner; the bound is correct but wholly
+nonselective. Do not build a production screener or retune survivor machinery.
+Reopen only for a materially tighter certificate with charged traffic below the
+head bytes it avoids, or changed model/head geometry.
+
+1. **Direct-to-session checkpoint-restore floor**: this is exact process-cold
    continuation, not fresh-prompt acceleration. Preregister `>=60 ms` restore
    saving on the frozen `582,854,188`-byte record. Populate a disposable session
    through checked positional reads, hash canonical wire order before GPU use,
    and discard the whole candidate on any short read, EOF, shape, inode, or
    digest failure. The current `60-80 ms` band is non-causal sizing, not evidence.
    Belief medium, prize bounded, difficulty M.
-3. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
+2. **A10B cold residency and split-copy floor is parked**: v0.653 consumed its
    sole packet unsealed before the first durable child launch. The no-payload
    headroom probe passed, but ordered hashing of all three shards followed by a
    global full-residency check found shard 1 nonresident. A post-stop diagnostic
@@ -2235,7 +2230,7 @@ nonregression, default admission, broader transfer, or another timing packet.
    packet supplies no native default, runtime loader, product, or mechanism
    authority.
 
-4. **High-ceiling structural options**: true-long attention needs a source-free
+3. **High-ceiling structural options**: true-long attention needs a source-free
    body that changes ownership, scheduling, residency, or physical bytes after
    v0.607; speculative decode needs matched MTPLX AR/D3/D7 acceptance evidence
    before asset or affine work; A3B verification needs a materially different
@@ -2338,8 +2333,8 @@ control. It is no longer an active experiment; keep `decode` as the default.
    saving and `61.094834 ms` request saving, both 6/6 positive. Retain only the
    hidden, default-off exact-A3B force path. Do not rerun, widen, automatically
    admit, or build workspace-only, borrowed-only, GPU-sampling, or
-   prompt-borrowing variants. Run the optimistic generic lm-head screening
-   oracle next before any production screener.
+   prompt-borrowing variants. v0.664 subsequently kills generic norm-certified
+   lm-head screening with zero rows pruned and bytes above the complete head.
 6. Keep prompt reduction explicitly input-changing. Keep true-long attention,
    MTPLX/asset work, A3B verifier redesign, lm-head screening, and top-k behind
    their named source-free, state, quality, and whole-token gates.

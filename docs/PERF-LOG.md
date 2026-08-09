@@ -6,6 +6,26 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - Recovered v0.664 LM-Head Screening KILL
+
+Status: the already-consumed clean `9f14e5c` acquisition seals
+`KILL_PRUNING_AND_BYTES`, authority `none`. The stale active queue is corrected;
+do not rerun the oracle.
+
+- At calls 0/1/7/31/63/127, the certified block-norm bound prunes exactly zero
+  of 248,319 competitors. Every capture retains all 248,319 survivors.
+- Exact validation confirms each unique winner and places every competitor below
+  it. The mechanism is correct but nonselective, not numerically broken.
+- Charged 128-byte traffic is 431,109,248-431,109,376 bytes per capture versus
+  417,177,600 bytes for the complete Q6_K head and a 125,153,280-byte gate.
+  Screening costs about 103.3% of simply reading the head.
+- All 32 manifest entries authenticate. Decision SHA-256 is
+  `97320e1ff959c364683dcd7d2efa949504f754f4c9fae51726b97786c8bc82fa`.
+
+Decision: close generic norm-certified lm-head screening. Reopen only for a
+materially tighter certificate with charged traffic below avoided head bytes,
+or changed model/head geometry—not alignment, compaction, or survivor retuning.
+
 ## 2026-08-09 - DeepSeek V4 Compressor-Pair Accounting KILL
 
 Status: KILL implementation of a pair-only KV/gate compressor kernel. Existing

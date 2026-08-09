@@ -1013,6 +1013,24 @@ fn session_contract_digest_is_valid(contract: &SessionContractRecord) -> bool {
         .is_some_and(|bytes| contract.sha256 == hex(Sha256::digest(bytes)))
 }
 
+fn realized_allocations_match_plan(
+    realized: &[RealizedAllocationRecord],
+    planned: &[MemoryAllocationRecord],
+) -> bool {
+    let mut realized = realized.to_vec();
+    realized.sort_by_key(|row| (row.requested_bytes, row.buffer_length, row.storage_mode));
+    let mut planned = planned
+        .iter()
+        .map(|row| RealizedAllocationRecord {
+            requested_bytes: row.logical_bytes.max(1),
+            buffer_length: row.logical_bytes.max(1),
+            storage_mode: row.storage_mode,
+        })
+        .collect::<Vec<_>>();
+    planned.sort_by_key(|row| (row.requested_bytes, row.buffer_length, row.storage_mode));
+    realized == planned
+}
+
 fn identity_cache_outcome(outcome: IdentityCacheOutcome) -> &'static str {
     match outcome {
         IdentityCacheOutcome::Hit => "hit",
@@ -1128,16 +1146,16 @@ fn new_session(
         "fresh session capacity differs from the frozen allocation contract"
     );
     ensure!(
-        realized.len() == contract.allocations.len()
-            && realized
-                .iter()
-                .zip(&contract.allocations)
-                .all(|(realized, planned)| {
-                    realized.requested_bytes == planned.logical_bytes.max(1)
-                        && realized.buffer_length == planned.logical_bytes.max(1)
-                        && realized.storage_mode == planned.storage_mode
-                }),
-        "fresh session realized allocation census differs from the frozen plan"
+        realized_allocations_match_plan(&realized, &contract.allocations),
+        "fresh session realized allocation multiset differs from the frozen plan: realized_count={} planned_count={} realized_bytes={} planned_bytes={}",
+        realized.len(),
+        contract.allocations.len(),
+        realized.iter().map(|row| row.buffer_length).sum::<u64>(),
+        contract
+            .allocations
+            .iter()
+            .map(|row| row.logical_bytes.max(1))
+            .sum::<u64>(),
     );
     let construction_wall_ms = started.elapsed().as_secs_f64() * 1e3;
     let after_bytes = ctx.current_allocated_size();
@@ -1166,6 +1184,7 @@ fn allocation_identity_is_valid(allocation: &SessionAllocation) -> bool {
     allocation.construction_wall_ms.is_finite()
         && allocation.construction_wall_ms > 0.0
         && session_contract_digest_is_valid(&allocation.contract)
+        && realized_allocations_match_plan(&allocation.realized, &allocation.contract.allocations)
 }
 
 fn allocation_plan_matches(expected: &SessionAllocation, observed: &SessionAllocation) -> bool {
@@ -2049,6 +2068,7 @@ fn reduce(acquisition: &AcquisitionRecord) -> Result<Decision> {
         push_failure(
             &mut failures,
             allocation_identity_is_valid(&first.allocation)
+                && first.allocation.contract.memory_plan_sha256 == acquisition.memory_plan.sha256
                 && first.allocation.contract.oracle_payload_sha256
                     == Some(acquisition.oracle_pre_sha256.clone())
                 && first.allocation.contract.oracle_payload_bytes == 16_908_288
@@ -2998,6 +3018,50 @@ mod tests {
         assert!(build_packet_is_canonical(&build));
         build["overrides"] = serde_json::json!(["allow_dirty"]);
         assert!(!build_packet_is_canonical(&build));
+    }
+
+    #[test]
+    fn allocation_census_matches_the_plan_as_a_multiset() {
+        let planned = vec![
+            MemoryAllocationRecord {
+                name: "first".to_string(),
+                logical_bytes: 16,
+                priced_bytes: 16_384,
+                alignment: 16_384,
+                storage_mode: "shared",
+            },
+            MemoryAllocationRecord {
+                name: "second".to_string(),
+                logical_bytes: 32,
+                priced_bytes: 16_384,
+                alignment: 16_384,
+                storage_mode: "shared",
+            },
+        ];
+        let mut realized = vec![
+            RealizedAllocationRecord {
+                requested_bytes: 32,
+                buffer_length: 32,
+                storage_mode: "shared",
+            },
+            RealizedAllocationRecord {
+                requested_bytes: 16,
+                buffer_length: 16,
+                storage_mode: "shared",
+            },
+        ];
+        assert!(realized_allocations_match_plan(&realized, &planned));
+        realized[0].buffer_length += 1;
+        assert!(!realized_allocations_match_plan(&realized, &planned));
+        realized[0].buffer_length -= 1;
+        realized[0].requested_bytes += 1;
+        assert!(!realized_allocations_match_plan(&realized, &planned));
+        realized[0].requested_bytes -= 1;
+        realized[0].storage_mode = "private";
+        assert!(!realized_allocations_match_plan(&realized, &planned));
+        realized[0].storage_mode = "shared";
+        realized.push(realized[0].clone());
+        assert!(!realized_allocations_match_plan(&realized, &planned));
     }
 
     #[test]

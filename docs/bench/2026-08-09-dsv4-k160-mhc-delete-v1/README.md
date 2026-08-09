@@ -54,6 +54,22 @@ session memory inventory hard-coded 256 router-logit rows while K160 constructs
 and adds a model-free 160-versus-256 inventory proof. The stopped launch remains
 an authority-free implementation `HOLD`, not a retryable observation.
 
+A second clean `0978bf7` launch at `2026-08-09T15:46:41Z` also stopped before
+C0. Static reconciliation then established that live construction and the plan
+both contain 635 Shared buffers and 4,357,310,628 logical bytes with matching
+per-size multiplicities; they differ only in semantic emission order because
+Rust constructs compressor and diagnostics locals before the final session
+initializer. Constructor order is not part of the frozen allocation contract.
+
+The next successor therefore compares exact `(requested bytes, realized length,
+storage mode)` multisets against the named plan, while retaining the actual
+ordered census and requiring it to match bit-for-bit across all 36 sessions.
+Count, byte, storage, capacity, oracle-residency, and cross-arm order drift still
+fail closed. The second launch likewise observed no C/A/P/Z execution or timing.
+Named plan entries remain pricing labels rather than runtime buffer identities;
+the normalized scratch's semantic presence is established separately by source,
+site/dispatch ledgers, and bitwise endpoint correctness.
+
 ## Question
 
 Can deleting the F32 `[16384,N]` normalized mHC slab and its only consumer

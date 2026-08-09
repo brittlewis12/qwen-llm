@@ -19,6 +19,8 @@
 mod attn_capture;
 mod attn_stage_floor;
 #[cfg(feature = "dsv4-diagnostics")]
+mod dsv4_mhc_delete;
+#[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_prefill;
 mod gguf_arena_floor;
 mod grammar_lm_head_row_floor;
@@ -484,6 +486,9 @@ enum Cmd {
     /// Profile native DeepSeek V4 packed prefill with production policy.
     #[cfg(feature = "dsv4-diagnostics")]
     Dsv4Prefill(dsv4_prefill::Dsv4PrefillArgs),
+    /// Decide the frozen K160 mHC representation-deletion ceiling.
+    #[cfg(feature = "dsv4-diagnostics")]
+    Dsv4MhcDelete(dsv4_mhc_delete::Dsv4MhcDeleteArgs),
     /// Generation-only benchmark aligned with `llama-bench tg<N>` semantics:
     /// empty KV per rep, random tokens, no logits readback, N decode steps.
     /// This is the apples-to-apples decode comparison. Use `decode` for real
@@ -2773,6 +2778,12 @@ fn main() -> Result<()> {
         Cmd::Dsv4Prefill(a) => {
             dsv4_prefill::run(a, serde_json::to_value(qwen_build_identity_packet())?)
         }
+        #[cfg(feature = "dsv4-diagnostics")]
+        Cmd::Dsv4MhcDelete(a) => dsv4_mhc_delete::run(
+            a,
+            serde_json::to_value(recorded_build_identity())?,
+            capture_qwen_env(),
+        ),
         Cmd::Tg(a) => run_tg(a),
         Cmd::Suite(a) => run_suite(a),
         Cmd::CtxSweep(a) => run_ctx_sweep(a),

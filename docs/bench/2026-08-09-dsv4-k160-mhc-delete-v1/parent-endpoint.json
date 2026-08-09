@@ -1,0 +1,44 @@
+{
+  "schema_version": 2,
+  "payload_sha256": "945befcd7a37d1e4e3f848dab574d38bd6da6bdaba6f8735465fedcfa9e2d848",
+  "payload": {
+    "report_kind": "dsv4_k160_mhc_parent_endpoint",
+    "acquired_at_utc": "2026-08-09T14:56:01Z",
+    "source_commit": "bbfcca84f10dc4ca095cba37608ea7804025bb7e",
+    "build": {
+      "build_commit": "bbfcca84f10dc4ca095cba37608ea7804025bb7e",
+      "build_commit_short": "bbfcca84f",
+      "build_dirty": false,
+      "build_source_state": "git-source-sha256-v2:f3f37b0c7cc36c069a83f63568e4f064ea9eac74e26c4307fa28d6c63074b809",
+      "overrides": [],
+      "problems": [],
+      "runtime_commit": "bbfcca84f10dc4ca095cba37608ea7804025bb7e",
+      "runtime_dirty": false,
+      "runtime_source_state": "git-source-sha256-v2:f3f37b0c7cc36c069a83f63568e4f064ea9eac74e26c4307fa28d6c63074b809",
+      "schema_version": 2,
+      "stamp_error": null,
+      "stamp_source": "git",
+      "status": "match"
+    },
+    "build_identity_sha256": "e7865a0f60dd745650f7ca8a215ff3a16da124fd123b4e28f351bef47aafdd89",
+    "binary_sha256": "00fd8591a8715a1018df0aa3313eaa8e614cb66c005782d2817052f3461ebb71",
+    "harness_sha256": "d155175d04b6448125be37aea54530f12dccd7d078a609abff51ec79c8df0d4a",
+    "metallib_sha256": "3f7d2bc9a1bf2e0caf69e1f45189de2b28bc1f0f2c36b020e940e1549b623a13",
+    "release_build": true,
+    "device_name": "Apple M4 Max",
+    "device_registry_id": 4294968482,
+    "os_version": "15.6.1",
+    "metal_system_profile_sha256": "fe4ab96bf18d0c31ed958def8c228cda802dd9f9557166873af63f0309bba6fe",
+    "qwen_env": {},
+    "model_content_id": "d003b61e8688fdb247135e9102fee3e49b938121f300e437ddab63f538377d87",
+    "token_sha256": "e9be2830e167b3f3ca9a946f5be84b0a6825c5087c33fc9969d7767ae54db795",
+    "endpoint_digest_domain": "qwen.dsv4.mhc-delete-timed-endpoint.v1",
+    "endpoint": {
+      "sha256": "4f0c8ccd41021df7fde0518a953e81a7e18c25b7b04288c8c95ad37787cee67f",
+      "position": 2048,
+      "token_count": 2048,
+      "logits_count": 129280,
+      "hidden_count": 4096
+    }
+  }
+}

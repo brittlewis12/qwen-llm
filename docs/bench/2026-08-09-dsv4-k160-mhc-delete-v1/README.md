@@ -2,13 +2,44 @@
 
 Status: implementation in progress. The packet was frozen at `0b4c62d` and its
 passive timing clarified at `9b0307d` before model or timing observations. The
-engine oracle substrate now exists; no canonical acquisition or result exists.
+engine oracle and campaign substrate now exist. An independent arithmetic-parent
+endpoint was acquired before experimental timing; no C/A/P/Z acquisition or
+result exists.
 
 Passive-timing clarification: implementation review exposed that retaining all
 completed command objects until request end would change their ordinary
 lifetime. Before any model execution or timing observation, this packet instead
 freezes immediate scalar reads after the wait that proves each command complete.
 Those common observer reads remain charged inside every A/P/Z wall sample.
+
+## Independent Parent Endpoint
+
+The arithmetic-parent endpoint was acquired from a clean detached `bbfcca8`
+release build on the frozen M4 Max/K160/token cell at `2026-08-09T14:56:01Z`.
+The campaign accepts only the exact committed artifact at
+`parent-endpoint.json`; it does not trust a merely self-consistent replacement.
+
+- artifact SHA-256:
+  `61fbbeec26a9cf026f88102674e0dd20054c1d91eb0c9bf4d0c8b813a37081bb`;
+- endpoint SHA-256:
+  `4f0c8ccd41021df7fde0518a953e81a7e18c25b7b04288c8c95ad37787cee67f`;
+- parent binary SHA-256:
+  `00fd8591a8715a1018df0aa3313eaa8e614cb66c005782d2817052f3461ebb71`;
+- acquisition harness SHA-256:
+  `d155175d04b6448125be37aea54530f12dccd7d078a609abff51ec79c8df0d4a`;
+- parent metallib SHA-256:
+  `3f7d2bc9a1bf2e0caf69e1f45189de2b28bc1f0f2c36b020e940e1549b623a13`.
+
+This bridge is a guard chosen by this packet: it checks that diagnostics
+instrumentation preserves the ordinary parent endpoint. It is not an inherent
+requirement of mHC deletion, and it grants no performance authority by itself.
+
+Before experimental timing, implementation review also made two existing
+validity requirements fail-closed: AC power mode must be exactly `2` both
+immediately before and after the timed loop, and the complete immutable
+acquisition is atomically published as an authority-free `HOLD` before the
+reducer runs. A reducer or final-publication failure therefore cannot strand
+the 36 observations only in process memory.
 
 ## Question
 

@@ -38,7 +38,8 @@ use objc2_metal::{
     MTLComputeCommandEncoder, MTLComputePassDescriptor, MTLComputePipelineState, MTLCounter,
     MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor,
     MTLCounterSamplingPoint, MTLCounterSet, MTLCreateSystemDefaultDevice, MTLDevice,
-    MTLDispatchType, MTLFence, MTLLibrary, MTLResourceOptions, MTLSize, MTLStorageMode,
+    MTLDispatchType, MTLFence, MTLLibrary, MTLResource, MTLResourceOptions, MTLSize,
+    MTLStorageMode,
 };
 use parking_lot::Mutex;
 use std::cell::Cell;
@@ -47,7 +48,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{
     Arc, OnceLock,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
 
 use crate::gguf::GgufFile;
@@ -113,7 +114,7 @@ unsafe extern "C" {
     ) -> i32;
 }
 
-static KERNEL_TRACE_EVER_ENABLED: AtomicBool = AtomicBool::new(false);
+static KERNEL_TRACE_ACTIVE_THREADS: AtomicUsize = AtomicUsize::new(0);
 
 const ATTN_V4_SUBGROUP_MIN_POS_DEFAULT: usize = 256;
 const ATTN_V4_NWG_MAX: usize = 1024;
@@ -224,6 +225,7 @@ impl KernelTraceCounters {
 #[must_use]
 pub struct KernelTraceGuard {
     previous: bool,
+    activated: bool,
 }
 
 pub struct MetalTimestampSampleBuffer {
@@ -240,11 +242,14 @@ impl MetalTimestampSampleBuffer {
 impl Drop for KernelTraceGuard {
     fn drop(&mut self) {
         KERNEL_TRACE_ACTIVE.with(|active| active.set(self.previous));
+        if self.activated {
+            let previous = KERNEL_TRACE_ACTIVE_THREADS.fetch_sub(1, Ordering::Relaxed);
+            debug_assert!(previous > 0);
+        }
     }
 }
 
 pub fn kernel_trace_begin() -> KernelTraceGuard {
-    KERNEL_TRACE_EVER_ENABLED.store(true, Ordering::Relaxed);
     KERNEL_TRACE_COUNTERS.with(|counters| counters.set(KernelTraceCounters::default()));
     KERNEL_TRACE_LAST.with(|last| last.set(KernelTraceCounters::default()));
     let previous = KERNEL_TRACE_ACTIVE.with(|active| {
@@ -252,7 +257,14 @@ pub fn kernel_trace_begin() -> KernelTraceGuard {
         active.set(true);
         previous
     });
-    KernelTraceGuard { previous }
+    let activated = !previous;
+    if activated {
+        KERNEL_TRACE_ACTIVE_THREADS.fetch_add(1, Ordering::Relaxed);
+    }
+    KernelTraceGuard {
+        previous,
+        activated,
+    }
 }
 
 pub fn kernel_trace_snapshot() -> KernelTraceCounters {
@@ -270,7 +282,8 @@ pub fn kernel_trace_take_delta() -> KernelTraceCounters {
 
 #[inline]
 fn kernel_trace_record_encoder(concurrent: bool) {
-    if !KERNEL_TRACE_EVER_ENABLED.load(Ordering::Relaxed) {
+    census_record_encoder(concurrent);
+    if KERNEL_TRACE_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
         return;
     }
     if !KERNEL_TRACE_ACTIVE.with(|active| active.get()) {
@@ -288,7 +301,7 @@ fn kernel_trace_record_encoder(concurrent: bool) {
 
 #[inline]
 fn kernel_trace_record_dispatch() {
-    if !KERNEL_TRACE_EVER_ENABLED.load(Ordering::Relaxed) {
+    if KERNEL_TRACE_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
         return;
     }
     if !KERNEL_TRACE_ACTIVE.with(|active| active.get()) {
@@ -311,6 +324,9 @@ fn kernel_trace_record_dispatch() {
 #[derive(Clone, Debug)]
 pub struct DispatchCensusRow {
     pub family: &'static str,
+    pub tag: Option<String>,
+    pub encoder_ordinal: u64,
+    pub encoder_concurrent: bool,
     pub kernel: String,
     pub grid_width: u64,
     pub grid_height: u64,
@@ -322,37 +338,147 @@ pub struct DispatchCensusRow {
     pub tg_threads: u64,
 }
 
-static DISPATCH_CENSUS_EVER_ENABLED: AtomicBool = AtomicBool::new(false);
+static DISPATCH_CENSUS_ACTIVE_THREADS: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     static DISPATCH_CENSUS: std::cell::RefCell<Option<Vec<DispatchCensusRow>>> =
         const { std::cell::RefCell::new(None) };
     static CENSUS_LAST_PSO: std::cell::RefCell<String> =
         const { std::cell::RefCell::new(String::new()) };
     static CENSUS_FAMILY: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+    static CENSUS_TAG: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    static CENSUS_NEXT_ENCODER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static CENSUS_ENCODER: std::cell::Cell<(u64, bool)> = const { std::cell::Cell::new((u64::MAX, false)) };
+}
+
+#[must_use]
+pub struct DispatchCensusTagGuard {
+    previous: Option<String>,
+}
+
+impl Drop for DispatchCensusTagGuard {
+    fn drop(&mut self) {
+        CENSUS_TAG.with(|tag| *tag.borrow_mut() = self.previous.take());
+    }
 }
 
 /// Begin recording dispatch shapes on this thread. Bench-only.
 pub fn dispatch_census_begin() {
-    DISPATCH_CENSUS_EVER_ENABLED.store(true, Ordering::Relaxed);
-    DISPATCH_CENSUS.with(|c| *c.borrow_mut() = Some(Vec::with_capacity(512)));
+    let activated = DISPATCH_CENSUS.with(|c| {
+        let activated = c.borrow().is_none();
+        *c.borrow_mut() = Some(Vec::with_capacity(512));
+        activated
+    });
+    if activated {
+        DISPATCH_CENSUS_ACTIVE_THREADS.fetch_add(1, Ordering::Relaxed);
+    }
+    CENSUS_TAG.with(|tag| *tag.borrow_mut() = None);
+    CENSUS_NEXT_ENCODER.with(|next| next.set(0));
+    CENSUS_ENCODER.with(|encoder| encoder.set((u64::MAX, false)));
 }
 
 /// Stop recording and take the census rows.
 pub fn dispatch_census_take() -> Vec<DispatchCensusRow> {
-    DISPATCH_CENSUS.with(|c| c.borrow_mut().take().unwrap_or_default())
+    let rows = DISPATCH_CENSUS.with(|c| c.borrow_mut().take());
+    if rows.is_some() {
+        let previous = DISPATCH_CENSUS_ACTIVE_THREADS.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(previous > 0);
+    }
+    rows.unwrap_or_default()
 }
 
 /// Set the current stage family label (called by decode stage boundaries).
 pub fn dispatch_census_set_family(family: &'static str) {
-    if !DISPATCH_CENSUS_EVER_ENABLED.load(Ordering::Relaxed) {
+    if DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
         return;
     }
     CENSUS_FAMILY.with(|f| f.set(family));
 }
 
+pub fn dispatch_census_is_active() -> bool {
+    DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed) != 0
+        && DISPATCH_CENSUS.with(|census| census.borrow().is_some())
+}
+
+#[doc(hidden)]
+pub fn diagnostics_observer_active_counts() -> [usize; 3] {
+    [
+        KERNEL_TRACE_ACTIVE_THREADS.load(Ordering::Relaxed),
+        DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed),
+        ALLOCATION_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed),
+    ]
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MetalAllocationCensusRow {
+    pub requested_bytes: u64,
+    pub buffer_length: u64,
+    pub storage_mode: &'static str,
+}
+
+static ALLOCATION_CENSUS_ACTIVE_THREADS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static ALLOCATION_CENSUS: std::cell::RefCell<Option<Vec<MetalAllocationCensusRow>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[doc(hidden)]
+pub fn allocation_census_begin() {
+    let activated = ALLOCATION_CENSUS.with(|census| {
+        let activated = census.borrow().is_none();
+        *census.borrow_mut() = Some(Vec::with_capacity(512));
+        activated
+    });
+    if activated {
+        ALLOCATION_CENSUS_ACTIVE_THREADS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[doc(hidden)]
+pub fn allocation_census_take() -> Vec<MetalAllocationCensusRow> {
+    let rows = ALLOCATION_CENSUS.with(|census| census.borrow_mut().take());
+    if rows.is_some() {
+        let previous = ALLOCATION_CENSUS_ACTIVE_THREADS.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(previous > 0);
+    }
+    rows.unwrap_or_default()
+}
+
+fn record_buffer_allocation(requested_bytes: usize, buffer: &Buffer) {
+    if ALLOCATION_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    ALLOCATION_CENSUS.with(|census| {
+        if let Some(rows) = census.borrow_mut().as_mut() {
+            let storage_mode = match buffer.storageMode() {
+                MTLStorageMode::Shared => "shared",
+                MTLStorageMode::Managed => "managed",
+                MTLStorageMode::Private => "private",
+                MTLStorageMode::Memoryless => "memoryless",
+                _ => "unknown",
+            };
+            rows.push(MetalAllocationCensusRow {
+                requested_bytes: requested_bytes as u64,
+                buffer_length: buffer.length() as u64,
+                storage_mode,
+            });
+        }
+    });
+}
+
+/// Attach an explicit diagnostics tag to dispatches recorded in this scope.
+/// Returns `None` without allocating when no census is active on this thread.
+pub fn dispatch_census_tag_scope(tag: impl FnOnce() -> String) -> Option<DispatchCensusTagGuard> {
+    if !dispatch_census_is_active() {
+        return None;
+    }
+    let tag = tag();
+    let previous = CENSUS_TAG.with(|current| current.borrow_mut().replace(tag));
+    Some(DispatchCensusTagGuard { previous })
+}
+
 #[inline]
 fn census_record_pso(name: &str) {
-    if !DISPATCH_CENSUS_EVER_ENABLED.load(Ordering::Relaxed) {
+    if DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
         return;
     }
     DISPATCH_CENSUS.with(|c| {
@@ -367,14 +493,34 @@ fn census_record_pso(name: &str) {
 }
 
 #[inline]
+fn census_record_encoder(concurrent: bool) {
+    if DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    DISPATCH_CENSUS.with(|census| {
+        if census.borrow().is_some() {
+            let ordinal = CENSUS_NEXT_ENCODER.with(|next| {
+                let ordinal = next.get();
+                next.set(ordinal + 1);
+                ordinal
+            });
+            CENSUS_ENCODER.with(|encoder| encoder.set((ordinal, concurrent)));
+        }
+    });
+}
+
+#[inline]
 fn census_record_dispatch(grid: MTLSize, threads: MTLSize) {
-    if !DISPATCH_CENSUS_EVER_ENABLED.load(Ordering::Relaxed) {
+    if DISPATCH_CENSUS_ACTIVE_THREADS.load(Ordering::Relaxed) == 0 {
         return;
     }
     DISPATCH_CENSUS.with(|c| {
         if let Some(rows) = c.borrow_mut().as_mut() {
             rows.push(DispatchCensusRow {
                 family: CENSUS_FAMILY.with(|f| f.get()),
+                tag: CENSUS_TAG.with(|tag| tag.borrow().clone()),
+                encoder_ordinal: CENSUS_ENCODER.with(|encoder| encoder.get().0),
+                encoder_concurrent: CENSUS_ENCODER.with(|encoder| encoder.get().1),
                 kernel: CENSUS_LAST_PSO.with(|p| p.borrow().clone()),
                 grid_width: grid.width as u64,
                 grid_height: grid.height as u64,
@@ -813,10 +959,12 @@ impl MetalContext {
         let bytes = bytemuck::cast_slice::<T, u8>(data);
         let n = bytes.len();
         if n == 0 {
-            return self
+            let buffer = self
                 .device
                 .newBufferWithLength_options(1, MTLResourceOptions::StorageModeShared)
-                .ok_or(MetalError::NoBuffer(1));
+                .ok_or(MetalError::NoBuffer(1))?;
+            record_buffer_allocation(1, &buffer);
+            return Ok(buffer);
         }
         let ptr = std::ptr::NonNull::new(bytes.as_ptr() as *mut std::ffi::c_void)
             .ok_or(MetalError::NoBuffer(n))?;
@@ -830,6 +978,7 @@ impl MetalContext {
             )
         }
         .ok_or(MetalError::NoBuffer(n))?;
+        record_buffer_allocation(n, &buf);
         Ok(buf)
     }
 
@@ -1014,9 +1163,12 @@ impl MetalContext {
     /// Allocate an uninitialized output buffer of `n_bytes`.
     pub fn buffer_uninit(&self, n_bytes: usize) -> Result<Buffer, MetalError> {
         let n = n_bytes.max(1);
-        self.device
+        let buffer = self
+            .device
             .newBufferWithLength_options(n, MTLResourceOptions::StorageModeShared)
-            .ok_or(MetalError::NoBuffer(n))
+            .ok_or(MetalError::NoBuffer(n))?;
+        record_buffer_allocation(n, &buffer);
+        Ok(buffer)
     }
 
     pub fn describe(&self) -> String {
@@ -20675,6 +20827,38 @@ pub fn mat_vec_trellis3_f32_readback_for_test(
 mod tests {
     use super::*;
     use std::mem::size_of;
+
+    #[test]
+    fn diagnostics_observers_return_to_inactive_state() {
+        assert_eq!(diagnostics_observer_active_counts(), [0, 0, 0]);
+        {
+            let _trace = kernel_trace_begin();
+            assert_eq!(diagnostics_observer_active_counts(), [1, 0, 0]);
+        }
+        dispatch_census_begin();
+        assert_eq!(diagnostics_observer_active_counts(), [0, 1, 0]);
+        assert!(dispatch_census_take().is_empty());
+        assert_eq!(diagnostics_observer_active_counts(), [0, 0, 0]);
+    }
+
+    #[test]
+    fn allocation_census_records_realized_storage() {
+        let ctx = MetalContext::new().expect("create Metal context");
+        allocation_census_begin();
+        let first = ctx
+            .buffer_uninit(17)
+            .expect("allocate uninitialized buffer");
+        let second = ctx.buffer_from(&[1u32, 2]).expect("allocate copied buffer");
+        let rows = allocation_census_take();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].requested_bytes, 17);
+        assert_eq!(rows[0].buffer_length, first.length() as u64);
+        assert_eq!(rows[0].storage_mode, "shared");
+        assert_eq!(rows[1].requested_bytes, 8);
+        assert_eq!(rows[1].buffer_length, second.length() as u64);
+        assert_eq!(rows[1].storage_mode, "shared");
+        assert_eq!(diagnostics_observer_active_counts(), [0, 0, 0]);
+    }
 
     fn offset_tensor(
         ctx: &MetalContext,

@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "dsv4-diagnostics")]
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 pub const DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS: usize = 4_096;
@@ -57,6 +59,13 @@ impl DeepSeekV4MhcSiteKind {
             Self::Ffn => 1,
         }
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Attention => "attention",
+            Self::Ffn => "ffn",
+        }
+    }
 }
 
 #[cfg(feature = "dsv4-diagnostics")]
@@ -111,9 +120,15 @@ impl DeepSeekV4MhcCommandInterval {
 #[cfg(feature = "dsv4-diagnostics")]
 #[derive(Clone)]
 struct PackedMhcOracleBuffer {
-    tensor: MetalTensor,
+    storage: Rc<PackedMhcOracleStorage>,
     n_tokens: usize,
     device_registry_id: u64,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+struct PackedMhcOracleStorage {
+    tensor: MetalTensor,
+    site_views: Box<[MetalTensor]>,
 }
 
 #[cfg(feature = "dsv4-diagnostics")]
@@ -128,10 +143,30 @@ impl PackedMhcOracleBuffer {
                 MHC_DELETE_SITE_COUNT as u64,
             ],
         )?;
+        Self::from_tensor(tensor, n_tokens, ctx.device.registryID())
+    }
+
+    fn from_tensor(
+        tensor: MetalTensor,
+        n_tokens: usize,
+        device_registry_id: u64,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        let site_elements =
+            checked_mul(n_tokens, DEEPSEEK_V4_HC_PARAMETER_COUNT, "mHC oracle site")?;
+        let site_views = (0..MHC_DELETE_SITE_COUNT)
+            .map(|ordinal| {
+                let offset = checked_mul(ordinal, site_elements, "mHC oracle offset")?;
+                Ok(tensor.view_subrange(
+                    offset as u64,
+                    vec![DEEPSEEK_V4_HC_PARAMETER_COUNT as u64, n_tokens as u64],
+                ))
+            })
+            .collect::<Result<Vec<_>, DeepSeekV4MetalError>>()?
+            .into_boxed_slice();
         Ok(Self {
-            tensor,
+            storage: Rc::new(PackedMhcOracleStorage { tensor, site_views }),
             n_tokens,
-            device_registry_id: ctx.device.registryID(),
+            device_registry_id,
         })
     }
 
@@ -139,21 +174,15 @@ impl PackedMhcOracleBuffer {
         &self,
         layer: usize,
         site: DeepSeekV4MhcSiteKind,
-    ) -> Result<MetalTensor, DeepSeekV4MetalError> {
+    ) -> Result<&MetalTensor, DeepSeekV4MetalError> {
         if layer >= DEEPSEEK_V4_LAYER_COUNT {
             return invalid(format!("mHC oracle layer {layer} is out of range"));
         }
         let ordinal = layer * 2 + site.index();
-        let site_elements = checked_mul(
-            self.n_tokens,
-            DEEPSEEK_V4_HC_PARAMETER_COUNT,
-            "mHC oracle site",
-        )?;
-        let offset = checked_mul(ordinal, site_elements, "mHC oracle offset")?;
-        Ok(self.tensor.view_subrange(
-            offset as u64,
-            vec![DEEPSEEK_V4_HC_PARAMETER_COUNT as u64, self.n_tokens as u64],
-        ))
+        self.storage
+            .site_views
+            .get(ordinal)
+            .ok_or_else(|| DeepSeekV4MetalError::Invalid("mHC oracle site is missing".into()))
     }
 
     fn validate_device_and_tokens(
@@ -180,12 +209,12 @@ impl PackedMhcOracleBuffer {
     fn current_payload_sha256(&self) -> Result<[u8; 32], DeepSeekV4MetalError> {
         use sha2::{Digest, Sha256};
 
-        let values = host_read_f32(&self.tensor, "sealed mHC oracle")?;
+        let values = host_read_f32(&self.storage.tensor, "sealed mHC oracle")?;
         Ok(Sha256::digest(bytemuck::cast_slice(&values)).into())
     }
 
     fn copy_payload_bits(&self) -> Result<Vec<u32>, DeepSeekV4MetalError> {
-        Ok(host_read_f32(&self.tensor, "sealed mHC oracle")?
+        Ok(host_read_f32(&self.storage.tensor, "sealed mHC oracle")?
             .into_iter()
             .map(f32::to_bits)
             .collect())
@@ -195,10 +224,11 @@ impl PackedMhcOracleBuffer {
 #[cfg(feature = "dsv4-diagnostics")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeepSeekV4MhcOracleIdentity {
-    pub model_content_sha256: [u8; 32],
-    pub compatibility_sha256: [u8; 32],
+    pub model_content_id: [u8; 32],
+    pub compatibility_id: [u8; 32],
     pub token_sha256: [u8; 32],
     pub policy_sha256: [u8; 32],
+    pub policy_manifest: String,
     pub start_position: u32,
     pub n_tokens: usize,
     pub rms_epsilon_bits: u32,
@@ -217,23 +247,52 @@ struct DeepSeekV4MhcCapture {
 }
 
 #[cfg(feature = "dsv4-diagnostics")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeepSeekV4MhcTimedEndpoint {
+    pub sha256: [u8; 32],
+    pub position: u32,
+    pub token_count: usize,
+    pub logits_count: usize,
+    pub hidden_count: usize,
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+fn mhc_timed_endpoint_sha256(
+    logits_bits: &[u32],
+    hidden_bits: &[u32],
+    tokens: &[u32],
+    position: u32,
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    digest.update(b"qwen.dsv4.mhc-delete-timed-endpoint.v1\0");
+    for values in [logits_bits, hidden_bits, tokens] {
+        digest.update((values.len() as u64).to_le_bytes());
+        digest.update(bytemuck::cast_slice(values));
+    }
+    digest.update(position.to_le_bytes());
+    digest.finalize().into()
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeepSeekV4MhcEndpointEvidence {
     endpoint_logits_bits: Vec<u32>,
     endpoint_hidden_bits: Vec<u32>,
     endpoint_position: u32,
     endpoint_tokens: Vec<u32>,
-    endpoint_prefix_sha256: [u8; 32],
-    endpoint_compatibility_sha256: [u8; 32],
-    endpoint_causal_sha256: [u8; 32],
+    endpoint_prefix_digest: [u8; 32],
+    endpoint_compatibility_id: [u8; 32],
+    endpoint_causal_digest: [u8; 32],
     endpoint_observation: DeepSeekV4SnapshotObservation,
     continuation_logits_bits: Vec<u32>,
     continuation_hidden_bits: Vec<u32>,
     continuation_position: u32,
     continuation_tokens: Vec<u32>,
-    continuation_prefix_sha256: [u8; 32],
-    continuation_compatibility_sha256: [u8; 32],
-    continuation_causal_sha256: [u8; 32],
+    continuation_prefix_digest: [u8; 32],
+    continuation_compatibility_id: [u8; 32],
+    continuation_causal_digest: [u8; 32],
     continuation_observation: DeepSeekV4SnapshotObservation,
     sha256: [u8; 32],
 }
@@ -252,9 +311,9 @@ impl DeepSeekV4MhcEndpointEvidence {
         digest.update(self.endpoint_position.to_le_bytes());
         digest.update((self.endpoint_tokens.len() as u64).to_le_bytes());
         digest.update(bytemuck::cast_slice(&self.endpoint_tokens));
-        digest.update(self.endpoint_prefix_sha256);
-        digest.update(self.endpoint_compatibility_sha256);
-        digest.update(self.endpoint_causal_sha256);
+        digest.update(self.endpoint_prefix_digest);
+        digest.update(self.endpoint_compatibility_id);
+        digest.update(self.endpoint_causal_digest);
         digest.update([self.endpoint_observation as u8]);
         for values in [
             &self.continuation_logits_bits,
@@ -266,9 +325,9 @@ impl DeepSeekV4MhcEndpointEvidence {
         digest.update(self.continuation_position.to_le_bytes());
         digest.update((self.continuation_tokens.len() as u64).to_le_bytes());
         digest.update(bytemuck::cast_slice(&self.continuation_tokens));
-        digest.update(self.continuation_prefix_sha256);
-        digest.update(self.continuation_compatibility_sha256);
-        digest.update(self.continuation_causal_sha256);
+        digest.update(self.continuation_prefix_digest);
+        digest.update(self.continuation_compatibility_id);
+        digest.update(self.continuation_causal_digest);
         digest.update([self.continuation_observation as u8]);
         self.sha256 = digest.finalize().into();
     }
@@ -285,12 +344,27 @@ impl DeepSeekV4MhcEndpointEvidence {
         self.continuation_position
     }
 
-    pub fn endpoint_causal_sha256(&self) -> [u8; 32] {
-        self.endpoint_causal_sha256
+    pub fn endpoint_causal_digest(&self) -> [u8; 32] {
+        self.endpoint_causal_digest
     }
 
-    pub fn continuation_causal_sha256(&self) -> [u8; 32] {
-        self.continuation_causal_sha256
+    pub fn continuation_causal_digest(&self) -> [u8; 32] {
+        self.continuation_causal_digest
+    }
+
+    pub fn timed_endpoint(&self) -> DeepSeekV4MhcTimedEndpoint {
+        DeepSeekV4MhcTimedEndpoint {
+            sha256: mhc_timed_endpoint_sha256(
+                &self.endpoint_logits_bits,
+                &self.endpoint_hidden_bits,
+                &self.endpoint_tokens,
+                self.endpoint_position,
+            ),
+            position: self.endpoint_position,
+            token_count: self.endpoint_tokens.len(),
+            logits_count: self.endpoint_logits_bits.len(),
+            hidden_count: self.endpoint_hidden_bits.len(),
+        }
     }
 }
 
@@ -311,7 +385,7 @@ impl DeepSeekV4MhcVerifiedCapture {
     }
 
     pub fn payload_bytes(&self) -> u64 {
-        self.capture.buffer.tensor.n_bytes()
+        self.capture.buffer.storage.tensor.n_bytes()
     }
 
     pub fn evidence(&self) -> &DeepSeekV4MhcEndpointEvidence {
@@ -347,7 +421,7 @@ impl DeepSeekV4MhcOracle {
     }
 
     pub fn payload_bytes(&self) -> u64 {
-        self.buffer.tensor.n_bytes()
+        self.buffer.storage.tensor.n_bytes()
     }
 
     pub fn sealed_sha256(&self) -> [u8; 32] {
@@ -406,6 +480,7 @@ pub fn seal_mhc_delete_oracle_pair(
 #[derive(Clone, Debug)]
 pub struct DeepSeekV4MhcDeleteProfile {
     pub execution: DeepSeekV4MhcExecutionKind,
+    pub queue_identity: u64,
     pub wall_ms: f64,
     pub sites: Vec<DeepSeekV4MhcSiteRecord>,
     pub command_intervals: Vec<DeepSeekV4MhcCommandInterval>,
@@ -449,10 +524,10 @@ impl DeepSeekV4MhcDeleteProfile {
 }
 
 #[cfg(feature = "dsv4-diagnostics")]
-struct PackedMhcSitePlan {
+struct PackedMhcSitePlan<'a> {
     producer_runs: bool,
-    producer_output: Option<MetalTensor>,
-    controls_input: Option<MetalTensor>,
+    producer_output: Option<&'a MetalTensor>,
+    controls_input: Option<&'a MetalTensor>,
 }
 
 #[cfg(feature = "dsv4-diagnostics")]
@@ -527,12 +602,12 @@ impl PackedMhcExecution {
         Ok(())
     }
 
-    fn site_plan(
-        &mut self,
+    fn site_plan<'a>(
+        &'a mut self,
         layer: usize,
         site: DeepSeekV4MhcSiteKind,
-        ordinary_mixes: &MetalTensor,
-    ) -> Result<PackedMhcSitePlan, DeepSeekV4MetalError> {
+        ordinary_mixes: &'a MetalTensor,
+    ) -> Result<PackedMhcSitePlan<'a>, DeepSeekV4MetalError> {
         let ordinal = layer
             .checked_mul(2)
             .and_then(|value| value.checked_add(site.index()))
@@ -543,56 +618,77 @@ impl PackedMhcExecution {
                 self.next_site
             ));
         }
-        let oracle_view = |execution: &Self| {
-            execution
-                .oracle
-                .as_ref()
-                .ok_or_else(|| {
-                    DeepSeekV4MetalError::Invalid("mHC oracle-backed arm omitted its buffer".into())
-                })?
-                .site_view(layer, site)
-        };
-        let (producer_runs, producer_output, controls_input, producer_role, controls_role) =
-            match self.kind {
-                DeepSeekV4MhcExecutionKind::Capture => {
-                    let oracle = oracle_view(self)?;
+        let oracle_metadata = self
+            .oracle
+            .as_ref()
+            .map(|buffer| {
+                buffer.site_view(layer, site).map(|view| {
                     (
-                        true,
-                        Some(oracle.clone()),
-                        Some(oracle),
-                        DeepSeekV4MhcBufferRole::Oracle,
-                        DeepSeekV4MhcBufferRole::Oracle,
+                        view.offset,
+                        view.n_bytes(),
+                        [DEEPSEEK_V4_HC_PARAMETER_COUNT as u64, view.shape[1]],
                     )
-                }
-                DeepSeekV4MhcExecutionKind::Current => (
-                    true,
-                    None,
-                    None,
-                    DeepSeekV4MhcBufferRole::OrdinaryMixes,
-                    DeepSeekV4MhcBufferRole::OrdinaryMixes,
-                ),
-                DeepSeekV4MhcExecutionKind::Producer => (
-                    true,
-                    None,
-                    Some(oracle_view(self)?),
-                    DeepSeekV4MhcBufferRole::OrdinaryMixes,
-                    DeepSeekV4MhcBufferRole::Oracle,
-                ),
-                DeepSeekV4MhcExecutionKind::Zero => (
-                    false,
-                    None,
-                    Some(oracle_view(self)?),
-                    DeepSeekV4MhcBufferRole::None,
-                    DeepSeekV4MhcBufferRole::Oracle,
-                ),
-            };
+                })
+            })
+            .transpose()?;
+        let (producer_runs, producer_role, controls_role) = match self.kind {
+            DeepSeekV4MhcExecutionKind::Capture => (
+                true,
+                DeepSeekV4MhcBufferRole::Oracle,
+                DeepSeekV4MhcBufferRole::Oracle,
+            ),
+            DeepSeekV4MhcExecutionKind::Current => (
+                true,
+                DeepSeekV4MhcBufferRole::OrdinaryMixes,
+                DeepSeekV4MhcBufferRole::OrdinaryMixes,
+            ),
+            DeepSeekV4MhcExecutionKind::Producer => (
+                true,
+                DeepSeekV4MhcBufferRole::OrdinaryMixes,
+                DeepSeekV4MhcBufferRole::Oracle,
+            ),
+            DeepSeekV4MhcExecutionKind::Zero => (
+                false,
+                DeepSeekV4MhcBufferRole::None,
+                DeepSeekV4MhcBufferRole::Oracle,
+            ),
+        };
+        if self.kind != DeepSeekV4MhcExecutionKind::Current && oracle_metadata.is_none() {
+            return invalid("mHC oracle-backed arm omitted its buffer");
+        }
         if self.record_sites {
-            let producer_offset = producer_runs.then_some(
-                producer_output
-                    .as_ref()
-                    .map_or(ordinary_mixes.offset, |tensor| tensor.offset),
-            );
-            let controls = controls_input.as_ref().unwrap_or(ordinary_mixes);
+            let oracle_metadata = oracle_metadata.unwrap_or((
+                ordinary_mixes.offset,
+                ordinary_mixes.n_bytes(),
+                [
+                    DEEPSEEK_V4_HC_PARAMETER_COUNT as u64,
+                    ordinary_mixes.shape[1],
+                ],
+            ));
+            let producer_offset = if producer_runs {
+                Some(match self.kind {
+                    DeepSeekV4MhcExecutionKind::Capture => oracle_metadata.0,
+                    DeepSeekV4MhcExecutionKind::Current | DeepSeekV4MhcExecutionKind::Producer => {
+                        ordinary_mixes.offset
+                    }
+                    DeepSeekV4MhcExecutionKind::Zero => unreachable!(),
+                })
+            } else {
+                None
+            };
+            let controls = match self.kind {
+                DeepSeekV4MhcExecutionKind::Current => (
+                    ordinary_mixes.offset,
+                    ordinary_mixes.n_bytes(),
+                    [
+                        DEEPSEEK_V4_HC_PARAMETER_COUNT as u64,
+                        ordinary_mixes.shape[1],
+                    ],
+                ),
+                DeepSeekV4MhcExecutionKind::Capture
+                | DeepSeekV4MhcExecutionKind::Producer
+                | DeepSeekV4MhcExecutionKind::Zero => oracle_metadata,
+            };
             self.sites.push(DeepSeekV4MhcSiteRecord {
                 ordinal,
                 layer,
@@ -601,12 +697,30 @@ impl PackedMhcExecution {
                 producer_output_role: producer_role,
                 producer_output_offset: producer_offset,
                 controls_input_role: controls_role,
-                controls_input_offset: controls.offset,
-                site_bytes: controls.n_bytes(),
-                shape: [DEEPSEEK_V4_HC_PARAMETER_COUNT as u64, controls.shape[1]],
+                controls_input_offset: controls.0,
+                site_bytes: controls.1,
+                shape: controls.2,
             });
         }
         self.next_site += 1;
+        let oracle = self
+            .oracle
+            .as_ref()
+            .map(|buffer| buffer.site_view(layer, site))
+            .transpose()?;
+        let producer_output = match self.kind {
+            DeepSeekV4MhcExecutionKind::Capture => oracle,
+            DeepSeekV4MhcExecutionKind::Current | DeepSeekV4MhcExecutionKind::Producer => {
+                Some(ordinary_mixes)
+            }
+            DeepSeekV4MhcExecutionKind::Zero => None,
+        };
+        let controls_input = match self.kind {
+            DeepSeekV4MhcExecutionKind::Capture
+            | DeepSeekV4MhcExecutionKind::Producer
+            | DeepSeekV4MhcExecutionKind::Zero => oracle,
+            DeepSeekV4MhcExecutionKind::Current => Some(ordinary_mixes),
+        };
         Ok(PackedMhcSitePlan {
             producer_runs,
             producer_output,
@@ -2371,6 +2485,12 @@ impl PrefillHyperScratch {
             "packed mHC collapsed",
         )?;
         #[cfg(feature = "dsv4-diagnostics")]
+        let tag_mhc_dispatches = mhc_execution
+            .as_ref()
+            .map_or_else(crate::metal::dispatch_census_is_active, |execution| {
+                execution.record_sites
+            });
+        #[cfg(feature = "dsv4-diagnostics")]
         let (producer_runs, producer_output, controls_input) =
             if let Some(execution) = mhc_execution {
                 let plan = execution.site_plan(layer, mhc_site, &mixes)?;
@@ -2385,6 +2505,14 @@ impl PrefillHyperScratch {
         #[cfg(not(feature = "dsv4-diagnostics"))]
         let producer_runs = true;
         if producer_runs {
+            #[cfg(feature = "dsv4-diagnostics")]
+            let rms_tag = tag_mhc_dispatches
+                .then(|| {
+                    crate::metal::dispatch_census_tag_scope(|| {
+                        format!("dsv4_mhc:{layer}:{}:rms", mhc_site.label())
+                    })
+                })
+                .flatten();
             encode_rms_norm_batched_f32(
                 ctx,
                 enc,
@@ -2395,13 +2523,23 @@ impl PrefillHyperScratch {
                 residual_width,
                 rms_eps,
             )?;
+            #[cfg(feature = "dsv4-diagnostics")]
+            drop(rms_tag);
+            #[cfg(feature = "dsv4-diagnostics")]
+            let function_tag = tag_mhc_dispatches
+                .then(|| {
+                    crate::metal::dispatch_census_tag_scope(|| {
+                        format!("dsv4_mhc:{layer}:{}:function", mhc_site.label())
+                    })
+                })
+                .flatten();
             encode_batch_projection(
                 ctx,
                 enc,
                 function,
                 &normalized,
                 #[cfg(feature = "dsv4-diagnostics")]
-                producer_output.as_ref().unwrap_or(&mixes),
+                producer_output.unwrap_or(&mixes),
                 #[cfg(not(feature = "dsv4-diagnostics"))]
                 &mixes,
                 residual_width,
@@ -2409,6 +2547,8 @@ impl PrefillHyperScratch {
                 n_tokens,
                 "packed mHC function",
             )?;
+            #[cfg(feature = "dsv4-diagnostics")]
+            drop(function_tag);
         }
         #[repr(C)]
         #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -2416,6 +2556,14 @@ impl PrefillHyperScratch {
             n_tokens: u32,
             eps: f32,
         }
+        #[cfg(feature = "dsv4-diagnostics")]
+        let controls_tag = tag_mhc_dispatches
+            .then(|| {
+                crate::metal::dispatch_census_tag_scope(|| {
+                    format!("dsv4_mhc:{layer}:{}:controls", mhc_site.label())
+                })
+            })
+            .flatten();
         let pso = ctx.pipeline("kernel_deepseek_v4_hc_controls_batch")?;
         enc.set_pipeline(&pso);
         enc.set_bytes(
@@ -2426,7 +2574,7 @@ impl PrefillHyperScratch {
             },
         );
         #[cfg(feature = "dsv4-diagnostics")]
-        enc.set_tensor(1, controls_input.as_ref().unwrap_or(&mixes));
+        enc.set_tensor(1, controls_input.unwrap_or(&mixes));
         #[cfg(not(feature = "dsv4-diagnostics"))]
         enc.set_tensor(1, &mixes);
         enc.set_tensor(2, scale);
@@ -2446,6 +2594,8 @@ impl PrefillHyperScratch {
                 depth: 1,
             },
         );
+        #[cfg(feature = "dsv4-diagnostics")]
+        drop(controls_tag);
 
         let pso = ctx.pipeline("kernel_deepseek_v4_hc_collapse_batch")?;
         enc.set_pipeline(&pso);
@@ -9574,11 +9724,12 @@ impl DeepSeekV4Session {
                 "mHC oracle capture requires a bound model-content identity".into(),
             )
         })?;
+        if !packed_shared_route_overlap_enabled() {
+            return invalid("mHC campaign requires the production shared-overlap policy");
+        }
         let compatibility = self.snapshot_compatibility_digest()?;
         let config = self.residency.config();
-        let mut policy = Sha256::new();
-        policy.update(b"qwen.dsv4.mhc-delete-policy.v1\0");
-        policy.update(format!(
+        let policy_manifest = format!(
             "route={};expert={};qb={};out={};compressor={compressor_matrix};shared={shared_matrix};router={router_e8p32_strict};qakv={};indexer={indexer_q_matrix};group8={};rope={};batched_compressor={};indexer_rope={};indexer_visible={};indexer_tiled={};selected_online={};direct_load={};shared_overlap={};q3q4={};gpu_iq3={};grouped_iq3={};iq2_f16={};iq2_mm={};grouped_output={};stage={stage_profile_active};post={post_route_profile_active}",
             route_policy.label(),
             expert_policy.label(),
@@ -9600,15 +9751,19 @@ impl DeepSeekV4Session {
             packed_iq2_f16_mm64x32_enabled(),
             packed_iq2_mm64x32_enabled(),
             packed_q8_grouped_output_enabled(),
-        ));
+        );
+        let mut policy = Sha256::new();
+        policy.update(b"qwen.dsv4.mhc-delete-policy.v1\0");
+        policy.update(policy_manifest.as_bytes());
         let mut tokens = Sha256::new();
         tokens.update(b"qwen.dsv4.mhc-delete-tokens.v1\0");
         tokens.update(bytemuck::cast_slice(token_ids));
         Ok(DeepSeekV4MhcOracleIdentity {
-            model_content_sha256: *model_content_id.as_bytes(),
-            compatibility_sha256: *compatibility.as_bytes(),
+            model_content_id: *model_content_id.as_bytes(),
+            compatibility_id: *compatibility.as_bytes(),
             token_sha256: tokens.finalize().into(),
             policy_sha256: policy.finalize().into(),
+            policy_manifest,
             start_position,
             n_tokens: token_ids.len(),
             rms_epsilon_bits: config.attention_rms_epsilon.to_bits(),
@@ -9620,18 +9775,12 @@ impl DeepSeekV4Session {
         })
     }
 
-    /// Capture all 86 exact packed mHC function outputs into one private,
-    /// ordered oracle. Capture follows the ordinary packed policy and exposes
-    /// no writable oracle handle after this call returns.
     #[cfg(feature = "dsv4-diagnostics")]
-    #[doc(hidden)]
-    pub fn capture_mhc_delete_oracle(
+    fn execute_mhc_delete_capture(
         &mut self,
         ctx: &MetalContext,
         token_ids: &[u32],
-        continuation_token: u32,
-    ) -> Result<(DeepSeekV4MhcVerifiedCapture, DeepSeekV4MhcDeleteProfile), DeepSeekV4MetalError>
-    {
+    ) -> Result<(DeepSeekV4MhcCapture, DeepSeekV4MhcDeleteProfile), DeepSeekV4MetalError> {
         let buffer = PackedMhcOracleBuffer::new_capture(ctx, token_ids.len())?;
         let mut execution = PackedMhcExecution::capture(buffer.clone());
         let mut collector = PackedMhcCommandCollector::default();
@@ -9656,16 +9805,76 @@ impl DeepSeekV4Session {
             identity,
             payload_sha256,
         };
-        let evidence = self.capture_mhc_delete_endpoint_evidence(ctx, continuation_token)?;
         Ok((
-            DeepSeekV4MhcVerifiedCapture { capture, evidence },
+            capture,
             DeepSeekV4MhcDeleteProfile {
                 execution: DeepSeekV4MhcExecutionKind::Capture,
+                queue_identity: Retained::as_ptr(&ctx.queue).cast::<()>() as usize as u64,
                 wall_ms,
                 sites,
                 command_intervals,
             },
         ))
+    }
+
+    /// Capture all 86 exact packed mHC function outputs and complete
+    /// endpoint/restored-continuation evidence as one indivisible transaction.
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[doc(hidden)]
+    pub fn capture_mhc_delete_oracle(
+        &mut self,
+        ctx: &MetalContext,
+        token_ids: &[u32],
+        continuation_token: u32,
+    ) -> Result<(DeepSeekV4MhcVerifiedCapture, DeepSeekV4MhcDeleteProfile), DeepSeekV4MetalError>
+    {
+        let (capture, profile) = self.execute_mhc_delete_capture(ctx, token_ids)?;
+        let evidence = self.capture_mhc_delete_endpoint_evidence(ctx, continuation_token)?;
+        Ok((DeepSeekV4MhcVerifiedCapture { capture, evidence }, profile))
+    }
+
+    /// Execute an untimed structural C arm and discard its unreplayable
+    /// payload after returning the 86-site and command ledgers.
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[doc(hidden)]
+    pub fn preflight_mhc_delete_capture(
+        &mut self,
+        ctx: &MetalContext,
+        token_ids: &[u32],
+    ) -> Result<DeepSeekV4MhcDeleteProfile, DeepSeekV4MetalError> {
+        let (_, profile) = self.execute_mhc_delete_capture(ctx, token_ids)?;
+        Ok(profile)
+    }
+
+    /// Copy only the fixed-size endpoint evidence permitted after a timed arm.
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[doc(hidden)]
+    pub fn capture_mhc_delete_timed_endpoint(
+        &self,
+    ) -> Result<DeepSeekV4MhcTimedEndpoint, DeepSeekV4MetalError> {
+        let logits_bits = self
+            .copy_logits_f32()?
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        let hidden_bits = self
+            .copy_final_normalized_hidden_f32()?
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        let tokens = self.committed_tokens();
+        Ok(DeepSeekV4MhcTimedEndpoint {
+            sha256: mhc_timed_endpoint_sha256(
+                &logits_bits,
+                &hidden_bits,
+                tokens,
+                self.next_position(),
+            ),
+            position: self.next_position(),
+            token_count: tokens.len(),
+            logits_count: logits_bits.len(),
+            hidden_count: hidden_bits.len(),
+        })
     }
 
     /// Capture complete bitwise endpoint and restored-continuation evidence.
@@ -9715,17 +9924,17 @@ impl DeepSeekV4Session {
             endpoint_hidden_bits,
             endpoint_position,
             endpoint_tokens,
-            endpoint_prefix_sha256: *endpoint.prefix_digest(),
-            endpoint_compatibility_sha256: *endpoint.compatibility_digest().as_bytes(),
-            endpoint_causal_sha256: *endpoint.causal_digest(),
+            endpoint_prefix_digest: *endpoint.prefix_digest(),
+            endpoint_compatibility_id: *endpoint.compatibility_digest().as_bytes(),
+            endpoint_causal_digest: *endpoint.causal_digest(),
             endpoint_observation: endpoint.source_observation(),
             continuation_logits_bits,
             continuation_hidden_bits,
             continuation_position,
             continuation_tokens,
-            continuation_prefix_sha256: *continuation.prefix_digest(),
-            continuation_compatibility_sha256: *continuation.compatibility_digest().as_bytes(),
-            continuation_causal_sha256: *continuation.causal_digest(),
+            continuation_prefix_digest: *continuation.prefix_digest(),
+            continuation_compatibility_id: *continuation.compatibility_digest().as_bytes(),
+            continuation_causal_digest: *continuation.causal_digest(),
             continuation_observation: continuation.source_observation(),
             sha256: [0; 32],
         };
@@ -9791,6 +10000,7 @@ impl DeepSeekV4Session {
         let (wall_ms, command_intervals) = collector.finish()?;
         Ok(DeepSeekV4MhcDeleteProfile {
             execution: execution_kind,
+            queue_identity: Retained::as_ptr(&ctx.queue).cast::<()>() as usize as u64,
             wall_ms,
             sites,
             command_intervals,
@@ -11887,6 +12097,7 @@ mod tests {
     fn mhc_delete_profile_reports_raw_and_union_gpu_time() {
         let profile = DeepSeekV4MhcDeleteProfile {
             execution: DeepSeekV4MhcExecutionKind::Producer,
+            queue_identity: 1,
             wall_ms: 9.0,
             sites: Vec::new(),
             command_intervals: vec![
@@ -11925,10 +12136,11 @@ mod tests {
         let ctx = MetalContext::new().expect("create Metal context");
         let buffer = PackedMhcOracleBuffer::new_capture(&ctx, 1).expect("create mHC oracle");
         let identity = DeepSeekV4MhcOracleIdentity {
-            model_content_sha256: [1; 32],
-            compatibility_sha256: [2; 32],
+            model_content_id: [1; 32],
+            compatibility_id: [2; 32],
             token_sha256: [3; 32],
             policy_sha256: [4; 32],
+            policy_manifest: "test-policy".to_string(),
             start_position: 0,
             n_tokens: 1,
             rms_epsilon_bits: 1.0e-6f32.to_bits(),
@@ -11968,7 +12180,7 @@ mod tests {
         );
         assert_eq!(
             offsets.last().unwrap() + site_bytes,
-            buffer.tensor.n_bytes()
+            buffer.storage.tensor.n_bytes()
         );
 
         let oracle = DeepSeekV4MhcOracle {
@@ -12006,11 +12218,11 @@ mod tests {
                     assert_eq!(plan.producer_runs, producer_runs);
                     let producer_is_oracle = plan.producer_output.as_ref().is_some_and(|tensor| {
                         Retained::as_ptr(&tensor.buffer)
-                            == Retained::as_ptr(&oracle.buffer.tensor.buffer)
+                            == Retained::as_ptr(&oracle.buffer.storage.tensor.buffer)
                     });
                     let controls_are_oracle = plan.controls_input.as_ref().is_some_and(|tensor| {
                         Retained::as_ptr(&tensor.buffer)
-                            == Retained::as_ptr(&oracle.buffer.tensor.buffer)
+                            == Retained::as_ptr(&oracle.buffer.storage.tensor.buffer)
                     });
                     assert_eq!(
                         producer_is_oracle,
@@ -12056,10 +12268,11 @@ mod tests {
     fn mhc_delete_oracle_requires_matching_capture_pair_and_endpoint() {
         let ctx = MetalContext::new().expect("create Metal context");
         let identity = DeepSeekV4MhcOracleIdentity {
-            model_content_sha256: [1; 32],
-            compatibility_sha256: [2; 32],
+            model_content_id: [1; 32],
+            compatibility_id: [2; 32],
             token_sha256: [3; 32],
             policy_sha256: [4; 32],
+            policy_manifest: "test-policy".to_string(),
             start_position: 0,
             n_tokens: 1,
             rms_epsilon_bits: 1.0e-6f32.to_bits(),
@@ -12082,11 +12295,8 @@ mod tests {
                 GgmlType::F32,
             )
             .expect("create deterministic capture buffer");
-            let buffer = PackedMhcOracleBuffer {
-                tensor,
-                n_tokens: 1,
-                device_registry_id: ctx.device.registryID(),
-            };
+            let buffer = PackedMhcOracleBuffer::from_tensor(tensor, 1, ctx.device.registryID())
+                .expect("plan deterministic capture views");
             DeepSeekV4MhcCapture {
                 payload_sha256: buffer
                     .current_payload_sha256()
@@ -12101,17 +12311,17 @@ mod tests {
                 endpoint_hidden_bits: vec![2],
                 endpoint_position: 1,
                 endpoint_tokens: vec![35],
-                endpoint_prefix_sha256: [5; 32],
-                endpoint_compatibility_sha256: [6; 32],
-                endpoint_causal_sha256: [causal; 32],
+                endpoint_prefix_digest: [5; 32],
+                endpoint_compatibility_id: [6; 32],
+                endpoint_causal_digest: [causal; 32],
                 endpoint_observation: DeepSeekV4SnapshotObservation::Available,
                 continuation_logits_bits: vec![3],
                 continuation_hidden_bits: vec![4],
                 continuation_position: 2,
                 continuation_tokens: vec![35, 35],
-                continuation_prefix_sha256: [7; 32],
-                continuation_compatibility_sha256: [6; 32],
-                continuation_causal_sha256: [8; 32],
+                continuation_prefix_digest: [7; 32],
+                continuation_compatibility_id: [6; 32],
+                continuation_causal_digest: [8; 32],
                 continuation_observation: DeepSeekV4SnapshotObservation::Available,
                 sha256: [0; 32],
             };
@@ -17905,7 +18115,7 @@ mod tests {
         let mut rows = Vec::with_capacity(n_tokens * MOE_TOP_K);
         let mut slots = Vec::with_capacity(n_tokens * MOE_TOP_K);
         let mut buckets = Vec::new();
-        for expert in 0..MOE_EXPERT_COUNT {
+        for (expert, expert_count) in counts.iter_mut().enumerate() {
             let start = slots.len();
             for (slot, &routed_expert) in expert_ids.iter().enumerate() {
                 if routed_expert == expert as i32 {
@@ -17914,7 +18124,7 @@ mod tests {
                 }
             }
             let count = slots.len() - start;
-            counts[expert] = count as i32;
+            *expert_count = count as i32;
             if count != 0 {
                 buckets.push(ExpertBucket {
                     expert,

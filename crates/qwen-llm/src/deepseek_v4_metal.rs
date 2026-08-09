@@ -13,11 +13,12 @@ pub use prefill::{
     DeepSeekV4MhcBufferRole, DeepSeekV4MhcCommandInterval, DeepSeekV4MhcCommandKind,
     DeepSeekV4MhcDeleteArm, DeepSeekV4MhcDeleteProfile, DeepSeekV4MhcEndpointEvidence,
     DeepSeekV4MhcExecutionKind, DeepSeekV4MhcOracle, DeepSeekV4MhcOracleIdentity,
-    DeepSeekV4MhcSiteKind, DeepSeekV4MhcSiteRecord, DeepSeekV4MhcVerifiedCapture,
-    PackedChunkProfile, PackedPostRouteLayerMetadata, PackedPostRouteSampledLayerProfile,
-    PackedPostRouteStageKind, PackedPostRouteStageProfile, PackedPostRouteStageTiming,
-    PackedPrefillSampledLayerProfile, PackedPrefillStageKind, PackedPrefillStageProfile,
-    PackedPrefillStageTiming, PackedPrefillStageTransition, seal_mhc_delete_oracle_pair,
+    DeepSeekV4MhcSiteKind, DeepSeekV4MhcSiteRecord, DeepSeekV4MhcTimedEndpoint,
+    DeepSeekV4MhcVerifiedCapture, PackedChunkProfile, PackedPostRouteLayerMetadata,
+    PackedPostRouteSampledLayerProfile, PackedPostRouteStageKind, PackedPostRouteStageProfile,
+    PackedPostRouteStageTiming, PackedPrefillSampledLayerProfile, PackedPrefillStageKind,
+    PackedPrefillStageProfile, PackedPrefillStageTiming, PackedPrefillStageTransition,
+    seal_mhc_delete_oracle_pair,
 };
 mod snapshot;
 

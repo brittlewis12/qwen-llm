@@ -1,5 +1,7 @@
 //! `qwen` — interactive CLI for the qwen-llm engine.
 
+#[cfg(feature = "dsv4-diagnostics")]
+mod dsv4_temporal;
 mod messages;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -21,8 +23,9 @@ use qwen_llm::deepseek_v4_metal::{
     DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples,
     DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4MultigroupSelectorGeometry,
     DeepSeekV4MultigroupSelectorTelemetry, DeepSeekV4Session, DeepSeekV4SessionCapacity,
-    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotFileOutcome,
-    causal_snapshot_record_bytes, load_causal_snapshot_file, publish_causal_snapshot_file,
+    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotFileOutcome, DeepSeekV4StageKind,
+    DeepSeekV4StageProfile, causal_snapshot_record_bytes, load_causal_snapshot_file,
+    publish_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
@@ -40,10 +43,12 @@ use qwen_llm::metal_forward::{
 };
 use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::model_family::ModelFamily;
+use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
+use qwen_llm::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
 use qwen_llm::runtime::{
-    LoadedModel, LoadedModelConfig, PreparedCheckpoint, Runtime, RuntimeError, Sequence,
-    SequenceConfig,
+    LoadedModel, LoadedModelConfig, PrefetchPolicy, PrefetchResidencyProbe, PreparedCheckpoint,
+    Runtime, RuntimeError, Sequence, SequenceConfig, prefetch_opened_gguf,
 };
 use qwen_llm::sampling::{
     BoundedTopKEvidence, GreedySelection, SAMPLER_ALGORITHM_VERSION, SampledToken, Sampler,
@@ -68,6 +73,147 @@ const GREEDY_GPU_ARGMAX_ENV: &str = "QWEN_GREEDY_GPU_ARGMAX";
 const DEEPSEEK_V4_SNAPSHOT_MAX_RECORD_BYTES: u64 = 1024 * 1024 * 1024;
 const DEEPSEEK_V4_SNAPSHOT_IDENTITY_CACHE_DIR: &str = ".qwen-dsv4-model-identity-v2";
 const DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE: &str = "Apple M4 Max";
+const DEEPSEEK_V4_PREFETCH_ENV: &str = "QWEN_DSV4_PREFETCH";
+const DEEPSEEK_V4_PREFETCH_AUTO_THRESHOLD: f64 = 0.98;
+#[cfg(feature = "dsv4-diagnostics")]
+const DEEPSEEK_V4_TEMPORAL_WINDOW_ENV: &str = "QWEN_DSV4_TEMPORAL_WINDOW";
+#[cfg(feature = "dsv4-diagnostics")]
+const DEEPSEEK_V4_TEMPORAL_JSON_ENV: &str = "QWEN_DSV4_TEMPORAL_JSON";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum DeepSeekV4PrefetchMode {
+    Off,
+    Always,
+    #[default]
+    Auto,
+}
+
+impl DeepSeekV4PrefetchMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Always => "always",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeepSeekV4PrefetchOutcome {
+    mode: DeepSeekV4PrefetchMode,
+    wall_ms: f64,
+}
+
+fn parse_deepseek_v4_prefetch_mode(value: Option<&OsStr>) -> Result<DeepSeekV4PrefetchMode> {
+    let Some(value) = value else {
+        return Ok(DeepSeekV4PrefetchMode::Auto);
+    };
+    let value = value
+        .to_str()
+        .with_context(|| format!("{DEEPSEEK_V4_PREFETCH_ENV} is not valid UTF-8"))?;
+    match value {
+        "off" => Ok(DeepSeekV4PrefetchMode::Off),
+        "always" => Ok(DeepSeekV4PrefetchMode::Always),
+        "auto" => Ok(DeepSeekV4PrefetchMode::Auto),
+        _ => bail!("{DEEPSEEK_V4_PREFETCH_ENV} must be one of auto|off|always, got {value:?}"),
+    }
+}
+
+fn configured_deepseek_v4_prefetch_mode() -> Result<DeepSeekV4PrefetchMode> {
+    parse_deepseek_v4_prefetch_mode(std::env::var_os(DEEPSEEK_V4_PREFETCH_ENV).as_deref())
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+fn parse_deepseek_v4_temporal_window(value: Option<&OsStr>) -> Result<usize> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    let value = value
+        .to_str()
+        .with_context(|| format!("{DEEPSEEK_V4_TEMPORAL_WINDOW_ENV} is not valid UTF-8"))?;
+    let window = value.parse::<usize>().with_context(|| {
+        format!("{DEEPSEEK_V4_TEMPORAL_WINDOW_ENV}={value:?} is not an integer")
+    })?;
+    ensure!(
+        window <= 65,
+        "{DEEPSEEK_V4_TEMPORAL_WINDOW_ENV} must be in 0..=65, got {window}"
+    );
+    Ok(window)
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+fn configured_deepseek_v4_temporal_window() -> Result<usize> {
+    parse_deepseek_v4_temporal_window(std::env::var_os(DEEPSEEK_V4_TEMPORAL_WINDOW_ENV).as_deref())
+}
+
+fn deepseek_v4_prefetch_policy(mode: DeepSeekV4PrefetchMode) -> PrefetchPolicy {
+    match mode {
+        DeepSeekV4PrefetchMode::Off => PrefetchPolicy::Off,
+        DeepSeekV4PrefetchMode::Always => PrefetchPolicy::Always,
+        DeepSeekV4PrefetchMode::Auto => {
+            PrefetchPolicy::cold_only(DEEPSEEK_V4_PREFETCH_AUTO_THRESHOLD)
+                .expect("DeepSeek V4 auto-prefetch threshold is a valid fraction")
+        }
+    }
+}
+
+fn apply_deepseek_v4_prefetch(
+    gguf: &GgufFile,
+    mode: DeepSeekV4PrefetchMode,
+) -> Result<DeepSeekV4PrefetchOutcome> {
+    let process_before = PidSnapshot::now().ok();
+    let defaults = LoadedModelConfig::default();
+    let config = LoadedModelConfig {
+        prefetch_policy: deepseek_v4_prefetch_policy(mode),
+        prefetch_residency_probe: PrefetchResidencyProbe::Sampled,
+        ..defaults
+    };
+    let report = prefetch_opened_gguf(gguf, &config);
+    let process_delta = process_before
+        .zip(PidSnapshot::now().ok())
+        .map(|(before, after)| PidDelta::between(before, after));
+    let bytes_returned = report.bytes_returned_total();
+    if mode == DeepSeekV4PrefetchMode::Always {
+        ensure!(
+            report.shards_skipped() == 0,
+            "explicit DeepSeek V4 prefetch skipped {} of {} shards",
+            report.shards_skipped(),
+            gguf.shard_count(),
+        );
+        ensure!(
+            bytes_returned == gguf.total_mapped_len() as u64,
+            "DeepSeek V4 prefetch returned {bytes_returned} bytes for {} mapped bytes",
+            gguf.total_mapped_len(),
+        );
+    }
+    let seconds = report.total_wall.as_secs_f64();
+    let effective_bytes_per_sec = if seconds > 0.0 {
+        bytes_returned as f64 / seconds
+    } else {
+        0.0
+    };
+    eprintln!(
+        concat!(
+            "deepseek_v4 prefetch: mode={} shards_prefetched={} shards_skipped={} workers={} chunk_bytes={} ",
+            "bytes_returned={} physical_read_bytes={} wall_ms={:.1} effective_gbps={:.2}"
+        ),
+        mode.as_str(),
+        report.shards_prefetched(),
+        report.shards_skipped(),
+        DEFAULT_WORKERS,
+        DEFAULT_CHUNK_BYTES,
+        bytes_returned,
+        process_delta
+            .map(|delta| delta.diskio_bytesread.to_string())
+            .unwrap_or_else(|| "unavailable".to_string()),
+        report.total_wall.as_secs_f64() * 1e3,
+        effective_bytes_per_sec / 1e9,
+    );
+    Ok(DeepSeekV4PrefetchOutcome {
+        mode,
+        wall_ms: report.total_wall.as_secs_f64() * 1e3,
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GreedyGpuArgmaxMode {
@@ -85,6 +231,7 @@ struct GreedyGpuDecision {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
 enum DeepSeekV4MultigroupSelectorArg {
     #[default]
+    Auto,
     Off,
     QualifiedExperimental,
 }
@@ -92,6 +239,7 @@ enum DeepSeekV4MultigroupSelectorArg {
 impl DeepSeekV4MultigroupSelectorArg {
     fn as_str(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Off => "off",
             Self::QualifiedExperimental => "qualified_experimental",
         }
@@ -255,11 +403,11 @@ struct Args {
     #[arg(long)]
     max_context_tokens: Option<usize>,
 
-    /// Select the M4 Max-qualified experimental DeepSeek V4 far-context selector.
+    /// Select the DeepSeek V4 far-context selector policy.
     #[arg(
         long,
         value_enum,
-        default_value = "off",
+        default_value = "auto",
         requires = "model",
         conflicts_with_all = ["info", "deepseek_census_json"]
     )]
@@ -441,7 +589,7 @@ impl DeepSeekV4MultigroupSelectorPlan {
         let device_name = device_name.into();
         let device_qualified = device_name == DEEPSEEK_V4_MULTIGROUP_SELECTOR_QUALIFIED_DEVICE;
         let geometry = match requested {
-            DeepSeekV4MultigroupSelectorArg::Off => None,
+            DeepSeekV4MultigroupSelectorArg::Auto | DeepSeekV4MultigroupSelectorArg::Off => None,
             DeepSeekV4MultigroupSelectorArg::QualifiedExperimental => {
                 ensure!(
                     device_qualified,
@@ -492,10 +640,14 @@ impl DeepSeekV4MultigroupSelectorPlan {
     }
 
     fn seal_session(&self, session: &mut DeepSeekV4Session, scope: &str) -> Result<()> {
-        if self.sealed() {
-            session
+        match self.requested {
+            DeepSeekV4MultigroupSelectorArg::Auto => {}
+            DeepSeekV4MultigroupSelectorArg::Off => session
+                .disable_multigroup_selector()
+                .context("disable the DeepSeek V4 multi-group selector")?,
+            DeepSeekV4MultigroupSelectorArg::QualifiedExperimental => session
                 .enable_multigroup_selector_experiment()
-                .context("seal qualified experimental DeepSeek V4 multi-group selector")?;
+                .context("seal qualified experimental DeepSeek V4 multi-group selector")?,
         }
         let telemetry = session.multigroup_selector_telemetry();
         ensure!(
@@ -534,7 +686,7 @@ impl DeepSeekV4MultigroupSelectorPlan {
             sealed == self.sealed(),
             "DeepSeek V4 multi-group selector completion changed sealed policy"
         );
-        if !self.sealed() {
+        if self.requested == DeepSeekV4MultigroupSelectorArg::Off {
             ensure!(
                 multigroup_invocations == 0 && ineligible_radix4_invocations == 0,
                 "disabled DeepSeek V4 multi-group selector recorded invocations"
@@ -2333,7 +2485,9 @@ fn validate_request_before_model_open(args: &Args) -> Result<()> {
 }
 
 fn validate_deepseek_v4_multigroup_selector_scope(args: &Args) -> Result<()> {
-    if args.deepseek_v4_multigroup_selector == DeepSeekV4MultigroupSelectorArg::Off {
+    if args.deepseek_v4_multigroup_selector
+        != DeepSeekV4MultigroupSelectorArg::QualifiedExperimental
+    {
         return Ok(());
     }
     ensure!(
@@ -2351,7 +2505,7 @@ fn validate_deepseek_v4_multigroup_selector_family(
     model_family: Option<ModelFamily>,
 ) -> Result<()> {
     ensure!(
-        requested == DeepSeekV4MultigroupSelectorArg::Off
+        requested != DeepSeekV4MultigroupSelectorArg::QualifiedExperimental
             || model_family == Some(ModelFamily::DeepSeek4),
         "--deepseek-v4-multigroup-selector requires a DeepSeek V4 model"
     );
@@ -2764,6 +2918,139 @@ fn copy_deepseek_v4_logits(
     Ok(logits)
 }
 
+#[derive(Default)]
+struct DeepSeekV4CliStageProfileAggregate {
+    stages: [f64; 10],
+    boundary_ms: f64,
+    command_gpu_ms: f64,
+    forward_wall_ms: f64,
+}
+
+fn median_f64(values: &[f64]) -> f64 {
+    let mut ordered = values.to_vec();
+    ordered.sort_by(f64::total_cmp);
+    if ordered.len().is_multiple_of(2) {
+        (ordered[ordered.len() / 2 - 1] + ordered[ordered.len() / 2]) * 0.5
+    } else {
+        ordered[ordered.len() / 2]
+    }
+}
+
+fn emit_deepseek_v4_whole_profile(
+    positions: &[u32],
+    wall_ms: &[f64],
+    gpu_ms: &[f64],
+    outside_gpu_ms: &[f64],
+    encode_cpu_ms: &[f64],
+    wait_residual_ms: &[f64],
+) {
+    eprintln!(
+        "deepseek_v4 whole_profile: positions={}..{} samples={} wall_median_ms={:.3} gpu_median_ms={:.3} outside_gpu_median_ms={:.3} encode_cpu_median_ms={:.3} wait_residual_median_ms={:.3} wall_ms={wall_ms:?} gpu_ms={gpu_ms:?}",
+        positions[0],
+        positions[positions.len() - 1],
+        positions.len(),
+        median_f64(wall_ms),
+        median_f64(gpu_ms),
+        median_f64(outside_gpu_ms),
+        median_f64(encode_cpu_ms),
+        median_f64(wait_residual_ms),
+    );
+}
+
+fn emit_deepseek_v4_stage_profile(
+    profile: &DeepSeekV4StageProfile,
+    group: usize,
+    groups: usize,
+    aggregate: &mut DeepSeekV4CliStageProfileAggregate,
+) {
+    let mut stages = [0.0f64; 10];
+    let mut boundary_ms = 0.0f64;
+    for layer in &profile.sampled_layers {
+        boundary_ms += layer.encoder_boundary_ms_scaled;
+        for stage in &layer.stages {
+            let index = match stage.kind {
+                DeepSeekV4StageKind::AttentionHyperConnection => 0,
+                DeepSeekV4StageKind::AttentionPrepare => 1,
+                DeepSeekV4StageKind::AttentionCore => 2,
+                DeepSeekV4StageKind::AttentionOutput => 3,
+                DeepSeekV4StageKind::HyperConnectionBridge => 4,
+                DeepSeekV4StageKind::MoeRouter => 5,
+                DeepSeekV4StageKind::MoeRoutedExperts => 6,
+                DeepSeekV4StageKind::MoeSharedExpert => 7,
+                DeepSeekV4StageKind::MoeCombine => 8,
+                DeepSeekV4StageKind::LayerTail => 9,
+            };
+            stages[index] += stage.duration_ms_scaled;
+        }
+    }
+    let command_gpu_ms = profile
+        .layers
+        .iter()
+        .map(|layer| layer.command_gpu_ms)
+        .sum::<f64>();
+    for (total, sample) in aggregate.stages.iter_mut().zip(stages) {
+        *total += sample;
+    }
+    aggregate.boundary_ms += boundary_ms;
+    aggregate.command_gpu_ms += command_gpu_ms;
+    aggregate.forward_wall_ms += profile.forward_wall_ms;
+    eprintln!(
+        concat!(
+            "deepseek_v4 stage_profile_group: position={} group={}/{} schedule=instrumented_per_layer ",
+            "forward_wall_ms={:.3} command_gpu_ms={:.3} ",
+            "attention_hc_ms={:.3} attention_prepare_ms={:.3} attention_core_ms={:.3} ",
+            "attention_output_ms={:.3} bridge_ms={:.3} moe_router_ms={:.3} ",
+            "moe_routed_ms={:.3} moe_shared_ms={:.3} moe_combine_ms={:.3} ",
+            "layer_tail_ms={:.3} encoder_boundary_ms={:.3} sampled_layers={}"
+        ),
+        profile.position,
+        group,
+        groups,
+        profile.forward_wall_ms,
+        command_gpu_ms,
+        stages[0],
+        stages[1],
+        stages[2],
+        stages[3],
+        stages[4],
+        stages[5],
+        stages[6],
+        stages[7],
+        stages[8],
+        stages[9],
+        boundary_ms,
+        profile.sampled_layers.len(),
+    );
+    if group + 1 == groups {
+        eprintln!(
+            concat!(
+                "deepseek_v4 stage_profile: positions={}..{} groups={} schedule=rotating_instrumented_per_layer ",
+                "mean_forward_wall_ms={:.3} mean_command_gpu_ms={:.3} ",
+                "attention_hc_ms={:.3} attention_prepare_ms={:.3} attention_core_ms={:.3} ",
+                "attention_output_ms={:.3} bridge_ms={:.3} moe_router_ms={:.3} ",
+                "moe_routed_ms={:.3} moe_shared_ms={:.3} moe_combine_ms={:.3} ",
+                "layer_tail_ms={:.3} encoder_boundary_ms={:.3}"
+            ),
+            profile.position + 1 - groups as u32,
+            profile.position,
+            groups,
+            aggregate.forward_wall_ms / groups as f64,
+            aggregate.command_gpu_ms / groups as f64,
+            aggregate.stages[0],
+            aggregate.stages[1],
+            aggregate.stages[2],
+            aggregate.stages[3],
+            aggregate.stages[4],
+            aggregate.stages[5],
+            aggregate.stages[6],
+            aggregate.stages[7],
+            aggregate.stages[8],
+            aggregate.stages[9],
+            aggregate.boundary_ms,
+        );
+    }
+}
+
 fn run_deepseek_v4_single_turn(
     model_path: &Path,
     gguf: GgufFile,
@@ -2781,6 +3068,7 @@ fn run_deepseek_v4_single_turn(
     }
     let request_start = std::time::Instant::now();
     let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
+    let prefetch_mode = configured_deepseek_v4_prefetch_mode()?;
     let sampling = cli_sampling_config(args)?;
     let arrival_ms = unix_epoch_ms()?;
     let encode_options = deepseek_v4_encode_options(args)?;
@@ -2941,6 +3229,7 @@ fn run_deepseek_v4_single_turn(
     let admitted_load_plan = load_plan
         .admit(initial_memory_signals)
         .context("admit strict DeepSeek V4 Metal residency and session")?;
+    let prefetch_outcome = apply_deepseek_v4_prefetch(&gguf, prefetch_mode)?;
     let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted_load_plan)
         .context("load admitted strict DeepSeek V4 Metal residency")?;
     let (residency, memory_admission, after_residency_bytes) = realized.into_parts();
@@ -3101,6 +3390,32 @@ fn run_deepseek_v4_single_turn(
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
     let mut sampler = Sampler::new(sampling).context("initialize DeepSeek V4 sampler")?;
+    const STAGE_PROFILE_GROUPS: usize = 4;
+    let stage_profile_enabled = qwen_llm::env_flag::read_default_off("QWEN_DSV4_STAGE_PROFILE");
+    const WHOLE_PROFILE_SAMPLES: usize = 8;
+    let whole_profile_enabled = qwen_llm::env_flag::read_default_off("QWEN_DSV4_WHOLE_PROFILE");
+    #[cfg(feature = "dsv4-diagnostics")]
+    let temporal_window = configured_deepseek_v4_temporal_window()?;
+    #[cfg(not(feature = "dsv4-diagnostics"))]
+    let temporal_window = 0usize;
+    ensure!(
+        usize::from(stage_profile_enabled)
+            + usize::from(whole_profile_enabled)
+            + usize::from(temporal_window > 0)
+            <= 1,
+        "QWEN_DSV4_STAGE_PROFILE, QWEN_DSV4_WHOLE_PROFILE, and QWEN_DSV4_TEMPORAL_WINDOW are mutually exclusive"
+    );
+    #[cfg(feature = "dsv4-diagnostics")]
+    let mut temporal_capture = dsv4_temporal::TemporalCapture::new(temporal_window);
+    let mut profile_warmup_pending = stage_profile_enabled || whole_profile_enabled;
+    let mut stage_profile_next_group = 0usize;
+    let mut stage_profile_aggregate = DeepSeekV4CliStageProfileAggregate::default();
+    let mut whole_profile_positions = Vec::with_capacity(WHOLE_PROFILE_SAMPLES);
+    let mut whole_profile_wall_ms = Vec::with_capacity(WHOLE_PROFILE_SAMPLES);
+    let mut whole_profile_gpu_ms = Vec::with_capacity(WHOLE_PROFILE_SAMPLES);
+    let mut whole_profile_outside_gpu_ms = Vec::with_capacity(WHOLE_PROFILE_SAMPLES);
+    let mut whole_profile_encode_cpu_ms = Vec::with_capacity(WHOLE_PROFILE_SAMPLES);
+    let mut whole_profile_wait_residual_ms = Vec::with_capacity(WHOLE_PROFILE_SAMPLES);
     let stdout_handle = std::io::stdout();
     let mut stdout = stdout_handle.lock();
     let generation = generate_serial(
@@ -3120,13 +3435,102 @@ fn run_deepseek_v4_single_turn(
         },
         |token| {
             let token = checked_deepseek_v4_token_id(token, vocab_size, "generated")?;
-            session
-                .forward_token(&ctx, token)
-                .context("forward generated DeepSeek V4 token")?;
+            #[cfg(feature = "dsv4-diagnostics")]
+            let capture_temporal = temporal_capture.should_capture();
+            #[cfg(not(feature = "dsv4-diagnostics"))]
+            let capture_temporal = false;
+            if capture_temporal {
+                #[cfg(feature = "dsv4-diagnostics")]
+                {
+                    let position = session.next_position();
+                    session
+                        .arm_decision_transcript(position)
+                        .context("arm temporal DeepSeek V4 decision capture")?;
+                    session
+                        .forward_token(&ctx, token)
+                        .context("forward temporal DeepSeek V4 token")?;
+                    let transcript = session
+                        .take_decision_transcript_and_reset()
+                        .context("take temporal DeepSeek V4 decision capture")?;
+                    temporal_capture.record(transcript)?;
+                }
+            } else if std::mem::take(&mut profile_warmup_pending) {
+                session
+                    .forward_token(&ctx, token)
+                    .context("warm profiled DeepSeek V4 decode")?;
+            } else if stage_profile_enabled && stage_profile_next_group < STAGE_PROFILE_GROUPS {
+                let group = stage_profile_next_group;
+                stage_profile_next_group += 1;
+                let sampled_layers = (0..session.residency().config().attention_kinds.len())
+                    .filter(|layer| layer % STAGE_PROFILE_GROUPS == group)
+                    .collect::<Vec<_>>();
+                let profile = session
+                    .forward_token_stage_profiled(&ctx, token, &sampled_layers)
+                    .context("stage-profile generated DeepSeek V4 token")?;
+                emit_deepseek_v4_stage_profile(
+                    &profile,
+                    group,
+                    STAGE_PROFILE_GROUPS,
+                    &mut stage_profile_aggregate,
+                );
+            } else if whole_profile_enabled && whole_profile_positions.len() < WHOLE_PROFILE_SAMPLES
+            {
+                let profile = session
+                    .forward_token_whole_profiled(&ctx, token)
+                    .context("whole-profile generated DeepSeek V4 token")?;
+                whole_profile_positions.push(profile.position);
+                whole_profile_wall_ms.push(profile.forward_wall_ms);
+                whole_profile_gpu_ms.push(profile.command_gpu_ms);
+                whole_profile_outside_gpu_ms.push(profile.outside_gpu_ms());
+                whole_profile_encode_cpu_ms.push(profile.encode_cpu_ms);
+                whole_profile_wait_residual_ms.push(profile.wait_residual_ms());
+                if whole_profile_positions.len() == WHOLE_PROFILE_SAMPLES {
+                    emit_deepseek_v4_whole_profile(
+                        &whole_profile_positions,
+                        &whole_profile_wall_ms,
+                        &whole_profile_gpu_ms,
+                        &whole_profile_outside_gpu_ms,
+                        &whole_profile_encode_cpu_ms,
+                        &whole_profile_wait_residual_ms,
+                    );
+                }
+            } else {
+                session
+                    .forward_token(&ctx, token)
+                    .context("forward generated DeepSeek V4 token")?;
+            }
             copy_deepseek_v4_logits(&session, vocab_size, "continuing")
         },
     )?;
     drop(stdout);
+    #[cfg(feature = "dsv4-diagnostics")]
+    if temporal_capture.requested_tokens() > 0 {
+        let mut report = temporal_capture.finish();
+        let final_logits = copy_deepseek_v4_logits(&session, vocab_size, "temporal final")?;
+        let final_logits_sha256 =
+            hex_encode_bytes(&Sha256::digest(bytemuck::cast_slice(&final_logits)));
+        let final_causal_digest = if args.deepseek_v4_snapshot.is_some() {
+            let snapshot = session
+                .capture_causal_snapshot()
+                .context("capture final temporal DeepSeek V4 causal state")?;
+            Some(hex_encode_bytes(snapshot.causal_digest()))
+        } else {
+            None
+        };
+        report.attach_final_state(final_logits_sha256, final_causal_digest);
+        if let Some(path) = std::env::var_os(DEEPSEEK_V4_TEMPORAL_JSON_ENV) {
+            let path = PathBuf::from(path);
+            std::fs::write(
+                &path,
+                format!("{}\n", serde_json::to_string_pretty(&report)?),
+            )
+            .with_context(|| format!("write temporal report {}", path.display()))?;
+        }
+        eprintln!(
+            "deepseek_v4 temporal: {}",
+            serde_json::to_string(&report.summary())?
+        );
+    }
     selector_plan.emit_completion("single_turn", session.multigroup_selector_telemetry())?;
 
     let decode_tps = if generation.wall_ms > 0.0 {
@@ -3148,7 +3552,7 @@ fn run_deepseek_v4_single_turn(
     eprintln!(
         concat!(
             "deepseek_v4 stats: prompt_kind={} prefill_mode={} prefill_chunk_cap={} prompt_tokens={} generated_tokens={} transitions={} ",
-            "stop_reason={} tokenizer_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} ",
+            "stop_reason={} tokenizer_ms={:.1} prefetch_mode={} prefetch_ms={:.1} load_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} ",
             "generation_ms={:.1} decode_tps={:.2} transition_tps={:.2} build_commit={} build_dirty={} generated_ids_sha256={}"
         ),
         prompt_kind,
@@ -3159,6 +3563,8 @@ fn run_deepseek_v4_single_turn(
         generation.transitions,
         generation.stop_reason.as_str(),
         tokenizer_ms,
+        prefetch_outcome.mode.as_str(),
+        prefetch_outcome.wall_ms,
         load_ms,
         prefill_ms,
         prefill_tps,
@@ -3553,6 +3959,7 @@ fn run_deepseek_v4_requests_jsonl(
     validate_deepseek_v4_requests_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
     let prefill_chunk_tokens = deepseek_v4_prefill_chunk_tokens()?;
+    let prefetch_mode = configured_deepseek_v4_prefetch_mode()?;
     cli_sampling_config(args)?;
     let stdin_mode = deepseek_v4_requests_reads_stdin(args)?;
     let requests_path = args
@@ -3633,6 +4040,7 @@ fn run_deepseek_v4_requests_jsonl(
     let admitted_load_plan = load_plan
         .admit(initial_memory_signals)
         .context("admit strict DeepSeek V4 Metal residency and session")?;
+    let _prefetch_outcome = apply_deepseek_v4_prefetch(&gguf, prefetch_mode)?;
     let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted_load_plan)
         .context("load admitted strict DeepSeek V4 Metal residency")?;
     let (residency, memory_admission, after_residency_bytes) = realized.into_parts();
@@ -7943,7 +8351,7 @@ mod tests {
             Args::try_parse_from(["qwen", "--model", "model.gguf", "--prompt", "hello"]).unwrap();
         assert_eq!(
             default.deepseek_v4_multigroup_selector,
-            DeepSeekV4MultigroupSelectorArg::Off
+            DeepSeekV4MultigroupSelectorArg::Auto
         );
 
         let explicit = Args::try_parse_from([
@@ -8021,6 +8429,17 @@ mod tests {
         )
         .unwrap();
         assert!(!off.sealed());
+        let auto = DeepSeekV4MultigroupSelectorPlan::new(
+            DeepSeekV4MultigroupSelectorArg::Auto,
+            "Apple M4 Max",
+            DeepSeekV4SessionCapacity::for_forward_limit(786_432, 1_048_576).unwrap(),
+        )
+        .unwrap();
+        assert!(!auto.sealed());
+        assert!(
+            auto.completion_record_from_values("single_turn", false, 21, 3)
+                .is_ok()
+        );
         assert!(
             DeepSeekV4MultigroupSelectorPlan::new(
                 DeepSeekV4MultigroupSelectorArg::QualifiedExperimental,
@@ -10423,6 +10842,58 @@ mod tests {
             parse_greedy_gpu_argmax_mode(Some(&non_unicode)),
             GreedyGpuArgmaxMode::ExplicitRollback
         );
+    }
+
+    #[test]
+    fn deepseek_v4_prefetch_defaults_auto_and_parses_strictly() {
+        assert_eq!(
+            parse_deepseek_v4_prefetch_mode(None).unwrap(),
+            DeepSeekV4PrefetchMode::Auto
+        );
+        assert_eq!(
+            parse_deepseek_v4_prefetch_mode(Some(OsStr::new("off"))).unwrap(),
+            DeepSeekV4PrefetchMode::Off
+        );
+        assert_eq!(
+            parse_deepseek_v4_prefetch_mode(Some(OsStr::new("always"))).unwrap(),
+            DeepSeekV4PrefetchMode::Always
+        );
+        assert_eq!(
+            parse_deepseek_v4_prefetch_mode(Some(OsStr::new("auto"))).unwrap(),
+            DeepSeekV4PrefetchMode::Auto
+        );
+        assert!(parse_deepseek_v4_prefetch_mode(Some(OsStr::new("cold"))).is_err());
+
+        assert_eq!(
+            deepseek_v4_prefetch_policy(DeepSeekV4PrefetchMode::Off),
+            PrefetchPolicy::Off
+        );
+        assert_eq!(
+            deepseek_v4_prefetch_policy(DeepSeekV4PrefetchMode::Always),
+            PrefetchPolicy::Always
+        );
+        match deepseek_v4_prefetch_policy(DeepSeekV4PrefetchMode::Auto) {
+            PrefetchPolicy::ColdOnly { threshold } => {
+                assert_eq!(threshold.value(), DEEPSEEK_V4_PREFETCH_AUTO_THRESHOLD);
+            }
+            other => panic!("expected DS4 cold-only auto policy, got {other:?}"),
+        }
+
+        use std::os::unix::ffi::OsStringExt;
+        let non_unicode = std::ffi::OsString::from_vec(vec![0xff]);
+        assert!(parse_deepseek_v4_prefetch_mode(Some(&non_unicode)).is_err());
+    }
+
+    #[cfg(feature = "dsv4-diagnostics")]
+    #[test]
+    fn deepseek_v4_temporal_window_is_bounded() {
+        assert_eq!(parse_deepseek_v4_temporal_window(None).unwrap(), 0);
+        assert_eq!(
+            parse_deepseek_v4_temporal_window(Some(OsStr::new("65"))).unwrap(),
+            65
+        );
+        assert!(parse_deepseek_v4_temporal_window(Some(OsStr::new("66"))).is_err());
+        assert!(parse_deepseek_v4_temporal_window(Some(OsStr::new("no"))).is_err());
     }
 
     #[test]

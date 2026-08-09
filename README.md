@@ -15,17 +15,17 @@ maintained benchmark table lives in `docs/PLAN.md`, and adaptive DFlash notes
 live in `docs/H5-DFLASH.md`. Native DeepSeek V4 status and evidence live in
 `docs/DEEPSEEK-V4-STRATEGY.md`.
 
-DeepSeek V4 keeps radix4 sparse selection by default. On an Apple M4 Max, a
-request budget that can reach at least 196,608 compressed rows may explicitly
-select the qualified far-context policy with:
+DeepSeek V4 automatically uses its exact multi-group sparse selector on an
+Apple M4 Max once a singleton reaches the qualified far-context band. Packed
+and ineligible singleton positions retain radix4. To force the rollback path:
 
 ```sh
---deepseek-v4-multigroup-selector=qualified-experimental
+--deepseek-v4-multigroup-selector=off
 ```
 
-The CLI rejects unsupported devices and unreachable request geometry before
-model residency. Packed and ineligible singleton positions continue to use
-radix4; this option is not a default-on or wider-device claim.
+`qualified-experimental` remains available as an explicit diagnostics policy;
+the CLI rejects unsupported devices and unreachable request geometry before
+model residency.
 
 ## Layout
 

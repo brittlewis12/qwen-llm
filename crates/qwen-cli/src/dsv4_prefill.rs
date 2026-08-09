@@ -1,13 +1,18 @@
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use objc2_metal::MTLDevice;
+use qwen_llm::checkpoint_identity::{CheckpointIdentityCache, checkpoint_content_identity};
 use qwen_llm::deepseek_v4::AttentionKind;
 use qwen_llm::deepseek_v4_metal::{
-    DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS, DeepSeekV4MetalResidency,
-    DeepSeekV4Session, PackedChunkProfile, PackedPostRouteStageKind, PackedPrefillStageKind,
+    DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS, DeepSeekV4CausalSnapshot,
+    DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4Session,
+    DeepSeekV4SnapshotCodecConstraints, PackedChunkProfile, PackedPostRouteStageKind,
+    PackedPrefillStageKind, load_causal_snapshot_file,
 };
 use qwen_llm::gguf::GgufFile;
-use qwen_llm::metal::MetalContext;
+use qwen_llm::metal::{
+    KernelTraceCounters, MetalContext, kernel_trace_begin, kernel_trace_snapshot,
+};
 use qwen_llm::tokenizer::Tokenizer;
 use serde::Serialize;
 use serde_json::Value;
@@ -45,6 +50,39 @@ pub struct Dsv4PrefillArgs {
     /// Emit the complete report to stdout instead of the compact summary.
     #[arg(long)]
     full_json: bool,
+
+    /// Skip sampled profiling after warmup and one ordinary production pass.
+    #[arg(long)]
+    ordinary_only: bool,
+    /// Restore this causal snapshot and measure an N=2 target-verifier lower bound.
+    #[arg(
+        long,
+        value_name = "PATH",
+        requires_all = ["verifier_position", "verifier_token_ids", "verifier_identity_cache"],
+        conflicts_with = "prompt_file"
+    )]
+    verifier_snapshot: Option<PathBuf>,
+    /// Expected next position stored in --verifier-snapshot.
+    #[arg(
+        long,
+        requires_all = ["verifier_snapshot", "verifier_token_ids", "verifier_identity_cache"]
+    )]
+    verifier_position: Option<u32>,
+    /// Exactly two token IDs: committed carry, then candidate draft.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        num_args = 2,
+        requires_all = ["verifier_snapshot", "verifier_position", "verifier_identity_cache"]
+    )]
+    verifier_token_ids: Option<Vec<u32>>,
+    /// Strong ordered-shard identity cache used to authenticate the snapshot.
+    #[arg(
+        long,
+        value_name = "DIR",
+        requires_all = ["verifier_snapshot", "verifier_position", "verifier_token_ids"]
+    )]
+    verifier_identity_cache: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +123,78 @@ struct Dsv4PrefillRun {
     optimistic_boundary_ceiling_ms: f64,
     optimistic_boundary_ceiling_percent: f64,
     chunks: Vec<Dsv4PrefillChunk>,
+}
+
+#[derive(Serialize)]
+struct Dsv4VerifierFloorReport {
+    schema_version: u32,
+    report_kind: &'static str,
+    build: Value,
+    model: String,
+    device: String,
+    snapshot: String,
+    snapshot_next_position: u32,
+    snapshot_prefix_sha256: String,
+    snapshot_causal_sha256: String,
+    model_content_sha256: String,
+    identity_cache_outcome: String,
+    identity_hashed_bytes: u64,
+    token_ids: [u32; 2],
+    load_ms: f64,
+    warmups: Vec<Dsv4VerifierFloorPair>,
+    samples: Vec<Dsv4VerifierFloorPair>,
+    medians: Dsv4VerifierFloorMedians,
+}
+
+#[derive(Serialize)]
+struct Dsv4VerifierFloorPair {
+    order: &'static str,
+    packed: Dsv4VerifierPackedSample,
+    singleton: Dsv4VerifierSingletonSample,
+}
+
+#[derive(Serialize)]
+struct Dsv4VerifierPackedSample {
+    position_before: u32,
+    position_after: u32,
+    wall_ms: f64,
+    pre_expert_gpu_ms: f64,
+    post_route_gpu_ms: f64,
+    command_gpu_ms: f64,
+    outside_gpu_ms: f64,
+    trace: Dsv4VerifierTrace,
+}
+
+#[derive(Serialize)]
+struct Dsv4VerifierSingletonSample {
+    position_before: u32,
+    position_after: u32,
+    wall_ms: f64,
+    command_gpu_ms: f64,
+    outside_gpu_ms: f64,
+    wait_residual_ms: f64,
+    encode_cpu_ms: f64,
+    reconstruction_residual_ms: f64,
+    trace: Dsv4VerifierTrace,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct Dsv4VerifierTrace {
+    encoders: u64,
+    concurrent_encoders: u64,
+    dispatches: u64,
+}
+
+#[derive(Serialize)]
+struct Dsv4VerifierFloorMedians {
+    packed_wall_ms: f64,
+    packed_gpu_ms: f64,
+    singleton_wall_ms: f64,
+    singleton_gpu_ms: f64,
+    packed_wall_over_singleton: f64,
+    packed_gpu_over_singleton: f64,
+    two_singletons_over_packed_wall: f64,
+    two_singletons_over_packed_gpu: f64,
 }
 
 #[derive(Serialize)]
@@ -176,6 +286,7 @@ struct Dsv4PrefillLayer {
     gate_dtype: String,
     up_dtype: String,
     down_dtype: String,
+    grouped_q3q4: bool,
     grouped_iq2: bool,
     grouped_iq3: bool,
     bm16: bool,
@@ -183,6 +294,8 @@ struct Dsv4PrefillLayer {
     active_experts: usize,
     max_routes_per_expert: u16,
     route_count: usize,
+    route_ids_sha256: String,
+    route_weights_sha256: String,
     route_tiles16: usize,
     route_tiles32: usize,
     route_tile16_occupancy: f64,
@@ -427,6 +540,7 @@ fn summarize_chunk(
             gate_dtype: format!("{:?}", metadata.gate_dtype),
             up_dtype: format!("{:?}", metadata.up_dtype),
             down_dtype: format!("{:?}", metadata.down_dtype),
+            grouped_q3q4: metadata.grouped_q3q4,
             grouped_iq2: metadata.grouped_iq2,
             grouped_iq3: metadata.grouped_iq3,
             bm16: metadata.bm16,
@@ -438,6 +552,14 @@ fn summarize_chunk(
                 .count(),
             max_routes_per_expert: metadata.expert_counts.iter().copied().max().unwrap_or(0),
             route_count,
+            route_ids_sha256: format!(
+                "{:x}",
+                Sha256::digest(bytemuck::cast_slice::<u16, u8>(&metadata.route_expert_ids))
+            ),
+            route_weights_sha256: format!(
+                "{:x}",
+                Sha256::digest(bytemuck::cast_slice::<u32, u8>(&metadata.route_weight_bits))
+            ),
             route_tiles16,
             route_tiles32,
             route_tile16_occupancy: route_count as f64 / (route_tiles16 * 16) as f64,
@@ -709,7 +831,315 @@ fn execute_profiled_request(
     Ok((run, logits))
 }
 
+fn digest_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn verifier_trace(counters: KernelTraceCounters) -> Dsv4VerifierTrace {
+    Dsv4VerifierTrace {
+        encoders: counters.encoders,
+        concurrent_encoders: counters.concurrent_encoders,
+        dispatches: counters.dispatches,
+    }
+}
+
+fn restore_verifier_snapshot(
+    session: &mut DeepSeekV4Session,
+    snapshot: &DeepSeekV4CausalSnapshot,
+) -> Result<()> {
+    session
+        .restore_causal_snapshot(snapshot)
+        .context("restore DeepSeek V4 verifier snapshot")?;
+    ensure!(
+        session.next_position() == snapshot.next_position(),
+        "restored verifier position {} != snapshot {}",
+        session.next_position(),
+        snapshot.next_position()
+    );
+    Ok(())
+}
+
+fn measure_verifier_packed(
+    ctx: &MetalContext,
+    session: &mut DeepSeekV4Session,
+    snapshot: &DeepSeekV4CausalSnapshot,
+    token_ids: &[u32; 2],
+) -> Result<Dsv4VerifierPackedSample> {
+    restore_verifier_snapshot(session, snapshot)?;
+    let position_before = session.next_position();
+    let trace_guard = kernel_trace_begin();
+    let started = Instant::now();
+    let profile = session
+        .profile_packed_chunk(ctx, token_ids, true, false)
+        .context("profile restored DeepSeek V4 N=2 packed verifier lower bound")?;
+    let wall_ms = started.elapsed().as_secs_f64() * 1e3;
+    let trace = kernel_trace_snapshot();
+    drop(trace_guard);
+    let position_after = session.next_position();
+    ensure!(
+        position_after == position_before + 2,
+        "packed verifier advanced {position_before} -> {position_after}, expected two tokens"
+    );
+    ensure!(
+        profile.pre_expert.command_gpu_ms.len() == 43
+            && profile.post_route.command_gpu_ms.len() == 43
+            && profile.post_route.metadata.len() == 43,
+        "packed verifier did not return two 43-layer command profiles"
+    );
+    ensure!(
+        trace.encoders > 1 && trace.dispatches > 0,
+        "packed verifier kernel trace does not prove packed execution: {trace:?}"
+    );
+    let pre_expert_gpu_ms = profile.pre_expert.command_gpu_ms.iter().sum::<f64>();
+    let post_route_gpu_ms = profile.post_route.command_gpu_ms.iter().sum::<f64>();
+    let command_gpu_ms = pre_expert_gpu_ms + post_route_gpu_ms;
+    ensure!(
+        wall_ms.is_finite() && wall_ms > 0.0 && command_gpu_ms.is_finite() && command_gpu_ms > 0.0,
+        "packed verifier returned invalid wall/GPU time {wall_ms}/{command_gpu_ms} ms"
+    );
+    Ok(Dsv4VerifierPackedSample {
+        position_before,
+        position_after,
+        wall_ms,
+        pre_expert_gpu_ms,
+        post_route_gpu_ms,
+        command_gpu_ms,
+        outside_gpu_ms: wall_ms - command_gpu_ms,
+        trace: verifier_trace(trace),
+    })
+}
+
+fn measure_verifier_singleton(
+    ctx: &MetalContext,
+    session: &mut DeepSeekV4Session,
+    snapshot: &DeepSeekV4CausalSnapshot,
+    token_id: u32,
+) -> Result<Dsv4VerifierSingletonSample> {
+    restore_verifier_snapshot(session, snapshot)?;
+    let position_before = session.next_position();
+    let trace_guard = kernel_trace_begin();
+    let profile = session
+        .forward_token_whole_profiled(ctx, token_id)
+        .context("profile restored DeepSeek V4 singleton comparator")?;
+    let trace = kernel_trace_snapshot();
+    drop(trace_guard);
+    let position_after = session.next_position();
+    ensure!(
+        profile.position == position_before && position_after == position_before + 1,
+        "singleton verifier profile/position mismatch: profile={} state={position_before}->{position_after}",
+        profile.position
+    );
+    ensure!(
+        trace.encoders == 1 && trace.concurrent_encoders == 0 && trace.dispatches > 0,
+        "singleton verifier kernel trace does not prove one-encoder execution: {trace:?}"
+    );
+    ensure!(
+        profile.forward_wall_ms.is_finite()
+            && profile.forward_wall_ms > 0.0
+            && profile.command_gpu_ms.is_finite()
+            && profile.command_gpu_ms > 0.0,
+        "singleton verifier returned invalid wall/GPU time {}/{} ms",
+        profile.forward_wall_ms,
+        profile.command_gpu_ms
+    );
+    Ok(Dsv4VerifierSingletonSample {
+        position_before,
+        position_after,
+        wall_ms: profile.forward_wall_ms,
+        command_gpu_ms: profile.command_gpu_ms,
+        outside_gpu_ms: profile.outside_gpu_ms(),
+        wait_residual_ms: profile.wait_residual_ms(),
+        encode_cpu_ms: profile.encode_cpu_ms,
+        reconstruction_residual_ms: profile.reconstruction_residual_ms(),
+        trace: verifier_trace(trace),
+    })
+}
+
+fn measure_verifier_pair(
+    ctx: &MetalContext,
+    session: &mut DeepSeekV4Session,
+    snapshot: &DeepSeekV4CausalSnapshot,
+    token_ids: &[u32; 2],
+    packed_first: bool,
+) -> Result<Dsv4VerifierFloorPair> {
+    if packed_first {
+        Ok(Dsv4VerifierFloorPair {
+            order: "packed/singleton",
+            packed: measure_verifier_packed(ctx, session, snapshot, token_ids)?,
+            singleton: measure_verifier_singleton(ctx, session, snapshot, token_ids[0])?,
+        })
+    } else {
+        let singleton = measure_verifier_singleton(ctx, session, snapshot, token_ids[0])?;
+        let packed = measure_verifier_packed(ctx, session, snapshot, token_ids)?;
+        Ok(Dsv4VerifierFloorPair {
+            order: "singleton/packed",
+            packed,
+            singleton,
+        })
+    }
+}
+
+fn median(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    if values.len().is_multiple_of(2) {
+        (values[middle - 1] + values[middle]) * 0.5
+    } else {
+        values[middle]
+    }
+}
+
+fn verifier_medians(samples: &[Dsv4VerifierFloorPair]) -> Dsv4VerifierFloorMedians {
+    let packed_wall_ms = median(samples.iter().map(|sample| sample.packed.wall_ms).collect());
+    let packed_gpu_ms = median(
+        samples
+            .iter()
+            .map(|sample| sample.packed.command_gpu_ms)
+            .collect(),
+    );
+    let singleton_wall_ms = median(
+        samples
+            .iter()
+            .map(|sample| sample.singleton.wall_ms)
+            .collect(),
+    );
+    let singleton_gpu_ms = median(
+        samples
+            .iter()
+            .map(|sample| sample.singleton.command_gpu_ms)
+            .collect(),
+    );
+    Dsv4VerifierFloorMedians {
+        packed_wall_ms,
+        packed_gpu_ms,
+        singleton_wall_ms,
+        singleton_gpu_ms,
+        packed_wall_over_singleton: packed_wall_ms / singleton_wall_ms,
+        packed_gpu_over_singleton: packed_gpu_ms / singleton_gpu_ms,
+        two_singletons_over_packed_wall: 2.0 * singleton_wall_ms / packed_wall_ms,
+        two_singletons_over_packed_gpu: 2.0 * singleton_gpu_ms / packed_gpu_ms,
+    }
+}
+
+fn run_verifier_floor(args: &Dsv4PrefillArgs, build: Value) -> Result<()> {
+    ensure!(args.warmups > 0, "--warmups must be nonzero");
+    if !args.ordinary_only {
+        ensure!(args.samples > 0, "--samples must be nonzero");
+    }
+    let snapshot_path = args
+        .verifier_snapshot
+        .as_ref()
+        .context("--verifier-snapshot is required")?;
+    let expected_position = args
+        .verifier_position
+        .context("--verifier-position is required")?;
+    let token_ids = args
+        .verifier_token_ids
+        .as_ref()
+        .context("--verifier-token-ids is required")?;
+    let token_ids: [u32; 2] = token_ids
+        .as_slice()
+        .try_into()
+        .context("--verifier-token-ids requires exactly two IDs")?;
+    let identity_cache = CheckpointIdentityCache::new(
+        args.verifier_identity_cache
+            .as_ref()
+            .context("--verifier-identity-cache is required")?,
+    );
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open model {}", args.model.display()))?;
+    let identity = checkpoint_content_identity(&gguf, &identity_cache)
+        .context("derive verifier model-content identity")?;
+    let model_content_id = DeepSeekV4ModelContentId::new(identity.content_id);
+    let ctx = MetalContext::new().context("create Metal context")?;
+    let forward_limit = usize::try_from(expected_position)
+        .context("verifier position exceeds usize")?
+        .checked_add(2)
+        .context("verifier forward limit overflow")?;
+    let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, forward_limit)
+        .context("plan restored DeepSeek V4 verifier floor")?;
+    let snapshot = load_causal_snapshot_file(
+        snapshot_path,
+        DeepSeekV4SnapshotCodecConstraints {
+            config: plan.config(),
+            session_capacity: plan.session_capacity(),
+            expected_model_content_id: model_content_id,
+            max_record_bytes: 16 * 1024 * 1024 * 1024,
+        },
+    )
+    .with_context(|| format!("load verifier snapshot {}", snapshot_path.display()))?;
+    ensure!(
+        snapshot.next_position() == expected_position,
+        "snapshot next position {} != requested {expected_position}",
+        snapshot.next_position()
+    );
+    let admitted = plan
+        .admit(ctx.memory_signals())
+        .context("admit restored DeepSeek V4 verifier floor")?;
+    let load_started = Instant::now();
+    let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
+        .context("load restored DeepSeek V4 verifier residency")?;
+    let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
+    let mut session = DeepSeekV4Session::new_with_model_content_id(
+        &ctx,
+        realized.into_residency(),
+        model_content_id,
+    )
+    .context("create restored DeepSeek V4 verifier session")?;
+
+    let mut warmups = Vec::with_capacity(args.warmups);
+    for index in 0..args.warmups {
+        warmups.push(measure_verifier_pair(
+            &ctx,
+            &mut session,
+            &snapshot,
+            &token_ids,
+            index.is_multiple_of(2),
+        )?);
+    }
+    let mut samples = Vec::with_capacity(args.samples);
+    for index in 0..args.samples {
+        samples.push(measure_verifier_pair(
+            &ctx,
+            &mut session,
+            &snapshot,
+            &token_ids,
+            (index + args.warmups).is_multiple_of(2),
+        )?);
+    }
+    let medians = verifier_medians(&samples);
+    let report = Dsv4VerifierFloorReport {
+        schema_version: 1,
+        report_kind: "dsv4_verifier_floor",
+        build,
+        model: args.model.display().to_string(),
+        device: ctx.device.name().to_string(),
+        snapshot: snapshot_path.display().to_string(),
+        snapshot_next_position: snapshot.next_position(),
+        snapshot_prefix_sha256: digest_hex(snapshot.prefix_digest()),
+        snapshot_causal_sha256: digest_hex(snapshot.causal_digest()),
+        model_content_sha256: digest_hex(model_content_id.as_bytes()),
+        identity_cache_outcome: format!("{:?}", identity.outcome),
+        identity_hashed_bytes: identity.bytes_hashed,
+        token_ids,
+        load_ms,
+        warmups,
+        samples,
+        medians,
+    };
+    let json = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = &args.json_out {
+        std::fs::write(path, format!("{json}\n"))
+            .with_context(|| format!("write verifier floor {}", path.display()))?;
+    }
+    println!("{json}");
+    Ok(())
+}
+
 pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
+    if args.verifier_snapshot.is_some() {
+        return run_verifier_floor(&args, build);
+    }
     ensure!(
         (1..=32_768).contains(&args.tokens),
         "--tokens must be 1..=32768"
@@ -740,9 +1170,11 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
     let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
     let mut residency = Some(realized.into_residency());
 
-    let mut warmups = Vec::with_capacity(args.warmups);
+    let warmup_count = args.warmups;
+    let sample_count = if args.ordinary_only { 0 } else { args.samples };
+    let mut warmups = Vec::with_capacity(warmup_count);
     let mut reference_logits = None;
-    for _ in 0..args.warmups {
+    for _ in 0..warmup_count {
         let (run, logits) =
             execute_ordinary_request(&ctx, &mut residency, &tokens, args.chunk_tokens)?;
         if let Some(reference) = &reference_logits {
@@ -754,17 +1186,21 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
     }
     let (ordinary, ordinary_logits) =
         execute_ordinary_request(&ctx, &mut residency, &tokens, args.chunk_tokens)?;
-    ensure!(
-        reference_logits.as_ref() == Some(&ordinary_logits),
-        "ordinary reference logits differ from warmup execution"
-    );
+    if let Some(reference) = reference_logits.as_ref() {
+        ensure!(
+            reference == &ordinary_logits,
+            "ordinary reference logits differ from warmup execution"
+        );
+    } else {
+        reference_logits = Some(ordinary_logits.clone());
+    }
     let ordinary_reference_wall_ms = ordinary.wall_ms;
     ensure!(
         ordinary_reference_wall_ms.is_finite() && ordinary_reference_wall_ms > 0.0,
         "ordinary DeepSeek V4 reference wall is invalid"
     );
-    let mut samples = Vec::with_capacity(args.samples);
-    for _ in 0..args.samples {
+    let mut samples = Vec::with_capacity(sample_count);
+    for _ in 0..sample_count {
         let (run, logits) = execute_profiled_request(
             &ctx,
             &mut residency,

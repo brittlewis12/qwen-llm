@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 K216 MXFP4 Matrix Default GO
+
+Status: K216's two MXFP4 routed-down layers now use a four-SIMDgroup F32
+64-output by 32-route matrix tile on complete N=2,048 chunks. Set
+`QWEN_DSV4_PACKED_MXFP4_MATRIX=0` to restore scalar GEMV.
+
+- The tile decodes each 64-by-32 MXFP4 weight panel once and reuses it across up
+  to 32 route columns. Weights, activations, accumulators, and outputs stay F32;
+  buckets below 16 columns remain scalar. The policy is fail-closed to the exact
+  Apple M4 Max, K216 asset, E=216, and N=2,048 identity plus the PSO's 12 KiB /
+  128-thread capability contract.
+- Reduced seams through B=33 and a production K=2,048/M=4,096 differential pass
+  guards and repeatability. Relative RMS is `7.57e-7`, cosine is `1.0`, and
+  normalized maximum error is `2.071e-6`. The production two-layer bucket floor
+  moves GPU median `412.742 -> 50.152 ms`, saving `358.306 ms` conservatively,
+  or 87.85%.
+- One initial endpoint acquisition is invalid: its second candidate warmup rises
+  from about 14.0 to 39.6 seconds and its ordinary pass to 27.5 seconds. The one
+  bounded stable retry records control/candidate/candidate/control walls of
+  `14,093.292/13,687.239/13,616.072/13,980.038 ms`. Candidate median saves
+  `385.009 ms`, or 2.74%, and both candidates beat both controls.
+- The changed N=2,048 chunk moves from a `8,034.713 ms` control median to
+  `7,731.563 ms`, saving `303.150 ms`, or 3.77%. An independent sampled pair
+  assigns `341.546 ms` to routed experts and `341.322 ms` to post-route GPU;
+  sampled request wall saves `364.856 ms` while neighboring stages stay flat.
+- On the exact 2,385-token official-chat prompt, all prompt IDs, the first-token
+  top-eight rank order, and all 32 greedy output IDs remain identical. The top
+  margin grows `3.067 -> 3.078`. Numerical propagation after changed layer 26
+  alters 72/189 route hashes and two cutoff-sensitive sparse selected sets;
+  every count and status remains valid, and each arm's cutoff margin is positive.
+
+Decision: default the physically smaller work unit for this exact profile with
+one-variable rollback. This is numerical/semantic authority, not bit-equivalence
+or transfer authority for FRESH, K160, N=4,096, tails, or another device. Raw
+artifacts are under `target/profiles/dsv4-k216-mxfp4-matrix-screen`.
+Adversarial review: cx session `019fe83c-1010-7721-9c50-488228e94883`.
+
 ## 2026-08-09 - DeepSeek V4 K216 Batched MXFP4 GEMV KILL
 
 Status: KILL exact 2D batching of K216's row-wise MXFP4 routed-down GEMVs. All

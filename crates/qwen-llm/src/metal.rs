@@ -3536,6 +3536,147 @@ pub fn encode_mat_vec_mxfp4_f32(
     Ok(())
 }
 
+pub(crate) fn encode_mat_mat_mxfp4_f32_mm64x32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_batch: usize,
+) -> Result<(), MetalError> {
+    const BLOCK_ELEMENTS: usize = 32;
+    const BLOCK_BYTES: usize = 17;
+    const KERNEL: &str = "mat_mat_mxfp4_f32_mm64x32";
+    if n_in == 0 || n_out == 0 || n_batch == 0 || !n_in.is_multiple_of(BLOCK_ELEMENTS) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "n_in={n_in} must be nonzero and divisible by {BLOCK_ELEMENTS}; n_out={n_out} and n_batch={n_batch} must be nonzero"
+            ),
+        });
+    }
+    let n_in_u32 = u32::try_from(n_in).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_in={n_in} exceeds u32"),
+    })?;
+    let n_out_u32 = u32::try_from(n_out).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_out={n_out} exceeds u32"),
+    })?;
+    let n_batch_u32 = u32::try_from(n_batch).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n_batch={n_batch} exceeds u32"),
+    })?;
+    let row_bytes = n_in
+        .checked_div(BLOCK_ELEMENTS)
+        .and_then(|blocks| blocks.checked_mul(BLOCK_BYTES))
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "MXFP4 row-byte calculation overflow".into(),
+        })?;
+    let row_bytes_u32 = u32::try_from(row_bytes).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("MXFP4 row bytes {row_bytes} exceeds u32"),
+    })?;
+    if weight.dtype != GgmlType::MXFP4 || x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "weight/x/y expected MXFP4/F32/F32, got {:?}/{:?}/{:?}",
+                weight.dtype, x.dtype, y.dtype
+            ),
+        });
+    }
+    if weight.shape.as_slice() != [n_in as u64, n_out as u64]
+        || x.shape.as_slice() != [n_in as u64, n_batch as u64]
+        || y.shape.as_slice() != [n_out as u64, n_batch as u64]
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "weight/x/y expected shapes [{n_in},{n_out}]/[{n_in},{n_batch}]/[{n_out},{n_batch}], got {:?}/{:?}/{:?}",
+                weight.shape, x.shape, y.shape
+            ),
+        });
+    }
+    if !x.offset.is_multiple_of(std::mem::align_of::<f32>() as u64)
+        || !y.offset.is_multiple_of(std::mem::align_of::<f32>() as u64)
+        || !y.is_writable()
+    {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "x/y must be aligned F32 and y writable, got offsets={}/{} y_provenance={:?}",
+                x.offset,
+                y.offset,
+                y.provenance()
+            ),
+        });
+    }
+    for (label, tensor) in [("weight", weight), ("x", x), ("y", y)] {
+        let end =
+            tensor
+                .offset
+                .checked_add(tensor.n_bytes())
+                .ok_or_else(|| MetalError::BadShape {
+                    kernel: KERNEL,
+                    detail: format!("{label} buffer range overflow"),
+                })?;
+        if end > tensor.buffer.length() as u64 {
+            return Err(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!(
+                    "{label} range offset={} bytes={} exceeds buffer={}",
+                    tensor.offset,
+                    tensor.n_bytes(),
+                    tensor.buffer.length()
+                ),
+            });
+        }
+    }
+
+    let pso = ctx.pipeline("kernel_mat_mat_mxfp4_f32_mm64x32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        m: u32,
+        n: u32,
+        k: u32,
+        nb01: u32,
+        stride_b: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            m: n_out_u32,
+            n: n_batch_u32,
+            k: n_in_u32,
+            nb01: row_bytes_u32,
+            stride_b: n_in_u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.set_threadgroup_memory(0, 12 * 1024);
+    enc.dispatch(
+        MTLSize {
+            width: n_batch.div_ceil(32),
+            height: n_out.div_ceil(64),
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn encode_mat_vec_block32_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -20894,6 +21035,26 @@ mod tests {
         }
     }
 
+    fn tensor_backing_bytes(tensor: &MetalTensor) -> Vec<u8> {
+        unsafe {
+            std::slice::from_raw_parts(
+                tensor.buffer.contents().as_ptr().cast::<u8>(),
+                tensor.buffer.length(),
+            )
+            .to_vec()
+        }
+    }
+
+    fn assert_offset_guards(tensor: &MetalTensor, prefix: usize, suffix: usize) {
+        let bytes = tensor_backing_bytes(tensor);
+        assert!(bytes[..prefix].iter().all(|&byte| byte == 0xA5));
+        assert!(
+            bytes[bytes.len() - suffix..]
+                .iter()
+                .all(|&byte| byte == 0x5A)
+        );
+    }
+
     fn encode_q6_k_block(d: f32, seed: usize) -> ([u8; 210], [f32; 256]) {
         let mut block = [0u8; 210];
         let mut decoded = [0.0f32; 256];
@@ -21295,6 +21456,364 @@ mod tests {
         assert!(!crate::metal_forward::weight_dtype_kept_native(
             GgmlType::MXFP4
         ));
+    }
+
+    #[test]
+    fn mxfp4_f32_matrix_tile_matches_scalar_envelope_and_guards() {
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        const N_IN: usize = 64;
+        const N_OUT: usize = 65;
+        let mut weight_bytes = Vec::new();
+        for row in 0..N_OUT {
+            for block in 0..N_IN / 32 {
+                let mut indices = [0u8; 32];
+                for (index, value) in indices.iter_mut().enumerate() {
+                    *value = ((row * 11 + block * 7 + index * 3) % 16) as u8;
+                }
+                weight_bytes.extend_from_slice(&encode_mxfp4_block(
+                    120 + ((row + block) % 8) as u8,
+                    &indices,
+                ));
+            }
+        }
+        let weight = offset_tensor(
+            &ctx,
+            7,
+            &weight_bytes,
+            13,
+            vec![N_IN as u64, N_OUT as u64],
+            GgmlType::MXFP4,
+        );
+
+        for n_batch in [1usize, 15, 16, 17, 31, 32, 33] {
+            let x_values = (0..n_batch * N_IN)
+                .map(|index| ((index * 17 % 101) as f32 - 50.0) / 19.0)
+                .collect::<Vec<_>>();
+            let x = offset_tensor(
+                &ctx,
+                16,
+                bytemuck::cast_slice(&x_values),
+                20,
+                vec![N_IN as u64, n_batch as u64],
+                GgmlType::F32,
+            );
+            let output_bytes = vec![0u8; n_batch * N_OUT * size_of::<f32>()];
+            let control = offset_tensor(
+                &ctx,
+                32,
+                &output_bytes,
+                28,
+                vec![N_OUT as u64, n_batch as u64],
+                GgmlType::F32,
+            );
+            let candidate = offset_tensor(
+                &ctx,
+                24,
+                &output_bytes,
+                36,
+                vec![N_OUT as u64, n_batch as u64],
+                GgmlType::F32,
+            );
+            let repeat = offset_tensor(
+                &ctx,
+                40,
+                &output_bytes,
+                44,
+                vec![N_OUT as u64, n_batch as u64],
+                GgmlType::F32,
+            );
+            let weight_before = tensor_backing_bytes(&weight);
+            let x_before = tensor_backing_bytes(&x);
+
+            let command = ctx
+                .queue
+                .commandBuffer()
+                .expect("MXFP4 matrix command buffer");
+            let encoder = KernelEncoder::begin(&command);
+            for row in 0..n_batch {
+                encode_mat_vec_mxfp4_f32(
+                    &ctx,
+                    &encoder,
+                    &weight,
+                    &x.view_subrange((row * N_IN) as u64, vec![N_IN as u64]),
+                    &control.view_subrange((row * N_OUT) as u64, vec![N_OUT as u64]),
+                    N_IN,
+                    N_OUT,
+                )
+                .expect("encode scalar MXFP4 control");
+            }
+            encode_mat_mat_mxfp4_f32_mm64x32(
+                &ctx, &encoder, &weight, &x, &candidate, N_IN, N_OUT, n_batch,
+            )
+            .expect("encode MXFP4 matrix candidate");
+            encode_mat_mat_mxfp4_f32_mm64x32(
+                &ctx, &encoder, &weight, &x, &repeat, N_IN, N_OUT, n_batch,
+            )
+            .expect("encode repeated MXFP4 matrix candidate");
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+
+            let control_values = tensor_f32_at_offset(&control);
+            let candidate_values = tensor_f32_at_offset(&candidate);
+            let repeat_values = tensor_f32_at_offset(&repeat);
+            assert_eq!(
+                candidate_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                repeat_values
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "n_batch={n_batch} repeat"
+            );
+            let mut diff_sq = 0.0f64;
+            let mut control_sq = 0.0f64;
+            let mut dot = 0.0f64;
+            let mut candidate_sq = 0.0f64;
+            let mut max_abs = 0.0f32;
+            let mut max_control = 0.0f32;
+            for (&got, &want) in candidate_values.iter().zip(&control_values) {
+                let diff = f64::from(got) - f64::from(want);
+                diff_sq += diff * diff;
+                control_sq += f64::from(want) * f64::from(want);
+                candidate_sq += f64::from(got) * f64::from(got);
+                dot += f64::from(got) * f64::from(want);
+                max_abs = max_abs.max((got - want).abs());
+                max_control = max_control.max(want.abs());
+            }
+            let relative_rms = (diff_sq / control_sq).sqrt();
+            let cosine = dot / (control_sq * candidate_sq).sqrt();
+            let normalized_max = f64::from(max_abs / max_control.max(1.0));
+            assert!(
+                relative_rms <= 2.0e-5,
+                "n_batch={n_batch} relative_rms={relative_rms}"
+            );
+            assert!(cosine >= 0.999_999_9, "n_batch={n_batch} cosine={cosine}");
+            assert!(
+                normalized_max <= 1.0e-4,
+                "n_batch={n_batch} normalized_max={normalized_max}"
+            );
+            assert!(candidate_values.iter().all(|value| value.is_finite()));
+            assert_eq!(tensor_backing_bytes(&weight), weight_before);
+            assert_eq!(tensor_backing_bytes(&x), x_before);
+            assert_offset_guards(&control, 32, 28);
+            assert_offset_guards(&candidate, 24, 36);
+            assert_offset_guards(&repeat, 40, 44);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn mxfp4_f32_matrix_tile_k216_bucket_floor() {
+        use std::time::Instant;
+
+        let ctx = match metal_test_context() {
+            Some(ctx) => ctx,
+            None => return,
+        };
+        let path = "/Users/tito/models/deepseek-v4-flash-0731-reap-k216/DeepSeek-V4-Flash-0731-REAP-K216-UD-IQ3_XXS-00001-of-00003.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("[mxfp4-mm-floor] skipped: K216 fixture missing");
+            return;
+        }
+        const N_IN: usize = 2_048;
+        const N_OUT: usize = 4_096;
+        const EXPERTS: usize = 216;
+        const MAX_BATCH: usize = 77;
+        let gguf = crate::gguf::GgufFile::open(path).expect("open K216 GGUF");
+        let load_bank = |layer: usize| {
+            let name = format!("blk.{layer}.ffn_down_exps.weight");
+            let tensor = gguf
+                .tensors
+                .iter()
+                .find(|tensor| tensor.name == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(tensor.dtype, GgmlType::MXFP4);
+            assert_eq!(
+                tensor.shape,
+                vec![N_IN as u64, N_OUT as u64, EXPERTS as u64]
+            );
+            MetalTensor::from_bytes(&ctx, gguf.slice(tensor), tensor.shape.clone(), tensor.dtype)
+                .expect("copy MXFP4 expert bank")
+        };
+        let banks = [load_bank(26), load_bank(42)];
+        let distributions =
+            [(160usize, 12_288usize), (166usize, 12_288usize)].map(|(bucket_count, columns)| {
+                let base = columns / bucket_count;
+                let remainder = columns % bucket_count;
+                (0..bucket_count)
+                    .map(|expert| base + usize::from(expert < remainder))
+                    .collect::<Vec<_>>()
+            });
+        assert_eq!(distributions[0].iter().sum::<usize>(), 12_288);
+        assert_eq!(distributions[1].iter().sum::<usize>(), 12_288);
+        assert!(distributions.iter().flatten().all(|&count| count >= 16));
+
+        let x_values = (0..MAX_BATCH * N_IN)
+            .map(|index| ((index * 17 % 101) as f32 - 50.0) / 19.0)
+            .collect::<Vec<_>>();
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&x_values),
+            vec![N_IN as u64, MAX_BATCH as u64],
+            GgmlType::F32,
+        )
+        .expect("MXFP4 floor input");
+        let control_output = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, MAX_BATCH as u64])
+            .expect("MXFP4 floor control output");
+        let candidate_output = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, MAX_BATCH as u64])
+            .expect("MXFP4 floor candidate output");
+        let expert_bytes = banks[0].n_bytes() / EXPERTS as u64;
+        assert_eq!(expert_bytes, (N_IN * N_OUT / 32 * 17) as u64);
+
+        let check_weight = banks[0].view_bytes(0, vec![N_IN as u64, N_OUT as u64]);
+        let check_command = ctx
+            .queue
+            .commandBuffer()
+            .expect("MXFP4 production-K check command buffer");
+        let check_encoder = KernelEncoder::begin(&check_command);
+        for column in 0..MAX_BATCH {
+            encode_mat_vec_mxfp4_f32(
+                &ctx,
+                &check_encoder,
+                &check_weight,
+                &input.view_subrange((column * N_IN) as u64, vec![N_IN as u64]),
+                &control_output.view_subrange((column * N_OUT) as u64, vec![N_OUT as u64]),
+                N_IN,
+                N_OUT,
+            )
+            .expect("encode production-K scalar check");
+        }
+        encode_mat_mat_mxfp4_f32_mm64x32(
+            &ctx,
+            &check_encoder,
+            &check_weight,
+            &input,
+            &candidate_output,
+            N_IN,
+            N_OUT,
+            MAX_BATCH,
+        )
+        .expect("encode production-K matrix check");
+        check_encoder.end();
+        check_command.commit();
+        check_command.waitUntilCompleted();
+        assert!(check_command.error().is_none());
+        let check_control = tensor_f32_at_offset(&control_output);
+        let check_candidate = tensor_f32_at_offset(&candidate_output);
+        let mut diff_sq = 0.0f64;
+        let mut control_sq = 0.0f64;
+        let mut candidate_sq = 0.0f64;
+        let mut dot = 0.0f64;
+        let mut max_abs = 0.0f32;
+        let mut max_control = 0.0f32;
+        for (&got, &want) in check_candidate.iter().zip(&check_control) {
+            let diff = f64::from(got) - f64::from(want);
+            diff_sq += diff * diff;
+            control_sq += f64::from(want) * f64::from(want);
+            candidate_sq += f64::from(got) * f64::from(got);
+            dot += f64::from(got) * f64::from(want);
+            max_abs = max_abs.max((got - want).abs());
+            max_control = max_control.max(want.abs());
+        }
+        let relative_rms = (diff_sq / control_sq).sqrt();
+        let cosine = dot / (control_sq * candidate_sq).sqrt();
+        let normalized_max = f64::from(max_abs / max_control.max(1.0));
+        eprintln!(
+            "[mxfp4-mm-floor] production-K relative_rms={relative_rms:.9} cosine={cosine:.9} normalized_max={normalized_max:.9}"
+        );
+        assert!(relative_rms <= 2.0e-5);
+        assert!(cosine >= 0.999_999_9);
+        assert!(normalized_max <= 1.0e-4);
+        assert!(check_candidate.iter().all(|value| value.is_finite()));
+
+        let run = |matrix: bool| {
+            let started = Instant::now();
+            let command = ctx
+                .queue
+                .commandBuffer()
+                .expect("MXFP4 floor command buffer");
+            let encoder = KernelEncoder::begin(&command);
+            for (bank, counts) in banks.iter().zip(&distributions) {
+                for (expert, &n_batch) in counts.iter().enumerate() {
+                    let weight = bank.view_bytes(
+                        expert as u64 * expert_bytes,
+                        vec![N_IN as u64, N_OUT as u64],
+                    );
+                    let x = input.view_subrange(0, vec![N_IN as u64, n_batch as u64]);
+                    if matrix {
+                        let y =
+                            candidate_output.view_subrange(0, vec![N_OUT as u64, n_batch as u64]);
+                        encode_mat_mat_mxfp4_f32_mm64x32(
+                            &ctx, &encoder, &weight, &x, &y, N_IN, N_OUT, n_batch,
+                        )
+                        .expect("encode MXFP4 matrix floor");
+                    } else {
+                        for column in 0..n_batch {
+                            let x_row = x.view_subrange((column * N_IN) as u64, vec![N_IN as u64]);
+                            let y_row = control_output
+                                .view_subrange((column * N_OUT) as u64, vec![N_OUT as u64]);
+                            encode_mat_vec_mxfp4_f32(
+                                &ctx, &encoder, &weight, &x_row, &y_row, N_IN, N_OUT,
+                            )
+                            .expect("encode scalar MXFP4 floor");
+                        }
+                    }
+                }
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none());
+            (
+                started.elapsed().as_secs_f64() * 1e3,
+                (command.GPUEndTime() - command.GPUStartTime()) * 1e3,
+            )
+        };
+
+        run(false);
+        run(true);
+        let a1 = run(false);
+        let b1 = run(true);
+        let b2 = run(true);
+        let a2 = run(false);
+        eprintln!(
+            "[mxfp4-mm-floor] wall_ms A/B/B/A={:.3}/{:.3}/{:.3}/{:.3}",
+            a1.0, b1.0, b2.0, a2.0
+        );
+        eprintln!(
+            "[mxfp4-mm-floor] gpu_ms A/B/B/A={:.3}/{:.3}/{:.3}/{:.3}",
+            a1.1, b1.1, b2.1, a2.1
+        );
+        let control_wall = (a1.0 + a2.0) / 2.0;
+        let candidate_wall = (b1.0 + b2.0) / 2.0;
+        let control_gpu = (a1.1 + a2.1) / 2.0;
+        let candidate_gpu = (b1.1 + b2.1) / 2.0;
+        let control_wall_spread = (a1.0 - a2.0).abs() / control_wall;
+        let candidate_wall_spread = (b1.0 - b2.0).abs() / candidate_wall;
+        let control_gpu_spread = (a1.1 - a2.1).abs() / control_gpu;
+        let candidate_gpu_spread = (b1.1 - b2.1).abs() / candidate_gpu;
+        let conservative_gpu_saving = a1.1.min(a2.1) - b1.1.max(b2.1);
+        let conservative_wall_saving = a1.0.min(a2.0) - b1.0.max(b2.0);
+        let gpu_fraction = 1.0 - candidate_gpu / control_gpu;
+        eprintln!(
+            "[mxfp4-mm-floor] medians wall={control_wall:.3}->{candidate_wall:.3} gpu={control_gpu:.3}->{candidate_gpu:.3} conservative_wall={conservative_wall_saving:.3} conservative_gpu={conservative_gpu_saving:.3} gpu_fraction={gpu_fraction:.4}"
+        );
+        assert!(control_wall_spread <= 0.05);
+        assert!(candidate_wall_spread <= 0.05);
+        assert!(control_gpu_spread <= 0.05);
+        assert!(candidate_gpu_spread <= 0.05);
+        assert!(b1.0 < a1.0.min(a2.0) && b2.0 < a1.0.min(a2.0));
+        assert!(b1.1 < a1.1.min(a2.1) && b2.1 < a1.1.min(a2.1));
+        assert!(conservative_gpu_saving >= 250.0);
+        assert!(conservative_wall_saving >= 200.0);
+        assert!(gpu_fraction >= 0.50);
     }
 
     #[test]

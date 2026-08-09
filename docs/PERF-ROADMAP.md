@@ -1193,9 +1193,18 @@ reduces 24,576 row dispatches to 326 bucket dispatches while preserving all
 25,165,824 threadgroups, dot products, and final-logit bits. K216 request median
 regresses by `739.232 ms` or `5.50%`; the changed full chunk regresses by
 `443.283 ms` or `5.69%`. The outlier is therefore not removable launch count.
-Close batching and grid sweeps. A future MXFP4 branch must create real
-cross-column tile reuse and clear a production-shape primitive gate before
-another full-model arm.
+Close batching and grid sweeps.
+
+The changed-work premise clears. A four-SIMDgroup F32 64x32 tile decodes each
+MXFP4 weight panel once for up to 32 route columns. Its real-bank two-layer GPU
+floor falls `412.742 -> 50.152 ms`, or 87.85%. A stable K216 endpoint retry
+moves the 2,385-token request median `14,036.665 -> 13,651.656 ms`, saving
+`385.009 ms` or 2.74%; the N=2,048 chunk saves `303.150 ms` or 3.77%. Sampled
+post-route GPU independently saves `341.322 ms`. On the official-chat prompt,
+all 32 greedy IDs and the top-eight first-token order remain identical despite
+expected downstream route and two cutoff-sensitive selected-set changes. Default
+only for the authenticated M4 Max/K216/E=216/N=2,048 profile; retain scalar
+buckets below 16 and `QWEN_DSV4_PACKED_MXFP4_MATRIX=0` rollback.
 
 The local DSpark census and external acceptance calibration are complete. On
 the exact 2,385-token official-chat prompt, llama.cpp N1 at confidence 0.3 moves
@@ -1231,12 +1240,11 @@ and exact shared-panel precedents are negative or about 1% whole-wall. Reopen
 only with 30-50 ms of independently isolated GPU-work deletion beyond unchanged
 projection arithmetic and a credible path to the complete wall bar.
 
-1. **Price a true K216 MXFP4 matrix tile, not launch aggregation.** Layers 26
-   and 42 retain `402.924 ms` of complete-layer excess, but exact 2D batching
-   regresses the changed chunk by `443.283 ms`. Reopen only with cross-column
-   weight/activation reuse and a production K=2,048/M=4,096 primitive saving
-   large enough to retain at least `max(100 ms, 1%)` after replacement cost and
-   numerical validation. Do not sweep the failed GEMV grid.
+1. **Refresh attribution before transferring the K216 win.** FRESH shares two
+   MXFP4-down layers but executes its leading cells at N=4,096; K160 has no
+   MXFP4 surface. Capture one current-default FRESH N=4,096 and K160 N=2,048
+   profile, then rank each asset by measured stage excess. Do not widen the
+   K216 policy or infer a shared next kernel from quant names alone.
 2. **Keep command ownership closed without GPU-work deletion.** The optimistic
    merged-route/indirect ceiling misses 2% after nonphysical full credits. Reopen
    only when a producer/consumer fusion independently deletes roughly 30-50 ms

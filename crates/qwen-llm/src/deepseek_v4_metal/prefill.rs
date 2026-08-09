@@ -6004,6 +6004,11 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
+    default_on packed_mxfp4_matrix_enabled,
+    "QWEN_DSV4_PACKED_MXFP4_MATRIX"
+);
+
+crate::env_flag!(
     default_off packed_gpu_route_iq3_enabled,
     "QWEN_DSV4_PACKED_GPU_ROUTE_IQ3"
 );
@@ -6039,6 +6044,16 @@ fn packed_grouped_q3q4_candidate_supported(ctx: &MetalContext) -> bool {
     true
 }
 
+fn packed_mxfp4_matrix_candidate_supported(ctx: &MetalContext) -> bool {
+    if ctx.device.maxThreadgroupMemoryLength() < 12 * 1024 {
+        return false;
+    }
+    let Ok(pipeline) = ctx.pipeline("kernel_mat_mat_mxfp4_f32_mm64x32") else {
+        return false;
+    };
+    pipeline.threadExecutionWidth() == 32 && pipeline.maxTotalThreadsPerThreadgroup() >= 128
+}
+
 #[allow(clippy::too_many_arguments)]
 fn packed_grouped_q3q4_scope_qualified(
     device_name: &str,
@@ -6058,6 +6073,20 @@ fn packed_grouped_q3q4_scope_qualified(
         && gate_dtype == GgmlType::Q3_K
         && up_dtype == GgmlType::Q3_K
         && down_dtype == GgmlType::Q4_K
+}
+
+fn packed_mxfp4_matrix_scope_qualified(
+    device_name: &str,
+    tensor_count: usize,
+    source_bytes: u64,
+    expert_count: usize,
+    n_tokens: usize,
+) -> bool {
+    device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
+        && tensor_count == 1_328
+        && source_bytes == PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES
+        && expert_count == 216
+        && n_tokens == PACKED_MATRIX_MIN_TOKENS
 }
 
 #[cfg(test)]
@@ -8505,6 +8534,7 @@ impl PrefillMoeScratch {
         shared_down: &MetalTensor,
         expert_policy: PackedExpertPolicy,
         grouped_q3q4_qualified: bool,
+        mxfp4_matrix: bool,
         shared_matrix: bool,
         shared_precomputed: bool,
         expert_clamp: f32,
@@ -8927,6 +8957,9 @@ impl PrefillMoeScratch {
             false
         };
         let used_grouped_target = used_grouped_q3q4 || used_grouped_iq2 || used_grouped_iq3;
+        let mut mxfp4_matrix_dispatches = 0usize;
+        let mut mxfp4_matrix_columns = 0usize;
+        let mut mxfp4_scalar_columns = 0usize;
         if !used_grouped_target {
             for bucket in schedule {
                 let gate_weight = expert_weight_view(
@@ -9035,7 +9068,33 @@ impl PrefillMoeScratch {
                         &inner_flat,
                         expert_clamp,
                     )?;
-                    if down_weight.dtype == GgmlType::MXFP4 {
+                    if down_weight.dtype == GgmlType::MXFP4 && mxfp4_matrix && chunk_len >= 16 {
+                        crate::metal::encode_mat_mat_mxfp4_f32_mm64x32(
+                            ctx,
+                            enc,
+                            &down_weight,
+                            &inner,
+                            &bucket_output,
+                            MOE_FFN_SIZE,
+                            DEEPSEEK_V4_HIDDEN_SIZE,
+                            chunk_len,
+                        )?;
+                        mxfp4_matrix_dispatches += 1;
+                        mxfp4_matrix_columns =
+                            mxfp4_matrix_columns.checked_add(chunk_len).ok_or_else(|| {
+                                DeepSeekV4MetalError::Invalid(
+                                    "packed MXFP4 matrix column count overflow".into(),
+                                )
+                            })?;
+                    } else if down_weight.dtype == GgmlType::MXFP4 {
+                        if mxfp4_matrix {
+                            mxfp4_scalar_columns =
+                                mxfp4_scalar_columns.checked_add(chunk_len).ok_or_else(|| {
+                                    DeepSeekV4MetalError::Invalid(
+                                        "packed MXFP4 scalar column count overflow".into(),
+                                    )
+                                })?;
+                        }
                         for row in 0..chunk_len {
                             let inner_row = f32_row(
                                 &inner,
@@ -9086,6 +9145,16 @@ impl PrefillMoeScratch {
                     )?;
                 }
             }
+        }
+        if mxfp4_matrix_dispatches > 0 {
+            eprintln!(
+                "deepseek_v4: MXFP4 F32 matrix routed down active gate={:?} up={:?} matrix_dispatches={} matrix_columns={} scalar_columns={}; rollback=QWEN_DSV4_PACKED_MXFP4_MATRIX=0",
+                gate_bank.dtype,
+                up_bank.dtype,
+                mxfp4_matrix_dispatches,
+                mxfp4_matrix_columns,
+                mxfp4_scalar_columns,
+            );
         }
 
         let shared_output = if shared_precomputed {
@@ -9707,6 +9776,7 @@ impl DeepSeekV4Session {
         start_position: u32,
         route_policy: PackedRoutePolicy,
         expert_policy: PackedExpertPolicy,
+        mxfp4_matrix: bool,
         q_b_projection: Q8PrecisionProjection,
         output_projection: Q8PrecisionProjection,
         compressor_matrix: bool,
@@ -9730,7 +9800,7 @@ impl DeepSeekV4Session {
         let compatibility = self.snapshot_compatibility_digest()?;
         let config = self.residency.config();
         let policy_manifest = format!(
-            "route={};expert={};qb={};out={};compressor={compressor_matrix};shared={shared_matrix};router={router_e8p32_strict};qakv={};indexer={indexer_q_matrix};group8={};rope={};batched_compressor={};indexer_rope={};indexer_visible={};indexer_tiled={};selected_online={};direct_load={};shared_overlap={};q3q4={};gpu_iq3={};grouped_iq3={};iq2_f16={};iq2_mm={};grouped_output={};stage={stage_profile_active};post={post_route_profile_active}",
+            "route={};expert={};mxfp4_matrix={mxfp4_matrix};qb={};out={};compressor={compressor_matrix};shared={shared_matrix};router={router_e8p32_strict};qakv={};indexer={indexer_q_matrix};group8={};rope={};batched_compressor={};indexer_rope={};indexer_visible={};indexer_tiled={};selected_online={};direct_load={};shared_overlap={};q3q4={};gpu_iq3={};grouped_iq3={};iq2_f16={};iq2_mm={};grouped_output={};stage={stage_profile_active};post={post_route_profile_active}",
             route_policy.label(),
             expert_policy.label(),
             q_b_projection.label(),
@@ -10249,6 +10319,15 @@ impl DeepSeekV4Session {
             } else {
                 expert_policy
             };
+        let mxfp4_matrix = packed_mxfp4_matrix_enabled()
+            && packed_mxfp4_matrix_scope_qualified(
+                &device_name,
+                residency_tensor_count,
+                residency_source_bytes,
+                expert_count,
+                token_ids.len(),
+            )
+            && packed_mxfp4_matrix_candidate_supported(ctx);
         if self.prefill.moe.expert_count != MOE_EXPERT_COUNT {
             static REPORTED: std::sync::Once = std::sync::Once::new();
             REPORTED.call_once(|| {
@@ -10338,6 +10417,7 @@ impl DeepSeekV4Session {
                 start_position,
                 route_policy,
                 expert_policy,
+                mxfp4_matrix,
                 q_b_projection,
                 output_projection,
                 compressor_matrix,
@@ -10384,6 +10464,7 @@ impl DeepSeekV4Session {
             emit_logits,
             route_policy,
             expert_policy,
+            mxfp4_matrix,
             q_b_projection,
             output_projection,
             compressor_matrix,
@@ -10426,6 +10507,7 @@ impl DeepSeekV4Session {
         emit_logits: bool,
         route_policy: PackedRoutePolicy,
         expert_policy: PackedExpertPolicy,
+        mxfp4_matrix: bool,
         q_b_projection: Q8PrecisionProjection,
         output_projection: Q8PrecisionProjection,
         compressor_matrix: bool,
@@ -11585,6 +11667,7 @@ impl DeepSeekV4Session {
                     shared_down,
                     expert_policy,
                     grouped_q3q4_qualified,
+                    mxfp4_matrix,
                     shared_matrix,
                     shared_overlap_command.is_some(),
                     self.residency.config().swiglu_clamp_experts[layer],
@@ -13229,6 +13312,55 @@ mod tests {
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
             PACKED_MATRIX_MIN_TOKENS - 1,
+        ));
+    }
+
+    #[test]
+    fn packed_mxfp4_matrix_scope_is_exactly_k216_n2048_m4() {
+        let qualified = |device, tensors, bytes, experts, tokens| {
+            packed_mxfp4_matrix_scope_qualified(device, tensors, bytes, experts, tokens)
+        };
+        assert!(qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            "Apple M3 Max",
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_327,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES - 1,
+            216,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            160,
+            PACKED_MATRIX_MIN_TOKENS,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
     }
 

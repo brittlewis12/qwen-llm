@@ -14230,11 +14230,16 @@ fn deepseek_v4_session_allocation_requests(
     capacity: DeepSeekV4SessionCapacity,
 ) -> Result<Vec<DeepSeekV4SessionAllocationRequest>, DeepSeekV4MetalError> {
     validate_session_config(config)?;
-    deepseek_v4_session_allocation_requests_for_kinds(&config.attention_kinds, capacity)
+    deepseek_v4_session_allocation_requests_for_kinds(
+        &config.attention_kinds,
+        config.expert_count as usize,
+        capacity,
+    )
 }
 
 fn deepseek_v4_session_allocation_requests_for_kinds(
     attention_kinds: &[AttentionKind],
+    expert_count: usize,
     capacity: DeepSeekV4SessionCapacity,
 ) -> Result<Vec<DeepSeekV4SessionAllocationRequest>, DeepSeekV4MetalError> {
     let sliding = attention_kinds
@@ -14260,7 +14265,7 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
     let moe = DeepSeekV4MoeConfig {
         hidden_size: DEEPSEEK_V4_HIDDEN_SIZE,
         ffn_size: 2_048,
-        expert_count: 256,
+        expert_count,
         top_k: 6,
         routed_scale: 1.0,
     };
@@ -18200,7 +18205,8 @@ mod tests {
         let config = crate::deepseek_v4::flash_0731_config_fixture();
         let capacity =
             DeepSeekV4SessionCapacity::for_forward_limit(3_073, config.context_length).unwrap();
-        let requests = deepseek_v4_session_allocation_requests_for_kinds(&kinds, capacity).unwrap();
+        let requests =
+            deepseek_v4_session_allocation_requests_for_kinds(&kinds, 256, capacity).unwrap();
         let csa_layer_count = kinds
             .iter()
             .filter(|&&kind| kind == AttentionKind::CompressedSparse)
@@ -18299,7 +18305,8 @@ mod tests {
         )
         .unwrap();
         let promoted =
-            deepseek_v4_session_allocation_requests_for_kinds(&kinds, promoted_capacity).unwrap();
+            deepseek_v4_session_allocation_requests_for_kinds(&kinds, 256, promoted_capacity)
+                .unwrap();
         assert_eq!(promoted.len(), requests.len() + 5);
         for name in [
             "prefill.attention.sparse_csa.scores",
@@ -18355,6 +18362,29 @@ mod tests {
             .into_iter()
             .collect()
         );
+    }
+
+    #[test]
+    fn session_memory_inventory_tracks_expert_geometry() {
+        let mut kinds = vec![AttentionKind::SlidingWindow; 2];
+        kinds.extend(std::iter::repeat_n(AttentionKind::CompressedSparse, 21));
+        kinds.extend(std::iter::repeat_n(AttentionKind::HeavilyCompressed, 20));
+        let config = crate::deepseek_v4::flash_0731_config_fixture();
+        let capacity =
+            DeepSeekV4SessionCapacity::for_forward_limit(2_049, config.context_length).unwrap();
+        let e256 =
+            deepseek_v4_session_allocation_requests_for_kinds(&kinds, 256, capacity).unwrap();
+        let e160 =
+            deepseek_v4_session_allocation_requests_for_kinds(&kinds, 160, capacity).unwrap();
+        let differences = e256
+            .iter()
+            .zip(&e160)
+            .filter(|(left, right)| left != right)
+            .collect::<Vec<_>>();
+        assert_eq!(differences.len(), 1);
+        assert_eq!(differences[0].0.name, "moe.logits");
+        assert_eq!(differences[0].0.logical_bytes, 256 * 4);
+        assert_eq!(differences[0].1.logical_bytes, 160 * 4);
     }
 
     #[test]

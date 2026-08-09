@@ -41,6 +41,19 @@ acquisition is atomically published as an authority-free `HOLD` before the
 reducer runs. A reducer or final-publication failure therefore cannot strand
 the 36 observations only in process memory.
 
+## Pre-Acquisition Hold
+
+A clean `c5a082a` campaign launch at `2026-08-09T15:39:46Z` stopped after
+residency load and before C0 with `fresh session realized allocation census
+differs from the frozen plan`. No C/A/P/Z arm executed and no experimental
+timing was observed.
+
+The census exposed a model-geometry bug rather than environmental noise: the
+session memory inventory hard-coded 256 router-logit rows while K160 constructs
+160. The successor derives that row count from the authenticated model config
+and adds a model-free 160-versus-256 inventory proof. The stopped launch remains
+an authority-free implementation `HOLD`, not a retryable observation.
+
 ## Question
 
 Can deleting the F32 `[16384,N]` normalized mHC slab and its only consumer

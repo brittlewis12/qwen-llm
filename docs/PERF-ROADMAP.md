@@ -888,12 +888,17 @@ cohort falls 5.02-6.43%, and ordinary wall falls 3.12-5.18%. A real 6,642-token
 continuation remains coherent and reaches EOS. Default the faster arithmetic
 with `QWEN_DSV4_PACKED_IQ2_F16_MATRIX=0` as the F32-staging rollback.
 
-The K160 REAP lane supplies a new same-GGUF prefill anchor. Native N=2,048
-moves from 227.9 to 266.1 token/s after mapped grouped Q3_K/Q4_K matrices cut
-routed experts from 4.03 to 2.76 seconds. The warm 2,385-token product prompt
-moves from 161.2 to 179.5 token/s with identical generated IDs. Pinned
-llama.cpp reaches 352.0 token/s on the same asset and shape, so the remaining
-prefill gap is real implementation headroom rather than model size.
+The K160 REAP lane supplies same-GGUF prefill and decode anchors. Mapped grouped
+Q3_K/Q4_K matrices first move native N=2,048 from 227.9 to 266.1 token/s.
+Overlapping the route-independent shared expert with CPU schedule construction
+then moves `7,770.189 -> 7,404.634 ms`, or `263.57 -> 276.58 token/s`, with
+identical logits. The warm 2,385-token product prompt moves
+  `182.00 -> 185.67 token/s` in a same-binary rollback pair. Current llama.cpp
+  b10326 reaches 276.84/318.04/331.68 token/s at ubatches 512/1,024/2,048;
+  three full-ubatch samples span 346.18/321.44/306.61 token/s as the device
+  heats. Its decode anchor remains 25.496 token/s at `tg128`. The prefill lead
+  is therefore a full-N work-unit advantage with thermal spread, not a stable
+  352 token/s result from four 512-token ubatches.
 
 The CSA/HCA leverage map is now regime-specific. At terminal singleton shape,
 the production scorer costs 2.102 ms across each of 21 CSA layers, radix4 costs
@@ -932,38 +937,257 @@ One same-binary warm K160 product pair moves the 2,385-token prompt from
 13,249 to 13,111 ms (`180.01 -> 181.90 token/s`) with the same generated-ID
 digest. Default the deletion with `QWEN_DSV4_ONLINE_DIRECT_LOAD=0` as rollback.
 
+The existing eight-head grouped online kernel also transfers exactly to long
+singleton HCA. Direct/grouped timings are `0.326/0.324 ms` at 513 rows,
+`0.790/0.668 ms` at 2,048 rows, and `2.994/2.542 ms` at 8,192 rows. Outputs are
+bit-identical at 512, 513, 527, 528, 895, 896, 897, 2,048, 8,191, and 8,192
+compressed rows. This removes another 0.452 ms/layer, or about 9.0 ms/token at
+terminal depth. Default it with `QWEN_DSV4_GROUPED_LONG_HCA=0` as rollback.
+
+Partitioning that grouped recurrence is the larger HCA move. Four/eight/sixteen
+partitions measure `0.639/0.339/0.330 ms/layer` at 8,192 compressed rows versus
+the 2.542 ms grouped incumbent. P8 is chosen because P16 buys only 0.009 ms
+while doubling partial storage; P8 charges 1,052,672 scratch bytes and includes
+the deterministic sink-aware reducer in every timing. It is repeat-bit stable
+and remains inside the legacy envelope across 512 through 8,192 structural
+rows. On the current asset at position 65,663 it saves 9.71 ms GPU and 9.24 ms
+wall while preserving argmax and every consumed route/CSA decision. At restored
+terminal state it saves 50.32-51.76 ms GPU and 50.19-52.26 ms wall per token,
+moving warm terminal GPU to 136.78-137.23 ms. Default P8 with
+`QWEN_DSV4_SPLITK_HCA=0` as rollback. HCA now contributes only about 6.8 ms at
+terminal depth; close further local HCA topology work.
+Automatic grouped and split-K HCA ownership is qualified to Apple M4 Max; other
+Metal devices retain the direct online path until measured.
+
+The exact 32-group selector also clears on the current asset with split-K HCA
+active in both arms. At position 786,431 and 196,608 visible CSA rows, radix
+controls are `125.048/123.507 ms GPU` and multigroup is `110.776 ms`, a
+conservative 12.731 ms/token saving. Final logits, hidden state, causal state,
+routes, and all CSA decisions are bit-identical; control drift is 1.24% GPU.
+Default it on Apple M4 Max only when capacity is 196,608..262,144, visibility is
+at least 196,608, and visibility occupies at least three quarters of capacity.
+Packed and ineligible singleton paths remain radix4. Roll back with
+`QWEN_DSV4_MULTIGROUP_SELECTOR=0` or the CLI `off` policy.
+
+The decode-side F16-staged Lightning matrix scorer establishes a changed-work-unit
+ceiling but is now product-KILLed. It retains the F16 K cache, stages only the 16
+KiB query slab to F16, uses F32 head-weight reduction, and leaves selection
+authoritative. At
+16,384 visible rows it saves 2.966 ms GPU and 2.391 ms wall on the current
+position-65,663 endpoint while preserving every consumed route/CSA ID and
+bit-identical logits and causal state. At 262,144 rows, two current-asset
+terminal packets save 33.355-34.087 ms GPU and 33.276-34.095 ms wall, moving
+terminal GPU to 104.495-105.264 ms with bit-identical final logits. Those
+integrated fixtures use synthetic zeroed long-history caches, so they establish
+geometry timing but not representative rank-boundary quality. A real 97,040-token
+snapshot replay supplies that missing evidence and fails decisively: the first
+same-input selected-set change appears at position 97,042, layer 38, then routes,
+tokens, logits, and causal state diverge. Across 65 transitions, 935/1,365 CSA
+sets differ while both F32 controls remain repeat-bit exact. Keep the F32
+singleton default and retain `QWEN_DSV4_LIGHTNING_F16_MATRIX=1` only as a
+diagnostic ceiling. Direct authoritative F16 scoring is closed.
+
+Packed selection no longer materializes its redundant public mask in ordinary
+builds. Selected attention has always consumed only cache-order IDs, count, and
+visibility; a dedicated maskless radix4 entry point now preserves exact ties,
+fallback IDs, count, and status without binding a mask buffer. This removes
+4,294,967,296 bytes from a full-context session and 12,582,912 bytes from the
+maintained 2,385-token request-sized session. Diagnostics retain the mask for
+FP4 comparisons. The packed score matrix remains the other 4 GiB half of this
+interface.
+
+Process-cold DeepSeek loading now uses the established Qwen parallel-pread
+mechanism rather than charging demand faults to the first prefill. On the
+current 97.05 GiB asset, cold load-plus-prefill falls 54.1% for the 11-token
+endpoint and 36.4% for the 2,385-token endpoint as a phase subtotal; `load_ms`
+already contains `prefetch_ms`. A full residency scan itself
+cost 1.384 seconds at this scale, so DS4 uses a reusable bounded distributed
+sample: a fully warm decision costs 3.9 ms and performs no reread. Default
+`auto` uses a conservative 98% threshold; structured cold and prefix-warmed
+fixtures keep the estimate within three percentage points of full `mincore`,
+make the same policy decision, and bias ambiguous states toward warming.
+`QWEN_DSV4_PREFETCH=off|always`
+provides demand-page rollback and forced warmup. Loader first touch is no longer
+an open DS4 optimization item unless direct destination population can beat the
+6.2-6.8 GB/s pread path without changing retained topology.
+
+K160 decode exposed a separate routed-expert work-unit defect. The first
+correctness path issued gate, up, SwiGLU, and down serially for each of six
+slots: 24 dispatches per layer, including eighteen quantized projections.
+Exact all-slot Q3_K gate/up/SwiGLU plus Q4_K down reduces the production-shape
+routed stage from 1.184 to 0.676
+ms/layer. Reusing the engine's packed fast K-block arithmetic then lowers it to
+0.236 ms/layer. On the same 2,385-token continuation, serial indexed, exact
+all-slot, and fast all-slot decode are 11.26, 14.62, and 19.62-19.82 token/s.
+The fast and exact paths emit the same 144-token digest. On the 632-token math
+continuation, fast and exact all-slot reach 23.84 and 16.79 token/s and retain
+the same complete digest and correct `001` result. Default the faster schedule
+only for M4 Max, hidden 4,096, FFN 2,048, 160 experts, top-6, and the measured
+Q3_K/Q3_K/Q4_K storage triple. Use `QWEN_DSV4_ALL_SLOTS_Q3Q4_FAST=0` as arithmetic rollback and
+`QWEN_DSV4_ALL_SLOTS_Q3Q4=0` as serial rollback.
+
+The reusable K160 prefill profile now splits routed gate/up, SwiGLU, and down at
+`1,850.847/33.523/866.190 ms`. It also closes several attractive but incorrect
+explanations for the llama.cpp lead. Parallel Q8 dequant is flat, a 64-row F32
+Q8 tile regresses to 258.0 token/s, mapped Q3/Q4 control/scatter cleanup has no
+routed-stage movement, literal llama.cpp Q3 dequant changes only 9 ms, and half
+Q8 Q-B/output saves only 90 ms while changing logits. Four fully optimized
+512-token chunks regress to 192.4 token/s as sparse expert occupancy and command
+boundaries dominate. Do not reopen those local shapes without new hardware or
+a different arithmetic/ownership premise.
+
+The corrected Metal timeline narrows that premise. `trace-metal.py` previously
+confused xctrace's duplicate duration and command-buffer-ID element types; it
+now keys fields by schema mnemonic and coalesces overlapping interval unions
+before computing idle gaps. Raw GPU work, union-busy time, and overlap remain
+separate, so future concurrent queues cannot manufacture idle time. One native ordinary pass spans 128 command
+buffers, 6,921.271 ms of GPU compute, and 267.638 ms of inter-command gap. One
+llama.cpp full-ubatch pass spans two compute commands plus a blit, 6,202.558 ms
+of compute, and effectively zero gap. An exact 32-row x 64-token F32 Q8 tile
+then leaves before-attention/output flat at 1,790.863/1,186.187 ms and lowers
+ordinary throughput to 267.39 token/s, so it is removed. Exact row-16, row-32,
+and row-64 Q8 geometries are bounded; command ownership is worth hundreds of
+milliseconds, not the whole external delta.
+
+Shader-level attribution finds one concrete compute defect hidden inside that
+aggregate. The 43 K160 F32 router projections consume `423.535 ms` across two
+N=2,048 passes. Q3_K and Q4_K dispatches are already near llama.cpp's per-kernel
+times; the router is not. A reassociated float4 E8 schedule cuts the router to
+`53.024 ms` but changes route-weight bits and later IDs. An exact replacement
+instead keeps each output's scalar K order while reusing activation loads across
+eight experts; both reference and replacement use source-scoped Metal safe math.
+Its 86 sampled intervals
+total `70.000 ms`, an approximately 176.8 ms/pass sampled-family delta, and it is
+bit-identical to the incumbent at N=1/32/128/2,048/4,096 and in the complete
+K160 prefill digest. Default that exact path only for the qualified K160-layout/M4/full-
+chunk scope; roll back with `QWEN_DSV4_PACKED_ROUTER_E8P32_STRICT=0`.
+
+Late post-route-L to pre-expert-L+1 enqueue does not harvest command ownership.
+It preserves all 128 commands on one serial queue, misses an A/B/A wall bracket,
+and introduced a fail-stop lifetime hazard before removal. This KILL is narrow:
+same-buffer graph ownership and designs that remove commands plus GPU work remain
+open.
+
+The direct skinny-matrix mHC premise is also closed. Replacing only the two
+24x16,384 token-axis Q8 projections with the existing half-staged matrix kernel
+saves about 51.9 ms across interpolated sampled stages, roughly 0.7% of the
+N=2,048 request, while changing final logits. A future mHC candidate must delete
+the 16,384-wide normalized representation and adjacent dispatches rather than
+buying another matrix schedule.
+
+The larger token-axis defect does clear. Q-A and raw-KV were still rereading
+their Q8 matrices independently for every prompt token while the neighboring
+Q-B, output, shared, and compressor projections owned full-chunk matrices.
+Reusing the accepted F32 R2C16 work unit for those 86 calls lowers sampled
+before-attention `1,830.257 -> 1,264.883 ms` and ordinary N=2,048 wall
+`7,825.465 -> 7,353.321 ms`. Real 2,385/6,642-token prefill improves 5.8/7.4%,
+and an 8,470-token structured probe preserves every generated ID and exact JSON
+while improving `224.68 -> 240.33 token/s`. The arithmetic schedule changes
+route decisions at depth, so this is numerical authority backed by real prompt
+behavior, not a bitwise claim. Default both projections only for the qualified
+K160/M4/full-chunk scope; tails stay exact and
+`QWEN_DSV4_PACKED_Q8_QA_KV_MATRIX=0` is the rollback.
+
+Changed-graph command ownership now closes as well. A force-only K160 arm gives
+GPU route/compact and true active-tile Q3/Q4 indirect dispatch every advantage:
+one command per layer, no CPU route, no exact-weight publication, and approximate
+weights. A hot bracket is flat, while the most favorable separate trace saves
+53.876 ms. Even crediting all 36.388 ms/pass of candidate GPU excess, all
+18.710 ms/pass of remaining short gaps, and the complete 23.991 ms hot-control
+spread reaches only 132.965 ms against the 135.190 ms 2% gate. Remove the force
+path. Reopen ownership only with an independently bounded 30-50 ms deletion of
+existing control GPU work; exact route weights, replay, pre-enqueue, indirect
+counts, or fewer commands alone are not changed premises.
+
+The count-aware GPU-route audit does not clear the next implementation bar.
+The retained 25-layer/four-chunk pilot charges 180.875 ms to route/compact and
+222.519 ms to fixed overlaunch. Metal compute encoders do support a GPU-written
+indirect threadgroup count, but scaling route/compact to 40 K160 layers leaves
+only about 195-222 ms against the trace's 267.638 ms idle ceiling even if every
+empty launch disappears. That is at most roughly 3% request movement, while
+partial expert tiles remain and learned-route rank order still changes. Hold
+this lane until a different design removes more than command idle.
+
+The temporal-certification oracle also closes before implementation. On one
+65-state continuation after a 31,834-token real prompt, median selected-set
+Jaccard is 0.5375 and the tight hindsight one-step bound still retains 57.25% of
+rows. Charging periodic full refreshes yields 78.29/74.57/76.29/80.44/83.44/89.28%
+work for cadences 2/4/8/16/32/64. Runtime head weights are 30.29% negative. This
+cannot compete with the 24.6% F16 matrix work unit even before a runnable bound,
+seed, compaction, and merge. Close the single uniform total-score delta premise;
+row- or block-specific certificates require their own materially lower ceiling.
+
+Exact score-to-ID streaming is also topology-KILLed. A correctness-green
+128-group producer preserves the cooperative F32 score order and exact local
+and global top-512 sets, but mixed terminal data takes 7.726 ms/layer versus
+3.714/3.684 ms controls for the complete scorer plus multi-group selector. Even
+all-tied data is slower before the mandatory merge. Mixed scores repeatedly
+drive a serial shared-heap repair while 255 threads wait; ties expose the
+remaining persistent-group, barrier, sort, and publication tax. Remove the
+prototype and require a new nonuniform bound or representation premise before
+reopening exact fusion.
+
+That performance result does not make K160 quality-equivalent to the 256-expert
+asset. The current small battery shows a correct but 23% longer math trace and a
+coherent prose answer that misses a 180-word limit by about 95 words. Before
+calling K160 a general product replacement, record one maintained
+K160-versus-FRESH quality row and one full-defaults-versus-arithmetic-rollbacks
+logit/top-1 audit. Memory, prefill, decode, and quality are separate axes.
+
+The local K216 REAP checkpoint is a different compact asset, not a widening of
+the K160 Q3_K/Q4_K lane. Its 89,060,075,612 tensor bytes retain the FRESH-style
+25-layer IQ2 cohort, 16 all-IQ3 layers, and two MXFP4-down outliers. Runtime-count
+grouped IQ2/IQ3 execution removes the compact per-bucket fallback: warm 2,385-token
+prefill moves `89.62 -> 168.46-169.33 token/s`, while 64-token decode reaches
+21.70 token/s; the 6,642-token row is 192.27/21.60 prefill/decode token/s. This
+makes K216 performance-viable and leaves its asset-quality comparison open.
+
+The local DSpark census and external acceptance calibration are complete. On
+the exact 2,385-token official-chat prompt, llama.cpp N1 at confidence 0.3 moves
+`26.785 -> 30.367 token/s`, accepts 107 of 142 attempted drafts, preserves the
+complete output digest, and realizes 1.718 useful tokens per target packet. A
+5% qwen win therefore requires a fully charged packet at or below 61.09 ms.
+Current qwen packed-prefill reuse is not that work unit: seven alternating
+restored pairs at position 2,384 measure N2 at 272.155 ms wall / 254.399 ms GPU,
+with 86 encoders and 2,994 dispatches. GPU work alone misses the packet budget
+by 4.16x before target decisions, hidden capture, the three-stage drafter,
+acceptance, or rollback. This KILLs packed-prefill reuse and command-only
+wrapping, not DSpark or speculative decoding generally.
+
 Force-ranked queue:
 
-1. **Close the K160 same-GGUF prefill gap.** Attribute the 1.88-second gap
-   between native's 7.70-second N=2,048 wall and llama.cpp's 5.82 seconds, then
-   change the remaining Q3_K/Q4_K work unit. Prefer lower-pressure gate/up
-   reuse, wider route tiles, or grouped down over another scalar or bank-axis
-   retune.
-2. **Stream exact Lightning score-to-top-k.** Replace full score/mask production
-   with deterministic partition-local top-512 and exact merge, or a LiteTopK
-   style conservative histogram filter with complete overflow fallback. Keep
-   F32 score arithmetic and lower-ID ties. The immediate prize is 8 GiB of
-   packed terminal scratch; far-decode latency can also delete radix scans.
-3. **Build grouped split-K online HCA.** Direct loading leaves 2.993 ms/layer at
-   terminal shape. Combine contiguous group-eight cache reuse with partitioned
-   online `(max, mass, value)` states and a numerically bounded sink-aware merge.
-   Claim bitwise identity only if a fixed merge reproduces the incumbent
-   recurrence. Treat Qwen `attn_v4` as topology lineage, not drop-in
-   dimension-256/GQA code.
-4. **Promote multigroup only on real far continuation.** The exact M4-Max path
-   already saves 13.9 ms whole-token on restored synthetic state. One reusable
-   real-prefix continuation with exact IDs, logits, and causal state can decide
-   default-on inside its existing 196,608-row qualification band.
-5. **Measure temporal certification, do not assume it.** Reuse existing score,
-   cutoff, and decision diagnostics at a restored two-token far endpoint to
-   record adjacent top-k overlap, signed weight changes, row-norm bound slack,
-   and corrected upper-envelope candidate fractions. Build incremental scoring
-   only if the recurring exact certificate rejects most rows after accumulated
-   slack.
-6. **Keep direct FP4/BF16 replacement closed.** Unguarded FP4 changed every
-   deep mask and regressed wall. Reopen low precision only as a certified
-   conservative filter whose exact fallback and all-in ceiling beat the F32
-   streaming path; do not treat candidate recall alone as exactness.
+1. **Delete the mHC normalized representation.** Direct half-matrix substitution
+   is KILLed. The next falsifier must replace the `[16384,N]` normalized slab
+   with an exact RMS-scale/residual-aware 24-row projection work unit, preserve
+   F32 rounding and control/collapse order, and clear the 2% whole-request gate.
+2. **Pair compressor ownership only if it deletes work.** The 124 compressor
+   projections already use llama-lineage half matrices. A candidate must reuse
+   normalized input or decoded panels across KV/gate and remove dispatch or
+   staging work; another tile is not a changed premise.
+3. **Keep command ownership closed without GPU-work deletion.** The optimistic
+   merged-route/indirect ceiling misses 2% after nonphysical full credits. Reopen
+   only when a producer/consumer fusion independently deletes roughly 30-50 ms
+   of control GPU work while preserving fail-stop mutation ownership.
+4. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
+   correct two-row causal execution plus measured resident drafter, hidden
+   capture, acceptance, and transaction costs fit inside the 61.09 ms complete
+   packet budget on the maintained snapshot. Do not adapt the current packed
+   path or fund command collapse around its unchanged GPU work.
+5. **Use the singleton stage front end only for a named general-decode lever.**
+   K160 wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus
+   llama.cpp's 39.2 ms. Attention core, prepare, output, routed, and shared are
+   11.58/7.68/7.89/10.51/2.98 ms; do not resume local kernel sweeps without a
+   structural >=2 ms/token deletion.
+6. **Record REAP quality governance before product equivalence claims.** Keep
+   K160's correct math result and failed 180-word constraint as the first row,
+   add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run
+   one full-defaults versus arithmetic-rollbacks logit/top-1 audit. Memory and
+   speed do not authorize an asset-quality claim.
+7. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
+   deep mask and regressed wall; F16 query staging now fails on real nonzero
+   history. Reopen low precision only as an F32-authoritative conservative
+   filter whose exact refinement, fallback, and merge beat the F32 streaming
+   path all-in. Candidate margin or recall alone is not a certificate.
 
 Short-context local tuning is bounded-KILL under the current 0.75 ms/token
 two-depth gate: all-slot barrier removal, larger IQ2 row groups, fixed-geometry

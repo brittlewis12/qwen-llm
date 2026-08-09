@@ -6,6 +6,571 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-08 - DeepSeek V4 K160 Exact E8 Router GO
+
+Status: full N=2,048/4,096 K160 chunks now default to an exact eight-expert
+router work unit on the qualified M4 Max layout cohort. The previous scalar F32 router was
+a measured large leaf; the faster float4 E8 schedule is not the default because
+its reassociation changes route weights and eventually route IDs.
+
+- Metal shader samples over two N=2,048 passes put the scalar router at
+  `423.535 ms / 86` intervals, matching the expected 43x2 dispatch census. The reassociated E8 schedule falls to
+  `53.024 ms`, but changes layer-0 weight bits and first changes selected IDs at
+  layer 4.
+- The strict E8 schedule shares each activation load across eight expert rows,
+  uses source-scoped Metal safe math, and retains the incumbent scalar K
+  traversal for every output. Its sampled intervals total `70.000 ms / 86`, an
+  83.5% reduction and an approximately 176.8 ms/pass sampled-family delta.
+- Model-free real-geometry differentials at N=1/32/128/2,048/4,096 are bitwise
+  equal to the scalar kernel. Control and candidate full-pass logits share digest
+  `a1cb26ab...b5b85ca`.
+- A thermally drifting B/A/B ordinary bracket measures strict
+  `7,254.435/8,106.435 ms` around scalar `8,218.809 ms`. Treat the isolated
+  shader delta, not that noisy wall spread, as the effect estimate.
+
+Decision: default strict E8 only for the Apple M4 Max K160 layout cohort: 1,328 tensors,
+89,920,886,108 source bytes, E=160, F32 router weights, and N=2,048/4,096.
+Rollback with `QWEN_DSV4_PACKED_ROUTER_E8P32_STRICT=0`. Remove the DS4
+reassociated E8 force path; its roughly 9.2 ms/pass advantage over strict does
+not justify numerical drift. Malformed rollback values fail closed and disable
+the candidate.
+Adversarial review: cx session `019fe392-84a9-7a93-96ae-3cced7b487dc`, final GO.
+
+## 2026-08-08 - DeepSeek V4 K160 Q-A / Raw-KV Matrix GO
+
+Status: K160 full N=2,048/4,096 chunks now default to F32 Q8 matrix ownership
+for Q-A and raw-KV projection. Tails retain the token-axis GEMV lineage.
+
+- In a same-binary sampled control/candidate pair run with the candidate later,
+  before-attention falls `1,830.257 -> 1,264.883 ms` and complete pre-expert GPU
+  falls `4,106.796 -> 3,539.851 ms`. Unaffected attention, output, after-output,
+  and post-route stages remain within about 0.5%.
+- Ordinary N=2,048 wall falls `7,825.465 -> 7,353.321 ms`, or 6.03%, while
+  prefill rises `261.71 -> 278.51 token/s`. Separate Q-A-only and KV-only arms
+  confirm that both token-axis projections contain material work.
+- Real 2,385- and 6,642-token prompts move `12,816.2 -> 12,110.9 ms` and
+  `31,560.6 -> 29,383.2 ms`, raising prefill 5.8% and 7.4%. Both 128-token
+  summaries remain coherent, accurate, and structurally equivalent.
+- An 8,470-token exact-JSON retrieval probe emits the same 31 generated IDs and
+  exact requested object in both arms while moving `37,698.4 -> 35,242.5 ms`
+  (`224.68 -> 240.33 token/s`). This covers two N=4,096 chunks plus a tail and
+  enters sparse attention.
+- This is a qualified numerical schedule, not a bitwise-equivalence claim. The
+  matrix computes scaled F32 weights before MMA rather than scaling GEMV block
+  partials afterward; route
+  weights differ from layer 0 and route IDs from layer 3. The observed gain is
+  a different legal arithmetic schedule, not work deletion with identical bits.
+
+Decision: default `both` only for the Apple M4 Max K160 layout cohort and full
+N=2,048/4,096 chunks. `QWEN_DSV4_PACKED_Q8_QA_KV_MATRIX=0` restores token-axis
+GEMV; `qa` and `kv` retain attribution modes. Malformed values fail closed.
+Adversarial review: cx session `019fe3e0-ddaf-7001-baab-2798012e94a4`, final GO.
+
+## 2026-08-08 - DeepSeek V4 K160 Merged GPU Route/Indirect KILL
+
+Status: the optimistic one-command-per-layer ownership ceiling is KILLed and
+removed. Runtime-E GPU routing, deterministic compaction, and true active-tile
+indirect Q3/Q4 dispatch cannot justify the larger exact rolling graph.
+
+- The force-only arm removes CPU routing, exact-weight publication, and 86 of
+  129 commands per pass. It deliberately uses approximate GPU route weights, so
+  it is a timing ceiling rather than a correctness candidate.
+- A hot control/candidate/control bracket is
+  `7,498.749 / 7,489.767 / 7,474.758 ms`; the candidate is about 3.0 ms slower
+  than interpolated controls. The most candidate-favorable separate traces show
+  only `6,893.311 -> 6,839.435 ms` wall movement.
+- Those traces contain 43 versus 129 commands per pass, but the candidate also
+  spends 36.388 ms/pass more GPU-busy time and retains about 18.710 ms/pass of
+  short command gaps. Crediting the entire GPU excess and every remaining gap
+  to a hypothetical rolling graph yields only 108.974 ms. Adding the complete
+  23.991 ms hot-control spread reaches 132.965 ms, still below the 135.190 ms
+  2% gate.
+
+Decision: remove the runtime-E/indirect force path and close route-record replay,
+exact Metal weights, broader pre-enqueue, and command-count-only variants under
+the current graph. Reopen command ownership only when it also deletes at least
+roughly 30-50 ms of independently bounded control GPU work. Adversarial review:
+cx session `019fe3fb-2f50-7ce3-999e-dc1f2fe4f278`, final KILL.
+
+## 2026-08-08 - DeepSeek V4 K160 Skinny mHC Matrix KILL
+
+Status: direct substitution of the existing half-staged Q8 matrix kernel for the
+24x16,384 attention/FFN mHC projections is removed. It proves a small primitive
+ceiling, not a useful product work unit.
+
+- A control/candidate/control sampled bracket reports before-attention
+  `1,736.945 / 1,816.815 / 1,926.178 ms` and after-output
+  `254.874 / 223.442 / 266.131 ms`. Relative to interpolated controls, the
+  candidate saves about 14.7 and 37.1 ms, or roughly 51.9 ms total.
+- Ordinary walls are `7,350.282 / 7,839.604 / 8,364.339 ms`; severe thermal
+  drift makes their 17.7 ms interpolated difference non-authoritative. The
+  sampled stage ceiling is only about 0.7% of the ordinary request.
+- Half staging changes the final-logit digest from `a1cb26ab...b5b85ca` to
+  `876c230f...184f3e`. Paying a numerical-quality campaign for a sub-1% ceiling
+  is uneconomic.
+
+Decision: KILL and remove direct skinny half-matrix substitution. Reopen mHC
+only for a representation-deleting fusion that avoids the 16,384-wide
+normalized slab and clears a materially larger whole-stage ceiling.
+
+## 2026-08-08 - DeepSeek V4 K160 Post-to-Pre Enqueue KILL
+
+Status: late host enqueue overlap with unchanged commands is removed. It neither
+creates GPU overlap on one serial queue nor credibly moves the product wall.
+
+- The candidate commits post-route layer L without waiting, queues pre-expert
+  layer L+1 behind it, then waits on L+1. The arithmetic and 128-command graph
+  remain unchanged.
+- An initial pair moves only `7,421.788 -> 7,397.473 ms`. A later A/B/A bracket
+  is `7,867.800 / 8,296.499 / 8,196.755 ms`; the candidate does not win.
+- Review also found a fail-stop hole in the prototype: deferred-command RAII was
+  installed after fallible host work, so an early return could outlive session
+  mutation. The prototype was removed rather than repaired around a failed
+  performance premise.
+
+Decision: KILL this exact late-enqueue schedule. It does not bound same-buffer
+merging, route-record replay, or a graph that removes GPU work and command
+boundaries together.
+
+## 2026-08-08 - DeepSeek V4 N2 Packed-Prefill Verifier-Floor KILL
+
+Status: current packed-prefill reuse is decisively uneconomic as the target
+half of an N1 DSpark packet. This is a mechanism KILL, not a claim against the
+local DSpark sidecar or speculative decoding generally.
+
+- Paired llama.cpp calibration on the exact 2,385-token official-chat prompt
+  moves `26.7849 -> 30.3666 token/s` with N1/confidence 0.3, accepts 107 of 142
+  attempted drafts, and preserves the complete output digest. The 256 target
+  transitions require 149 packets, or 1.71812 useful tokens per packet; a 5%
+  qwen win therefore permits at most 61.09 ms for the complete packet.
+- Seven warmed, alternating pairs restore the exact current-asset position-2,384
+  snapshot before each arm. Packed N2 measures 272.1545 ms wall / 254.3989 ms
+  GPU; singleton measures 54.3888 / 52.8137 ms. Snapshot restore and the first
+  packed first-touch warmup are excluded, making the candidate optimistic.
+- The non-sampled packed trace contains 86 encoders and 2,994 dispatches versus
+  one encoder and 2,146 dispatches for singleton execution. Packed pre-expert
+  and post-route are approximately 147.7 and 106.7 ms; either side independently
+  exceeds the complete packet budget.
+- Packed GPU alone misses the budget by 4.164x before per-row target decisions,
+  target-hidden capture, the three DSpark stages, acceptance, or rollback.
+  Eliminating host residual or wrapping unchanged work in one command cannot
+  rescue the premise.
+
+Decision: KILL direct reuse, wrapping, or command collapse of the current
+packed-prefill work unit for N2 verification. HOLD a new singleton-derived
+transactional N2 verifier. Reopen only when a materially new, causally correct
+two-row target path plus all resident drafter and transaction costs demonstrates
+a stable complete packet at or below 61.09 ms with byte-identical greedy output.
+Adversarial review: cx session `019fe2d0-5816-76b1-b1f2-5762f6ac0253`.
+
+## 2026-08-08 - DeepSeek V4 REAP K216 Admission / Grouped-IQ GO
+
+Status: the local three-shard REAP K216 asset is runnable with its actual
+FRESH-style IQ mixture. It is not a Q3_K/Q4_K checkpoint: 25 layers use
+IQ2_XS/IQ2_XS/IQ3_XXS, 16 are all-IQ3_XXS, and the two remaining layers end in
+MXFP4. The strict census binds 1,328 tensors and 89,060,075,612 tensor bytes.
+
+- The metadata-only first shard ends exactly after its zero-tensor header and
+  omits 28 bytes of terminal alignment padding. GGUF admission tolerates only
+  that exact zero-tensor/EOF case; partial padding and nonempty unpadded shards
+  remain rejected.
+- Packed Q8 policies now bind the K216 byte/count pair. Existing IQ2/IQ3 grouped
+  kernels accept runtime E=216 while CPU routing remains authoritative and GPU
+  route compaction remains E=256-only. K160 Q3_K/Q4_K qualification is unchanged.
+- Focused E=216 bucket, matrix, and all-IQ3 differentials pass. The live fixture
+  pins three shards, tensor bytes, expert count, and the 25/16/1/1 dtype cohorts.
+- Warm 2,385-token prefill moves from the compact per-bucket fallback's 89.62
+  token/s to 168.46-169.33 token/s. A 64-token continuation decodes at 21.70
+  token/s. At 6,642 prompt tokens the same binary reaches 192.27 prefill token/s
+  and 21.60 decode token/s. The fallback and grouped first-token digest match;
+  the boundary probe remains `Hi!`.
+
+Decision: default the already-qualified grouped IQ work units for E=216 on M4
+Max. K216 is performance-viable; asset-level quality remains a separate claim.
+
+## 2026-08-08 - DeepSeek V4 Exact Streaming Top-512 KILL
+
+Status: the exact persistent-partition score-to-ID producer is removed. Its
+local selections are correct, but the producer alone is slower than the complete
+incumbent scorer plus multi-group selector before paying for a global merge.
+
+- The candidate uses 128 groups x 2,048 rows, preserves the cooperative F32
+  score operation order, and retains a threadgroup-local top-512 over each
+  partition. Every local ranked list and the global union match the incumbent
+  selector exactly, including tied lower-ID ordering.
+- On mixed terminal data, scorer-plus-selector controls are `3.714/3.684
+  ms/layer`; the producer alone is `7.726 ms`, a `4.026 ms/layer` regression
+  before the mandatory merge. Control drift is 0.82%.
+- With all scores tied, controls are `4.126/3.860 ms` and the producer is
+  `4.335 ms`. Mixed data adds 3.39 ms inside the producer because thread zero
+  repeatedly repairs the shared heap while the other 255 threads wait; ties
+  rarely replace the root and expose the smaller persistent-group/barrier tax.
+
+Decision: KILL the persistent local-K heap family and remove the prototype. Do
+not rescue it with neighboring partition counts or a parallel sort: the tied
+producer already has no demonstrated budget for the required merge. Reopen
+exact streaming only for a genuinely different invariant with a complete floor
+below the current approximately 3.7 ms/layer score-plus-select owner.
+
+## 2026-08-08 - DeepSeek V4 Real-History F16 Lightning KILL
+
+Status: the F16-staged singleton Lightning scorer remains a diagnostic ceiling
+only. It is not eligible for default admission on real nonzero history.
+
+- One 97,040-token causal snapshot preserves 24,260 visible CSA rows in a
+  685,862,976-byte payload. Independent F32/F16/F32 processes restore that
+  exact state and capture 65 consecutive transitions, or 1,365 CSA decisions.
+- The two F32 controls are repeat-bit identical for selected-ID and route
+  traces, generated tokens, final logits, and final causal state. All three
+  arms have the same prompt-endpoint logit digest, and the F16 arm reports the
+  intended matrix scorer.
+- The first same-input selected-set failure occurs at position 97,042, layer
+  38. The F32 cutoff margin is `2.992e-5`; F16 reports `2.043e-4` while choosing
+  a different set, so candidate margin is not a safe confidence guard. Routing
+  changes in that layer and later state diverges.
+- Across the complete continuation, F16 differs on 935/1,365 selected sets and
+  1,265 routes; generated tokens, final logits, and causal digests differ. Count
+  and status remain valid in every decision. Later mismatch totals measure
+  causal amplification, not independent primitive error.
+
+Decision: KILL authoritative F16 query staging under the current scorer. Retain
+the measured 33-34 ms terminal ceiling as diagnostics only. Reopen low-precision
+scoring only with an F32-authoritative conservative bound that prices exact
+refinement and merge below the exact F32 alternative.
+
+## 2026-08-08 - DeepSeek V4 Uniform Temporal Certificate KILL
+
+Status: a 65-state real 31,834-token continuation closes the single uniform
+score-drift certificate with periodic full refresh. This is a mechanism KILL,
+not a claim against row- or block-specific bounds.
+
+- Across 64 transitions and 21 CSA layers, median top-512 Jaccard is `0.5375`.
+  The corrected hindsight oracle uses direct anchor-to-current upward drift in
+  F64, includes new rows, and charges a full score pass whenever an anchor is
+  refreshed.
+- One-step optimistic work is 57.25% of visible rows. Refresh-charged work for
+  cadences 1/2/4/8/16/32/64 is
+  `100.00/78.29/74.57/76.29/80.44/83.44/89.28%`; no cadence approaches the 20%
+  ceiling needed to compete with the existing F16 matrix work unit before
+  bound, seed, compaction, or irregular-dispatch costs.
+- Runtime head weights are materially signed: 30.29% are negative over 87,360
+  observations, spanning `-0.2500..0.2425`. The nonnegative weighted-ReLU
+  shortcut is unavailable on this trace.
+
+Decision: do not implement the global-delta CIS design or pay for a deeper
+repeat. Reopen temporal certification only for a structurally nonuniform bound
+whose complete charged ceiling is below 20-25% at both lower and deep far
+contexts.
+
+## 2026-08-08 - DeepSeek V4 Cold-Only Parallel-Pread Default GO
+
+Status: DeepSeek V4 now reuses the runtime's retained-descriptor, four-worker
+parallel-pread warmer. The default `auto` policy samples file-cache residency
+and conservatively warms shards below a DS4-specific 98% threshold. Set
+`QWEN_DSV4_PREFETCH=off` for the prior demand-paged path or `always` to force a
+full reread.
+
+- On a targeted-cache-cold current 97.05 GiB asset, parallel pread returns
+  104.2 GB at 6.21-6.75 GB/s, with process counters confirming 104.19 GB of
+  physical reads. The 11-token endpoint moves from `143.9 + 36,323.4 ms`
+  load-plus-prefill to `15,505.6 + 1,218.3 ms`, a 54.1% phase-subtotal
+  reduction. `load_ms` includes `prefetch_ms`; those fields are not additive.
+- The 2,385-token endpoint moves from `141.6 + 48,533.4 ms` to
+  `16,823.6 + 14,114.5 ms`, a 36.4% wall reduction. Both cells preserve the
+  exact first generated-token digest.
+- Full `mincore` over the 104 GB checkpoint cost 1,383.7 ms even when warm. A
+  reusable bounded probe samples 64 evenly distributed 64-page windows per
+  shard; the warm skip now costs 3.9 ms, reads zero physical bytes, and leaves
+  ordinary warm prefill unchanged. Structured cold, half-prefix-warmed,
+  95%-prefix-warmed, and fully warmed fixtures keep the sampled estimate within
+  three percentage points of full `mincore` and make the same 98% policy
+  decision; the threshold intentionally biases ambiguous partial states toward
+  prefetch.
+- After targeted invalidation, the sampled default correctly skipped the warm
+  5 MB metadata shard and prefetched all three cold weight shards in 16,764.7
+  ms. The residency observer changes only the decision cost; the warmer and
+  retained mmap topology are the same established Qwen mechanisms.
+
+Decision: default conservative cache-state-gated pread for both single-turn and resident
+DeepSeek V4 loading. Whole-file `always` is not the default because it would
+re-read 104 GB on warm launches; sampled `auto` preserves that endpoint at
+bounded observer cost.
+
+## 2026-08-08 - DeepSeek V4 Packed Selection Mask Deletion GO
+
+Status: ordinary packed prefill no longer allocates or writes the dense
+`i32[capacity_rows, 4096]` selected mask. The exact radix4 selector publishes
+only cache-order IDs, counts, and statuses, which are the complete production
+attention contract. Test and `dsv4-diagnostics` builds retain the mask for FP4
+counterfactuals.
+
+- A dedicated compile-time maskless Metal entry point shares the radix
+  threshold, lower-row tie handling, ordered compaction, fallback IDs, count,
+  and status implementation with the full selector. It has no mask buffer to
+  corrupt accidentally.
+- The mixed 16-query selector fixture covers exact ties, signed-zero/subnormal
+  ordering, nonfinite scores, invalid visibility, and every fallback class.
+  Maskless IDs/count/status are bit-identical to the full radix4 output.
+- At full 262,144-row capacity the deleted tensor is exactly 4,294,967,296
+  bytes per session. The adjacent packed score matrix remains 4 GiB and is the
+  next representation target.
+- On the maintained 2,385-token request, the request-sized 768-row session
+  removes 12,582,912 priced bytes. A warm ordinary run is 13,883.3 ms / 171.79
+  token/s and preserves generated-ID SHA-256 `c52c0b84...d3812cd63`; this is a
+  correctness/footprint claim, not a latency promotion claim.
+
+Decision: keep the exact production deletion without an experiment flag. Metal
+publishes bounded deterministic fallback IDs on selector failure, attention may
+consume those IDs in the same command, and host status validation then rejects
+the request. Future selectors must preserve that memory-safe transactional
+failure contract; they cannot claim pre-consumption failure without moving
+status into the GPU dependency graph.
+
+## 2026-08-08 - DeepSeek V4 Far Lightning F16 Matrix Candidate HOLD
+
+Status: the eight-SIMDgroup Lightning matrix scorer is retained force-only for
+singleton CSA histories at or above 16,384 visible rows. Set
+`QWEN_DSV4_LIGHTNING_F16_MATRIX=1` to stage the 8,192-value query to F16; the
+default remains the cooperative F32-query scorer. Packed prefill is unchanged.
+
+- The retained primitive curve remains `0.659 -> 0.166 ms/layer` at 16,384
+  rows, `1.05-1.36 -> 0.261` at 65,536, and `2.102-2.106 -> 0.518` at
+  262,144. Per-layer query conversion is about 0.0083 ms and is included in
+  integrated execution.
+- The production caller adds one 16 KiB F16 query scratch and dispatches only
+  visible-row tiles. A focused tail test proves the final padded tile writes
+  `-INF` while later score storage remains untouched; selectors retain their
+  visible-count contract.
+- On the current asset at position 65,663, control/matrix/control is
+  `49.449/46.849/50.182 ms GPU` and `53.334/51.348/54.145 ms wall`. The matrix
+  path saves 2.966/2.391 ms, preserves every consumed CSA ID and route, and is
+  bit-identical for logits and causal state.
+- At the current asset's synthetic terminal endpoint, two packets save
+  33.355/34.087 ms GPU and 33.276/34.095 ms wall. Matrix terminal GPU is
+  105.264/104.495 ms; logits are repeat-bit identical to the F32 control.
+
+Decision correction after adversarial review: retain the measured ceiling but
+do not default the changed query arithmetic. The integrated far fixtures use
+real weights with synthetic zeroed long-history caches, so their exact selected
+IDs are predominantly tie behavior rather than representative rank-boundary
+evidence. Reopen default admission only after a nonzero causal replay compares
+selected IDs, cutoff margins, logits, and state across the qualified range.
+Direct FP4 replacement remains closed.
+
+## 2026-08-08 - DeepSeek V4 2K Prefill Cold-Touch Attribution
+
+Status: the apparent 2K-only prefill regression is a cache-condition artifact,
+not an engine-path regression.
+
+- The first ordinary CLI pass measured `46,614.4 ms / 51.16 token/s` while the
+  intended `2,048 + 337` schedule and every qualified 2K matrix/expert path were
+  active.
+- The reusable profiler then measured the exact rendered prompt at
+  `14,347.3 ms / 166.23 token/s`. Repeating the original CLI command after that
+  full weight touch measured `14,395.6 ms / 165.68 token/s` on the same binary
+  and generated-ID digest.
+- `load_ms` covers residency construction, not GPU first-touch of all mapped
+  weight pages. That first-touch work is currently charged to `prefill_ms`, so a
+  process-cold row must not be labeled warm from `load_ms` alone.
+
+Decision: no code rollback or short-prefill repair. Keep process-cold first
+touch and model-ready warm prefill as separate reported regimes.
+
+## 2026-08-07 - DeepSeek V4 Multigroup Selector Default GO
+
+Status: the exact 32-group selector now owns its qualified singleton band by
+default on Apple M4 Max. Set `QWEN_DSV4_MULTIGROUP_SELECTOR=0` or pass
+`--deepseek-v4-multigroup-selector=off` to retain radix4 throughout.
+
+- Eligibility remains narrow: capacity 196,608 through 262,144 rows, at least
+  196,608 visible rows, and visibility at least three quarters of capacity.
+  Packed prefill and every ineligible singleton continue to use radix4.
+- The maintained current-asset gate at position 786,431 runs with split-K HCA
+  active in both arms. Radix controls are `125.048/123.507 ms GPU`; multigroup
+  is `110.776 ms`, a conservative 12.731 ms/token saving. Wall medians are
+  `1,025.108/1,038.833 -> 1,010.328 ms`, a 14.780 ms saving despite the
+  snapshot-heavy harness.
+- Candidate and controls are bit-identical for final logits, normalized hidden
+  state, causal and prefix digests, committed tokens, every route, every CSA
+  decision, and all 21 eligible selector invocations. Control GPU/wall drift is
+  1.24%/1.33%.
+- CLI policy now defaults to `auto`. `qualified-experimental` remains a
+  diagnostics-only explicit seal; `off` is the product rollback. Other devices
+  do not enter the automatic path.
+
+Decision: default the exact path in its measured band. Selection remains a
+major far-context term below the band and after multigroup; streaming
+score-to-top-k stays first in the queue because it also deletes dense scratch
+and radix materialization.
+
+## 2026-08-07 - DeepSeek V4 Eight-Way Split-K HCA Default GO
+
+Status: singleton HCA histories above 512 compressed rows now default to an
+eight-way grouped split-K online recurrence. Set `QWEN_DSV4_SPLITK_HCA=0` to
+restore grouped single-partition execution; the grouped and direct-load
+rollbacks remain available beneath it.
+
+- The producer partitions the chronological raw-plus-compressed row stream,
+  preserves eight-head sharing of each contiguous 16-row F16 tile, and emits
+  F32 `(maximum, mass, unnormalized value)` states. A deterministic reducer
+  introduces the denominator-only sink once and merges partitions in index
+  order. No row, head, or cache representation changes.
+- At 8,192 compressed rows, grouped/P4/P8/P16 are
+  `2.542/0.639/0.339/0.330 ms/layer`. P16 saves only 0.009 ms/layer while
+  doubling partial storage, so P8 is the production point. At 513 and 2,048
+  rows, P8 is `0.064/0.100 ms/layer` versus grouped `0.281/0.668 ms/layer`.
+- P8 adds 1,052,672 logical scratch bytes per session. The partial-state write,
+  read, and reducer are included in every timing.
+- Across structural row counts 512, 513, 527, 528, 895, 896, 897, 2,048,
+  8,191, and 8,192, P8 is repeat-bit deterministic and remains inside the
+  maintained legacy envelope. At terminal shape its relative RMS versus the
+  legacy two-pass reference is `3.506e-5`, better than the serial online
+  path's `5.873e-5` on the same fixture.
+- On the current asset at position 65,663, legacy/grouped-split GPU is
+  `58.79 -> 49.08 ms` and wall is `62.31 -> 53.07 ms`. Argmax and every
+  consumed route/CSA decision remain unchanged; logit relative RMS is
+  `2.19e-7`.
+- On the current asset's restored synthetic terminal state, two warm packets
+  move grouped midpoint to split-K by `51.76/50.32 ms GPU` and
+  `52.26/50.19 ms wall`. Split-K terminal GPU is `137.23/136.78 ms`; logits
+  are repeatable, argmax is unchanged, and relative RMS versus grouped is
+  `5.29e-7`.
+
+Decision: default P8. This removes about 27% of the measured terminal token and
+reduces the HCA subtotal to roughly 6.8 ms. Close local HCA topology work;
+far-context leverage now belongs to Lightning score production and exact
+selection.
+
+## 2026-08-07 - DeepSeek V4 Grouped Long-HCA Default GO
+
+Status: singleton HCA histories above 512 compressed rows now default to the
+existing eight-head grouped online kernel. Set
+`QWEN_DSV4_GROUPED_LONG_HCA=0` to restore the one-head direct-load path.
+
+- The grouped kernel stages each contiguous 16-row F16 KV tile once for eight
+  independent SIMD groups while retaining one sink-aware online recurrence per
+  head. It changes neither row order nor the reduction lineage within a head.
+- In the maintained far-HCA profiler, direct/grouped medians are
+  `0.326/0.324 ms` at 513 rows, `0.790/0.668 ms` at 2,048 rows, and
+  `2.994/2.542 ms` at 8,192 rows. The terminal saving is 0.452 ms/layer, or
+  about 9.0 ms/token across 20 HCA layers.
+- Grouped output is bit-identical to the direct online output at compressed-row
+  counts 512, 513, 527, 528, 895, 896, 897, 2,048, 8,191, and 8,192. The
+  existing online-versus-legacy numerical envelope remains unchanged.
+- The path is restricted to one ratio-128 HCA query over the ring raw cache.
+  Packed prefill, CSA, and the <=512-row cooperative path are unchanged.
+
+Decision: default the exact eight-head reuse at long HCA shape. A split-K
+continuation must now beat the 2.542 ms/layer grouped incumbent by at least
+0.75 ms/layer after charging partial-state writes and deterministic merge; if
+it cannot, close HCA and move to score/selection.
+
+## 2026-08-07 - DeepSeek V4 K160 Cross-Engine Timeline / Q8 R4C8 KILL
+
+Status: the same-GGUF prefill lead is a full-ubatch work-unit effect, and the
+remaining exact Q8 row-axis retune is closed.
+
+- Current llama.cpp b10326 reaches 276.84/318.04/331.68 token/s at
+  N=2,048 with ubatches 512/1,024/2,048. A three-run ubatch-2,048 bracket is
+  346.18/321.44/306.61 token/s, exposing meaningful thermal drift rather than
+  one stable 352 token/s row. The earlier 512-ubatch attribution was wrong.
+- A loaded ubatch-2,048 Metal trace covers one complete 329.62 token/s pass.
+  It uses a 654.562 ms command, a 5,547.996 ms command, and a terminal blit,
+  with 0.002 ms total compute gap. The current shader set includes half-MMA
+  Q8, indirect Q3_K/Q4_K matrices, Lightning indexing, and Flash Attention.
+- The matching native ordinary trace segment uses 128 command buffers. It
+  contains 6,921.271 ms of compute and 267.638 ms of inter-command gap over a
+  7,188.909 ms GPU span. Under trace, about 0.27 seconds of the delta is
+  ownership/synchronization and about 0.72 seconds is longer GPU work; traced
+  throughput itself is not promotion evidence.
+- The first reducer output was invalid: xctrace exports two `duration` fields
+  and two command-buffer-ID fields per GPU row. `trace-metal.py` now keys by
+  schema mnemonic, reports the actual GPU duration/command buffer, and can emit
+  per-command intervals with `--include-intervals`. A later adversarial review
+  found that adjacent raw intervals would invent gaps once queues overlap; the
+  reducer now coalesces interval unions and reports raw work, union-busy time,
+  and overlap separately. The cited serial trace is numerically unchanged.
+- An exact 32-row x 64-token Q8 F32 tile splits dequantization across two SIMD
+  groups with 8 KiB TGM while preserving every F32 MMA operand and K order.
+  Its final logits are bit-identical, but ordinary prefill falls to 267.39
+  token/s; before-attention/output measure 1,790.863/1,186.187 ms versus the
+  adjacent control's 1,777.454/1,175.456 ms. The candidate is removed.
+- A source/precedent audit closes the obvious command-seam implementation.
+  The existing GPU route pilot charges 180.875 ms of route/compact and 222.519
+  ms of fixed overlaunch across 25 layers and four N=2,048 chunks. Even if a
+  new Metal indirect dispatch deletes all overlaunch, scaling route/compact to
+  40 K160 layers leaves only about 195-222 ms against the measured 267.638 ms
+  idle ceiling, or at most roughly 3% of request wall. Partial 32-row expert
+  tiles remain in both paths, and GPU learned-route arithmetic still changes
+  near-tied rank order.
+
+Decision: retain the corrected timeline instrument and remove the dead Q8
+tile. Row-16, row-32, and row-64 exact F32 geometries are now bounded, and hold
+the indirect-route integration below the current leverage bar. Reopen prefill
+only for a materially different arithmetic/ownership premise; do not infer a
+1.6-second launch ceiling from command-buffer count alone. Return primary
+optimization weight to the measured far-context score/select and HCA terms.
+
+## 2026-08-07 - DeepSeek V4 K160 Shared/Route Overlap Default GO
+
+Status: full N=2,048 K160 chunks now overlap the route-independent shared
+expert with CPU route planning. Set
+`QWEN_DSV4_PACKED_SHARED_ROUTE_OVERLAP=0` to restore serial execution.
+
+- After the router command completes, native submits shared gate/up/SwiGLU/down
+  immediately. The CPU constructs the stable expert/token/slot plan while that
+  command runs, then submits routed experts and combine behind it on the same
+  queue. Route IDs, weights, expert arithmetic, and reduction order are
+  unchanged.
+- Same-GGUF ordinary N=2,048 wall falls `7,770.189 -> 7,404.634 ms`, or
+  4.71%. Throughput rises `263.57 -> 276.58 token/s`; an independent candidate
+  warmup is `7,440.263 ms`.
+- The maintained sampled serial path and overlapped ordinary path emit the same
+  final-logit SHA-256 `a1cb26ab...b85ca`. A committed-command drop guard waits
+  on the shared branch on every error path before scratch can be reused.
+- On the real 2,385-token prompt, a same-binary default/rollback pair is
+  `12,845.6/13,104.2 ms`, or `185.67/182.00 token/s`, with the same generated-ID
+  SHA-256 `5de15535...b0cfd0`. The 337-token tail is intentionally unchanged.
+- The generalized profiler measures routed gate/up, SwiGLU, and down at
+  `1,850.847/33.523/866.190 ms`. Parallel Q8 dequant, row-64 shared-B Q8,
+  mapped Q3/Q4 control/scatter cleanup, literal llama.cpp Q3 dequant, half Q8,
+  and four optimized 512-token chunks do not carry a material phase win. The
+  512 schedule regresses to `10,644.162 ms` (`192.41 token/s`).
+
+Decision: default the exact medium-grained DAG overlap for the authenticated
+K160 full-chunk profile. Keep the local retunes closed; the remaining
+same-GGUF gap is graph ownership/utilization rather than one scalar quant loop.
+
+## 2026-08-07 - DeepSeek V4 K160 All-Slot Decode Default GO
+
+Status: K160 REAP Q3_K/Q4_K decode now defaults to a fast all-slot routed
+expert path. `QWEN_DSV4_ALL_SLOTS_Q3Q4_FAST=0` restores exact all-slot
+arithmetic; `QWEN_DSV4_ALL_SLOTS_Q3Q4=0` restores serial indexed execution.
+
+- The bring-up path issued gate, up, SwiGLU, and down separately for each of six
+  routes: 24 dispatches per layer, including eighteen quantized projections.
+  Exact all-slot execution reduces this to fused gate/up/SwiGLU plus down and
+  preserves the retained continuation.
+- The faster path uses the engine's existing packed Q3_K and Q4_K matvec
+  arithmetic. It runs separate low-pressure gate and up dispatches, in-place
+  SwiGLU, and one all-slot down dispatch. The K160 routed stage falls
+  `1.184 -> 0.676 -> 0.236 ms/layer` for serial, exact all-slot, and fast
+  all-slot execution.
+- On the warm 2,385-token product prompt, decode moves
+  `11.26 -> 14.62 -> 19.62-19.82 token/s`. All three paths emit the same
+  144-token SHA-256. Prefill remains about 182 token/s and is unaffected.
+- On the 632-token high-reasoning math continuation, fast versus exact all-slot
+  is `23.84` versus `16.79 token/s`. Both emit the same full continuation SHA,
+  reach EOS, and answer `001` correctly.
+- Pinned llama.cpp b10297 reaches 25.496 token/s on the same GGUF. The quant is
+  therefore not the cause of the old 10.9 token/s result; native still has an
+  attributable 11.5 ms/token residual versus the external floor.
+
+Decision: default the fivefold routed-stage work-unit improvement with two
+independent rollback levels. Next expose the existing singleton stage recorder
+through a reusable bench front end before guessing at the remaining decode
+gap. K160-versus-FRESH quality remains a separate asset-level decision.
+
 ## 2026-08-07 - DeepSeek V4 Half-Staged IQ2 Matrix Default GO
 
 Status: the 25 IQ2_XS gate/up layers now default to F16-staged operands in the

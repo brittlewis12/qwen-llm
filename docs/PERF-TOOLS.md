@@ -152,7 +152,9 @@ Stdout defaults to a compact summary with request totals and aggregate stage
 maps. `--json-out` always writes the complete schema-v5 report, including every
 chunk and layer, so one expensive acquisition remains sufficient for later
 attribution. Use `--full-json` only when the complete report must also be emitted
-to stdout.
+to stdout. Use `--ordinary-only` when an external tracer needs only the required
+warmup and one unsampled production pass; it skips the additional sampled pass
+without changing ordinary execution.
 
 The candidate chunk must currently be twice the executed chunk. For each
 adjacent pair, the report charges the larger positive sampled non-GPU residual
@@ -161,6 +163,49 @@ sum by the ordinary request wall. This is a ceiling for deciding whether a real
 larger-chunk implementation is worth building, not a speedup claim. Without
 `--prompt-file`, a deterministic vocabulary-wide token ramp is used. Do not use
 the sampled wall as product throughput.
+
+To price the current packed path as a restored two-row verifier lower bound,
+reuse a current-asset causal snapshot rather than replaying its prefix:
+
+```sh
+./target/release/qwen-bench dsv4-prefill \
+  -m "$DSV4_MODEL" \
+  --verifier-snapshot "$SNAPSHOT" \
+  --verifier-position 2384 \
+  --verifier-token-ids 128822 19 \
+  --verifier-identity-cache "$IDENTITY_CACHE_DIR" \
+  --warmups 1 \
+  --samples 7 \
+  --json-out target/profiles/dsv4-verifier-n2.json
+```
+
+The two token IDs are separate arguments: the committed carry followed by the
+candidate draft. Every arm restores the authenticated snapshot outside timing;
+the schedule alternates packed and singleton order and reports wall, GPU,
+pre/post-route splits, positions, and kernel traces. This is a mechanism floor,
+not a speculative product packet: it excludes drafter execution, target-hidden
+capture, acceptance, and transaction costs. The maintained position-2,384 run
+measures packed N2 at 272.155 ms wall / 254.399 ms GPU versus a 61.09 ms complete
+packet budget, killing reuse of this packed work unit without making a broader
+claim about purpose-built verification.
+
+Ordinary DeepSeek V4 CLI loading defaults to cache-state-gated parallel pread.
+The stats line reports `prefetch_mode` and `prefetch_ms`; the preceding compact
+prefetch line records shard decisions, returned bytes, physical reads, and
+effective throughput. Use `QWEN_DSV4_PREFETCH=off` to measure the demand-paged
+control or `always` to force a full retained-descriptor reread. The default
+`auto` policy uses a bounded distributed residency sample, so a warm 100 GiB
+checkpoint does not pay the page-linear full-`mincore` observer cost.
+
+For consecutive sparse-CSA decision analysis, build `qwen` with
+`dsv4-diagnostics` and set `QWEN_DSV4_TEMPORAL_WINDOW=65`. Sixty-five captured
+score states cover 64 transitions. `QWEN_DSV4_TEMPORAL_JSON=PATH` retains
+per-layer candidate economics plus compact per-position selected-ID, boundary,
+head-weight, and route records; stderr receives only the aggregate summary.
+With `--deepseek-v4-snapshot`, the report also records final logits and causal
+digests, so independent restored arms can be compared without replaying the
+prefix. This schedule performs host readback and is correctness/attribution
+instrumentation, not a throughput measurement.
 
 ## Decision table
 
@@ -401,50 +446,27 @@ Tables that are usually useful for this workload:
 - `metal-resource-allocations`
 - `time-profile`
 
-Until a repo-local parser exists, this compact extractor gives a first-pass
-summary of target-process compute intervals and gaps. Treat schema names,
-process names, and timestamp fields as trace-version dependent:
+Use the repo-local reducer for command-buffer cadence, compute spans, and GPU
+gaps:
 
 ```sh
-uv run python - <<'PY'
-import subprocess, xml.etree.ElementTree as ET, statistics as st, os
-trace = os.environ.get('TRACE', 'target/profiles/metal-decode.trace')
-schema = 'metal-gpu-intervals'
-xml = subprocess.check_output([
-    'xcrun', 'xctrace', 'export', '--input', trace,
-    '--xpath', f'/trace-toc/run[@number="1"]/data/table[@schema="{schema}"]',
-], stderr=subprocess.DEVNULL)
-root = ET.fromstring(xml)
-refs = {}
-for el in root.iter():
-    if 'id' in el.attrib:
-        refs[el.attrib['id']] = el.attrib.get('fmt') or (el.text.strip() if el.text else '')
-intervals = []
-for row in root.iter('row'):
-    d, raw = {}, {}
-    for child in row:
-        val = refs.get(child.attrib.get('ref')) if 'ref' in child.attrib else None
-        if val is None:
-            val = child.attrib.get('fmt') or (child.text.strip() if child.text else '')
-        d.setdefault(child.tag, val)
-        raw.setdefault(child.tag, child.text.strip() if child.text else '')
-    if d.get('process') == 'qwen-bench' and d.get('gpu-channel-name') == 'Compute':
-        start_ms = int(raw.get('start-time', '0')) / 1e6
-        dur_ms = int(raw.get('duration', '0')) / 1e6
-        intervals.append((start_ms, dur_ms))
-intervals.sort()
-gaps = [max(0, intervals[i][0] - (intervals[i-1][0] + intervals[i-1][1]))
-        for i in range(1, len(intervals))]
-print('target_compute_interval_count', len(intervals))
-if intervals:
-    durs = [d for _, d in intervals]
-    print('compute_total_ms', round(sum(durs), 3), 'compute_median_ms', round(st.median(durs), 3))
-if gaps:
-    print('gap_total_ms', round(sum(gaps), 3), 'gap_median_us', round(st.median(gaps) * 1000, 1))
-if not intervals:
-    print('no qwen-bench Compute intervals matched; inspect --toc and process names')
-PY
+uv run scripts/profile/trace-metal.py "$TRACE" --process-prefix qwen-bench
+uv run scripts/profile/trace-metal.py "$TRACE" --process-prefix qwen-bench \
+  --include-intervals --json
 ```
+
+The reducer keys XML fields by schema mnemonic rather than engineering-type
+element name. `xctrace` tables contain duplicate `duration` and
+`metal-command-buffer-id` elements; treating those tag names as unique can
+silently substitute CPU-to-GPU latency for GPU duration or encoder IDs for
+command-buffer IDs. Treat schema names and process names as trace-version
+dependent, and use `--include-intervals` only when the per-command detail is
+needed.
+
+Shader-profiler tables are optional. When present, the reducer reports sampled
+interval counts and bounded nearest-rank percentiles by normalized shader family.
+Their summed duration is profiler coverage, not whole-graph GPU time; use it for
+matched family comparisons, not workload-share accounting.
 
 ### GPU counters and the GPU flag
 

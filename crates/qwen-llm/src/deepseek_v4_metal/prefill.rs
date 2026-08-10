@@ -4666,6 +4666,7 @@ const PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES: usize = 4_096;
 const PACKED_GROUPED_EXPERT_INLINE_MAX_TILES: usize = PACKED_GROUPED_EXPERT_INLINE_MAX_BYTES / 12;
 const PACKED_GROUPED_IQ2_MMA16_TILE_ROWS: usize = 16;
 const PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS: usize = 128;
+const PACKED_GROUPED_Q3Q4_NARROW_TOKENS: usize = 128;
 const PACKED_GROUPED_IQ2_MMA16_MEDIUM_TOKENS: usize = PACKED_MATRIX_MIN_TOKENS;
 const PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS: usize = DEEPSEEK_V4_PREFILL_MAX_TOKENS;
 const PACKED_GROUPED_IQ2_MMA16_MAX_TILES: usize = MOE_EXPERT_COUNT
@@ -6150,10 +6151,35 @@ fn packed_grouped_q3q4_scope_qualified(
         && tensor_count == 1_328
         && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
-        && packed_q8_partial_matrix_chunk_qualified(n_tokens)
+        && (n_tokens == PACKED_GROUPED_Q3Q4_NARROW_TOKENS
+            || packed_q8_partial_matrix_chunk_qualified(n_tokens))
         && gate_dtype == GgmlType::Q3_K
         && up_dtype == GgmlType::Q3_K
         && down_dtype == GgmlType::Q4_K
+}
+
+#[allow(clippy::too_many_arguments)]
+fn packed_shared_route_overlap_scope_qualified(
+    device_name: &str,
+    tensor_count: usize,
+    source_bytes: u64,
+    expert_count: usize,
+    n_tokens: usize,
+    gate_dtype: GgmlType,
+    up_dtype: GgmlType,
+    down_dtype: GgmlType,
+) -> bool {
+    packed_q8_partial_matrix_chunk_qualified(n_tokens)
+        && packed_grouped_q3q4_scope_qualified(
+            device_name,
+            tensor_count,
+            source_bytes,
+            expert_count,
+            n_tokens,
+            gate_dtype,
+            up_dtype,
+            down_dtype,
+        )
 }
 
 fn packed_mxfp4_matrix_scope_qualified(
@@ -10940,7 +10966,7 @@ impl DeepSeekV4Session {
             #[cfg(feature = "dsv4-diagnostics")]
             let overlap_shared_route = packed_shared_route_overlap_enabled()
                 && route_policy == PackedRoutePolicy::Cpu
-                && packed_grouped_q3q4_scope_qualified(
+                && packed_shared_route_overlap_scope_qualified(
                     &device_name,
                     residency_tensor_count,
                     residency_source_bytes,
@@ -10958,7 +10984,7 @@ impl DeepSeekV4Session {
             #[cfg(not(feature = "dsv4-diagnostics"))]
             let overlap_shared_route = packed_shared_route_overlap_enabled()
                 && route_policy == PackedRoutePolicy::Cpu
-                && packed_grouped_q3q4_scope_qualified(
+                && packed_shared_route_overlap_scope_qualified(
                     &device_name,
                     residency_tensor_count,
                     residency_source_bytes,
@@ -12149,6 +12175,10 @@ impl DeepSeekV4Session {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "prefill/k160_n128_floor.rs"]
+mod k160_n128_floor;
 
 #[cfg(test)]
 mod tests {
@@ -13713,6 +13743,7 @@ mod tests {
             )
         };
         for tokens in [
+            PACKED_GROUPED_Q3Q4_NARROW_TOKENS,
             256,
             337,
             512,
@@ -13731,6 +13762,140 @@ mod tests {
                 GgmlType::Q4_K,
             ));
         }
+        for (device, tensors, bytes, experts, gate, up, down) in [
+            (
+                "Apple M3 Max",
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+                GgmlType::Q3_K,
+                GgmlType::Q3_K,
+                GgmlType::Q4_K,
+            ),
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_327,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+                GgmlType::Q3_K,
+                GgmlType::Q3_K,
+                GgmlType::Q4_K,
+            ),
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES - 1,
+                160,
+                GgmlType::Q3_K,
+                GgmlType::Q3_K,
+                GgmlType::Q4_K,
+            ),
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES + 1,
+                160,
+                GgmlType::Q3_K,
+                GgmlType::Q3_K,
+                GgmlType::Q4_K,
+            ),
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                159,
+                GgmlType::Q3_K,
+                GgmlType::Q3_K,
+                GgmlType::Q4_K,
+            ),
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                161,
+                GgmlType::Q3_K,
+                GgmlType::Q3_K,
+                GgmlType::Q4_K,
+            ),
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+                GgmlType::Q4_K,
+                GgmlType::Q3_K,
+                GgmlType::Q4_K,
+            ),
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+                GgmlType::Q3_K,
+                GgmlType::Q4_K,
+                GgmlType::Q4_K,
+            ),
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+                GgmlType::Q3_K,
+                GgmlType::Q3_K,
+                GgmlType::Q3_K,
+            ),
+        ] {
+            assert!(!qualified(
+                device,
+                tensors,
+                bytes,
+                experts,
+                PACKED_GROUPED_Q3Q4_NARROW_TOKENS,
+                gate,
+                up,
+                down,
+            ));
+        }
+        assert!(!packed_shared_route_overlap_scope_qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_GROUPED_Q3Q4_NARROW_TOKENS,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        assert!(packed_shared_route_overlap_scope_qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            256,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_GROUPED_Q3Q4_NARROW_TOKENS - 1,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            PACKED_GROUPED_Q3Q4_NARROW_TOKENS + 1,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,

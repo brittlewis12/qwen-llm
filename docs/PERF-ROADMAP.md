@@ -900,6 +900,16 @@ saving 0.382/1.819 seconds from load plus prefill, while one decode pair is flat
 at 25.81 versus 26.01 token/s. Treat the result as a composed placement and
 coverage repair, not a new arithmetic kernel ceiling.
 
+The remaining N=128 K160 cliff is now repaired. A model-backed synthetic
+median-class layer floor moves `32.925 -> 13.095 ms GPU` conservatively,
+preserving output bits and projecting an illustrative 852.7 ms saving across 43
+layers despite only 24.24% tile occupancy. The isolated production request
+moves `2,394.366 -> 1,627.548 ms`, or `53.46 -> 78.65 token/s`, and both policies
+emit the same 32-token greedy digest. Qualification adds exactly N=128 to the
+existing authenticated M4 Max/K160/Q3_K-Q3_K-Q4_K scope; shared/route overlap
+and N=129..255 remain on their old policies. Short-tail matrix coverage is no
+longer a leading K160 opportunity.
+
 The CSA/HCA leverage map is now regime-specific. At terminal singleton shape,
 the production scorer costs 2.102 ms across each of 21 CSA layers, radix4 costs
 1.875 ms on mixed scores, selected attention costs 0.323 ms, and online HCA

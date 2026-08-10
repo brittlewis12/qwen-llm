@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-10 - DeepSeek V4 K160 N=128 Grouped-Expert GO
+
+Status: the exact K160 REAP asset now runs its promoted mapped grouped
+Q3_K/Q3_K/Q4_K expert work unit at N=128 as well as N=256..4,096. N=127,
+N=129..255, crossed assets, and crossed dtypes remain ineligible.
+`QWEN_DSV4_PACKED_GROUPED_Q3Q4=0` restores per-expert bucket execution. The
+independent shared/route overlap remains N=256..4,096 and does not enter either
+N=128 arm.
+
+- A model-backed one-layer floor uses a synthetic median-class schedule
+  parameterized from the maintained N=512 K160 census: 768 routes, 96 active
+  experts, one 116-route hot expert, 99 width-32 tiles, and 24.24% tile
+  occupancy. Candidate and bucketed-control outputs are bit-identical for this
+  exact layer-0 bank, input, and schedule; output canaries remain intact.
+- Control/candidate GPU A/B/B/A is
+  `33.357/13.095/13.092/32.925 ms`; wall is
+  `33.947/13.277/13.291/33.597 ms`. The conservative saving is
+  `19.830 ms GPU` and `20.305 ms wall` per representative layer, an
+  illustrative `852.676/873.126 ms` 43-layer projection. This clears the frozen
+  100 ms scaled GPU gate by 8.53x.
+- An isolated production N=128 request against the actual pre-change policy
+  moves `2,394.366 -> 1,627.548 ms`, or `53.46 -> 78.65 token/s`. Independent
+  warm repeats are `2,423.637/1,635.136 ms`; each arm repeats within 1.3%, while
+  the candidate removes 32.0% of request wall.
+- Product logits are numerical rather than bitwise because the grouped width-32
+  lineage replaces bucket-specific small-N choices. The first token remains 301;
+  its top-two margin moves `1.544 -> 1.622`. Both arms repeat the same 32-token
+  greedy SHA-256 `dc93ccd8...24f2ae6` across warmup and ordinary executions.
+- The first control load is storage-cold at 21.46 seconds while the following
+  candidate load is cache-warm at 0.58 seconds. Load carries no authority for
+  this decision; the within-process warm/ordinary prefill repeats and the
+  model-backed A/B/B/A floor decide it.
+
+Decision: promote only K160 N=128. This closes the worst remaining short-tail
+qualification cliff without changing a kernel or broadening the exact asset and
+dtype contract. Raw ordinary reports are
+`target/profiles/dsv4-k160-n128-grouped-{control,candidate}.json`; the ignored
+model-backed floor remains the regression and repricing instrument.
+Adversarial review: cx session `019fed3c-14fd-7303-a953-fc9598d30ee3`.
+
 ## 2026-08-10 - DeepSeek V4 K216 N=4,096 MXFP4 Matrix GO
 
 Status: K216's promoted MXFP4 routed-down matrix tile now covers complete

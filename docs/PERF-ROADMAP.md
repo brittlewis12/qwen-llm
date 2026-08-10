@@ -889,16 +889,16 @@ continuation remains coherent and reaches EOS. Default the faster arithmetic
 with `QWEN_DSV4_PACKED_IQ2_F16_MATRIX=0` as the F32-staging rollback.
 
 The K160 REAP lane supplies same-GGUF prefill and decode anchors. Mapped grouped
-Q3_K/Q4_K matrices first move native N=2,048 from 227.9 to 266.1 token/s.
-Overlapping the route-independent shared expert with CPU schedule construction
-then moves `7,770.189 -> 7,404.634 ms`, or `263.57 -> 276.58 token/s`, with
-identical logits. The warm 2,385-token product prompt moves
-  `182.00 -> 185.67 token/s` in a same-binary rollback pair. Current llama.cpp
-  b10326 reaches 276.84/318.04/331.68 token/s at ubatches 512/1,024/2,048;
-  three full-ubatch samples span 346.18/321.44/306.61 token/s as the device
-  heats. Its decode anchor remains 25.496 token/s at `tg128`. The prefill lead
-  is therefore a full-N work-unit advantage with thermal spread, not a stable
-  352 token/s result from four 512-token ubatches.
+Q3_K/Q4_K matrices and shared/route overlap first moved native N=2,048 from
+227.9 to 276.58 token/s. Current llama.cpp b10326 reaches 278.73 token/s at
+pp512 on the exact GGUF, while qwen's old partial N=512 chunk collapsed to
+18.428 token/s. Explicit residency plus the promoted matrix stack recovers
+254.909 token/s at N=512; arbitrary edge-safe tails reach 215.34 at N=337 and
+249.80 at N=498. On real 2,385/6,642-token prompts, current prefill is
+297.27/274.78 token/s. Residency remains profitable after its load charge,
+saving 0.382/1.819 seconds from load plus prefill, while one decode pair is flat
+at 25.81 versus 26.01 token/s. Treat the result as a composed placement and
+coverage repair, not a new arithmetic kernel ceiling.
 
 The CSA/HCA leverage map is now regime-specific. At terminal singleton shape,
 the production scorer costs 2.102 ms across each of 21 CSA layers, radix4 costs
@@ -1070,8 +1070,9 @@ eight experts; both reference and replacement use source-scoped Metal safe math.
 Its 86 sampled intervals
 total `70.000 ms`, an approximately 176.8 ms/pass sampled-family delta, and it is
 bit-identical to the incumbent at N=1/32/128/2,048/4,096 and in the complete
-K160 prefill digest. Default that exact path only for the qualified K160-layout/M4/full-
-chunk scope; roll back with `QWEN_DSV4_PACKED_ROUTER_E8P32_STRICT=0`.
+K160 prefill digest. Default that exact path only for the qualified K160/M4
+N=256..4,096 scope; roll back with
+`QWEN_DSV4_PACKED_ROUTER_E8P32_STRICT=0`.
 
 Late post-route-L to pre-expert-L+1 enqueue does not harvest command ownership.
 It preserves all 128 commands on one serial queue, misses an A/B/A wall bracket,
@@ -1112,7 +1113,8 @@ and an 8,470-token structured probe preserves every generated ID and exact JSON
 while improving `224.68 -> 240.33 token/s`. The arithmetic schedule changes
 route decisions at depth, so this is numerical authority backed by real prompt
 behavior, not a bitwise claim. Default both projections only for the qualified
-K160/M4/full-chunk scope; tails stay exact and
+K160/M4 N=256..4,096 scope. Multiples of 128 retain R2C16; arbitrary tails use
+the guarded R2C4 body, and N<256 stays exact.
 `QWEN_DSV4_PACKED_Q8_QA_KV_MATRIX=0` is the rollback.
 
 Changed-graph command ownership now closes as well. A force-only K160 arm gives

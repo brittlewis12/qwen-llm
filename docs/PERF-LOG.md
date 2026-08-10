@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 K160 Residency / Tail Matrix GO
+
+Status: the exact K160 REAP asset now defaults to one model-wide Metal residency
+set, and N=256..4,096 packed chunks use the already-promoted matrix, router, and
+grouped-expert work units. Set `QWEN_DSV4_RESIDENCY_SET=0` to restore implicit
+residency; each arithmetic path retains its existing rollback.
+
+- Local llama.cpp b10326 reaches 278.73 token/s on the exact K160 GGUF at
+  pp512. That same-asset schedule proof exposed a qwen width cliff: the prior
+  N=512 tail took 27,783.566 ms, or 18.428 token/s, rather than showing a closed
+  prefill ceiling.
+- Attribution separates two necessary mechanisms. With all candidate matrix
+  paths but no explicit residency, N=512 regresses to 14.738 token/s and sampled
+  execution contains multi-second page/residency gaps. Residency with exact
+  arithmetic reaches 81.257 token/s. Composing both reaches 254.909 token/s, a
+  13.83x recovery over the incumbent tail.
+- The generalized edge-safe schedule reaches 215.34 token/s at N=337 and
+  249.80 token/s at the real N=498 battery tail. Warmup and ordinary executions
+  repeat final-logit bits. Qualification remains exact to Apple M4 Max, the
+  43-layer/E=160/1,328-tensor K160 topology, and 89,920,886,108 source bytes;
+  N<256 retains the incumbent path.
+- On the real 2,385-token CLI prompt, residency moves prefill
+  `8,885.0 -> 8,022.9 ms` while load moves `158.5 -> 638.5 ms`. The complete
+  load-plus-prefill subtotal still saves 382.1 ms. At 6,642 tokens, prefill moves
+  `26,444.5 -> 24,172.1 ms`; after the `453.1 ms` load charge, the subtotal saves
+  1,819.3 ms.
+- The complete promoted matrix stack takes 8,014.5 ms on the 2,385-token prompt
+  versus 29,907.4 ms with its arithmetic rollbacks. Both choose token 19 with a
+  3.72-3.77 logit margin, retain the same top-ten set, and emit the same 32-token
+  greedy SHA-256 `570b3dda...bdcc2a`.
+- Loaded decode is flat within one bounded pair: 25.81 token/s with residency
+  versus 26.01 without, with identical generated IDs. A no-prefetch diagnostic
+  can charge roughly 33 seconds to `requestResidency`; the product's existing
+  cold-aware prefetch precedes load. This result authorizes the normal
+  cache-warm/auto-prefetch product path, not a standalone storage-cold ratio.
+
+Decision: promote the composition rather than treating residency or matrix
+coverage as independent wins. The performance failure was retained-page
+placement plus a dispatch qualification hole, not deficient K160 arithmetic.
+Raw evidence is under `target/profiles/dsv4-k160-*`.
+
 ## 2026-08-09 - DeepSeek V4 FRESH MXFP4 Matrix Default GO
 
 Status: the promoted MXFP4 F32 matrix tile now also defaults on complete

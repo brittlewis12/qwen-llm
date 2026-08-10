@@ -55,18 +55,21 @@ use crate::metal::{
 use crate::tensor::{GgmlType, ggml_type_layout};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2_foundation::{NSError, NSString};
 #[cfg(feature = "dsv4-diagnostics")]
 use objc2_metal::MTLCommandBufferStatus;
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLSize,
+    MTLAllocation, MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLComputePipelineState,
+    MTLDevice, MTLResidencySet, MTLResidencySetDescriptor, MTLSize,
 };
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU32;
 
 pub const DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT: usize = 1_328;
 const GGUF_BINDING_ALIGNMENT: usize = 32;
+const DEEPSEEK_V4_REAP_K160_SOURCE_BYTES: u64 = 89_920_886_108;
 pub const DEEPSEEK_V4_CONNECTION_COUNT: usize = 4;
 pub const DEEPSEEK_V4_HC_PARAMETER_COUNT: usize = 24;
 pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
@@ -667,9 +670,109 @@ impl DeepSeekV4RealizedLoad {
 pub struct DeepSeekV4MetalResidency {
     config: DeepSeekV4Config,
     session_capacity: DeepSeekV4SessionCapacity,
+    _residency_set: Option<DeepSeekV4ResidencySetGuard>,
     tensors: BTreeMap<String, MetalTensor>,
     report: DeepSeekV4ResidencyReport,
     device_registry_id: u64,
+}
+
+struct DeepSeekV4ResidencySetGuard {
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    set: Retained<ProtocolObject<dyn MTLResidencySet>>,
+}
+
+impl Drop for DeepSeekV4ResidencySetGuard {
+    fn drop(&mut self) {
+        self.queue.removeResidencySet(&self.set);
+        self.set.endResidency();
+    }
+}
+
+crate::env_flag!(
+    default_on deepseek_v4_residency_set_enabled,
+    "QWEN_DSV4_RESIDENCY_SET"
+);
+
+fn buffer_as_allocation(
+    buffer: &ProtocolObject<dyn MTLBuffer>,
+) -> &ProtocolObject<dyn MTLAllocation> {
+    ProtocolObject::from_ref(buffer)
+}
+
+fn deepseek_v4_residency_set_scope_qualified(
+    enabled: bool,
+    device_name: &str,
+    layer_count: u32,
+    expert_count: u32,
+    report: &DeepSeekV4ResidencyReport,
+) -> bool {
+    enabled
+        && device_name == "Apple M4 Max"
+        && layer_count as usize == DEEPSEEK_V4_LAYER_COUNT
+        && expert_count == 160
+        && report.tensor_count == DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT
+        && report.source_bytes == DEEPSEEK_V4_REAP_K160_SOURCE_BYTES
+}
+
+fn create_deepseek_v4_residency_set(
+    ctx: &MetalContext,
+    tensors: &BTreeMap<String, MetalTensor>,
+    config: &DeepSeekV4Config,
+    report: &DeepSeekV4ResidencyReport,
+) -> Option<DeepSeekV4ResidencySetGuard> {
+    if !deepseek_v4_residency_set_scope_qualified(
+        deepseek_v4_residency_set_enabled(),
+        &ctx.device.name().to_string(),
+        config.layer_count,
+        config.expert_count,
+        report,
+    ) {
+        return None;
+    }
+    let mut seen = HashSet::new();
+    let mut buffers = Vec::new();
+    for tensor in tensors.values() {
+        let ptr = Retained::as_ptr(&tensor.buffer) as *const _ as usize;
+        if seen.insert(ptr) {
+            buffers.push(&*tensor.buffer);
+        }
+    }
+    if buffers.is_empty() {
+        eprintln!("deepseek_v4: model residency set skipped because no buffers were realized");
+        return None;
+    }
+
+    let descriptor = MTLResidencySetDescriptor::new();
+    descriptor.setLabel(Some(&NSString::from_str("qwen-dsv4-k160-model")));
+    // SAFETY: initialCapacity is advisory and equals the unique allocation count.
+    unsafe { descriptor.setInitialCapacity(buffers.len()) };
+    let set = match ctx.device.newResidencySetWithDescriptor_error(&descriptor) {
+        Ok(set) => set,
+        Err(error) => {
+            let error: Retained<NSError> = error;
+            eprintln!(
+                "deepseek_v4: model residency set unavailable; continuing without it: {}",
+                error.localizedDescription()
+            );
+            return None;
+        }
+    };
+    for buffer in buffers {
+        set.addAllocation(buffer_as_allocation(buffer));
+    }
+    set.commit();
+    set.requestResidency();
+    ctx.queue.addResidencySet(&set);
+    eprintln!(
+        "deepseek_v4: model residency set active allocations={} committed_allocation_bytes={} device_registry_id={} rollback=QWEN_DSV4_RESIDENCY_SET=0",
+        set.allocationCount(),
+        set.allocatedSize(),
+        ctx.device.registryID(),
+    );
+    Some(DeepSeekV4ResidencySetGuard {
+        queue: ctx.queue.clone(),
+        set,
+    })
 }
 
 impl DeepSeekV4MetalResidency {
@@ -768,6 +871,8 @@ impl DeepSeekV4MetalResidency {
         let windows = realize_windows(ctx, gguf, &plan.retained)?;
         let tensors = realize_tensors(ctx, gguf, &plan.retained, &windows)?;
         validate_realization(gguf, &tensors, &plan.report)?;
+        let residency_set =
+            create_deepseek_v4_residency_set(ctx, &tensors, &plan.config, &plan.report);
         let after_residency_bytes = ctx.current_allocated_size();
         plan.memory.reconcile_residency(
             refreshed_admission.signals.current_allocated_bytes,
@@ -778,6 +883,7 @@ impl DeepSeekV4MetalResidency {
             residency: Self {
                 config: plan.config,
                 session_capacity: plan.session_capacity,
+                _residency_set: residency_set,
                 tensors,
                 report: plan.report,
                 device_registry_id: ctx.device.registryID(),
@@ -14860,6 +14966,62 @@ mod tests {
         0x41, 0x57, 0xcb, 0x33, 0x0d, 0x9b, 0xde, 0xe5, 0x43, 0x2e, 0x32, 0x0f, 0xa1, 0xd8, 0xe4,
         0x9e, 0x2a,
     ];
+
+    #[test]
+    fn k160_residency_set_scope_is_exact() {
+        let mut report = DeepSeekV4ResidencyReport {
+            tensor_count: DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT,
+            source_bytes: DEEPSEEK_V4_REAP_K160_SOURCE_BYTES,
+            window_count: 4,
+            window_bytes: 0,
+            view_count: 0,
+            unique_view_bytes: 0,
+            logical_view_bytes: 0,
+            alias_count: 0,
+            alias_bytes: 0,
+            fallback_count: 5,
+            fallback_bytes: 0,
+            resident_bytes: 0,
+            page_size: 16 * 1024,
+            max_buffer_length: 0,
+            required_alignment: GGUF_BINDING_ALIGNMENT,
+        };
+        assert!(deepseek_v4_residency_set_scope_qualified(
+            true,
+            "Apple M4 Max",
+            43,
+            160,
+            &report,
+        ));
+        for (enabled, device, layers, experts) in [
+            (false, "Apple M4 Max", 43, 160),
+            (true, "Apple M3 Max", 43, 160),
+            (true, "Apple M4 Max", 42, 160),
+            (true, "Apple M4 Max", 43, 216),
+        ] {
+            assert!(!deepseek_v4_residency_set_scope_qualified(
+                enabled, device, layers, experts, &report,
+            ));
+        }
+
+        report.tensor_count -= 1;
+        assert!(!deepseek_v4_residency_set_scope_qualified(
+            true,
+            "Apple M4 Max",
+            43,
+            160,
+            &report,
+        ));
+        report.tensor_count += 1;
+        report.source_bytes -= 1;
+        assert!(!deepseek_v4_residency_set_scope_qualified(
+            true,
+            "Apple M4 Max",
+            43,
+            160,
+            &report,
+        ));
+    }
 
     #[derive(serde::Deserialize)]
     struct MetalFp4Fixture {

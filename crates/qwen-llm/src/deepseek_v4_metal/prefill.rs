@@ -2854,6 +2854,14 @@ fn packed_q8_matrix_chunk_qualified(n_tokens: usize) -> bool {
     )
 }
 
+fn packed_q8_matrix_execution_chunk_qualified(n_tokens: usize) -> bool {
+    (1..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&n_tokens)
+}
+
+fn packed_q8_k160_matrix_chunk_qualified(n_tokens: usize) -> bool {
+    (256..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&n_tokens)
+}
+
 fn packed_router_e8p32_scope_qualified(
     device_name: &str,
     tensor_count: usize,
@@ -2865,7 +2873,7 @@ fn packed_router_e8p32_scope_qualified(
         && tensor_count == 1_328
         && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
-        && packed_q8_matrix_chunk_qualified(n_tokens)
+        && packed_q8_k160_matrix_chunk_qualified(n_tokens)
 }
 
 fn packed_q8_qa_kv_matrix_scope_qualified(
@@ -2879,7 +2887,7 @@ fn packed_q8_qa_kv_matrix_scope_qualified(
         && tensor_count == 1_328
         && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
-        && packed_q8_matrix_chunk_qualified(n_tokens)
+        && packed_q8_k160_matrix_chunk_qualified(n_tokens)
 }
 
 fn packed_q8_compressor_matrix_scope_qualified(
@@ -2889,7 +2897,13 @@ fn packed_q8_compressor_matrix_scope_qualified(
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
-    packed_q8_matrix_chunk_qualified(n_tokens)
+    let chunk_qualified =
+        if source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES && expert_count == 160 {
+            packed_q8_k160_matrix_chunk_qualified(n_tokens)
+        } else {
+            packed_q8_matrix_chunk_qualified(n_tokens)
+        };
+    chunk_qualified
         && device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
         && tensor_count == 1_328
         && packed_q8_matrix_asset_qualified(source_bytes, expert_count)
@@ -2984,18 +2998,29 @@ fn packed_q8_output_projection_for_chunk(
         residency.config().expert_count as usize,
         n_tokens,
     );
-    Ok(resolve_packed_q8_matrix_policy(policy, profile_qualified))
+    Ok(resolve_packed_q8_matrix_policy(
+        policy,
+        profile_qualified,
+        n_tokens,
+    ))
 }
 
 fn resolve_packed_q8_matrix_policy(
     policy: PackedQ8MatrixPolicy,
     profile_qualified: bool,
+    n_tokens: usize,
 ) -> Q8PrecisionProjection {
     match policy {
-        PackedQ8MatrixPolicy::Auto if profile_qualified => Q8PrecisionProjection::WideF32Matrix,
+        PackedQ8MatrixPolicy::Auto if profile_qualified && n_tokens.is_multiple_of(128) => {
+            Q8PrecisionProjection::WideF32Matrix
+        }
+        PackedQ8MatrixPolicy::Auto if profile_qualified => Q8PrecisionProjection::F32Matrix,
         PackedQ8MatrixPolicy::Auto | PackedQ8MatrixPolicy::Exact => Q8PrecisionProjection::Exact,
         PackedQ8MatrixPolicy::F32Matrix => Q8PrecisionProjection::F32Matrix,
-        PackedQ8MatrixPolicy::WideF32Matrix => Q8PrecisionProjection::WideF32Matrix,
+        PackedQ8MatrixPolicy::WideF32Matrix if n_tokens.is_multiple_of(128) => {
+            Q8PrecisionProjection::WideF32Matrix
+        }
+        PackedQ8MatrixPolicy::WideF32Matrix => Q8PrecisionProjection::F32Matrix,
     }
 }
 
@@ -3013,13 +3038,22 @@ fn packed_q8_qb_projection_for_chunk(
         residency.config().expert_count as usize,
         n_tokens,
     );
-    Ok(resolve_packed_q8_matrix_policy(policy, profile_qualified))
+    Ok(resolve_packed_q8_matrix_policy(
+        policy,
+        profile_qualified,
+        n_tokens,
+    ))
 }
 
 impl Q8PrecisionProjection {
     fn uses_full_chunk_f32(self, n_tokens: usize) -> bool {
-        matches!(self, Self::F32Matrix | Self::WideF32Matrix)
-            && packed_q8_matrix_chunk_qualified(n_tokens)
+        match self {
+            Self::F32Matrix => packed_q8_matrix_execution_chunk_qualified(n_tokens),
+            Self::WideF32Matrix => {
+                packed_q8_matrix_execution_chunk_qualified(n_tokens) && n_tokens.is_multiple_of(128)
+            }
+            _ => false,
+        }
     }
 
     fn label(self) -> &'static str {
@@ -3683,16 +3717,29 @@ impl PrefillAttentionScratch {
             rms_eps,
         )?;
         if q_a_kv_matrix.qa() {
-            encode_q8_f32_mma_r2c16k64(
-                ctx,
-                enc,
-                q_a,
-                &normalized_input,
-                &q_lora_raw,
-                config.hidden_size,
-                config.q_lora_rank,
-                n_tokens,
-            )?;
+            if n_tokens.is_multiple_of(128) {
+                encode_q8_f32_mma_r2c16k64(
+                    ctx,
+                    enc,
+                    q_a,
+                    &normalized_input,
+                    &q_lora_raw,
+                    config.hidden_size,
+                    config.q_lora_rank,
+                    n_tokens,
+                )?;
+            } else {
+                encode_q8_f32_mma_r2c4k64(
+                    ctx,
+                    enc,
+                    q_a,
+                    &normalized_input,
+                    &q_lora_raw,
+                    config.hidden_size,
+                    config.q_lora_rank,
+                    n_tokens,
+                )?;
+            }
         } else {
             encode_batch_projection(
                 ctx,
@@ -3764,16 +3811,29 @@ impl PrefillAttentionScratch {
             rms_eps,
         )?;
         if q_a_kv_matrix.kv() {
-            encode_q8_f32_mma_r2c16k64(
-                ctx,
-                enc,
-                kv_weight,
-                &normalized_input,
-                &kv_raw,
-                config.hidden_size,
-                config.head_dim,
-                n_tokens,
-            )?;
+            if n_tokens.is_multiple_of(128) {
+                encode_q8_f32_mma_r2c16k64(
+                    ctx,
+                    enc,
+                    kv_weight,
+                    &normalized_input,
+                    &kv_raw,
+                    config.hidden_size,
+                    config.head_dim,
+                    n_tokens,
+                )?;
+            } else {
+                encode_q8_f32_mma_r2c4k64(
+                    ctx,
+                    enc,
+                    kv_weight,
+                    &normalized_input,
+                    &kv_raw,
+                    config.hidden_size,
+                    config.head_dim,
+                    n_tokens,
+                )?;
+            }
         } else {
             encode_state_batch_projection(
                 ctx,
@@ -6069,7 +6129,7 @@ fn packed_grouped_q3q4_scope_qualified(
         && tensor_count == 1_328
         && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
-        && packed_q8_matrix_chunk_qualified(n_tokens)
+        && packed_q8_k160_matrix_chunk_qualified(n_tokens)
         && gate_dtype == GgmlType::Q3_K
         && up_dtype == GgmlType::Q3_K
         && down_dtype == GgmlType::Q4_K
@@ -7841,20 +7901,33 @@ impl PrefillMoeScratch {
             vec![DEEPSEEK_V4_HIDDEN_SIZE as u64, n_tokens as u64],
             "packed shared output",
         )?;
-        if shared_matrix && !packed_q8_matrix_chunk_qualified(n_tokens) {
+        if shared_matrix && !packed_q8_matrix_execution_chunk_qualified(n_tokens) {
             return invalid("packed shared Q8 matrix policy reached an unsupported chunk");
         }
         if shared_matrix && shared_gate.dtype == GgmlType::Q8_0 {
-            encode_q8_f32_mma_r2c16k64(
-                ctx,
-                enc,
-                shared_gate,
-                normalized_input,
-                &gate,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                MOE_FFN_SIZE,
-                n_tokens,
-            )?;
+            if n_tokens.is_multiple_of(128) {
+                encode_q8_f32_mma_r2c16k64(
+                    ctx,
+                    enc,
+                    shared_gate,
+                    normalized_input,
+                    &gate,
+                    DEEPSEEK_V4_HIDDEN_SIZE,
+                    MOE_FFN_SIZE,
+                    n_tokens,
+                )?;
+            } else {
+                encode_q8_f32_mma_r2c4k64(
+                    ctx,
+                    enc,
+                    shared_gate,
+                    normalized_input,
+                    &gate,
+                    DEEPSEEK_V4_HIDDEN_SIZE,
+                    MOE_FFN_SIZE,
+                    n_tokens,
+                )?;
+            }
         } else {
             encode_batch_projection(
                 ctx,
@@ -7869,16 +7942,29 @@ impl PrefillMoeScratch {
             )?;
         }
         if shared_matrix && shared_up.dtype == GgmlType::Q8_0 {
-            encode_q8_f32_mma_r2c16k64(
-                ctx,
-                enc,
-                shared_up,
-                normalized_input,
-                &up,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                MOE_FFN_SIZE,
-                n_tokens,
-            )?;
+            if n_tokens.is_multiple_of(128) {
+                encode_q8_f32_mma_r2c16k64(
+                    ctx,
+                    enc,
+                    shared_up,
+                    normalized_input,
+                    &up,
+                    DEEPSEEK_V4_HIDDEN_SIZE,
+                    MOE_FFN_SIZE,
+                    n_tokens,
+                )?;
+            } else {
+                encode_q8_f32_mma_r2c4k64(
+                    ctx,
+                    enc,
+                    shared_up,
+                    normalized_input,
+                    &up,
+                    DEEPSEEK_V4_HIDDEN_SIZE,
+                    MOE_FFN_SIZE,
+                    n_tokens,
+                )?;
+            }
         } else {
             encode_batch_projection(
                 ctx,
@@ -7902,16 +7988,29 @@ impl PrefillMoeScratch {
             shared_clamp,
         )?;
         if shared_matrix && shared_down.dtype == GgmlType::Q8_0 {
-            encode_q8_f32_mma_r2c16k64(
-                ctx,
-                enc,
-                shared_down,
-                &inner,
-                &shared_output,
-                MOE_FFN_SIZE,
-                DEEPSEEK_V4_HIDDEN_SIZE,
-                n_tokens,
-            )?;
+            if n_tokens.is_multiple_of(128) {
+                encode_q8_f32_mma_r2c16k64(
+                    ctx,
+                    enc,
+                    shared_down,
+                    &inner,
+                    &shared_output,
+                    MOE_FFN_SIZE,
+                    DEEPSEEK_V4_HIDDEN_SIZE,
+                    n_tokens,
+                )?;
+            } else {
+                encode_q8_f32_mma_r2c4k64(
+                    ctx,
+                    enc,
+                    shared_down,
+                    &inner,
+                    &shared_output,
+                    MOE_FFN_SIZE,
+                    DEEPSEEK_V4_HIDDEN_SIZE,
+                    n_tokens,
+                )?;
+            }
         } else {
             encode_batch_projection(
                 ctx,
@@ -8690,7 +8789,7 @@ impl PrefillMoeScratch {
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
-                    "deepseek_v4: grouped Q3_K/Q4_K packed experts active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_GROUPED_Q3Q4=0"
+                    "deepseek_v4: grouped Q3_K/Q4_K packed experts active for N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_GROUPED_Q3Q4=0"
                 );
             }
             true
@@ -10556,7 +10655,7 @@ impl DeepSeekV4Session {
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
-                    "deepseek_v4: Q8 compressor matrices active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX=0"
+                    "deepseek_v4: Q8 compressor matrices active for N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_COMPRESSOR_MATRIX=0"
                 );
             }
         }
@@ -10565,7 +10664,7 @@ impl DeepSeekV4Session {
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
-                    "deepseek_v4: shared-expert Q8 matrices active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_SHARED_MATRIX=0"
+                    "deepseek_v4: shared-expert Q8 matrices active for N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_SHARED_MATRIX=0"
                 );
             }
         }
@@ -10583,7 +10682,7 @@ impl DeepSeekV4Session {
                 std::sync::atomic::AtomicBool::new(false);
             if !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!(
-                    "deepseek_v4: F32 Q8 Q-A/raw-KV matrix mode={q_a_kv_matrix:?} active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QA_KV_MATRIX=0"
+                    "deepseek_v4: F32 Q8 Q-A/raw-KV matrix mode={q_a_kv_matrix:?} active for N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QA_KV_MATRIX=0"
                 );
             }
         }
@@ -10596,7 +10695,7 @@ impl DeepSeekV4Session {
                     _ => "exact",
                 };
                 eprintln!(
-                    "deepseek_v4: Q8 Q-B matrix policy={} active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB={rollback}",
+                    "deepseek_v4: Q8 Q-B matrix policy={} active for N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB={rollback}",
                     q_b_projection.label(),
                 );
             }
@@ -10610,7 +10709,7 @@ impl DeepSeekV4Session {
                     _ => "exact",
                 };
                 eprintln!(
-                    "deepseek_v4: Q8 output A/B matrix policy={} active for full N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT={rollback}",
+                    "deepseek_v4: Q8 output A/B matrix policy={} active for N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT={rollback}",
                     output_projection.label(),
                 );
             }
@@ -11448,7 +11547,7 @@ impl DeepSeekV4Session {
                 static REPORTED: std::sync::Once = std::sync::Once::new();
                 REPORTED.call_once(|| {
                     eprintln!(
-                        "deepseek_v4: shared expert overlaps CPU route planning for full K160 chunks; rollback=QWEN_DSV4_PACKED_SHARED_ROUTE_OVERLAP=0"
+                        "deepseek_v4: shared expert overlaps CPU route planning for qualified K160 chunks; rollback=QWEN_DSV4_PACKED_SHARED_ROUTE_OVERLAP=0"
                     );
                 });
                 Some(shared_command)
@@ -13060,38 +13159,48 @@ mod tests {
             PackedQ8MatrixPolicy::WideF32Matrix
         );
         assert_eq!(
-            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true),
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true, 512),
             Q8PrecisionProjection::WideF32Matrix
         );
         assert_eq!(
-            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, false),
-            Q8PrecisionProjection::Exact
-        );
-        assert_eq!(
-            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Exact, true),
-            Q8PrecisionProjection::Exact
-        );
-        assert_eq!(
-            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::F32Matrix, false),
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true, 337),
             Q8PrecisionProjection::F32Matrix
         );
         assert_eq!(
-            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::WideF32Matrix, false),
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, false, 337),
+            Q8PrecisionProjection::Exact
+        );
+        assert_eq!(
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Exact, true, 512),
+            Q8PrecisionProjection::Exact
+        );
+        assert_eq!(
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::F32Matrix, false, 337),
+            Q8PrecisionProjection::F32Matrix
+        );
+        assert_eq!(
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::WideF32Matrix, false, 512),
             Q8PrecisionProjection::WideF32Matrix
         );
+        assert_eq!(
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::WideF32Matrix, false, 337),
+            Q8PrecisionProjection::F32Matrix
+        );
         let matrix = Q8PrecisionProjection::F32Matrix;
-        assert!(!matrix.uses_full_chunk_f32(512));
+        assert!(matrix.uses_full_chunk_f32(337));
+        assert!(matrix.uses_full_chunk_f32(512));
         assert!(matrix.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
         assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
         let wide = Q8PrecisionProjection::WideF32Matrix;
-        assert!(!wide.uses_full_chunk_f32(512));
+        assert!(wide.uses_full_chunk_f32(512));
+        assert!(!wide.uses_full_chunk_f32(337));
         assert!(wide.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
         assert!(wide.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
         assert!(parse_packed_q8_qb_policy(Some("half_matrix")).is_err());
     }
 
     #[test]
-    fn packed_q8_output_matrix_policy_is_explicit_and_full_chunk_only() {
+    fn packed_q8_output_matrix_policy_is_explicit_and_qualified_width_only() {
         assert_eq!(
             parse_packed_q8_output_policy(None).unwrap(),
             PackedQ8MatrixPolicy::Auto
@@ -13113,15 +13222,23 @@ mod tests {
             PackedQ8MatrixPolicy::WideF32Matrix
         );
         assert_eq!(
-            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true),
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true, 512),
             Q8PrecisionProjection::WideF32Matrix
         );
         assert_eq!(
-            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, false),
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, true, 337),
+            Q8PrecisionProjection::F32Matrix
+        );
+        assert_eq!(
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::Auto, false, 337),
             Q8PrecisionProjection::Exact
         );
+        assert_eq!(
+            resolve_packed_q8_matrix_policy(PackedQ8MatrixPolicy::WideF32Matrix, false, 337),
+            Q8PrecisionProjection::F32Matrix
+        );
         let matrix = Q8PrecisionProjection::F32Matrix;
-        assert!(!matrix.uses_full_chunk_f32(512));
+        assert!(matrix.uses_full_chunk_f32(512));
         assert!(matrix.uses_full_chunk_f32(PACKED_MATRIX_MIN_TOKENS));
         assert!(matrix.uses_full_chunk_f32(DEEPSEEK_V4_PREFILL_MAX_TOKENS));
         assert!(parse_packed_q8_output_policy(Some("half_matrix")).is_err());
@@ -13146,12 +13263,21 @@ mod tests {
             256,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
-        assert!(qualified(
+        for tokens in [256, 337, 512, 2_048, 4_095, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+            assert!(qualified(
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+                tokens,
+            ));
+        }
+        assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            PACKED_MATRIX_MIN_TOKENS,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            256,
+            512,
         ));
         assert!(qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
@@ -13226,7 +13352,14 @@ mod tests {
         let qualified = |device, tensors, bytes, experts, tokens| {
             packed_router_e8p32_scope_qualified(device, tensors, bytes, experts, tokens)
         };
-        for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+        for tokens in [
+            256,
+            337,
+            512,
+            PACKED_MATRIX_MIN_TOKENS,
+            4_095,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ] {
             assert!(qualified(
                 PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
                 1_328,
@@ -13268,7 +13401,7 @@ mod tests {
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
-            PACKED_MATRIX_MIN_TOKENS - 1,
+            255,
         ));
     }
 
@@ -13292,7 +13425,14 @@ mod tests {
         let qualified = |device, tensors, bytes, experts, tokens| {
             packed_q8_qa_kv_matrix_scope_qualified(device, tensors, bytes, experts, tokens)
         };
-        for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+        for tokens in [
+            256,
+            337,
+            512,
+            PACKED_MATRIX_MIN_TOKENS,
+            4_095,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ] {
             assert!(qualified(
                 PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
                 1_328,
@@ -13320,7 +13460,7 @@ mod tests {
             1_328,
             PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
             160,
-            PACKED_MATRIX_MIN_TOKENS - 1,
+            255,
         ));
     }
 
@@ -13401,7 +13541,14 @@ mod tests {
                 device, tensors, bytes, experts, tokens, gate, up, down,
             )
         };
-        for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+        for tokens in [
+            256,
+            337,
+            512,
+            PACKED_MATRIX_MIN_TOKENS,
+            4_095,
+            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ] {
             assert!(qualified(
                 PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
                 1_328,
@@ -13413,6 +13560,16 @@ mod tests {
                 GgmlType::Q4_K,
             ));
         }
+        assert!(!qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+            160,
+            255,
+            GgmlType::Q3_K,
+            GgmlType::Q3_K,
+            GgmlType::Q4_K,
+        ));
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
@@ -13459,16 +13616,6 @@ mod tests {
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
             160,
             PACKED_MATRIX_MIN_TOKENS,
-            GgmlType::Q3_K,
-            GgmlType::Q3_K,
-            GgmlType::Q4_K,
-        ));
-        assert!(!qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-            160,
-            512,
             GgmlType::Q3_K,
             GgmlType::Q3_K,
             GgmlType::Q4_K,

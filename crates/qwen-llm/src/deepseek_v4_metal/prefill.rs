@@ -2899,7 +2899,8 @@ fn packed_q8_compressor_matrix_scope_qualified(
 ) -> bool {
     let chunk_qualified = if matches!(
         (source_bytes, expert_count),
-        (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160)
+        (PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES, 256)
+            | (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160)
             | (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216)
     ) {
         packed_q8_partial_matrix_chunk_qualified(n_tokens)
@@ -2910,6 +2911,23 @@ fn packed_q8_compressor_matrix_scope_qualified(
         && device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
         && tensor_count == 1_328
         && packed_q8_matrix_asset_qualified(source_bytes, expert_count)
+}
+
+fn packed_gpu_route_compact_scope_qualified(
+    device_name: &str,
+    tensor_count: usize,
+    source_bytes: u64,
+    expert_count: usize,
+    n_tokens: usize,
+) -> bool {
+    packed_q8_matrix_chunk_qualified(n_tokens)
+        && packed_q8_compressor_matrix_scope_qualified(
+            device_name,
+            tensor_count,
+            source_bytes,
+            expert_count,
+            n_tokens,
+        )
 }
 
 fn packed_indexer_q_matrix_scope_qualified(
@@ -10465,7 +10483,7 @@ impl DeepSeekV4Session {
             && expert_count == MOE_EXPERT_COUNT
             && packed_gpu_route_compact_enabled()
             && token_ids.len() <= PACKED_GPU_ROUTE_MAX_TOKENS
-            && packed_q8_compressor_matrix_scope_qualified(
+            && packed_gpu_route_compact_scope_qualified(
                 &device_name,
                 residency_tensor_count,
                 residency_source_bytes,
@@ -10750,7 +10768,7 @@ impl DeepSeekV4Session {
                     _ => "exact",
                 };
                 eprintln!(
-                    "deepseek_v4: Q8 Q-B matrix policy={} active for N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB={rollback}",
+                    "deepseek_v4: Q8 Q-B matrix policy={} active for N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_QB={rollback}; exact_rollback=QWEN_DSV4_PACKED_Q8_QB=exact",
                     q_b_projection.label(),
                 );
             }
@@ -10764,7 +10782,7 @@ impl DeepSeekV4Session {
                     _ => "exact",
                 };
                 eprintln!(
-                    "deepseek_v4: Q8 output A/B matrix policy={} active for N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT={rollback}",
+                    "deepseek_v4: Q8 output A/B matrix policy={} active for N={n_tokens} chunks; rollback=QWEN_DSV4_PACKED_Q8_OUTPUT={rollback}; exact_rollback=QWEN_DSV4_PACKED_Q8_OUTPUT=exact",
                     output_projection.label(),
                 );
             }
@@ -13380,52 +13398,40 @@ mod tests {
         let qualified = |device, tensors, bytes, experts, tokens| {
             packed_q8_compressor_matrix_scope_qualified(device, tensors, bytes, experts, tokens)
         };
-        assert!(qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
-            1_328,
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-            256,
-            PACKED_MATRIX_MIN_TOKENS,
-        ));
-        assert!(qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
-            1_328,
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-            256,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-        ));
         for tokens in [256, 337, 512, 2_048, 4_095, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
-            assert!(qualified(
+            for (bytes, experts) in [
+                (
+                    PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+                    MOE_EXPERT_COUNT,
+                ),
+                (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160),
+                (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
+            ] {
+                assert!(qualified(
+                    PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                    1_328,
+                    bytes,
+                    experts,
+                    tokens,
+                ));
+            }
+        }
+        for (bytes, experts) in [
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+                MOE_EXPERT_COUNT,
+            ),
+            (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160),
+            (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
+        ] {
+            assert!(!qualified(
                 PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
                 1_328,
-                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
-                160,
-                tokens,
+                bytes,
+                experts,
+                255,
             ));
         }
-        assert!(!qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
-            1_328,
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-            256,
-            512,
-        ));
-        for tokens in [256, 337, 512, 2_048, 4_095, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
-            assert!(qualified(
-                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
-                1_328,
-                PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-                216,
-                tokens,
-            ));
-        }
-        assert!(!qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-            216,
-            255,
-        ));
         assert!(!qualified(
             "Apple M3 Max",
             1_328,
@@ -13465,8 +13471,8 @@ mod tests {
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-            256,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS - 1,
+            216,
+            337,
         ));
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
@@ -13474,6 +13480,20 @@ mod tests {
             PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
             256,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+        ));
+        assert!(!packed_gpu_route_compact_scope_qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            MOE_EXPERT_COUNT,
+            337,
+        ));
+        assert!(packed_gpu_route_compact_scope_qualified(
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            MOE_EXPERT_COUNT,
+            PACKED_MATRIX_MIN_TOKENS,
         ));
     }
 
@@ -14857,7 +14877,7 @@ mod tests {
 
         for (n_in, n_out) in [(64usize, 16usize), (128, 32)] {
             let weight = q8_precision_test_weight(&ctx, n_in, n_out);
-            for n_tokens in [1usize, 31, 32, 33, 128] {
+            for n_tokens in [1usize, 31, 32, 33, 128, 337] {
                 let padded_tokens = n_tokens.div_ceil(32) * 32;
                 let input_storage = MetalTensor::from_bytes(
                     &ctx,

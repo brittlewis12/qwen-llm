@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-10 - DeepSeek V4 FRESH Partial-Tail Q8 Matrix GO
+
+Status: the exact FRESH 0731 asset now extends its promoted Q8 compressor,
+shared-expert, Q-B, and output matrix policies from N={2,048,4,096} to every
+N=256..4,096. K160/K216 keep their existing partial coverage; K160-only
+Q-A/raw-KV and the N=4,096-only indexer-Q policy do not widen.
+
+- This changes one authenticated host qualifier only. The R2C16 aligned path,
+  guarded R2C4 tail path, Q8 decode, projection arithmetic, and four existing
+  component rollbacks remain unchanged. The R2C4 differential now explicitly
+  covers N=337 and passes its numerical and guard checks.
+- At N=337, Q8 compressor matrix invocations move `0 -> 124`. Ordinary
+  control/candidate/control wall moves
+  `3,528.151 -> 2,059.391 -> 3,550.126 ms`, saving 41.6-42.0%; sampled wall
+  moves `3,530.246 -> 2,041.133 -> 3,535.441 ms`, saving 42.2-42.3%.
+- Pre-expert GPU moves `2,143.824/2,146.556 -> 670.647 ms`, a 68.7-68.8%
+  reduction. Post-route GPU remains within 17 ms at
+  `1,202.278/1,206.640 -> 1,190.189 ms`, isolating the saving to the authorized
+  Q8 projections rather than the newly repaired IQ2 tail.
+- The current no-yearcore 6,224-token ring0 request reaches the same EOS after
+  54 tokens with the same generated-ID digest `2f4047cb...b06219`; decode stays
+  in the same class at `21.85 -> 21.63 token/s`. Its chunk decomposition is
+  4,096 + 2,048 + 80, so it does not exercise a newly qualified width and has no
+  speed authority for this change.
+
+Decision: promote the exact FRESH partial-width qualifier. This composes with
+the IQ2 tail repair to remove both independently observed N=337 cliffs. The
+same-output product guard rules out an obvious regression but does not upgrade
+the isolated result into a maintained-prompt speed claim. Partial Q8 matrix
+coverage is now complete for all three authenticated assets.
+
 ## 2026-08-10 - DeepSeek V4 FRESH Partial-Tail IQ2 Matrix GO
 
 Status: the exact FRESH 0731 asset now joins K216 in extending the promoted

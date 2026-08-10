@@ -1267,6 +1267,18 @@ tokens, and records a complete generated-ID digest. Keep this second widening
 exact to M4 Max, 1,328 tensors, 104,202,502,492 source bytes, E=256, and
 N=256..4,096. Partial IQ2 coverage is now closed for both supported IQ2 assets.
 
+FRESH partial-Q8 coverage closes the remaining N=337 pre-expert cliff. Extending
+only its already-promoted compressor/shared/Q-B/output qualifier to
+N=256..4,096 moves ordinary control/candidate/control wall
+`3,528.151/2,059.391/3,550.126 ms` and pre-expert GPU
+`2,143.824/670.647/2,146.556 ms`; post-route GPU remains effectively flat. The
+124 compressor matrix invocations are now present, while K160-only Q-A/raw-KV
+and N=4,096-only indexer-Q remain unchanged. The no-yearcore 6,224-token ring0
+guard retains the same EOS, 54 generated tokens, and generated-ID digest, but
+its 4,096 + 2,048 + 80 decomposition does not exercise a newly qualified width
+and carries no speed authority. Partial Q8 coverage is now closed for all three
+authenticated assets; do not widen by architecture alone.
+
 Fresh attribution then authorizes one exact transfer rather than a quant-wide
 widening. FRESH layers 26 and 42 retain `525.089/511.884 ms` of routed-expert
 GPU at N=4,096. The unchanged tile reduces them to `167.483/160.357 ms`, deleting

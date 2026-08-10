@@ -1274,6 +1274,17 @@ projections contend for the same execution resources, while added encoder
 boundaries consume the residual. Reopen this pocket only with dispatch, byte, or
 arithmetic deletion.
 
+The exact A10B process-cold path has a bounded force-only rescue. The incumbent
+needs 165.95 seconds to load and 111.76 seconds for a 13-token first prefill.
+Authenticated W4 destination pread populates 77.02 GB in 9.82 seconds and cuts
+that one-token process wall `280.58 -> 30.38 s`, with the same generated token.
+Sustained inference still collapses without explicit placement. Adding one
+879-allocation residency set charges 59.45 seconds during load, then restores
+222 ms prefill and 44.77 decode token/s while reproducing the known exact
+v0.538 128-token stream. Keep `QWEN_GGUF_PARALLEL_COPY=pread` force-only and
+ordinary loading unchanged. The remaining A10B problem is residency wiring,
+not another population selector or cache-warmer pass.
+
 Force-ranked queue:
 
 Compressor pairing also closes at accounting. The 124 projections already use
@@ -1292,35 +1303,41 @@ projection arithmetic and a credible path to the complete wall bar.
    N=256..4,096, first require a large isolated N=337 routed-stage saving, then
    retain the same 2,385/6,642-token numerical and greedy guard. Do not bundle
    MXFP4, Q8, or a new tile.
-2. **Require a physical routed gate/up deletion before implementation.** After
+2. **Bound A10B residency wiring before any loader expansion.** The force-only
+   composition restores loaded speed, but `requestResidency` owns 59.45 seconds
+   of an 83.36-second load. Reopen only with one mechanism that changes that
+   work, such as destination pre-wiring or uncached source reads; require loaded
+   parity and complete first-byte improvement. Do not sweep workers, suppress
+   the cache warmer again, or auto-admit A10B from the current result.
+3. **Require a physical routed gate/up deletion before implementation.** After
    the MXFP4 repair, FRESH and K160 still spend about `1,833` and `1,877 ms` in
    routed gate/up, but neither profile exposes a broken layer or shared quant
    work unit. Advance only a cohort-wide design that first demonstrates roughly
    150-200 ms of fewer weight decodes, routed assignments, or intermediate
    publication. Do not reopen paired gate/up staging, tile geometry, or command
    rearrangement from the subtotal alone.
-3. **Keep command ownership closed without GPU-work deletion.** The optimistic
+4. **Keep command ownership closed without GPU-work deletion.** The optimistic
    merged-route/indirect ceiling misses 2% after nonphysical full credits. Reopen
    only when a producer/consumer fusion independently deletes roughly 30-50 ms
    of control GPU work while preserving fail-stop mutation ownership.
-4. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
+5. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
    correct two-row causal execution plus measured resident drafter, hidden
    capture, acceptance, and transaction costs fit inside the 61.09 ms complete
    packet budget on the maintained snapshot. Do not adapt the current packed
    path or fund command collapse around its unchanged GPU work.
-5. **Use the singleton stage front end only for a named work deletion.** K160
+6. **Use the singleton stage front end only for a named work deletion.** K160
    wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus llama.cpp's
    39.2 ms. Attention core, prepare, output, routed, and shared are
    11.58/7.68/7.89/10.51/2.98 ms. Routed/shared waves move wall by only
    0.006 ms, and packed online-selected transfer saves `-0.242 ms` GPU. Do not
    resume local rearrangement or kernel sweeps without a structural
    >=2 ms/token deletion.
-6. **Record REAP quality governance before product equivalence claims.** Keep
+7. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,
    add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run
    one full-defaults versus arithmetic-rollbacks logit/top-1 audit. Memory and
    speed do not authorize an asset-quality claim.
-7. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
+8. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
    deep mask and regressed wall; F16 query staging now fails on real nonzero
    history. Reopen low precision only as an F32-authoritative conservative
    filter whose exact refinement, fallback, and merge beat the F32 streaming

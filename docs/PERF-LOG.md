@@ -6,6 +6,41 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - A10B Force-Only Destination-Pread / Residency GO
+
+Status: `QWEN_GGUF_PARALLEL_COPY=pread` now admits only the authenticated local
+122B-A10B Q4_K_XL asset and composes direct destination pread, native Q8
+embedding, and one model-wide Metal residency set. Absent environment remains
+on the incumbent loader; `QWEN_GGUF_PARALLEL_COPY=0` is the rollback.
+
+- The profile freezes 879 exact-sized Shared/DefaultCache/Tracked offset-zero
+  resources, 77,018,996,736 source bytes, the literal W4 schedule, three shard
+  lengths, architecture, descriptor and inventory digests, embedding identity,
+  M4 Max device contract, and an 85,608,931,328-byte admission floor. Every
+  mismatch fails before population and A10B rejects mmap-copy population.
+- The incumbent 13-token/one-output request records 165,952.1 ms load,
+  111,759.3 ms prefill, and 280.58 seconds process wall. It incurs 4.70 million
+  page faults and peaks near 80.0 GB footprint.
+- Destination pread alone populates all 77.02 GB in 9.82 seconds and lowers the
+  same request to 22,994.9 ms load, 6,707.1 ms prefill, and 30.38 seconds wall.
+  Both paths produce token SHA-256 `3bad3a51...6f753`.
+- That fast-load arm is not sufficient under current placement. A later
+  128-token run retains the known exact v0.538 stream but collapses to
+  1.06 token/s after a 66.8-second first prefill.
+- Explicit residency costs 59,454.8 ms in the bounded composed run, then lowers
+  prefill to 222.0 ms and restores 44.77 decode / 46.03 transition token/s. The
+  complete known 128-token stream finishes in 87.48 seconds and exactly matches
+  both v0.538 native and F32 reference text.
+- Suppressing the existing cache warmer is a narrow KILL: load moves
+  `22.99 -> 15.18 s`, prefill moves `6.71 -> 14.23 s`, and process wall is
+  effectively flat at `30.38 -> 30.07 s`. The suppression code is removed.
+
+Decision: retain the exact force-only composition because it changes the local
+asset from unusable to functional while preserving its known stream and loaded
+speed. Do not auto-admit it: load still costs 83.36 seconds in the complete
+residency run, acquisition is not paired, and request-residency wiring now owns
+the obvious remaining wall.
+
 ## 2026-08-09 - DeepSeek V4 K216 Partial-Tail Q8 Matrix GO
 
 Status: K216 now extends its already-promoted Q8 compressor, shared-expert,

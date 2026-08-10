@@ -57,13 +57,14 @@ use crate::metal::{
     encode_scatter_offset_f32_to_q8_0_kv, encode_shared_swiglu_q8_0_f32, encode_sigmoid_f32,
     encode_sigmoid_mul_gate_strided_f32, encode_silu_mul_f32, encode_split_q_gate_f32,
     encode_ssm_conv_silu_f32, encode_topk_logits_softmax_dot_sigmoid_f32,
-    encode_topk_logits_softmax_f32, encode_topk_logits_softmax_parallel_f32, host_page_size_bytes,
-    plan_retained_storage,
+    encode_topk_logits_softmax_f32, encode_topk_logits_softmax_parallel_f32,
+    evaluate_metal_memory_admission, host_page_size_bytes, plan_retained_storage,
 };
 use crate::model::{Arch, ArchKind};
 use crate::sampling::{BoundedTopKEvidence, GreedySelection, SampledToken, Sampler, SamplingError};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2_foundation::{NSError, NSString};
 use sha2::{Digest, Sha256};
 use std::{
     cell::Cell,
@@ -399,6 +400,7 @@ const GGUF_PAGE_ROUNDED_A3B_PADDED_RESOURCES: usize = 232;
 const GGUF_OWNED_WORKERS: usize = 4;
 const A3B_PARALLEL_COPY_AUTO_DEVICE: &str = "Apple M4 Max";
 const A3B_PARALLEL_COPY_AUTO_MIN_MEMORY: u64 = 128 * 1024 * 1024 * 1024;
+const A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES: u64 = 85_608_931_328;
 const A3B_PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 8] = [
     "QWEN_GGUF_NO_COPY",
     "QWEN_GGUF_OWNED_ARENA",
@@ -413,6 +415,7 @@ const A3B_PARALLEL_COPY_AUTO_OVERRIDE_ENVS: [&str; 8] = [
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum ParallelCopyProfileId {
     A3bQ4kmV1,
+    A10bQ4xlV1,
     Dense27bQ4kmV1,
 }
 
@@ -420,6 +423,7 @@ impl ParallelCopyProfileId {
     fn label(self) -> &'static str {
         match self {
             Self::A3bQ4kmV1 => "a3b-q4km-v1",
+            Self::A10bQ4xlV1 => "a10b-q4xl-v1",
             Self::Dense27bQ4kmV1 => "dense27b-q4km-v1",
         }
     }
@@ -434,12 +438,14 @@ enum ParallelCopyDeviceConstraint {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ParallelCopyAuthentication {
     A3bRetainedPlan,
+    A10bPlannerFree,
     DensePlannerFree,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ParallelCopyMarkerContract {
     A3b,
+    A10bSchema2,
     DenseSchema2,
 }
 
@@ -525,6 +531,29 @@ const DENSE27B_PARALLEL_COPY_ARCH: Arch = Arch {
     expert_used_count: 0,
     expert_feed_forward_length: 0,
     expert_shared_feed_forward_length: 0,
+    mtp_n_hidden_layers: 0,
+};
+
+const A10B_PARALLEL_COPY_ARCH: Arch = Arch {
+    kind: ArchKind::Moe,
+    n_layer: 48,
+    hidden_size: 3072,
+    intermediate_size: 0,
+    vocab_size: 248_320,
+    full_attention_interval: 4,
+    n_q_heads: 32,
+    n_kv_heads: 2,
+    attn_head_dim: 256,
+    rope_theta: 10_000_000.0,
+    partial_rotary_factor: 0.25,
+    gdn_n_v_heads: 64,
+    gdn_n_k_heads: 16,
+    gdn_head_dim: 128,
+    gdn_conv_kernel: 4,
+    expert_count: 256,
+    expert_used_count: 8,
+    expert_feed_forward_length: 1024,
+    expert_shared_feed_forward_length: 1024,
     mtp_n_hidden_layers: 0,
 };
 
@@ -704,8 +733,104 @@ const DENSE27B_PARALLEL_COPY_PROFILE: ParallelCopyProfile = ParallelCopyProfile 
     ],
 };
 
-static PARALLEL_COPY_PROFILES: [&ParallelCopyProfile; 2] =
-    [&A3B_PARALLEL_COPY_PROFILE, &DENSE27B_PARALLEL_COPY_PROFILE];
+const A10B_PARALLEL_PREAD_PROFILE: ParallelCopyProfile = ParallelCopyProfile {
+    id: ParallelCopyProfileId::A10bQ4xlV1,
+    architecture_label: Some("qwen35moe"),
+    arch: A10B_PARALLEL_COPY_ARCH,
+    tied_embeddings: false,
+    mtp_present: false,
+    shard_mapped_lengths: &[10_943_552, 49_640_779_424, 27_378_273_056],
+    descriptor_layout_digest: 0x3eb2_9091_5bec_2041,
+    inventory_digest: "b331c475123dbee3bc862a495266dee3996c5f3adabcd6fbeaff9bbabd71a4f8",
+    embedding_dtype: GgmlType::Q8_0,
+    embedding_shape: &[3072, 248_320],
+    device_constraint: ParallelCopyDeviceConstraint::ExactUnified("Apple M4 Max"),
+    authentication: ParallelCopyAuthentication::A10bPlannerFree,
+    marker_contract: ParallelCopyMarkerContract::A10bSchema2,
+    supports_direct_pread: true,
+    request_count: 879,
+    source_bytes: 77_018_996_736,
+    cuts: [214, 435, 658],
+    task_counts: [214, 221, 223, 221],
+    worker_bytes: [
+        19_474_295_808,
+        19_228_744_704,
+        19_231_902_720,
+        19_084_053_504,
+    ],
+    boundaries: [
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 2,
+                name: "output.weight",
+                shard_idx: 1,
+                source_offset: 35_488,
+                source_bytes: 810_516_480,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 220,
+                name: "blk.11.ffn_down_exps.weight",
+                shard_idx: 1,
+                source_offset: 18_920_683_168,
+                source_bytes: 553_648_128,
+            },
+        },
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 213,
+                name: "blk.11.ffn_down_shexp.weight",
+                shard_idx: 1,
+                source_offset: 19_474_331_296,
+                source_bytes: 3_342_336,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 437,
+                name: "blk.23.ffn_gate_exps.weight",
+                shard_idx: 1,
+                source_offset: 38_250_091_168,
+                source_bytes: 452_984_832,
+            },
+        },
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 436,
+                name: "blk.23.ffn_gate_inp.weight",
+                shard_idx: 1,
+                source_offset: 38_703_076_000,
+                source_bytes: 3_145_728,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 657,
+                name: "blk.35.ffn_up_exps.weight",
+                shard_idx: 2,
+                source_offset: 7_841_234_720,
+                source_bytes: 452_984_832,
+            },
+        },
+        ParallelCopyScheduleBoundary {
+            first: ParallelCopyScheduleIdentity {
+                request_index: 650,
+                name: "blk.35.ffn_up_shexp.weight",
+                shard_idx: 2,
+                source_offset: 8_294_219_552,
+                source_bytes: 3_342_336,
+            },
+            last: ParallelCopyScheduleIdentity {
+                request_index: 867,
+                name: "blk.47.post_attention_norm.weight",
+                shard_idx: 2,
+                source_offset: 27_378_260_768,
+                source_bytes: 12_288,
+            },
+        },
+    ],
+};
+
+static PARALLEL_COPY_PROFILES: [&ParallelCopyProfile; 3] = [
+    &A3B_PARALLEL_COPY_PROFILE,
+    &A10B_PARALLEL_PREAD_PROFILE,
+    &DENSE27B_PARALLEL_COPY_PROFILE,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GgufNoCopyMode {
@@ -1123,8 +1248,9 @@ fn t9_ffn_capture_slots_for_current_call() -> Option<(MetalTensor, MetalTensor)>
 }
 
 use objc2_metal::{
-    MTLBuffer, MTLCPUCacheMode, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue,
-    MTLComputePipelineState, MTLDevice, MTLHazardTrackingMode, MTLResource, MTLStorageMode,
+    MTLAllocation, MTLBuffer, MTLCPUCacheMode, MTLCommandBuffer, MTLCommandBufferStatus,
+    MTLCommandQueue, MTLComputePipelineState, MTLDevice, MTLHazardTrackingMode, MTLResidencySet,
+    MTLResidencySetDescriptor, MTLResource, MTLStorageMode,
 };
 
 #[cfg(test)]
@@ -1327,6 +1453,19 @@ pub struct MetalModel {
     pub lm_head: MetalTensor,
 
     pub blocks: Vec<MetalBlock>,
+    _residency_set: Option<MetalModelResidencySetGuard>,
+}
+
+struct MetalModelResidencySetGuard {
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    set: Retained<ProtocolObject<dyn MTLResidencySet>>,
+}
+
+impl Drop for MetalModelResidencySetGuard {
+    fn drop(&mut self) {
+        self.queue.removeResidencySet(&self.set);
+        self.set.endResidency();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1358,6 +1497,7 @@ struct ResolvedWeightLoadChoices {
 #[derive(Clone, Copy)]
 enum PreparedParallelCopyProof {
     A3bRetainedPlan,
+    A10bPlannerFree,
     DensePlannerFree,
 }
 
@@ -2227,6 +2367,13 @@ fn validate_parallel_population(
     profile: &ParallelCopyProfile,
     population: ParallelPopulationMethod,
 ) -> Result<(), MfError> {
+    if profile.id == ParallelCopyProfileId::A10bQ4xlV1
+        && population != ParallelPopulationMethod::Pread
+    {
+        return Err(MfError::LoadPolicy(
+            "A10B parallel population requires direct pread".to_string(),
+        ));
+    }
     if population == ParallelPopulationMethod::Pread && !profile.supports_direct_pread {
         return Err(MfError::LoadPolicy(format!(
             "parallel pread rejects unauthenticated profile {}",
@@ -2394,12 +2541,21 @@ fn emit_parallel_copy_marker(
                 }
             }
         }
-        ParallelCopyMarkerContract::DenseSchema2 => {
+        ParallelCopyMarkerContract::A10bSchema2 | ParallelCopyMarkerContract::DenseSchema2 => {
             let accounting = accounting.ok_or_else(|| {
                 MfError::LoadPolicy(
-                    "dense parallel-copy marker is missing endpoint accounting".to_string(),
+                    "profile parallel-copy marker is missing endpoint accounting".to_string(),
                 )
             })?;
+            let mapped_bytes =
+                profile
+                    .shard_mapped_lengths
+                    .iter()
+                    .try_fold(0u64, |total, &length| {
+                        total.checked_add(length as u64).ok_or_else(|| {
+                            MfError::LoadPolicy("parallel-copy mapped byte overflow".to_string())
+                        })
+                    })?;
             let boundary = profile.boundaries;
             emit_metal_load_line(format_args!(
                 concat!(
@@ -2413,7 +2569,7 @@ fn emit_parallel_copy_marker(
                     "create=shared,default_cache,default ",
                     "observed=shared,default_cache,tracked ",
                     "page=16384 alignment=32 max_buffer=77309411328 ",
-                    "mapped=16817244384 layout=0xd116405fd99f54d9 ",
+                    "mapped={} layout={:#018x} ",
                     "inventory={} allocation_us={} source_us={} copy_us={} ",
                     "binding_us={} ready_us={} user_cpu_us={} system_cpu_us={} ",
                     "total_cpu_us={} timer_minor_faults={} timer_major_faults={} ",
@@ -2474,6 +2630,8 @@ fn emit_parallel_copy_marker(
                 boundary[3].last.shard_idx,
                 boundary[3].last.source_offset,
                 boundary[3].last.source_bytes,
+                mapped_bytes,
+                profile.descriptor_layout_digest,
                 profile.inventory_digest,
                 timing.allocation_us,
                 timing.source_us,
@@ -3120,6 +3278,89 @@ enum DirectStorage {
     ForcedParallelCopied(PlannedParallelCopiedStorage),
 }
 
+fn create_a10b_parallel_residency_set(
+    ctx: &MetalContext,
+    direct_storage: &DirectStorage,
+) -> Result<Option<MetalModelResidencySetGuard>, MfError> {
+    let DirectStorage::ForcedParallelCopied(storage) = direct_storage else {
+        return Ok(None);
+    };
+    if storage.profile.id != ParallelCopyProfileId::A10bQ4xlV1 {
+        return Ok(None);
+    }
+    if storage.resources.len() != storage.profile.request_count {
+        return Err(MfError::LoadPolicy(format!(
+            "A10B residency resource count drifted: {}/{}",
+            storage.resources.len(),
+            storage.profile.request_count
+        )));
+    }
+
+    let descriptor = MTLResidencySetDescriptor::new();
+    descriptor.setLabel(Some(&NSString::from_str("qwen-a10b-parallel-pread")));
+    // SAFETY: initialCapacity is advisory and equals the authenticated resource count.
+    unsafe { descriptor.setInitialCapacity(storage.resources.len()) };
+    let set = ctx
+        .device
+        .newResidencySetWithDescriptor_error(&descriptor)
+        .map_err(|error| {
+            let error: Retained<NSError> = error;
+            MfError::LoadPolicy(format!(
+                "A10B residency set creation failed: {}",
+                error.localizedDescription()
+            ))
+        })?;
+    let mut expected_allocated_bytes = 0u64;
+    for buffer in &storage.resources {
+        let allocation: &ProtocolObject<dyn MTLAllocation> = ProtocolObject::from_ref(&**buffer);
+        let allocated_bytes = u64::try_from(allocation.allocatedSize()).map_err(|_| {
+            MfError::LoadPolicy("A10B residency allocation size does not fit u64".to_string())
+        })?;
+        expected_allocated_bytes = expected_allocated_bytes
+            .checked_add(allocated_bytes)
+            .ok_or_else(|| {
+                MfError::LoadPolicy("A10B residency allocated byte overflow".to_string())
+            })?;
+        set.addAllocation(allocation);
+    }
+    set.commit();
+    if set.allocationCount() != storage.resources.len()
+        || set.allocatedSize() != expected_allocated_bytes
+    {
+        let actual_count = set.allocationCount();
+        let actual_bytes = set.allocatedSize();
+        set.endResidency();
+        return Err(MfError::LoadPolicy(format!(
+            concat!(
+                "A10B residency set commitment drifted: allocations={}/{} ",
+                "bytes={}/{}"
+            ),
+            actual_count,
+            storage.resources.len(),
+            actual_bytes,
+            expected_allocated_bytes,
+        )));
+    }
+    let started = std::time::Instant::now();
+    set.requestResidency();
+    let residency_ms = started.elapsed().as_secs_f64() * 1e3;
+    ctx.queue.addResidencySet(&set);
+    emit_metal_load_line(format_args!(
+        concat!(
+            "[metal-gguf-parallel-residency] profile={} allocations={} ",
+            "allocated_bytes={} request_ms={:.3} rollback=QWEN_GGUF_PARALLEL_COPY=0"
+        ),
+        storage.profile.id.label(),
+        set.allocationCount(),
+        set.allocatedSize(),
+        residency_ms,
+    ));
+    Ok(Some(MetalModelResidencySetGuard {
+        queue: ctx.queue.clone(),
+        set,
+    }))
+}
+
 struct MetalWeightLoader<'a> {
     ctx: &'a MetalContext,
     gguf: &'a GgufFile,
@@ -3562,6 +3803,21 @@ fn parallel_copy_profile_matches(
         return Ok(false);
     }
     let shard_lengths = gguf.shard_mapped_lengths();
+    let embedding_qualified = match profile.id {
+        ParallelCopyProfileId::A10bQ4xlV1 => {
+            embedding_selection == NativeQuantEmbeddingSelection::Forced
+        }
+        ParallelCopyProfileId::A3bQ4kmV1 | ParallelCopyProfileId::Dense27bQ4kmV1 => {
+            embedding_selection == NativeQuantEmbeddingSelection::AutoPromoted
+                && native_quant_embedding_default_promoted(
+                    &model.arch,
+                    model.tied_embeddings,
+                    model.mtp.is_some(),
+                    model.token_embd.dtype,
+                    &model.token_embd.shape,
+                )
+        }
+    };
     if shard_lengths.as_slice() != profile.shard_mapped_lengths
         || gguf_descriptor_layout_digest(gguf) != profile.descriptor_layout_digest
         || model.arch != profile.arch
@@ -3569,14 +3825,7 @@ fn parallel_copy_profile_matches(
         || model.mtp.is_some() != profile.mtp_present
         || model.token_embd.dtype != profile.embedding_dtype
         || model.token_embd.shape.as_slice() != profile.embedding_shape
-        || embedding_selection != NativeQuantEmbeddingSelection::AutoPromoted
-        || !native_quant_embedding_default_promoted(
-            &model.arch,
-            model.tied_embeddings,
-            model.mtp.is_some(),
-            model.token_embd.dtype,
-            &model.token_embd.shape,
-        )
+        || !embedding_qualified
         || host_page_size_bytes()? != 16_384
         || ctx.max_buffer_length() != 77_309_411_328
         || expected.len() != profile.request_count
@@ -3677,8 +3926,29 @@ fn auto_parallel_copy_population(
 ) -> Option<ParallelPopulationMethod> {
     match profile {
         ParallelCopyProfileId::A3bQ4kmV1 => Some(ParallelPopulationMethod::Pread),
+        ParallelCopyProfileId::A10bQ4xlV1 => None,
         ParallelCopyProfileId::Dense27bQ4kmV1 => None,
     }
+}
+
+fn forced_a10b_parallel_pread_embedding_qualified(
+    parallel_mode: GgufParallelCopyMode,
+    gguf: &GgufFile,
+    model: &Model<'_>,
+) -> bool {
+    if parallel_mode != GgufParallelCopyMode::ForcedPread {
+        return false;
+    }
+    let profile = &A10B_PARALLEL_PREAD_PROFILE;
+    let architecture = gguf.architecture();
+    architecture.as_deref() == profile.architecture_label
+        && gguf.shard_mapped_lengths().as_slice() == profile.shard_mapped_lengths
+        && gguf_descriptor_layout_digest(gguf) == profile.descriptor_layout_digest
+        && model.arch == profile.arch
+        && model.tied_embeddings == profile.tied_embeddings
+        && model.mtp.is_some() == profile.mtp_present
+        && model.token_embd.dtype == profile.embedding_dtype
+        && model.token_embd.shape.as_slice() == profile.embedding_shape
 }
 
 fn authenticated_a3b_storage_plan(
@@ -3891,6 +4161,43 @@ fn planned_parallel_copied_storage_for_load(
     realize_parallel_copied_profile(ctx, gguf, expected, prepared)
 }
 
+fn validate_a10b_parallel_memory_admission(
+    ctx: &MetalContext,
+    profile: &ParallelCopyProfile,
+    phase: &str,
+) -> Result<(), MfError> {
+    if profile.id != ParallelCopyProfileId::A10bQ4xlV1 {
+        return Ok(());
+    }
+    let admission = evaluate_metal_memory_admission(
+        A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES,
+        0,
+        ctx.memory_signals(),
+        true,
+    );
+    emit_metal_load_line(format_args!(
+        concat!(
+            "[metal-gguf-parallel-memory] profile={} phase={} admitted={} reason={} ",
+            "required={} recommended={} current={} process_remaining={:?}"
+        ),
+        profile.id.label(),
+        phase,
+        admission.admitted,
+        admission.reason.as_str(),
+        A10B_PARALLEL_PREAD_REQUIRED_HEADROOM_BYTES,
+        admission.signals.recommended_max_bytes,
+        admission.signals.current_allocated_bytes,
+        admission.signals.process_limit_remaining_bytes,
+    ));
+    if !admission.admitted {
+        return Err(MfError::LoadPolicy(format!(
+            "A10B parallel pread memory admission failed during {phase}: {}",
+            admission.reason.as_str()
+        )));
+    }
+    Ok(())
+}
+
 fn prepare_parallel_copied_profile(
     ctx: &MetalContext,
     gguf: &GgufFile,
@@ -3902,11 +4209,13 @@ fn prepare_parallel_copied_profile(
     destination_length: ParallelDestinationLength,
 ) -> Result<PreparedParallelCopiedProfile, MfError> {
     validate_parallel_destination_length(profile, population, destination_length)?;
+    validate_a10b_parallel_memory_admission(ctx, profile, "prepare")?;
     let proof = match profile.authentication {
         ParallelCopyAuthentication::A3bRetainedPlan => {
             authenticated_a3b_storage_plan(ctx, gguf, model, expected, embedding_selection)?;
             PreparedParallelCopyProof::A3bRetainedPlan
         }
+        ParallelCopyAuthentication::A10bPlannerFree => PreparedParallelCopyProof::A10bPlannerFree,
         ParallelCopyAuthentication::DensePlannerFree => PreparedParallelCopyProof::DensePlannerFree,
     };
     let expected_identities = expected
@@ -3939,13 +4248,25 @@ fn realize_parallel_copied_profile(
         _proof,
     } = prepared;
     validate_model_weight_request_sequence(&expected_identities, expected)?;
+    validate_a10b_parallel_memory_admission(ctx, profile, "realize")?;
+    let source_stamps = if profile.id == ParallelCopyProfileId::A10bQ4xlV1 {
+        Some(gguf.revalidate_retained_shard_stamps().map_err(|error| {
+            MfError::LoadPolicy(format!("A10B pread source preflight failed: {error}"))
+        })?)
+    } else {
+        None
+    };
     let usage_before = match profile.marker_contract {
         ParallelCopyMarkerContract::A3b => None,
-        ParallelCopyMarkerContract::DenseSchema2 => Some(capture_parallel_copy_usage()?),
+        ParallelCopyMarkerContract::A10bSchema2 | ParallelCopyMarkerContract::DenseSchema2 => {
+            Some(capture_parallel_copy_usage()?)
+        }
     };
     let proc_before = match profile.marker_contract {
         ParallelCopyMarkerContract::A3b => None,
-        ParallelCopyMarkerContract::DenseSchema2 => Some(capture_parallel_copy_proc_usage()?),
+        ParallelCopyMarkerContract::A10bSchema2 | ParallelCopyMarkerContract::DenseSchema2 => {
+            Some(capture_parallel_copy_proc_usage()?)
+        }
     };
     let ready_started = std::time::Instant::now();
     let resources_result = expected
@@ -4200,6 +4521,16 @@ fn realize_parallel_copied_profile(
         Ok(())
     });
     copy_result?;
+    if let Some(before) = source_stamps {
+        let after = gguf.revalidate_retained_shard_stamps().map_err(|error| {
+            MfError::LoadPolicy(format!("A10B pread source postflight failed: {error}"))
+        })?;
+        if after != before {
+            return Err(MfError::LoadPolicy(
+                "A10B retained source stamps changed during population".to_string(),
+            ));
+        }
+    }
     let copy_finished = std::time::Instant::now();
     drop(tasks);
     drop(tasks_by_request);
@@ -4229,11 +4560,15 @@ fn realize_parallel_copied_profile(
     let binding_finished = std::time::Instant::now();
     let usage_after = match profile.marker_contract {
         ParallelCopyMarkerContract::A3b => None,
-        ParallelCopyMarkerContract::DenseSchema2 => Some(capture_parallel_copy_usage()?),
+        ParallelCopyMarkerContract::A10bSchema2 | ParallelCopyMarkerContract::DenseSchema2 => {
+            Some(capture_parallel_copy_usage()?)
+        }
     };
     let proc_after = match profile.marker_contract {
         ParallelCopyMarkerContract::A3b => None,
-        ParallelCopyMarkerContract::DenseSchema2 => Some(capture_parallel_copy_proc_usage()?),
+        ParallelCopyMarkerContract::A10bSchema2 | ParallelCopyMarkerContract::DenseSchema2 => {
+            Some(capture_parallel_copy_proc_usage()?)
+        }
     };
 
     let allocation_us = allocation_finished
@@ -4653,17 +4988,23 @@ impl MetalModel {
                     .to_string(),
             ));
         }
-        let embedding_selection = resolve_native_quant_embedding(
-            embedding_mode,
-            native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
-            native_quant_embedding_default_promoted(
-                &model.arch,
-                model.tied_embeddings,
-                model.mtp.is_some(),
-                model.token_embd.dtype,
-                &model.token_embd.shape,
-            ),
-        );
+        let forced_a10b_embedding = embedding_mode == NativeQuantEmbeddingMode::Auto
+            && forced_a10b_parallel_pread_embedding_qualified(parallel_mode, gguf, model);
+        let embedding_selection = if forced_a10b_embedding {
+            NativeQuantEmbeddingSelection::Forced
+        } else {
+            resolve_native_quant_embedding(
+                embedding_mode,
+                native_quant_embedding_supported(model.token_embd.dtype, &model.token_embd.shape),
+                native_quant_embedding_default_promoted(
+                    &model.arch,
+                    model.tied_embeddings,
+                    model.mtp.is_some(),
+                    model.token_embd.dtype,
+                    &model.token_embd.shape,
+                ),
+            )
+        };
         emit_native_quant_embedding_policy(model, embedding_selection);
         let router_f16 = moe_router_f16_enabled();
         let expected =
@@ -4852,6 +5193,7 @@ impl MetalModel {
         direct_storage: DirectStorage,
         exact_sentinel: bool,
     ) -> Result<Self, MfError> {
+        let residency_set = create_a10b_parallel_residency_set(ctx, &direct_storage)?;
         let mut loader = MetalWeightLoader::new(ctx, gguf, direct_storage, choices.router_f16);
         let token_embd =
             loader.load_embedding(model.token_embd, choices.embedding_selection.uses_native())?;
@@ -4990,6 +5332,7 @@ impl MetalModel {
             output_norm,
             lm_head,
             blocks,
+            _residency_set: residency_set,
         })
     }
 }
@@ -14151,6 +14494,10 @@ mod tests {
             Some(ParallelPopulationMethod::Pread)
         );
         assert_eq!(
+            auto_parallel_copy_population(ParallelCopyProfileId::A10bQ4xlV1),
+            None
+        );
+        assert_eq!(
             auto_parallel_copy_population(ParallelCopyProfileId::Dense27bQ4kmV1),
             None
         );
@@ -14166,12 +14513,20 @@ mod tests {
             observed,
             vec![
                 (ParallelCopyProfileId::A3bQ4kmV1, true),
+                (ParallelCopyProfileId::A10bQ4xlV1, true),
                 (ParallelCopyProfileId::Dense27bQ4kmV1, true),
             ]
         );
         for profile in PARALLEL_COPY_PROFILES {
-            validate_parallel_population(profile, ParallelPopulationMethod::MmapCopy)
-                .expect("mmap population capability");
+            if profile.id == ParallelCopyProfileId::A10bQ4xlV1 {
+                assert!(
+                    validate_parallel_population(profile, ParallelPopulationMethod::MmapCopy)
+                        .is_err()
+                );
+            } else {
+                validate_parallel_population(profile, ParallelPopulationMethod::MmapCopy)
+                    .expect("mmap population capability");
+            }
             validate_parallel_population(profile, ParallelPopulationMethod::Pread)
                 .expect("pread population capability");
         }
@@ -14347,14 +14702,61 @@ mod tests {
     }
 
     #[test]
-    fn gguf_parallel_pread_dense_auto_remains_none() {
+    fn gguf_parallel_pread_non_a3b_auto_remains_none() {
         assert_eq!(
             auto_parallel_copy_population(ParallelCopyProfileId::Dense27bQ4kmV1),
             None
         );
         assert_eq!(
+            auto_parallel_copy_population(ParallelCopyProfileId::A10bQ4xlV1),
+            None
+        );
+        assert_eq!(
             auto_parallel_copy_population(ParallelCopyProfileId::A3bQ4kmV1),
             Some(ParallelPopulationMethod::Pread)
+        );
+    }
+
+    #[test]
+    fn gguf_parallel_pread_a10b_profile_is_exact_and_force_only() {
+        let profile = &A10B_PARALLEL_PREAD_PROFILE;
+        assert_eq!(profile.id.label(), "a10b-q4xl-v1");
+        assert_eq!(profile.architecture_label, Some("qwen35moe"));
+        assert_eq!(profile.arch, A10B_PARALLEL_COPY_ARCH);
+        assert_eq!(
+            profile.shard_mapped_lengths,
+            [10_943_552, 49_640_779_424, 27_378_273_056]
+        );
+        assert_eq!(profile.descriptor_layout_digest, 0x3eb2_9091_5bec_2041);
+        assert_eq!(
+            profile.inventory_digest,
+            "b331c475123dbee3bc862a495266dee3996c5f3adabcd6fbeaff9bbabd71a4f8"
+        );
+        assert_eq!(profile.embedding_dtype, GgmlType::Q8_0);
+        assert_eq!(profile.embedding_shape, [3072, 248_320]);
+        assert_eq!(profile.request_count, 879);
+        assert_eq!(profile.source_bytes, 77_018_996_736);
+        assert_eq!(profile.cuts, [214, 435, 658]);
+        assert_eq!(profile.task_counts, [214, 221, 223, 221]);
+        assert_eq!(
+            profile.worker_bytes,
+            [
+                19_474_295_808,
+                19_228_744_704,
+                19_231_902_720,
+                19_084_053_504
+            ]
+        );
+        assert!(validate_parallel_population(profile, ParallelPopulationMethod::Pread).is_ok());
+        assert!(validate_parallel_population(profile, ParallelPopulationMethod::MmapCopy).is_err());
+        assert_eq!(
+            parallel_copy_marker_label(
+                profile,
+                ParallelPopulationMethod::Pread,
+                ParallelDestinationLength::LogicalExact,
+            )
+            .unwrap(),
+            "[metal-gguf-parallel-pread]"
         );
     }
 

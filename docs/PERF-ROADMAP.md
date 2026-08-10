@@ -1241,6 +1241,21 @@ maintained 203.63 pre-change artifact, while the 6,642-token row stays flat at
 K160-only Q-A/raw-KV excluded, N<256 exact, and every component rollback
 independent. Routed experts now own 1,958.163 ms of the changed-tail profile.
 
+The corresponding K216 IQ2 coverage repair clears the new leading pocket. The
+authenticated asset now extends its existing half-staged 64x32 work unit to
+N=256..4,096 without changing a kernel. At N=337, ordinary wall across the
+control/candidate/control bracket is `2,853.157/1,909.523/2,902.541 ms`;
+routed-expert GPU moves
+`1,960.673/490.587/1,955.293 ms`, while pre-expert GPU remains flat. Direct
+production-K error stays inside the promoted half-staged contract. Current
+no-yearcore ring0 guards at 3,246/6,224 tokens reach 250.10/240.57 prefill
+token/s over complete 32/64-token requests, with 22.19/21.38 decode token/s and
+recorded generated-ID digests. No matched F32 rollback was acquired, so those
+rows make no cross-policy output-equivalence claim.
+Keep the widening exact to M4 Max, 1,328 tensors, 89,060,075,612 source bytes,
+E=216, and N=256..4,096; FRESH, K160, crossed identities, and N<256 retain their
+prior policies.
+
 Fresh attribution then authorizes one exact transfer rather than a quant-wide
 widening. FRESH layers 26 and 42 retain `525.089/511.884 ms` of routed-expert
 GPU at N=4,096. The unchanged tile reduces them to `167.483/160.357 ms`, deleting
@@ -1296,48 +1311,41 @@ and exact shared-panel precedents are negative or about 1% whole-wall. Reopen
 only with 30-50 ms of independently isolated GPU-work deletion beyond unchanged
 projection arithmetic and a credible path to the complete wall bar.
 
-1. **Test K216 half-staged IQ2 on partial tails.** After the Q8 repair, routed
-   experts still own 1,958.163 ms of N=337. The 25-layer IQ2 cohort was
-   1,550.434 ms before that repair and already has a promoted half-staged 64x32
-   full-chunk work unit. Extend only its exact K216 width qualification to
-   N=256..4,096, first require a large isolated N=337 routed-stage saving, then
-   retain the same 2,385/6,642-token numerical and greedy guard. Do not bundle
-   MXFP4, Q8, or a new tile.
-2. **Bound A10B residency wiring before any loader expansion.** The force-only
+1. **Bound A10B residency wiring before any loader expansion.** The force-only
    composition restores loaded speed, but `requestResidency` owns 59.45 seconds
    of an 83.36-second load. Reopen only with one mechanism that changes that
    work, such as destination pre-wiring or uncached source reads; require loaded
    parity and complete first-byte improvement. Do not sweep workers, suppress
    the cache warmer again, or auto-admit A10B from the current result.
-3. **Require a physical routed gate/up deletion before implementation.** After
+2. **Require a physical routed gate/up deletion before implementation.** After
    the MXFP4 repair, FRESH and K160 still spend about `1,833` and `1,877 ms` in
    routed gate/up, but neither profile exposes a broken layer or shared quant
    work unit. Advance only a cohort-wide design that first demonstrates roughly
    150-200 ms of fewer weight decodes, routed assignments, or intermediate
    publication. Do not reopen paired gate/up staging, tile geometry, or command
    rearrangement from the subtotal alone.
-4. **Keep command ownership closed without GPU-work deletion.** The optimistic
+3. **Keep command ownership closed without GPU-work deletion.** The optimistic
    merged-route/indirect ceiling misses 2% after nonphysical full credits. Reopen
    only when a producer/consumer fusion independently deletes roughly 30-50 ms
    of control GPU work while preserving fail-stop mutation ownership.
-5. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
+4. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
    correct two-row causal execution plus measured resident drafter, hidden
    capture, acceptance, and transaction costs fit inside the 61.09 ms complete
    packet budget on the maintained snapshot. Do not adapt the current packed
    path or fund command collapse around its unchanged GPU work.
-6. **Use the singleton stage front end only for a named work deletion.** K160
+5. **Use the singleton stage front end only for a named work deletion.** K160
    wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus llama.cpp's
    39.2 ms. Attention core, prepare, output, routed, and shared are
    11.58/7.68/7.89/10.51/2.98 ms. Routed/shared waves move wall by only
    0.006 ms, and packed online-selected transfer saves `-0.242 ms` GPU. Do not
    resume local rearrangement or kernel sweeps without a structural
    >=2 ms/token deletion.
-7. **Record REAP quality governance before product equivalence claims.** Keep
+6. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,
    add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run
    one full-defaults versus arithmetic-rollbacks logit/top-1 audit. Memory and
    speed do not authorize an asset-quality claim.
-8. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
+7. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
    deep mask and regressed wall; F16 query staging now fails on real nonzero
    history. Reopen low precision only as an F32-authoritative conservative
    filter whose exact refinement, fallback, and merge beat the F32 streaming

@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-10 - DeepSeek V4 K216 Partial-Tail IQ2 Matrix GO
+
+Status: the authenticated M4 Max/K216 asset now extends its promoted
+half-staged 64x32 IQ2 expert work unit from N={128,2,048,4,096} to every
+N=256..4,096. FRESH, K160, crossed identities, and N<256 remain on their prior
+policies; the existing layered F16-to-F32-to-grouped rollback chain remains.
+
+- This is a host qualification repair only. The existing edge-safe kernel,
+  expert/token/slot plan, separate gate/up projections, standalone SwiGLU, IQ3
+  down projection, and arithmetic all remain unchanged.
+- Reduced- and production-K N=337 differentials pass every guard. Against F32
+  staging, production-K gate/up relative RMS stays at or below `3.41e-4` and
+  post-SwiGLU relative RMS is `1.687e-3` with cosine `0.999998577`, within the
+  already-promoted half-staged contract.
+- In the N=337 control/candidate/control bracket, ordinary wall moves
+  `2,853.157 -> 1,909.523 -> 2,902.541 ms`; sampled wall moves
+  `2,887.149 -> 1,908.074 -> 2,869.554 ms`. The candidate saves 33.1-34.2% of
+  ordinary wall.
+- Routed-expert GPU moves `1,960.673/1,955.293 -> 490.587 ms`, a stable
+  74.9-75.0% reduction, while pre-expert GPU stays flat at
+  `666.326/662.504 -> 667.585 ms`. The saving is isolated to the authorized
+  25-layer IQ2 pocket rather than changed Q8, MXFP4, attention, or routing work.
+- No-yearcore ring0 guards at 3,246 and 6,224 input tokens reach 250.10 and
+  240.57 prefill token/s over complete 32/64-token requests. Decode remains
+  22.19/21.38 token/s, and both requests record complete generated-ID digests.
+  No matched F32 rollback was acquired, so no cross-policy output-equivalence
+  claim is made.
+
+Decision: default the exact K216 partial-width qualification. The measured work
+unit removes about 1.47 seconds of routed GPU at N=337 without widening another
+asset or changing the kernel. Keep broader routed gate/up work behind a physical
+deletion rather than retuning this now-covered tile.
+
 ## 2026-08-09 - A10B Force-Only Destination-Pread / Residency GO
 
 Status: `QWEN_GGUF_PARALLEL_COPY=pread` now admits only the authenticated local

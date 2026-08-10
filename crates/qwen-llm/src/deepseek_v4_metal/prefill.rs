@@ -6212,6 +6212,26 @@ fn packed_grouped_iq2_mma16_qualified(n_tokens: usize) -> bool {
     )
 }
 
+fn packed_grouped_iq2_matrix_execution_chunk_qualified(n_tokens: usize) -> bool {
+    n_tokens == PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS
+        || packed_q8_partial_matrix_chunk_qualified(n_tokens)
+}
+
+fn packed_grouped_iq2_matrix_scope_qualified(
+    device_name: &str,
+    tensor_count: usize,
+    source_bytes: u64,
+    expert_count: usize,
+    n_tokens: usize,
+) -> bool {
+    device_name == PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
+        && (packed_grouped_iq2_mma16_qualified(n_tokens)
+            || (tensor_count == 1_328
+                && source_bytes == PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES
+                && expert_count == 216
+                && packed_q8_partial_matrix_chunk_qualified(n_tokens)))
+}
+
 fn packed_grouped_expert_scope(
     mode: PackedGroupedExpertMode,
     n_tokens: usize,
@@ -6234,11 +6254,13 @@ fn packed_grouped_iq_expert_count_qualified(expert_count: usize) -> bool {
 fn packed_grouped_expert_policy(
     ctx: &MetalContext,
     n_tokens: usize,
+    tensor_count: usize,
+    source_bytes: u64,
+    expert_count: usize,
 ) -> Result<PackedExpertPolicy, DeepSeekV4MetalError> {
+    let device_name = ctx.device.name().to_string();
     let enabled = match packed_grouped_expert_mode() {
-        PackedGroupedExpertMode::Auto => {
-            ctx.device.name().to_string() == PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
-        }
+        PackedGroupedExpertMode::Auto => device_name == PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
         PackedGroupedExpertMode::ForceOn => true,
         PackedGroupedExpertMode::ForceOff => false,
     } && packed_grouped_expert_kernels_supported(ctx);
@@ -6253,8 +6275,13 @@ fn packed_grouped_expert_policy(
     };
     if packed_grouped_iq2_mma16_enabled()
         && enabled
-        && packed_grouped_iq2_mma16_qualified(n_tokens)
-        && ctx.device.name().to_string() == PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
+        && packed_grouped_iq2_matrix_scope_qualified(
+            &device_name,
+            tensor_count,
+            source_bytes,
+            expert_count,
+            n_tokens,
+        )
         && iq2_matrix_supported
     {
         return Ok(PackedExpertPolicy::GroupedIq2XsIq3XxsMma16QualifiedChunk);
@@ -6268,9 +6295,15 @@ fn packed_grouped_expert_policy(
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
 pub(super) fn packed_grouped_expert_enabled_for_test(ctx: &MetalContext) -> bool {
-    packed_grouped_expert_policy(ctx, PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS)
-        .expect("valid packed grouped expert policy")
-        .uses_iq2_target()
+    packed_grouped_expert_policy(
+        ctx,
+        PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS,
+        1_328,
+        PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+        MOE_EXPERT_COUNT,
+    )
+    .expect("valid packed grouped expert policy")
+    .uses_iq2_target()
 }
 
 #[cfg(all(test, feature = "dsv4-diagnostics"))]
@@ -7647,7 +7680,7 @@ impl PackedExpertPolicy {
             self,
             Self::GroupedIq2XsIq3XxsMma16QualifiedChunk
                 | Self::GroupedIq2XsIq3XxsMma16AndIq3XxsQualifiedChunk
-        ) && packed_grouped_iq2_mma16_qualified(n_tokens)
+        ) && packed_grouped_iq2_matrix_execution_chunk_qualified(n_tokens)
     }
 
     fn uses_iq3_target(self) -> bool {
@@ -9760,6 +9793,20 @@ fn encode_packed_selected_sink_attention_f16(
 }
 
 impl DeepSeekV4Session {
+    fn packed_grouped_expert_policy_for_chunk(
+        &self,
+        ctx: &MetalContext,
+        n_tokens: usize,
+    ) -> Result<PackedExpertPolicy, DeepSeekV4MetalError> {
+        packed_grouped_expert_policy(
+            ctx,
+            n_tokens,
+            self.residency.report().tensor_count,
+            self.residency.report().source_bytes,
+            self.prefill.moe.expert_count,
+        )
+    }
+
     /// Execute one layer-major chunk and expose logits for its final token.
     /// Weight projections are batched; causal cache/compressor transitions
     /// remain position-ordered and preserve any retained prefix.
@@ -9802,7 +9849,7 @@ impl DeepSeekV4Session {
     ) -> Result<PackedChunkProfile, DeepSeekV4MetalError> {
         let grouped_mode = packed_grouped_expert_mode();
         let expert_policy = if packed_grouped_expert_scope(grouped_mode, token_ids.len())? {
-            packed_grouped_expert_policy(ctx, token_ids.len())?
+            self.packed_grouped_expert_policy_for_chunk(ctx, token_ids.len())?
         } else {
             PackedExpertPolicy::Current
         };
@@ -9840,7 +9887,7 @@ impl DeepSeekV4Session {
     ) -> Result<PackedPostRouteStageProfile, DeepSeekV4MetalError> {
         let grouped_mode = packed_grouped_expert_mode();
         let expert_policy = if packed_grouped_expert_scope(grouped_mode, token_ids.len())? {
-            packed_grouped_expert_policy(ctx, token_ids.len())?
+            self.packed_grouped_expert_policy_for_chunk(ctx, token_ids.len())?
         } else {
             PackedExpertPolicy::Current
         };
@@ -9872,7 +9919,7 @@ impl DeepSeekV4Session {
         if packed_grouped_iq_expert_count_qualified(self.prefill.moe.expert_count)
             && packed_grouped_expert_scope(grouped_mode, n_tokens)?
         {
-            packed_grouped_expert_policy(ctx, n_tokens)
+            self.packed_grouped_expert_policy_for_chunk(ctx, n_tokens)
         } else {
             Ok(PackedExpertPolicy::Current)
         }
@@ -10335,7 +10382,7 @@ impl DeepSeekV4Session {
             if packed_grouped_iq_expert_count_qualified(self.prefill.moe.expert_count)
                 && packed_grouped_expert_scope(grouped_mode, token_ids.len())?
             {
-                packed_grouped_expert_policy(ctx, token_ids.len())?
+                self.packed_grouped_expert_policy_for_chunk(ctx, token_ids.len())?
             } else {
                 PackedExpertPolicy::Current
             };
@@ -10734,15 +10781,15 @@ impl DeepSeekV4Session {
             if eligible_layers > 0 && !REPORTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 if packed_iq2_f16_mm64x32_enabled() {
                     eprintln!(
-                        "deepseek_v4: half-staged 64x32 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_IQ2_F16_MATRIX=0"
+                        "deepseek_v4: half-staged 64x32 IQ2 packed prefill active for qualified N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_IQ2_F16_MATRIX=0"
                     );
                 } else if packed_iq2_mm64x32_enabled() {
                     eprintln!(
-                        "deepseek_v4: 64x32 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_IQ2_MM64X32=0"
+                        "deepseek_v4: 64x32 IQ2 packed prefill active for qualified N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_IQ2_MM64X32=0"
                     );
                 } else {
                     eprintln!(
-                        "deepseek_v4: BM16 IQ2 packed prefill active for full N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_BM16_IQ2=0"
+                        "deepseek_v4: BM16 IQ2 packed prefill active for qualified N={n_tokens} chunks; eligible_layers={eligible_layers}; rollback=QWEN_DSV4_PACKED_BM16_IQ2=0"
                     );
                 }
             }
@@ -13076,10 +13123,72 @@ mod tests {
         assert!(!mma16.uses_iq2_mma16(127));
         assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_NARROW_TOKENS));
         assert!(!mma16.uses_iq2_mma16(129));
+        assert!(!mma16.uses_iq2_mma16(255));
+        assert!(mma16.uses_iq2_mma16(256));
+        assert!(mma16.uses_iq2_mma16(337));
         assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_MEDIUM_TOKENS));
-        assert!(!mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS - 1));
+        assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS - 1));
         assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS));
         assert!(!mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS + 1));
+        for tokens in [256, 337, 4_095] {
+            assert!(packed_grouped_iq2_matrix_scope_qualified(
+                PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+                216,
+                tokens,
+            ));
+        }
+        for (device, tensors, bytes, experts) in [
+            (
+                "Apple M3 Max",
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+                216,
+            ),
+            (
+                PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+                1_327,
+                PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+                216,
+            ),
+            (
+                PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                216,
+            ),
+            (
+                PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+            ),
+            (
+                PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+                256,
+            ),
+        ] {
+            assert!(!packed_grouped_iq2_matrix_scope_qualified(
+                device, tensors, bytes, experts, 337,
+            ));
+        }
+        assert!(!packed_grouped_iq2_matrix_scope_qualified(
+            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            MOE_EXPERT_COUNT,
+            337,
+        ));
+        assert!(!packed_grouped_iq2_matrix_scope_qualified(
+            PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+            1_328,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
+            255,
+        ));
         assert!(!mma16.uses_iq3_target());
         let gpu_compact = mma16.with_iq3_target();
         assert_eq!(
@@ -15714,7 +15823,7 @@ mod tests {
         let mma16_tile_buffer =
             MetalTensor::zeros_i32(&ctx, vec![PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS as u64])
                 .unwrap();
-        for n_tokens in [1, 12, 15, 16, 17, 31, 32, 33, 64, 128, 2_048, 4_096] {
+        for n_tokens in [1, 12, 15, 16, 17, 31, 32, 33, 64, 128, 337, 2_048, 4_096] {
             let route_count = n_tokens * K;
             let (_expert_ids, rows, slots, schedule) =
                 grouped_test_schedule_for_experts(n_tokens, E);
@@ -16088,7 +16197,7 @@ mod tests {
         let mma16_tile_buffer =
             MetalTensor::zeros_i32(&ctx, vec![PACKED_GROUPED_IQ2_MMA16_DESCRIPTOR_WORDS as u64])
                 .unwrap();
-        for n_tokens in [1, 15, 16, 17, 128, 2_048, 4_096] {
+        for n_tokens in [1, 15, 16, 17, 128, 337, 2_048, 4_096] {
             let route_count = n_tokens * K;
             let (_expert_ids, rows, slots, schedule) = grouped_test_schedule(n_tokens);
             let grouped_plan =

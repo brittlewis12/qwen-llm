@@ -69,6 +69,7 @@ use std::num::NonZeroU32;
 
 pub const DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT: usize = 1_328;
 const GGUF_BINDING_ALIGNMENT: usize = 32;
+const DEEPSEEK_V4_FRESH_SOURCE_BYTES: u64 = 104_202_502_492;
 const DEEPSEEK_V4_REAP_K160_SOURCE_BYTES: u64 = 89_920_886_108;
 const DEEPSEEK_V4_REAP_K216_SOURCE_BYTES: u64 = 89_060_075_612;
 pub const DEEPSEEK_V4_CONNECTION_COUNT: usize = 4;
@@ -712,7 +713,8 @@ fn deepseek_v4_residency_set_scope_qualified(
         && layer_count as usize == DEEPSEEK_V4_LAYER_COUNT
         && report.tensor_count == DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT
         && ((expert_count == 160 && report.source_bytes == DEEPSEEK_V4_REAP_K160_SOURCE_BYTES)
-            || (expert_count == 216 && report.source_bytes == DEEPSEEK_V4_REAP_K216_SOURCE_BYTES))
+            || (expert_count == 216 && report.source_bytes == DEEPSEEK_V4_REAP_K216_SOURCE_BYTES)
+            || (expert_count == 256 && report.source_bytes == DEEPSEEK_V4_FRESH_SOURCE_BYTES))
 }
 
 fn create_deepseek_v4_residency_set(
@@ -15013,6 +15015,16 @@ mod tests {
             43,
             216,
             &k216_report,
+        ));
+
+        let mut fresh_report = report.clone();
+        fresh_report.source_bytes = DEEPSEEK_V4_FRESH_SOURCE_BYTES;
+        assert!(deepseek_v4_residency_set_scope_qualified(
+            true,
+            "Apple M4 Max",
+            43,
+            256,
+            &fresh_report,
         ));
 
         report.tensor_count -= 1;

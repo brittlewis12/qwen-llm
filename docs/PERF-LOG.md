@@ -6,6 +6,40 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 FRESH Residency-Set Default GO
+
+Status: the exact FRESH 0731 asset now joins K160 and K216 under the
+model-wide Metal residency-set default. Eleven unique allocations cover three
+retained windows and eight fallback buffers. The common rollback remains
+`QWEN_DSV4_RESIDENCY_SET=0`.
+
+- With the repaired `124,554,051,584`-byte recommended working set, the exact
+  104,202,502,492-byte FRESH topology admits with its complete request memory
+  plan. The prior smaller recommendation rejected it before any performance
+  claim was possible.
+- On the real 2,385-token prompt, a fully warm control loads in 45.8 ms and
+  prefills in 15,535.2 ms, or 153.52 token/s. Explicit residency loads in
+  1,191.3 ms and prefills in 12,489.7 ms, or 190.96 token/s. It saves
+  3,045.5 ms of prefill and 1,900.0 ms after charging the additional load wall.
+- A first control that explicitly warms 104.194 GB still takes 67,550.4 ms of
+  prefill at 35.31 token/s. This separates filesystem warmth from stable Metal
+  placement. One 6,642-token residency confirmation reaches 209.05 token/s
+  after a 1,146.4 ms load.
+- A 32-token greedy guard is flat at 27.58 versus 27.80 transition token/s and
+  reproduces SHA-256 `be45434e...2e501a` in both arms.
+- Eager placement remains file-state sensitive. A final partially cooled
+  automatic smoke charges 53,077.7 ms to load and then only 1,244.9 ms to
+  prefill; the adjacent no-set run charges 6,317.7 ms to load and 46,409.2 ms
+  to prefill. Those states are not symmetric ratio authority. They show that
+  the set relocates the same placement cliff rather than deleting storage I/O.
+- Qualification is exact to Apple M4 Max, 43 layers, E=256, 1,328 tensors, and
+  104,202,502,492 source bytes. Other assets and devices remain unqualified.
+
+Decision: promote prompt-independent placement for the authenticated asset.
+The real 2.4K and 6.6K workloads pay back eager residency, loaded decode stays
+flat, and short partially cold work is approximately a stall-placement trade.
+Do not claim a universal storage-cold first-byte ratio from these observations.
+
 ## 2026-08-09 - DeepSeek V4 K216 Residency-Set Default GO
 
 Status: the model-wide Metal residency set now also defaults for the exact K216

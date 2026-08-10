@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-10 - DeepSeek V4 FRESH Partial-Tail IQ2 Matrix GO
+
+Status: the exact FRESH 0731 asset now joins K216 in extending the promoted
+half-staged 64x32 IQ2 expert work unit to N=256..4,096. The selector binds Apple
+M4 Max, 1,328 tensors, 104,202,502,492 source bytes, and E=256. K160, crossed
+identities, and N<256 retain their prior policies.
+
+- This transfers only the host qualification proven on K216. The Metal kernel,
+  route plan, separate gate/up projections, standalone SwiGLU, IQ3 down work,
+  and layered F16-to-F32-to-grouped rollback chain are unchanged.
+- The production-K N=337 differential already exercises E=256 and bounds
+  gate/up relative RMS at or below `3.41e-4` and post-SwiGLU relative RMS at
+  `1.687e-3`, with cosine `0.999998577` against F32 staging.
+- N=337 ordinary control/candidate/control wall moves
+  `4,574.917 -> 3,537.230 -> 4,623.495 ms`, saving 22.7-23.5%. Sampled wall
+  moves `4,579.649 -> 3,584.349 -> 4,804.050 ms`, saving 21.7-25.4%.
+- Routed-expert GPU moves `2,149.805/2,249.189 -> 549.527 ms`, a 74.4-75.6%
+  reduction. Pre-expert GPU is `2,151.210/2,260.377 -> 2,180.064 ms`, so the
+  direct saving remains isolated to the same 25-layer IQ2 cohort.
+- A current no-yearcore ring0 request processes 6,224 input tokens at
+  223.95 prefill token/s, reaches EOS after 54 generated tokens, and decodes at
+  21.85 token/s with generated-ID digest `2f4047cb...b06219`. No matched old-tail
+  product control was acquired, so this row is a numerical and product guard,
+  not an endpoint speed ratio.
+
+Decision: promote the exact FRESH scope. K216 supplies the independent
+mechanism proof and FRESH reproduces the same routed-stage deletion with a
+larger than one-second N=337 wall saving. Partial IQ2 coverage is now closed for
+both supported IQ2 assets; do not broaden by expert count or retune the tile.
+
 ## 2026-08-10 - DeepSeek V4 K216 Partial-Tail IQ2 Matrix GO
 
 Status: the authenticated M4 Max/K216 asset now extends its promoted

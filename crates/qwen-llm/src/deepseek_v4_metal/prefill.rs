@@ -6224,12 +6224,17 @@ fn packed_grouped_iq2_matrix_scope_qualified(
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
+    let partial_asset_qualified = tensor_count == 1_328
+        && matches!(
+            (source_bytes, expert_count),
+            (
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+                MOE_EXPERT_COUNT
+            ) | (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216)
+        );
     device_name == PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE
         && (packed_grouped_iq2_mma16_qualified(n_tokens)
-            || (tensor_count == 1_328
-                && source_bytes == PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES
-                && expert_count == 216
-                && packed_q8_partial_matrix_chunk_qualified(n_tokens)))
+            || (partial_asset_qualified && packed_q8_partial_matrix_chunk_qualified(n_tokens)))
 }
 
 fn packed_grouped_expert_scope(
@@ -13131,13 +13136,21 @@ mod tests {
         assert!(mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS));
         assert!(!mma16.uses_iq2_mma16(PACKED_GROUPED_IQ2_MMA16_WIDE_TOKENS + 1));
         for tokens in [256, 337, 4_095] {
-            assert!(packed_grouped_iq2_matrix_scope_qualified(
-                PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
-                1_328,
-                PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-                216,
-                tokens,
-            ));
+            for (bytes, experts) in [
+                (
+                    PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+                    MOE_EXPERT_COUNT,
+                ),
+                (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216),
+            ] {
+                assert!(packed_grouped_iq2_matrix_scope_qualified(
+                    PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+                    1_328,
+                    bytes,
+                    experts,
+                    tokens,
+                ));
+            }
         }
         for (device, tensors, bytes, experts) in [
             (
@@ -13170,6 +13183,12 @@ mod tests {
                 PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
                 256,
             ),
+            (
+                PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+                216,
+            ),
         ] {
             assert!(!packed_grouped_iq2_matrix_scope_qualified(
                 device, tensors, bytes, experts, 337,
@@ -13178,15 +13197,15 @@ mod tests {
         assert!(!packed_grouped_iq2_matrix_scope_qualified(
             PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
             1_328,
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-            MOE_EXPERT_COUNT,
-            337,
+            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+            216,
+            255,
         ));
         assert!(!packed_grouped_iq2_matrix_scope_qualified(
             PACKED_GROUPED_EXPERT_QUALIFIED_DEVICE,
             1_328,
-            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-            216,
+            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+            MOE_EXPERT_COUNT,
             255,
         ));
         assert!(!mma16.uses_iq3_target());

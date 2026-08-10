@@ -1252,9 +1252,20 @@ no-yearcore ring0 guards at 3,246/6,224 tokens reach 250.10/240.57 prefill
 token/s over complete 32/64-token requests, with 22.19/21.38 decode token/s and
 recorded generated-ID digests. No matched F32 rollback was acquired, so those
 rows make no cross-policy output-equivalence claim.
-Keep the widening exact to M4 Max, 1,328 tensors, 89,060,075,612 source bytes,
-E=216, and N=256..4,096; FRESH, K160, crossed identities, and N<256 retain their
-prior policies.
+That first widening remains exact to M4 Max, 1,328 tensors, 89,060,075,612
+source bytes, E=216, and N=256..4,096; K160, crossed identities, and N<256 retain
+their prior policies.
+
+FRESH reproduces the same partial-IQ2 mechanism under its own exact identity.
+At N=337, ordinary control/candidate/control wall moves
+`4,574.917/3,537.230/4,623.495 ms`; routed-expert GPU moves
+`2,149.805/549.527/2,249.189 ms`, while pre-expert GPU remains within the control
+span. This removes 74.4-75.6% of the targeted stage and 22.7-23.5% of ordinary
+wall without changing the kernel. A current no-yearcore 6,224-token ring0
+request reaches 223.95 prefill and 21.85 decode token/s, stops at EOS after 54
+tokens, and records a complete generated-ID digest. Keep this second widening
+exact to M4 Max, 1,328 tensors, 104,202,502,492 source bytes, E=256, and
+N=256..4,096. Partial IQ2 coverage is now closed for both supported IQ2 assets.
 
 Fresh attribution then authorizes one exact transfer rather than a quant-wide
 widening. FRESH layers 26 and 42 retain `525.089/511.884 ms` of routed-expert

@@ -1231,6 +1231,16 @@ expected downstream route and two cutoff-sensitive selected-set changes. Default
 only for the authenticated M4 Max/K216/E=216/N=2,048 profile; retain scalar
 buckets below 16 and `QWEN_DSV4_PACKED_MXFP4_MATRIX=0` rollback.
 
+K216 partial-tail Q8 coverage now clears separately. Extending only the shared
+compressor/shared/Q-B/output qualifier from complete chunks to N=256..4,096
+moves isolated N=337 `4,373.684 -> 2,878.119 ms`, or
+`77.01 -> 117.09 token/s`. Sampled pre-expert GPU falls from 2,230.149 to
+670.104 ms. The real 2,385-token request reaches 233.77 token/s versus the
+maintained 203.63 pre-change artifact, while the 6,642-token row stays flat at
+212.32 versus 213.26 token/s and preserves all 64 generated IDs. Keep
+K160-only Q-A/raw-KV excluded, N<256 exact, and every component rollback
+independent. Routed experts now own 1,958.163 ms of the changed-tail profile.
+
 Fresh attribution then authorizes one exact transfer rather than a quant-wide
 widening. FRESH layers 26 and 42 retain `525.089/511.884 ms` of routed-expert
 GPU at N=4,096. The unchanged tile reduces them to `167.483/160.357 ms`, deleting
@@ -1275,14 +1285,13 @@ and exact shared-panel precedents are negative or about 1% whole-wall. Reopen
 only with 30-50 ms of independently isolated GPU-work deletion beyond unchanged
 projection arithmetic and a credible path to the complete wall bar.
 
-1. **Repair K216 partial-tail matrix coverage before new kernel work.** Its
-   exact N=337 incumbent reaches only 77.01 token/s. A sampled pass assigns
-   2,230.149 ms before routed experts, 2,162.220 ms after route, and
-   2,064.187 ms to routed experts. First test the already-promoted Q8
-   compressor, shared, Q-B, and output work units on N=256..4,096 while keeping
-   K160-only Q-A/raw-KV policy excluded. Use R2C4 for arbitrary tails, retain
-   R2C16 on aligned widths, and keep N<256 exact. This is a numerical schedule
-   extension requiring a real-prompt guard, not a new kernel program.
+1. **Test K216 half-staged IQ2 on partial tails.** After the Q8 repair, routed
+   experts still own 1,958.163 ms of N=337. The 25-layer IQ2 cohort was
+   1,550.434 ms before that repair and already has a promoted half-staged 64x32
+   full-chunk work unit. Extend only its exact K216 width qualification to
+   N=256..4,096, first require a large isolated N=337 routed-stage saving, then
+   retain the same 2,385/6,642-token numerical and greedy guard. Do not bundle
+   MXFP4, Q8, or a new tile.
 2. **Require a physical routed gate/up deletion before implementation.** After
    the MXFP4 repair, FRESH and K160 still spend about `1,833` and `1,877 ms` in
    routed gate/up, but neither profile exposes a broken layer or shared quant

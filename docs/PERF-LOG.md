@@ -6,6 +6,33 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 K216 Partial-Tail Q8 Matrix GO
+
+Status: K216 now extends its already-promoted Q8 compressor, shared-expert,
+Q-B, and output matrix schedules to packed widths 256..4,096. Aligned widths
+retain R2C16, arbitrary tails use guarded R2C4, and N<256 remains exact.
+K160-only Q-A/raw-KV policy is unchanged.
+
+- The change is one exact-asset qualifier, not a new kernel. It is restricted
+  to Apple M4 Max, E=216, 1,328 tensors, and 89,060,075,612 source bytes. Each
+  component retains its existing rollback.
+- At isolated N=337, ordinary wall moves `4,373.684 -> 2,878.119 ms`, raising
+  prefill `77.01 -> 117.09 token/s`. The candidate saves 1,495.565 ms, or
+  34.20%. Sampled pre-expert GPU falls `2,230.149 -> 670.104 ms`; routed
+  experts remain the largest stage at 1,958.163 ms.
+- The real 2,385-token `2,048 + 337` request reaches 233.77 token/s versus the
+  maintained 203.63 token/s pre-change residency artifact, saving about
+  1.51 seconds of prefill. This cross-run comparison corroborates the isolated
+  tail result rather than supplying a paired whole-request ratio.
+- The maintained 6,642-token request is flat at 212.32 versus 213.26 token/s
+  and reproduces all 64 generated IDs, SHA-256 `8e378559...e442acb`. The
+  2,385-token first choice remains token 19 with a 2.907 logit margin and a
+  coherent 32-token continuation.
+
+Decision: promote the authenticated partial-tail coverage repair. It deletes a
+large N=337 qualification cliff without claiming broad 6.5K movement. The
+remaining N=337 routed-expert stage is the next independently measured pocket.
+
 ## 2026-08-09 - DeepSeek V4 FRESH Residency-Set Default GO
 
 Status: the exact FRESH 0731 asset now joins K160 and K216 under the

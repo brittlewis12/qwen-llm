@@ -2858,7 +2858,7 @@ fn packed_q8_matrix_execution_chunk_qualified(n_tokens: usize) -> bool {
     (1..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&n_tokens)
 }
 
-fn packed_q8_k160_matrix_chunk_qualified(n_tokens: usize) -> bool {
+fn packed_q8_partial_matrix_chunk_qualified(n_tokens: usize) -> bool {
     (256..=DEEPSEEK_V4_PREFILL_MAX_TOKENS).contains(&n_tokens)
 }
 
@@ -2873,7 +2873,7 @@ fn packed_router_e8p32_scope_qualified(
         && tensor_count == 1_328
         && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
-        && packed_q8_k160_matrix_chunk_qualified(n_tokens)
+        && packed_q8_partial_matrix_chunk_qualified(n_tokens)
 }
 
 fn packed_q8_qa_kv_matrix_scope_qualified(
@@ -2887,7 +2887,7 @@ fn packed_q8_qa_kv_matrix_scope_qualified(
         && tensor_count == 1_328
         && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
-        && packed_q8_k160_matrix_chunk_qualified(n_tokens)
+        && packed_q8_partial_matrix_chunk_qualified(n_tokens)
 }
 
 fn packed_q8_compressor_matrix_scope_qualified(
@@ -2897,12 +2897,15 @@ fn packed_q8_compressor_matrix_scope_qualified(
     expert_count: usize,
     n_tokens: usize,
 ) -> bool {
-    let chunk_qualified =
-        if source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES && expert_count == 160 {
-            packed_q8_k160_matrix_chunk_qualified(n_tokens)
-        } else {
-            packed_q8_matrix_chunk_qualified(n_tokens)
-        };
+    let chunk_qualified = if matches!(
+        (source_bytes, expert_count),
+        (PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES, 160)
+            | (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216)
+    ) {
+        packed_q8_partial_matrix_chunk_qualified(n_tokens)
+    } else {
+        packed_q8_matrix_chunk_qualified(n_tokens)
+    };
     chunk_qualified
         && device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
         && tensor_count == 1_328
@@ -6129,7 +6132,7 @@ fn packed_grouped_q3q4_scope_qualified(
         && tensor_count == 1_328
         && source_bytes == PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES
         && expert_count == 160
-        && packed_q8_k160_matrix_chunk_qualified(n_tokens)
+        && packed_q8_partial_matrix_chunk_qualified(n_tokens)
         && gate_dtype == GgmlType::Q3_K
         && up_dtype == GgmlType::Q3_K
         && down_dtype == GgmlType::Q4_K
@@ -13279,12 +13282,21 @@ mod tests {
             256,
             512,
         ));
-        assert!(qualified(
+        for tokens in [256, 337, 512, 2_048, 4_095, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+            assert!(qualified(
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+                216,
+                tokens,
+            ));
+        }
+        assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,
             PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
             216,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            255,
         ));
         assert!(!qualified(
             "Apple M3 Max",

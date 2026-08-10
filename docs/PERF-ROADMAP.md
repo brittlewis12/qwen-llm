@@ -54,6 +54,10 @@ Scope rules:
 - Process-cold model loading and first residency are a first-class product lane.
   Keep their boundary separate from model-ready TTFT, but let broad exact cold
   wins outrank narrower loaded-model work under the current deployment mix.
+- Whole-model `MTLResidencySet` placement is opt-in. A hard-killed 104.2 GB
+  FRESH process stranded essentially the complete set as reboot-only wired
+  memory. Promotion requires explicit unload plus a supervisor teardown window;
+  `QWEN_DSV4_RESIDENCY_SET=1` is unsafe under sub-second SIGKILL escalation.
 
 Exactness labels:
 
@@ -1185,11 +1189,12 @@ Model-wide residency then separates placement from arithmetic: a fully warm
 resident allocations reaches 203.63 token/s. After the 566.9 ms load charge,
 load plus prefill still saves 1.886 seconds. A short decode guard is flat at
 27.80 versus 28.08 token/s with identical IDs, and one 6,642-token residency
-run reaches 208.57 token/s. Default only for the exact M4 Max/E=216/source-byte
-identity under the shared `QWEN_DSV4_RESIDENCY_SET=0` rollback. Eager residency
-cost remains file-state sensitive: one partially cooled run charges 3.96 seconds
-to load and loses to its post-treatment rollback, so do not claim a universal
-cache-warm subtotal win from this promotion.
+run reaches 208.57 token/s. The measured placement benefit is exact to the M4
+Max/E=216/source-byte identity, but whole-model residency now requires
+`QWEN_DSV4_RESIDENCY_SET=1`. Eager residency cost remains file-state sensitive:
+one partially cooled run charges 3.96 seconds to load and loses to its
+post-treatment control, so do not claim a universal cache-warm subtotal win
+from this promotion.
 
 FRESH now completes the same placement policy for all three maintained 0731
 assets without transferring their arithmetic policies. Its eleven allocations
@@ -1201,8 +1206,10 @@ and a short decode guard is flat at 27.58 versus 27.80 token/s with identical
 generated IDs. A partially cooled default instead moves a roughly 46-second
 on-demand prefill stall into a roughly 53-second eager load. Treat that as
 conditioning evidence, not a cold ratio: residency controls placement, while
-prefetch and physical reads remain separate. Default only for the exact M4
-Max/E=256/1,328-tensor/104,202,502,492-byte identity under the shared rollback.
+prefetch and physical reads remain separate. The path remains exact to the M4
+Max/E=256/1,328-tensor/104,202,502,492-byte identity, but now requires
+`QWEN_DSV4_RESIDENCY_SET=1` and a lifecycle that cannot escalate directly to
+SIGKILL.
 
 K160's raw-KV matrix policy does not transfer directly. A default-off K216 arm
 selects its 43 Q8_0 raw-KV projections while leaving all Q-A projections and the

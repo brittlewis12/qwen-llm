@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-10 - DeepSeek V4 Whole-Model Residency Safety Rollback
+
+Status: whole-model `MTLResidencySet` placement is now opt-in for every
+DeepSeek V4 asset. `QWEN_DSV4_RESIDENCY_SET=1` retains the measured placement
+path; an unset variable no longer pins model weights.
+
+- An interrupted FRESH prefill process reported 11 committed allocations and
+  `104,202,698,752` residency bytes. After its supervisor escalated SIGTERM to
+  SIGKILL in 200 ms, system wired memory remained about 98.7 GiB with no live
+  inference process. The host requires a reboot to recover that allocation.
+- The stranded bytes account for nearly the complete observed wired excess.
+  Normal ownership already detaches the set and calls `endResidency` on drop;
+  forced termination bypasses Rust destruction, and Metal does not reliably
+  reclaim a hard-killed residency set.
+- The three asset-specific placement promotions remain valid performance
+  evidence. They do not authorize default pinning in a short-lived CLI whose
+  supervisors may impose sub-second kill windows.
+
+Decision: fail safe on lifecycle rather than placement speed. Keep explicit
+residency available only for controlled processes with exclusive Metal access,
+an explicit unload path, and a supervisor grace interval long enough to finish
+teardown. Do not run the opt-in path under OpenCode's current 200 ms escalation.
+
 ## 2026-08-10 - DeepSeek V4 K160 N=128 Grouped-Expert GO
 
 Status: the exact K160 REAP asset now runs its promoted mapped grouped

@@ -690,8 +690,12 @@ impl Drop for DeepSeekV4ResidencySetGuard {
     }
 }
 
+// A hard-killed process can leave very large residency sets wired in the
+// Metal driver until reboot. Keep whole-model pinning explicit until every
+// supported process supervisor provides a teardown window long enough for
+// `endResidency` to complete.
 crate::env_flag!(
-    default_on deepseek_v4_residency_set_enabled,
+    default_off deepseek_v4_residency_set_enabled,
     "QWEN_DSV4_RESIDENCY_SET"
 );
 
@@ -767,7 +771,7 @@ fn create_deepseek_v4_residency_set(
     set.requestResidency();
     ctx.queue.addResidencySet(&set);
     eprintln!(
-        "deepseek_v4: model residency set active allocations={} committed_allocation_bytes={} device_registry_id={} rollback=QWEN_DSV4_RESIDENCY_SET=0",
+        "deepseek_v4: model residency set active allocations={} committed_allocation_bytes={} device_registry_id={} opt_in=QWEN_DSV4_RESIDENCY_SET=1 warning=forced_termination_may_strand_wired_memory",
         set.allocationCount(),
         set.allocatedSize(),
         ctx.device.registryID(),

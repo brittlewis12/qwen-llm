@@ -6174,7 +6174,7 @@ fn packed_mxfp4_matrix_scope_qualified(
             ) | (
                 PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
                 216,
-                PACKED_MATRIX_MIN_TOKENS,
+                PACKED_MATRIX_MIN_TOKENS | DEEPSEEK_V4_PREFILL_MAX_TOKENS,
             )
         )
 }
@@ -13625,7 +13625,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_mxfp4_matrix_scope_is_exactly_fresh_n4096_or_k216_n2048() {
+    fn packed_mxfp4_matrix_scope_covers_fresh_n4096_and_both_k216_full_widths() {
         let qualified = |device, tensors, bytes, experts, tokens| {
             packed_mxfp4_matrix_scope_qualified(device, tensors, bytes, experts, tokens)
         };
@@ -13636,13 +13636,15 @@ mod tests {
             MOE_EXPERT_COUNT,
             DEEPSEEK_V4_PREFILL_MAX_TOKENS,
         ));
-        assert!(qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
-            1_328,
-            PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-            216,
-            PACKED_MATRIX_MIN_TOKENS,
-        ));
+        for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+            assert!(qualified(
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
+                216,
+                tokens,
+            ));
+        }
         assert!(!qualified(
             "Apple M3 Max",
             1_328,
@@ -13676,8 +13678,17 @@ mod tests {
             1_328,
             PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
             216,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
+            1_024,
         ));
+        for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+            assert!(!qualified(
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_MATRIX_REAP_K160_SOURCE_BYTES,
+                160,
+                tokens,
+            ));
+        }
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
             1_328,

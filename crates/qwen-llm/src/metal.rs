@@ -21488,7 +21488,7 @@ mod tests {
             GgmlType::MXFP4,
         );
 
-        for n_batch in [1usize, 15, 16, 17, 31, 32, 33] {
+        for n_batch in [1usize, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129] {
             let x_values = (0..n_batch * N_IN)
                 .map(|index| ((index * 17 % 101) as f32 - 50.0) / 19.0)
                 .collect::<Vec<_>>();
@@ -21608,9 +21608,14 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore]
-    fn mxfp4_f32_matrix_tile_k216_bucket_floor() {
+    fn run_mxfp4_f32_matrix_tile_k216_bucket_floor(
+        columns: usize,
+        bucket_counts: [usize; 2],
+        max_batch: usize,
+        min_conservative_gpu_saving: f64,
+        min_conservative_wall_saving: f64,
+        min_gpu_fraction: f64,
+    ) {
         use std::time::Instant;
 
         let ctx = match metal_test_context() {
@@ -21625,7 +21630,6 @@ mod tests {
         const N_IN: usize = 2_048;
         const N_OUT: usize = 4_096;
         const EXPERTS: usize = 216;
-        const MAX_BATCH: usize = 77;
         let gguf = crate::gguf::GgufFile::open(path).expect("open K216 GGUF");
         let load_bank = |layer: usize| {
             let name = format!("blk.{layer}.ffn_down_exps.weight");
@@ -21643,31 +21647,32 @@ mod tests {
                 .expect("copy MXFP4 expert bank")
         };
         let banks = [load_bank(26), load_bank(42)];
-        let distributions =
-            [(160usize, 12_288usize), (166usize, 12_288usize)].map(|(bucket_count, columns)| {
+        let distributions = [(bucket_counts[0], columns), (bucket_counts[1], columns)].map(
+            |(bucket_count, columns)| {
                 let base = columns / bucket_count;
                 let remainder = columns % bucket_count;
                 (0..bucket_count)
                     .map(|expert| base + usize::from(expert < remainder))
                     .collect::<Vec<_>>()
-            });
-        assert_eq!(distributions[0].iter().sum::<usize>(), 12_288);
-        assert_eq!(distributions[1].iter().sum::<usize>(), 12_288);
+            },
+        );
+        assert_eq!(distributions[0].iter().sum::<usize>(), columns);
+        assert_eq!(distributions[1].iter().sum::<usize>(), columns);
         assert!(distributions.iter().flatten().all(|&count| count >= 16));
 
-        let x_values = (0..MAX_BATCH * N_IN)
+        let x_values = (0..max_batch * N_IN)
             .map(|index| ((index * 17 % 101) as f32 - 50.0) / 19.0)
             .collect::<Vec<_>>();
         let input = MetalTensor::from_bytes(
             &ctx,
             bytemuck::cast_slice(&x_values),
-            vec![N_IN as u64, MAX_BATCH as u64],
+            vec![N_IN as u64, max_batch as u64],
             GgmlType::F32,
         )
         .expect("MXFP4 floor input");
-        let control_output = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, MAX_BATCH as u64])
+        let control_output = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, max_batch as u64])
             .expect("MXFP4 floor control output");
-        let candidate_output = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, MAX_BATCH as u64])
+        let candidate_output = MetalTensor::zeros_f32(&ctx, vec![N_OUT as u64, max_batch as u64])
             .expect("MXFP4 floor candidate output");
         let expert_bytes = banks[0].n_bytes() / EXPERTS as u64;
         assert_eq!(expert_bytes, (N_IN * N_OUT / 32 * 17) as u64);
@@ -21678,7 +21683,7 @@ mod tests {
             .commandBuffer()
             .expect("MXFP4 production-K check command buffer");
         let check_encoder = KernelEncoder::begin(&check_command);
-        for column in 0..MAX_BATCH {
+        for column in 0..max_batch {
             encode_mat_vec_mxfp4_f32(
                 &ctx,
                 &check_encoder,
@@ -21698,7 +21703,7 @@ mod tests {
             &candidate_output,
             N_IN,
             N_OUT,
-            MAX_BATCH,
+            max_batch,
         )
         .expect("encode production-K matrix check");
         check_encoder.end();
@@ -21811,9 +21816,21 @@ mod tests {
         assert!(candidate_gpu_spread <= 0.05);
         assert!(b1.0 < a1.0.min(a2.0) && b2.0 < a1.0.min(a2.0));
         assert!(b1.1 < a1.1.min(a2.1) && b2.1 < a1.1.min(a2.1));
-        assert!(conservative_gpu_saving >= 250.0);
-        assert!(conservative_wall_saving >= 200.0);
-        assert!(gpu_fraction >= 0.50);
+        assert!(conservative_gpu_saving >= min_conservative_gpu_saving);
+        assert!(conservative_wall_saving >= min_conservative_wall_saving);
+        assert!(gpu_fraction >= min_gpu_fraction);
+    }
+
+    #[test]
+    #[ignore]
+    fn mxfp4_f32_matrix_tile_k216_n2048_bucket_floor() {
+        run_mxfp4_f32_matrix_tile_k216_bucket_floor(12_288, [160, 166], 77, 250.0, 200.0, 0.50);
+    }
+
+    #[test]
+    #[ignore]
+    fn mxfp4_f32_matrix_tile_k216_n4096_all_expert_floor() {
+        run_mxfp4_f32_matrix_tile_k216_bucket_floor(24_576, [216; 2], 114, 600.0, 600.0, 0.75);
     }
 
     #[test]

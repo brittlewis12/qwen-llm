@@ -1231,6 +1231,19 @@ expected downstream route and two cutoff-sensitive selected-set changes. Default
 only for the authenticated M4 Max/K216/E=216/N=2,048 profile; retain scalar
 buckets below 16 and `QWEN_DSV4_PACKED_MXFP4_MATRIX=0` rollback.
 
+The same physical work unit now clears K216's complete N=4,096 cell. A
+maximally fragmented all-216-expert floor over 24,576 routes per MXFP4 layer
+moves GPU median `818.645 -> 93.280 ms`, conservatively deleting 723.470 ms.
+On the real packed schedule, routed-expert and post-route GPU fall
+`2,801.109 -> 2,141.642 ms` and `6,561.063 -> 5,915.977 ms`; sampled wall falls
+637.605 ms. One ordinary reference reaches 268.79 token/s versus 257.15 for its
+adjacent rollback, while other unsampled runs remain order/host-state
+confounded. A 6,642-token official-chat rollback/default audit preserves all 64
+greedy IDs. Extend only the exact K216 N=4,096 qualifier; FRESH N=2,048
+remains unmeasured and excluded. Screen that final crossed width only when host
+pressure permits one clean sampled pair; require at least 300 ms of isolated
+routed/post-route GPU deletion and the existing greedy product guard.
+
 K216 partial-tail Q8 coverage now clears separately. Extending only the shared
 compressor/shared/Q-B/output qualifier from complete chunks to N=256..4,096
 moves isolated N=337 `4,373.684 -> 2,878.119 ms`, or
@@ -1347,10 +1360,14 @@ projection arithmetic and a credible path to the complete wall bar.
    150-200 ms of fewer weight decodes, routed assignments, or intermediate
    publication. Do not reopen paired gate/up staging, tile geometry, or command
    rearrangement from the subtotal alone.
-3. **Keep command ownership closed without GPU-work deletion.** The optimistic
-   merged-route/indirect ceiling misses 2% after nonphysical full credits. Reopen
-   only when a producer/consumer fusion independently deletes roughly 30-50 ms
-   of control GPU work while preserving fail-stop mutation ownership.
+3. **Keep command ownership closed without a larger GPU-work deletion.** The
+   removed merged-route arm already deletes CPU routing, publication, and 86 of
+   129 commands. Its maximally favorable planning ceiling is 132.965 ms; adding
+   perfect deletion of the current strict router projection raises that only to
+   167.965 ms, below the 220 ms ambitious-oracle gate before charging an exact
+   producer. Do not build sealed A/O/Z route replay. Reopen only when a
+   producer/consumer fusion independently identifies at least another 53 ms of
+   existing GPU work and preserves fail-stop mutation ownership.
 4. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
    correct two-row causal execution plus measured resident drafter, hidden
    capture, acceptance, and transaction costs fit inside the 61.09 ms complete

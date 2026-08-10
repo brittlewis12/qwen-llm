@@ -6,6 +6,42 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-10 - DeepSeek V4 K216 N=4,096 MXFP4 Matrix GO
+
+Status: K216's promoted MXFP4 routed-down matrix tile now covers complete
+N=4,096 chunks as well as N=2,048. FRESH remains N=4,096-only, K160 remains
+ineligible, buckets below 16 columns stay scalar, and
+`QWEN_DSV4_PACKED_MXFP4_MATRIX=0` restores scalar GEMV.
+
+- This changes only the authenticated host qualifier. The 64x32 F32 tile,
+  MXFP4 decode, route-planning code, and mixed scalar remainder are unchanged.
+  The tile retains its accepted numerical schedule rather than scalar
+  accumulation order. Reduced seams now cover route widths through 129 columns.
+- A deliberately fragmented all-216-expert N=4,096 floor prices both real
+  MXFP4 banks over 24,576 routes each. Control/candidate GPU median moves
+  `818.645 -> 93.280 ms`; conservative GPU and wall savings are
+  `723.470/731.498 ms`, and the candidate removes 88.61% of the floor.
+- On the real N=4,096 routed schedule, sampled routed-expert GPU moves
+  `2,801.109 -> 2,141.642 ms` and post-route GPU moves
+  `6,561.063 -> 5,915.977 ms`. Pre-expert GPU stays within 37.1 ms at
+  `8,595.501/8,632.566 ms`, isolating about 645-659 ms to routed experts.
+- The same sampled pair moves request wall `16,090.089 -> 15,452.484 ms`.
+  Its uninstrumented reference moves `15,928.313 -> 15,238.435 ms`, or
+  `257.15 -> 268.79 token/s`. An earlier ordinary-only A/B/A is contradictory
+  under order and host-state confounding, so the isolated GPU deletion, not a
+  pooled wall ratio, is authoritative.
+- A 6,642-token official-chat audit exercises N=4,096, N=2,048, and a tail.
+  The `=0` rollback and default arms preserve all 64 greedy IDs and digest
+  `8e378559...e442acb`. Their host-state-confounded prefill walls carry no speed
+  authority. Raw request rows are under
+  `target/profiles/dsv4-k216-mxfp4-width-product-{a,b}.jsonl`, with A as
+  rollback and B as default.
+
+Decision: promote only the exact Apple M4 Max/K216/E=216/N=4,096 cell. The
+candidate deletes substantially more real GPU work than the already-promoted
+N=2,048 cell while preserving its accepted numerical and product contract. Do
+not infer FRESH N=2,048 authority or reopen MXFP4 tile geometry.
+
 ## 2026-08-10 - DeepSeek V4 FRESH Partial-Tail Q8 Matrix GO
 
 Status: the exact FRESH 0731 asset now extends its promoted Q8 compressor,

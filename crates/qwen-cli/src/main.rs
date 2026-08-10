@@ -1,5 +1,6 @@
 //! `qwen` — interactive CLI for the qwen-llm engine.
 
+mod cli;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_temporal;
 mod messages;
@@ -7,8 +8,11 @@ mod messages;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use messages::{
-    DeepSeekV4EncodeOptions, DeepSeekV4Reasoning, load_deepseek_v4_0731_messages_prompt,
-    load_messages_prompt_with_policy, messages_thinking_mode,
+    DeepSeekV4EncodeOptions, DeepSeekV4Reasoning, QwenGenerationMode,
+    load_deepseek_v4_0731_messages_prompt, load_messages_prompt_with_policy,
+    messages_thinking_mode, parse_strict_messages_input, render_deepseek_v4_0731_messages_prompt,
+    render_deepseek_v4_0731_single_turn_prompt, render_qwen_messages_prompt_with_generation,
+    render_qwen_single_turn_prompt,
 };
 use objc2_metal::MTLDevice;
 use qwen_llm::checkpoint_identity::{
@@ -305,8 +309,21 @@ fn resolve_greedy_gpu_decision(
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "qwen", version, about = "qwen-llm inference CLI")]
+#[command(
+    name = "qwen",
+    version,
+    about = "Fast local Qwen and DeepSeek inference on Apple Silicon",
+    args_conflicts_with_subcommands = true,
+    after_help = "Examples:\n  qwen run -m MODEL --user 'Explain this'\n  qwen run -m MODEL --system 'Be concise' --user 'Explain this'\n  qwen run -m MODEL --user -\n  qwen run -m MODEL --messages -\n  qwen run -m MODEL --raw-prompt '<exact model input>'\n  qwen run -m Qwen3.6-35B-A3B.gguf --user 'Explain this' --no-thinking\n\n--no-thinking controls model prompt rendering; it does not hide CLI diagnostics.\nCLI diagnostic suppression is not currently available.\nFor resident JSONL batching and expanded legacy/research help, run:\n  qwen --help\nLegacy flags shown there are flat and cannot be combined with qwen run.",
+    after_long_help = "Modern examples:\n  qwen run -m MODEL --user 'Explain this'\n  qwen run -m MODEL --messages -\n  qwen run -m MODEL --raw-prompt '<exact model input>'\n\nLegacy/research examples (flat; do not combine with qwen run):\n  qwen -m MODEL --prompt '<raw model input>'\n  qwen -m MODEL --requests-jsonl requests.jsonl\n\n--no-thinking controls model prompt rendering; it does not hide CLI diagnostics.\nCLI diagnostic suppression is not currently available."
+)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<cli::Command>,
+
+    #[arg(skip)]
+    prepared_prompt: Option<PreparedPrompt>,
+
     /// Path to a Qwen or DeepSeek V4 GGUF file.
     #[arg(short = 'm', long)]
     model: Option<std::path::PathBuf>,
@@ -318,94 +335,102 @@ struct Args {
     /// Print the deterministic DeepSeek V4 schema/quant census as JSON.
     #[arg(
         long,
+        hide_short_help = true,
         requires = "model",
         conflicts_with_all = ["info", "prompt", "prompt_file", "messages", "requests_jsonl"]
     )]
     deepseek_census_json: bool,
 
     /// Raw prompt text for single-turn generation.
-    #[arg(short = 'p', long, conflicts_with_all = ["prompt_file", "messages"])]
+    #[arg(short = 'p', long, hide_short_help = true, conflicts_with_all = ["prompt_file", "messages"])]
     prompt: Option<String>,
 
     /// Read raw prompt text from a file.
-    #[arg(long, conflicts_with_all = ["prompt", "messages"])]
+    #[arg(long, hide_short_help = true, conflicts_with_all = ["prompt", "messages"])]
     prompt_file: Option<PathBuf>,
 
     /// Render a bare or wrapped JSON messages file with the model-family encoder.
-    #[arg(long, conflicts_with_all = ["prompt", "prompt_file", "requests_jsonl"])]
+    #[arg(long, hide_short_help = true, conflicts_with_all = ["prompt", "prompt_file", "requests_jsonl"])]
     messages: Option<PathBuf>,
 
     /// Render only the first N messages.
-    #[arg(long, requires = "messages")]
+    #[arg(long, hide_short_help = true, requires = "messages")]
     messages_max: Option<usize>,
 
     /// Preserve assistant `<think>...</think>` history.
     #[arg(
         long,
+        hide_short_help = true,
         requires = "messages",
         conflicts_with = "messages_strip_thinking"
     )]
     messages_preserve_thinking: bool,
 
     /// Strip a leading assistant `<think>...</think>` block from history.
-    #[arg(long, requires = "messages")]
+    #[arg(long, hide_short_help = true, requires = "messages")]
     messages_strip_thinking: bool,
 
     /// Do not append the assistant generation prompt after messages.
-    #[arg(long, requires = "messages")]
+    #[arg(long, hide_short_help = true, requires = "messages")]
     messages_no_generation_prompt: bool,
 
     /// DeepSeek V4 release reasoning mode for --messages encoding.
-    #[arg(long, requires = "messages", value_enum)]
+    #[arg(long, hide_short_help = true, requires = "messages", value_enum)]
     reasoning: Option<ReasoningLevelArg>,
 
     /// Retain reasoning across turns (DeepSeek V4 thinking modes only).
-    #[arg(long, requires = "messages")]
+    #[arg(long, hide_short_help = true, requires = "messages")]
     preserve_reasoning: bool,
 
     /// Read JSONL request objects from a file or '-' while keeping one model loaded.
-    #[arg(long, conflicts_with_all = ["prompt", "prompt_file", "messages"])]
+    #[arg(long, hide_short_help = true, conflicts_with_all = ["prompt", "prompt_file", "messages"])]
     requests_jsonl: Option<PathBuf>,
 
     /// Maximum number of tokens to generate.
-    #[arg(short = 'n', long, default_value_t = 64)]
+    #[arg(short = 'n', long, hide_short_help = true, default_value_t = 64)]
     tokens: usize,
 
     /// Sampling temperature; zero preserves greedy decoding.
-    #[arg(long = "temp", visible_alias = "temperature", default_value_t = 0.0)]
+    #[arg(
+        long = "temp",
+        visible_alias = "temperature",
+        hide_short_help = true,
+        default_value_t = 0.0
+    )]
     temperature: f32,
 
     /// Top-k sampling cutoff; zero disables it.
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, hide_short_help = true, default_value_t = 200)]
     top_k: usize,
 
     /// Nucleus sampling cutoff; one disables it.
-    #[arg(long, default_value_t = 1.0)]
+    #[arg(long, hide_short_help = true, default_value_t = 1.0)]
     top_p: f32,
 
     /// Min-p sampling cutoff; zero disables it.
-    #[arg(long, default_value_t = 0.05)]
+    #[arg(long, hide_short_help = true, default_value_t = 0.05)]
     min_p: f32,
 
     /// Effective deterministic seed; identical requests reuse the same stream.
-    #[arg(long, default_value_t = 42)]
+    #[arg(long, hide_short_help = true, default_value_t = 42)]
     seed: u64,
 
     /// Enable experimental dense-27B Q4_K_M prompt-lookup decode.
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     prompt_lookup: bool,
 
     /// Prompt prefill chunk size, or `auto` for the bounded MoE allowlist.
-    #[arg(long, default_value = "1024")]
+    #[arg(long, hide_short_help = true, default_value = "1024")]
     prefill_chunk: PrefillChunkArg,
 
     /// Override sequence capacity. Defaults to prompt + generated tokens + slack.
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     max_context_tokens: Option<usize>,
 
     /// Select the DeepSeek V4 far-context selector policy.
     #[arg(
         long,
+        hide_short_help = true,
         value_enum,
         default_value = "auto",
         requires = "model",
@@ -414,46 +439,47 @@ struct Args {
     deepseek_v4_multigroup_selector: DeepSeekV4MultigroupSelectorArg,
 
     /// Prefix-cache byte budget in MiB; oversized snapshots are retained alone.
-    #[arg(long, default_value_t = 16 * 1024)]
+    #[arg(long, hide_short_help = true, default_value_t = 16 * 1024)]
     prefix_cache_max_mib: u64,
 
     /// Cache this many exact prompt tokens as the reusable prefix for requests.
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     cache_prefix_tokens: Option<usize>,
 
     /// Auto-cache repeated JSONL prompt prefixes at or above this token length.
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, hide_short_help = true, default_value_t = 1024)]
     cache_prefix_auto_min_tokens: usize,
 
     /// Persist anonymous prefix checkpoints under this private directory.
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     durable_prefix_cache: Option<PathBuf>,
 
     /// Load or immutably publish one explicit DeepSeek V4 causal-prefix file.
     #[arg(
         long = "deepseek-v4-snapshot",
+        hide_short_help = true,
         value_name = "PATH",
         conflicts_with_all = ["info", "deepseek_census_json", "requests_jsonl", "durable_prefix_cache"]
     )]
     deepseek_v4_snapshot: Option<PathBuf>,
 
     /// Aggregate durable checkpoint budget in MiB.
-    #[arg(long, default_value_t = 32 * 1024)]
+    #[arg(long, hide_short_help = true, default_value_t = 32 * 1024)]
     durable_prefix_cache_max_mib: u64,
 
     /// Maximum size of one encoded durable checkpoint record in MiB.
-    #[arg(long, default_value_t = 16 * 1024)]
+    #[arg(long, hide_short_help = true, default_value_t = 16 * 1024)]
     durable_prefix_cache_max_entry_mib: u64,
 
     /// Auto-persist one-shot prompt boundaries at or above this token length.
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, hide_short_help = true, default_value_t = 1024)]
     durable_prefix_cache_min_tokens: usize,
 
     /// Append per-request JSON stats for multi-request runs.
     ///
     /// Timing fields are model-internal; this JSONL mode writes each completion
     /// after full decode rather than streaming the first token to stdout.
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     request_stats: Option<PathBuf>,
 
     /// Append per-request structured stats as JSONL under a common cross-family
@@ -468,20 +494,21 @@ struct Args {
     ///
     /// The envelope has a small stable core plus namespaced backend
     /// extensions under `diagnostics.<family>`.
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     request_stats_jsonl: Option<PathBuf>,
 
     /// Append single-turn first-post-model-load timing rows as JSONL.
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     request_timings: Option<PathBuf>,
 
     /// Run one identical warm follow-up for paired request timing.
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     request_timing_warm_followup: bool,
 
     /// Attribute sampler-v1 and full-logit host work on the frozen A3B request.
     #[arg(
         long,
+        hide_short_help = true,
         requires = "request_timings",
         conflicts_with_all = [
             "requests_jsonl",
@@ -507,14 +534,14 @@ struct Args {
     sampled_structural: bool,
 
     /// Do not ask the tokenizer to add model-defined special tokens.
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     no_special_tokens: bool,
 
     /// Append a FIFO request-trace row after each completed generation.
     ///
     /// Format is compatible with `scripts/profile/replay_economics.py
     /// --request-trace`: `arrival_ms tokens id ...`.
-    #[arg(long)]
+    #[arg(long, hide_short_help = true)]
     trace_request: Option<PathBuf>,
 }
 
@@ -530,7 +557,10 @@ struct ExplicitCliOptions {
 
 impl ExplicitCliOptions {
     fn from_matches(matches: &clap::ArgMatches) -> Self {
-        let command_line = |id| matches.value_source(id) == Some(ValueSource::CommandLine);
+        let command_line = |id| {
+            matches.try_contains_id(id).is_ok()
+                && matches.value_source(id) == Some(ValueSource::CommandLine)
+        };
         Self {
             prefill_chunk: command_line("prefill_chunk"),
             prefix_cache_max_mib: command_line("prefix_cache_max_mib"),
@@ -928,6 +958,13 @@ enum PromptSource {
     Inline,
     File,
     Messages,
+}
+
+#[derive(Clone, Debug)]
+struct PreparedPrompt {
+    text: String,
+    source: PromptSource,
+    completed_checkpoint_eligible: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -2225,8 +2262,14 @@ fn main() -> Result<()> {
         .init();
 
     let matches = Args::command().get_matches();
-    let explicit_options = ExplicitCliOptions::from_matches(&matches);
-    let args = Args::from_arg_matches(&matches).expect("validated clap arguments");
+    let explicit_options = matches.subcommand().map_or_else(
+        || ExplicitCliOptions::from_matches(&matches),
+        |(_, matches)| ExplicitCliOptions::from_matches(matches),
+    );
+    let mut args = Args::from_arg_matches(&matches).expect("validated clap arguments");
+    let invocation = cli::normalize(&mut args);
+    invocation.apply_option_overrides(&mut args);
+    let modern_run = invocation.is_run();
     validate_deepseek_v4_reasoning_scope(&args)?;
     validate_request_timing_mode(&args)?;
     validate_sampling_attribution_mode(&args)?;
@@ -2243,10 +2286,13 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let Some(model_path) = args.model.as_ref() else {
-        eprintln!(
-            "usage: qwen -m <path-to-gguf> (-p <prompt> | --messages <file>)  (or `qwen --info`)"
-        );
+    let Some(model_path) = args.model.clone() else {
+        let stderr = std::io::stderr();
+        let mut stderr = stderr.lock();
+        Args::command()
+            .write_help(&mut stderr)
+            .context("write qwen help")?;
+        writeln!(stderr)?;
         std::process::exit(2);
     };
 
@@ -2255,7 +2301,7 @@ fn main() -> Result<()> {
             args.request_stats_jsonl.is_none(),
             "--request-stats-jsonl is not applicable with --deepseek-census-json; only DeepSeek V4 single-turn generation emits the sidecar today"
         );
-        return print_deepseek_v4_census(model_path);
+        return print_deepseek_v4_census(&model_path);
     }
 
     if args.deepseek_v4_snapshot.is_some() {
@@ -2270,12 +2316,13 @@ fn main() -> Result<()> {
         && args.prompt_file.is_none()
         && args.messages.is_none()
         && args.requests_jsonl.is_none()
+        && !modern_run
     {
         ensure!(
             args.request_stats_jsonl.is_none(),
             "--request-stats-jsonl is not applicable without a request; only DeepSeek V4 single-turn generation emits the sidecar today. Provide --prompt, --prompt-file, --messages, or --requests-jsonl."
         );
-        return print_model_info(model_path);
+        return print_model_info(&model_path);
     }
 
     let staged_integrity = configured_checkpoint_staged_integrity()?;
@@ -2284,18 +2331,21 @@ fn main() -> Result<()> {
         "{CHECKPOINT_STAGED_INTEGRITY_ENV} requires --durable-prefix-cache"
     );
     validate_request_before_model_open(&args)?;
-    let gguf = GgufFile::open(model_path)
+    let gguf = GgufFile::open(&model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
     let model_family = ModelFamily::detect(&gguf);
     validate_deepseek_v4_multigroup_selector_family(
         args.deepseek_v4_multigroup_selector,
         model_family,
     )?;
+    if let cli::Invocation::Run(run) = invocation {
+        args.prepared_prompt = Some(prepare_modern_run_prompt(run, model_family, &gguf, &args)?);
+    }
     if model_family == Some(ModelFamily::DeepSeek4) {
         return if args.requests_jsonl.is_some() {
-            run_deepseek_v4_requests_jsonl(model_path, gguf, &args, explicit_options)
+            run_deepseek_v4_requests_jsonl(&model_path, gguf, &args, explicit_options)
         } else {
-            run_deepseek_v4_single_turn(model_path, gguf, &args, explicit_options)
+            run_deepseek_v4_single_turn(&model_path, gguf, &args, explicit_options)
         };
     }
     ensure!(
@@ -2307,12 +2357,12 @@ fn main() -> Result<()> {
         "--reasoning and --preserve-reasoning apply to DeepSeek V4 --messages requests only"
     );
 
-    if args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some() {
-        return run_single_turn(model_path, gguf, &args, staged_integrity);
+    if has_single_turn_input(&args) {
+        return run_single_turn(&model_path, gguf, &args, staged_integrity);
     }
 
     if let Some(path) = args.requests_jsonl.as_ref() {
-        return run_requests_jsonl(model_path, path, gguf, &args);
+        return run_requests_jsonl(&model_path, path, gguf, &args);
     }
 
     unreachable!("request mode was validated above")
@@ -2514,13 +2564,142 @@ fn validate_deepseek_v4_multigroup_selector_family(
 
 fn validate_deepseek_v4_reasoning_scope(args: &Args) -> Result<()> {
     ensure!(
-        (args.reasoning.is_none() && !args.preserve_reasoning) || args.messages.is_some(),
+        (args.reasoning.is_none() && !args.preserve_reasoning) || has_messages_input(args),
         "--reasoning and --preserve-reasoning require --messages"
     );
     Ok(())
 }
 
+fn has_messages_input(args: &Args) -> bool {
+    args.messages.is_some()
+        || args
+            .prepared_prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.source == PromptSource::Messages)
+}
+
+fn has_single_turn_input(args: &Args) -> bool {
+    args.prepared_prompt.is_some()
+        || args.prompt.is_some()
+        || args.prompt_file.is_some()
+        || args.messages.is_some()
+}
+
+fn prepare_modern_run_prompt(
+    run: cli::RunInvocation,
+    model_family: Option<ModelFamily>,
+    gguf: &GgufFile,
+    args: &Args,
+) -> Result<PreparedPrompt> {
+    let family = model_family.with_context(|| {
+        format!(
+            "`qwen run` does not support model architecture {:?}",
+            gguf.architecture()
+        )
+    })?;
+    ensure!(
+        matches!(
+            family,
+            ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::DeepSeek4
+        ),
+        "`qwen run` does not support model family {}",
+        family.architecture_name()
+    );
+    ensure!(
+        family != ModelFamily::DeepSeek4 || args.max_context_tokens.is_none(),
+        "--max-context-tokens is not supported for DeepSeek V4 single-turn generation; remove --max-context-tokens"
+    );
+    if run.no_thinking && matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) {
+        ensure!(
+            validated_qwen36_no_thinking_model(family, gguf),
+            "--no-thinking is currently validated only for Qwen3.6 35B A3B with the qwen35 tokenizer; omit --no-thinking to use this model's default generation behavior"
+        );
+    }
+
+    let no_thinking = run.no_thinking;
+    let input = run.acquire_input()?;
+    let (text, source) = match input {
+        cli::AcquiredRunInput::RawPrompt(prompt) => (prompt, PromptSource::Inline),
+        cli::AcquiredRunInput::User { system, user } => {
+            let prompt = match family {
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => render_qwen_single_turn_prompt(
+                    &user,
+                    system.as_deref(),
+                    if no_thinking {
+                        QwenGenerationMode::NoThinking
+                    } else {
+                        QwenGenerationMode::Auto
+                    },
+                ),
+                ModelFamily::DeepSeek4 => render_deepseek_v4_0731_single_turn_prompt(
+                    &user,
+                    system.as_deref(),
+                    DeepSeekV4EncodeOptions::default(),
+                )
+                .context("render DeepSeek V4 0731 user request")?,
+            };
+            (prompt, PromptSource::Messages)
+        }
+        cli::AcquiredRunInput::Messages { document, source } => {
+            let messages = parse_strict_messages_input(&document, &source)?;
+            let prompt = match family {
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
+                    render_qwen_messages_prompt_with_generation(
+                        &messages,
+                        false,
+                        true,
+                        if no_thinking {
+                            QwenGenerationMode::NoThinking
+                        } else {
+                            QwenGenerationMode::Auto
+                        },
+                    )
+                }
+                ModelFamily::DeepSeek4 => render_deepseek_v4_0731_messages_prompt(
+                    &messages,
+                    DeepSeekV4EncodeOptions::default(),
+                )
+                .context("render strict DeepSeek V4 0731 messages")?,
+            };
+            (prompt, PromptSource::Messages)
+        }
+    };
+    Ok(PreparedPrompt {
+        text,
+        source,
+        completed_checkpoint_eligible: false,
+    })
+}
+
+fn validated_qwen36_no_thinking_model(family: ModelFamily, gguf: &GgufFile) -> bool {
+    validated_qwen36_no_thinking_identity(
+        family,
+        gguf.get_str("general.base_model.0.name"),
+        gguf.get_str("tokenizer.ggml.model"),
+        gguf.get_str("tokenizer.ggml.pre"),
+    )
+}
+
+fn validated_qwen36_no_thinking_identity(
+    family: ModelFamily,
+    base_model_name: Option<&str>,
+    tokenizer_model: Option<&str>,
+    tokenizer_pre: Option<&str>,
+) -> bool {
+    family == ModelFamily::Qwen35Moe
+        && base_model_name == Some("Qwen3.6 35B A3B")
+        && tokenizer_model == Some("gpt2")
+        && tokenizer_pre == Some("qwen35")
+}
+
 fn prompt_text(args: &Args) -> Result<(String, PromptSource, bool)> {
+    if let Some(prompt) = args.prepared_prompt.as_ref() {
+        return Ok((
+            prompt.text.clone(),
+            prompt.source,
+            prompt.completed_checkpoint_eligible,
+        ));
+    }
     if let Some(prompt) = args.prompt.as_ref() {
         return Ok((prompt.clone(), PromptSource::Inline, false));
     }
@@ -2548,7 +2727,9 @@ fn prompt_text(args: &Args) -> Result<(String, PromptSource, bool)> {
             preserves_assistant_content && !args.messages_no_generation_prompt,
         ));
     }
-    bail!("single-turn generation requires --prompt, --prompt-file, or --messages")
+    bail!(
+        "single-turn generation requires --prompt, --prompt-file, --messages, or `qwen run --user`"
+    )
 }
 
 fn prompt_add_special_tokens(args: &Args, source: PromptSource) -> bool {
@@ -2627,8 +2808,8 @@ fn validate_deepseek_v4_generation_mode(args: &Args, explicit: ExplicitCliOption
         unsupported.join(", ")
     );
     ensure!(
-        args.prompt.is_some() || args.prompt_file.is_some() || args.messages.is_some(),
-        "DeepSeek V4 generation requires --prompt, --prompt-file, or --messages"
+        has_single_turn_input(args),
+        "DeepSeek V4 generation requires --prompt, --prompt-file, --messages, or `qwen run --user`"
     );
     Ok(())
 }
@@ -8343,6 +8524,40 @@ mod tests {
         assert!(deepseek_v4_required_forwards(0, 1).is_err());
         assert!(deepseek_v4_required_forwards(1, 0).is_err());
         assert!(deepseek_v4_required_forwards(usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn qwen_no_thinking_capability_is_closed_to_the_validated_identity() {
+        assert!(validated_qwen36_no_thinking_identity(
+            ModelFamily::Qwen35Moe,
+            Some("Qwen3.6 35B A3B"),
+            Some("gpt2"),
+            Some("qwen35"),
+        ));
+        for identity in [
+            (
+                ModelFamily::Qwen35,
+                Some("Qwen3.6 35B A3B"),
+                Some("gpt2"),
+                Some("qwen35"),
+            ),
+            (
+                ModelFamily::Qwen35Moe,
+                Some("Qwen3.5 35B A3B"),
+                Some("gpt2"),
+                Some("qwen35"),
+            ),
+            (
+                ModelFamily::Qwen35Moe,
+                Some("Qwen3.6 35B A3B"),
+                Some("gpt2"),
+                Some("other"),
+            ),
+        ] {
+            assert!(!validated_qwen36_no_thinking_identity(
+                identity.0, identity.1, identity.2, identity.3,
+            ));
+        }
     }
 
     #[test]

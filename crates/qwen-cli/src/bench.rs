@@ -1642,30 +1642,6 @@ fn resolve_stop_tokens(
         .map_err(|e| anyhow!("resolving stop tokens from GGUF: {e}"))
 }
 
-fn render_qwen_single_turn_prompt(
-    user_prompt: &str,
-    system_prompt: Option<&str>,
-    enable_thinking: bool,
-) -> String {
-    let mut out = String::new();
-    if let Some(system) = system_prompt
-        && !system.is_empty()
-    {
-        out.push_str("<|im_start|>system\n");
-        out.push_str(system);
-        out.push_str("<|im_end|>\n");
-    }
-    out.push_str("<|im_start|>user\n");
-    out.push_str(user_prompt);
-    out.push_str("<|im_end|>\n<|im_start|>assistant\n");
-    if enable_thinking {
-        out.push_str("<think>\n");
-    } else {
-        out.push_str("<think>\n\n</think>\n\n");
-    }
-    out
-}
-
 /// JSON schema version for `BenchRow`. Bump when fields are renamed,
 /// removed, or have their semantics changed. Adding new optional fields
 /// (always-null on old emitters) does NOT require a bump.
@@ -10645,7 +10621,15 @@ fn run_pld(args: PldArgs) -> Result<()> {
     let mm = MetalModel::load(&ctx, &g, &m).context("metal-load weights")?;
     let tok = Tokenizer::from_gguf(&g).context("open tokenizer")?;
     let rendered_prompt = if qwen_chat {
-        render_qwen_single_turn_prompt(&prompt, system.as_deref(), !disable_thinking)
+        messages::render_qwen_single_turn_prompt(
+            &prompt,
+            system.as_deref().filter(|system| !system.is_empty()),
+            if disable_thinking {
+                messages::QwenGenerationMode::NoThinking
+            } else {
+                messages::QwenGenerationMode::Thinking
+            },
+        )
     } else {
         prompt.clone()
     };
@@ -11130,7 +11114,15 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         anyhow::bail!("`--system` and `--disable-thinking` require `--qwen-chat`");
     }
     let rendered_prompt = if qwen_chat {
-        render_qwen_single_turn_prompt(&prompt, system.as_deref(), !disable_thinking)
+        messages::render_qwen_single_turn_prompt(
+            &prompt,
+            system.as_deref().filter(|system| !system.is_empty()),
+            if disable_thinking {
+                messages::QwenGenerationMode::NoThinking
+            } else {
+                messages::QwenGenerationMode::Thinking
+            },
+        )
     } else {
         prompt.clone()
     };

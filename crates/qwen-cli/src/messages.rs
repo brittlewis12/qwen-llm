@@ -97,6 +97,15 @@ pub(crate) enum MessagesThinkingMode {
     Strip,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum QwenGenerationMode {
+    #[default]
+    Auto,
+    #[allow(dead_code)]
+    Thinking,
+    NoThinking,
+}
+
 pub(crate) fn messages_thinking_mode(preserve: bool, strip: bool) -> MessagesThinkingMode {
     if preserve {
         MessagesThinkingMode::Preserve
@@ -124,16 +133,55 @@ pub(crate) fn load_messages_prompt_with_policy(
     thinking_mode: MessagesThinkingMode,
     append_generation_prompt: bool,
 ) -> Result<(String, bool)> {
+    load_messages_prompt_with_policy_and_generation(
+        path,
+        max_messages,
+        thinking_mode,
+        append_generation_prompt,
+        QwenGenerationMode::Auto,
+    )
+}
+
+pub(crate) fn load_messages_prompt_with_policy_and_generation(
+    path: &Path,
+    max_messages: Option<usize>,
+    thinking_mode: MessagesThinkingMode,
+    append_generation_prompt: bool,
+    generation_mode: QwenGenerationMode,
+) -> Result<(String, bool)> {
     let (messages, meta) = load_messages_input(path, max_messages)?;
+    render_loaded_qwen_messages(
+        &messages,
+        &meta,
+        thinking_mode,
+        append_generation_prompt,
+        generation_mode,
+    )
+}
+
+fn render_loaded_qwen_messages(
+    messages: &[ChatMessage],
+    meta: &serde_json::Value,
+    thinking_mode: MessagesThinkingMode,
+    append_generation_prompt: bool,
+    generation_mode: QwenGenerationMode,
+) -> Result<(String, bool)> {
     let preserve_thinking = match thinking_mode {
         MessagesThinkingMode::Preserve => true,
         MessagesThinkingMode::Strip => false,
-        MessagesThinkingMode::Auto => messages_auto_preserve_thinking(&meta),
+        MessagesThinkingMode::Auto => messages_auto_preserve_thinking(meta),
     };
-    Ok((
-        render_qwen_messages_prompt(&messages, preserve_thinking, append_generation_prompt),
-        preserve_thinking,
-    ))
+    let prompt = if generation_mode == QwenGenerationMode::Auto {
+        render_qwen_messages_prompt(messages, preserve_thinking, append_generation_prompt)
+    } else {
+        render_qwen_messages_prompt_with_generation(
+            messages,
+            preserve_thinking,
+            append_generation_prompt,
+            generation_mode,
+        )
+    };
+    Ok((prompt, preserve_thinking))
 }
 
 #[allow(dead_code)]
@@ -168,14 +216,22 @@ fn load_messages_input(
     max_messages: Option<usize>,
 ) -> Result<(Vec<ChatMessage>, serde_json::Value)> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("parse messages input {}", path.display()))?;
+    load_messages_input_from_str(&raw, &path.display().to_string(), max_messages)
+}
+
+fn load_messages_input_from_str(
+    raw: &str,
+    source: &str,
+    max_messages: Option<usize>,
+) -> Result<(Vec<ChatMessage>, serde_json::Value)> {
+    let value: serde_json::Value =
+        serde_json::from_str(raw).with_context(|| format!("parse messages input {source}"))?;
     let (mut messages, meta) = parse_messages_input(value)?;
     if let Some(max) = max_messages {
         messages.truncate(max);
     }
     if messages.is_empty() {
-        bail!("messages input {} contains no messages", path.display());
+        bail!("messages input {source} contains no messages");
     }
     Ok((messages, meta))
 }
@@ -228,10 +284,108 @@ pub(crate) fn parse_messages_input(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct StrictChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct StrictMessagesWrapper {
+    messages: Vec<StrictChatMessage>,
+}
+
+#[allow(dead_code)]
+pub(crate) fn parse_strict_messages_input(raw: &str, source: &str) -> Result<Vec<ChatMessage>> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| anyhow!("parse messages input {source}: {error}"))?;
+    let strict = match value {
+        serde_json::Value::Array(_) => serde_json::from_value(value)
+            .map_err(|error| anyhow!("parse bare messages array from {source}: {error}"))?,
+        serde_json::Value::Object(_) => {
+            let wrapper: StrictMessagesWrapper = serde_json::from_value(value)
+                .map_err(|error| anyhow!("parse messages wrapper from {source}: {error}"))?;
+            wrapper.messages
+        }
+        other => bail!(
+            "messages input {source} must be a message array or {{\"messages\":[...]}}, got {other}"
+        ),
+    };
+    validate_strict_messages(strict, source)
+}
+
+#[allow(dead_code)]
+fn validate_strict_messages(
+    messages: Vec<StrictChatMessage>,
+    source: &str,
+) -> Result<Vec<ChatMessage>> {
+    if messages.is_empty() {
+        bail!("messages input {source} contains no messages");
+    }
+
+    let mut expect_user = true;
+    let mut saw_user = false;
+    let mut validated = Vec::with_capacity(messages.len());
+    for (index, message) in messages.into_iter().enumerate() {
+        match message.role.as_str() {
+            "system" if index == 0 && expect_user => {}
+            "user" if expect_user => {
+                expect_user = false;
+                saw_user = true;
+            }
+            "assistant" if !expect_user => {
+                if message.content.trim_start().starts_with("<think>") {
+                    bail!(
+                        "message {index} in {source} contains structured assistant thinking; modern `qwen run --messages` does not yet represent reasoning history. Use the legacy --messages interface if those semantics are intentional"
+                    );
+                }
+                expect_user = true;
+            }
+            role => {
+                let expected = if expect_user { "user" } else { "assistant" };
+                bail!(
+                    "message {index} in {source} has role {role:?}; expected {expected:?} in the strict ordinary-chat subset"
+                );
+            }
+        }
+        validated.push(ChatMessage {
+            role: message.role,
+            content: message.content,
+            ..Default::default()
+        });
+    }
+
+    if !saw_user {
+        bail!("messages input {source} requires at least one user turn");
+    }
+    if expect_user {
+        bail!("messages input {source} must end with a user turn before generation");
+    }
+    Ok(validated)
+}
+
 pub(crate) fn render_qwen_messages_prompt(
     messages: &[ChatMessage],
     preserve_thinking: bool,
     append_generation_prompt: bool,
+) -> String {
+    render_qwen_messages_prompt_with_generation(
+        messages,
+        preserve_thinking,
+        append_generation_prompt,
+        QwenGenerationMode::Auto,
+    )
+}
+
+pub(crate) fn render_qwen_messages_prompt_with_generation(
+    messages: &[ChatMessage],
+    preserve_thinking: bool,
+    append_generation_prompt: bool,
+    generation_mode: QwenGenerationMode,
 ) -> String {
     let mut output = String::new();
     for message in messages {
@@ -247,8 +401,56 @@ pub(crate) fn render_qwen_messages_prompt(
     }
     if append_generation_prompt {
         output.push_str("<|im_start|>assistant\n");
+        match generation_mode {
+            QwenGenerationMode::Auto => {}
+            QwenGenerationMode::Thinking => output.push_str("<think>\n"),
+            QwenGenerationMode::NoThinking => output.push_str("<think>\n\n</think>\n\n"),
+        }
     }
     output
+}
+
+pub(crate) fn render_qwen_single_turn_prompt(
+    user: &str,
+    system: Option<&str>,
+    generation_mode: QwenGenerationMode,
+) -> String {
+    let mut messages = Vec::with_capacity(usize::from(system.is_some()) + 1);
+    if let Some(system) = system {
+        messages.push(ChatMessage {
+            role: "system".into(),
+            content: system.into(),
+            ..Default::default()
+        });
+    }
+    messages.push(ChatMessage {
+        role: "user".into(),
+        content: user.into(),
+        ..Default::default()
+    });
+    render_qwen_messages_prompt_with_generation(&messages, false, true, generation_mode)
+}
+
+#[allow(dead_code)]
+pub(crate) fn render_deepseek_v4_0731_single_turn_prompt(
+    user: &str,
+    system: Option<&str>,
+    options: DeepSeekV4EncodeOptions,
+) -> Result<String> {
+    let mut messages = Vec::with_capacity(usize::from(system.is_some()) + 1);
+    if let Some(system) = system {
+        messages.push(ChatMessage {
+            role: "system".into(),
+            content: system.into(),
+            ..Default::default()
+        });
+    }
+    messages.push(ChatMessage {
+        role: "user".into(),
+        content: user.into(),
+        ..Default::default()
+    });
+    render_deepseek_v4_0731_messages_prompt(&messages, options)
 }
 
 /// Render the ordinary chat subset of the DeepSeek V4 release encoder,
@@ -500,8 +702,84 @@ mod tests {
     }
 
     #[test]
+    fn qwen_single_turn_generation_modes_are_byte_exact() {
+        assert_eq!(
+            render_qwen_single_turn_prompt("Hello", None, QwenGenerationMode::Auto),
+            "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n"
+        );
+        assert_eq!(
+            render_qwen_single_turn_prompt("Hello", None, QwenGenerationMode::Thinking),
+            "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n<think>\n"
+        );
+        assert_eq!(
+            render_qwen_single_turn_prompt(
+                "Hello",
+                Some("Be exact."),
+                QwenGenerationMode::NoThinking,
+            ),
+            concat!(
+                "<|im_start|>system\nBe exact.<|im_end|>\n",
+                "<|im_start|>user\nHello<|im_end|>\n",
+                "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            )
+        );
+    }
+
+    #[test]
+    fn strict_messages_accept_only_the_ordinary_chat_subset() {
+        for raw in [
+            r#"[{"role":"user","content":"hello"}]"#,
+            r#"{"messages":[{"role":"system","content":"Be exact."},{"role":"user","content":"one"},{"role":"assistant","content":"done"},{"role":"user","content":"two"}]}"#,
+        ] {
+            let messages = parse_strict_messages_input(raw, "test").unwrap();
+            assert_eq!(messages.last().unwrap().role, "user");
+            assert!(messages.iter().all(|message| message.extra.is_empty()));
+        }
+
+        let cases = [
+            (
+                r#"{"messages":[{"role":"user","content":"hello"}],"meta":{}}"#,
+                "unknown field",
+            ),
+            (
+                r#"[{"role":"user","content":"hello","tool_calls":[]}]"#,
+                "unknown field",
+            ),
+            (
+                r#"[{"role":"developer","content":"hello"}]"#,
+                "expected \"user\"",
+            ),
+            (
+                r#"[{"role":"user","content":"one"},{"role":"user","content":"two"}]"#,
+                "expected \"assistant\"",
+            ),
+            (
+                r#"[{"role":"user","content":"one"},{"role":"assistant","content":"done"}]"#,
+                "must end with a user turn",
+            ),
+            (
+                r#"[{"role":"user","content":"one"},{"role":"assistant","content":"<think>hidden</think>done"},{"role":"user","content":"two"}]"#,
+                "does not yet represent reasoning history",
+            ),
+        ];
+        for (raw, expected) in cases {
+            let error = parse_strict_messages_input(raw, "test")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(expected),
+                "expected {expected:?} in {error:?}"
+            );
+        }
+    }
+
+    #[test]
     fn deepseek_v4_ordinary_chat_matches_release_derived_references() {
         let chat = DeepSeekV4EncodeOptions::default();
+        assert_eq!(
+            render_deepseek_v4_0731_single_turn_prompt("Hello", Some("Be exact."), chat).unwrap(),
+            "<｜begin▁of▁sentence｜>Be exact.<｜User｜>Hello<｜Assistant｜></think>"
+        );
         assert_eq!(
             render_deepseek_v4_0731_messages_prompt(&[message("user", "Hello")], chat).unwrap(),
             "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>"

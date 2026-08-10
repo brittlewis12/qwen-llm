@@ -31,7 +31,7 @@ model residency.
 
 ```
 crates/qwen-llm     — engine library
-crates/qwen-cli     — `qwen` interactive CLI + `qwen-bench` throughput tool
+crates/qwen-cli     — `qwen` inference CLI + `qwen-bench` throughput tool
 kernels/            — Metal compute shaders (compiled to embedded .metallib)
 docs/PLAN.md        — architectural decisions
 ```
@@ -47,6 +47,41 @@ cargo build --release -p qwen-cli --bin qwen
 cargo build --release -p qwen-cli --bin qwen-bench
 ./target/release/qwen-bench -m ~/models/Qwen3.6-27B-Q4_K_M.gguf
 ```
+
+## Inference
+
+Use `run` for an ordinary model-templated request:
+
+```sh
+qwen run -m MODEL --user "Explain this"
+qwen run -m MODEL --system "Be concise" --user "Explain this"
+qwen run -m MODEL --user -
+```
+
+Structured messages accept a strict bare array or `{ "messages": [...] }`;
+`-` reads one complete JSON document from stdin:
+
+```sh
+qwen run -m MODEL --messages messages.json
+qwen run -m MODEL --messages -
+```
+
+Raw model input remains explicit. On supported detected model families,
+`--raw-prompt` has the same tokenization and output semantics as the legacy
+`-p/--prompt` interface:
+
+```sh
+qwen run -m MODEL --raw-prompt '<exact model input>'
+```
+
+On the validated Qwen3.6 35B A3B surface, `--no-thinking` uses the model-family
+non-thinking template transition. DeepSeek ordinary chat is already
+non-thinking, so the option is idempotent there. It does not suppress CLI
+diagnostics, and diagnostic suppression is not currently available. Existing
+flat invocations and resident `--requests-jsonl FILE|-` remain supported;
+`qwen -h` shows the common path and `qwen --help` shows expanded documented
+legacy/research options with copy-ready flat examples. Legacy flags cannot be
+combined with `qwen run`.
 
 ## Reference quarry
 

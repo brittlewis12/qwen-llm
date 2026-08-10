@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-09 - DeepSeek V4 K216 Residency-Set Default GO
+
+Status: the model-wide Metal residency set now also defaults for the exact K216
+REAP asset. Five unique allocations cover its two retained windows and three
+fallback buffers. `QWEN_DSV4_RESIDENCY_SET=0` remains the common rollback.
+
+- The first control warms two cold shards, then still prefills the 2,385-token
+  prompt in 27,066.4 ms, or 88.12 token/s. That separates storage warmth from
+  Metal residency: a warm page cache alone does not prevent the retained-window
+  traversal cliff.
+- The force arm reaches 11,712.6 ms and 203.63 token/s. A following fully warm
+  control reaches 14,165.2 ms and 168.37 token/s. Against that stricter control,
+  residency saves 2,452.6 ms of prefill; after its `566.9 ms` load charge,
+  load plus prefill still saves 1,885.7 ms, or 13.28%.
+- On a 13-token prompt, residency saves 955.4 ms of prefill and still saves
+  208.3 ms after load. Thirty-one decode transitions are 27.80 versus
+  28.08 token/s (`-1.0%`), with the same 32-token greedy digest. The real
+  6,642-token prompt reaches 208.57 token/s in one corroborating residency run.
+- One later partially cooled default pays 3,960.4 ms of load, including a
+  1,408.9 ms prefetch, and reaches 171.78 token/s. Its following rollback is
+  faster after inheriting the candidate's freshly established residency. Keep
+  that reversal as a conditioning warning; it is not a symmetric comparison or
+  authority for a universal cache-warm win.
+- Qualification is exact to Apple M4 Max, 43 layers, E=216, 1,328 tensors, and
+  89,060,075,612 source bytes. K160 remains qualified independently; FRESH and
+  all other assets remain outside the default.
+
+Decision: promote placement without widening any K216 arithmetic path. The
+result transfers the retained-window mechanism, not K160's quant-specific tail
+policy. Storage-cold prefetch remains a separate phase and claim.
+
 ## 2026-08-09 - DeepSeek V4 K160 Residency / Tail Matrix GO
 
 Status: the exact K160 REAP asset now defaults to one model-wide Metal residency

@@ -70,6 +70,7 @@ use std::num::NonZeroU32;
 pub const DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT: usize = 1_328;
 const GGUF_BINDING_ALIGNMENT: usize = 32;
 const DEEPSEEK_V4_REAP_K160_SOURCE_BYTES: u64 = 89_920_886_108;
+const DEEPSEEK_V4_REAP_K216_SOURCE_BYTES: u64 = 89_060_075_612;
 pub const DEEPSEEK_V4_CONNECTION_COUNT: usize = 4;
 pub const DEEPSEEK_V4_HC_PARAMETER_COUNT: usize = 24;
 pub const DEEPSEEK_V4_SINKHORN_ITERATIONS: usize = 20;
@@ -709,9 +710,9 @@ fn deepseek_v4_residency_set_scope_qualified(
     enabled
         && device_name == "Apple M4 Max"
         && layer_count as usize == DEEPSEEK_V4_LAYER_COUNT
-        && expert_count == 160
         && report.tensor_count == DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT
-        && report.source_bytes == DEEPSEEK_V4_REAP_K160_SOURCE_BYTES
+        && ((expert_count == 160 && report.source_bytes == DEEPSEEK_V4_REAP_K160_SOURCE_BYTES)
+            || (expert_count == 216 && report.source_bytes == DEEPSEEK_V4_REAP_K216_SOURCE_BYTES))
 }
 
 fn create_deepseek_v4_residency_set(
@@ -743,7 +744,7 @@ fn create_deepseek_v4_residency_set(
     }
 
     let descriptor = MTLResidencySetDescriptor::new();
-    descriptor.setLabel(Some(&NSString::from_str("qwen-dsv4-k160-model")));
+    descriptor.setLabel(Some(&NSString::from_str("qwen-dsv4-model-weights")));
     // SAFETY: initialCapacity is advisory and equals the unique allocation count.
     unsafe { descriptor.setInitialCapacity(buffers.len()) };
     let set = match ctx.device.newResidencySetWithDescriptor_error(&descriptor) {
@@ -14968,7 +14969,7 @@ mod tests {
     ];
 
     #[test]
-    fn k160_residency_set_scope_is_exact() {
+    fn model_residency_set_scope_is_exact() {
         let mut report = DeepSeekV4ResidencyReport {
             tensor_count: DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT,
             source_bytes: DEEPSEEK_V4_REAP_K160_SOURCE_BYTES,
@@ -15003,6 +15004,16 @@ mod tests {
                 enabled, device, layers, experts, &report,
             ));
         }
+
+        let mut k216_report = report.clone();
+        k216_report.source_bytes = DEEPSEEK_V4_REAP_K216_SOURCE_BYTES;
+        assert!(deepseek_v4_residency_set_scope_qualified(
+            true,
+            "Apple M4 Max",
+            43,
+            216,
+            &k216_report,
+        ));
 
         report.tensor_count -= 1;
         assert!(!deepseek_v4_residency_set_scope_qualified(

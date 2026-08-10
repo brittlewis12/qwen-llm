@@ -1170,6 +1170,16 @@ grouped IQ2/IQ3 execution removes the compact per-bucket fallback: warm 2,385-to
 prefill moves `89.62 -> 168.46-169.33 token/s`, while 64-token decode reaches
 21.70 token/s; the 6,642-token row is 192.27/21.60 prefill/decode token/s. This
 makes K216 performance-viable and leaves its asset-quality comparison open.
+Model-wide residency then separates placement from arithmetic: a fully warm
+2,385-token control reaches 168.37 token/s, while the same graph with five
+resident allocations reaches 203.63 token/s. After the 566.9 ms load charge,
+load plus prefill still saves 1.886 seconds. A short decode guard is flat at
+27.80 versus 28.08 token/s with identical IDs, and one 6,642-token residency
+run reaches 208.57 token/s. Default only for the exact M4 Max/E=216/source-byte
+identity under the shared `QWEN_DSV4_RESIDENCY_SET=0` rollback. Eager residency
+cost remains file-state sensitive: one partially cooled run charges 3.96 seconds
+to load and loses to its post-treatment rollback, so do not claim a universal
+cache-warm subtotal win from this promotion.
 
 K160's raw-KV matrix policy does not transfer directly. A default-off K216 arm
 selects its 43 Q8_0 raw-KV projections while leaving all Q-A projections and the

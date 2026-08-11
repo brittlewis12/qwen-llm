@@ -1,5 +1,9 @@
 # DeepSeek V4 Concurrent Prefix Fanout
 
+Update (2026-08-11): a shared bounded affinity planner exists, but DeepSeek
+keeps input-order pairing by default until a memory-safe model-backed run
+qualifies reordered worker assignment.
+
 Date: 2026-08-11
 
 Status: product `GO` for qualifying DeepSeek V4 concurrency pairs.

@@ -2953,6 +2953,17 @@ serial and lets auto choose B=2 at `1.078x`. Keep this as bounded
 logical-termination flexibility, not evidence for lane refill or variable prompt
 frontiers.
 
+Seekable Qwen B=2 files now plan pairs inside independent 16-request windows.
+Prefer the largest actually restorable prefix edges, then pair remaining requests
+by adjacent generation depth; preserve stdout input order with a hard window-sized
+buffer bound. Interleaved long-prefix A3B work moves warm wall
+`18.48 -> 12.81 s` (`1.443x`), while a no-prefix skewed-depth fixture moves
+decode `1.218 -> 0.982 s` (`1.241x`); both remain byte-exact. Keep
+`QWEN_CONCURRENCY_PAIR_PLANNER=0` as rollback. DeepSeek uses the shared planner
+only when explicitly enabled until a safe K160-class validation can run. This
+cheap scheduling win precedes dynamic B=2 refill; it does not remove the serial
+private-prefill wall or authorize ragged fixed-wide execution.
+
 DeepSeek K160 common-route B=8 is also closed at its cheapest model-backed
 floor. Giving all eight rows the same six experts, the production all-slot
 control and six N=8 Q3_K/Q4_K mat-mat chains move `1.9760 -> 1.8630 ms/layer`

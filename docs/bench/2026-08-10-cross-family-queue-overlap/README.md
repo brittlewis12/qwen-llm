@@ -1,5 +1,10 @@
 # Cross-family queue-overlap baseline
 
+Update (2026-08-11): seekable Qwen files now choose B=2 partners by bounded
+prefix affinity and generation depth rather than input adjacency. See
+`docs/bench/2026-08-11-qwen-b2-pair-affinity/README.md`. DeepSeek retains the
+original input-order default pending model-backed validation.
+
 ## Question
 
 Can one resident model safely execute independent sequence-private singleton

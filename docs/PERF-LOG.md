@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Qwen B=2 Pair-Affinity Planner GO
+
+Status: seekable Qwen `--concurrency 2` files now pair requests within bounded
+16-request windows by restorable prefix affinity, then generation depth. Stdout
+remains in input order and completed-output buffering is hard-bounded below one
+window. `QWEN_CONCURRENCY_PAIR_PLANNER=0` restores input-order pairing.
+
+- An interleaved `A0,B0,A1,B1` Qwen3.6 A3B Q4 fixture moves from zero fanout to
+  `5,120 + 7,168` restored prefix tokens. Summed pair prepare/decode moves
+  `15.752 -> 10.182 s` (`1.547x`) and warm process wall moves
+  `18.48 -> 12.81 s` (`1.443x`) with byte-identical stdout.
+- A no-prefix `8,64,10,62`-token fixture moves from `108` serial-tail
+  transitions to `4`; decode moves `1.218 -> 0.982 s` (`1.241x`) and process
+  wall moves `4.32 -> 4.11 s` (`1.051x`) with byte-identical stdout.
+- Planner schema 1 names request-window, prefix-pair, depth-pair, and serial
+  counts. Qwen pair schema 3 includes original request indices after physical
+  reordering. Malformed rollback values fail closed.
+- The planner is a deterministic bounded heuristic, not global optimal matching,
+  dynamic refill, or continuous batching. DeepSeek shares the implementation but
+  remains default-off pending a safe model-backed validation.
+
+Decision: promote Qwen pair planning before adding scheduler state or kernel
+interfaces. Full evidence:
+`docs/bench/2026-08-11-qwen-b2-pair-affinity/README.md`.
+
 ## 2026-08-11 - Mixed-Limit Fixed Cohorts GO
 
 Status: dense B=8 and qualified Qwen MoE B=16 now cohort equal tokenized prompt

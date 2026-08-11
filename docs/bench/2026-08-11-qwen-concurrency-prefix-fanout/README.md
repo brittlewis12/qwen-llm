@@ -1,5 +1,9 @@
 # Qwen Concurrent Prefix Fanout
 
+Update (2026-08-11): the bounded pair-affinity planner now places compatible
+requests together before invoking this unchanged fanout mechanism. See
+`docs/bench/2026-08-11-qwen-b2-pair-affinity/README.md`.
+
 Date: 2026-08-11
 
 Status: product `GO` for dense and MoE Qwen with fixed prefill chunks.

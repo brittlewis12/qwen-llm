@@ -6,6 +6,8 @@ use std::sync::{Arc, mpsc};
 const WIDTH: usize = 2;
 const PREFIX_FANOUT_MIN_TOKENS: usize = 256;
 const PREFIX_FANOUT_ENV: &str = "QWEN_CONCURRENCY_PREFIX_FANOUT";
+const PAIR_PLANNER_ENV: &str = "QWEN_CONCURRENCY_PAIR_PLANNER";
+const PAIR_PLANNER_WINDOW: usize = 16;
 const PREFIX_FANOUT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -13,6 +15,42 @@ struct PrefixFanoutPlan {
     common_prefix_tokens: usize,
     selected_prefix_tokens: usize,
     reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PairWork {
+    Pair([usize; WIDTH]),
+    Serial(usize),
+}
+
+impl PairWork {
+    fn first_request_index(self) -> usize {
+        match self {
+            Self::Pair(indices) => indices[0].min(indices[1]),
+            Self::Serial(index) => index,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct PairSchedule {
+    work: Vec<PairWork>,
+    prefix_affinity_pairs: usize,
+    depth_balanced_pairs: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct PairPlannerTelemetry {
+    schema_version: u32,
+    backend: &'static str,
+    enabled: bool,
+    requests: usize,
+    prefix_affinity_pairs: usize,
+    depth_balanced_pairs: usize,
+    serial_requests: usize,
+    planning_window: usize,
+    strategy: &'static str,
+    output_order: &'static str,
 }
 
 #[derive(Debug)]
@@ -119,6 +157,7 @@ struct PairTelemetry {
     schema_version: u32,
     backend: &'static str,
     pair_index: usize,
+    request_indices: [usize; WIDTH],
     prompt_tokens: [usize; WIDTH],
     requested_tokens: [usize; WIDTH],
     generated_tokens: usize,
@@ -197,6 +236,7 @@ struct DeepSeekPairTelemetry {
     schema_version: u32,
     backend: &'static str,
     pair_index: usize,
+    request_indices: [usize; WIDTH],
     prompt_tokens: [usize; WIDTH],
     requested_tokens: [usize; WIDTH],
     generated_tokens: usize,
@@ -382,7 +422,50 @@ pub(super) fn run_prepared(
     validate_greedy_gpu_mode(greedy_gpu_mode)?;
     validate_requests(requests, args)?;
     let requirements = qwen_execution_admission_requirements(loaded, requests, args)?;
-    let pair_count = requests.len() / WIDTH;
+    let requested_tokens = requests
+        .iter()
+        .map(|request| jsonl_generation_capacity(request, args).map(|(tokens, _)| tokens))
+        .collect::<Result<Vec<_>>>()?;
+    let prompt_refs = requests
+        .iter()
+        .map(|request| request.prompt_ids.as_slice())
+        .collect::<Vec<_>>();
+    let planner_enabled = pair_planner_enabled(true)?;
+    let fanout_enabled = prefix_fanout_enabled();
+    let schedule = plan_request_pairs(
+        &prompt_refs,
+        &requested_tokens,
+        planner_enabled,
+        |left, right| {
+            plan_prefix_fanout(left, right, args.prefill_chunk, fanout_enabled)
+                .selected_prefix_tokens
+        },
+    )?;
+    let pair_count = schedule
+        .work
+        .iter()
+        .filter(|work| matches!(work, PairWork::Pair(_)))
+        .count();
+    eprintln!(
+        "concurrency_planner: {}",
+        serde_json::to_string(&PairPlannerTelemetry {
+            schema_version: 1,
+            backend: "qwen_pair_affinity_v1",
+            enabled: planner_enabled,
+            requests: requests.len(),
+            prefix_affinity_pairs: schedule.prefix_affinity_pairs,
+            depth_balanced_pairs: schedule.depth_balanced_pairs,
+            serial_requests: requests.len() - pair_count * WIDTH,
+            planning_window: PAIR_PLANNER_WINDOW,
+            strategy: if planner_enabled {
+                "bounded_prefix_affinity_then_depth"
+            } else {
+                "input_order"
+            },
+            output_order: "input",
+        })
+        .context("serialize Qwen concurrency planner telemetry")?
+    );
     let mut executor = if pair_count > 0 {
         let admission = loaded
             .admit_independent_queue2(
@@ -411,39 +494,80 @@ pub(super) fn run_prepared(
         .context("load producer-declared stop tokens")?;
 
     let mut completed = 0usize;
-    let mut pairs = requests.chunks_exact(WIDTH);
-    for (pair_index, pair) in pairs.by_ref().enumerate() {
+    let mut pair_index = 0usize;
+    let mut pending_outputs = std::iter::repeat_with(|| None)
+        .take(requests.len())
+        .collect::<Vec<Option<RequestOutput>>>();
+    let mut next_output = 0usize;
+    let mut buffered_outputs = 0usize;
+    for work in schedule.work {
         shutdown::checkpoint()?;
-        let pair = [&pair[0], &pair[1]];
-        let (outputs, telemetry) = run_pair(
-            loaded,
-            tokenizer,
-            executor.as_mut().expect("planned concurrent executor"),
-            pair,
-            args,
-            &stop_tokens,
-            pair_index,
-        )
-        .with_context(|| format!("run concurrent request pair {pair_index}"))?;
-        write_outputs(stdout, &outputs)?;
-        eprintln!(
-            "concurrency_pair: {}",
-            serde_json::to_string(&telemetry).context("serialize concurrency telemetry")?
+        match work {
+            PairWork::Pair(indices) => {
+                let pair = [&requests[indices[0]], &requests[indices[1]]];
+                let (outputs, telemetry) = run_pair(
+                    loaded,
+                    tokenizer,
+                    executor.as_mut().expect("planned concurrent executor"),
+                    pair,
+                    args,
+                    &stop_tokens,
+                    pair_index,
+                    indices,
+                )
+                .with_context(|| format!("run concurrent request pair {pair_index}"))?;
+                for (index, output) in indices.into_iter().zip(outputs) {
+                    ensure!(
+                        pending_outputs[index].replace(output).is_none(),
+                        "concurrent planner completed request {index} twice"
+                    );
+                }
+                eprintln!(
+                    "concurrency_pair: {}",
+                    serde_json::to_string(&telemetry).context("serialize concurrency telemetry")?
+                );
+                completed += WIDTH;
+                buffered_outputs = buffered_outputs
+                    .checked_add(WIDTH)
+                    .context("concurrent output buffer accounting overflow")?;
+                pair_index += 1;
+            }
+            PairWork::Serial(index) => {
+                let request = &requests[index];
+                let (output, _) =
+                    run_jsonl_request(loaded, tokenizer, request, args, greedy_gpu_mode)
+                        .with_context(|| {
+                            format!("run concurrent serial tail request {}", request.id)
+                        })?;
+                ensure!(
+                    pending_outputs[index].replace(output).is_none(),
+                    "concurrent planner completed request {index} twice"
+                );
+                completed += 1;
+                buffered_outputs = buffered_outputs
+                    .checked_add(1)
+                    .context("concurrent output buffer accounting overflow")?;
+            }
+        }
+        let written = write_contiguous_outputs(stdout, &mut pending_outputs, &mut next_output)?;
+        buffered_outputs = buffered_outputs
+            .checked_sub(written)
+            .context("concurrent output buffer accounting underflow")?;
+        ensure!(
+            buffered_outputs < PAIR_PLANNER_WINDOW,
+            "concurrent output buffer exceeded its planning window"
         );
-        completed += WIDTH;
-    }
-
-    if let Some(request) = pairs.remainder().first() {
-        shutdown::checkpoint()?;
-        let (output, _) = run_jsonl_request(loaded, tokenizer, request, args, greedy_gpu_mode)
-            .with_context(|| format!("run concurrent serial tail request {}", request.id))?;
-        write_outputs(stdout, std::slice::from_ref(&output))?;
-        completed += 1;
     }
     ensure!(
         completed == requests.len(),
         "concurrent JSONL completed {completed}/{} requests",
         requests.len()
+    );
+    ensure!(
+        next_output == requests.len()
+            && buffered_outputs == 0
+            && pending_outputs.iter().all(Option::is_none),
+        "concurrent JSONL output reorder buffer did not drain"
     );
     Ok(completed)
 }
@@ -569,6 +693,117 @@ fn common_prefix_tokens<T: PartialEq>(left: &[T], right: &[T]) -> usize {
         .zip(right)
         .take_while(|(left, right)| left == right)
         .count()
+}
+
+fn pair_planner_enabled(default_enabled: bool) -> Result<bool> {
+    let value = std::env::var_os(PAIR_PLANNER_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow!("{PAIR_PLANNER_ENV} must be valid UTF-8"))
+        })
+        .transpose()?;
+    parse_pair_planner_enabled(value.as_deref(), default_enabled)
+}
+
+fn parse_pair_planner_enabled(value: Option<&str>, default_enabled: bool) -> Result<bool> {
+    let Some(value) = value else {
+        return Ok(default_enabled);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => bail!("{PAIR_PLANNER_ENV} must be a boolean"),
+    }
+}
+
+fn plan_request_pairs<T: Ord>(
+    prompts: &[&[T]],
+    requested_tokens: &[usize],
+    enabled: bool,
+    selected_prefix_tokens: impl Fn(&[T], &[T]) -> usize,
+) -> Result<PairSchedule> {
+    ensure!(
+        prompts.len() == requested_tokens.len(),
+        "pair planner prompt/token-limit length mismatch"
+    );
+    let mut work = Vec::new();
+    let mut prefix_affinity_pairs = 0usize;
+    let mut depth_balanced_pairs = 0usize;
+    for window_start in (0..prompts.len()).step_by(PAIR_PLANNER_WINDOW) {
+        let window_end = (window_start + PAIR_PLANNER_WINDOW).min(prompts.len());
+        let mut available = (window_start..window_end).collect::<Vec<_>>();
+        let serial = (!available.len().is_multiple_of(WIDTH))
+            .then(|| available.pop().expect("odd pair-planning window"));
+        let mut window_work = Vec::new();
+        if enabled {
+            let mut edges = Vec::new();
+            for (offset, &left) in available.iter().enumerate() {
+                for &right in &available[offset + 1..] {
+                    let prefix_tokens = selected_prefix_tokens(prompts[left], prompts[right]);
+                    if prefix_tokens > 0 {
+                        edges.push((
+                            prefix_tokens,
+                            requested_tokens[left].abs_diff(requested_tokens[right]),
+                            left,
+                            right,
+                        ));
+                    }
+                }
+            }
+            edges.sort_by(|left, right| {
+                right
+                    .0
+                    .cmp(&left.0)
+                    .then_with(|| left.1.cmp(&right.1))
+                    .then_with(|| left.2.cmp(&right.2))
+                    .then_with(|| left.3.cmp(&right.3))
+            });
+            let mut matched = vec![false; window_end - window_start];
+            for (_, _, left, right) in edges {
+                let left_slot = left - window_start;
+                let right_slot = right - window_start;
+                if !matched[left_slot] && !matched[right_slot] {
+                    matched[left_slot] = true;
+                    matched[right_slot] = true;
+                    window_work.push(PairWork::Pair([left, right]));
+                    prefix_affinity_pairs += 1;
+                }
+            }
+            available.retain(|&index| !matched[index - window_start]);
+            available.sort_by_key(|&index| (requested_tokens[index], index));
+            for pair in available.chunks_exact(WIDTH) {
+                let mut pair = [pair[0], pair[1]];
+                pair.sort_unstable();
+                window_work.push(PairWork::Pair(pair));
+                depth_balanced_pairs += 1;
+            }
+        } else {
+            for pair in available.chunks_exact(WIDTH) {
+                window_work.push(PairWork::Pair([pair[0], pair[1]]));
+            }
+        }
+        if let Some(serial) = serial {
+            window_work.push(PairWork::Serial(serial));
+        }
+        window_work.sort_by_key(|item| item.first_request_index());
+        work.extend(window_work);
+    }
+    ensure!(
+        work.iter()
+            .map(|item| match item {
+                PairWork::Pair(_) => WIDTH,
+                PairWork::Serial(_) => 1,
+            })
+            .sum::<usize>()
+            == prompts.len(),
+        "pair planner request accounting drifted"
+    );
+    Ok(PairSchedule {
+        work,
+        prefix_affinity_pairs,
+        depth_balanced_pairs,
+    })
 }
 
 fn prefix_fanout_enabled() -> bool {
@@ -915,6 +1150,7 @@ fn run_pair(
     args: &Args,
     stop_tokens: &[i32],
     pair_index: usize,
+    request_indices: [usize; WIDTH],
 ) -> Result<([RequestOutput; WIDTH], PairTelemetry)> {
     let prepare_t0 = Instant::now();
     let prepared = prepare_pair(loaded, requests, args)?;
@@ -1043,9 +1279,10 @@ fn run_pair(
     Ok((
         outputs,
         PairTelemetry {
-            schema_version: 2,
-            backend: "qwen_independent_queues_v2",
+            schema_version: 3,
+            backend: "qwen_independent_queues_v3",
             pair_index,
+            request_indices,
             prompt_tokens: [requests[0].prompt_ids.len(), requests[1].prompt_ids.len()],
             requested_tokens,
             generated_tokens,
@@ -1085,6 +1322,23 @@ fn write_outputs(stdout: &mut impl Write, outputs: &[RequestOutput]) -> Result<(
         .context("write concurrent request outputs")?;
     stdout.flush()?;
     Ok(())
+}
+
+fn write_contiguous_outputs(
+    stdout: &mut impl Write,
+    pending: &mut [Option<RequestOutput>],
+    next_output: &mut usize,
+) -> Result<usize> {
+    let mut ready = Vec::new();
+    while let Some(output) = pending.get_mut(*next_output).and_then(Option::take) {
+        ready.push(output);
+        *next_output += 1;
+    }
+    let written = ready.len();
+    if !ready.is_empty() {
+        write_outputs(stdout, &ready)?;
+    }
+    Ok(written)
 }
 
 fn plan_deepseek_prefix_fanout(
@@ -1676,6 +1930,7 @@ fn run_deepseek_pair(
     prefill_chunk_tokens: usize,
     session_priced_upper_bytes: u64,
     pair_index: usize,
+    request_indices: [usize; WIDTH],
 ) -> Result<([DeepSeekCompletedLane; WIDTH], DeepSeekPairTelemetry)> {
     let prompt_tokens = [requests[0].prompt_tokens, requests[1].prompt_tokens];
     let requested_tokens = [requests[0].max_tokens, requests[1].max_tokens];
@@ -1914,9 +2169,10 @@ fn run_deepseek_pair(
     Ok((
         completed,
         DeepSeekPairTelemetry {
-            schema_version: 2,
-            backend: "deepseek_v4_independent_queues_v2",
+            schema_version: 3,
+            backend: "deepseek_v4_independent_queues_v3",
             pair_index,
+            request_indices,
             prompt_tokens,
             requested_tokens,
             generated_tokens,
@@ -1965,6 +2221,50 @@ pub(super) fn run_deepseek_file(
         !requests.is_empty(),
         "DeepSeek concurrency requires requests"
     );
+    let prompt_refs = requests
+        .iter()
+        .map(|request| request.prompt_token_ids.as_slice())
+        .collect::<Vec<_>>();
+    let requested_tokens = requests
+        .iter()
+        .map(|request| request.max_tokens)
+        .collect::<Vec<_>>();
+    let planner_enabled = pair_planner_enabled(false)?;
+    let fanout_enabled = prefix_fanout_enabled();
+    let schedule = plan_request_pairs(
+        &prompt_refs,
+        &requested_tokens,
+        planner_enabled,
+        |left, right| {
+            plan_deepseek_prefix_fanout(left, right, prefill_chunk_tokens, fanout_enabled)
+                .selected_prefix_tokens
+        },
+    )?;
+    let pair_count = schedule
+        .work
+        .iter()
+        .filter(|work| matches!(work, PairWork::Pair(_)))
+        .count();
+    eprintln!(
+        "deepseek_v4 concurrency_planner: {}",
+        serde_json::to_string(&PairPlannerTelemetry {
+            schema_version: 1,
+            backend: "deepseek_v4_pair_affinity_v1",
+            enabled: planner_enabled,
+            requests: requests.len(),
+            prefix_affinity_pairs: schedule.prefix_affinity_pairs,
+            depth_balanced_pairs: schedule.depth_balanced_pairs,
+            serial_requests: requests.len() - pair_count * WIDTH,
+            planning_window: PAIR_PLANNER_WINDOW,
+            strategy: if planner_enabled {
+                "bounded_prefix_affinity_then_depth"
+            } else {
+                "input_order"
+            },
+            output_order: "input",
+        })
+        .context("serialize DeepSeek concurrency planner telemetry")?
+    );
     let contexts = [
         ctx.with_new_command_queue()
             .context("create DeepSeek concurrency queue 0")?,
@@ -1975,62 +2275,112 @@ pub(super) fn run_deepseek_file(
     let stdout_handle = std::io::stdout();
     let mut stdout = stdout_handle.lock();
     let mut executed = 0usize;
-    let mut requests = requests.into_iter();
+    let request_count = requests.len();
+    let mut requests = requests.into_iter().map(Some).collect::<Vec<_>>();
+    let mut pending_outputs = std::iter::repeat_with(|| None)
+        .take(request_count)
+        .collect::<Vec<Option<RequestOutput>>>();
+    let mut next_output = 0usize;
+    let mut buffered_outputs = 0usize;
     let mut pair_index = 0usize;
-    while let Some(left) = requests.next() {
-        let Some(right) = requests.next() else {
-            let before_session = contexts[0].current_allocated_size();
-            let lane = prepare_deepseek_lane(
-                &contexts[0],
-                &residency,
-                selector_plan,
-                left,
-                prefill_chunk_tokens,
-                vocab_size,
-            )?;
-            let after_session = contexts[0].current_allocated_size();
-            let session_delta = after_session
-                .checked_sub(before_session)
-                .context("DeepSeek odd-tail allocation counter regressed")?;
-            let session_runtime_upper = session_priced_upper_bytes
-                .checked_add(DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES)
-                .context("DeepSeek odd-tail runtime byte overflow")?;
-            ensure!(
-                session_delta <= session_runtime_upper,
-                "DeepSeek odd-tail runtime allocation {session_delta} exceeds session-plus-reserve upper {session_runtime_upper}"
-            );
-            let completion =
-                generate_deepseek_lane(&contexts[0], tokenizer, vocab_size, stop_tokens, lane)?;
-            emit_deepseek_completion(selector_plan, &completion, prefill_chunk_tokens, 1)?;
-            write_outputs(&mut stdout, std::slice::from_ref(&completion.output))?;
-            executed += 1;
-            break;
-        };
-        let (completed, telemetry) = run_deepseek_pair(
-            [&contexts[0], &contexts[1]],
-            &residency,
-            selector_plan,
-            tokenizer,
-            vocab_size,
-            stop_tokens,
-            [left, right],
-            prefill_chunk_tokens,
-            session_priced_upper_bytes,
-            pair_index,
-        )?;
-        for lane in &completed {
-            emit_deepseek_completion(selector_plan, lane, prefill_chunk_tokens, WIDTH)?;
+    for work in schedule.work {
+        shutdown::checkpoint()?;
+        match work {
+            PairWork::Pair(indices) => {
+                let left = requests[indices[0]]
+                    .take()
+                    .context("DeepSeek pair planner reused its left request")?;
+                let right = requests[indices[1]]
+                    .take()
+                    .context("DeepSeek pair planner reused its right request")?;
+                let (completed, telemetry) = run_deepseek_pair(
+                    [&contexts[0], &contexts[1]],
+                    &residency,
+                    selector_plan,
+                    tokenizer,
+                    vocab_size,
+                    stop_tokens,
+                    [left, right],
+                    prefill_chunk_tokens,
+                    session_priced_upper_bytes,
+                    pair_index,
+                    indices,
+                )?;
+                for lane in &completed {
+                    emit_deepseek_completion(selector_plan, lane, prefill_chunk_tokens, WIDTH)?;
+                }
+                for (index, output) in indices.into_iter().zip(completed.map(|lane| lane.output)) {
+                    ensure!(
+                        pending_outputs[index].replace(output).is_none(),
+                        "DeepSeek pair planner completed request {index} twice"
+                    );
+                }
+                eprintln!(
+                    "deepseek_v4 concurrency_pair: {}",
+                    serde_json::to_string(&telemetry)
+                        .context("serialize DeepSeek concurrency telemetry")?
+                );
+                executed += WIDTH;
+                buffered_outputs = buffered_outputs
+                    .checked_add(WIDTH)
+                    .context("DeepSeek output buffer accounting overflow")?;
+                pair_index += 1;
+            }
+            PairWork::Serial(index) => {
+                let request = requests[index]
+                    .take()
+                    .context("DeepSeek pair planner reused its serial request")?;
+                let before_session = contexts[0].current_allocated_size();
+                let lane = prepare_deepseek_lane(
+                    &contexts[0],
+                    &residency,
+                    selector_plan,
+                    request,
+                    prefill_chunk_tokens,
+                    vocab_size,
+                )?;
+                let after_session = contexts[0].current_allocated_size();
+                let session_delta = after_session
+                    .checked_sub(before_session)
+                    .context("DeepSeek odd-tail allocation counter regressed")?;
+                let session_runtime_upper = session_priced_upper_bytes
+                    .checked_add(DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES)
+                    .context("DeepSeek odd-tail runtime byte overflow")?;
+                ensure!(
+                    session_delta <= session_runtime_upper,
+                    "DeepSeek odd-tail runtime allocation {session_delta} exceeds session-plus-reserve upper {session_runtime_upper}"
+                );
+                let completion =
+                    generate_deepseek_lane(&contexts[0], tokenizer, vocab_size, stop_tokens, lane)?;
+                emit_deepseek_completion(selector_plan, &completion, prefill_chunk_tokens, 1)?;
+                ensure!(
+                    pending_outputs[index].replace(completion.output).is_none(),
+                    "DeepSeek pair planner completed request {index} twice"
+                );
+                executed += 1;
+                buffered_outputs = buffered_outputs
+                    .checked_add(1)
+                    .context("DeepSeek output buffer accounting overflow")?;
+            }
         }
-        let outputs = completed.map(|lane| lane.output);
-        write_outputs(&mut stdout, &outputs)?;
-        eprintln!(
-            "deepseek_v4 concurrency_pair: {}",
-            serde_json::to_string(&telemetry)
-                .context("serialize DeepSeek concurrency telemetry")?
+        let written =
+            write_contiguous_outputs(&mut stdout, &mut pending_outputs, &mut next_output)?;
+        buffered_outputs = buffered_outputs
+            .checked_sub(written)
+            .context("DeepSeek output buffer accounting underflow")?;
+        ensure!(
+            buffered_outputs < PAIR_PLANNER_WINDOW,
+            "DeepSeek output buffer exceeded its planning window"
         );
-        executed += WIDTH;
-        pair_index += 1;
     }
+    ensure!(
+        executed == request_count
+            && next_output == request_count
+            && buffered_outputs == 0
+            && requests.iter().all(Option::is_none)
+            && pending_outputs.iter().all(Option::is_none),
+        "DeepSeek concurrency planner did not drain every request"
+    );
     Ok(executed)
 }
 
@@ -2102,6 +2452,123 @@ mod tests {
         assert_eq!(next_decode_work([true, false]), DecodeWork::Serial(0));
         assert_eq!(next_decode_work([false, true]), DecodeWork::Serial(1));
         assert_eq!(next_decode_work([false, false]), DecodeWork::Complete);
+    }
+
+    #[test]
+    fn pair_planner_recovers_interleaved_prefix_affinity() {
+        let mut a0 = vec![1; PREFIX_FANOUT_MIN_TOKENS];
+        a0.push(10);
+        let mut a1 = vec![1; PREFIX_FANOUT_MIN_TOKENS];
+        a1.push(11);
+        let mut b0 = vec![2; PREFIX_FANOUT_MIN_TOKENS];
+        b0.push(10);
+        let mut b1 = vec![2; PREFIX_FANOUT_MIN_TOKENS];
+        b1.push(11);
+        let prompts = [a0.as_slice(), b0.as_slice(), a1.as_slice(), b1.as_slice()];
+        let schedule = plan_request_pairs(&prompts, &[20, 20, 21, 21], true, |left, right| {
+            let common = common_prefix_tokens(left, right);
+            if common >= PREFIX_FANOUT_MIN_TOKENS {
+                common
+            } else {
+                0
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            schedule.work,
+            vec![PairWork::Pair([0, 2]), PairWork::Pair([1, 3])]
+        );
+        assert_eq!(schedule.prefix_affinity_pairs, 2);
+        assert_eq!(schedule.depth_balanced_pairs, 0);
+    }
+
+    #[test]
+    fn pair_planner_prefers_the_deepest_available_prefix_edges() {
+        let base = vec![7; PREFIX_FANOUT_MIN_TOKENS];
+        let a = base.clone();
+        let mut b = base.clone();
+        b.push(0);
+        let mut c = b.clone();
+        c.push(0);
+        let mut d = base;
+        d.push(1);
+        let prompts = [a.as_slice(), b.as_slice(), c.as_slice(), d.as_slice()];
+        let schedule = plan_request_pairs(&prompts, &[20; 4], true, |left, right| {
+            let common = common_prefix_tokens(left, right);
+            if common >= PREFIX_FANOUT_MIN_TOKENS {
+                common
+            } else {
+                0
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            schedule.work,
+            vec![PairWork::Pair([0, 3]), PairWork::Pair([1, 2])]
+        );
+        assert_eq!(schedule.prefix_affinity_pairs, 2);
+    }
+
+    #[test]
+    fn pair_planner_balances_nonprefix_generation_depth() {
+        let prompt_storage = [vec![0], vec![1], vec![2], vec![3], vec![4]];
+        let prompts = prompt_storage.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let schedule = plan_request_pairs(&prompts, &[2, 100, 3, 99, 50], true, |_, _| 0).unwrap();
+        assert_eq!(
+            schedule.work,
+            vec![
+                PairWork::Pair([0, 2]),
+                PairWork::Pair([1, 3]),
+                PairWork::Serial(4),
+            ]
+        );
+        assert_eq!(schedule.prefix_affinity_pairs, 0);
+        assert_eq!(schedule.depth_balanced_pairs, 2);
+    }
+
+    #[test]
+    fn disabled_pair_planner_preserves_input_order() {
+        let prompt_storage = [vec![0], vec![1], vec![2]];
+        let prompts = prompt_storage.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let schedule = plan_request_pairs(&prompts, &[3, 1, 2], false, |_, _| 0).unwrap();
+        assert_eq!(
+            schedule.work,
+            vec![PairWork::Pair([0, 1]), PairWork::Serial(2)]
+        );
+        assert_eq!(schedule.prefix_affinity_pairs, 0);
+        assert_eq!(schedule.depth_balanced_pairs, 0);
+    }
+
+    #[test]
+    fn pair_planner_policy_defaults_and_invalid_values_are_explicit() {
+        assert!(parse_pair_planner_enabled(None, true).unwrap());
+        assert!(!parse_pair_planner_enabled(None, false).unwrap());
+        assert!(!parse_pair_planner_enabled(Some("off"), true).unwrap());
+        assert!(parse_pair_planner_enabled(Some("YES"), false).unwrap());
+        assert!(parse_pair_planner_enabled(Some("maybe"), true).is_err());
+    }
+
+    #[test]
+    fn pair_planner_never_reorders_across_bounded_windows() {
+        let prompt_storage = (0..(PAIR_PLANNER_WINDOW + WIDTH))
+            .map(|index| {
+                let mut prompt = vec![7; PREFIX_FANOUT_MIN_TOKENS];
+                prompt.push(index);
+                prompt
+            })
+            .collect::<Vec<_>>();
+        let prompts = prompt_storage.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let schedule =
+            plan_request_pairs(&prompts, &vec![20; prompts.len()], true, |left, right| {
+                common_prefix_tokens(left, right)
+            })
+            .unwrap();
+        assert!(schedule.work.iter().all(|work| match work {
+            PairWork::Pair([left, right]) => {
+                left / PAIR_PLANNER_WINDOW == right / PAIR_PLANNER_WINDOW
+            }
+            PairWork::Serial(_) => true,
+        }));
     }
 
     #[test]

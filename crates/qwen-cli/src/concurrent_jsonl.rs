@@ -3,6 +3,16 @@ use qwen_llm::runtime::IndependentQueue2SequenceExecutor;
 use std::sync::{Arc, mpsc};
 
 const WIDTH: usize = 2;
+const PREFIX_FANOUT_MIN_TOKENS: usize = 256;
+const PREFIX_FANOUT_ENV: &str = "QWEN_CONCURRENCY_PREFIX_FANOUT";
+const PREFIX_FANOUT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PrefixFanoutPlan {
+    common_prefix_tokens: usize,
+    selected_prefix_tokens: usize,
+    reason: &'static str,
+}
 
 #[derive(Debug)]
 struct LaneProgress {
@@ -114,12 +124,37 @@ struct PairTelemetry {
     productive_transitions: usize,
     paired_transitions: usize,
     serial_tail_transitions: usize,
+    common_prefix_tokens: usize,
+    prefix_fanout_tokens: usize,
+    prefix_fanout_reason: &'static str,
+    prefix_fanout_min_tokens: usize,
+    prefix_snapshot_bytes: u64,
+    prefix_prefill_ms: f64,
+    prefix_snapshot_ms: f64,
+    prefix_restore_ms: f64,
+    private_prefill_ms: f64,
+    prefix_snapshot_required_bytes: u64,
+    prefix_memory_admission_required_bytes: Option<u64>,
+    prefix_memory_admission_reason: &'static str,
     prepare_ms: f64,
     prefill_ms: f64,
     decode_ms: f64,
     executor_gpu_ms: [Option<f64>; WIDTH],
     aggregate_generated_tps: f64,
     aggregate_transition_tps: f64,
+}
+
+struct PreparedPair {
+    lanes: [PreparedLane; WIDTH],
+    plan: PrefixFanoutPlan,
+    prefix_snapshot_bytes: u64,
+    prefix_prefill_ms: f64,
+    prefix_snapshot_ms: f64,
+    prefix_restore_ms: f64,
+    private_prefill_ms: f64,
+    prefix_snapshot_required_bytes: u64,
+    prefix_memory_admission_required_bytes: Option<u64>,
+    prefix_memory_admission_reason: &'static str,
 }
 
 struct DeepSeekPreparedLane {
@@ -446,6 +481,96 @@ fn validate_requests(requests: &[PreparedJsonlRequest], args: &Args) -> Result<(
     Ok(())
 }
 
+fn common_prefix_tokens(left: &[i32], right: &[i32]) -> usize {
+    left.iter()
+        .zip(right)
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+fn prefix_fanout_enabled() -> bool {
+    std::env::var_os(PREFIX_FANOUT_ENV)
+        .and_then(|value| value.into_string().ok())
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true)
+}
+
+fn plan_prefix_fanout(
+    left: &[i32],
+    right: &[i32],
+    prefill_chunk: PrefillChunkArg,
+    enabled: bool,
+) -> PrefixFanoutPlan {
+    let common_prefix_tokens = common_prefix_tokens(left, right);
+    if !enabled {
+        return PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: 0,
+            reason: "disabled",
+        };
+    }
+    if common_prefix_tokens < PREFIX_FANOUT_MIN_TOKENS {
+        return PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: 0,
+            reason: "below_minimum",
+        };
+    }
+    let PrefillChunkArg::Fixed(chunk) = prefill_chunk else {
+        return PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: 0,
+            reason: "auto_chunk_unsupported",
+        };
+    };
+    if left == right {
+        return PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: common_prefix_tokens,
+            reason: "selected_identical",
+        };
+    }
+    let selected_prefix_tokens = common_prefix_tokens / chunk * chunk;
+    if selected_prefix_tokens < PREFIX_FANOUT_MIN_TOKENS {
+        PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: 0,
+            reason: "alignment_below_minimum",
+        }
+    } else {
+        PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens,
+            reason: if selected_prefix_tokens == common_prefix_tokens {
+                "selected"
+            } else {
+                "selected_chunk_aligned"
+            },
+        }
+    }
+}
+
+fn prepared_lane(
+    request: &PreparedJsonlRequest,
+    max_tokens: usize,
+    sequence: Sequence,
+    logits: Vec<f32>,
+) -> PreparedLane {
+    PreparedLane {
+        id: request.id.clone(),
+        prompt_tokens: request.prompt_ids.len(),
+        max_tokens,
+        sequence,
+        logits,
+        sampling: request.sampling,
+    }
+}
+
 fn prepare_lane(
     loaded: &LoadedModel,
     request: &PreparedJsonlRequest,
@@ -483,6 +608,201 @@ fn prepare_lane(
     ))
 }
 
+fn prepare_pair(
+    loaded: &LoadedModel,
+    requests: [&PreparedJsonlRequest; WIDTH],
+    args: &Args,
+) -> Result<PreparedPair> {
+    let mut plan = plan_prefix_fanout(
+        &requests[0].prompt_ids,
+        &requests[1].prompt_ids,
+        args.prefill_chunk,
+        prefix_fanout_enabled(),
+    );
+    if plan.selected_prefix_tokens == 0 {
+        let (left, left_prefill_ms) = prepare_lane(loaded, requests[0], args)?;
+        let (right, right_prefill_ms) = prepare_lane(loaded, requests[1], args)?;
+        return Ok(PreparedPair {
+            lanes: [left, right],
+            plan,
+            prefix_snapshot_bytes: 0,
+            prefix_prefill_ms: 0.0,
+            prefix_snapshot_ms: 0.0,
+            prefix_restore_ms: 0.0,
+            private_prefill_ms: left_prefill_ms + right_prefill_ms,
+            prefix_snapshot_required_bytes: 0,
+            prefix_memory_admission_required_bytes: None,
+            prefix_memory_admission_reason: "not_requested",
+        });
+    }
+
+    let PrefillChunkArg::Fixed(requested_chunk) = args.prefill_chunk else {
+        unreachable!("fanout planner rejects automatic chunks")
+    };
+    let (left_max_tokens, left_capacity) = jsonl_generation_capacity(requests[0], args)?;
+    let (right_max_tokens, right_capacity) = jsonl_generation_capacity(requests[1], args)?;
+    let max_prompt_tokens = requests
+        .iter()
+        .map(|request| request.prompt_ids.len())
+        .max()
+        .expect("fixed-width request pair");
+    let chunk = requested_chunk.min(max_prompt_tokens.max(1));
+    let mut scratch = allocate_legacy_prefill_scratch(loaded, chunk, max_prompt_tokens)
+        .context("allocate concurrent shared-prefix scratch")?;
+    let mut sequences = [
+        loaded
+            .create_sequence(SequenceConfig::new(left_capacity))
+            .context("allocate concurrent shared-prefix source sequence")?,
+        loaded
+            .create_sequence(SequenceConfig::new(right_capacity))
+            .context("allocate concurrent shared-prefix restore sequence")?,
+    ];
+
+    let prefix_len = plan.selected_prefix_tokens;
+    let prefix_snapshot_required_bytes = loaded
+        .estimate_checkpoint_boundary_sizes(&sequences[0], prefix_len, false, false)
+        .context("estimate concurrent shared-prefix snapshot")?
+        .snapshot_bytes;
+    let prefix_memory_admission = evaluate_metal_memory_admission(
+        prefix_snapshot_required_bytes,
+        PREFIX_FANOUT_RESERVE_BYTES,
+        loaded.context().memory_signals(),
+        true,
+    );
+    let prefix_memory_admission_required_bytes = prefix_memory_admission.required_bytes;
+    let prefix_memory_admission_reason = prefix_memory_admission.reason.as_str();
+    if !prefix_memory_admission.admitted {
+        plan.selected_prefix_tokens = 0;
+        plan.reason = "memory_fallback";
+        let forward = loaded.forward();
+        let mut private_prefill_ms = 0.0;
+        let (left_logits, left_ms) = prefill_span(
+            &forward,
+            &mut sequences[0],
+            &mut scratch,
+            &requests[0].prompt_ids,
+            0,
+        )
+        .context("prefill concurrent memory-fallback lane 0")?;
+        private_prefill_ms += left_ms;
+        let (right_logits, right_ms) = prefill_span(
+            &forward,
+            &mut sequences[1],
+            &mut scratch,
+            &requests[1].prompt_ids,
+            0,
+        )
+        .context("prefill concurrent memory-fallback lane 1")?;
+        private_prefill_ms += right_ms;
+        let [left_sequence, right_sequence] = sequences;
+        return Ok(PreparedPair {
+            lanes: [
+                prepared_lane(requests[0], left_max_tokens, left_sequence, left_logits),
+                prepared_lane(requests[1], right_max_tokens, right_sequence, right_logits),
+            ],
+            plan,
+            prefix_snapshot_bytes: 0,
+            prefix_prefill_ms: 0.0,
+            prefix_snapshot_ms: 0.0,
+            prefix_restore_ms: 0.0,
+            private_prefill_ms,
+            prefix_snapshot_required_bytes,
+            prefix_memory_admission_required_bytes,
+            prefix_memory_admission_reason,
+        });
+    }
+
+    shutdown::checkpoint()?;
+    let forward = loaded.forward();
+    let (prefix_logits, prefix_prefill_ms) = prefill_span(
+        &forward,
+        &mut sequences[0],
+        &mut scratch,
+        &requests[0].prompt_ids[..prefix_len],
+        0,
+    )
+    .context("prefill concurrent shared prefix")?;
+    shutdown::checkpoint()?;
+
+    let snapshot_t0 = Instant::now();
+    let prepared = loaded
+        .prepare_checkpoint_boundary(
+            &sequences[0],
+            requests[0].prompt_ids[..prefix_len].to_vec(),
+            None,
+            None,
+        )
+        .context("capture concurrent shared prefix")?;
+    let prefix_snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
+    let prefix_snapshot_bytes = prepared.snapshot_bytes();
+    ensure!(
+        prefix_snapshot_bytes == prefix_snapshot_required_bytes,
+        "concurrent prefix snapshot bytes {prefix_snapshot_bytes} != estimate {prefix_snapshot_required_bytes}"
+    );
+    shutdown::checkpoint()?;
+
+    let restore_t0 = Instant::now();
+    let restored = loaded
+        .restore_prepared_checkpoint(&prepared, &mut sequences[1], &requests[1].prompt_ids)
+        .context("restore concurrent shared prefix")?;
+    let prefix_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+    ensure!(
+        restored.matched_prefix_len == prefix_len && restored.restored_prefix_len == prefix_len,
+        "concurrent shared-prefix restore selected an unexpected boundary"
+    );
+    shutdown::checkpoint()?;
+
+    let mut private_prefill_ms = 0.0;
+    let left_logits = if requests[0].prompt_ids.len() == prefix_len {
+        prefix_logits.clone()
+    } else {
+        let (logits, ms) = prefill_span(
+            &forward,
+            &mut sequences[0],
+            &mut scratch,
+            &requests[0].prompt_ids[prefix_len..],
+            prefix_len,
+        )
+        .context("prefill concurrent shared-prefix lane 0 suffix")?;
+        private_prefill_ms += ms;
+        logits
+    };
+    shutdown::checkpoint()?;
+    let right_logits = if requests[1].prompt_ids.len() == prefix_len {
+        prefix_logits
+    } else {
+        let (logits, ms) = prefill_span(
+            &forward,
+            &mut sequences[1],
+            &mut scratch,
+            &requests[1].prompt_ids[prefix_len..],
+            prefix_len,
+        )
+        .context("prefill concurrent shared-prefix lane 1 suffix")?;
+        private_prefill_ms += ms;
+        logits
+    };
+    drop(prepared);
+    drop(scratch);
+    let [left_sequence, right_sequence] = sequences;
+
+    Ok(PreparedPair {
+        lanes: [
+            prepared_lane(requests[0], left_max_tokens, left_sequence, left_logits),
+            prepared_lane(requests[1], right_max_tokens, right_sequence, right_logits),
+        ],
+        plan,
+        prefix_snapshot_bytes,
+        prefix_prefill_ms,
+        prefix_snapshot_ms,
+        prefix_restore_ms,
+        private_prefill_ms,
+        prefix_snapshot_required_bytes,
+        prefix_memory_admission_required_bytes,
+        prefix_memory_admission_reason,
+    })
+}
+
 fn start_lane(prepared: PreparedLane, tokenizer: &Tokenizer, stop_tokens: &[i32]) -> Result<Lane> {
     let mut sampler = Sampler::new(prepared.sampling).context("initialize concurrent sampler")?;
     let first = sampler
@@ -514,11 +834,11 @@ fn run_pair(
     pair_index: usize,
 ) -> Result<([RequestOutput; WIDTH], PairTelemetry)> {
     let prepare_t0 = Instant::now();
-    let (left, left_prefill_ms) = prepare_lane(loaded, requests[0], args)?;
-    let (right, right_prefill_ms) = prepare_lane(loaded, requests[1], args)?;
+    let prepared = prepare_pair(loaded, requests, args)?;
+    let [left, right] = prepared.lanes;
     let requested_tokens = [left.max_tokens, right.max_tokens];
     let prepare_ms = prepare_t0.elapsed().as_secs_f64() * 1e3;
-    let prefill_ms = left_prefill_ms + right_prefill_ms;
+    let prefill_ms = prepared.prefix_prefill_ms + prepared.private_prefill_ms;
 
     let decode_t0 = Instant::now();
     let mut lanes = [
@@ -640,8 +960,8 @@ fn run_pair(
     Ok((
         outputs,
         PairTelemetry {
-            schema_version: 1,
-            backend: "qwen_independent_queues_v1",
+            schema_version: 2,
+            backend: "qwen_independent_queues_v2",
             pair_index,
             prompt_tokens: [requests[0].prompt_ids.len(), requests[1].prompt_ids.len()],
             requested_tokens,
@@ -649,6 +969,18 @@ fn run_pair(
             productive_transitions,
             paired_transitions,
             serial_tail_transitions,
+            common_prefix_tokens: prepared.plan.common_prefix_tokens,
+            prefix_fanout_tokens: prepared.plan.selected_prefix_tokens,
+            prefix_fanout_reason: prepared.plan.reason,
+            prefix_fanout_min_tokens: PREFIX_FANOUT_MIN_TOKENS,
+            prefix_snapshot_bytes: prepared.prefix_snapshot_bytes,
+            prefix_prefill_ms: prepared.prefix_prefill_ms,
+            prefix_snapshot_ms: prepared.prefix_snapshot_ms,
+            prefix_restore_ms: prepared.prefix_restore_ms,
+            private_prefill_ms: prepared.private_prefill_ms,
+            prefix_snapshot_required_bytes: prepared.prefix_snapshot_required_bytes,
+            prefix_memory_admission_required_bytes: prepared.prefix_memory_admission_required_bytes,
+            prefix_memory_admission_reason: prepared.prefix_memory_admission_reason,
             prepare_ms,
             prefill_ms,
             decode_ms,
@@ -1222,6 +1554,69 @@ mod tests {
         assert_eq!(next_decode_work([true, false]), DecodeWork::Serial(0));
         assert_eq!(next_decode_work([false, true]), DecodeWork::Serial(1));
         assert_eq!(next_decode_work([false, false]), DecodeWork::Complete);
+    }
+
+    #[test]
+    fn prefix_fanout_requires_a_stable_shared_boundary() {
+        let identical = vec![7; 300];
+        assert_eq!(
+            plan_prefix_fanout(&identical, &identical, PrefillChunkArg::Fixed(512), true,),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 300,
+                selected_prefix_tokens: 300,
+                reason: "selected_identical",
+            }
+        );
+
+        let mut right = vec![7; 900];
+        right[700] = 8;
+        assert_eq!(
+            plan_prefix_fanout(&vec![7; 900], &right, PrefillChunkArg::Fixed(512), true,),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 700,
+                selected_prefix_tokens: 512,
+                reason: "selected_chunk_aligned",
+            }
+        );
+
+        let shorter = vec![7; 300];
+        let longer = vec![7; 600];
+        let expected = PrefixFanoutPlan {
+            common_prefix_tokens: 300,
+            selected_prefix_tokens: 0,
+            reason: "alignment_below_minimum",
+        };
+        assert_eq!(
+            plan_prefix_fanout(&shorter, &longer, PrefillChunkArg::Fixed(512), true,),
+            expected
+        );
+        assert_eq!(
+            plan_prefix_fanout(&longer, &shorter, PrefillChunkArg::Fixed(512), true,),
+            expected
+        );
+    }
+
+    #[test]
+    fn prefix_fanout_fails_closed_for_policy_controls() {
+        let prompt = vec![7; 512];
+        assert_eq!(
+            plan_prefix_fanout(&prompt, &prompt, PrefillChunkArg::Fixed(512), false).reason,
+            "disabled"
+        );
+        assert_eq!(
+            plan_prefix_fanout(&prompt, &prompt, PrefillChunkArg::Auto, true).reason,
+            "auto_chunk_unsupported"
+        );
+        assert_eq!(
+            plan_prefix_fanout(
+                &vec![7; PREFIX_FANOUT_MIN_TOKENS - 1],
+                &vec![7; PREFIX_FANOUT_MIN_TOKENS - 1],
+                PrefillChunkArg::Fixed(128),
+                true,
+            )
+            .reason,
+            "below_minimum"
+        );
     }
 
     #[test]

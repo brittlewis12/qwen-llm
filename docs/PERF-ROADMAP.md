@@ -2826,6 +2826,18 @@ limits, including paired-to-serial handoff. Keep dense B=8, stdin, prompt lookup
 prefix-cache mutation, and request sidecars fail-closed. Call the capability
 resident concurrency, not batching.
 
+Qwen resident concurrency now composes with pair-local prepared-checkpoint
+fanout for qualifying fixed-chunk pairs without mutating the prefix cache.
+Identical 6,469-token A3B prompts move
+pair preparation `8,251.823 -> 4,199.627 ms`, or 1.965x, while a pair sharing
+6,475 tokens at a stable 6,144-token boundary moves
+`8,244.651 -> 5,293.907 ms`, or 1.557x. Both preserve complete per-request JSON
+output exactly. Keep fixed-chunk alignment, the 256-token floor, snapshot-aware
+memory fallback, and `QWEN_CONCURRENCY_PREFIX_FANOUT=0` rollback. This is the
+highest-leverage current batch-serving composition for repeated system prompts;
+it applies equally to dense and MoE Qwen because route scratch is not causal
+snapshot state.
+
 DeepSeek V4 now exposes the same surface through worker-local sessions over one
 shared immutable residency. Its memory plan admits two sessions up front; K160
 prices `99.15 GB` including reserve and observes `8.683 GB` of two-session state

@@ -6,6 +6,46 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Qwen Concurrent Prefix Fanout GO
+
+Status: qualifying fixed-chunk `qwen --requests-jsonl FILE --concurrency 2`
+pairs now prefill one shared Qwen prompt prefix, capture its causal state,
+restore the second resident lane, and prefill only private suffixes. This
+applies to dense and MoE Qwen; `QWEN_CONCURRENCY_PREFIX_FANOUT=0` restores two
+complete serial prefills.
+
+- Fanout requires at least 256 exact shared token IDs. Partial prefixes align
+  down to a fixed prefill-chunk boundary so suffix execution preserves the cold
+  chunk schedule. Fully identical prompts retain their complete boundary and
+  reuse the producer's prompt logits. Automatic chunk policy remains serial and
+  reports `auto_chunk_unsupported`.
+- A pair of identical 6,469-token A3B prompts moves model prefill
+  `8,246.567 -> 4,146.937 ms` and total pair preparation
+  `8,251.823 -> 4,199.627 ms`, a 1.965x preparation gain. The 198,374,756-byte
+  snapshot takes 39.064 ms to capture and 10.049 ms to restore.
+- A partial-prefix pair shares 6,475 tokens and selects the stable 6,144-token
+  boundary. Model prefill moves `8,240.966 -> 5,241.881 ms`; pair preparation
+  moves `8,244.651 -> 5,293.907 ms`, or 1.557x. Snapshot capture and restore are
+  38.147/10.398 ms.
+- Both controls and candidates emit byte-identical JSON objects per request,
+  including generated-token hashes, text, stop reasons, and terminal semantics.
+  Decode remains the existing independent-queue path and is flat within the
+  short validation windows.
+- The same identical-prompt guard on dense Qwen3.5 0.8B moves preparation
+  `1,657.922 -> 870.028 ms`, or 1.905x, with byte-identical outputs. Its
+  99,718,468-byte snapshot takes 27.153/4.789 ms to capture/restore.
+- Snapshot bytes are estimated and admitted after both sequences and shared
+  prefill scratch exist. A denied snapshot falls back to two full prefills; the
+  prepared checkpoint is dropped before concurrent decode.
+
+Decision: promote prefix-once fanout as the default policy for qualifying Qwen
+concurrency pairs; ineligible pairs retain serial preparation.
+This converts repeated-system-prompt and shared-document pairs from merely mild
+decode overlap into a substantial whole-request win without changing the
+executor or cache index. DeepSeek fanout remains separate because its durable
+snapshot identity and observation contracts differ. Durable protocol and raw
+rows are in `docs/bench/2026-08-11-qwen-concurrency-prefix-fanout/`.
+
 ## 2026-08-11 - DeepSeek V4 FRESH N=2,048 MXFP4 Matrix GO
 
 Status: FRESH's promoted MXFP4 routed-down matrix tile now covers complete

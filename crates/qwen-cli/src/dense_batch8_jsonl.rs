@@ -14,6 +14,35 @@ struct PrefixFanoutPlan {
     reason: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CohortCompatibility {
+    prompt_tokens: usize,
+    requested_tokens: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PlannedWork {
+    Batch([usize; DENSE_BATCH8_WIDTH]),
+    Serial(usize),
+}
+
+impl PlannedWork {
+    fn first_request_index(&self) -> usize {
+        match self {
+            Self::Batch(indices) => indices[0],
+            Self::Serial(index) => *index,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CohortPlan {
+    work: Vec<PlannedWork>,
+    compatibility_buckets: usize,
+    full_cohorts: usize,
+    serial_fallback_requests: usize,
+}
+
 #[derive(Debug)]
 struct LaneProgress {
     max_tokens: usize,
@@ -146,7 +175,19 @@ struct CohortTelemetry {
     memory_admission_reason: &'static str,
 }
 
-fn common_prefix_tokens(requests: &[PreparedJsonlRequest]) -> usize {
+#[derive(Debug, Serialize)]
+struct PlannerTelemetry {
+    schema_version: u32,
+    backend: &'static str,
+    requests: usize,
+    compatibility_buckets: usize,
+    full_cohorts: usize,
+    batched_requests: usize,
+    serial_fallback_requests: usize,
+    output_order: &'static str,
+}
+
+fn common_prefix_tokens(requests: &[&PreparedJsonlRequest]) -> usize {
     let Some(first) = requests.first() else {
         return 0;
     };
@@ -162,7 +203,7 @@ fn common_prefix_tokens(requests: &[PreparedJsonlRequest]) -> usize {
         })
 }
 
-fn plan_prefix_fanout(requests: &[PreparedJsonlRequest], enabled: bool) -> PrefixFanoutPlan {
+fn plan_prefix_fanout(requests: &[&PreparedJsonlRequest], enabled: bool) -> PrefixFanoutPlan {
     let common_prefix_tokens = common_prefix_tokens(requests);
     if !enabled {
         return PrefixFanoutPlan {
@@ -212,6 +253,61 @@ fn parse_prefix_fanout_enabled(value: Option<&OsStr>) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "0" | "false" | "no" | "off"
     )
+}
+
+fn cohort_compatibility(
+    request: &PreparedJsonlRequest,
+    args: &Args,
+) -> Result<CohortCompatibility> {
+    let (requested_tokens, _) = jsonl_generation_capacity(request, args)?;
+    Ok(CohortCompatibility {
+        prompt_tokens: request.prompt_ids.len(),
+        requested_tokens,
+    })
+}
+
+fn plan_request_work(requests: &[PreparedJsonlRequest], args: &Args) -> Result<CohortPlan> {
+    let mut buckets: Vec<(CohortCompatibility, Vec<usize>)> = Vec::new();
+    for (index, request) in requests.iter().enumerate() {
+        let key = cohort_compatibility(request, args)?;
+        if let Some((_, indices)) = buckets.iter_mut().find(|(candidate, _)| *candidate == key) {
+            indices.push(index);
+        } else {
+            buckets.push((key, vec![index]));
+        }
+    }
+
+    let compatibility_buckets = buckets.len();
+    let mut work = Vec::new();
+    let mut full_cohorts = 0usize;
+    let mut serial_fallback_requests = 0usize;
+    for (_, indices) in buckets {
+        let mut cohorts = indices.chunks_exact(DENSE_BATCH8_WIDTH);
+        for cohort in &mut cohorts {
+            work.push(PlannedWork::Batch(
+                cohort.try_into().expect("exact dense B=8 planner chunk"),
+            ));
+            full_cohorts += 1;
+        }
+        for &index in cohorts.remainder() {
+            work.push(PlannedWork::Serial(index));
+            serial_fallback_requests += 1;
+        }
+    }
+    work.sort_by_key(PlannedWork::first_request_index);
+    ensure!(
+        full_cohorts
+            .checked_mul(DENSE_BATCH8_WIDTH)
+            .and_then(|batched| batched.checked_add(serial_fallback_requests))
+            == Some(requests.len()),
+        "dense B=8 planner request accounting drifted"
+    );
+    Ok(CohortPlan {
+        work,
+        compatibility_buckets,
+        full_cohorts,
+        serial_fallback_requests,
+    })
 }
 
 pub(super) fn validate_cli(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
@@ -295,52 +391,114 @@ pub(super) fn run_file(
     validate_greedy_gpu_mode(greedy_gpu_mode)?;
     let requests = prepare_jsonl_requests(requests_path, tokenizer, args)?;
     validate_requests(&requests, args)?;
+    let plan = plan_request_work(&requests, args)?;
     let stop_tokens = loaded
         .gguf()
         .stop_token_ids()
         .context("load producer-declared stop tokens")?;
-    let mut executor = loaded
-        .create_dense_batch8_executor()
-        .context("create dense B=8 executor")?;
-    let mut completed = 0usize;
-    for (cohort_index, cohort) in requests.chunks_exact(DENSE_BATCH8_WIDTH).enumerate() {
-        shutdown::checkpoint()?;
-        let cohort: &[PreparedJsonlRequest; DENSE_BATCH8_WIDTH] =
-            cohort.try_into().expect("validated dense B=8 cohort width");
-        let (outputs, telemetry) = run_cohort(
-            loaded,
-            tokenizer,
-            &mut executor,
-            cohort,
-            args,
-            &stop_tokens,
-            cohort_index,
+    let mut executor = if plan.full_cohorts > 0 {
+        Some(
+            loaded
+                .create_dense_batch8_executor()
+                .context("create dense B=8 executor")?,
         )
-        .with_context(|| format!("run dense B=8 cohort {cohort_index}"))?;
+    } else {
+        None
+    };
+    let planner_telemetry = PlannerTelemetry {
+        schema_version: 1,
+        backend: "dense_qwen_fixed_cohort_planner_v1",
+        requests: requests.len(),
+        compatibility_buckets: plan.compatibility_buckets,
+        full_cohorts: plan.full_cohorts,
+        batched_requests: plan.full_cohorts * DENSE_BATCH8_WIDTH,
+        serial_fallback_requests: plan.serial_fallback_requests,
+        output_order: "input",
+    };
+    let mut pending_outputs = std::iter::repeat_with(|| None)
+        .take(requests.len())
+        .collect::<Vec<Option<RequestOutput>>>();
+    let mut next_output = 0usize;
+    let mut completed = 0usize;
+    let mut cohort_index = 0usize;
+    for work in plan.work {
         shutdown::checkpoint()?;
-        let mut encoded = Vec::new();
-        for output in &outputs {
-            serde_json::to_writer(&mut encoded, output).context("encode request output")?;
-            encoded.push(b'\n');
+        match work {
+            PlannedWork::Batch(indices) => {
+                let cohort = indices.map(|index| &requests[index]);
+                let (outputs, telemetry) = run_cohort(
+                    loaded,
+                    tokenizer,
+                    executor.as_mut().expect("planned dense B=8 executor"),
+                    &cohort,
+                    args,
+                    &stop_tokens,
+                    cohort_index,
+                )
+                .with_context(|| format!("run dense B=8 cohort {cohort_index}"))?;
+                for (index, output) in indices.into_iter().zip(outputs) {
+                    ensure!(
+                        pending_outputs[index].replace(output).is_none(),
+                        "dense B=8 planner produced request {index} twice"
+                    );
+                }
+                eprintln!(
+                    "dense_batch8: {}",
+                    serde_json::to_string(&telemetry).context("serialize dense B=8 telemetry")?
+                );
+                cohort_index += 1;
+            }
+            PlannedWork::Serial(index) => {
+                let (output, _) =
+                    run_jsonl_request(loaded, tokenizer, &requests[index], args, greedy_gpu_mode)
+                        .with_context(|| format!("run dense B=8 serial fallback request {index}"))?;
+                ensure!(
+                    pending_outputs[index].replace(output).is_none(),
+                    "dense B=8 planner produced request {index} twice"
+                );
+            }
         }
+        shutdown::checkpoint()?;
+        completed += flush_ready_outputs(stdout, &mut pending_outputs, &mut next_output)?;
+    }
+    ensure!(
+        completed == requests.len() && next_output == requests.len(),
+        "dense B=8 planner completed {completed}/{} requests",
+        requests.len()
+    );
+    eprintln!(
+        "dense_batch8_planner: {}",
+        serde_json::to_string(&planner_telemetry)
+            .context("serialize dense B=8 planner telemetry")?
+    );
+    Ok(completed)
+}
+
+fn flush_ready_outputs(
+    stdout: &mut impl Write,
+    pending: &mut [Option<RequestOutput>],
+    next: &mut usize,
+) -> Result<usize> {
+    let mut encoded = Vec::new();
+    let start = *next;
+    while let Some(output) = pending.get_mut(*next).and_then(Option::take) {
+        serde_json::to_writer(&mut encoded, &output).context("encode request output")?;
+        encoded.push(b'\n');
+        *next += 1;
+    }
+    if !encoded.is_empty() {
         stdout
             .write_all(&encoded)
-            .context("write dense B=8 cohort outputs")?;
+            .context("write dense B=8 ordered outputs")?;
         stdout.flush()?;
-        eprintln!(
-            "dense_batch8: {}",
-            serde_json::to_string(&telemetry).context("serialize dense B=8 telemetry")?
-        );
-        completed += outputs.len();
     }
-    Ok(completed)
+    Ok(*next - start)
 }
 
 fn validate_requests(requests: &[PreparedJsonlRequest], args: &Args) -> Result<()> {
     ensure!(
-        !requests.is_empty() && requests.len().is_multiple_of(DENSE_BATCH8_WIDTH),
-        "--batch-size {DENSE_BATCH8_WIDTH} requires a non-empty request count divisible by {DENSE_BATCH8_WIDTH}; got {}",
-        requests.len()
+        !requests.is_empty(),
+        "--batch-size {DENSE_BATCH8_WIDTH} requires at least one request"
     );
     for request in requests {
         ensure!(
@@ -361,22 +519,6 @@ fn validate_requests(requests: &[PreparedJsonlRequest], args: &Args) -> Result<(
         );
         jsonl_generation_capacity(request, args)?;
     }
-    for (cohort_index, cohort) in requests.chunks_exact(DENSE_BATCH8_WIDTH).enumerate() {
-        let expected_prompt = cohort[0].prompt_ids.len();
-        let expected_tokens = cohort[0].request.tokens.unwrap_or(args.tokens);
-        for (slot, request) in cohort.iter().enumerate().skip(1) {
-            ensure!(
-                request.prompt_ids.len() == expected_prompt,
-                "dense B=8 cohort {cohort_index} slot {slot} prompt length {} != {expected_prompt}",
-                request.prompt_ids.len()
-            );
-            let requested_tokens = request.request.tokens.unwrap_or(args.tokens);
-            ensure!(
-                requested_tokens == expected_tokens,
-                "dense B=8 cohort {cohort_index} slot {slot} token limit {requested_tokens} != {expected_tokens}"
-            );
-        }
-    }
     Ok(())
 }
 
@@ -384,13 +526,13 @@ fn run_cohort(
     loaded: &LoadedModel,
     tokenizer: &Tokenizer,
     executor: &mut DenseBatch8SequenceExecutor<'_>,
-    requests: &[PreparedJsonlRequest; DENSE_BATCH8_WIDTH],
+    requests: &[&PreparedJsonlRequest; DENSE_BATCH8_WIDTH],
     args: &Args,
     stop_tokens: &[i32],
     cohort_index: usize,
 ) -> Result<(Vec<RequestOutput>, CohortTelemetry)> {
     let prompt_tokens = requests[0].prompt_ids.len();
-    let (requested_tokens, capacity) = jsonl_generation_capacity(&requests[0], args)?;
+    let (requested_tokens, capacity) = jsonl_generation_capacity(requests[0], args)?;
     let chunk = match args.prefill_chunk {
         PrefillChunkArg::Fixed(requested) => requested.min(prompt_tokens.max(1)),
         PrefillChunkArg::Auto => bail!("dense B=8 requires a fixed prefill chunk"),
@@ -765,6 +907,18 @@ mod tests {
         }
     }
 
+    fn output(id: &str) -> RequestOutput {
+        RequestOutput {
+            id: id.to_string(),
+            prompt_tokens: 1,
+            generated_tokens: 1,
+            generated_token_sha256: id.to_string(),
+            generated_text: id.to_string(),
+            stop_reason: StopReason::TokenLimit,
+            terminal_token_target_transition_consumed: false,
+        }
+    }
+
     #[test]
     fn cli_contract_is_explicit_and_family_scoped() {
         let args = test_args();
@@ -805,20 +959,36 @@ mod tests {
     }
 
     #[test]
-    fn request_admission_requires_uniform_full_cohorts() {
+    fn planner_forms_compatible_cohorts_and_serializes_underfill() {
         let args = test_args();
         let mut requests = (0..DENSE_BATCH8_WIDTH)
-            .map(|slot| prepared(&format!("slot-{slot}"), &[1, 2]))
+            .map(|slot| prepared(&format!("a-{slot}"), &[1, 2]))
+            .chain((0..DENSE_BATCH8_WIDTH).map(|slot| {
+                let mut request = prepared(&format!("b-{slot}"), &[1, 2, 3]);
+                request.request.tokens = Some(4);
+                request
+            }))
             .collect::<Vec<_>>();
+        requests.push(prepared("a-underfill", &[1, 2]));
+        requests.push(prepared("c-underfill", &[1, 2, 3, 4]));
         validate_requests(&requests, &args).unwrap();
-        assert!(validate_requests(&requests[..7], &args).is_err());
+        let plan = plan_request_work(&requests, &args).unwrap();
+        assert_eq!(plan.compatibility_buckets, 3);
+        assert_eq!(plan.full_cohorts, 2);
+        assert_eq!(plan.serial_fallback_requests, 2);
+        assert_eq!(
+            plan.work,
+            vec![
+                PlannedWork::Batch([0, 1, 2, 3, 4, 5, 6, 7]),
+                PlannedWork::Batch([8, 9, 10, 11, 12, 13, 14, 15]),
+                PlannedWork::Serial(16),
+                PlannedWork::Serial(17),
+            ]
+        );
+        let underfill = plan_request_work(&requests[..7], &args).unwrap();
+        assert_eq!(underfill.full_cohorts, 0);
+        assert_eq!(underfill.serial_fallback_requests, 7);
 
-        requests[3].prompt_ids.push(3);
-        assert!(validate_requests(&requests, &args).is_err());
-        requests[3].prompt_ids.pop();
-        requests[4].request.tokens = Some(4);
-        assert!(validate_requests(&requests, &args).is_err());
-        requests[4].request.tokens = None;
         requests[5].sampling.temperature = 0.1;
         assert!(validate_requests(&requests, &args).is_err());
         requests[5].sampling.temperature = 0.0;
@@ -839,9 +1009,13 @@ mod tests {
                 prepared(&format!("slot-{slot}"), &tokens)
             })
             .collect::<Vec<_>>();
-        assert_eq!(common_prefix_tokens(&requests), PREFIX_FANOUT_MIN_TOKENS);
+        let request_refs = requests.iter().collect::<Vec<_>>();
         assert_eq!(
-            plan_prefix_fanout(&requests, true),
+            common_prefix_tokens(&request_refs),
+            PREFIX_FANOUT_MIN_TOKENS
+        );
+        assert_eq!(
+            plan_prefix_fanout(&request_refs, true),
             PrefixFanoutPlan {
                 common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
                 selected_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
@@ -849,7 +1023,7 @@ mod tests {
             }
         );
         assert_eq!(
-            plan_prefix_fanout(&requests, false),
+            plan_prefix_fanout(&request_refs, false),
             PrefixFanoutPlan {
                 common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
                 selected_prefix_tokens: 0,
@@ -857,7 +1031,7 @@ mod tests {
             }
         );
         assert_eq!(
-            align_prefix_fanout(plan_prefix_fanout(&requests, true), 257, 128),
+            align_prefix_fanout(plan_prefix_fanout(&request_refs, true), 257, 128),
             PrefixFanoutPlan {
                 common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
                 selected_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
@@ -877,8 +1051,9 @@ mod tests {
                 prepared(&format!("wider-{slot}"), &tokens)
             })
             .collect::<Vec<_>>();
+        let wider_refs = wider.iter().collect::<Vec<_>>();
         assert_eq!(
-            align_prefix_fanout(plan_prefix_fanout(&wider, true), 261, 256),
+            align_prefix_fanout(plan_prefix_fanout(&wider_refs, true), 261, 256),
             PrefixFanoutPlan {
                 common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS + 4,
                 selected_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
@@ -886,7 +1061,7 @@ mod tests {
             }
         );
         assert_eq!(
-            align_prefix_fanout(plan_prefix_fanout(&wider, true), 261, 200),
+            align_prefix_fanout(plan_prefix_fanout(&wider_refs, true), 261, 200),
             PrefixFanoutPlan {
                 common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS + 4,
                 selected_prefix_tokens: 0,
@@ -899,14 +1074,45 @@ mod tests {
             .enumerate()
             .map(|(slot, request)| prepared(&format!("short-{slot}"), &request.prompt_ids[1..]))
             .collect::<Vec<_>>();
+        let short_refs = short.iter().collect::<Vec<_>>();
         assert_eq!(
-            plan_prefix_fanout(&short, true),
+            plan_prefix_fanout(&short_refs, true),
             PrefixFanoutPlan {
                 common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS - 1,
                 selected_prefix_tokens: 0,
                 reason: "below_minimum",
             }
         );
+    }
+
+    #[test]
+    fn reorder_buffer_emits_only_contiguous_input_order() {
+        let mut pending = std::iter::repeat_with(|| None)
+            .take(3)
+            .collect::<Vec<Option<RequestOutput>>>();
+        let mut next = 0usize;
+        let mut stdout = Vec::new();
+        pending[2] = Some(output("two"));
+        assert_eq!(
+            flush_ready_outputs(&mut stdout, &mut pending, &mut next).unwrap(),
+            0
+        );
+        pending[0] = Some(output("zero"));
+        assert_eq!(
+            flush_ready_outputs(&mut stdout, &mut pending, &mut next).unwrap(),
+            1
+        );
+        pending[1] = Some(output("one"));
+        assert_eq!(
+            flush_ready_outputs(&mut stdout, &mut pending, &mut next).unwrap(),
+            2
+        );
+        let rows = String::from_utf8(stdout).unwrap();
+        let zero = rows.find("zero").unwrap();
+        let one = rows.find("one").unwrap();
+        let two = rows.find("two").unwrap();
+        assert!(zero < one && one < two);
+        assert_eq!(next, 3);
     }
 
     #[test]

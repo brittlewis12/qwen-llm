@@ -14,11 +14,12 @@ The opt-in product path is:
 qwen --model MODEL --requests-jsonl REQUESTS.jsonl --batch-size 8
 ```
 
-It deliberately admits only dense Qwen, file input, complete contiguous cohorts
-of eight, equal tokenized prompt lengths, equal generation limits, fixed prefill
-chunks, F16 KV, and temperature-zero decoding. Stdin, prompt lookup, prefix
-caching, sampled decode, partial cohorts, request reordering, and per-request
-stats sidecars remain explicit errors rather than silent fallbacks.
+It deliberately admits only dense Qwen, file input, fixed prefill chunks, F16
+KV, and temperature-zero decoding. A stable planner groups equal tokenized
+prompt lengths and generation limits into complete cohorts of eight, routes
+underfill through serial execution, and emits rows in original input order.
+Stdin, prompt lookup, prefix caching, sampled decode, ragged active cohorts, and
+per-request stats sidecars remain explicit errors rather than silent fallbacks.
 `QWEN_GREEDY_GPU_ARGMAX=0` also rejects the mode so the established GPU-greedy
 rollback cannot be bypassed by batching.
 
@@ -51,9 +52,10 @@ not duplicate source strings.
 
 ## Validation
 
-CPU-only contract tests cover CLI/family exclusions, full-cohort and equal-shape
-admission, one-token generation, first-token EOS, transition-time EOS, N-1
-target transitions, and finished-lane padding.
+CPU-only contract tests cover CLI/family exclusions, compatibility planning,
+serialized underfill, ordered output buffering, one-token generation,
+first-token EOS, transition-time EOS, N-1 target transitions, and finished-lane
+padding.
 
 One process-cold Qwen3.5 0.8B Q4_K_M product comparison used the same
 eight-request varied-prompt file in batch and serial modes. All eight 12-token
@@ -91,6 +93,9 @@ no stdout, and named the incompatible rollback.
 - Shared-prefix fanout is promoted by
   `../2026-08-11-dense-b8-prefix-fanout/`: 27B cohort prefill improves `4.812x`
   with byte-identical output against rollback and serial controls.
+- Arbitrary file counts and mixed compatible shapes are promoted by
+  `../2026-08-11-dense-b8-cohort-planner/`; full cohorts batch, underfill runs
+  serially, and complete output remains byte-identical to serial input order.
 - Let MoE and DeepSeek qualify family-specific executors behind the same cohort
   concept; do not route them through the dense implementation.
 

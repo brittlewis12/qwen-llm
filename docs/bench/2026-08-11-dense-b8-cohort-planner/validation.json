@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "parent_commit": "1b093edd667d21fecd8b2ca018a300267966c936",
+  "build_scope": {
+    "dirty": true,
+    "note": "Planner source and unrelated DeepSeek prefill WIP were uncommitted; the exact planner source hash is recorded."
+  },
+  "candidate_source_sha256": {
+    "crates/qwen-cli/src/dense_batch8_jsonl.rs": "d5e893f204884e1cde4ff0197173530cfb1033d185d96591b87344345d9c7cf7"
+  },
+  "model": {
+    "path": "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf",
+    "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"
+  },
+  "request_sha256": "1a30e715ef7af9d8f10abda24e77acfb9f6beff19aa22546c4299973a676203d",
+  "output_sha256": {
+    "candidate": "935285b8763ce02fccaa983465ed4281b2c65053c3128857ef2f5d3dec724467",
+    "cache_disabled_serial": "935285b8763ce02fccaa983465ed4281b2c65053c3128857ef2f5d3dec724467"
+  },
+  "planner": {
+    "requests": 18,
+    "compatibility_buckets": 3,
+    "full_cohorts": 2,
+    "batched_requests": 16,
+    "serial_fallback_requests": 2,
+    "output_order": "input"
+  },
+  "cohorts": [
+    {
+      "cohort_index": 0,
+      "prompt_tokens_per_request": 1029,
+      "requested_tokens_per_request": 4,
+      "common_prefix_tokens": 1025,
+      "prefix_fanout_tokens": 1024,
+      "prefill_ms": 588.354875,
+      "decode_ms": 51.79,
+      "aggregate_generated_tps": 617.8798995945162
+    },
+    {
+      "cohort_index": 1,
+      "prompt_tokens_per_request": 1112,
+      "requested_tokens_per_request": 6,
+      "common_prefix_tokens": 1108,
+      "prefix_fanout_tokens": 1024,
+      "prefill_ms": 610.292292,
+      "decode_ms": 80.185166,
+      "aggregate_generated_tps": 598.6144619317743
+    }
+  ],
+  "output_ids": [
+    "a-0", "b-0", "a-1", "b-1", "a-2", "b-2",
+    "a-3", "b-3", "a-4", "b-4", "a-5", "b-5",
+    "a-6", "b-6", "a-7", "b-7", "a-underfill", "solo"
+  ],
+  "checks": {
+    "targeted_cli_tests": 5,
+    "cargo_clippy_deny_warnings": true,
+    "post_run_swap_used_mib": 0.06
+  }
+}

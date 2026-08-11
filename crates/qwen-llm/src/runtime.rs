@@ -28,7 +28,9 @@ use crate::metal_forward::{
     MfError, SessionSnapshot, SnapshotIdentity, SnapshotValidationError,
 };
 use crate::model::Arch;
-use crate::moe_batch16::{MOE_BATCH16_WIDTH, MoeBatch16Error, MoeBatch16Executor, MoeBatch16Step};
+use crate::moe_batch16::{
+    MOE_BATCH16_WIDTH, MoeBatch16Error, MoeBatch16Executor, MoeBatch16PlanTelemetry, MoeBatch16Step,
+};
 use crate::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS, prefetch_fd};
 use crate::prefix_cache::{DEFAULT_MAX_BYTES, PrefixCache, PrefixCacheStats};
 pub use crate::qwen_queue2::QwenQueue2Error as IndependentQueue2Error;
@@ -1805,6 +1807,10 @@ impl MoeBatch16SequenceExecutor<'_> {
 
     pub fn scratch_bytes(&self) -> u64 {
         self.inner.scratch_bytes()
+    }
+
+    pub fn plan_telemetry(&self) -> MoeBatch16PlanTelemetry {
+        self.inner.plan_telemetry()
     }
 
     pub fn is_poisoned(&self) -> bool {

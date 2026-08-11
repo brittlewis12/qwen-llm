@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Qwen MoE B=16 Capability Plan GO
+
+Status: replace the single A3B-Q4 allowlist with an immutable per-stage plan.
+Exact Q8 GDN, packed Q4 gate/up, and Q6/Q8 heads batch when their tensor and
+kernel contracts match; unsupported stages call ordinary production decode per
+lane. Architecture, shape, quant-block, rotary, integer-width, state, and
+diagnostic-override checks remain fail-closed.
+
+- The unchanged Qwen3.6 A3B Q4 composition emits 512 tokens byte-identically to
+  serial output. B=16 reaches `158.269` aggregate token/s and moves process wall
+  `12.17 -> 7.33 s`; telemetry reports 30 Q8 GDN blocks, 40 packed Q4 gate/up
+  blocks, no per-lane fallbacks, and a Q6 head.
+- Qwen3.5 A3B IQ4_XS also remains byte-identical across 31 transitions. Its plan
+  batches 30 Q8 GDN blocks and the Q6 head while retaining all 40 IQ3 gate/up
+  blocks per lane. Wall moves `8.77 -> 7.28 s` (`1.205x`) at `145.810` aggregate
+  token/s.
+- IQ4 independent B=2 is slightly better at `7.17 s` and roughly `149-153`
+  aggregate token/s per pair. The mixed plan is therefore capability evidence,
+  not authority to prefer B=16 for every quant composition.
+- A one-transition MTP-tagged Qwen3.6 Q4 smoke is byte-identical and selects the
+  same 40-layer base plan. MTP metadata no longer causes an arbitrary rejection.
+- The existing exact token-axis Q8 kernel now serves eligible heads, removing an
+  obvious A10B fallback cliff. A10B itself remains unmeasured and `HOLD` because
+  its 77 GiB load and prior width evidence require a separate short probe.
+
+Decision: support Qwen MoE B=16 by executable capabilities, while keeping width
+preference evidence-driven. Q4 A3B remains B=16 `GO`; IQ4 should use B=2 until a
+wider IQ3 gate/up stage creates margin. Full result:
+`docs/bench/2026-08-11-qwen-moe-b16-capability-plan/README.md`.
+
 ## 2026-08-11 - Qwen MoE B=16 Product GO
 
 Status: the exact packed-gate/up organization now ships through ordinary

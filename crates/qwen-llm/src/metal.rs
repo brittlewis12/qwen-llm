@@ -19784,7 +19784,7 @@ pub fn encode_mat_vec_q5_k_f32(
 /// switch the DFlash drafter from F32-dequant to native Q8_0 storage
 /// (drafter weight footprint 7.4 GB → 1.85 GB, eliminates per-token
 /// re-read of the dequant'd F32 weights at hot decode).
-fn mat_vec_q8_0_lcpp_enabled() -> bool {
+pub(crate) fn mat_vec_q8_0_lcpp_enabled() -> bool {
     static OVERRIDE: OnceLock<Option<bool>> = OnceLock::new();
     let override_value =
         *OVERRIDE.get_or_init(|| match std::env::var("QWEN_MATVEC_Q8_0_LCPP").as_deref() {

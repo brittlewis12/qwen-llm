@@ -1,4 +1,4 @@
-//! Product fixed-width MoE decode for the Qwen 35B-A3B execution profile.
+//! Product fixed-width MoE decode selected from model capabilities.
 //!
 //! This intentionally mirrors the measured B=16 composition rather than
 //! extending the dense batching machinery. Causal state, routing decisions,
@@ -8,20 +8,67 @@ use crate::env_flag::read_default_off;
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_argmax_f32_greedy,
     encode_get_rows_f32, encode_mat_vec_q6_k_batch_f32, encode_mat_vec_q8_0_batch_f32,
-    encode_moe_swiglu_q4_K_f32_packed_slots, encode_rms_norm_mul_f32,
+    encode_moe_swiglu_q4_K_f32_packed_slots, encode_rms_norm_mul_f32, mat_vec_q8_0_lcpp_enabled,
 };
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, MetalBlock, MetalForward, MetalGdnBlock, MetalModel, MetalSession, MfError,
-    RMS_EPS,
+    RMS_EPS, encode_mat_vec_dispatch,
 };
 use crate::model::{Arch, ArchKind};
 use crate::sampling::{GreedySelection, SamplingError};
-use crate::tensor::GgmlType;
+use crate::tensor::{GgmlType, ggml_type_layout};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue};
 
 pub const MOE_BATCH16_WIDTH: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GdnMixerMode {
+    BatchedQ8,
+    PerLane,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoutedGateUpMode {
+    PackedQ4,
+    PerLane,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HeadMode {
+    BatchedQ6,
+    BatchedQ8,
+    PerLane,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MoeBatch16PlanTelemetry {
+    pub q8_batched_gdn_blocks: usize,
+    pub packed_q4_gate_up_blocks: usize,
+    pub per_lane_gdn_blocks: usize,
+    pub per_lane_gate_up_blocks: usize,
+    pub head_mode: HeadMode,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MixerMode {
+    Gdn(GdnMixerMode),
+    Attention,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BlockExecutionPlan {
+    mixer: MixerMode,
+    routed: RoutedGateUpMode,
+}
+
+#[derive(Debug)]
+struct MoeBatch16ExecutionPlan {
+    blocks: Box<[BlockExecutionPlan]>,
+    head: HeadMode,
+    telemetry: MoeBatch16PlanTelemetry,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MoeBatch16Error {
@@ -209,6 +256,7 @@ fn matvec_dtype(dtype: GgmlType) -> bool {
             | GgmlType::BF16
             | GgmlType::Q2_K
             | GgmlType::Q3_K
+            | GgmlType::IQ2_XS
             | GgmlType::IQ2_S
             | GgmlType::IQ3_XXS
             | GgmlType::IQ3_S
@@ -217,10 +265,273 @@ fn matvec_dtype(dtype: GgmlType) -> bool {
             | GgmlType::Q4_K
             | GgmlType::Q5_K
             | GgmlType::Q6_K
+            | GgmlType::MXFP4
             | GgmlType::Q8_0
             | GgmlType::IQ4_NL
             | GgmlType::IQ4_XS
     )
+}
+
+fn validate_matvec_contract(
+    dtype: GgmlType,
+    n_in: usize,
+    n_out: usize,
+    label: &str,
+) -> Result<(), MoeBatch16Error> {
+    if !matvec_dtype(dtype) {
+        return Err(MoeBatch16Error::Unsupported(format!(
+            "{label} dtype {dtype:?} has no production mat-vec contract"
+        )));
+    }
+    let block = ggml_type_layout(dtype)
+        .and_then(|(block, _)| usize::try_from(block).ok())
+        .filter(|block| *block > 0)
+        .ok_or_else(|| {
+            MoeBatch16Error::Unsupported(format!(
+                "{label} dtype {dtype:?} has no valid block layout"
+            ))
+        })?;
+    if n_in == 0
+        || n_out == 0
+        || !n_in.is_multiple_of(block)
+        || u32::try_from(n_in).is_err()
+        || u32::try_from(n_out).is_err()
+        || n_in.checked_mul(n_out).is_none()
+    {
+        return Err(MoeBatch16Error::Unsupported(format!(
+            "{label} dimensions {n_in}x{n_out} are invalid for {dtype:?} block {block}"
+        )));
+    }
+    Ok(())
+}
+
+fn embedding_dtype(dtype: GgmlType) -> bool {
+    matches!(
+        dtype,
+        GgmlType::F32
+            | GgmlType::F16
+            | GgmlType::BF16
+            | GgmlType::Q4_K
+            | GgmlType::Q6_K
+            | GgmlType::Q8_0
+    )
+}
+
+fn routed_gate_up_dtype(gate: GgmlType, up: GgmlType) -> bool {
+    gate == up
+        && matches!(
+            gate,
+            GgmlType::Q4_K
+                | GgmlType::Q5_K
+                | GgmlType::Q6_K
+                | GgmlType::Q8_0
+                | GgmlType::IQ3_XXS
+                | GgmlType::IQ3_S
+                | GgmlType::BF16
+                | GgmlType::F32
+        )
+}
+
+fn dimensions_fit_u32(dimensions: &[usize]) -> bool {
+    dimensions.iter().all(|value| u32::try_from(*value).is_ok())
+        && checked_mul(dimensions, "kernel dimensions").is_ok()
+}
+
+fn select_gdn_mode(
+    qkv: GgmlType,
+    z: GgmlType,
+    out: GgmlType,
+    hidden: usize,
+    conv_dim: usize,
+    value_dim: usize,
+) -> Result<GdnMixerMode, MoeBatch16Error> {
+    validate_matvec_contract(qkv, hidden, conv_dim, "GDN QKV projection")?;
+    validate_matvec_contract(z, hidden, value_dim, "GDN Z projection")?;
+    validate_matvec_contract(out, value_dim, hidden, "GDN output projection")?;
+    let batched_dimensions = dimensions_fit_u32(&[hidden, conv_dim, value_dim])
+        && hidden.is_multiple_of(32)
+        && value_dim.is_multiple_of(32);
+    Ok(
+        if qkv == GgmlType::Q8_0
+            && z == GgmlType::Q8_0
+            && out == GgmlType::Q8_0
+            && batched_dimensions
+            && mat_vec_q8_0_lcpp_enabled()
+        {
+            GdnMixerMode::BatchedQ8
+        } else {
+            GdnMixerMode::PerLane
+        },
+    )
+}
+
+fn select_routed_mode(
+    gate: GgmlType,
+    up: GgmlType,
+    hidden: usize,
+    expert_ffn: usize,
+    experts: usize,
+    topk: usize,
+) -> Result<RoutedGateUpMode, MoeBatch16Error> {
+    if !routed_gate_up_dtype(gate, up) {
+        return Err(MoeBatch16Error::Unsupported(format!(
+            "routed gate/up dtype contract is unsupported: {gate:?}/{up:?}"
+        )));
+    }
+    validate_matvec_contract(gate, hidden, expert_ffn, "routed gate projection")?;
+    validate_matvec_contract(up, hidden, expert_ffn, "routed up projection")?;
+    if matches!(
+        gate,
+        GgmlType::Q5_K | GgmlType::IQ3_XXS | GgmlType::IQ3_S | GgmlType::BF16 | GgmlType::F32
+    ) && expert_ffn
+        .checked_mul(2)
+        .is_none_or(|packed_width| packed_width > hidden)
+    {
+        return Err(MoeBatch16Error::Unsupported(
+            "routed gate/up fallback scratch exceeds the production session contract".into(),
+        ));
+    }
+    let packed_dimensions = hidden.is_multiple_of(256)
+        && dimensions_fit_u32(&[hidden, expert_ffn, experts, topk, MOE_BATCH16_WIDTH])
+        && checked_mul(
+            &[MOE_BATCH16_WIDTH, topk, expert_ffn],
+            "packed routed output",
+        )
+        .is_ok();
+    Ok(if gate == GgmlType::Q4_K && packed_dimensions {
+        RoutedGateUpMode::PackedQ4
+    } else {
+        RoutedGateUpMode::PerLane
+    })
+}
+
+fn select_head_mode(
+    dtype: GgmlType,
+    hidden: usize,
+    vocab: usize,
+) -> Result<HeadMode, MoeBatch16Error> {
+    validate_matvec_contract(dtype, hidden, vocab, "LM head")?;
+    Ok(
+        if dtype == GgmlType::Q6_K
+            && hidden.is_multiple_of(256)
+            && dimensions_fit_u32(&[hidden, vocab, MOE_BATCH16_WIDTH])
+        {
+            HeadMode::BatchedQ6
+        } else if dtype == GgmlType::Q8_0
+            && hidden.is_multiple_of(32)
+            && dimensions_fit_u32(&[hidden, vocab, MOE_BATCH16_WIDTH])
+            && mat_vec_q8_0_lcpp_enabled()
+        {
+            HeadMode::BatchedQ8
+        } else {
+            HeadMode::PerLane
+        },
+    )
+}
+
+fn has_meaningful_batched_stage(
+    gdn_modes: impl IntoIterator<Item = GdnMixerMode>,
+    routed_modes: impl IntoIterator<Item = RoutedGateUpMode>,
+    head: HeadMode,
+) -> bool {
+    matches!(head, HeadMode::BatchedQ6 | HeadMode::BatchedQ8)
+        || gdn_modes
+            .into_iter()
+            .any(|mode| mode == GdnMixerMode::BatchedQ8)
+        || routed_modes
+            .into_iter()
+            .any(|mode| mode == RoutedGateUpMode::PackedQ4)
+}
+
+fn validate_architecture(arch: &Arch) -> Result<(), MoeBatch16Error> {
+    if arch.kind != ArchKind::Moe {
+        return Err(MoeBatch16Error::Unsupported(
+            "model architecture is not Qwen MoE".into(),
+        ));
+    }
+    geometry(arch)?;
+    if arch.n_layer == 0 {
+        return Err(MoeBatch16Error::Unsupported(
+            "model must contain at least one base layer".into(),
+        ));
+    }
+    if arch.gdn_head_dim != 128 || arch.gdn_conv_kernel != 4 {
+        return Err(MoeBatch16Error::Unsupported(
+            "GDN requires head_dim 128 and convolution kernel 4".into(),
+        ));
+    }
+    if arch.gdn_n_k_heads == 0
+        || arch.gdn_n_v_heads == 0
+        || !arch.gdn_n_v_heads.is_multiple_of(arch.gdn_n_k_heads)
+    {
+        return Err(MoeBatch16Error::Unsupported(
+            "GDN value heads must be an integral multiple of key heads".into(),
+        ));
+    }
+    let attention_group = if arch.n_kv_heads > 0 {
+        arch.n_q_heads.checked_div(arch.n_kv_heads)
+    } else {
+        None
+    };
+    if arch.attn_head_dim != 256
+        || arch.n_kv_heads == 0
+        || arch.n_q_heads == 0
+        || !arch.n_q_heads.is_multiple_of(arch.n_kv_heads)
+        || !matches!(attention_group, Some(4 | 6 | 8 | 16))
+    {
+        return Err(MoeBatch16Error::Unsupported(
+            "attention requires head_dim 256 and GQA group 4, 6, 8, or 16".into(),
+        ));
+    }
+    if !arch.rope_theta.is_finite() || arch.rope_theta <= 0.0 {
+        return Err(MoeBatch16Error::Unsupported(
+            "RoPE theta must be finite and positive".into(),
+        ));
+    }
+    let rotary_width = arch.attn_head_dim as f32 * arch.partial_rotary_factor;
+    if !arch.partial_rotary_factor.is_finite()
+        || arch.partial_rotary_factor <= 0.0
+        || !rotary_width.is_finite()
+        || rotary_width.fract() != 0.0
+        || rotary_width < 2.0
+        || rotary_width > arch.attn_head_dim as f32
+        || !(rotary_width as usize).is_multiple_of(2)
+    {
+        return Err(MoeBatch16Error::Unsupported(
+            "partial rotary factor must produce a positive even width within the attention head"
+                .into(),
+        ));
+    }
+    if arch.expert_count > 256 || arch.expert_used_count > 16 {
+        return Err(MoeBatch16Error::Unsupported(
+            "production routing requires at most 256 experts and top-k at most 16".into(),
+        ));
+    }
+    let hidden = arch.hidden_size as usize;
+    let conv_heads = (arch.gdn_n_k_heads as usize)
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(arch.gdn_n_v_heads as usize))
+        .ok_or_else(|| MoeBatch16Error::Unsupported("GDN head geometry overflow".into()))?;
+    for (label, dimensions) in [
+        ("GDN", vec![conv_heads, arch.gdn_head_dim as usize]),
+        (
+            "attention Q",
+            vec![arch.n_q_heads as usize, arch.attn_head_dim as usize],
+        ),
+        (
+            "attention KV",
+            vec![arch.n_kv_heads as usize, arch.attn_head_dim as usize],
+        ),
+        ("embedding", vec![hidden, arch.vocab_size as usize]),
+    ] {
+        checked_mul(&dimensions, label)?;
+        if !dimensions_fit_u32(&dimensions) {
+            return Err(MoeBatch16Error::Unsupported(format!(
+                "{label} dimensions exceed kernel ABI"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn down_dtype(dtype: GgmlType) -> bool {
@@ -285,40 +596,10 @@ fn require_weight_shape_one_of(
     )))
 }
 
-fn validate_capabilities(model: &MetalModel) -> Result<(), MoeBatch16Error> {
+fn build_execution_plan(model: &MetalModel) -> Result<MoeBatch16ExecutionPlan, MoeBatch16Error> {
     let arch = &model.arch;
-    if arch.kind != ArchKind::Moe {
-        return Err(MoeBatch16Error::Unsupported(
-            "model architecture is not Qwen MoE".into(),
-        ));
-    }
-    geometry(arch)?;
-    // The production qualification currently covers the 35B-A3B backbone.
-    if arch.n_layer != 40
-        || arch.hidden_size != 2048
-        || arch.intermediate_size != 0
-        || arch.vocab_size != 248_320
-        || arch.full_attention_interval != 4
-        || arch.n_q_heads != 16
-        || arch.n_kv_heads != 2
-        || arch.attn_head_dim != 256
-        || arch.rope_theta.to_bits() != 10_000_000.0f32.to_bits()
-        || arch.partial_rotary_factor.to_bits() != 0.25f32.to_bits()
-        || arch.gdn_n_v_heads != 32
-        || arch.gdn_n_k_heads != 16
-        || arch.gdn_head_dim != 128
-        || arch.gdn_conv_kernel != 4
-        || arch.expert_count != 256
-        || arch.expert_used_count != 8
-        || arch.expert_feed_forward_length != 512
-        || arch.expert_shared_feed_forward_length != 512
-        || arch.mtp_n_hidden_layers != 0
-    {
-        return Err(MoeBatch16Error::Unsupported(
-            "only the qualified Qwen 35B-A3B geometry is currently supported".into(),
-        ));
-    }
-    if model.blocks.len() != arch.n_layer as usize {
+    validate_architecture(arch)?;
+    if model.blocks.is_empty() || model.blocks.len() != arch.n_layer as usize {
         return Err(MoeBatch16Error::Unsupported(
             "block inventory does not match architecture".into(),
         ));
@@ -345,45 +626,60 @@ fn validate_capabilities(model: &MetalModel) -> Result<(), MoeBatch16Error> {
             )));
         }
     }
-    if model.lm_head.dtype != GgmlType::Q6_K {
-        return Err(MoeBatch16Error::Unsupported(format!(
-            "LM head must be Q6_K, got {:?}",
-            model.lm_head.dtype
-        )));
-    }
     let hidden = arch.hidden_size as usize;
     let vocab = arch.vocab_size as usize;
     let experts = arch.expert_count as usize;
     let expert_ffn = arch.expert_feed_forward_length as usize;
     let shared_ffn = arch.expert_shared_feed_forward_length as usize;
-    let conv_dim = (2 * arch.gdn_n_k_heads as usize + arch.gdn_n_v_heads as usize)
-        * arch.gdn_head_dim as usize;
-    let value_dim = arch.gdn_n_v_heads as usize * arch.gdn_head_dim as usize;
-    let q_dim = arch.n_q_heads as usize * arch.attn_head_dim as usize;
-    let kv_dim = arch.n_kv_heads as usize * arch.attn_head_dim as usize;
-    if model.token_embd.dtype != GgmlType::Q8_0 {
+    let conv_heads = checked_mul(&[2, arch.gdn_n_k_heads as usize], "GDN head geometry")?
+        .checked_add(arch.gdn_n_v_heads as usize)
+        .ok_or_else(|| MoeBatch16Error::Validation("GDN head geometry overflow".into()))?;
+    let conv_dim = checked_mul(
+        &[conv_heads, arch.gdn_head_dim as usize],
+        "GDN convolution geometry",
+    )?;
+    let value_dim = checked_mul(
+        &[arch.gdn_n_v_heads as usize, arch.gdn_head_dim as usize],
+        "GDN value geometry",
+    )?;
+    let q_dim = checked_mul(
+        &[arch.n_q_heads as usize, arch.attn_head_dim as usize],
+        "attention Q geometry",
+    )?;
+    let kv_dim = checked_mul(
+        &[arch.n_kv_heads as usize, arch.attn_head_dim as usize],
+        "attention KV geometry",
+    )?;
+    if !embedding_dtype(model.token_embd.dtype) {
         return Err(MoeBatch16Error::Unsupported(format!(
-            "token embedding must be Q8_0, got {:?}",
+            "token embedding dtype {:?} has no batched get-rows contract",
             model.token_embd.dtype
         )));
     }
+    validate_matvec_contract(model.token_embd.dtype, hidden, vocab, "token embedding")?;
     require_weight_shape(&model.token_embd, "token embedding", &[hidden, vocab])?;
     require_weight_shape(&model.output_norm, "output norm", &[hidden])?;
     require_weight_shape(&model.lm_head, "LM head", &[hidden, vocab])?;
+    let head = select_head_mode(model.lm_head.dtype, hidden, vocab)?;
+    let mut blocks = Vec::with_capacity(model.blocks.len());
     for (index, block) in model.blocks.iter().enumerate() {
-        let (shared_gate, shared_up, shared_down, moe) = match block {
+        let (mixer, shared_gate, shared_up, shared_down, moe) = match block {
             MetalBlock::Gdn(block) => {
-                for (name, tensor) in [
-                    ("qkv", &block.in_proj_qkv),
-                    ("z", &block.in_proj_z),
-                    ("out", &block.out_proj),
-                ] {
-                    if tensor.dtype != GgmlType::Q8_0 {
-                        return Err(MoeBatch16Error::Unsupported(format!(
-                            "block {index} GDN {name} projection must be Q8_0, got {:?}",
-                            tensor.dtype
-                        )));
-                    }
+                let mode = select_gdn_mode(
+                    block.in_proj_qkv.dtype,
+                    block.in_proj_z.dtype,
+                    block.out_proj.dtype,
+                    hidden,
+                    conv_dim,
+                    value_dim,
+                )?;
+                for (name, tensor) in [("beta", &block.beta_proj), ("alpha", &block.alpha_proj)] {
+                    validate_matvec_contract(
+                        tensor.dtype,
+                        hidden,
+                        arch.gdn_n_v_heads as usize,
+                        &format!("block {index} GDN {name} projection"),
+                    )?;
                 }
                 require_weight_shape(
                     &block.in_proj_qkv,
@@ -400,7 +696,36 @@ fn validate_capabilities(model: &MetalModel) -> Result<(), MoeBatch16Error> {
                     &format!("block {index} GDN output"),
                     &[value_dim, hidden],
                 )?;
+                for (name, tensor, dimensions) in [
+                    ("attention norm", &block.attn_norm, vec![hidden]),
+                    ("post-attention norm", &block.post_attn_norm, vec![hidden]),
+                    (
+                        "beta projection",
+                        &block.beta_proj,
+                        vec![hidden, arch.gdn_n_v_heads as usize],
+                    ),
+                    (
+                        "alpha projection",
+                        &block.alpha_proj,
+                        vec![hidden, arch.gdn_n_v_heads as usize],
+                    ),
+                    ("A log", &block.a_log, vec![arch.gdn_n_v_heads as usize]),
+                    ("DT bias", &block.dt_bias, vec![arch.gdn_n_v_heads as usize]),
+                    (
+                        "convolution",
+                        &block.conv1d,
+                        vec![arch.gdn_conv_kernel as usize, conv_dim],
+                    ),
+                    ("state norm", &block.norm, vec![arch.gdn_head_dim as usize]),
+                ] {
+                    require_weight_shape(
+                        tensor,
+                        &format!("block {index} GDN {name}"),
+                        &dimensions,
+                    )?;
+                }
                 (
+                    MixerMode::Gdn(mode),
                     &block.ffn_gate,
                     &block.ffn_up,
                     &block.ffn_down,
@@ -408,21 +733,22 @@ fn validate_capabilities(model: &MetalModel) -> Result<(), MoeBatch16Error> {
                 )
             }
             MetalBlock::Attn(block) => {
-                for (name, tensor) in [
-                    ("Q", &block.q),
-                    ("K", &block.k),
-                    ("V", &block.v),
-                    ("O", &block.o),
+                let q_full_dim = checked_mul(&[2, q_dim], "attention Q projection width")?;
+                for (name, tensor, n_in, n_out) in [
+                    ("Q", &block.q, hidden, q_full_dim),
+                    ("K", &block.k, hidden, kv_dim),
+                    ("V", &block.v, hidden, kv_dim),
+                    ("O", &block.o, q_dim, hidden),
                 ] {
-                    if !matvec_dtype(tensor.dtype) {
-                        return Err(MoeBatch16Error::Unsupported(format!(
-                            "block {index} attention {name} dtype {:?} has no production mat-vec contract",
-                            tensor.dtype
-                        )));
-                    }
+                    validate_matvec_contract(
+                        tensor.dtype,
+                        n_in,
+                        n_out,
+                        &format!("block {index} attention {name}"),
+                    )?;
                 }
                 for (name, tensor, dimensions) in [
-                    ("Q", &block.q, [hidden, 2 * q_dim]),
+                    ("Q", &block.q, [hidden, q_full_dim]),
                     ("K", &block.k, [hidden, kv_dim]),
                     ("V", &block.v, [hidden, kv_dim]),
                     ("O", &block.o, [q_dim, hidden]),
@@ -433,7 +759,16 @@ fn validate_capabilities(model: &MetalModel) -> Result<(), MoeBatch16Error> {
                         &dimensions,
                     )?;
                 }
+                for (name, tensor, dimensions) in [
+                    ("attention norm", &block.attn_norm, vec![hidden]),
+                    ("post-attention norm", &block.post_attn_norm, vec![hidden]),
+                    ("Q norm", &block.q_norm, vec![arch.attn_head_dim as usize]),
+                    ("K norm", &block.k_norm, vec![arch.attn_head_dim as usize]),
+                ] {
+                    require_weight_shape(tensor, &format!("block {index} {name}"), &dimensions)?;
+                }
                 (
+                    MixerMode::Attention,
                     &block.ffn_gate,
                     &block.ffn_up,
                     &block.ffn_down,
@@ -444,18 +779,25 @@ fn validate_capabilities(model: &MetalModel) -> Result<(), MoeBatch16Error> {
         let moe = moe.ok_or_else(|| {
             MoeBatch16Error::Unsupported(format!("block {index} has no MoE weights"))
         })?;
-        if moe.gate_exps.dtype != GgmlType::Q4_K || moe.up_exps.dtype != GgmlType::Q4_K {
-            return Err(MoeBatch16Error::Unsupported(format!(
-                "block {index} routed gate/up banks must both be Q4_K"
-            )));
-        }
-        if !matches!(moe.gate_inp.dtype, GgmlType::F32 | GgmlType::F16)
-            || moe.gate_inp_shexp.dtype != GgmlType::F32
-        {
+        let routed = select_routed_mode(
+            moe.gate_exps.dtype,
+            moe.up_exps.dtype,
+            hidden,
+            expert_ffn,
+            experts,
+            arch.expert_used_count as usize,
+        )?;
+        if moe.gate_inp_shexp.dtype != GgmlType::F32 {
             return Err(MoeBatch16Error::Unsupported(format!(
                 "block {index} router/shared-gate dtype contract is unsupported"
             )));
         }
+        validate_matvec_contract(
+            moe.gate_inp.dtype,
+            hidden,
+            experts,
+            &format!("block {index} router"),
+        )?;
         require_weight_shape(
             &moe.gate_inp,
             &format!("block {index} router"),
@@ -484,17 +826,18 @@ fn validate_capabilities(model: &MetalModel) -> Result<(), MoeBatch16Error> {
                 moe.down_exps.dtype
             )));
         }
-        for (name, tensor) in [
-            ("shared gate", shared_gate),
-            ("shared up", shared_up),
-            ("shared down", shared_down),
+        validate_matvec_contract(
+            moe.down_exps.dtype,
+            expert_ffn,
+            hidden,
+            &format!("block {index} routed down"),
+        )?;
+        for (name, tensor, n_in, n_out) in [
+            ("shared gate", shared_gate, hidden, shared_ffn),
+            ("shared up", shared_up, hidden, shared_ffn),
+            ("shared down", shared_down, shared_ffn, hidden),
         ] {
-            if !matvec_dtype(tensor.dtype) {
-                return Err(MoeBatch16Error::Unsupported(format!(
-                    "block {index} {name} dtype {:?} is unsupported",
-                    tensor.dtype
-                )));
-            }
+            validate_matvec_contract(tensor.dtype, n_in, n_out, &format!("block {index} {name}"))?;
         }
         require_weight_shape(
             shared_gate,
@@ -511,12 +854,49 @@ fn validate_capabilities(model: &MetalModel) -> Result<(), MoeBatch16Error> {
             &format!("block {index} shared down projection"),
             &[shared_ffn, hidden],
         )?;
+        blocks.push(BlockExecutionPlan { mixer, routed });
     }
-    Ok(())
+    let telemetry = MoeBatch16PlanTelemetry {
+        q8_batched_gdn_blocks: blocks
+            .iter()
+            .filter(|block| block.mixer == MixerMode::Gdn(GdnMixerMode::BatchedQ8))
+            .count(),
+        packed_q4_gate_up_blocks: blocks
+            .iter()
+            .filter(|block| block.routed == RoutedGateUpMode::PackedQ4)
+            .count(),
+        per_lane_gdn_blocks: blocks
+            .iter()
+            .filter(|block| block.mixer == MixerMode::Gdn(GdnMixerMode::PerLane))
+            .count(),
+        per_lane_gate_up_blocks: blocks
+            .iter()
+            .filter(|block| block.routed == RoutedGateUpMode::PerLane)
+            .count(),
+        head_mode: head,
+    };
+    if !has_meaningful_batched_stage(
+        blocks.iter().filter_map(|block| match block.mixer {
+            MixerMode::Gdn(mode) => Some(mode),
+            MixerMode::Attention => None,
+        }),
+        blocks.iter().map(|block| block.routed),
+        head,
+    ) {
+        return Err(MoeBatch16Error::Unsupported(
+            "execution plan has no meaningful batched compute stage".into(),
+        ));
+    }
+    Ok(MoeBatch16ExecutionPlan {
+        blocks: blocks.into_boxed_slice(),
+        head,
+        telemetry,
+    })
 }
 
 pub(crate) struct MoeBatch16Executor<'a> {
     forward: MetalForward<'a>,
+    plan: MoeBatch16ExecutionPlan,
     scratch: MoeBatch16Scratch,
     poisoned: bool,
 }
@@ -527,9 +907,10 @@ impl<'a> MoeBatch16Executor<'a> {
         model: &'a MetalModel,
     ) -> Result<Self, MoeBatch16Error> {
         // All capability checks deliberately precede the large logits/inner allocations.
-        validate_capabilities(model)?;
+        let plan = build_execution_plan(model)?;
         Ok(Self {
             forward: MetalForward::new(ctx, model),
+            plan,
             scratch: MoeBatch16Scratch::new(ctx, model)?,
             poisoned: false,
         })
@@ -537,6 +918,10 @@ impl<'a> MoeBatch16Executor<'a> {
 
     pub(crate) fn scratch_bytes(&self) -> u64 {
         self.scratch.bytes
+    }
+
+    pub(crate) fn plan_telemetry(&self) -> MoeBatch16PlanTelemetry {
+        self.plan.telemetry
     }
 
     pub(crate) fn is_poisoned(&self) -> bool {
@@ -997,9 +1382,17 @@ impl<'a> MoeBatch16Executor<'a> {
         let arch = &self.forward.model.arch;
         let hidden = arch.hidden_size as usize;
         let vocab = arch.vocab_size as usize;
-        let conv_dim = (2 * arch.gdn_n_k_heads as usize + arch.gdn_n_v_heads as usize)
-            * arch.gdn_head_dim as usize;
-        let value_dim = arch.gdn_n_v_heads as usize * arch.gdn_head_dim as usize;
+        let conv_heads = checked_mul(&[2, arch.gdn_n_k_heads as usize], "GDN head geometry")?
+            .checked_add(arch.gdn_n_v_heads as usize)
+            .ok_or_else(|| MoeBatch16Error::Validation("GDN head geometry overflow".into()))?;
+        let conv_dim = checked_mul(
+            &[conv_heads, arch.gdn_head_dim as usize],
+            "GDN convolution geometry",
+        )?;
+        let value_dim = checked_mul(
+            &[arch.gdn_n_v_heads as usize, arch.gdn_head_dim as usize],
+            "GDN value geometry",
+        )?;
         let encoder = KernelEncoder::begin(command);
         encode_get_rows_f32(
             self.forward.ctx,
@@ -1015,14 +1408,28 @@ impl<'a> MoeBatch16Executor<'a> {
 
         let mut gdn_index = 0usize;
         for (block_index, block) in self.forward.model.blocks.iter().enumerate() {
-            match block {
-                MetalBlock::Gdn(block) => {
+            let block_plan = self.plan.blocks[block_index];
+            match (block, block_plan.mixer) {
+                (MetalBlock::Gdn(block), MixerMode::Gdn(GdnMixerMode::BatchedQ8)) => {
                     self.encode_gdn(
                         command, block, gdn_index, sessions, hidden, conv_dim, value_dim,
                     )?;
                     gdn_index += 1;
                 }
-                MetalBlock::Attn(_) => {
+                (MetalBlock::Gdn(_), MixerMode::Gdn(GdnMixerMode::PerLane)) => {
+                    let encoder = KernelEncoder::begin(command);
+                    for session in sessions.iter_mut() {
+                        self.forward.encode_moe_mixer_prep_by_index(
+                            &encoder,
+                            block_index,
+                            position,
+                            session,
+                        )?;
+                    }
+                    encoder.end();
+                    gdn_index += 1;
+                }
+                (MetalBlock::Attn(_), MixerMode::Attention) => {
                     let encoder = KernelEncoder::begin(command);
                     for session in sessions.iter_mut() {
                         self.forward.encode_moe_mixer_prep_by_index(
@@ -1034,8 +1441,27 @@ impl<'a> MoeBatch16Executor<'a> {
                     }
                     encoder.end();
                 }
+                _ => {
+                    return Err(MoeBatch16Error::Validation(format!(
+                        "block {block_index} execution plan no longer matches model"
+                    )));
+                }
             }
-            self.encode_packed_ffn(command, block, block_index, sessions, hidden)?;
+            match block_plan.routed {
+                RoutedGateUpMode::PackedQ4 => {
+                    self.encode_packed_ffn(command, block, block_index, sessions, hidden)?;
+                }
+                RoutedGateUpMode::PerLane => {
+                    for session in sessions.iter_mut() {
+                        self.forward
+                            .encode_moe_ffn_after_mixer_production_by_index(
+                                command,
+                                block_index,
+                                session,
+                            )?;
+                    }
+                }
+            }
         }
 
         let encoder = KernelEncoder::begin(command);
@@ -1050,28 +1476,86 @@ impl<'a> MoeBatch16Executor<'a> {
             )?;
         }
         encoder.end();
-        self.blit_rows_from_sessions(command, sessions, &self.scratch.rows, |session| &session.h)?;
-        let encoder = KernelEncoder::begin(command);
-        encode_mat_vec_q6_k_batch_f32(
-            self.forward.ctx,
-            &encoder,
-            &self.forward.model.lm_head,
-            &self.scratch.rows,
-            &self.scratch.logits,
-            hidden,
-            vocab,
-            MOE_BATCH16_WIDTH,
-        )?;
-        encode_argmax_f32_greedy(
-            self.forward.ctx,
-            &encoder,
-            &self.scratch.logits,
-            &self.scratch.selections,
-            MOE_BATCH16_WIDTH,
-            vocab,
-        )?;
-        encoder.end();
-        self.blit_logits(command, sessions, vocab)?;
+        match self.plan.head {
+            HeadMode::BatchedQ6 => {
+                self.blit_rows_from_sessions(command, sessions, &self.scratch.rows, |session| {
+                    &session.h
+                })?;
+                let encoder = KernelEncoder::begin(command);
+                encode_mat_vec_q6_k_batch_f32(
+                    self.forward.ctx,
+                    &encoder,
+                    &self.forward.model.lm_head,
+                    &self.scratch.rows,
+                    &self.scratch.logits,
+                    hidden,
+                    vocab,
+                    MOE_BATCH16_WIDTH,
+                )?;
+                encode_argmax_f32_greedy(
+                    self.forward.ctx,
+                    &encoder,
+                    &self.scratch.logits,
+                    &self.scratch.selections,
+                    MOE_BATCH16_WIDTH,
+                    vocab,
+                )?;
+                encoder.end();
+                self.blit_logits(command, sessions, vocab)?;
+            }
+            HeadMode::BatchedQ8 => {
+                self.blit_rows_from_sessions(command, sessions, &self.scratch.rows, |session| {
+                    &session.h
+                })?;
+                let encoder = KernelEncoder::begin(command);
+                encode_mat_vec_q8_0_batch_f32(
+                    self.forward.ctx,
+                    &encoder,
+                    &self.forward.model.lm_head,
+                    &self.scratch.rows,
+                    &self.scratch.logits,
+                    hidden,
+                    vocab,
+                    MOE_BATCH16_WIDTH,
+                )?;
+                encode_argmax_f32_greedy(
+                    self.forward.ctx,
+                    &encoder,
+                    &self.scratch.logits,
+                    &self.scratch.selections,
+                    MOE_BATCH16_WIDTH,
+                    vocab,
+                )?;
+                encoder.end();
+                self.blit_logits(command, sessions, vocab)?;
+            }
+            HeadMode::PerLane => {
+                let encoder = KernelEncoder::begin(command);
+                for session in sessions.iter() {
+                    encode_mat_vec_dispatch(
+                        self.forward.ctx,
+                        &encoder,
+                        &self.forward.model.lm_head,
+                        &session.h,
+                        &session.logits,
+                        hidden,
+                        vocab,
+                    )?;
+                }
+                encoder.end();
+                self.blit_session_logits_to_pack(command, sessions, vocab)?;
+                let encoder = KernelEncoder::begin(command);
+                encode_argmax_f32_greedy(
+                    self.forward.ctx,
+                    &encoder,
+                    &self.scratch.logits,
+                    &self.scratch.selections,
+                    MOE_BATCH16_WIDTH,
+                    vocab,
+                )?;
+                encoder.end();
+            }
+        }
         Ok(())
     }
 
@@ -1257,8 +1741,11 @@ impl<'a> MoeBatch16Executor<'a> {
         sessions: &[&mut MetalSession; MOE_BATCH16_WIDTH],
         destination: impl Fn(&MetalSession) -> &MetalTensor,
     ) -> Result<(), MoeBatch16Error> {
-        let row_bytes = u64::try_from(self.forward.model.arch.hidden_size as usize * 4)
-            .map_err(|_| MoeBatch16Error::Validation("row byte width overflow".into()))?;
+        let row_bytes = u64::try_from(checked_mul(
+            &[self.forward.model.arch.hidden_size as usize, 4],
+            "row byte width",
+        )?)
+        .map_err(|_| MoeBatch16Error::Validation("row byte width overflow".into()))?;
         let blit = BlitEncoder::begin(command);
         for (slot, session) in sessions.iter().enumerate() {
             let destination = destination(session);
@@ -1281,8 +1768,11 @@ impl<'a> MoeBatch16Executor<'a> {
         destination: &MetalTensor,
         source: impl Fn(&MetalSession) -> &MetalTensor,
     ) -> Result<(), MoeBatch16Error> {
-        let row_bytes = u64::try_from(self.forward.model.arch.hidden_size as usize * 4)
-            .map_err(|_| MoeBatch16Error::Validation("row byte width overflow".into()))?;
+        let row_bytes = u64::try_from(checked_mul(
+            &[self.forward.model.arch.hidden_size as usize, 4],
+            "row byte width",
+        )?)
+        .map_err(|_| MoeBatch16Error::Validation("row byte width overflow".into()))?;
         let blit = BlitEncoder::begin(command);
         for (slot, session) in sessions.iter().enumerate() {
             let source = source(session);
@@ -1304,7 +1794,7 @@ impl<'a> MoeBatch16Executor<'a> {
         sessions: &[&mut MetalSession; MOE_BATCH16_WIDTH],
         vocab: usize,
     ) -> Result<(), MoeBatch16Error> {
-        let row_bytes = u64::try_from(vocab * 4)
+        let row_bytes = u64::try_from(checked_mul(&[vocab, 4], "logit byte width")?)
             .map_err(|_| MoeBatch16Error::Validation("logit byte width overflow".into()))?;
         let blit = BlitEncoder::begin(command);
         for (slot, session) in sessions.iter().enumerate() {
@@ -1313,6 +1803,28 @@ impl<'a> MoeBatch16Executor<'a> {
                 self.scratch.logits.offset + slot as u64 * row_bytes,
                 &session.logits.buffer,
                 session.logits.offset,
+                row_bytes,
+            );
+        }
+        blit.end();
+        Ok(())
+    }
+
+    fn blit_session_logits_to_pack(
+        &self,
+        command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        sessions: &[&mut MetalSession; MOE_BATCH16_WIDTH],
+        vocab: usize,
+    ) -> Result<(), MoeBatch16Error> {
+        let row_bytes = u64::try_from(checked_mul(&[vocab, 4], "logit byte width")?)
+            .map_err(|_| MoeBatch16Error::Validation("logit byte width exceeds u64".into()))?;
+        let blit = BlitEncoder::begin(command);
+        for (slot, session) in sessions.iter().enumerate() {
+            blit.copy_buffer(
+                &session.logits.buffer,
+                session.logits.offset,
+                &self.scratch.logits.buffer,
+                self.scratch.logits.offset + slot as u64 * row_bytes,
                 row_bytes,
             );
         }
@@ -1419,5 +1931,132 @@ mod tests {
         arch.expert_feed_forward_length = u32::MAX;
         arch.hidden_size = u32::MAX;
         assert!(moe_batch16_scratch_bytes(&arch).is_err());
+    }
+
+    #[test]
+    fn a3b_selects_all_exact_batched_modes() {
+        let arch = a3b_arch();
+        validate_architecture(&arch).unwrap();
+        assert_eq!(
+            select_gdn_mode(
+                GgmlType::Q8_0,
+                GgmlType::Q8_0,
+                GgmlType::Q8_0,
+                2048,
+                8192,
+                4096
+            )
+            .unwrap(),
+            GdnMixerMode::BatchedQ8
+        );
+        assert_eq!(
+            select_routed_mode(GgmlType::Q4_K, GgmlType::Q4_K, 2048, 512, 256, 8).unwrap(),
+            RoutedGateUpMode::PackedQ4
+        );
+        assert_eq!(
+            select_head_mode(GgmlType::Q6_K, 2048, 248_320).unwrap(),
+            HeadMode::BatchedQ6
+        );
+    }
+
+    #[test]
+    fn mtp_metadata_does_not_change_base_eligibility() {
+        let mut arch = a3b_arch();
+        arch.mtp_n_hidden_layers = 2;
+        validate_architecture(&arch).unwrap();
+    }
+
+    #[test]
+    fn a10b_geometry_and_mixed_routed_modes_are_supported() {
+        let mut arch = a3b_arch();
+        arch.n_layer = 48;
+        arch.hidden_size = 3072;
+        arch.n_q_heads = 32;
+        arch.gdn_n_v_heads = 64;
+        arch.expert_feed_forward_length = 1024;
+        arch.expert_shared_feed_forward_length = 1024;
+        validate_architecture(&arch).unwrap();
+        assert_eq!(
+            select_gdn_mode(
+                GgmlType::Q8_0,
+                GgmlType::Q8_0,
+                GgmlType::Q8_0,
+                3072,
+                12_288,
+                8192,
+            )
+            .unwrap(),
+            GdnMixerMode::BatchedQ8
+        );
+        assert_eq!(
+            select_routed_mode(GgmlType::Q4_K, GgmlType::Q4_K, 3072, 1024, 256, 8).unwrap(),
+            RoutedGateUpMode::PackedQ4
+        );
+        assert_eq!(
+            select_routed_mode(GgmlType::Q5_K, GgmlType::Q5_K, 3072, 1024, 256, 8).unwrap(),
+            RoutedGateUpMode::PerLane
+        );
+        assert_eq!(
+            select_head_mode(GgmlType::Q8_0, 3072, 248_320).unwrap(),
+            HeadMode::BatchedQ8
+        );
+    }
+
+    #[test]
+    fn iq3_routed_falls_back_while_q8_head_batches() {
+        assert_eq!(
+            select_routed_mode(GgmlType::IQ3_S, GgmlType::IQ3_S, 3072, 1024, 256, 8,).unwrap(),
+            RoutedGateUpMode::PerLane
+        );
+        assert_eq!(
+            select_head_mode(GgmlType::Q8_0, 3072, 248_320).unwrap(),
+            HeadMode::BatchedQ8
+        );
+    }
+
+    #[test]
+    fn unsupported_modes_and_no_batched_stage_are_rejected() {
+        assert!(select_routed_mode(GgmlType::F16, GgmlType::F16, 2048, 512, 256, 8).is_err());
+        assert!(select_head_mode(GgmlType::I32, 2048, 1024).is_err());
+        assert!(!has_meaningful_batched_stage(
+            [GdnMixerMode::PerLane],
+            [RoutedGateUpMode::PerLane],
+            HeadMode::PerLane,
+        ));
+    }
+
+    #[test]
+    fn architecture_rejects_overflow_and_true_mixer_abi_failures() {
+        let mut overflow = a3b_arch();
+        overflow.hidden_size = u32::MAX;
+        overflow.expert_count = u32::MAX;
+        overflow.expert_feed_forward_length = u32::MAX;
+        assert!(validate_architecture(&overflow).is_err());
+
+        let mut bad_gdn = a3b_arch();
+        bad_gdn.gdn_head_dim = 64;
+        assert!(validate_architecture(&bad_gdn).is_err());
+        bad_gdn = a3b_arch();
+        bad_gdn.gdn_n_v_heads = 31;
+        assert!(validate_architecture(&bad_gdn).is_err());
+
+        let mut bad_attention = a3b_arch();
+        bad_attention.attn_head_dim = 128;
+        assert!(validate_architecture(&bad_attention).is_err());
+        bad_attention = a3b_arch();
+        bad_attention.n_q_heads = 15;
+        assert!(validate_architecture(&bad_attention).is_err());
+
+        let mut zero_layers = a3b_arch();
+        zero_layers.n_layer = 0;
+        assert!(validate_architecture(&zero_layers).is_err());
+
+        let mut fractional_rope = a3b_arch();
+        fractional_rope.partial_rotary_factor = 64.5 / 256.0;
+        assert!(validate_architecture(&fractional_rope).is_err());
+
+        assert!(
+            validate_matvec_contract(GgmlType::Q8_0, 2048, u32::MAX as usize + 1, "test").is_err()
+        );
     }
 }

@@ -2911,6 +2911,18 @@ cancellation/poisoning, and incomplete-cohort serial fallback. The integrated
 path now clears that gate at `155.614` aggregate token/s and `1.231x` complete
 process wall over ordinary serial JSONL, with byte-identical outputs.
 
+The product executor is now capability-planned rather than tied to one model
+filename. Each block can independently use exact Q8 GDN, packed Q4 gate/up, or
+production per-lane fallback, and the head can use exact token-axis Q6 or Q8.
+The unchanged Qwen3.6 A3B Q4 composition remains exact at `158.269` aggregate
+token/s. Qwen3.5 A3B IQ4_XS also remains exact and improves serial wall
+`8.77 -> 7.28 s`, but independent B=2 is slightly better at `7.17 s`; keep B=2
+as that composition's preferred width. A short MTP-tagged Q4 smoke is exact.
+This establishes the durable boundary: tensor/kernel contracts decide whether a
+stage can batch, while measured whole-plan economics decide which width a future
+scheduler selects. Do not replace that distinction with another filename
+allowlist. A10B remains `HOLD` pending a memory-safe exact probe against B=8/B=2.
+
 DeepSeek K160 common-route B=8 is also closed at its cheapest model-backed
 floor. Giving all eight rows the same six experts, the production all-slot
 control and six N=8 Q3_K/Q4_K mat-mat chains move `1.9760 -> 1.8630 ms/layer`

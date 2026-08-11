@@ -1,6 +1,6 @@
 use super::*;
 use qwen_llm::dense_batch8::DENSE_BATCH8_WIDTH;
-use qwen_llm::moe_batch16::MOE_BATCH16_WIDTH;
+use qwen_llm::moe_batch16::{HeadMode, MOE_BATCH16_WIDTH, MoeBatch16PlanTelemetry};
 use qwen_llm::runtime::{DenseBatch8SequenceExecutor, MoeBatch16SequenceExecutor, RuntimeError};
 
 const PAD_TOKEN: i32 = 0;
@@ -22,6 +22,7 @@ trait FixedCohortExecutor<const WIDTH: usize> {
     const PLANNER_BACKEND: &'static str;
     const TELEMETRY_PREFIX: &'static str;
     const PLANNER_TELEMETRY_PREFIX: &'static str;
+    const TELEMETRY_SCHEMA_VERSION: u32;
 
     fn validate(
         &self,
@@ -39,6 +40,10 @@ trait FixedCohortExecutor<const WIDTH: usize> {
     fn scratch_bytes(&self) -> Option<u64> {
         None
     }
+
+    fn moe_plan_telemetry(&self) -> Option<MoeBatch16PlanTelemetry> {
+        None
+    }
 }
 
 impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_> {
@@ -48,6 +53,7 @@ impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_>
     const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v1";
     const TELEMETRY_PREFIX: &'static str = "dense_batch8";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "dense_batch8_planner";
+    const TELEMETRY_SCHEMA_VERSION: u32 = 2;
 
     fn validate(
         &self,
@@ -81,10 +87,11 @@ impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_>
 impl FixedCohortExecutor<MOE_BATCH16_WIDTH> for MoeBatch16SequenceExecutor<'_> {
     const DISPLAY_NAME: &'static str = "MoE B=16";
     const PREFIX_FANOUT_ENV: &'static str = MOE_PREFIX_FANOUT_ENV;
-    const COHORT_BACKEND: &'static str = "qwen_moe_static_batch16_v1";
+    const COHORT_BACKEND: &'static str = "qwen_moe_capability_batch16_v2";
     const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v1";
     const TELEMETRY_PREFIX: &'static str = "moe_batch16";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "moe_batch16_planner";
+    const TELEMETRY_SCHEMA_VERSION: u32 = 3;
 
     fn validate(
         &self,
@@ -109,6 +116,10 @@ impl FixedCohortExecutor<MOE_BATCH16_WIDTH> for MoeBatch16SequenceExecutor<'_> {
 
     fn scratch_bytes(&self) -> Option<u64> {
         Some(MoeBatch16SequenceExecutor::scratch_bytes(self))
+    }
+
+    fn moe_plan_telemetry(&self) -> Option<MoeBatch16PlanTelemetry> {
+        Some(MoeBatch16SequenceExecutor::plan_telemetry(self))
     }
 }
 
@@ -282,6 +293,16 @@ struct CohortTelemetry {
     executor_scratch_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     executor_scratch_incremental_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moe_q8_batched_gdn_blocks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moe_packed_q4_gate_up_blocks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moe_per_lane_gdn_blocks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moe_per_lane_gate_up_blocks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moe_head_mode: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1027,10 +1048,11 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             terminal_token_target_transition_consumed: false,
         });
     }
+    let moe_plan = executor.moe_plan_telemetry();
     Ok((
         outputs,
         CohortTelemetry {
-            schema_version: 2,
+            schema_version: E::TELEMETRY_SCHEMA_VERSION,
             backend: E::COHORT_BACKEND,
             cohort_index,
             width: WIDTH,
@@ -1067,6 +1089,15 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             // current_allocated_size and memory_signals. Adding it here would
             // charge the MoE scratch twice.
             executor_scratch_incremental_bytes: executor.scratch_bytes().map(|_| 0),
+            moe_q8_batched_gdn_blocks: moe_plan.map(|plan| plan.q8_batched_gdn_blocks),
+            moe_packed_q4_gate_up_blocks: moe_plan.map(|plan| plan.packed_q4_gate_up_blocks),
+            moe_per_lane_gdn_blocks: moe_plan.map(|plan| plan.per_lane_gdn_blocks),
+            moe_per_lane_gate_up_blocks: moe_plan.map(|plan| plan.per_lane_gate_up_blocks),
+            moe_head_mode: moe_plan.map(|plan| match plan.head_mode {
+                HeadMode::BatchedQ6 => "batched_q6",
+                HeadMode::BatchedQ8 => "batched_q8",
+                HeadMode::PerLane => "per_lane",
+            }),
         },
     ))
 }

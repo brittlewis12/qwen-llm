@@ -23230,3 +23230,32 @@ Interpretation:
   contributes little by 16K.
 - The combined branch is still a stronger overall decode checkpoint than either
   attention-only or pipelined submission.
+
+## 2026-08-11 — Qwen MoE B=8 Whole-Model KILL
+
+Status: the fixed-cohort Qwen MoE branch is closed before product integration.
+
+The initial mechanism was stronger than the old GDN-only replay. A complete
+three-GDN plus one-attention cell improved `1.3705x` at position 1,024 and
+`1.2918x` in a later cell at 32K. Across all 40 blocks plus a batched LM head,
+the aggressive arm moved `78.3039 -> 54.8739 ms` GPU (`1.4270x`, about `145.8`
+aggregate token/s). This was about 16% above the independently measured B=8
+queue-overlap control, so it legitimately advanced to continuation testing.
+
+The continuation gate rejected it. Packed-all diverged one lane at step 4;
+packed-routed diverged at step 15 even with a serial LM head. A stage oracle
+showed Q4 expert gate/up was bitwise equal, while the selected Q5 kernels differed
+only by alternate-kernel rounding (`<=9.095e-13`). Keeping B=8 Q4 gate/up and the
+replay control's singleton generic Q5 down made routed inner/output bitwise equal.
+
+That corrected arm stayed greedy-identical for 32 generated steps. At step 38,
+both replay and candidate diverged together from singleton, proving the remaining
+limit belongs to the existing GDN mat-mat schedule. Corrected timing was only
+`78.0269 -> 64.6661 ms` (`1.2066x`) and `1.0335x` beyond replay, or about `123.7`
+aggregate token/s versus `125.8` for independent queues.
+
+Decision: delete the spike and do not build a Qwen MoE static scheduler. Dense
+B=8 remains promoted; independent queues remain the simpler cross-family
+fallback. Reopen only for a materially new exact organization, or a realistic
+functional-equivalence packet that remains at least 10% ahead of queue overlap.
+Full result: `docs/bench/2026-08-11-qwen-moe-b8-cell-kill/README.md`.

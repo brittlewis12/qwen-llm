@@ -2799,6 +2799,22 @@ request overlap, prefix sharing, and layer-synchronous execution. Primary BS=1
 changes should avoid hard-coding state ownership or layouts that make those
 facilities unnecessarily difficult later.
 
+The lane is now implementation-backed rather than hypothetical. Dense Qwen B=8
+ships for compatible JSONL cohorts, preserves input order, falls back leftovers
+to serial execution, and fans out shared prompt prefixes. Dense 27B whole-model
+decode reaches `2.57x` aggregate throughput at short context and `2.14x` at 16K.
+Independent-queue overlap remains the cross-family fallback (`1.44x` 0.8B,
+`1.47x` A3B, `1.37x` DeepSeek K160 at B=2).
+
+Qwen A3B static B=8 is closed after a complete whole-model spike. Aggressive
+packed execution reaches `1.43x` and beats B=8 independent queues by about 16%,
+but generated continuation diverges. Restricting the candidate to bitwise-exact
+incremental Q4 expert gate/up batching leaves only `1.2066x` over serial,
+`1.0335x` over the existing GDN replay, and about `123.7` aggregate token/s,
+below the `125.8` independent-queue control. Do not build a MoE static scheduler
+without a materially new exact organization or a product-approved functional
+equivalence packet that stays at least 10% ahead of queue overlap.
+
 Low-cost architectural seams to preserve now:
 
 - Keep mutable target, draft, KV, GDN, and rollback state sequence-owned.
@@ -2850,9 +2866,10 @@ for aggregate throughput.
   residency control
   for the unexplained first-prefill gap; do not infer a residency program from
   the aggregate gap alone.
-- Multi-request S8 replay, shared-prefix multi-query execution, independent
-  streams, and paged attention remain in the secondary serving lane. Their
-  serving evidence does not rank against serial BS=1.
+- Dense fixed-cohort B=8 and shared-prefix fanout are active secondary serving
+  capabilities. Qwen MoE static B=8 is closed as described above; independent
+  streams and future paged attention remain in this lane. Their serving evidence
+  does not rank against serial BS=1.
 - Defer ICB/MTL4, binary archives, no-copy loading, and residency sets as warm
   throughput priorities. Revisit them for process-cold load or memory objectives.
 

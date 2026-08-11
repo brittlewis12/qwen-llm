@@ -2817,8 +2817,17 @@ two sessions plus maximum prefill scratch. Dense 0.8B and A3B product smokes
 match ordinary serial output exactly across heterogeneous prompts and token
 limits, including paired-to-serial handoff. Keep dense B=8, stdin, prompt lookup,
 prefix-cache mutation, and request sidecars fail-closed. Call the capability
-resident concurrency, not batching. Carry the same lifecycle contract to
-DeepSeek only after pricing its materially larger per-session state.
+resident concurrency, not batching.
+
+DeepSeek V4 now exposes the same surface through worker-local sessions over one
+shared immutable residency. Its memory plan admits two sessions up front; K160
+prices `99.15 GB` including reserve and observes `8.683 GB` of two-session state
+against an `8.692 GB` session inventory. Keep packed prefill serial: overlapping
+two prefills is exact but expands them enough to lose whole-request wall. Release
+both prepared workers only for generation. Greedy and heterogeneous seeded
+sampling fixtures match serial output exactly; equal-length sampled generation
+retains `1.280x` aggregate movement. Fail closed when the command-queue-scoped
+DeepSeek residency-set opt-in is active.
 
 Qwen A3B static B=8 is closed after a complete whole-model spike. Aggressive
 packed execution reaches `1.43x` and beats B=8 independent queues by about 16%,

@@ -1,5 +1,6 @@
 use super::*;
 use qwen_llm::runtime::IndependentQueue2SequenceExecutor;
+use std::sync::{Arc, mpsc};
 
 const WIDTH: usize = 2;
 
@@ -121,15 +122,53 @@ struct PairTelemetry {
     aggregate_transition_tps: f64,
 }
 
-pub(super) fn validate_cli(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
-    validate_cli_with_greedy_mode(args, explicit, configured_greedy_gpu_argmax_mode())
+struct DeepSeekPreparedLane {
+    request: DeepSeekV4PreparedRequest,
+    session: DeepSeekV4Session,
+    logits: Vec<f32>,
+    session_ms: f64,
+    prefill_mode: &'static str,
+    prefill_ms: f64,
 }
 
-fn validate_cli_with_greedy_mode(
-    args: &Args,
-    explicit: ExplicitCliOptions,
-    greedy_gpu_mode: GreedyGpuArgmaxMode,
-) -> Result<()> {
+struct DeepSeekCompletedLane {
+    output: RequestOutput,
+    line: usize,
+    session_ms: f64,
+    prefill_mode: &'static str,
+    prefill_ms: f64,
+    generation_ms: f64,
+    transitions: usize,
+    selector_telemetry: DeepSeekV4MultigroupSelectorTelemetry,
+}
+
+#[derive(Debug, Serialize)]
+struct DeepSeekPairTelemetry {
+    schema_version: u32,
+    backend: &'static str,
+    pair_index: usize,
+    prompt_tokens: [usize; WIDTH],
+    requested_tokens: [usize; WIDTH],
+    generated_tokens: usize,
+    productive_transitions: usize,
+    pair_wall_ms: f64,
+    serial_prefill_ms: f64,
+    concurrent_generation_ms: f64,
+    session_allocation_delta_bytes: u64,
+    session_priced_upper_bytes: u64,
+    runtime_allocation_upper_bytes: u64,
+    aggregate_generated_tps: f64,
+    aggregate_transition_tps: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeepSeekWorkerControl {
+    Prepare,
+    Generate,
+    Abort,
+}
+
+pub(super) fn validate_cli(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
     let Some(concurrency) = args.concurrency else {
         return Ok(());
     };
@@ -152,10 +191,6 @@ fn validate_cli_with_greedy_mode(
         metadata.is_file(),
         "--concurrency requires a regular JSONL file, got {}",
         requests_path.display()
-    );
-    ensure!(
-        args.temperature == 0.0,
-        "--concurrency currently requires greedy decoding (--temp 0)"
     );
     ensure!(
         !args.prompt_lookup,
@@ -182,7 +217,7 @@ fn validate_cli_with_greedy_mode(
             && !explicit.durable_prefix_cache_min_tokens,
         "--concurrency does not yet compose with durable prefix caching"
     );
-    validate_greedy_gpu_mode(greedy_gpu_mode)
+    Ok(())
 }
 
 fn validate_greedy_gpu_mode(mode: GreedyGpuArgmaxMode) -> Result<()> {
@@ -193,19 +228,43 @@ fn validate_greedy_gpu_mode(mode: GreedyGpuArgmaxMode) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_model_family(
+pub(super) fn validate_model_family(args: &Args, model_family: Option<ModelFamily>) -> Result<()> {
+    validate_model_family_with_modes(
+        args.concurrency,
+        args.temperature,
+        model_family,
+        configured_greedy_gpu_argmax_mode(),
+        qwen_llm::env_flag::read_default_off("QWEN_DSV4_RESIDENCY_SET"),
+    )
+}
+
+fn validate_model_family_with_modes(
     concurrency: Option<usize>,
+    temperature: f32,
     model_family: Option<ModelFamily>,
+    greedy_gpu_mode: GreedyGpuArgmaxMode,
+    deepseek_residency_set: bool,
 ) -> Result<()> {
-    ensure!(
-        concurrency.is_none()
-            || matches!(
-                model_family,
-                Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe)
-            ),
-        "--concurrency currently requires a Qwen model"
-    );
-    Ok(())
+    if concurrency.is_none() {
+        return Ok(());
+    }
+    match model_family {
+        Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) => {
+            ensure!(
+                temperature == 0.0,
+                "Qwen --concurrency currently requires greedy decoding (--temp 0)"
+            );
+            validate_greedy_gpu_mode(greedy_gpu_mode)
+        }
+        Some(ModelFamily::DeepSeek4) => {
+            ensure!(
+                !deepseek_residency_set,
+                "--concurrency requires QWEN_DSV4_RESIDENCY_SET=0 because DeepSeek residency sets are command-queue scoped"
+            );
+            Ok(())
+        }
+        None => bail!("--concurrency requires a supported Qwen or DeepSeek V4 model"),
+    }
 }
 
 pub(super) fn run_file(
@@ -613,6 +672,488 @@ fn write_outputs(stdout: &mut impl Write, outputs: &[RequestOutput]) -> Result<(
     Ok(())
 }
 
+fn prepare_deepseek_lane(
+    ctx: &MetalContext,
+    residency: &Arc<DeepSeekV4MetalResidency>,
+    selector_plan: &DeepSeekV4MultigroupSelectorPlan,
+    request: DeepSeekV4PreparedRequest,
+    prefill_chunk_tokens: usize,
+    vocab_size: u32,
+) -> Result<DeepSeekPreparedLane> {
+    shutdown::checkpoint()?;
+    ensure!(
+        request.required_forwards <= residency.session_capacity().forward_limit(),
+        "request {} requires {} forwards, beyond the shared session budget {}",
+        request.id,
+        request.required_forwards,
+        residency.session_capacity().forward_limit(),
+    );
+    let session_t0 = Instant::now();
+    let mut session = DeepSeekV4Session::new_shared(ctx, residency.clone()).with_context(|| {
+        format!(
+            "create concurrent DeepSeek session for request {}",
+            request.id
+        )
+    })?;
+    selector_plan.seal_session(&mut session, &request.id)?;
+    let session_ms = session_t0.elapsed().as_secs_f64() * 1e3;
+
+    let prefill_t0 = Instant::now();
+    let packed_chunk_count =
+        deepseek_v4_packed_chunk_count(request.prompt_token_ids.len(), prefill_chunk_tokens);
+    let prefill_mode = if packed_chunk_count > 0 {
+        execute_deepseek_v4_prompt_suffix(
+            &mut session,
+            ctx,
+            &request.prompt_token_ids,
+            prefill_chunk_tokens,
+        )
+        .with_context(|| format!("prefill concurrent request {}", request.id))?;
+        if packed_chunk_count == 1 {
+            "layer_major"
+        } else {
+            "layer_major_chunks"
+        }
+    } else {
+        for (index, &token) in request.prompt_token_ids.iter().enumerate() {
+            session.forward_token(ctx, token).with_context(|| {
+                format!(
+                    "forward concurrent request {} prompt token {index}",
+                    request.id
+                )
+            })?;
+        }
+        "singleton"
+    };
+    let logits = copy_deepseek_v4_logits(&session, vocab_size, "concurrent prompt")
+        .with_context(|| format!("copy request {} prompt logits", request.id))?;
+    deepseek_v4_debug_dump_logits_sha256(&request.id, &logits);
+    let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+    Ok(DeepSeekPreparedLane {
+        request,
+        session,
+        logits,
+        session_ms,
+        prefill_mode,
+        prefill_ms,
+    })
+}
+
+fn generate_deepseek_lane(
+    ctx: &MetalContext,
+    tokenizer: &Tokenizer,
+    vocab_size: u32,
+    stop_tokens: &[i32],
+    mut lane: DeepSeekPreparedLane,
+) -> Result<DeepSeekCompletedLane> {
+    let mut sampler = Sampler::new(lane.request.sampling)
+        .with_context(|| format!("initialize sampler for request {}", lane.request.id))?;
+    let mut generated_bytes = Vec::new();
+    let mut transition_index = 0usize;
+    let generation = generate_serial(
+        lane.logits,
+        lane.request.max_tokens,
+        stop_tokens,
+        &mut sampler,
+        |token| {
+            let piece = tokenizer
+                .try_decode_piece_bytes_exact(token)
+                .with_context(|| format!("decode request {} token {token}", lane.request.id))?;
+            generated_bytes.extend_from_slice(piece);
+            Ok(())
+        },
+        |token| {
+            let current_transition = transition_index;
+            let token = checked_deepseek_v4_token_id(
+                token,
+                vocab_size,
+                &format!(
+                    "request {} generated transition {current_transition}",
+                    lane.request.id
+                ),
+            )?;
+            lane.session.forward_token(ctx, token).with_context(|| {
+                format!(
+                    "forward request {} generated transition {current_transition}",
+                    lane.request.id
+                )
+            })?;
+            let logits = copy_deepseek_v4_logits(&lane.session, vocab_size, "continuing")
+                .with_context(|| {
+                    format!(
+                        "copy request {} continuing logits after transition {current_transition}",
+                        lane.request.id
+                    )
+                })?;
+            transition_index += 1;
+            Ok(logits)
+        },
+    )?;
+    let selector_telemetry = lane.session.multigroup_selector_telemetry();
+    let output = RequestOutput {
+        id: lane.request.id,
+        prompt_tokens: lane.request.prompt_tokens,
+        generated_tokens: generation.tokens.len(),
+        generated_token_sha256: generated_token_sha256(&generation.tokens),
+        generated_text: String::from_utf8_lossy(&generated_bytes).into_owned(),
+        stop_reason: generation.stop_reason,
+        terminal_token_target_transition_consumed: false,
+    };
+    Ok(DeepSeekCompletedLane {
+        output,
+        line: lane.request.line,
+        session_ms: lane.session_ms,
+        prefill_mode: lane.prefill_mode,
+        prefill_ms: lane.prefill_ms,
+        generation_ms: generation.wall_ms,
+        transitions: generation.transitions,
+        selector_telemetry,
+    })
+}
+
+fn emit_deepseek_completion(
+    selector_plan: &DeepSeekV4MultigroupSelectorPlan,
+    completion: &DeepSeekCompletedLane,
+    prefill_chunk_tokens: usize,
+    effective_concurrency: usize,
+) -> Result<()> {
+    selector_plan.emit_completion(&completion.output.id, completion.selector_telemetry)?;
+    let prefill_tps = if completion.prefill_ms > 0.0 {
+        completion.output.prompt_tokens as f64 / (completion.prefill_ms / 1e3)
+    } else {
+        0.0
+    };
+    let decode_tps = if completion.generation_ms > 0.0 {
+        completion.output.generated_tokens as f64 / (completion.generation_ms / 1e3)
+    } else {
+        0.0
+    };
+    eprintln!(
+        concat!(
+            "deepseek_v4 stats: request={} line={} prompt_kind=raw prefill_mode={} prefill_chunk_cap={} prompt_tokens={} ",
+            "generated_tokens={} transitions={} stop_reason={} session_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} ",
+            "generation_ms={:.1} decode_tps={:.2} concurrency={} build_commit={} build_dirty={}"
+        ),
+        completion.output.id,
+        completion.line,
+        completion.prefill_mode,
+        prefill_chunk_tokens,
+        completion.output.prompt_tokens,
+        completion.output.generated_tokens,
+        completion.transitions,
+        completion.output.stop_reason.as_str(),
+        completion.session_ms,
+        completion.prefill_ms,
+        prefill_tps,
+        completion.generation_ms,
+        decode_tps,
+        effective_concurrency,
+        env!("QWEN_BUILD_COMMIT"),
+        env!("QWEN_BUILD_DIRTY"),
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_deepseek_worker(
+    ctx: &MetalContext,
+    residency: Arc<DeepSeekV4MetalResidency>,
+    selector_plan: &DeepSeekV4MultigroupSelectorPlan,
+    tokenizer: &Tokenizer,
+    vocab_size: u32,
+    stop_tokens: &[i32],
+    request: DeepSeekV4PreparedRequest,
+    prefill_chunk_tokens: usize,
+    control: mpsc::Receiver<DeepSeekWorkerControl>,
+    prepared_tx: mpsc::Sender<bool>,
+) -> Result<DeepSeekCompletedLane> {
+    match control
+        .recv()
+        .context("receive DeepSeek concurrency prepare control")?
+    {
+        DeepSeekWorkerControl::Prepare => {}
+        DeepSeekWorkerControl::Abort => bail!("DeepSeek concurrency worker aborted before prepare"),
+        DeepSeekWorkerControl::Generate => {
+            bail!("DeepSeek concurrency worker received generation before prepare")
+        }
+    }
+    let prepared = prepare_deepseek_lane(
+        ctx,
+        &residency,
+        selector_plan,
+        request,
+        prefill_chunk_tokens,
+        vocab_size,
+    );
+    prepared_tx
+        .send(prepared.is_ok())
+        .context("publish DeepSeek concurrency prepare status")?;
+    match control
+        .recv()
+        .context("receive DeepSeek concurrency generation control")?
+    {
+        DeepSeekWorkerControl::Generate => {
+            generate_deepseek_lane(ctx, tokenizer, vocab_size, stop_tokens, prepared?)
+        }
+        DeepSeekWorkerControl::Abort => match prepared {
+            Ok(_) => bail!("DeepSeek concurrency worker aborted after peer setup failure"),
+            Err(error) => Err(error),
+        },
+        DeepSeekWorkerControl::Prepare => {
+            bail!("DeepSeek concurrency worker received duplicate prepare control")
+        }
+    }
+}
+
+fn run_deepseek_pair(
+    contexts: [&MetalContext; WIDTH],
+    residency: &Arc<DeepSeekV4MetalResidency>,
+    selector_plan: &DeepSeekV4MultigroupSelectorPlan,
+    tokenizer: &Tokenizer,
+    vocab_size: u32,
+    stop_tokens: &[i32],
+    requests: [DeepSeekV4PreparedRequest; WIDTH],
+    prefill_chunk_tokens: usize,
+    session_priced_upper_bytes: u64,
+    pair_index: usize,
+) -> Result<([DeepSeekCompletedLane; WIDTH], DeepSeekPairTelemetry)> {
+    let prompt_tokens = [requests[0].prompt_tokens, requests[1].prompt_tokens];
+    let requested_tokens = [requests[0].max_tokens, requests[1].max_tokens];
+    let [left_request, right_request] = requests;
+    let pair_t0 = Instant::now();
+    let before_sessions = contexts[0].current_allocated_size();
+    let runtime_allocation_upper_bytes = session_priced_upper_bytes
+        .checked_mul(WIDTH as u64)
+        .and_then(|bytes| bytes.checked_add(DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES))
+        .context("DeepSeek two-session runtime byte overflow")?;
+    let (completed, serial_prefill_ms, concurrent_generation_ms, session_allocation_delta_bytes) =
+        std::thread::scope(|scope| -> Result<_> {
+            let (left_control_tx, left_control_rx) = mpsc::channel();
+            let (right_control_tx, right_control_rx) = mpsc::channel();
+            let (left_prepared_tx, left_prepared_rx) = mpsc::channel();
+            let (right_prepared_tx, right_prepared_rx) = mpsc::channel();
+            let left_residency = residency.clone();
+            let right_residency = residency.clone();
+            let left_handle = scope.spawn(move || {
+                run_deepseek_worker(
+                    contexts[0],
+                    left_residency,
+                    selector_plan,
+                    tokenizer,
+                    vocab_size,
+                    stop_tokens,
+                    left_request,
+                    prefill_chunk_tokens,
+                    left_control_rx,
+                    left_prepared_tx,
+                )
+            });
+            let right_handle = scope.spawn(move || {
+                run_deepseek_worker(
+                    contexts[1],
+                    right_residency,
+                    selector_plan,
+                    tokenizer,
+                    vocab_size,
+                    stop_tokens,
+                    right_request,
+                    prefill_chunk_tokens,
+                    right_control_rx,
+                    right_prepared_tx,
+                )
+            });
+
+            let prefill_t0 = Instant::now();
+            left_control_tx
+                .send(DeepSeekWorkerControl::Prepare)
+                .context("start DeepSeek concurrency lane 0 prefill")?;
+            let left_prepared = left_prepared_rx.recv().unwrap_or(false);
+            let right_prepared = if left_prepared {
+                right_control_tx
+                    .send(DeepSeekWorkerControl::Prepare)
+                    .context("start DeepSeek concurrency lane 1 prefill")?;
+                right_prepared_rx.recv().unwrap_or(false)
+            } else {
+                false
+            };
+            let serial_prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+
+            if !left_prepared || !right_prepared {
+                let _ = left_control_tx.send(DeepSeekWorkerControl::Abort);
+                let _ = right_control_tx.send(DeepSeekWorkerControl::Abort);
+                let left_result = left_handle.join();
+                let right_result = right_handle.join();
+                if !left_prepared {
+                    return match left_result {
+                        Ok(Err(error)) => Err(error),
+                        Ok(Ok(_)) => bail!("DeepSeek concurrency lane 0 failed without an error"),
+                        Err(_) => bail!("DeepSeek concurrency lane 0 panicked during prefill"),
+                    };
+                }
+                return match right_result {
+                    Ok(Err(error)) => Err(error),
+                    Ok(Ok(_)) => bail!("DeepSeek concurrency lane 1 failed without an error"),
+                    Err(_) => bail!("DeepSeek concurrency lane 1 panicked during prefill"),
+                };
+            }
+
+            let after_sessions = contexts[0].current_allocated_size();
+            let session_allocation_delta_bytes = after_sessions
+                .checked_sub(before_sessions)
+                .context("DeepSeek concurrent session allocation counter regressed")?;
+            ensure!(
+                session_allocation_delta_bytes <= runtime_allocation_upper_bytes,
+                "DeepSeek concurrent runtime allocation {session_allocation_delta_bytes} exceeds session-plus-reserve upper {runtime_allocation_upper_bytes}"
+            );
+
+            let generation_t0 = Instant::now();
+            left_control_tx
+                .send(DeepSeekWorkerControl::Generate)
+                .context("start DeepSeek concurrency lane 0 generation")?;
+            right_control_tx
+                .send(DeepSeekWorkerControl::Generate)
+                .context("start DeepSeek concurrency lane 1 generation")?;
+            let left_result = left_handle.join();
+            let right_result = right_handle.join();
+            let concurrent_generation_ms = generation_t0.elapsed().as_secs_f64() * 1e3;
+            let left =
+                left_result.map_err(|_| anyhow!("DeepSeek concurrency lane 0 panicked"))??;
+            let right =
+                right_result.map_err(|_| anyhow!("DeepSeek concurrency lane 1 panicked"))??;
+            Ok((
+                [left, right],
+                serial_prefill_ms,
+                concurrent_generation_ms,
+                session_allocation_delta_bytes,
+            ))
+        })?;
+    let pair_wall_ms = pair_t0.elapsed().as_secs_f64() * 1e3;
+    let generated_tokens = completed
+        .iter()
+        .map(|lane| lane.output.generated_tokens)
+        .sum::<usize>();
+    let productive_transitions = completed.iter().map(|lane| lane.transitions).sum::<usize>();
+    ensure!(
+        productive_transitions.checked_add(WIDTH) == Some(generated_tokens),
+        "DeepSeek concurrent pair violated aggregate N-1 transition semantics"
+    );
+    let aggregate_generated_tps = if concurrent_generation_ms > 0.0 {
+        generated_tokens as f64 / (concurrent_generation_ms / 1e3)
+    } else {
+        0.0
+    };
+    let aggregate_transition_tps = if concurrent_generation_ms > 0.0 {
+        productive_transitions as f64 / (concurrent_generation_ms / 1e3)
+    } else {
+        0.0
+    };
+    Ok((
+        completed,
+        DeepSeekPairTelemetry {
+            schema_version: 1,
+            backend: "deepseek_v4_independent_queues_v1",
+            pair_index,
+            prompt_tokens,
+            requested_tokens,
+            generated_tokens,
+            productive_transitions,
+            pair_wall_ms,
+            serial_prefill_ms,
+            concurrent_generation_ms,
+            session_allocation_delta_bytes,
+            session_priced_upper_bytes,
+            runtime_allocation_upper_bytes,
+            aggregate_generated_tps,
+            aggregate_transition_tps,
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_deepseek_file(
+    ctx: &MetalContext,
+    residency: DeepSeekV4MetalResidency,
+    selector_plan: &DeepSeekV4MultigroupSelectorPlan,
+    tokenizer: &Tokenizer,
+    vocab_size: u32,
+    stop_tokens: &[i32],
+    requests: Vec<DeepSeekV4PreparedRequest>,
+    prefill_chunk_tokens: usize,
+    session_priced_upper_bytes: u64,
+) -> Result<usize> {
+    ensure!(
+        !requests.is_empty(),
+        "DeepSeek concurrency requires requests"
+    );
+    let contexts = [
+        ctx.with_new_command_queue()
+            .context("create DeepSeek concurrency queue 0")?,
+        ctx.with_new_command_queue()
+            .context("create DeepSeek concurrency queue 1")?,
+    ];
+    let residency = Arc::new(residency);
+    let stdout_handle = std::io::stdout();
+    let mut stdout = stdout_handle.lock();
+    let mut executed = 0usize;
+    let mut requests = requests.into_iter();
+    let mut pair_index = 0usize;
+    while let Some(left) = requests.next() {
+        let Some(right) = requests.next() else {
+            let before_session = contexts[0].current_allocated_size();
+            let lane = prepare_deepseek_lane(
+                &contexts[0],
+                &residency,
+                selector_plan,
+                left,
+                prefill_chunk_tokens,
+                vocab_size,
+            )?;
+            let after_session = contexts[0].current_allocated_size();
+            let session_delta = after_session
+                .checked_sub(before_session)
+                .context("DeepSeek odd-tail allocation counter regressed")?;
+            let session_runtime_upper = session_priced_upper_bytes
+                .checked_add(DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES)
+                .context("DeepSeek odd-tail runtime byte overflow")?;
+            ensure!(
+                session_delta <= session_runtime_upper,
+                "DeepSeek odd-tail runtime allocation {session_delta} exceeds session-plus-reserve upper {session_runtime_upper}"
+            );
+            let completion =
+                generate_deepseek_lane(&contexts[0], tokenizer, vocab_size, stop_tokens, lane)?;
+            emit_deepseek_completion(selector_plan, &completion, prefill_chunk_tokens, 1)?;
+            write_outputs(&mut stdout, std::slice::from_ref(&completion.output))?;
+            executed += 1;
+            break;
+        };
+        let (completed, telemetry) = run_deepseek_pair(
+            [&contexts[0], &contexts[1]],
+            &residency,
+            selector_plan,
+            tokenizer,
+            vocab_size,
+            stop_tokens,
+            [left, right],
+            prefill_chunk_tokens,
+            session_priced_upper_bytes,
+            pair_index,
+        )?;
+        for lane in &completed {
+            emit_deepseek_completion(selector_plan, lane, prefill_chunk_tokens, WIDTH)?;
+        }
+        let outputs = completed.map(|lane| lane.output);
+        write_outputs(&mut stdout, &outputs)?;
+        eprintln!(
+            "deepseek_v4 concurrency_pair: {}",
+            serde_json::to_string(&telemetry)
+                .context("serialize DeepSeek concurrency telemetry")?
+        );
+        executed += WIDTH;
+        pair_index += 1;
+    }
+    Ok(executed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,59 +1225,82 @@ mod tests {
     }
 
     #[test]
-    fn cli_contract_is_greedy_file_scoped_and_cross_qwen() {
+    fn cli_contract_is_file_scoped_and_family_capability_aware() {
         let file = TestFile::new();
         let args = test_args(&file.0);
         assert_eq!(args.concurrency, Some(2));
-        validate_cli_with_greedy_mode(
-            &args,
-            ExplicitCliOptions::default(),
+        validate_cli(&args, ExplicitCliOptions::default()).unwrap();
+        validate_model_family_with_modes(
+            args.concurrency,
+            0.0,
+            Some(ModelFamily::Qwen35),
             GreedyGpuArgmaxMode::DefaultOff,
+            false,
         )
         .unwrap();
-        validate_model_family(args.concurrency, Some(ModelFamily::Qwen35)).unwrap();
-        validate_model_family(args.concurrency, Some(ModelFamily::Qwen35Moe)).unwrap();
-        assert!(validate_model_family(args.concurrency, Some(ModelFamily::DeepSeek4)).is_err());
-        assert!(validate_greedy_gpu_mode(GreedyGpuArgmaxMode::ExplicitRollback).is_err());
+        validate_model_family_with_modes(
+            args.concurrency,
+            0.0,
+            Some(ModelFamily::Qwen35Moe),
+            GreedyGpuArgmaxMode::DefaultOff,
+            false,
+        )
+        .unwrap();
+        validate_model_family_with_modes(
+            args.concurrency,
+            0.7,
+            Some(ModelFamily::DeepSeek4),
+            GreedyGpuArgmaxMode::ExplicitRollback,
+            false,
+        )
+        .unwrap();
+        assert!(
+            validate_model_family_with_modes(
+                args.concurrency,
+                0.0,
+                Some(ModelFamily::Qwen35),
+                GreedyGpuArgmaxMode::ExplicitRollback,
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_model_family_with_modes(
+                args.concurrency,
+                0.0,
+                Some(ModelFamily::DeepSeek4),
+                GreedyGpuArgmaxMode::DefaultOff,
+                true,
+            )
+            .is_err()
+        );
 
         let mut invalid = test_args(&file.0);
         invalid.concurrency = Some(3);
-        let error = validate_cli_with_greedy_mode(
-            &invalid,
-            ExplicitCliOptions::default(),
-            GreedyGpuArgmaxMode::DefaultOff,
-        )
-        .unwrap_err();
+        let error = validate_cli(&invalid, ExplicitCliOptions::default()).unwrap_err();
         assert!(error.to_string().contains("currently requires 2"));
 
         invalid = test_args(&file.0);
         invalid.temperature = 0.7;
-        let error = validate_cli_with_greedy_mode(
-            &invalid,
-            ExplicitCliOptions::default(),
+        validate_cli(&invalid, ExplicitCliOptions::default()).unwrap();
+        let error = validate_model_family_with_modes(
+            invalid.concurrency,
+            invalid.temperature,
+            Some(ModelFamily::Qwen35),
             GreedyGpuArgmaxMode::DefaultOff,
+            false,
         )
         .unwrap_err();
         assert!(error.to_string().contains("greedy decoding"));
 
         invalid = test_args(&file.0);
         invalid.prompt_lookup = true;
-        let error = validate_cli_with_greedy_mode(
-            &invalid,
-            ExplicitCliOptions::default(),
-            GreedyGpuArgmaxMode::DefaultOff,
-        )
-        .unwrap_err();
+        let error = validate_cli(&invalid, ExplicitCliOptions::default()).unwrap_err();
         assert!(error.to_string().contains("prompt-lookup"));
 
         invalid = test_args(&file.0);
         invalid.requests_jsonl = Some(PathBuf::from("-"));
-        let error = validate_cli_with_greedy_mode(
-            &invalid,
-            ExplicitCliOptions::default(),
-            GreedyGpuArgmaxMode::DefaultOff,
-        )
-        .unwrap_err();
+        let error = validate_cli(&invalid, ExplicitCliOptions::default()).unwrap_err();
         assert!(error.to_string().contains("regular JSONL file"));
     }
 }

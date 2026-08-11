@@ -147,8 +147,46 @@ validation.
 
 The A10B extra-queue residency attachment is implemented but deliberately not
 model-run here: loading that asset would spend far more machine pressure than
-this lifecycle gate justifies. DeepSeek retains generated-feedback probe
-authority but does not yet expose this Qwen runtime path through the product CLI.
+this lifecycle gate justifies. DeepSeek uses a separate family-appropriate
+executor, recorded next.
+
+## DeepSeek product integration
+
+DeepSeek V4 now shares the same `--concurrency 2` surface with a
+family-appropriate executor. Two worker-local sessions share immutable residency
+and independent Metal queues. The coordinator serializes prefill, then releases
+both prepared workers into concurrent generation. This ownership shape avoids an
+unsafe `Send` claim for mutable Metal sessions and preserves pair-atomic,
+input-ordered stdout. An odd tail runs at effective concurrency one.
+
+The first complete-worker arm overlapped prefill as well as decode. It was exact
+but immediately falsified as a product organization: K160 pair wall was
+`2,742.826 ms`, while individual prefills expanded to `2,391/2,450 ms` from
+roughly `1,201/626 ms` in the serial control. The promoted scheduler therefore
+keeps packed prefill serial and overlaps generation only.
+
+On the same heterogeneous 3/8/1-token greedy fixture used for Qwen, K160
+concurrency reproduces every serial output object and token SHA-256. A warm
+representative pair spends `1,789.692 ms` in serial prefill and `309.129 ms` in
+concurrent generation, versus roughly `343.9 ms` of summed serial generation.
+The whole-pair movement is only about 3-4% because these tiny prompts are
+prefill-dominated; the earlier 32-step packet remains the decode-throughput
+authority.
+
+A second fixture gives the two requests distinct temperatures (`0.7/0.8`),
+top-k/top-p/min-p settings, and seeds (`123/456`). Concurrent and serial outputs
+again match exactly. Concurrent generation takes `180.358 ms` versus
+`230.8 ms` summed serial (`1.280x`), and whole pair wall moves about `1.049x`.
+DeepSeek can safely retain request-local seeded sampling because each worker owns
+its sampler; Qwen concurrency remains GPU-greedy only.
+
+The load plan now admits residency plus two complete sessions before realizing
+the model. K160 requires `99,149,463,552` bytes including its 512 MiB dynamic
+reserve. The observed two-session delta is `8,682,995,712` bytes versus
+`8,691,613,696` priced session bytes. A truthy
+`QWEN_DSV4_RESIDENCY_SET` fails before model load because that set remains scoped
+to one command queue. After validation runs, host free memory returns to 92-93%
+and swap remains at 2.44 MiB.
 
 ## Artifacts
 

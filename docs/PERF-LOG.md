@@ -23354,3 +23354,38 @@ transitions; the odd request remained in order. This is lifecycle and exactness
 authority, not a new throughput packet. DeepSeek product integration remains a
 separate follow-up because its session memory is materially larger. Full result:
 `docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.
+
+## 2026-08-11 — DeepSeek Resident Concurrency Product GO
+
+Status: regular-file `--concurrency 2` is now cross-family. DeepSeek V4 uses
+worker-local mutable sessions over one shared immutable residency and two Metal
+queues; no session crosses a host thread boundary.
+
+The first complete-worker organization overlapped both prefill and generation.
+It preserved exact outputs but was killed immediately: K160 pair wall reached
+`2,742.826 ms`, with the two prefills expanding to `2,391/2,450 ms` from roughly
+`1,201/626 ms` serial. The promoted scheduler sends explicit prepare controls one
+worker at a time, verifies both sessions are ready and admitted, then releases
+both workers into concurrent generation. Errors, panic, cancellation, or channel
+closure cannot strand a scoped worker; pair stdout is atomic and input ordered.
+
+K160 greedy serial and concurrent paths match complete outputs and generated-ID
+SHA-256 over heterogeneous 3/8/1-token requests, including an odd tail. A warm
+pair spends `1,789.692 ms` in serial prefill and `309.129 ms` in concurrent
+generation, versus about `343.9 ms` summed serial generation. This tiny fixture
+is prefill-dominated, so whole-pair movement is only about 3-4%; the existing
+32-step `1.402x` packet remains decode authority.
+
+Request-local sampling also composes. Two requests with temperatures `0.7/0.8`,
+different filters, and seeds `123/456` match serial output exactly. Concurrent
+generation moves `230.8 -> 180.358 ms` (`1.280x`), while complete pair wall
+improves about `1.049x`.
+
+The corrected load path carries session count two through initial and refreshed
+admission. K160 requires `99,149,463,552` bytes including reserve; observed
+two-session state is `8,682,995,712` bytes against an `8,691,613,696` priced
+inventory. The odd tail reconciles one session and reports concurrency one.
+`QWEN_DSV4_RESIDENCY_SET=1` fails before model load because the set remains
+queue-scoped. Validation exits return memory to 92-93% free with swap unchanged
+at 2.44 MiB. Full result:
+`docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.

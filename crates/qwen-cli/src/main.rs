@@ -25,7 +25,7 @@ use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedI
 use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
 use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
 use qwen_llm::deepseek_v4_metal::{
-    DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS,
+    DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES, DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS,
     DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS, DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS,
     DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples,
     DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4MultigroupSelectorGeometry,
@@ -2358,7 +2358,7 @@ fn run() -> Result<()> {
         .with_context(|| format!("open model {}", model_path.display()))?;
     let model_family = ModelFamily::detect(&gguf);
     dense_batch8_jsonl::validate_model_family(args.batch_size, model_family)?;
-    concurrent_jsonl::validate_model_family(args.concurrency, model_family)?;
+    concurrent_jsonl::validate_model_family(&args, model_family)?;
     validate_deepseek_v4_multigroup_selector_family(
         args.deepseek_v4_multigroup_selector,
         model_family,
@@ -4248,8 +4248,9 @@ fn run_deepseek_v4_requests_jsonl(
     let memory_plan = load_plan.memory_plan().clone();
     let initial_memory_signals = ctx.memory_signals();
     eprintln!("deepseek_v4: memory plan; {memory_plan}");
+    let session_count = if args.concurrency.is_some() { 2 } else { 1 };
     let admitted_load_plan = load_plan
-        .admit(initial_memory_signals)
+        .admit_for_sessions(initial_memory_signals, session_count)
         .context("admit strict DeepSeek V4 Metal residency and session")?;
     let _prefetch_outcome = apply_deepseek_v4_prefetch(&gguf, prefetch_mode)?;
     let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted_load_plan)
@@ -4283,6 +4284,23 @@ fn run_deepseek_v4_requests_jsonl(
         load_t0.elapsed().as_secs_f64() * 1e3,
         residency.report(),
     );
+
+    if args.concurrency.is_some() {
+        let prepared = prepared.expect("DeepSeek concurrency requires file lookahead");
+        let executed = concurrent_jsonl::run_deepseek_file(
+            &ctx,
+            residency,
+            &selector_plan,
+            &tokenizer,
+            vocab_size,
+            &stop_tokens,
+            prepared,
+            prefill_chunk_tokens,
+            memory_plan.session_priced_upper_bytes(),
+        )?;
+        eprintln!("deepseek_v4: requests complete; executed={executed}");
+        return Ok(());
+    }
 
     let stdout_handle = std::io::stdout();
     let mut residency_slot = Some(residency);

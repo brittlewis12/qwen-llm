@@ -72,6 +72,7 @@ pub(super) struct QwenSelectionInput {
     pub dense_serial_remainders: usize,
     pub moe_full_cohorts: usize,
     pub moe_serial_remainders: usize,
+    pub fixed_cohort_economics_rejected: bool,
     pub concurrency2_memory_admitted: bool,
     pub dense_batch8_memory_admitted: bool,
     pub moe_batch16_memory_admitted: bool,
@@ -266,6 +267,8 @@ pub(super) fn select_qwen(input: QwenSelectionInput) -> ExecutionSelection {
                     selected: SelectedExecution::Concurrency2,
                     reason: if input.dense_full_cohorts > 0 {
                         "memory_narrowed_to_pair"
+                    } else if input.fixed_cohort_economics_rejected {
+                        "utilization_narrowed_to_pair"
                     } else {
                         "independent_pair_fallback"
                     },
@@ -313,6 +316,10 @@ pub(super) fn select_qwen(input: QwenSelectionInput) -> ExecutionSelection {
                         && input.moe_full_cohorts > 0
                     {
                         "memory_narrowed_to_pair"
+                    } else if profile == QwenMoeEconomicsProfile::A3bQ4
+                        && input.fixed_cohort_economics_rejected
+                    {
+                        "utilization_narrowed_to_pair"
                     } else {
                         "measured_width_preference"
                     },
@@ -459,6 +466,7 @@ mod tests {
             dense_serial_remainders: 0,
             moe_full_cohorts: 1,
             moe_serial_remainders: 0,
+            fixed_cohort_economics_rejected: false,
             concurrency2_memory_admitted: true,
             dense_batch8_memory_admitted: true,
             moe_batch16_memory_admitted: true,
@@ -479,6 +487,19 @@ mod tests {
             ..input
         };
         assert_eq!(select_qwen(input).selected, SelectedExecution::Concurrency2);
+
+        let input = QwenSelectionInput {
+            fixed_cohort_economics_rejected: true,
+            ..input
+        };
+        assert_eq!(select_qwen(input).reason, "utilization_narrowed_to_pair");
+
+        let input = QwenSelectionInput {
+            moe_full_cohorts: 1,
+            moe_batch16_memory_admitted: false,
+            ..input
+        };
+        assert_eq!(select_qwen(input).reason, "memory_narrowed_to_pair");
     }
 
     #[test]
@@ -492,6 +513,12 @@ mod tests {
         let selected = select_qwen(input);
         assert_eq!(selected.selected, SelectedExecution::Concurrency2);
         assert_eq!(selected.profile, "a3b_iq4_non_mtp");
+
+        let input = QwenSelectionInput {
+            fixed_cohort_economics_rejected: true,
+            ..input
+        };
+        assert_eq!(select_qwen(input).reason, "measured_width_preference");
     }
 
     #[test]
@@ -523,6 +550,7 @@ mod tests {
             dense_serial_remainders: 1,
             moe_full_cohorts: 0,
             moe_serial_remainders: 0,
+            fixed_cohort_economics_rejected: false,
             concurrency2_memory_admitted: true,
             dense_batch8_memory_admitted: true,
             moe_batch16_memory_admitted: true,
@@ -538,6 +566,19 @@ mod tests {
             ..input
         };
         assert_eq!(select_qwen(input).selected, SelectedExecution::Concurrency2);
+
+        let input = QwenSelectionInput {
+            fixed_cohort_economics_rejected: true,
+            ..input
+        };
+        assert_eq!(select_qwen(input).reason, "utilization_narrowed_to_pair");
+
+        let input = QwenSelectionInput {
+            dense_full_cohorts: 1,
+            dense_batch8_memory_admitted: false,
+            ..input
+        };
+        assert_eq!(select_qwen(input).reason, "memory_narrowed_to_pair");
     }
 
     #[test]

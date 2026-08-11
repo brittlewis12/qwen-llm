@@ -2941,6 +2941,18 @@ family-supported defaults with memory fallback. Keep explicit width flags as
 operator overrides and keep auto opt-in until continuous arrival scheduling has
 its own latency/throughput policy.
 
+Fixed B=8/B=16 membership now permits heterogeneous requested generation limits
+when prompt token counts match. Sort each prompt-length bucket by limit, allocate
+the cohort maximum capacity to every lane, and batch only candidates whose
+requested productive transitions fill at least three quarters of physical slots.
+Moderate A3B limits 24-39 remain exact and move process wall about `1.10x`; dense
+0.8B moves `1.607x`. The exact `0.75` boundary moves `1.042x`, and homogeneous
+two-token work moves `1.020x`; reject the zero-transition case. A skewed
+1-40-token B=16 cohort is exact but `0.744x`, so the gate sends explicit mode to
+serial and lets auto choose B=2 at `1.078x`. Keep this as bounded
+logical-termination flexibility, not evidence for lane refill or variable prompt
+frontiers.
+
 DeepSeek K160 common-route B=8 is also closed at its cheapest model-backed
 floor. Giving all eight rows the same six experts, the production all-slot
 control and six N=8 Q3_K/Q4_K mat-mat chains move `1.9760 -> 1.8630 ms/layer`

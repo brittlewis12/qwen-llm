@@ -12,13 +12,18 @@ file once, inspects executable capabilities without allocating sequence state,
 performs conservative memory admission, emits one schema-v1 selection record,
 then chooses exactly one existing backend:
 
-- dense Qwen fixed B=8 when a complete compatible cohort is ready;
+- dense Qwen fixed B=8 when a complete utilization-qualified cohort is ready;
 - Qwen MoE fixed B=16 for the measured non-MTP A3B Q4 composition;
 - independent resident B=2 for the measured A3B IQ3-routed composition, for an
   underfilled qualified Q4 file, or as a memory-safe narrower fallback;
 - DeepSeek V4 independent B=2 when two-session admission succeeds and the
   command-queue-scoped residency set is off;
 - serial execution otherwise.
+
+Fixed-cohort compatibility now means equal tokenized prompt length; per-request
+generation limits may differ when their requested transition utilization clears
+the three-quarter floor. See
+`docs/bench/2026-08-11-fixed-cohort-mixed-limits/README.md`.
 
 The MoE preference key is architecture geometry plus immutable capability-plan
 telemetry, including exact routed dtype class; it does not inspect a model

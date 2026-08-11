@@ -1,5 +1,9 @@
 # Dense B=8 JSONL product slice
 
+Update (2026-08-11): the later mixed-limit qualification removes generation
+limit from the compatibility key under a three-quarter utilization gate. See
+`docs/bench/2026-08-11-fixed-cohort-mixed-limits/README.md`.
+
 ## Question
 
 Can the measured fixed-width dense-Qwen backend serve real file JSONL requests

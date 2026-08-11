@@ -3,9 +3,11 @@ use qwen_llm::dense_batch8::DENSE_BATCH8_WIDTH;
 use qwen_llm::moe_batch16::{HeadMode, MOE_BATCH16_WIDTH, MoeBatch16PlanTelemetry};
 use qwen_llm::runtime::{DenseBatch8SequenceExecutor, MoeBatch16SequenceExecutor, RuntimeError};
 
-const PAD_TOKEN: i32 = 0;
+const FINISHED_LANE_FILL_TOKEN: i32 = 0;
 const TRANSIENT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const PREFIX_FANOUT_MIN_TOKENS: usize = 256;
+const MIN_REQUESTED_TRANSITION_UTILIZATION_NUMERATOR: usize = 3;
+const MIN_REQUESTED_TRANSITION_UTILIZATION_DENOMINATOR: usize = 4;
 const DENSE_PREFIX_FANOUT_ENV: &str = "QWEN_DENSE_BATCH8_PREFIX_FANOUT";
 const MOE_PREFIX_FANOUT_ENV: &str = "QWEN_MOE_BATCH16_PREFIX_FANOUT";
 
@@ -49,11 +51,11 @@ trait FixedCohortExecutor<const WIDTH: usize> {
 impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_> {
     const DISPLAY_NAME: &'static str = "dense B=8";
     const PREFIX_FANOUT_ENV: &'static str = DENSE_PREFIX_FANOUT_ENV;
-    const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v2";
-    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v1";
+    const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v3";
+    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v2";
     const TELEMETRY_PREFIX: &'static str = "dense_batch8";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "dense_batch8_planner";
-    const TELEMETRY_SCHEMA_VERSION: u32 = 2;
+    const TELEMETRY_SCHEMA_VERSION: u32 = 3;
 
     fn validate(
         &self,
@@ -87,11 +89,11 @@ impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_>
 impl FixedCohortExecutor<MOE_BATCH16_WIDTH> for MoeBatch16SequenceExecutor<'_> {
     const DISPLAY_NAME: &'static str = "MoE B=16";
     const PREFIX_FANOUT_ENV: &'static str = MOE_PREFIX_FANOUT_ENV;
-    const COHORT_BACKEND: &'static str = "qwen_moe_capability_batch16_v2";
-    const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v1";
+    const COHORT_BACKEND: &'static str = "qwen_moe_capability_batch16_v3";
+    const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v2";
     const TELEMETRY_PREFIX: &'static str = "moe_batch16";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "moe_batch16_planner";
-    const TELEMETRY_SCHEMA_VERSION: u32 = 3;
+    const TELEMETRY_SCHEMA_VERSION: u32 = 4;
 
     fn validate(
         &self,
@@ -133,7 +135,6 @@ struct PrefixFanoutPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CohortCompatibility {
     prompt_tokens: usize,
-    requested_tokens: usize,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -145,7 +146,7 @@ enum PlannedWork<const WIDTH: usize> {
 impl<const WIDTH: usize> PlannedWork<WIDTH> {
     fn first_request_index(&self) -> usize {
         match self {
-            Self::Batch(indices) => indices[0],
+            Self::Batch(indices) => *indices.iter().min().expect("nonempty fixed cohort"),
             Self::Serial(index) => *index,
         }
     }
@@ -155,13 +156,16 @@ impl<const WIDTH: usize> PlannedWork<WIDTH> {
 struct CohortPlan<const WIDTH: usize> {
     work: Vec<PlannedWork<WIDTH>>,
     compatibility_buckets: usize,
+    candidate_cohorts: usize,
     full_cohorts: usize,
+    economics_rejected_cohorts: usize,
     serial_fallback_requests: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct CohortPlanSummary {
     pub full_cohorts: usize,
+    pub economics_rejected_cohorts: usize,
     pub serial_fallback_requests: usize,
 }
 
@@ -194,7 +198,7 @@ impl LaneProgress {
             .last()
             .copied()
             .filter(|_| self.is_active())
-            .unwrap_or(PAD_TOKEN)
+            .unwrap_or(FINISHED_LANE_FILL_TOKEN)
     }
 
     /// Record one selected token and return whether its piece is visible.
@@ -269,11 +273,16 @@ struct CohortTelemetry {
     cohort_index: usize,
     width: usize,
     prompt_tokens_per_request: usize,
-    requested_tokens_per_request: usize,
+    requested_tokens_per_lane: Vec<usize>,
+    shared_capacity_tokens: usize,
+    generated_tokens_per_lane: Vec<usize>,
+    productive_transitions_per_lane: Vec<usize>,
+    padding_transitions_per_lane: Vec<usize>,
     generated_tokens: usize,
     productive_transitions: usize,
     padding_transitions: usize,
     physical_batch_steps: usize,
+    physical_transition_utilization: f64,
     common_prefix_tokens: usize,
     prefix_fanout_tokens: usize,
     prefix_fanout_reason: &'static str,
@@ -308,6 +317,10 @@ struct CohortTelemetry {
     #[serde(skip_serializing_if = "Option::is_none")]
     moe_per_lane_gate_up_blocks: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    moe_per_lane_iq3_gate_up_blocks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moe_per_lane_other_gate_up_blocks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     moe_head_mode: Option<&'static str>,
 }
 
@@ -317,9 +330,12 @@ struct PlannerTelemetry {
     backend: &'static str,
     requests: usize,
     compatibility_buckets: usize,
+    candidate_cohorts: usize,
     full_cohorts: usize,
+    economics_rejected_cohorts: usize,
     batched_requests: usize,
     serial_fallback_requests: usize,
+    minimum_requested_transition_utilization: &'static str,
     output_order: &'static str,
 }
 
@@ -395,11 +411,65 @@ fn cohort_compatibility(
     request: &PreparedJsonlRequest,
     args: &Args,
 ) -> Result<CohortCompatibility> {
-    let (requested_tokens, _) = jsonl_generation_capacity(request, args)?;
+    jsonl_generation_capacity(request, args)?;
     Ok(CohortCompatibility {
         prompt_tokens: request.prompt_ids.len(),
-        requested_tokens,
     })
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct CohortGenerationPlan {
+    prompt_tokens: usize,
+    requested_tokens: Vec<usize>,
+    shared_capacity: usize,
+}
+
+fn cohort_generation_plan<const WIDTH: usize>(
+    requests: &[&PreparedJsonlRequest; WIDTH],
+    args: &Args,
+) -> Result<CohortGenerationPlan> {
+    let prompt_tokens = requests[0].prompt_ids.len();
+    let mut requested_tokens = Vec::with_capacity(WIDTH);
+    let mut shared_capacity = 0usize;
+    for (slot, request) in requests.iter().enumerate() {
+        ensure!(
+            request.prompt_ids.len() == prompt_tokens,
+            "fixed cohort slot {slot} prompt length {} != {prompt_tokens}",
+            request.prompt_ids.len()
+        );
+        let (requested, capacity) = jsonl_generation_capacity(request, args)?;
+        requested_tokens.push(requested);
+        shared_capacity = shared_capacity.max(capacity);
+    }
+    Ok(CohortGenerationPlan {
+        prompt_tokens,
+        requested_tokens,
+        shared_capacity,
+    })
+}
+
+fn requested_transition_utilization_qualifies<const WIDTH: usize>(
+    indices: &[usize; WIDTH],
+    requested_tokens: &[usize],
+) -> Result<bool> {
+    let transitions = indices.map(|index| requested_tokens[index].saturating_sub(1));
+    let max_transitions = transitions.into_iter().max().unwrap_or(0);
+    if max_transitions == 0 {
+        return Ok(false);
+    }
+    let productive = transitions.into_iter().try_fold(0usize, |sum, value| {
+        sum.checked_add(value)
+            .context("fixed-cohort productive transition estimate overflow")
+    })?;
+    let physical = max_transitions
+        .checked_mul(WIDTH)
+        .context("fixed-cohort physical transition estimate overflow")?;
+    Ok(productive
+        .checked_mul(MIN_REQUESTED_TRANSITION_UTILIZATION_DENOMINATOR)
+        .context("fixed-cohort utilization comparison overflow")?
+        >= physical
+            .checked_mul(MIN_REQUESTED_TRANSITION_UTILIZATION_NUMERATOR)
+            .context("fixed-cohort utilization comparison overflow")?)
 }
 
 fn plan_request_work<const WIDTH: usize>(
@@ -407,6 +477,10 @@ fn plan_request_work<const WIDTH: usize>(
     args: &Args,
 ) -> Result<CohortPlan<WIDTH>> {
     ensure!(WIDTH > 0, "fixed-cohort planner width must be nonzero");
+    let requested_tokens = requests
+        .iter()
+        .map(|request| jsonl_generation_capacity(request, args).map(|(tokens, _)| tokens))
+        .collect::<Result<Vec<_>>>()?;
     let mut buckets: Vec<(CohortCompatibility, Vec<usize>)> = Vec::new();
     for (index, request) in requests.iter().enumerate() {
         let key = cohort_compatibility(request, args)?;
@@ -419,15 +493,27 @@ fn plan_request_work<const WIDTH: usize>(
 
     let compatibility_buckets = buckets.len();
     let mut work = Vec::new();
+    let mut candidate_cohorts = 0usize;
     let mut full_cohorts = 0usize;
+    let mut economics_rejected_cohorts = 0usize;
     let mut serial_fallback_requests = 0usize;
-    for (_, indices) in buckets {
+    for (_, mut indices) in buckets {
+        indices.sort_by_key(|&index| (requested_tokens[index], index));
         let mut cohorts = indices.chunks_exact(WIDTH);
         for cohort in &mut cohorts {
-            work.push(PlannedWork::Batch(
-                cohort.try_into().expect("exact fixed-cohort planner chunk"),
-            ));
-            full_cohorts += 1;
+            let cohort: [usize; WIDTH] =
+                cohort.try_into().expect("exact fixed-cohort planner chunk");
+            candidate_cohorts += 1;
+            if requested_transition_utilization_qualifies(&cohort, &requested_tokens)? {
+                work.push(PlannedWork::Batch(cohort));
+                full_cohorts += 1;
+            } else {
+                economics_rejected_cohorts += 1;
+                for index in cohort {
+                    work.push(PlannedWork::Serial(index));
+                    serial_fallback_requests += 1;
+                }
+            }
         }
         for &index in cohorts.remainder() {
             work.push(PlannedWork::Serial(index));
@@ -445,7 +531,9 @@ fn plan_request_work<const WIDTH: usize>(
     Ok(CohortPlan {
         work,
         compatibility_buckets,
+        candidate_cohorts,
         full_cohorts,
+        economics_rejected_cohorts,
         serial_fallback_requests,
     })
 }
@@ -457,6 +545,7 @@ pub(super) fn plan_summary<const WIDTH: usize>(
     let plan = plan_request_work::<WIDTH>(requests, args)?;
     Ok(CohortPlanSummary {
         full_cohorts: plan.full_cohorts,
+        economics_rejected_cohorts: plan.economics_rejected_cohorts,
         serial_fallback_requests: plan.serial_fallback_requests,
     })
 }
@@ -649,13 +738,16 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         .stop_token_ids()
         .context("load producer-declared stop tokens")?;
     let planner_telemetry = PlannerTelemetry {
-        schema_version: 1,
+        schema_version: 2,
         backend: E::PLANNER_BACKEND,
         requests: requests.len(),
         compatibility_buckets: plan.compatibility_buckets,
+        candidate_cohorts: plan.candidate_cohorts,
         full_cohorts: plan.full_cohorts,
+        economics_rejected_cohorts: plan.economics_rejected_cohorts,
         batched_requests: plan.full_cohorts * WIDTH,
         serial_fallback_requests: plan.serial_fallback_requests,
+        minimum_requested_transition_utilization: "3/4",
         output_order: "input",
     };
     let mut pending_outputs = std::iter::repeat_with(|| None)
@@ -782,8 +874,9 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     stop_tokens: &[i32],
     cohort_index: usize,
 ) -> Result<(Vec<RequestOutput>, CohortTelemetry)> {
-    let prompt_tokens = requests[0].prompt_ids.len();
-    let (requested_tokens, capacity) = jsonl_generation_capacity(requests[0], args)?;
+    let generation_plan = cohort_generation_plan(requests, args)?;
+    let prompt_tokens = generation_plan.prompt_tokens;
+    let capacity = generation_plan.shared_capacity;
     let chunk = match args.prefill_chunk {
         PrefillChunkArg::Fixed(requested) => requested.min(prompt_tokens.max(1)),
         PrefillChunkArg::Auto => bail!("{} requires a fixed prefill chunk", E::DISPLAY_NAME),
@@ -978,20 +1071,25 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             .try_into()
             .expect("fixed-cohort sequence width");
         executor
-            .validate([PAD_TOKEN; WIDTH], sequences.each_mut())
+            .validate([FINISHED_LANE_FILL_TOKEN; WIDTH], sequences.each_mut())
             .with_context(|| format!("validate {} cohort backend", E::DISPLAY_NAME))?;
     }
 
     let decode_t0 = Instant::now();
     let mut lanes = Vec::with_capacity(WIDTH);
-    for ((request, sequence), logits) in requests.iter().zip(sequences).zip(prompt_logits) {
+    for (slot, ((request, sequence), logits)) in requests
+        .iter()
+        .zip(sequences)
+        .zip(prompt_logits)
+        .enumerate()
+    {
         let mut sampler = Sampler::new(request.sampling)
             .with_context(|| format!("initialize {} greedy sampler", E::DISPLAY_NAME))?;
         let first = sampler
             .sample(&logits)
             .with_context(|| format!("select {} first token", E::DISPLAY_NAME))?
             .token;
-        let mut progress = LaneProgress::new(requested_tokens);
+        let mut progress = LaneProgress::new(generation_plan.requested_tokens[slot]);
         let visible = progress.record_selection(first, stop_tokens)?;
         let mut generated_text = String::new();
         if visible {
@@ -1058,6 +1156,26 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         .iter()
         .map(|lane| lane.progress.padding_transitions)
         .sum::<usize>();
+    let generated_tokens_per_lane = lanes
+        .iter()
+        .map(|lane| lane.progress.generated.len())
+        .collect::<Vec<_>>();
+    let productive_transitions_per_lane = lanes
+        .iter()
+        .map(|lane| lane.progress.logical_transitions)
+        .collect::<Vec<_>>();
+    let padding_transitions_per_lane = lanes
+        .iter()
+        .map(|lane| lane.progress.padding_transitions)
+        .collect::<Vec<_>>();
+    let physical_transition_slots = physical_batch_steps
+        .checked_mul(WIDTH)
+        .context("fixed-cohort realized transition slot overflow")?;
+    let physical_transition_utilization = if physical_transition_slots > 0 {
+        productive_transitions as f64 / physical_transition_slots as f64
+    } else {
+        0.0
+    };
     let aggregate_generated_tps = if decode_ms > 0.0 {
         generated_tokens as f64 / (decode_ms / 1e3)
     } else {
@@ -1097,11 +1215,16 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             cohort_index,
             width: WIDTH,
             prompt_tokens_per_request: prompt_tokens,
-            requested_tokens_per_request: requested_tokens,
+            requested_tokens_per_lane: generation_plan.requested_tokens,
+            shared_capacity_tokens: generation_plan.shared_capacity,
+            generated_tokens_per_lane,
+            productive_transitions_per_lane,
+            padding_transitions_per_lane,
             generated_tokens,
             productive_transitions,
             padding_transitions,
             physical_batch_steps,
+            physical_transition_utilization,
             common_prefix_tokens: prefix_fanout.common_prefix_tokens,
             prefix_fanout_tokens: prefix_fanout.selected_prefix_tokens,
             prefix_fanout_reason: prefix_fanout.reason,
@@ -1133,6 +1256,9 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             moe_packed_q4_gate_up_blocks: moe_plan.map(|plan| plan.packed_q4_gate_up_blocks),
             moe_per_lane_gdn_blocks: moe_plan.map(|plan| plan.per_lane_gdn_blocks),
             moe_per_lane_gate_up_blocks: moe_plan.map(|plan| plan.per_lane_gate_up_blocks),
+            moe_per_lane_iq3_gate_up_blocks: moe_plan.map(|plan| plan.per_lane_iq3_gate_up_blocks),
+            moe_per_lane_other_gate_up_blocks: moe_plan
+                .map(|plan| plan.per_lane_other_gate_up_blocks),
             moe_head_mode: moe_plan.map(|plan| match plan.head_mode {
                 HeadMode::BatchedQ6 => "batched_q6",
                 HeadMode::BatchedQ8 => "batched_q8",
@@ -1257,19 +1383,27 @@ mod tests {
     fn planner_forms_compatible_cohorts_and_serializes_underfill() {
         let args = test_args();
         let mut requests = (0..DENSE_BATCH8_WIDTH)
-            .map(|slot| prepared(&format!("a-{slot}"), &[1, 2]))
+            .map(|slot| {
+                let mut request = prepared(&format!("a-{slot}"), &[1, 2]);
+                request.request.tokens = Some(24 + slot);
+                request
+            })
             .chain((0..DENSE_BATCH8_WIDTH).map(|slot| {
                 let mut request = prepared(&format!("b-{slot}"), &[1, 2, 3]);
                 request.request.tokens = Some(4);
                 request
             }))
             .collect::<Vec<_>>();
-        requests.push(prepared("a-underfill", &[1, 2]));
+        let mut a_underfill = prepared("a-underfill", &[1, 2]);
+        a_underfill.request.tokens = Some(32);
+        requests.push(a_underfill);
         requests.push(prepared("c-underfill", &[1, 2, 3, 4]));
         validate_requests(&requests, &args).unwrap();
         let plan = plan_request_work::<DENSE_BATCH8_WIDTH>(&requests, &args).unwrap();
         assert_eq!(plan.compatibility_buckets, 3);
+        assert_eq!(plan.candidate_cohorts, 2);
         assert_eq!(plan.full_cohorts, 2);
+        assert_eq!(plan.economics_rejected_cohorts, 0);
         assert_eq!(plan.serial_fallback_requests, 2);
         assert_eq!(
             plan.work,
@@ -1296,16 +1430,24 @@ mod tests {
         let mut args = test_args();
         args.batch_size = Some(MOE_BATCH16_WIDTH);
         let mut requests = (0..MOE_BATCH16_WIDTH)
-            .map(|slot| prepared(&format!("full-{slot}"), &[1, 2, 3]))
+            .map(|slot| {
+                let mut request = prepared(&format!("full-{slot}"), &[1, 2, 3]);
+                request.request.tokens = Some(24 + slot);
+                request
+            })
             .collect::<Vec<_>>();
         let mut heterogeneous = prepared("heterogeneous", &[1, 2, 3, 4]);
         heterogeneous.request.tokens = Some(7);
         requests.push(heterogeneous);
-        requests.push(prepared("underfill", &[1, 2, 3]));
+        let mut underfill = prepared("underfill", &[1, 2, 3]);
+        underfill.request.tokens = Some(40);
+        requests.push(underfill);
 
         let plan = plan_request_work::<MOE_BATCH16_WIDTH>(&requests, &args).unwrap();
         assert_eq!(plan.compatibility_buckets, 2);
+        assert_eq!(plan.candidate_cohorts, 1);
         assert_eq!(plan.full_cohorts, 1);
+        assert_eq!(plan.economics_rejected_cohorts, 0);
         assert_eq!(plan.serial_fallback_requests, 2);
         assert_eq!(
             plan.work,
@@ -1319,6 +1461,71 @@ mod tests {
         let underfill = plan_request_work::<MOE_BATCH16_WIDTH>(&requests[..15], &args).unwrap();
         assert_eq!(underfill.full_cohorts, 0);
         assert_eq!(underfill.serial_fallback_requests, 15);
+    }
+
+    #[test]
+    fn planner_rejects_padding_dominated_mixed_limits() {
+        let args = test_args();
+        let limits = [1, 2, 3, 4, 5, 6, 7, 40];
+        let requests = limits
+            .iter()
+            .enumerate()
+            .map(|(slot, &limit)| {
+                let mut request = prepared(&format!("slot-{slot}"), &[1, 2]);
+                request.request.tokens = Some(limit);
+                request
+            })
+            .collect::<Vec<_>>();
+        let plan = plan_request_work::<DENSE_BATCH8_WIDTH>(&requests, &args).unwrap();
+        assert_eq!(plan.compatibility_buckets, 1);
+        assert_eq!(plan.candidate_cohorts, 1);
+        assert_eq!(plan.full_cohorts, 0);
+        assert_eq!(plan.economics_rejected_cohorts, 1);
+        assert_eq!(plan.serial_fallback_requests, DENSE_BATCH8_WIDTH);
+        assert!(
+            plan.work
+                .iter()
+                .all(|work| matches!(work, PlannedWork::Serial(_)))
+        );
+    }
+
+    #[test]
+    fn requested_transition_utilization_floor_is_inclusive() {
+        let at_floor = [3, 3, 4, 4, 4, 4, 5, 5];
+        let below_floor = [2, 3, 4, 4, 4, 4, 5, 5];
+        let indices: [usize; DENSE_BATCH8_WIDTH] = std::array::from_fn(|index| index);
+        assert!(requested_transition_utilization_qualifies(&indices, &at_floor).unwrap());
+        assert!(!requested_transition_utilization_qualifies(&indices, &below_floor).unwrap());
+    }
+
+    #[test]
+    fn cohort_capacity_uses_the_longest_limit_independent_of_lane_order() {
+        let args = test_args();
+        let limits = [1, 2, 3, 4, 5, 6, 7, 20];
+        let requests = limits
+            .iter()
+            .enumerate()
+            .map(|(slot, &limit)| {
+                let mut request = prepared(&format!("slot-{slot}"), &[1, 2]);
+                request.request.tokens = Some(limit);
+                request
+            })
+            .collect::<Vec<_>>();
+        let refs: [&PreparedJsonlRequest; DENSE_BATCH8_WIDTH] =
+            std::array::from_fn(|slot| &requests[slot]);
+        let plan = cohort_generation_plan(&refs, &args).unwrap();
+        assert_eq!(plan.prompt_tokens, 2);
+        assert_eq!(plan.requested_tokens, limits);
+        assert_eq!(plan.shared_capacity, 38);
+
+        let reversed: [&PreparedJsonlRequest; DENSE_BATCH8_WIDTH] =
+            std::array::from_fn(|slot| &requests[DENSE_BATCH8_WIDTH - slot - 1]);
+        let reversed_plan = cohort_generation_plan(&reversed, &args).unwrap();
+        assert_eq!(reversed_plan.shared_capacity, plan.shared_capacity);
+        assert_eq!(
+            reversed_plan.requested_tokens,
+            limits.into_iter().rev().collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1463,10 +1670,20 @@ mod tests {
         assert_eq!(full.generated, [10, 11, 12]);
         full.validate_complete(2).unwrap();
 
+        let mut short_limit = LaneProgress::new(2);
+        assert!(short_limit.record_selection(10, &[99]).unwrap());
+        assert!(short_limit.record_batch_step(true, 11, &[99]).unwrap());
+        assert!(!short_limit.record_batch_step(false, 7, &[99]).unwrap());
+        assert!(!short_limit.record_batch_step(false, 8, &[99]).unwrap());
+        assert_eq!(short_limit.generated, [10, 11]);
+        assert_eq!(short_limit.logical_transitions, 1);
+        assert_eq!(short_limit.padding_transitions, 2);
+        short_limit.validate_complete(3).unwrap();
+
         let mut early = LaneProgress::new(3);
         assert!(!early.record_selection(99, &[99]).unwrap());
         assert_eq!(early.stop_reason, Some(StopReason::Eos));
-        assert_eq!(early.transition_token(), PAD_TOKEN);
+        assert_eq!(early.transition_token(), FINISHED_LANE_FILL_TOKEN);
         assert!(!early.record_batch_step(false, 7, &[99]).unwrap());
         assert!(!early.record_batch_step(false, 8, &[99]).unwrap());
         assert_eq!(early.generated, [99]);

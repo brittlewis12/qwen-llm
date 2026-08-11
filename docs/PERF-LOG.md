@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Mixed-Limit Fixed Cohorts GO
+
+Status: dense B=8 and qualified Qwen MoE B=16 now cohort equal tokenized prompt
+lengths with independent per-request generation limits. Limit-sorted packing and
+a three-quarter requested-transition-utilization floor prevent filler-dominated
+work from masquerading as useful batching.
+
+- Qwen3.6 A3B Q4 limits 24-39 realize `0.802632` transition utilization, preserve
+  the serial stdout hash, and move process wall `8.85 -> 8.07-8.08 s`. Automatic
+  mode selects B=16.
+- The exact `0.75` boundary remains byte-identical and moves `6.76 -> 6.49 s`
+  (`1.042x`). A homogeneous two-token cohort moves `4.06 -> 3.98 s`; all
+  one-token cohorts stay serial because they have no physical batch transition.
+- The same fixture on dense 0.8B forms two B=8 cohorts, remains byte-identical,
+  and moves `2.33 -> 1.45 s` (`1.607x`).
+- A deliberately skewed 1-40-token Q4 cohort realizes only `0.322115`; an ungated
+  spike regresses `6.05 -> 8.13 s`. The final planner rejects it before executor
+  allocation, reproduces serial wall at `6.06 s`, and lets automatic mode select
+  B=2 at `5.61 s` (`1.078x`). All organizations emit the same stdout hash.
+- Every lane receives the cohort maximum context capacity. Schema-v3 dense and
+  schema-v4 MoE telemetry expose per-lane limits, productive/padding transitions,
+  shared capacity, and realized utilization; planner schema 2 reports economics
+  rejection explicitly.
+
+Decision: promote bounded mixed-limit membership, not dynamic refill. Revisit the
+three-quarter floor only with cross-model evidence or a scheduler that removes
+filler work. Full result:
+`docs/bench/2026-08-11-fixed-cohort-mixed-limits/README.md`.
+
 ## 2026-08-11 - Automatic JSONL Execution Width GO
 
 Status: `--execution-mode auto` now selects one existing exact JSONL backend

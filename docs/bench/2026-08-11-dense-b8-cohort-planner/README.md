@@ -1,5 +1,10 @@
 # Dense B=8 cohort planner and underfill fallback
 
+Update (2026-08-11): generation limits are no longer part of compatibility after
+the mixed-limit qualification in
+`docs/bench/2026-08-11-fixed-cohort-mixed-limits/README.md`. The original result
+below remains the historical planner packet.
+
 ## Question
 
 Can `--batch-size 8` accept an ordinary heterogeneous JSONL file rather than

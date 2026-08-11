@@ -1,5 +1,10 @@
 # Qwen MoE B=16 Product Integration
 
+Update (2026-08-11): fixed cohorts now admit heterogeneous per-request generation
+limits under the utilization gate documented in
+`docs/bench/2026-08-11-fixed-cohort-mixed-limits/README.md`. The original
+same-limit qualification below remains unchanged.
+
 Date: 2026-08-11
 
 Status: `GO` for the qualified Qwen 35B-A3B fixed-cohort JSONL path. The product

@@ -392,7 +392,9 @@ struct Args {
     #[arg(long, hide_short_help = true, conflicts_with_all = ["prompt", "prompt_file", "messages"])]
     requests_jsonl: Option<PathBuf>,
 
-    /// Decode fixed JSONL cohorts: 8 on dense Qwen or 16 on Qwen MoE.
+    /// Decode equal-prompt-length JSONL cohorts with per-request token limits.
+    ///
+    /// Width is 8 on dense Qwen or 16 on Qwen MoE.
     #[arg(long, hide_short_help = true, requires = "requests_jsonl")]
     batch_size: Option<usize>,
 
@@ -6483,6 +6485,7 @@ fn run_requests_jsonl(
         let dense_summary = if requests.is_empty() {
             fixed_cohort_jsonl::CohortPlanSummary {
                 full_cohorts: 0,
+                economics_rejected_cohorts: 0,
                 serial_fallback_requests: 0,
             }
         } else {
@@ -6491,6 +6494,7 @@ fn run_requests_jsonl(
         let moe_summary = if requests.is_empty() {
             fixed_cohort_jsonl::CohortPlanSummary {
                 full_cohorts: 0,
+                economics_rejected_cohorts: 0,
                 serial_fallback_requests: 0,
             }
         } else {
@@ -6560,6 +6564,11 @@ fn run_requests_jsonl(
             dense_serial_remainders: dense_summary.serial_fallback_requests,
             moe_full_cohorts: moe_summary.full_cohorts,
             moe_serial_remainders: moe_summary.serial_fallback_requests,
+            fixed_cohort_economics_rejected: match model_family {
+                Some(ModelFamily::Qwen35) => dense_summary.economics_rejected_cohorts > 0,
+                Some(ModelFamily::Qwen35Moe) => moe_summary.economics_rejected_cohorts > 0,
+                Some(ModelFamily::DeepSeek4) | None => false,
+            },
             concurrency2_memory_admitted,
             dense_batch8_memory_admitted,
             moe_batch16_memory_admitted,

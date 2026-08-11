@@ -1443,6 +1443,10 @@ fn encode_argmax_reduction(
 /// directly (instead of going through the F32 codec) and the kernel
 /// dispatchers to pick `_q4_k`/`_q6_k` based on dtype.
 pub struct MetalModel {
+    // Fields drop in declaration order. Remove the residency set before any
+    // allocation it references can be released.
+    _residency_set: Option<MetalModelResidencySetGuard>,
+
     /// Reference back to the loader's bound model. Carries `arch`, the
     /// layer schedule (GDN vs Attn), tied-embedding flag.
     pub arch: crate::model::Arch,
@@ -1453,7 +1457,6 @@ pub struct MetalModel {
     pub lm_head: MetalTensor,
 
     pub blocks: Vec<MetalBlock>,
-    _residency_set: Option<MetalModelResidencySetGuard>,
 }
 
 struct MetalModelResidencySetGuard {
@@ -1463,8 +1466,18 @@ struct MetalModelResidencySetGuard {
 
 impl Drop for MetalModelResidencySetGuard {
     fn drop(&mut self) {
+        let started = std::time::Instant::now();
+        let allocations = self.set.allocationCount();
+        let allocated_bytes = self.set.allocatedSize();
         self.queue.removeResidencySet(&self.set);
         self.set.endResidency();
+        let _ = std::io::Write::write_fmt(
+            &mut std::io::stderr().lock(),
+            format_args!(
+                "[metal-residency] API teardown returned allocations={allocations} allocated_bytes={allocated_bytes} elapsed_ms={:.3}\n",
+                started.elapsed().as_secs_f64() * 1e3,
+            ),
+        );
     }
 }
 

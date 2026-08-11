@@ -685,8 +685,18 @@ struct DeepSeekV4ResidencySetGuard {
 
 impl Drop for DeepSeekV4ResidencySetGuard {
     fn drop(&mut self) {
+        let started = std::time::Instant::now();
+        let allocations = self.set.allocationCount();
+        let committed_allocation_bytes = self.set.allocatedSize();
         self.queue.removeResidencySet(&self.set);
         self.set.endResidency();
+        let _ = std::io::Write::write_fmt(
+            &mut std::io::stderr().lock(),
+            format_args!(
+                "deepseek_v4: model residency set API teardown returned allocations={allocations} committed_allocation_bytes={committed_allocation_bytes} elapsed_ms={:.3}\n",
+                started.elapsed().as_secs_f64() * 1e3,
+            ),
+        );
     }
 }
 

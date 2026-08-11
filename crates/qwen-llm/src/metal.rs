@@ -45,6 +45,11 @@ use parking_lot::Mutex;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::{
     Arc, OnceLock,
@@ -197,6 +202,17 @@ pub enum MetalError {
     TensorByteSizeOverflow { shape: Vec<u64>, dtype: GgmlType },
     #[error("GGUF no-copy backing: {0}")]
     GgufNoCopy(String),
+    #[error("Metal process lease unavailable: {0}")]
+    ProcessLease(String),
+    #[error("could not inspect host memory before Metal initialization: {0}")]
+    HostMemoryTelemetry(String),
+    #[error(
+        "refusing Metal initialization after wired memory remained unsafe for 15 seconds: wired={wired_bytes} physical={physical_bytes}; reboot if no large Metal process remains"
+    )]
+    UnsafeHostWiredMemory {
+        wired_bytes: u64,
+        physical_bytes: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -660,11 +676,310 @@ fn duration_ns_saturating(duration: std::time::Duration) -> u64 {
 // MetalContext
 // ===========================================================================
 
+const METAL_PROCESS_LEASE_WAIT_ENV: &str = "QWEN_METAL_LEASE_WAIT";
+const METAL_PROCESS_LEASE_SKIP_WIRED_GATE_ENV: &str = "QWEN_METAL_LEASE_SKIP_WIRED_GATE";
+const UNSAFE_WIRED_MEMORY_DIVISOR: u64 = 2;
+const WIRED_MEMORY_STABILIZATION_POLLS: usize = 30;
+const WIRED_MEMORY_STABILIZATION_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(500);
+
+struct MetalProcessLease {
+    _file: File,
+    _path: PathBuf,
+    owner_pid: u32,
+}
+
+static METAL_PROCESS_LEASE: OnceLock<Arc<MetalProcessLease>> = OnceLock::new();
+static METAL_PROCESS_LEASE_ACQUIRE: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn metal_process_lease_path() -> Result<PathBuf, MetalError> {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    #[cfg(test)]
+    let directory =
+        std::env::temp_dir().join(format!("qwen-llm-metal-tests-{}", std::process::id()));
+    #[cfg(not(test))]
+    let directory = PathBuf::from("/tmp").join(format!("qwen-llm-{uid}"));
+    match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) => {
+            if !metadata.is_dir() || metadata.uid() != uid {
+                return Err(MetalError::ProcessLease(format!(
+                    "lease directory {} is not a user-owned directory",
+                    directory.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(&directory).map_err(|error| {
+                MetalError::ProcessLease(format!(
+                    "create lease directory {}: {error}",
+                    directory.display()
+                ))
+            })?;
+        }
+        Err(error) => {
+            return Err(MetalError::ProcessLease(format!(
+                "inspect lease directory {}: {error}",
+                directory.display()
+            )));
+        }
+    }
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).map_err(
+        |error| {
+            MetalError::ProcessLease(format!(
+                "secure lease directory {}: {error}",
+                directory.display()
+            ))
+        },
+    )?;
+    let secured = std::fs::symlink_metadata(&directory).map_err(|error| {
+        MetalError::ProcessLease(format!(
+            "verify lease directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    if !secured.is_dir() || secured.uid() != uid || secured.mode() & 0o077 != 0 {
+        return Err(MetalError::ProcessLease(format!(
+            "lease directory {} did not retain private ownership and mode",
+            directory.display()
+        )));
+    }
+    Ok(directory.join("metal.lock"))
+}
+
+fn flock_file(file: &File, operation: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: file owns a valid descriptor and flock accepts this operation.
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+        Ok(())
+    } else {
+        // Do not hide EINTR: a queue-managed process must be able to unwind
+        // after its cooperative SIGINT/SIGTERM handler interrupts a wait.
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn lease_owner_field(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(512)
+        .collect()
+}
+
+fn lease_owner_display(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '=' | '-' | '_' | '.' | '/' | ':') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(512)
+        .collect()
+}
+
+fn metal_process_lease_owner() -> String {
+    let executable = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_owned()))
+        .and_then(|name| name.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    let session = std::env::var("OPENCODE_CALLER_SESSION_ID")
+        .map(|value| lease_owner_field(&value))
+        .unwrap_or_else(|_| "none".to_string());
+    format!(
+        "pid={} executable={} opencode_session={}\n",
+        std::process::id(),
+        lease_owner_field(&executable),
+        session,
+    )
+}
+
+fn read_metal_process_lease_owner(file: &mut File) -> String {
+    if file.seek(SeekFrom::Start(0)).is_err() {
+        return "owner metadata unavailable".to_string();
+    }
+    let mut owner = String::new();
+    if file.take(4096).read_to_string(&mut owner).is_err() || owner.trim().is_empty() {
+        "owner metadata unavailable".to_string()
+    } else {
+        lease_owner_display(owner.trim())
+    }
+}
+
+fn validate_metal_process_lease_file(file: &File, path: &Path) -> Result<(), MetalError> {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    let opened = file.metadata().map_err(|error| {
+        MetalError::ProcessLease(format!("inspect open lease {}: {error}", path.display()))
+    })?;
+    let linked = std::fs::symlink_metadata(path).map_err(|error| {
+        MetalError::ProcessLease(format!("inspect linked lease {}: {error}", path.display()))
+    })?;
+    if !opened.is_file()
+        || !linked.is_file()
+        || opened.uid() != uid
+        || linked.uid() != uid
+        || opened.mode() & 0o077 != 0
+        || linked.mode() & 0o077 != 0
+        || opened.nlink() != 1
+        || opened.dev() != linked.dev()
+        || opened.ino() != linked.ino()
+    {
+        return Err(MetalError::ProcessLease(format!(
+            "lease {} is not one user-owned regular inode",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn open_metal_process_lease(path: &Path, wait: bool) -> Result<MetalProcessLease, MetalError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| MetalError::ProcessLease(format!("open {}: {error}", path.display())))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| {
+            MetalError::ProcessLease(format!("secure lease {}: {error}", path.display()))
+        })?;
+    validate_metal_process_lease_file(&file, path)?;
+    match flock_file(&file, libc::LOCK_EX | libc::LOCK_NB) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            let owner = read_metal_process_lease_owner(&mut file);
+            if !wait {
+                return Err(MetalError::ProcessLease(format!(
+                    "another qwen process owns {} ({owner}); queue the work or set {METAL_PROCESS_LEASE_WAIT_ENV}=1 to wait",
+                    path.display(),
+                )));
+            }
+            eprintln!(
+                "metal: waiting for process lease {} ({owner})",
+                path.display()
+            );
+            flock_file(&file, libc::LOCK_EX).map_err(|error| {
+                MetalError::ProcessLease(format!("wait for {}: {error}", path.display()))
+            })?;
+        }
+        Err(error) => {
+            return Err(MetalError::ProcessLease(format!(
+                "lock {}: {error}",
+                path.display()
+            )));
+        }
+    }
+    validate_metal_process_lease_file(&file, path)?;
+    file.set_len(0).map_err(|error| {
+        MetalError::ProcessLease(format!("truncate {}: {error}", path.display()))
+    })?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| MetalError::ProcessLease(format!("rewind {}: {error}", path.display())))?;
+    // This record is diagnostic attribution, not lock authority. The flock is
+    // authoritative, so do not put a device durability barrier on acquisition;
+    // a crash may leave stale or partial text that the next owner overwrites.
+    file.write_all(metal_process_lease_owner().as_bytes())
+        .and_then(|()| file.flush())
+        .map_err(|error| {
+            MetalError::ProcessLease(format!("write owner to {}: {error}", path.display()))
+        })?;
+    Ok(MetalProcessLease {
+        _file: file,
+        _path: path.to_owned(),
+        owner_pid: std::process::id(),
+    })
+}
+
+fn host_physical_memory_bytes() -> Option<u64> {
+    // SAFETY: sysconf has no pointer arguments for these selectors.
+    let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+    // SAFETY: sysconf has no pointer arguments for these selectors.
+    let page_bytes = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    (pages > 0 && page_bytes > 0)
+        .then(|| (pages as u64).checked_mul(page_bytes as u64))
+        .flatten()
+}
+
+fn host_wired_memory_is_unsafe(wired_bytes: u64, physical_bytes: u64) -> bool {
+    physical_bytes > 0 && wired_bytes >= physical_bytes / UNSAFE_WIRED_MEMORY_DIVISOR
+}
+
+fn ensure_host_wired_memory_is_safe() -> Result<(), MetalError> {
+    if cfg!(test) || crate::env_flag::read_default_off(METAL_PROCESS_LEASE_SKIP_WIRED_GATE_ENV) {
+        if !cfg!(test) {
+            eprintln!(
+                "metal: bypassing wired-memory poison gate via {METAL_PROCESS_LEASE_SKIP_WIRED_GATE_ENV}=1"
+            );
+        }
+        return Ok(());
+    }
+    let physical_bytes = host_physical_memory_bytes().ok_or_else(|| {
+        MetalError::HostMemoryTelemetry("physical memory size is unavailable".to_string())
+    })?;
+    for poll in 0..=WIRED_MEMORY_STABILIZATION_POLLS {
+        let wired_bytes = crate::cache_probe::wired_memory_bytes()
+            .map_err(|error| MetalError::HostMemoryTelemetry(error.to_string()))?;
+        if !host_wired_memory_is_unsafe(wired_bytes, physical_bytes) {
+            return Ok(());
+        }
+        if poll == WIRED_MEMORY_STABILIZATION_POLLS {
+            return Err(MetalError::UnsafeHostWiredMemory {
+                wired_bytes,
+                physical_bytes,
+            });
+        }
+        std::thread::sleep(WIRED_MEMORY_STABILIZATION_INTERVAL);
+    }
+    unreachable!("wired-memory stabilization loop returns on every terminal poll")
+}
+
+fn acquire_metal_process_lease() -> Result<Arc<MetalProcessLease>, MetalError> {
+    if let Some(lease) = METAL_PROCESS_LEASE.get() {
+        if lease.owner_pid != std::process::id() {
+            return Err(MetalError::ProcessLease(
+                "Metal lease cannot be inherited across fork".to_string(),
+            ));
+        }
+        return Ok(lease.clone());
+    }
+    let acquisition = METAL_PROCESS_LEASE_ACQUIRE.get_or_init(|| Mutex::new(()));
+    let _guard = acquisition.lock();
+    if let Some(lease) = METAL_PROCESS_LEASE.get() {
+        if lease.owner_pid != std::process::id() {
+            return Err(MetalError::ProcessLease(
+                "Metal lease cannot be inherited across fork".to_string(),
+            ));
+        }
+        return Ok(lease.clone());
+    }
+    let wait = crate::env_flag::read_default_off(METAL_PROCESS_LEASE_WAIT_ENV);
+    let lease = Arc::new(open_metal_process_lease(
+        &metal_process_lease_path()?,
+        wait,
+    )?);
+    ensure_host_wired_memory_is_safe()?;
+    let _ = METAL_PROCESS_LEASE.set(lease.clone());
+    Ok(lease)
+}
+
 pub struct MetalContext {
     pub device: Device,
     pub queue: Queue,
     pub library: Library,
     pso_cache: Arc<Mutex<MetalPipelineCache>>,
+    _process_lease: Arc<MetalProcessLease>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -841,6 +1156,7 @@ impl MetalContext {
 
     /// Initialize a Metal context backed by the embedded `kernels.metallib`.
     pub fn new() -> Result<Self, MetalError> {
+        let process_lease = acquire_metal_process_lease()?;
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?;
         let queue = device.newCommandQueue().ok_or(MetalError::NoQueue)?;
 
@@ -855,6 +1171,7 @@ impl MetalContext {
             queue,
             library,
             pso_cache: Arc::new(Mutex::new(MetalPipelineCache::default())),
+            _process_lease: process_lease,
         })
     }
 
@@ -20968,6 +21285,69 @@ pub fn mat_vec_trellis3_f32_readback_for_test(
 mod tests {
     use super::*;
     use std::mem::size_of;
+
+    struct LeaseFixture(PathBuf);
+
+    impl LeaseFixture {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            Self(PathBuf::from(format!(
+                "/tmp/qwen-metal-lease-test-{}-{id}.lock",
+                std::process::id()
+            )))
+        }
+    }
+
+    impl Drop for LeaseFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn process_lease_rejects_overlap_and_recovers_after_release() {
+        let fixture = LeaseFixture::new();
+        let first = open_metal_process_lease(&fixture.0, false).expect("acquire first lease");
+        let error = open_metal_process_lease(&fixture.0, false)
+            .err()
+            .expect("overlapping lease must fail");
+        let MetalError::ProcessLease(detail) = error else {
+            panic!("unexpected overlap error: {error}");
+        };
+        assert!(detail.contains("another qwen process owns"));
+        assert!(detail.contains(&format!("pid={}", std::process::id())));
+        drop(first);
+        let second = open_metal_process_lease(&fixture.0, false)
+            .expect("lease must recover after owner release");
+        drop(second);
+    }
+
+    #[test]
+    fn process_lease_owner_fields_are_single_line_and_bounded() {
+        let dirty = format!("bad value\n{}", "x".repeat(1_024));
+        let cleaned = lease_owner_field(&dirty);
+        assert!(!cleaned.contains('\n'));
+        assert!(!cleaned.contains(' '));
+        assert_eq!(cleaned.len(), 512);
+    }
+
+    #[test]
+    fn process_lease_owner_display_cannot_inject_lines() {
+        let dirty = "pid=1\nforged=owner\t\u{1b}[31m";
+        let cleaned = lease_owner_display(dirty);
+        assert_eq!(cleaned, "pid=1_forged=owner___31m");
+        assert!(!cleaned.contains('\n'));
+        assert!(!cleaned.contains('\t'));
+    }
+
+    #[test]
+    fn wired_memory_guard_rejects_half_of_physical_memory() {
+        assert!(!host_wired_memory_is_unsafe(0, 128));
+        assert!(!host_wired_memory_is_unsafe(63, 128));
+        assert!(host_wired_memory_is_unsafe(64, 128));
+        assert!(!host_wired_memory_is_unsafe(u64::MAX, 0));
+    }
 
     #[test]
     fn diagnostics_observers_return_to_inactive_state() {

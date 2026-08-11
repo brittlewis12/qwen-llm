@@ -278,17 +278,7 @@ pub struct InvalidateReport {
     pub after: ResidencyReport,
 }
 
-/// Estimate of memory the kernel could hand out without pressuring
-/// currently-active work. Sums the vm_stat categories that XNU treats
-/// as cheaply reclaimable: `free`, `inactive`, `speculative`, and
-/// `purgeable`. Excludes wired, active, and compressor pages.
-///
-/// Used by the prefetch policy for headroom telemetry. The current policy logs
-/// when its conservative bound would fail but does not skip warmup; a hard gate
-/// awaits a controlled pressure-regime experiment.
-///
-/// Errors surface any `host_statistics64` failure.
-pub fn available_memory_bytes() -> io::Result<u64> {
+fn vm_statistics64() -> io::Result<libc::vm_statistics64> {
     let host = unsafe { mach2::mach_init::mach_host_self() };
     // SAFETY: host is a valid mach port; we pass a properly sized and
     // aligned buffer for the requested flavor; count is initialized to
@@ -308,13 +298,34 @@ pub fn available_memory_bytes() -> io::Result<u64> {
             "host_statistics64(HOST_VM_INFO64) returned kern={ret}"
         )));
     }
-    let stats = unsafe { stats.assume_init() };
+    Ok(unsafe { stats.assume_init() })
+}
+
+/// Estimate of memory the kernel could hand out without pressuring
+/// currently-active work. Sums the vm_stat categories that XNU treats
+/// as cheaply reclaimable: `free`, `inactive`, `speculative`, and
+/// `purgeable`. Excludes wired, active, and compressor pages.
+///
+/// Used by the prefetch policy for headroom telemetry. The current policy logs
+/// when its conservative bound would fail but does not skip warmup; a hard gate
+/// awaits a controlled pressure-regime experiment.
+///
+/// Errors surface any `host_statistics64` failure.
+pub fn available_memory_bytes() -> io::Result<u64> {
+    let stats = vm_statistics64()?;
     let page = host_page_size() as u64;
     let reclaimable = stats.free_count as u64
         + stats.inactive_count as u64
         + stats.speculative_count as u64
         + stats.purgeable_count as u64;
     Ok(reclaimable * page)
+}
+
+/// Bytes XNU currently reports as wired and therefore unavailable for normal
+/// reclamation. This includes Metal allocations pinned by the GPU driver.
+pub fn wired_memory_bytes() -> io::Result<u64> {
+    let stats = vm_statistics64()?;
+    Ok(stats.wire_count as u64 * host_page_size() as u64)
 }
 
 #[cfg(test)]
@@ -393,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn available_memory_is_positive_and_bounded_by_total() {
+    fn host_memory_signals_are_positive_and_bounded_by_total() {
         // Sanity: the call succeeds on macOS, returns a positive value,
         // and is less than or equal to total physical memory (from the
         // hw.memsize sysctl).
@@ -406,6 +417,12 @@ mod tests {
         assert!(
             avail <= total,
             "available {avail} exceeds total physical {total}"
+        );
+        let wired = wired_memory_bytes().expect("wired_memory_bytes");
+        assert!(wired > 0, "expected positive wired memory, got {wired}");
+        assert!(
+            wired <= total,
+            "wired {wired} exceeds total physical {total}"
         );
     }
 

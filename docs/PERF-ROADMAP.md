@@ -58,6 +58,18 @@ Scope rules:
   FRESH process stranded essentially the complete set as reboot-only wired
   memory. Promotion requires explicit unload plus a supervisor teardown window;
   `QWEN_DSV4_RESIDENCY_SET=1` is unsafe under sub-second SIGKILL escalation.
+- Metal initialization is process-exclusive across qwen binaries. Direct
+  contention fails with owner metadata, queue-managed work may set
+  `QWEN_METAL_LEASE_WAIT=1`, and a host that remains at least half wired after a
+  15-second stabilization window is treated as poisoned. This heuristic does
+  not coordinate non-qwen Metal frameworks or prove Metal teardown completion;
+  `QWEN_METAL_LEASE_SKIP_WIRED_GATE=1` is the explicit telemetry-gate override,
+  not a process-exclusion bypass.
+- SIGINT and SIGTERM request cooperative qwen/qwen-bench cancellation at safe
+  token, chunk, request, and benchmark boundaries. This only enables destructor
+  teardown; it cannot survive a supervisor's SIGKILL before the boundary is
+  reached. OpenCode's 200 ms escalation must be lengthened or disabled before
+  explicit whole-model residency is safe under its process supervision.
 
 Exactness labels:
 

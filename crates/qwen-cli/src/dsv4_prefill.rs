@@ -767,6 +767,7 @@ fn execute_ordinary_request(
     let request_started = Instant::now();
     let mut chunk_wall_ms = Vec::with_capacity(chunk_count);
     for (chunk_index, chunk) in tokens.chunks(chunk_tokens).enumerate() {
+        crate::shutdown::checkpoint()?;
         let chunk_started = Instant::now();
         if chunk_index + 1 == chunk_count {
             session
@@ -777,6 +778,7 @@ fn execute_ordinary_request(
                 .advance_tokens(ctx, chunk)
                 .context("advance ordinary DeepSeek V4 profile chunk")?;
         }
+        crate::shutdown::checkpoint()?;
         chunk_wall_ms.push(chunk_started.elapsed().as_secs_f64() * 1e3);
     }
     let wall_ms = request_started.elapsed().as_secs_f64() * 1e3;
@@ -808,6 +810,7 @@ fn execute_profiled_request(
     let request_started = Instant::now();
     let mut chunks = Vec::with_capacity(chunk_count);
     for (chunk_index, chunk) in tokens.chunks(chunk_tokens).enumerate() {
+        crate::shutdown::checkpoint()?;
         let emit_logits = chunk_index + 1 == chunk_count;
         let token_start = chunk_index * chunk_tokens;
         let chunk_started = Instant::now();
@@ -823,6 +826,7 @@ fn execute_profiled_request(
             chunk_started.elapsed().as_secs_f64() * 1e3,
             attention_kinds,
         )?);
+        crate::shutdown::checkpoint()?;
     }
     let wall_ms = request_started.elapsed().as_secs_f64() * 1e3;
     let logits = copy_logit_bits(&session)?;
@@ -1167,6 +1171,7 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
     let load_started = Instant::now();
     let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted)
         .context("load DeepSeek V4 residency")?;
+    crate::shutdown::checkpoint()?;
     let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
     let mut residency = Some(realized.into_residency());
 
@@ -1175,6 +1180,7 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
     let mut warmups = Vec::with_capacity(warmup_count);
     let mut reference_logits = None;
     for _ in 0..warmup_count {
+        crate::shutdown::checkpoint()?;
         let (run, logits) =
             execute_ordinary_request(&ctx, &mut residency, &tokens, args.chunk_tokens)?;
         if let Some(reference) = &reference_logits {
@@ -1201,6 +1207,7 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
     );
     let mut samples = Vec::with_capacity(sample_count);
     for _ in 0..sample_count {
+        crate::shutdown::checkpoint()?;
         let (run, logits) = execute_profiled_request(
             &ctx,
             &mut residency,
@@ -1232,6 +1239,7 @@ pub fn run(args: Dsv4PrefillArgs, build: Value) -> Result<()> {
         ordinary,
         samples,
     };
+    crate::shutdown::checkpoint()?;
     let full_json = serde_json::to_string_pretty(&report)?;
     if let Some(path) = &args.json_out {
         std::fs::write(path, format!("{full_json}\n"))

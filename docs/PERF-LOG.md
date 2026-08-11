@@ -6,6 +6,67 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-10 - Cooperative CLI Metal Teardown
+
+Status: `qwen` and `qwen-bench` now convert SIGINT and SIGTERM into an
+async-signal-safe cancellation flag. Generation, packed-prefill, request, and
+benchmark boundaries observe it and return through ordinary Rust unwinding, so
+model and residency guards can run instead of default signal termination.
+
+- A 0.8B decode smoke received SIGTERM during a 10,000-token run, stopped at the
+  next token boundary, and returned through ordinary unwinding. A following
+  process acquired the Metal lease immediately; wired memory remained at the
+  healthy roughly 3.1 GiB baseline. The final CLI status follows `128 + signal`.
+- The handler only publishes the atomic flag; it performs no potentially
+  blocking stdio. Residency teardown calls `removeResidencySet`/`endResidency`
+  before logging its result. The elapsed value measures API return, not proof
+  that XNU has unwired every page.
+- Blocking stdin input remains a cooperative-cancellation window: stdio may
+  retry an interrupted read, so a streaming request loop observes the flag no
+  later than the next input line. Loaded compute does not continue while it
+  waits, but a supervisor must still preserve the teardown window.
+- This does not make OpenCode's 200 ms TERM-to-KILL escalation safe. A process
+  blocked in one synchronous command buffer or packed-prefill chunk cannot reach
+  a checkpoint in 200 ms, and SIGKILL still bypasses every destructor.
+
+Decision: retain cooperative teardown as the qwen half of the lifecycle
+contract. OpenCode must provide a long or disabled SIGKILL deadline, and
+whole-model residency stays opt-in until that supervisor half is deployed.
+
+## 2026-08-10 - Process-Wide Metal Exclusion And Poison Gate
+
+Status: the first engine `MetalContext` in a process now acquires a
+machine-visible, per-user `flock` before creating a Metal device. The lease is
+retained for the process lifetime. A competing qwen engine fails before Metal
+allocation; `QWEN_METAL_LEASE_WAIT=1` provides the blocking mode intended for a
+queue.
+
+- The lock lives in a private per-UID directory under `/tmp` and records PID,
+  executable, and OpenCode caller session for attributable denial. This
+  sanitized text is diagnostic only; `flock` is the authority and stale text
+  after a crash is harmless. Kernel file locks recover automatically on ordinary
+  or abnormal process exit; repeated contexts in one process share the same
+  lease, while a forked child is rejected.
+- Lock release cannot prove that Metal reclaimed a hard-killed residency set.
+  The first context therefore waits up to 15 seconds for system wired memory
+  below half of physical RAM, then rejects. This heuristic circuit breaker turns
+  the observed reboot-only poisoned state into an explicit error instead of
+  another indefinitely hanging model load. A user who has independently
+  accounted for legitimate wired memory may explicitly bypass only this gate
+  with `QWEN_METAL_LEASE_SKIP_WIRED_GATE=1`; process exclusion still applies.
+- Queue wait mode intentionally has no internal timeout. It remains blocked
+  while a live owner holds the lease, but SIGINT or SIGTERM interrupts the wait
+  and starts cooperative unwinding. The queue owns any higher-level deadline.
+- The storage-plan command's allocation-free direct device query remains outside
+  the lease. Any command that constructs an engine `MetalContext` is covered.
+- This is qwen-process enforcement, not a universal GPU scheduler. External
+  MLX, MPS, llama.cpp, and arbitrary Metal processes still require the planned
+  one-slot host queue and capability boundary.
+
+Decision: prevent overlap and poisoned-host retries before optimizing queue
+ergonomics. Keep the default fail-fast for interactive commands; let Pueue use
+the explicit wait mode for authorized serialized jobs.
+
 ## 2026-08-10 - DeepSeek V4 Whole-Model Residency Safety Rollback
 
 Status: whole-model `MTLResidencySet` placement is now opt-in for every

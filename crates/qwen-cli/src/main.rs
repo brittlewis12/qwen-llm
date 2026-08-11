@@ -4,6 +4,7 @@ mod cli;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_temporal;
 mod messages;
+mod shutdown;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
@@ -2252,7 +2253,12 @@ struct PromptLookupDecodeStats {
     physical_target_positions: usize,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    shutdown::finish(run())
+}
+
+fn run() -> Result<()> {
+    shutdown::install()?;
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -3038,10 +3044,12 @@ fn advance_deepseek_v4_prompt_prefix(
         .into_iter()
         .enumerate()
     {
+        shutdown::checkpoint()?;
         let chunk = &token_ids[range];
         session.advance_tokens(ctx, chunk).with_context(|| {
             format!("advance DeepSeek V4 snapshot prefix chunk {chunk_index} without logits")
         })?;
+        shutdown::checkpoint()?;
     }
     Ok(())
 }
@@ -3059,6 +3067,7 @@ fn execute_deepseek_v4_prompt_suffix(
     let chunks = deepseek_v4_prefill_chunk_ranges(token_ids.len(), chunk_tokens);
     let chunk_count = chunks.len();
     for (chunk_index, range) in chunks.into_iter().enumerate() {
+        shutdown::checkpoint()?;
         let chunk = &token_ids[range];
         if chunk_index + 1 == chunk_count {
             session
@@ -3069,6 +3078,7 @@ fn execute_deepseek_v4_prompt_suffix(
                 format!("advance DeepSeek V4 prompt chunk {chunk_index} without logits")
             })?;
         }
+        shutdown::checkpoint()?;
     }
     Ok(chunk_count)
 }
@@ -3413,6 +3423,7 @@ fn run_deepseek_v4_single_turn(
     let prefetch_outcome = apply_deepseek_v4_prefetch(&gguf, prefetch_mode)?;
     let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted_load_plan)
         .context("load admitted strict DeepSeek V4 Metal residency")?;
+    shutdown::checkpoint()?;
     let (residency, memory_admission, after_residency_bytes) = realized.into_parts();
     let memory_signals = memory_admission.signals;
     eprintln!(
@@ -4224,6 +4235,7 @@ fn run_deepseek_v4_requests_jsonl(
     let _prefetch_outcome = apply_deepseek_v4_prefetch(&gguf, prefetch_mode)?;
     let realized = DeepSeekV4MetalResidency::load_from_plan(&ctx, &gguf, admitted_load_plan)
         .context("load admitted strict DeepSeek V4 Metal residency")?;
+    shutdown::checkpoint()?;
     let (residency, memory_admission, after_residency_bytes) = realized.into_parts();
     let memory_signals = memory_admission.signals;
     eprintln!(
@@ -4258,6 +4270,7 @@ fn run_deepseek_v4_requests_jsonl(
     let mut reconcile_first_session = Some((before_residency_bytes, after_residency_bytes));
     let mut executed = 0usize;
     let mut execute = |request: DeepSeekV4PreparedRequest| -> Result<()> {
+        shutdown::checkpoint()?;
         if let Some(limit) = logical_context_limit {
             validate_deepseek_v4_request_context_limit(
                 &request.id,
@@ -4456,8 +4469,10 @@ fn run_deepseek_v4_requests_jsonl(
             execute(request)?;
         }
     } else {
+        shutdown::checkpoint()?;
         let stdin = std::io::stdin();
         for (index, line) in stdin.lock().lines().enumerate() {
+            shutdown::checkpoint()?;
             let line = line.context("read requests line from stdin")?;
             if let Some(request) = prepare_deepseek_v4_jsonl_request_line(
                 &tokenizer,
@@ -6363,6 +6378,7 @@ fn run_requests_jsonl(
     );
 
     if requests_path == Path::new("-") {
+        shutdown::checkpoint()?;
         let stdin = std::io::stdin();
         let reader = stdin.lock();
         if args.cache_prefix_auto_min_tokens > 0 {
@@ -6371,6 +6387,7 @@ fn run_requests_jsonl(
             );
         }
         for (line_idx, line) in reader.lines().enumerate() {
+            shutdown::checkpoint()?;
             let line_no = line_idx + 1;
             let line = line.with_context(|| format!("read requests line {line_no}"))?;
             let Some(prepared_request) =
@@ -6469,7 +6486,9 @@ fn prepare_jsonl_requests(
     };
 
     let mut prepared = Vec::new();
+    shutdown::checkpoint()?;
     for (line_idx, line) in reader.lines().enumerate() {
+        shutdown::checkpoint()?;
         let line_no = line_idx + 1;
         let line = line.with_context(|| format!("read requests line {line_no}"))?;
         if let Some(request) = prepare_jsonl_request_line(line_no, &line, tokenizer, args)? {
@@ -6920,6 +6939,7 @@ fn prefill_span(
     token_ids: &[i32],
     start_position: usize,
 ) -> Result<(Vec<f32>, f64)> {
+    shutdown::checkpoint()?;
     ensure!(!token_ids.is_empty(), "cannot prefill an empty token span");
     sequence.check_position(start_position)?;
     let t0 = Instant::now();
@@ -6933,6 +6953,7 @@ fn prefill_span(
         None,
     )
     .context("prefill prompt span")?;
+    shutdown::checkpoint()?;
     sequence.advance_by(token_ids.len())?;
     Ok((logits, t0.elapsed().as_secs_f64() * 1e3))
 }
@@ -7183,6 +7204,7 @@ where
     let mut stop_reason = None;
 
     while tokens.len() < max_tokens {
+        shutdown::checkpoint()?;
         let selection_t0 = Instant::now();
         let token = select(context, &state)?;
         first_token_selection_ms.get_or_insert_with(|| selection_t0.elapsed().as_secs_f64() * 1e3);
@@ -7202,6 +7224,7 @@ where
 
         let transition_t0 = Instant::now();
         state = transition(context, token)?;
+        shutdown::checkpoint()?;
         let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
         transition_ms += elapsed_ms;
         first_transition_ms.get_or_insert(elapsed_ms);
@@ -7285,6 +7308,7 @@ where
     let mut post_callback_policy_ms = 0.0;
 
     let stop_reason = 'outer: loop {
+        shutdown::checkpoint()?;
         tokens.push(carry);
 
         if stop_tokens.contains(&carry) {

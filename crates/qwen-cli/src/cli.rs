@@ -257,11 +257,13 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
 }
 
 fn read_stdin_string(label: &str) -> Result<String> {
+    crate::shutdown::checkpoint()?;
     let mut input = String::new();
     std::io::stdin()
         .lock()
         .read_to_string(&mut input)
         .with_context(|| format!("read {label}"))?;
+    crate::shutdown::checkpoint()?;
     ensure!(!input.is_empty(), "{label} read empty stdin");
     Ok(input)
 }

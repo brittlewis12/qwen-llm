@@ -31,6 +31,7 @@ mod lm_head_screening_oracle;
 mod messages;
 mod q4_mma_ceiling;
 mod response_shape_runtime;
+mod shutdown;
 #[path = "../source_identity.rs"]
 mod source_identity;
 
@@ -2717,7 +2718,12 @@ struct PpWaitArgs {
     output: OutputFormat,
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    shutdown::finish(run())
+}
+
+fn run() -> Result<()> {
+    shutdown::install()?;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -10672,6 +10678,7 @@ fn run_pld(args: PldArgs) -> Result<()> {
     let mut ref_carry = argmax_i32(&ref_last_logits);
     let mut ref_processed_pos = (prompt_ids.len() - 1) as u32;
     loop {
+        shutdown::checkpoint()?;
         ref_generated.push(ref_carry);
         if stops.contains(&ref_carry) || ref_generated.len() >= tokens {
             break;
@@ -10717,6 +10724,7 @@ fn run_pld(args: PldArgs) -> Result<()> {
     let mut events = Vec::new();
     let mut event_index = 0usize;
     'outer: loop {
+        shutdown::checkpoint()?;
         let carry_index = candidate_generated.len();
         let event_carry = carry;
         candidate_generated.push(carry);
@@ -12089,6 +12097,7 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
     let mut decoder = DFlashDecoder::new(&mf, &mhead, dsess);
 
     loop {
+        shutdown::checkpoint()?;
         // Emit + stop checks happen inside the loop so EOS / max can short-circuit.
         if emitted.len() >= tokens {
             break;
@@ -12591,6 +12600,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
 
     let t_decode = Instant::now();
     'outer: loop {
+        shutdown::checkpoint()?;
         if emitted.len() >= tokens {
             break;
         }
@@ -13065,6 +13075,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
     let loaded = runtime
         .load_model(&model)
         .with_context(|| format!("load {}", model.display()))?;
+    shutdown::checkpoint()?;
     let ctx = loaded.context();
     let g = loaded.gguf();
     let mm = loaded.metal_model();
@@ -13189,6 +13200,7 @@ fn run_pp(args: PpArgs) -> Result<()> {
     let mut gpu_samples = Vec::with_capacity(runs);
     let mut ts_samples = Vec::with_capacity(runs);
     for run_idx in 0..runs {
+        shutdown::checkpoint()?;
         let mut s = loaded
             .create_sequence(SequenceConfig::new(cap))
             .context("session run")?;
@@ -13448,6 +13460,7 @@ fn run_tg(args: TgArgs) -> Result<()> {
     let loaded = runtime
         .load_model(&model)
         .with_context(|| format!("load {}", model.display()))?;
+    shutdown::checkpoint()?;
     let ctx = loaded.context();
     let g = loaded.gguf();
     let mm = loaded.metal_model();
@@ -13512,6 +13525,7 @@ fn run_tg(args: TgArgs) -> Result<()> {
             // engine-specific field on the JSON row.
             let mut gpu_ms_acc = 0.0;
             for pos in 0..n_gen {
+                shutdown::checkpoint()?;
                 // Use `single_token_argmax_profiled` (dispatches dense/MoE
                 // internally) so we can sum per-step GPU time. The argmax i32 is
                 // discarded; the next input is drawn from the seeded RNG, matching
@@ -13619,6 +13633,7 @@ fn run_tg(args: TgArgs) -> Result<()> {
     let mut ts_samples: Vec<f64> = Vec::with_capacity(runs);
     let mut trace_samples: Vec<KernelTraceCounters> = Vec::with_capacity(runs);
     for run_idx in 0..runs {
+        shutdown::checkpoint()?;
         let first = next_rand_tok();
         let (wall_ms, gpu_ms, trace) = run_once(first, &mut next_rand_tok).context("tg run")?;
         let ts = n_gen as f64 * 1000.0 / wall_ms;
@@ -13819,6 +13834,7 @@ fn run_suite_pp_row(
     let mut session_alloc_samples = Vec::with_capacity(runs);
     let mut scratch_alloc_samples = Vec::with_capacity(runs);
     for _ in 0..runs {
+        shutdown::checkpoint()?;
         let session_t0 = Instant::now();
         let mut seq = loaded
             .create_sequence(SequenceConfig::new(cap))
@@ -13950,6 +13966,7 @@ fn run_suite_tg_row(
     let mut session_alloc_samples = Vec::with_capacity(runs);
     let mut trace_samples = Vec::with_capacity(runs);
     for _ in 0..runs {
+        shutdown::checkpoint()?;
         let first = next_rand_tok();
         let (wall_ms, gpu_ms, trace, session_alloc_ms) =
             run_once(first, &mut next_rand_tok).context("suite tg run")?;
@@ -14145,6 +14162,7 @@ fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let m = Model::from_gguf(&g).context("parse model arch from gguf")?;
     let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model weights")?;
+    shutdown::checkpoint()?;
     let ids = synthetic_prompt_ids(n_prompt, m.arch.vocab_size, seed);
     let prefill_chunk =
         prefill_chunk.unwrap_or_else(|| default_prefill_chunk(m.arch.kind, ids.len()));
@@ -14201,6 +14219,7 @@ fn run_pp_wait(args: PpWaitArgs) -> Result<()> {
     )?;
     text_log!("[pp-wait] ready; waiting for {:?}", go_file);
     while !go_file.exists() {
+        shutdown::checkpoint()?;
         std::thread::sleep(Duration::from_millis(25));
     }
     text_log!("[pp-wait] go signal received; running timed prefill");
@@ -14405,6 +14424,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
     let mut final_next_token: Option<i32> = None;
 
     for rep in 0..runs {
+        shutdown::checkpoint()?;
         // Fresh session per rep so we measure a steady-state cold-cache
         // prefill+decode pair, not the cumulative state of the previous rep.
         drop(last_session.take());
@@ -14464,6 +14484,7 @@ fn run_decode(args: DecodeArgs) -> Result<()> {
         let t1 = Instant::now();
         let mut next_tok = argmax_i32(&last_logits);
         for k in 0..tokens {
+            shutdown::checkpoint()?;
             let pos = ids.len() + k;
             let input_tok = next_tok;
             gen_ids.push(input_tok);
@@ -15502,6 +15523,7 @@ fn run_attn_intra(args: AttnIntraArgs) -> Result<()> {
 
     let mut agg: Vec<(String, f64)> = Vec::new();
     for run in 0..runs {
+        shutdown::checkpoint()?;
         let position = target as u32 + run as u32;
         let mut phases: Vec<(String, f64)> = Vec::new();
         timed(
@@ -16122,6 +16144,7 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
             let mut sx = MetalSession::fresh(&ctx, &mm, target_ctx + window + 16)?;
             let _ = mf.single_token(0, 0, &mut sx)?;
             for p in 1..(target_ctx as u32) {
+                shutdown::checkpoint()?;
                 let _ = mf.single_token(0, p, &mut sx)?;
             }
             sessions.push(sx);
@@ -16147,6 +16170,7 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
         target_ctx, go_file
     );
     while !go_file.exists() {
+        shutdown::checkpoint()?;
         std::thread::sleep(Duration::from_millis(25));
     }
     eprintln!(

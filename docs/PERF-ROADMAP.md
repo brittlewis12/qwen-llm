@@ -2806,6 +2806,16 @@ decode reaches `2.57x` aggregate throughput at short context and `2.14x` at 16K.
 Independent-queue overlap remains the cross-family fallback (`1.44x` 0.8B,
 `1.47x` A3B, `1.37x` DeepSeek K160 at B=2).
 
+The fallback now clears a generated-continuation gate rather than only a
+teacher-forced transition. Across two distinct 32-step greedy streams, A3B
+retains exact IDs and final logits at `1.378x`; DeepSeek K160 retains exact IDs
+and final logits at `1.402x`, including full-logit readback. Open one narrow
+product slice: regular-file JSONL, explicit concurrency two, serial prefill,
+pairwise independent-queue decode, input-order emission, odd-tail serial
+fallback, and up-front session admission. Reject composition with dense B=8,
+stdin, prompt lookup, and prefix-cache mutation until this lifecycle is green.
+Call the capability resident concurrency, not batching.
+
 Qwen A3B static B=8 is closed after a complete whole-model spike. Aggressive
 packed execution reaches `1.43x` and beats B=8 independent queues by about 16%,
 but generated continuation diverges. Restricting the candidate to bitwise-exact

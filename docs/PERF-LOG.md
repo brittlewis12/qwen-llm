@@ -23293,3 +23293,34 @@ kernel clears 30% locally, another stage exposes an independently large charged
 ceiling, or shared executor infrastructure makes a low-single-digit increment
 worth carrying. Full result:
 `docs/bench/2026-08-11-dsv4-k160-routed-expert-b8-kill/README.md`.
+
+## 2026-08-11 — Cross-Family Generated Queue Continuation GO
+
+Status: independent B=2 Metal queues now clear a 32-step generated greedy
+continuation gate on Qwen MoE and DeepSeek V4, authorizing a narrow resident
+concurrency product spike.
+
+The queue probe now optionally feeds each selected argmax into the next
+transition. Qwen uses its existing GPU argmax output; DeepSeek copies full
+logits, applies a finite tie-stable CPU argmax, and feeds the selected token from
+inside each queue worker. Serialized and independent arms compare every selected
+ID plus final full-logit SHA-256. Teacher-forced mode remains the default.
+
+On Qwen 35B-A3B, two 32-step streams move `98.28 -> 135.48` aggregate token/s
+(`1.3784x`) with a `1.988` GPU concurrency factor. Pair walls are
+`650.343/652.011 ms` serialized and `474.513/470.319 ms` independent. All IDs
+and final logits match; two sessions add `170,229,760` Metal bytes.
+
+On DeepSeek K160, the same causal contract moves `26.87 -> 37.66` aggregate
+token/s (`1.4016x`) with a `1.995` concurrency factor. Pair walls are
+`2,451.020/2,316.198 ms` serialized and `1,738.087/1,662.708 ms` independent.
+All IDs and final logits match. Two sessions add `8,714,649,600` bytes; normal
+exit returns wired memory to baseline, host compression rises, and swap remains
+unchanged.
+
+Decision: proceed to an explicit regular-file JSONL `--concurrency 2` slice.
+Prefill remains serial, decode pairs overlap on independent queues, outputs stay
+in input order, and an odd tail runs serially. Require up-front multi-session
+admission and fail closed with dense B=8, stdin, prompt lookup, and prefix-cache
+mutation. This is resident concurrency, not batching or a daemon. Full result:
+`docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.

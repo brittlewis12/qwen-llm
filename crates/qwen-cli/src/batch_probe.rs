@@ -34,9 +34,13 @@ pub struct QueueOverlapProbeArgs {
     /// Prompt tokens consumed before the timed decode window.
     #[arg(long, default_value = "1")]
     target_ctx: usize,
-    /// Teacher-forced decode transitions per client and arm.
+    /// Decode transitions per client and arm.
     #[arg(long, default_value = "1")]
     window: usize,
+    /// Feed each selected argmax back into the next transition instead of
+    /// using deterministic teacher-forced tokens.
+    #[arg(long)]
+    generated_feedback: bool,
     /// Counterbalanced serialized/independent-queue pairs.
     #[arg(long, default_value = "2")]
     runs: usize,
@@ -126,6 +130,12 @@ struct QwenEvidence {
     final_logits_sha256: Vec<String>,
 }
 
+#[derive(Eq, PartialEq)]
+struct DeepSeekEvidence {
+    argmax_ids: Vec<Vec<u32>>,
+    final_logits_sha256: Vec<String>,
+}
+
 fn median(values: impl IntoIterator<Item = f64>) -> f64 {
     let mut values = values.into_iter().collect::<Vec<_>>();
     values.sort_by(f64::total_cmp);
@@ -141,6 +151,21 @@ fn token_for(seed: u64, client: usize, position: usize, vocab: usize) -> u32 {
         .wrapping_add((client as u64 + 1).wrapping_mul(7_919))
         .wrapping_add((position as u64 + 1).wrapping_mul(104_729));
     (mixed % vocab as u64) as u32
+}
+
+fn argmax_f32(values: &[f32], label: &str) -> Result<u32> {
+    ensure!(!values.is_empty(), "{label} logits are empty");
+    ensure!(
+        values.iter().all(|value| value.is_finite()),
+        "{label} logits contain a non-finite value"
+    );
+    let mut best = 0usize;
+    for index in 1..values.len() {
+        if values[index] > values[best] {
+            best = index;
+        }
+    }
+    u32::try_from(best).context("argmax token exceeds u32")
 }
 
 fn checked_transitions(clients: usize, window: usize) -> Result<usize> {
@@ -353,6 +378,7 @@ fn run_qwen_serialized(
     window: usize,
     seed: u64,
     session_upper_bytes: u64,
+    generated_feedback: bool,
 ) -> Result<ArmResult<QwenEvidence>> {
     let admitted_session_bytes = require_incremental_admission(
         ctx,
@@ -372,17 +398,24 @@ fn run_qwen_serialized(
     }
     let allocated_after = ctx.current_allocated_size();
     let mut argmax_ids = vec![Vec::with_capacity(window); clients];
+    let mut next_tokens = (0..clients)
+        .map(|client| token_for(seed, client, target_ctx, model.arch.vocab_size as usize) as i32)
+        .collect::<Vec<_>>();
     let mut gpu_sum_ms = 0.0;
     let started = Instant::now();
     for step in 0..window {
         crate::shutdown::checkpoint()?;
         for client in 0..clients {
-            let token = token_for(
-                seed,
-                client,
-                target_ctx + step,
-                model.arch.vocab_size as usize,
-            ) as i32;
+            let token = if generated_feedback {
+                next_tokens[client]
+            } else {
+                token_for(
+                    seed,
+                    client,
+                    target_ctx + step,
+                    model.arch.vocab_size as usize,
+                ) as i32
+            };
             unsafe {
                 ids[client]
                     .buffer
@@ -422,8 +455,11 @@ fn run_qwen_serialized(
                 command.GPUEndTime(),
                 "serialized Qwen command",
             )?;
-            argmax_ids[client]
-                .push(unsafe { *argmax[client].buffer.contents().as_ptr().cast::<i32>() });
+            let selected = unsafe { *argmax[client].buffer.contents().as_ptr().cast::<i32>() };
+            argmax_ids[client].push(selected);
+            if generated_feedback {
+                next_tokens[client] = selected;
+            }
         }
     }
     let wall_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -467,6 +503,7 @@ fn run_qwen_independent(
     window: usize,
     seed: u64,
     session_upper_bytes: u64,
+    generated_feedback: bool,
 ) -> Result<ArmResult<QwenEvidence>> {
     let clients = contexts.len();
     let admitted_session_bytes = require_incremental_admission(
@@ -487,6 +524,9 @@ fn run_qwen_independent(
     }
     let allocated_after = ctx.current_allocated_size();
     let mut argmax_ids = vec![Vec::with_capacity(window); clients];
+    let mut next_tokens = (0..clients)
+        .map(|client| token_for(seed, client, target_ctx, model.arch.vocab_size as usize) as i32)
+        .collect::<Vec<_>>();
     let mut gpu_sum_ms = 0.0;
     let mut gpu_span_ms = 0.0;
     let started = Instant::now();
@@ -494,12 +534,16 @@ fn run_qwen_independent(
         crate::shutdown::checkpoint()?;
         let mut commands = Vec::with_capacity(clients);
         for client in 0..clients {
-            let token = token_for(
-                seed,
-                client,
-                target_ctx + step,
-                model.arch.vocab_size as usize,
-            ) as i32;
+            let token = if generated_feedback {
+                next_tokens[client]
+            } else {
+                token_for(
+                    seed,
+                    client,
+                    target_ctx + step,
+                    model.arch.vocab_size as usize,
+                ) as i32
+            };
             unsafe {
                 let ptr = ids[client].buffer.contents().as_ptr().cast::<i32>();
                 ptr.write(token);
@@ -551,6 +595,9 @@ fn run_qwen_independent(
         for client in 0..clients {
             let value = unsafe { *argmax[client].buffer.contents().as_ptr().cast::<i32>() };
             argmax_ids[client].push(value);
+            if generated_feedback {
+                next_tokens[client] = value;
+            }
         }
     }
     let wall_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -622,6 +669,7 @@ fn run_qwen(
             args.window,
             warmup_seed,
             session_upper_bytes,
+            args.generated_feedback,
         )?;
         let warmup_independent = run_qwen_independent(
             ctx,
@@ -631,6 +679,7 @@ fn run_qwen(
             args.window,
             warmup_seed,
             session_upper_bytes,
+            args.generated_feedback,
         )?;
         ensure!(
             warmup_serialized.evidence == warmup_independent.evidence,
@@ -649,6 +698,7 @@ fn run_qwen(
                         args.window,
                         run_seed,
                         session_upper_bytes,
+                        args.generated_feedback,
                     )?,
                     run_qwen_independent(
                         ctx,
@@ -658,6 +708,7 @@ fn run_qwen(
                         args.window,
                         run_seed,
                         session_upper_bytes,
+                        args.generated_feedback,
                     )?,
                     "serialized_independent",
                 )
@@ -670,6 +721,7 @@ fn run_qwen(
                     args.window,
                     run_seed,
                     session_upper_bytes,
+                    args.generated_feedback,
                 )?;
                 let serialized = run_qwen_serialized(
                     ctx,
@@ -679,6 +731,7 @@ fn run_qwen(
                     args.window,
                     run_seed,
                     session_upper_bytes,
+                    args.generated_feedback,
                 )?;
                 (serialized, independent, "independent_serialized")
             };
@@ -768,7 +821,8 @@ fn run_deepseek_serialized(
     window: usize,
     seed: u64,
     session_upper_bytes: u64,
-) -> Result<ArmResult<Vec<String>>> {
+    generated_feedback: bool,
+) -> Result<ArmResult<DeepSeekEvidence>> {
     let clients = contexts.len();
     let admitted_session_bytes = require_incremental_admission(
         &contexts[0],
@@ -781,22 +835,39 @@ fn run_deepseek_serialized(
     let mut sessions = prepare_deepseek_sessions(contexts, residency, target_ctx, window, seed)?;
     let allocated_after = contexts[0].current_allocated_size();
     let vocab_size = residency.config().vocab_size as usize;
+    let mut argmax_ids = vec![Vec::with_capacity(window); clients];
+    let mut next_tokens = (0..clients)
+        .map(|client| token_for(seed, client, target_ctx, vocab_size))
+        .collect::<Vec<_>>();
     let mut gpu_sum_ms = 0.0;
     let started = Instant::now();
     for step in 0..window {
         crate::shutdown::checkpoint()?;
         for client in 0..clients {
-            let token = token_for(seed, client, target_ctx + step, vocab_size);
+            let token = if generated_feedback {
+                next_tokens[client]
+            } else {
+                token_for(seed, client, target_ctx + step, vocab_size)
+            };
             let profile =
                 sessions[client].forward_token_whole_profiled(&contexts[client], token)?;
             gpu_sum_ms += profile.command_gpu_ms;
+            if generated_feedback {
+                let logits = sessions[client].copy_logits_f32()?;
+                let selected = argmax_f32(&logits, "serialized DeepSeek")?;
+                argmax_ids[client].push(selected);
+                next_tokens[client] = selected;
+            }
         }
     }
     let wall_ms = started.elapsed().as_secs_f64() * 1e3;
-    let evidence = sessions
-        .iter()
-        .map(digest_logits)
-        .collect::<Result<Vec<_>>>()?;
+    let evidence = DeepSeekEvidence {
+        argmax_ids,
+        final_logits_sha256: sessions
+            .iter()
+            .map(digest_logits)
+            .collect::<Result<Vec<_>>>()?,
+    };
     let transitions = checked_transitions(clients, window)?;
     let allocation_delta = observed_allocation_delta(
         allocated_before,
@@ -830,7 +901,8 @@ fn run_deepseek_independent(
     window: usize,
     seed: u64,
     session_upper_bytes: u64,
-) -> Result<ArmResult<Vec<String>>> {
+    generated_feedback: bool,
+) -> Result<ArmResult<DeepSeekEvidence>> {
     let clients = contexts.len();
     let admitted_session_bytes = require_incremental_admission(
         &contexts[0],
@@ -852,7 +924,7 @@ fn run_deepseek_independent(
             let (start_tx, start_rx) = mpsc::channel();
             start_senders.push(start_tx);
             handles.push(scope.spawn(
-                move || -> Result<(Vec<DeepSeekV4WholeTokenProfile>, String)> {
+                move || -> Result<(Vec<DeepSeekV4WholeTokenProfile>, Vec<u32>, String)> {
                     let mut session = match catch_unwind(AssertUnwindSafe(|| {
                         prepare_deepseek_session(
                             ctx, &residency, client, target_ctx, window, seed,
@@ -868,6 +940,13 @@ fn run_deepseek_independent(
                         .send(client)
                         .context("publish DeepSeek queue-overlap worker readiness")?;
                     let mut profiles = Vec::with_capacity(window);
+                    let mut argmax_ids = Vec::with_capacity(window);
+                    let mut next_token = token_for(
+                        seed,
+                        client,
+                        target_ctx,
+                        residency.config().vocab_size as usize,
+                    );
                     for step in 0..window {
                         start_rx
                             .recv()
@@ -876,19 +955,33 @@ fn run_deepseek_independent(
                             let active = session
                                 .as_mut()
                                 .expect("checked DeepSeek queue-overlap session state");
-                            let result = match catch_unwind(AssertUnwindSafe(|| {
-                                crate::shutdown::checkpoint().and_then(|()| {
-                                    let token = token_for(
-                                        seed,
-                                        client,
-                                        target_ctx + step,
-                                        residency.config().vocab_size as usize,
-                                    );
-                                    active
+                            let result = match catch_unwind(AssertUnwindSafe(
+                                || -> Result<(DeepSeekV4WholeTokenProfile, Option<u32>)> {
+                                    crate::shutdown::checkpoint()?;
+                                    let token = if generated_feedback {
+                                        next_token
+                                    } else {
+                                        token_for(
+                                            seed,
+                                            client,
+                                            target_ctx + step,
+                                            residency.config().vocab_size as usize,
+                                        )
+                                    };
+                                    let profile = active
                                         .forward_token_whole_profiled(ctx, token)
-                                        .map_err(anyhow::Error::from)
-                                })
-                            })) {
+                                        .map_err(anyhow::Error::from)?;
+                                    let selected = if generated_feedback {
+                                        Some(argmax_f32(
+                                            &active.copy_logits_f32()?,
+                                            "independent DeepSeek",
+                                        )?)
+                                    } else {
+                                        None
+                                    };
+                                    Ok((profile, selected))
+                                },
+                            )) {
                                 Ok(result) => result,
                                 Err(payload) => Err(anyhow!(
                                     "DeepSeek queue-overlap worker {client} step {step} panicked: {}",
@@ -896,7 +989,13 @@ fn run_deepseek_independent(
                                 )),
                             };
                             match result {
-                                Ok(profile) => profiles.push(profile),
+                                Ok((profile, selected)) => {
+                                    profiles.push(profile);
+                                    if let Some(selected) = selected {
+                                        argmax_ids.push(selected);
+                                        next_token = selected;
+                                    }
+                                }
                                 Err(error) => session = Err(error),
                             }
                         }
@@ -905,7 +1004,7 @@ fn run_deepseek_independent(
                             .context("publish DeepSeek queue-overlap step completion")?;
                     }
                     let session = session?;
-                    Ok((profiles, digest_logits(&session)?))
+                    Ok((profiles, argmax_ids, digest_logits(&session)?))
                 },
             ));
         }
@@ -948,13 +1047,19 @@ fn run_deepseek_independent(
         }
         Ok((wall_ms, allocated_after, completed))
     })?;
-    let evidence = completed
-        .iter()
-        .map(|(_, digest)| digest.clone())
-        .collect::<Vec<_>>();
+    let evidence = DeepSeekEvidence {
+        argmax_ids: completed
+            .iter()
+            .map(|(_, argmax_ids, _)| argmax_ids.clone())
+            .collect(),
+        final_logits_sha256: completed
+            .iter()
+            .map(|(_, _, digest)| digest.clone())
+            .collect(),
+    };
     let profiles = completed
         .iter()
-        .map(|(profiles, _)| profiles.as_slice())
+        .map(|(profiles, _, _)| profiles.as_slice())
         .collect::<Vec<_>>();
     ensure!(
         profiles.iter().all(|profiles| profiles.len() == window),
@@ -1042,6 +1147,7 @@ fn run_deepseek(
             args.window,
             warmup_seed,
             planned_session_bytes,
+            args.generated_feedback,
         )?;
         let warmup_independent = run_deepseek_independent(
             &contexts[..clients],
@@ -1050,6 +1156,7 @@ fn run_deepseek(
             args.window,
             warmup_seed,
             planned_session_bytes,
+            args.generated_feedback,
         )?;
         ensure!(
             warmup_serialized.evidence == warmup_independent.evidence,
@@ -1067,6 +1174,7 @@ fn run_deepseek(
                         args.window,
                         run_seed,
                         planned_session_bytes,
+                        args.generated_feedback,
                     )?,
                     run_deepseek_independent(
                         &contexts[..clients],
@@ -1075,6 +1183,7 @@ fn run_deepseek(
                         args.window,
                         run_seed,
                         planned_session_bytes,
+                        args.generated_feedback,
                     )?,
                     "serialized_independent",
                 )
@@ -1086,6 +1195,7 @@ fn run_deepseek(
                     args.window,
                     run_seed,
                     planned_session_bytes,
+                    args.generated_feedback,
                 )?;
                 let serialized = run_deepseek_serialized(
                     &contexts[..clients],
@@ -1094,6 +1204,7 @@ fn run_deepseek(
                     args.window,
                     run_seed,
                     planned_session_bytes,
+                    args.generated_feedback,
                 )?;
                 (serialized, independent, "independent_serialized")
             };
@@ -1167,7 +1278,7 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
         ),
     };
     let report = QueueOverlapProbeReport {
-        schema_version: 1,
+        schema_version: 2,
         report_kind: "cross_family_queue_overlap_probe",
         build,
         model: args.model.display().to_string(),
@@ -1177,8 +1288,16 @@ pub fn run(args: QueueOverlapProbeArgs, build: Value) -> Result<()> {
         decode_tokens_per_client: args.window,
         runs: args.runs,
         warmup_pairs: 1,
-        token_policy: "backend_native_prompt_deterministic_teacher_forced_decode_distinct_per_client",
-        workload_kind: "independent_singleton_requests",
+        token_policy: if args.generated_feedback {
+            "backend_native_prompt_deterministic_first_token_then_greedy_feedback"
+        } else {
+            "backend_native_prompt_deterministic_teacher_forced_decode_distinct_per_client"
+        },
+        workload_kind: if args.generated_feedback {
+            "independent_generated_continuations"
+        } else {
+            "independent_singleton_requests"
+        },
         scheduler_policy: "per_step_lockstep",
         graph_policy,
         host_submission_policy,
@@ -1204,6 +1323,12 @@ mod tests {
         assert_eq!(token_for(7, 2, 11, 100_000), token_for(7, 2, 11, 100_000));
         assert_ne!(token_for(7, 1, 11, 100_000), token_for(7, 2, 11, 100_000));
         assert_ne!(token_for(7, 2, 10, 100_000), token_for(7, 2, 11, 100_000));
+    }
+
+    #[test]
+    fn generated_feedback_argmax_is_tie_stable_and_finite() {
+        assert_eq!(argmax_f32(&[-1.0, 3.0, 3.0, 2.0], "test").unwrap(), 1);
+        assert!(argmax_f32(&[0.0, f32::NAN], "test").is_err());
     }
 
     #[test]

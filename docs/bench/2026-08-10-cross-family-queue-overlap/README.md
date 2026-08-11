@@ -81,8 +81,40 @@ correctness cliffs.
 4. Keep continuous/ragged batching blocked until a whole-model fixed-cohort
    backend beats both baselines.
 
+## Generated-feedback follow-up
+
+The original packet teacher-forced every transition. A schema-2 follow-up feeds
+each selected greedy token into the next transition for 32 steps per client,
+then requires every generated ID and the final full-logit digest to match
+serialized execution. The prompt and first transition token remain distinct and
+deterministic per client.
+
+| family / asset | serialized aggregate tok/s | independent aggregate tok/s | speedup | GPU concurrency factor | 32-step evidence |
+|---|---:|---:|---:|---:|---|
+| Qwen 35B-A3B Q4_K_M | 98.28 | 135.48 | **1.378x** | 1.988 | exact |
+| DeepSeek V4 K160 | 26.87 | 37.66 | **1.402x** | 1.995 | exact |
+
+A3B serialized pair walls were `650.343/652.011 ms`; independent walls were
+`474.513/470.319 ms`. Its two-session Metal delta was `170,229,760` bytes.
+K160 serialized pair walls were `2,451.020/2,316.198 ms`; independent walls
+were `1,738.087/1,662.708 ms`. Its two-session delta remained
+`8,714,649,600` bytes. K160 returned wired memory to baseline after normal exit;
+host compression increased, while swap use remained unchanged.
+
+Both rows used source identity
+`git-source-sha256-v2:9a0a21ea274f8d80e5dccd9ad6ba71fd61ccfc92723842d3891ed90b26d39140`.
+The dirty source-matched evidence authorizes a product-shaped spike, not a final
+throughput claim. The next slice is explicit file-JSONL concurrency two: serial
+prefill, two independent queues during decode, ordered output, odd-tail serial
+fallback, and up-front multi-session admission. It is resident concurrency, not
+static or continuous batching.
+
 ## Artifacts
 
 - `qwen35-0p8b-b2.json`
 - `qwen35moe-a3b-b2.json`
 - `deepseek4-k160-b2.json`
+- Generated-feedback reports were acquired as
+  `target/profiles/qwen-a3b-b2-generated-feedback.json` and
+  `target/profiles/dsv4-k160-b2-generated-feedback.json`; the durable values and
+  source identity are recorded above.

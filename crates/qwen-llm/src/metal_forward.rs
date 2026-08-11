@@ -192,7 +192,7 @@ pub(crate) fn checked_u64_div_exact(
 
 crate::env_flag!(default_off kv_q8_flag, "QWEN_KV_Q8");
 
-fn kv_cache_dtype_for_arch(arch: &crate::model::Arch) -> GgmlType {
+pub(crate) fn kv_cache_dtype_for_arch(arch: &crate::model::Arch) -> GgmlType {
     let enabled = kv_q8_flag();
     let group = (arch.n_q_heads / arch.n_kv_heads.max(1)) as usize;
     if enabled
@@ -1468,6 +1468,29 @@ impl MetalModel {
     #[doc(hidden)]
     pub fn has_queue_scoped_residency_set(&self) -> bool {
         self._residency_set.is_some()
+    }
+
+    pub(crate) fn attach_residency_to_queue(
+        &self,
+        queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    ) -> Option<MetalAdditionalQueueResidencySetGuard> {
+        let model_guard = self._residency_set.as_ref()?;
+        queue.addResidencySet(&model_guard.set);
+        Some(MetalAdditionalQueueResidencySetGuard {
+            queue: queue.clone(),
+            set: model_guard.set.clone(),
+        })
+    }
+}
+
+pub(crate) struct MetalAdditionalQueueResidencySetGuard {
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    set: Retained<ProtocolObject<dyn MTLResidencySet>>,
+}
+
+impl Drop for MetalAdditionalQueueResidencySetGuard {
+    fn drop(&mut self) {
+        self.queue.removeResidencySet(&self.set);
     }
 }
 
@@ -9621,6 +9644,25 @@ impl<'a> MetalForward<'a> {
             ids_buf,
             argmax_tok,
             ArgmaxReduction::SpeculativeLowest,
+        )
+    }
+
+    pub(crate) fn encode_single_token_greedy(
+        &self,
+        enc: &KernelEncoder,
+        position: u32,
+        session: &mut MetalSession,
+        ids_buf: &MetalTensor,
+        argmax_tok: &MetalTensor,
+    ) -> Result<(), MfError> {
+        session.ensure_usable()?;
+        self.encode_single_token_argmax_with_reduction(
+            enc,
+            position,
+            session,
+            ids_buf,
+            argmax_tok,
+            ArgmaxReduction::GreedyTotal,
         )
     }
 

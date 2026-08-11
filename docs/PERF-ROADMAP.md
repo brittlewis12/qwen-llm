@@ -2809,12 +2809,16 @@ Independent-queue overlap remains the cross-family fallback (`1.44x` 0.8B,
 The fallback now clears a generated-continuation gate rather than only a
 teacher-forced transition. Across two distinct 32-step greedy streams, A3B
 retains exact IDs and final logits at `1.378x`; DeepSeek K160 retains exact IDs
-and final logits at `1.402x`, including full-logit readback. Open one narrow
-product slice: regular-file JSONL, explicit concurrency two, serial prefill,
-pairwise independent-queue decode, input-order emission, odd-tail serial
-fallback, and up-front session admission. Reject composition with dense B=8,
-stdin, prompt lookup, and prefix-cache mutation until this lifecycle is green.
-Call the capability resident concurrency, not batching.
+and final logits at `1.402x`, including full-logit readback. The first narrow
+product slice now ships for dense and MoE Qwen as regular-file JSONL with
+explicit concurrency two, serial prefill, pairwise independent-queue decode,
+input-order emission, odd-tail serial fallback, and model-derived admission for
+two sessions plus maximum prefill scratch. Dense 0.8B and A3B product smokes
+match ordinary serial output exactly across heterogeneous prompts and token
+limits, including paired-to-serial handoff. Keep dense B=8, stdin, prompt lookup,
+prefix-cache mutation, and request sidecars fail-closed. Call the capability
+resident concurrency, not batching. Carry the same lifecycle contract to
+DeepSeek only after pricing its materially larger per-session state.
 
 Qwen A3B static B=8 is closed after a complete whole-model spike. Aggressive
 packed execution reaches `1.43x` and beats B=8 independent queues by about 16%,

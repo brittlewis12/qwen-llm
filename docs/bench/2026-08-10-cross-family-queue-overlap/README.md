@@ -109,6 +109,47 @@ prefill, two independent queues during decode, ordered output, odd-tail serial
 fallback, and up-front multi-session admission. It is resident concurrency, not
 static or continuous batching.
 
+## Qwen product integration
+
+The authorized slice now ships as `qwen --requests-jsonl FILE --concurrency 2`
+for dense and MoE Qwen models. It accepts heterogeneous prompt lengths and token
+limits, prefills each request serially, overlaps complete singleton decode graphs
+while both lanes remain active, and moves the surviving lane back to ordinary
+serial GPU-greedy decode. Consecutive pairing and pair-atomic output preserve
+input order; an odd final request uses the existing serial request path.
+
+The safety boundary is explicit:
+
+- regular files and greedy requests only;
+- no prefix-cache mutation, prompt lookup, request stats, or request traces;
+- model-derived, Metal-priced admission for two complete sessions plus the
+  largest candidate or fallback prefill scratch and a 2 GiB transient reserve;
+- mutable-buffer alias checks, independent logical positions, precommit
+  frontier rollback, and cohort poisoning after any committed failure;
+- queue-scoped model residency attached to both additional queues and removed by
+  guards before those queues are released.
+
+Two release smoke comparisons used three heterogeneous requests: 5/10/10 prompt
+tokens, 3/8/1 requested output tokens, two paired transitions, five serial-tail
+transitions, and an odd serial request. Every output object, generated-token
+SHA-256, decoded text, stop reason, and terminal-frontier flag matched ordinary
+serial JSONL exactly on both `Qwen3.5-0.8B-Q4_K_M` and
+`Qwen3.6-35B-A3B-UD-Q4_K_M`.
+
+The 0.8B admission priced `1,908,720` bytes of prefill scratch and
+`2,209,935,920` required bytes including reserve. A3B priced `139,372,039` bytes
+of prefill scratch and `2,456,494,751` required bytes. The implied session plans
+are about 30.3 MiB and 84.8 MiB per lane; the latter agrees with the earlier
+measured 170.2 MB two-session delta. One product-shaped A3B pair reported 139.1
+aggregate generated token/s, but this smoke was not counterbalanced and carries
+no new throughput authority. Its role is lifecycle and serial-equivalence
+validation.
+
+The A10B extra-queue residency attachment is implemented but deliberately not
+model-run here: loading that asset would spend far more machine pressure than
+this lifecycle gate justifies. DeepSeek retains generated-feedback probe
+authority but does not yet expose this Qwen runtime path through the product CLI.
+
 ## Artifacts
 
 - `qwen35-0p8b-b2.json`
@@ -118,3 +159,6 @@ static or continuous batching.
   `target/profiles/qwen-a3b-b2-generated-feedback.json` and
   `target/profiles/dsv4-k160-b2-generated-feedback.json`; the durable values and
   source identity are recorded above.
+- Product smoke JSONL and stderr were disposable `target/` artifacts; all
+  contract, identity-independent outputs, admission values, and conclusions are
+  recorded in this document.

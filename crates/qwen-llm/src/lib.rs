@@ -51,6 +51,7 @@ pub mod pid_metrics;
 pub mod prefetch;
 pub mod prefix_cache;
 pub mod prompt_lookup;
+mod qwen_queue2;
 pub mod runtime;
 pub mod sampling;
 pub mod tensor;

@@ -1,6 +1,7 @@
 //! `qwen` — interactive CLI for the qwen-llm engine.
 
 mod cli;
+mod concurrent_jsonl;
 mod dense_batch8_jsonl;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_temporal;
@@ -391,6 +392,15 @@ struct Args {
     /// Decode fixed-width JSONL cohorts; currently supports 8 on dense Qwen.
     #[arg(long, hide_short_help = true, requires = "requests_jsonl")]
     batch_size: Option<usize>,
+
+    /// Run two independent resident JSONL requests with overlapping decode.
+    #[arg(
+        long,
+        hide_short_help = true,
+        requires = "requests_jsonl",
+        conflicts_with = "batch_size"
+    )]
+    concurrency: Option<usize>,
 
     /// Maximum number of tokens to generate.
     #[arg(short = 'n', long, hide_short_help = true, default_value_t = 64)]
@@ -2287,6 +2297,7 @@ fn run() -> Result<()> {
     validate_sampled_structural_mode(&args)?;
     validate_durable_prefix_cache_mode(&args)?;
     dense_batch8_jsonl::validate_cli(&args, explicit_options)?;
+    concurrent_jsonl::validate_cli(&args, explicit_options)?;
     if args.request_stats_jsonl.is_some() && args.info {
         bail!(
             "--request-stats-jsonl is not applicable with --info; only DeepSeek V4 single-turn generation emits the sidecar today"
@@ -2347,6 +2358,7 @@ fn run() -> Result<()> {
         .with_context(|| format!("open model {}", model_path.display()))?;
     let model_family = ModelFamily::detect(&gguf);
     dense_batch8_jsonl::validate_model_family(args.batch_size, model_family)?;
+    concurrent_jsonl::validate_model_family(args.concurrency, model_family)?;
     validate_deepseek_v4_multigroup_selector_family(
         args.deepseek_v4_multigroup_selector,
         model_family,
@@ -6353,7 +6365,7 @@ fn run_requests_jsonl(
 
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
-    let prefix_cache_max_bytes = if args.batch_size.is_some() {
+    let prefix_cache_max_bytes = if args.batch_size.is_some() || args.concurrency.is_some() {
         0
     } else {
         prefix_cache_max_bytes(args)?
@@ -6389,7 +6401,16 @@ fn run_requests_jsonl(
         prefix_cache_max_bytes / (1024 * 1024),
     );
 
-    if args.batch_size.is_some() {
+    if args.concurrency.is_some() {
+        n_requests += concurrent_jsonl::run_file(
+            &loaded,
+            &tokenizer,
+            requests_path,
+            args,
+            greedy_gpu_mode,
+            &mut stdout,
+        )?;
+    } else if args.batch_size.is_some() {
         n_requests += dense_batch8_jsonl::run_file(
             &loaded,
             &tokenizer,

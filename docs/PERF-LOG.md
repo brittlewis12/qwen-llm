@@ -23324,3 +23324,33 @@ in input order, and an odd tail runs serially. Require up-front multi-session
 admission and fail closed with dense B=8, stdin, prompt lookup, and prefix-cache
 mutation. This is resident concurrency, not batching or a daemon. Full result:
 `docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.
+
+## 2026-08-11 — Qwen Resident Concurrency Product GO
+
+Status: the generated-feedback queue mechanism is now a fail-closed
+regular-file JSONL product path for dense and MoE Qwen.
+
+`qwen --requests-jsonl FILE --concurrency 2` serially prefills heterogeneous
+requests, overlaps two complete singleton decode graphs while both lanes remain
+active, returns a surviving lane to ordinary serial GPU-greedy decode, emits each
+pair in input order, and sends an odd final request through the existing serial
+path. The mode rejects stdin, sampling, dense B=8, prompt lookup, cache mutation,
+request sidecars, and an explicit GPU-greedy rollback.
+
+The runtime prices every allocation made by `MetalSession::fresh`, including
+per-layer GDN state, F16 or Q8 KV, attention partials, MoE scratch, logits, and
+integer buffers. Admission adds two such sessions, the largest Metal-priced
+candidate or fallback prefill scratch in the file, and a 2 GiB transient reserve.
+The resulting required bytes were `2,209,935,920` for 0.8B and `2,456,494,751`
+for A3B, rather than the probe's inherited 10+ GiB fixed allowance. Queue-scoped
+model residency is explicitly attached to both additional command queues and
+removed by guards on teardown.
+
+Release smokes compared normal serial JSONL and concurrency two over the same
+three requests, with 5/10/10 prompt tokens and 3/8/1 output limits. Dense 0.8B
+and A3B both matched every complete output object and generated-token SHA-256.
+The pair executed two overlapping transitions, then five serial-tail
+transitions; the odd request remained in order. This is lifecycle and exactness
+authority, not a new throughput packet. DeepSeek product integration remains a
+separate follow-up because its session memory is materially larger. Full result:
+`docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.

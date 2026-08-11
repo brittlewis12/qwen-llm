@@ -20,7 +20,9 @@ use crate::dense_batch8::{
 };
 use crate::gguf::{GgufError, GgufFile, GgufShard};
 use crate::loader::{LoadError, Model};
-use crate::metal::{MetalContext, MetalError};
+use crate::metal::{
+    MetalContext, MetalError, MetalMemoryAdmission, evaluate_metal_memory_admission,
+};
 use crate::metal_forward::{
     MetalForward, MetalLoadPrefetchAdvice, MetalModel, MetalModelLoadOptions, MetalSession,
     MfError, SessionSnapshot, SnapshotIdentity, SnapshotValidationError,
@@ -28,6 +30,11 @@ use crate::metal_forward::{
 use crate::model::Arch;
 use crate::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS, prefetch_fd};
 use crate::prefix_cache::{DEFAULT_MAX_BYTES, PrefixCache, PrefixCacheStats};
+pub use crate::qwen_queue2::QwenQueue2Error as IndependentQueue2Error;
+use crate::qwen_queue2::{
+    QWEN_QUEUE2_DYNAMIC_RESERVE_BYTES, QWEN_QUEUE2_WIDTH, QwenQueue2Error, QwenQueue2Executor,
+    qwen_queue2_session_upper_bytes,
+};
 use crate::tokenizer::{TokError, Tokenizer};
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -92,6 +99,8 @@ pub enum RuntimeError {
     CheckpointSizeOverflow,
     #[error("dense B=8 execution: {0}")]
     DenseBatch8(#[from] DenseBatch8Error),
+    #[error("independent queue execution: {0}")]
+    IndependentQueue2(#[from] IndependentQueue2Error),
 }
 
 struct RuntimeInner {
@@ -1143,6 +1152,55 @@ impl LoadedModel {
         })
     }
 
+    /// Price two independent sequence sessions and the largest serial prefill
+    /// scratch that can coexist with them before allocating either session.
+    pub fn admit_independent_queue2(
+        &self,
+        max_context_tokens: usize,
+        prefill_scratch_upper_bytes: u64,
+    ) -> Result<MetalMemoryAdmission, RuntimeError> {
+        let per_session =
+            qwen_queue2_session_upper_bytes(self.context(), &self.metal_model, max_context_tokens)?;
+        let session_bytes = per_session
+            .checked_mul(QWEN_QUEUE2_WIDTH as u64)
+            .ok_or_else(|| {
+                QwenQueue2Error::Validation("two-session byte estimate overflow".into())
+            })?;
+        let incremental_bytes = session_bytes
+            .checked_add(prefill_scratch_upper_bytes)
+            .ok_or_else(|| {
+                QwenQueue2Error::Validation(
+                    "two-session plus prefill-scratch byte estimate overflow".into(),
+                )
+            })?;
+        let admission = evaluate_metal_memory_admission(
+            incremental_bytes,
+            QWEN_QUEUE2_DYNAMIC_RESERVE_BYTES,
+            self.context().memory_signals(),
+            true,
+        );
+        if !admission.admitted {
+            return Err(QwenQueue2Error::Validation(format!(
+                "memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+                admission.reason.as_str(),
+                admission.required_bytes,
+                admission.working_set_headroom_bytes,
+                admission.signals.process_limit_remaining_bytes,
+            ))
+            .into());
+        }
+        Ok(admission)
+    }
+
+    pub fn create_independent_queue2_executor(
+        &self,
+    ) -> Result<IndependentQueue2SequenceExecutor<'_>, RuntimeError> {
+        Ok(IndependentQueue2SequenceExecutor {
+            inner: QwenQueue2Executor::new(self.context(), &self.metal_model)?,
+            owner: Arc::clone(&self.owner),
+        })
+    }
+
     pub fn snapshot_identity(&self, sequence: &Sequence) -> Result<SnapshotIdentity, RuntimeError> {
         self.ensure_owns(sequence)?;
         let &(model_id, tokenizer_id) = self.identity_parts.get_or_init(|| {
@@ -1513,6 +1571,54 @@ impl LoadedModel {
 pub struct DenseBatch8SequenceExecutor<'a> {
     inner: DenseBatch8Executor<'a>,
     owner: Arc<ModelOwnerToken>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IndependentQueue2Step {
+    pub argmax_ids: [i32; QWEN_QUEUE2_WIDTH],
+    pub gpu_ms: [Option<f64>; QWEN_QUEUE2_WIDTH],
+}
+
+pub struct IndependentQueue2SequenceExecutor<'a> {
+    inner: QwenQueue2Executor<'a>,
+    owner: Arc<ModelOwnerToken>,
+}
+
+impl IndependentQueue2SequenceExecutor<'_> {
+    /// Consume one pending token from each independent sequence. Frontiers may
+    /// differ; both advance only after both command buffers complete.
+    pub fn step_greedy(
+        &mut self,
+        token_ids: [i32; QWEN_QUEUE2_WIDTH],
+        sequences: [&mut Sequence; QWEN_QUEUE2_WIDTH],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<IndependentQueue2Step, RuntimeError> {
+        let [left, right] = sequences;
+        ensure_same_model_owner(&self.owner, &left.owner)?;
+        ensure_same_model_owner(&self.owner, &right.owner)?;
+        left.ensure_can_append(1)?;
+        right.ensure_can_append(1)?;
+        let positions = [
+            u32::try_from(left.position).map_err(|_| {
+                QwenQueue2Error::Validation("left position does not fit u32".into())
+            })?,
+            u32::try_from(right.position).map_err(|_| {
+                QwenQueue2Error::Validation("right position does not fit u32".into())
+            })?,
+        ];
+        let step = self.inner.step_greedy(
+            token_ids,
+            positions,
+            [&mut left.state, &mut right.state],
+            cancelled,
+        )?;
+        left.position += 1;
+        right.position += 1;
+        Ok(IndependentQueue2Step {
+            argmax_ids: step.argmax_ids,
+            gpu_ms: step.gpu_ms,
+        })
+    }
 }
 
 impl DenseBatch8SequenceExecutor<'_> {

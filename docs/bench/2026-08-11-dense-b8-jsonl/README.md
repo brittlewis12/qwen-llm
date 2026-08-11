@@ -22,10 +22,14 @@ stats sidecars remain explicit errors rather than silent fallbacks.
 `QWEN_GREEDY_GPU_ARGMAX=0` also rejects the mode so the established GPU-greedy
 rollback cannot be bypassed by batching.
 
-Prompt prefill remains serial. Decode is lockstep B=8. A lane that reaches EOS
-or its token limit stops changing logically, while token zero advances its
-private physical state until the cohort drains. Padding is never emitted,
-hashed, counted as useful work, or published as a canonical boundary.
+Prompt suffix prefill remains serial. Cohorts sharing at least 256 exact tokens
+prefill one chunk-aligned common prefix and restore its transient snapshot into
+seven sibling sessions; this neither inserts nor consumes a prefix-cache entry.
+`QWEN_DENSE_BATCH8_PREFIX_FANOUT=0` restores eight complete serial prefills.
+Decode is lockstep B=8. A lane that reaches EOS or its token limit stops changing
+logically, while token zero advances its private physical state until the cohort
+drains. Padding is never emitted, hashed, counted as useful work, or published
+as a canonical boundary.
 
 ## Safety boundary
 
@@ -84,6 +88,9 @@ no stdout, and named the incompatible rollback.
   `../2026-08-11-dense-b8-long-context/`; its dirty-build evidence is not a
   canonical family-board cell. Retain explicit opt-in until cohort formation
   and underfill policy are separately qualified.
+- Shared-prefix fanout is promoted by
+  `../2026-08-11-dense-b8-prefix-fanout/`: 27B cohort prefill improves `4.812x`
+  with byte-identical output against rollback and serial controls.
 - Let MoE and DeepSeek qualify family-specific executors behind the same cohort
   concept; do not route them through the dense implementation.
 

@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "parent_commit": "9652c65b61450e763464cf24c407196113ff4d24",
+  "build_scope": {
+    "dirty": true,
+    "note": "Candidate source and unrelated DeepSeek prefill WIP were uncommitted; exact candidate source hashes are recorded."
+  },
+  "candidate_source_sha256": {
+    "crates/qwen-cli/src/dense_batch8_jsonl.rs": "b6014f29243261d8948838cd8c74d3ad6b6f2957aeb9ed7772248636d7ce77c9",
+    "crates/qwen-llm/src/runtime.rs": "834630e9462eb27528cd16fb6007a3ca4bc1bb859ce3b310b69af29984350cf0"
+  },
+  "models": {
+    "dense_27b": {
+      "path": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+      "size_bytes": 16817244384,
+      "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+    },
+    "dense_0p8b": {
+      "path": "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf",
+      "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"
+    }
+  },
+  "aligned_request": {
+    "sha256": "08e48c39543c6f8292b3284c234d9f2866465817ff53862f3cd8e4e6b57f0425",
+    "requests": 8,
+    "prompt_tokens_per_request": 1029,
+    "common_prefix_tokens": 1024,
+    "requested_tokens_per_request": 8
+  },
+  "dense_27b": {
+    "candidate": {
+      "load_ms": 1928.3,
+      "prefill_ms": 7553.250291,
+      "decode_ms": 899.42225,
+      "aggregate_generated_tps": 47.8084681583094,
+      "prefix_fanout_tokens": 1024,
+      "prefix_snapshot_bytes": 224006272,
+      "prefix_prefill_ms": 4111.817541,
+      "prefix_snapshot_ms": 40.260083,
+      "prefix_restore_ms": 75.861916,
+      "suffix_prefill_ms": 3324.454999,
+      "generated_tokens": 43,
+      "productive_transitions": 35,
+      "padding_transitions": 21,
+      "memory_admission_incremental_bytes": 1999261824,
+      "memory_admission_reserve_bytes": 2147483648,
+      "memory_admission_required_bytes": 4146745472,
+      "memory_admission_reason": "admitted_process_budget_omitted"
+    },
+    "rollback": {
+      "environment": "QWEN_DENSE_BATCH8_PREFIX_FANOUT=0",
+      "load_ms": 2020.5,
+      "prefill_ms": 36344.080334,
+      "decode_ms": 905.459625,
+      "aggregate_generated_tps": 47.48969342503814,
+      "memory_admission_reason": "admitted_process_budget_omitted"
+    },
+    "speedup": {
+      "prefill": 4.81171402161867,
+      "prefill_plus_decode": 4.406835799957911,
+      "load_plus_prefill_plus_decode": 3.7828864110661753
+    },
+    "output_sha256": {
+      "candidate": "d0c7036fc49242f77d51608197beb64b0c20845fd68dc5fca32a96894d5c0955",
+      "rollback": "d0c7036fc49242f77d51608197beb64b0c20845fd68dc5fca32a96894d5c0955",
+      "cache_disabled_serial": "d0c7036fc49242f77d51608197beb64b0c20845fd68dc5fca32a96894d5c0955"
+    }
+  },
+  "dense_0p8b_aligned": {
+    "candidate_prefill_ms": 591.680958,
+    "rollback_prefill_ms": 1056.512041,
+    "prefill_speedup": 1.7856110235002693,
+    "prefill_plus_decode_speedup": 1.661340259014866,
+    "memory_admission_reason": "admitted_process_budget_omitted",
+    "output_sha256": {
+      "candidate": "83137f6dbd6c105aea50b33e31c8f5403a9396d000b9af7eaeb08c728f6f731a",
+      "rollback": "83137f6dbd6c105aea50b33e31c8f5403a9396d000b9af7eaeb08c728f6f731a",
+      "cache_disabled_serial": "83137f6dbd6c105aea50b33e31c8f5403a9396d000b9af7eaeb08c728f6f731a"
+    }
+  },
+  "dense_0p8b_identical": {
+    "request_sha256": "913224bda74a67154a3fc950983ba8eadea973a6986ec06837127791e2aa94aa",
+    "prompt_tokens_per_request": 504,
+    "common_prefix_tokens": 504,
+    "candidate_prefill_ms": 115.935542,
+    "rollback_prefill_ms": 523.067959,
+    "prefill_speedup": 4.51171357787761,
+    "memory_admission_reason": "admitted_process_budget_omitted",
+    "output_sha256": {
+      "candidate": "7f020cc44e52beab665a7264278a3718d2cf0350de86a983debde00f54bf4144",
+      "rollback": "7f020cc44e52beab665a7264278a3718d2cf0350de86a983debde00f54bf4144",
+      "cache_disabled_serial": "7f020cc44e52beab665a7264278a3718d2cf0350de86a983debde00f54bf4144"
+    }
+  },
+  "checks": {
+    "targeted_runtime_test": "prepared_checkpoint_matching_includes_pending_boundary_token",
+    "targeted_cli_tests": 4,
+    "cargo_clippy_deny_warnings": true,
+    "post_run_swap_used_mib": 0.06
+  }
+}

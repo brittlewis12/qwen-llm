@@ -73,6 +73,13 @@ pub enum RuntimeError {
     },
     #[error("prefix snapshot logits length {got} != vocab size {expected}")]
     PrefixLogitsLengthMismatch { got: usize, expected: usize },
+    #[error(
+        "prepared checkpoint canonical prefix of {checkpoint_tokens} tokens does not match request of {request_tokens} tokens"
+    )]
+    PreparedCheckpointRequestMismatch {
+        checkpoint_tokens: usize,
+        request_tokens: usize,
+    },
     #[error("prefix snapshot validation: {0}")]
     SnapshotValidation(#[from] SnapshotValidationError),
     #[error("sequence belongs to a different loaded model")]
@@ -531,6 +538,17 @@ mod tests {
     }
 
     #[test]
+    fn prepared_checkpoint_matching_includes_pending_boundary_token() {
+        assert!(checkpoint_matches_request(&[1, 2], None, &[1, 2]));
+        assert!(checkpoint_matches_request(&[1, 2], None, &[1, 2, 3]));
+        assert!(!checkpoint_matches_request(&[1, 2], None, &[1, 9, 3]));
+        assert!(checkpoint_matches_request(&[1, 2], Some(3), &[1, 2, 3]));
+        assert!(checkpoint_matches_request(&[1, 2], Some(3), &[1, 2, 3, 4]));
+        assert!(!checkpoint_matches_request(&[1, 2], Some(3), &[1, 2]));
+        assert!(!checkpoint_matches_request(&[1, 2], Some(3), &[1, 2, 4]));
+    }
+
+    #[test]
     fn model_load_intent_scopes_parallel_copy_auto_admission() {
         assert!(
             !ModelLoadIntent::ForceOnly
@@ -957,6 +975,14 @@ pub struct PreparedCheckpoint {
     max_context_tokens: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct PreparedCheckpointRestore {
+    pub matched_prefix_len: usize,
+    pub restored_prefix_len: usize,
+    pub exact: bool,
+    pub exact_final_logits: Option<Vec<f32>>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CheckpointBoundarySizeEstimate {
     pub snapshot_bytes: u64,
@@ -979,6 +1005,16 @@ impl PreparedCheckpoint {
     pub fn has_pending_token(&self) -> bool {
         self.snapshot.pending_token.is_some()
     }
+}
+
+fn checkpoint_matches_request(
+    prefix_tokens: &[i32],
+    pending_token: Option<i32>,
+    request_tokens: &[i32],
+) -> bool {
+    request_tokens.starts_with(prefix_tokens)
+        && pending_token
+            .is_none_or(|pending| request_tokens.get(prefix_tokens.len()).copied() == Some(pending))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1214,7 +1250,9 @@ impl LoadedModel {
     }
 
     /// Estimate the CPU payload retained by a prepared boundary before copying
-    /// any Metal state. Encoded records add a small fixed header and digest.
+    /// any Metal state. `prefix_len` may describe a future boundary, but must
+    /// fit this sequence's configured capacity. Encoded records add a small
+    /// fixed header and digest.
     pub fn estimate_checkpoint_boundary_sizes(
         &self,
         sequence: &Sequence,
@@ -1223,7 +1261,13 @@ impl LoadedModel {
         has_final_logits: bool,
     ) -> Result<CheckpointBoundarySizeEstimate, RuntimeError> {
         self.ensure_owns(sequence)?;
-        sequence.check_position(prefix_len)?;
+        if prefix_len > sequence.max_context_tokens() {
+            return Err(SnapshotValidationError::PrefixCapacity {
+                prefix_len,
+                capacity: sequence.max_context_tokens(),
+            }
+            .into());
+        }
         let abi = sequence.snapshot_abi();
         let prefix_len = prefix_len as u128;
         let n_attn = abi.n_attn_layers as u128;
@@ -1266,6 +1310,56 @@ impl LoadedModel {
         Ok(PrefixCacheInsert {
             snapshot_bytes,
             stats: cache.stats(),
+        })
+    }
+
+    /// Restore one already captured causal boundary directly into a fresh
+    /// sequence without indexing it in the RAM cache or encoding it to disk.
+    ///
+    /// The complete canonical checkpoint prefix must match `request_tokens`.
+    /// A pending terminal token is matched but remains unconsumed, so callers
+    /// continue prefilling at `restored_prefix_len` rather than
+    /// `matched_prefix_len`.
+    pub fn restore_prepared_checkpoint(
+        &self,
+        prepared: &PreparedCheckpoint,
+        sequence: &mut Sequence,
+        request_tokens: &[i32],
+    ) -> Result<PreparedCheckpointRestore, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &prepared.owner)?;
+        self.ensure_owns(sequence)?;
+        sequence.check_position(0)?;
+        sequence.ensure_can_append(request_tokens.len())?;
+        let matched_prefix_len = prepared.snapshot.matched_prefix_len();
+        if !checkpoint_matches_request(
+            &prepared.snapshot.prefix_tokens,
+            prepared.snapshot.pending_token,
+            request_tokens,
+        ) {
+            return Err(RuntimeError::PreparedCheckpointRequestMismatch {
+                checkpoint_tokens: matched_prefix_len,
+                request_tokens: request_tokens.len(),
+            });
+        }
+        let identity = self.snapshot_identity(sequence)?;
+        prepared.snapshot.validate_for_restore(
+            &identity,
+            sequence.max_context_tokens(),
+            Some(self.metal_model.arch.vocab_size as usize),
+        )?;
+        sequence.restore_from_snapshot(&prepared.snapshot, &identity)?;
+        let restored_prefix_len = prepared.snapshot.prefix_len();
+        let exact = request_tokens.len() == matched_prefix_len;
+        let exact_final_logits = if exact && restored_prefix_len == matched_prefix_len {
+            prepared.snapshot.final_logits.clone()
+        } else {
+            None
+        };
+        Ok(PreparedCheckpointRestore {
+            matched_prefix_len,
+            restored_prefix_len,
+            exact,
+            exact_final_logits,
         })
     }
 

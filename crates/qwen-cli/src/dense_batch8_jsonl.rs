@@ -4,6 +4,15 @@ use qwen_llm::runtime::DenseBatch8SequenceExecutor;
 
 const PAD_TOKEN: i32 = 0;
 const TRANSIENT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const PREFIX_FANOUT_MIN_TOKENS: usize = 256;
+const PREFIX_FANOUT_ENV: &str = "QWEN_DENSE_BATCH8_PREFIX_FANOUT";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PrefixFanoutPlan {
+    common_prefix_tokens: usize,
+    selected_prefix_tokens: usize,
+    reason: &'static str,
+}
 
 #[derive(Debug)]
 struct LaneProgress {
@@ -114,6 +123,15 @@ struct CohortTelemetry {
     productive_transitions: usize,
     padding_transitions: usize,
     physical_batch_steps: usize,
+    common_prefix_tokens: usize,
+    prefix_fanout_tokens: usize,
+    prefix_fanout_reason: &'static str,
+    prefix_fanout_min_tokens: usize,
+    prefix_snapshot_bytes: u64,
+    prefix_prefill_ms: f64,
+    prefix_snapshot_ms: f64,
+    prefix_restore_ms: f64,
+    suffix_prefill_ms: f64,
     prefill_ms: f64,
     decode_ms: f64,
     batch_transition_ms: f64,
@@ -121,7 +139,79 @@ struct CohortTelemetry {
     aggregate_generated_tps: f64,
     sequence_allocation_delta_bytes: u64,
     remaining_sequence_required_bytes: u64,
+    prefix_snapshot_required_bytes: u64,
+    memory_admission_incremental_bytes: u64,
+    memory_admission_reserve_bytes: u64,
+    memory_admission_required_bytes: Option<u64>,
     memory_admission_reason: &'static str,
+}
+
+fn common_prefix_tokens(requests: &[PreparedJsonlRequest]) -> usize {
+    let Some(first) = requests.first() else {
+        return 0;
+    };
+    requests
+        .iter()
+        .skip(1)
+        .fold(first.prompt_ids.len(), |len, request| {
+            first.prompt_ids[..len]
+                .iter()
+                .zip(&request.prompt_ids)
+                .take_while(|(left, right)| left == right)
+                .count()
+        })
+}
+
+fn plan_prefix_fanout(requests: &[PreparedJsonlRequest], enabled: bool) -> PrefixFanoutPlan {
+    let common_prefix_tokens = common_prefix_tokens(requests);
+    if !enabled {
+        return PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: 0,
+            reason: "disabled",
+        };
+    }
+    if common_prefix_tokens < PREFIX_FANOUT_MIN_TOKENS {
+        return PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: 0,
+            reason: "below_minimum",
+        };
+    }
+    PrefixFanoutPlan {
+        common_prefix_tokens,
+        selected_prefix_tokens: common_prefix_tokens,
+        reason: "selected",
+    }
+}
+
+fn align_prefix_fanout(
+    mut plan: PrefixFanoutPlan,
+    prompt_tokens: usize,
+    prefill_chunk: usize,
+) -> PrefixFanoutPlan {
+    if plan.selected_prefix_tokens == 0 || plan.selected_prefix_tokens == prompt_tokens {
+        return plan;
+    }
+    let aligned = plan.selected_prefix_tokens / prefill_chunk * prefill_chunk;
+    if aligned < PREFIX_FANOUT_MIN_TOKENS {
+        plan.selected_prefix_tokens = 0;
+        plan.reason = "alignment_below_minimum";
+    } else if aligned != plan.selected_prefix_tokens {
+        plan.selected_prefix_tokens = aligned;
+        plan.reason = "selected_chunk_aligned";
+    }
+    plan
+}
+
+fn parse_prefix_fanout_enabled(value: Option<&OsStr>) -> bool {
+    let Some(value) = value.and_then(OsStr::to_str) else {
+        return true;
+    };
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }
 
 pub(super) fn validate_cli(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
@@ -305,6 +395,15 @@ fn run_cohort(
         PrefillChunkArg::Fixed(requested) => requested.min(prompt_tokens.max(1)),
         PrefillChunkArg::Auto => bail!("dense B=8 requires a fixed prefill chunk"),
     };
+    ensure!(chunk > 0, "dense B=8 prefill chunk must be nonzero");
+    let mut prefix_fanout = align_prefix_fanout(
+        plan_prefix_fanout(
+            requests,
+            parse_prefix_fanout_enabled(std::env::var_os(PREFIX_FANOUT_ENV).as_deref()),
+        ),
+        prompt_tokens,
+        chunk,
+    );
 
     let mut scratch = allocate_legacy_prefill_scratch(loaded, chunk, prompt_tokens)?;
     let mut sequences = Vec::with_capacity(DENSE_BATCH8_WIDTH);
@@ -322,12 +421,43 @@ fn run_cohort(
     let remaining_sequence_required_bytes = sequence_allocation_delta_bytes
         .checked_mul((DENSE_BATCH8_WIDTH - 1) as u64)
         .context("dense B=8 remaining sequence byte estimate overflow")?;
-    let memory_admission = evaluate_metal_memory_admission(
-        remaining_sequence_required_bytes,
+    let mut prefix_snapshot_required_bytes = if prefix_fanout.selected_prefix_tokens > 0 {
+        loaded
+            .estimate_checkpoint_boundary_sizes(
+                &sequences[0],
+                prefix_fanout.selected_prefix_tokens,
+                false,
+                false,
+            )
+            .context("estimate dense B=8 prefix fanout snapshot")?
+            .snapshot_bytes
+    } else {
+        0
+    };
+    let mut memory_admission_incremental_bytes = remaining_sequence_required_bytes
+        .checked_add(prefix_snapshot_required_bytes)
+        .context("dense B=8 fanout admission byte overflow")?;
+    let mut memory_admission = evaluate_metal_memory_admission(
+        memory_admission_incremental_bytes,
         TRANSIENT_RESERVE_BYTES,
         loaded.context().memory_signals(),
         true,
     );
+    if !memory_admission.admitted && prefix_fanout.selected_prefix_tokens > 0 {
+        let without_fanout = evaluate_metal_memory_admission(
+            remaining_sequence_required_bytes,
+            TRANSIENT_RESERVE_BYTES,
+            loaded.context().memory_signals(),
+            true,
+        );
+        if without_fanout.admitted {
+            prefix_fanout.selected_prefix_tokens = 0;
+            prefix_fanout.reason = "memory_fallback";
+            prefix_snapshot_required_bytes = 0;
+            memory_admission_incremental_bytes = remaining_sequence_required_bytes;
+            memory_admission = without_fanout;
+        }
+    }
     ensure!(
         memory_admission.admitted,
         "dense B=8 memory admission denied: reason={} required_bytes={:?} working_set_headroom_bytes={:?} process_limit_remaining_bytes={:?}",
@@ -347,11 +477,84 @@ fn run_cohort(
     let forward = loaded.forward();
     let prefill_t0 = Instant::now();
     let mut prompt_logits = Vec::with_capacity(DENSE_BATCH8_WIDTH);
-    for (slot, (request, sequence)) in requests.iter().zip(&mut sequences).enumerate() {
-        shutdown::checkpoint()?;
-        let (logits, _) = prefill_span(&forward, sequence, &mut scratch, &request.prompt_ids, 0)
-            .with_context(|| format!("prefill dense B=8 cohort slot {slot}"))?;
-        prompt_logits.push(logits);
+    let mut prefix_snapshot_bytes = 0u64;
+    let mut prefix_prefill_ms = 0.0;
+    let mut prefix_snapshot_ms = 0.0;
+    let mut prefix_restore_ms = 0.0;
+    let mut suffix_prefill_ms = 0.0;
+    if prefix_fanout.selected_prefix_tokens > 0 {
+        let prefix_len = prefix_fanout.selected_prefix_tokens;
+        let (prefix_logits, ms) = prefill_span(
+            &forward,
+            &mut sequences[0],
+            &mut scratch,
+            &requests[0].prompt_ids[..prefix_len],
+            0,
+        )
+        .context("prefill dense B=8 shared prefix")?;
+        prefix_prefill_ms = ms;
+
+        let snapshot_t0 = Instant::now();
+        let prepared = loaded
+            .prepare_checkpoint_boundary(
+                &sequences[0],
+                requests[0].prompt_ids[..prefix_len].to_vec(),
+                None,
+                None,
+            )
+            .context("capture dense B=8 shared prefix")?;
+        prefix_snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
+        prefix_snapshot_bytes = prepared.snapshot_bytes();
+        ensure!(
+            prefix_snapshot_bytes == prefix_snapshot_required_bytes,
+            "dense B=8 prefix snapshot bytes {} != estimate {}",
+            prefix_snapshot_bytes,
+            prefix_snapshot_required_bytes,
+        );
+
+        for slot in 0..DENSE_BATCH8_WIDTH {
+            shutdown::checkpoint()?;
+            if slot > 0 {
+                let restore_t0 = Instant::now();
+                let restored = loaded
+                    .restore_prepared_checkpoint(
+                        &prepared,
+                        &mut sequences[slot],
+                        &requests[slot].prompt_ids,
+                    )
+                    .with_context(|| format!("restore dense B=8 shared prefix into slot {slot}"))?;
+                prefix_restore_ms += restore_t0.elapsed().as_secs_f64() * 1e3;
+                ensure!(
+                    restored.matched_prefix_len == prefix_len
+                        && restored.restored_prefix_len == prefix_len,
+                    "dense B=8 slot {slot} restored an unexpected prefix boundary"
+                );
+            }
+            let suffix = &requests[slot].prompt_ids[prefix_len..];
+            if suffix.is_empty() {
+                prompt_logits.push(prefix_logits.clone());
+            } else {
+                let (logits, ms) = prefill_span(
+                    &forward,
+                    &mut sequences[slot],
+                    &mut scratch,
+                    suffix,
+                    prefix_len,
+                )
+                .with_context(|| format!("prefill dense B=8 cohort suffix slot {slot}"))?;
+                suffix_prefill_ms += ms;
+                prompt_logits.push(logits);
+            }
+        }
+    } else {
+        for (slot, (request, sequence)) in requests.iter().zip(&mut sequences).enumerate() {
+            shutdown::checkpoint()?;
+            let (logits, ms) =
+                prefill_span(&forward, sequence, &mut scratch, &request.prompt_ids, 0)
+                    .with_context(|| format!("prefill dense B=8 cohort slot {slot}"))?;
+            suffix_prefill_ms += ms;
+            prompt_logits.push(logits);
+        }
     }
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     drop(scratch);
@@ -488,8 +691,8 @@ fn run_cohort(
     Ok((
         outputs,
         CohortTelemetry {
-            schema_version: 1,
-            backend: "dense_qwen_static_batch8_v1",
+            schema_version: 2,
+            backend: "dense_qwen_static_batch8_v2",
             cohort_index,
             width: DENSE_BATCH8_WIDTH,
             prompt_tokens_per_request: prompt_tokens,
@@ -498,6 +701,15 @@ fn run_cohort(
             productive_transitions,
             padding_transitions,
             physical_batch_steps,
+            common_prefix_tokens: prefix_fanout.common_prefix_tokens,
+            prefix_fanout_tokens: prefix_fanout.selected_prefix_tokens,
+            prefix_fanout_reason: prefix_fanout.reason,
+            prefix_fanout_min_tokens: PREFIX_FANOUT_MIN_TOKENS,
+            prefix_snapshot_bytes,
+            prefix_prefill_ms,
+            prefix_snapshot_ms,
+            prefix_restore_ms,
+            suffix_prefill_ms,
             prefill_ms,
             decode_ms,
             batch_transition_ms,
@@ -505,6 +717,10 @@ fn run_cohort(
             aggregate_generated_tps,
             sequence_allocation_delta_bytes,
             remaining_sequence_required_bytes,
+            prefix_snapshot_required_bytes,
+            memory_admission_incremental_bytes,
+            memory_admission_reserve_bytes: memory_admission.reserve_bytes,
+            memory_admission_required_bytes: memory_admission.required_bytes,
             memory_admission_reason: memory_admission.reason.as_str(),
         },
     ))
@@ -608,6 +824,89 @@ mod tests {
         requests[5].sampling.temperature = 0.0;
         requests[6].request.cache_prefix_tokens = Some(1);
         assert!(validate_requests(&requests, &args).is_err());
+    }
+
+    #[test]
+    fn prefix_fanout_requires_an_eight_way_minimum_prefix() {
+        assert!(parse_prefix_fanout_enabled(None));
+        assert!(parse_prefix_fanout_enabled(Some(OsStr::new("1"))));
+        assert!(!parse_prefix_fanout_enabled(Some(OsStr::new("off"))));
+        let shared = (0..PREFIX_FANOUT_MIN_TOKENS as i32).collect::<Vec<_>>();
+        let requests = (0..DENSE_BATCH8_WIDTH)
+            .map(|slot| {
+                let mut tokens = shared.clone();
+                tokens.push(10_000 + slot as i32);
+                prepared(&format!("slot-{slot}"), &tokens)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(common_prefix_tokens(&requests), PREFIX_FANOUT_MIN_TOKENS);
+        assert_eq!(
+            plan_prefix_fanout(&requests, true),
+            PrefixFanoutPlan {
+                common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
+                selected_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
+                reason: "selected",
+            }
+        );
+        assert_eq!(
+            plan_prefix_fanout(&requests, false),
+            PrefixFanoutPlan {
+                common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
+                selected_prefix_tokens: 0,
+                reason: "disabled",
+            }
+        );
+        assert_eq!(
+            align_prefix_fanout(plan_prefix_fanout(&requests, true), 257, 128),
+            PrefixFanoutPlan {
+                common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
+                selected_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
+                reason: "selected",
+            }
+        );
+
+        let wider = requests
+            .iter()
+            .enumerate()
+            .map(|(slot, request)| {
+                let mut tokens = request.prompt_ids.clone();
+                tokens.splice(
+                    PREFIX_FANOUT_MIN_TOKENS..PREFIX_FANOUT_MIN_TOKENS,
+                    [8, 9, 10, 11],
+                );
+                prepared(&format!("wider-{slot}"), &tokens)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            align_prefix_fanout(plan_prefix_fanout(&wider, true), 261, 256),
+            PrefixFanoutPlan {
+                common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS + 4,
+                selected_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
+                reason: "selected_chunk_aligned",
+            }
+        );
+        assert_eq!(
+            align_prefix_fanout(plan_prefix_fanout(&wider, true), 261, 200),
+            PrefixFanoutPlan {
+                common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS + 4,
+                selected_prefix_tokens: 0,
+                reason: "alignment_below_minimum",
+            }
+        );
+
+        let short = requests
+            .iter()
+            .enumerate()
+            .map(|(slot, request)| prepared(&format!("short-{slot}"), &request.prompt_ids[1..]))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            plan_prefix_fanout(&short, true),
+            PrefixFanoutPlan {
+                common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS - 1,
+                selected_prefix_tokens: 0,
+                reason: "below_minimum",
+            }
+        );
     }
 
     #[test]

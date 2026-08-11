@@ -1268,10 +1268,17 @@ On the real packed schedule, routed-expert and post-route GPU fall
 637.605 ms. One ordinary reference reaches 268.79 token/s versus 257.15 for its
 adjacent rollback, while other unsampled runs remain order/host-state
 confounded. A 6,642-token official-chat rollback/default audit preserves all 64
-greedy IDs. Extend only the exact K216 N=4,096 qualifier; FRESH N=2,048
-remains unmeasured and excluded. Screen that final crossed width only when host
-pressure permits one clean sampled pair; require at least 300 ms of isolated
-routed/post-route GPU deletion and the existing greedy product guard.
+greedy IDs. Extend only the exact K216 N=4,096 qualifier.
+
+The final crossed MXFP4 width now clears independently on FRESH. At N=2,048,
+the two changed layers move routed-expert GPU from
+`545.777/547.867 ms` in bracketing controls to `217.289 ms`, conservatively
+deleting 328.488 ms and clearing the frozen 300 ms gate. The real 2,385-token
+official-chat control/candidate/control prefill is
+`13,504.5/11,542.8/11,848.4 ms`; candidate beats the faster control by
+305.6 ms while preserving the first-token top-eight order and all 32 greedy
+IDs. Extend only the exact M4 Max/FRESH/E=256/N=2,048 qualifier. Full-width
+MXFP4 coverage is now closed for FRESH and K216 without another tile search.
 
 K216 partial-tail Q8 coverage now clears separately. Extending only the shared
 compressor/shared/Q-B/output qualifier from complete chunks to N=256..4,096

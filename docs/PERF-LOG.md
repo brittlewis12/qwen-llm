@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - DeepSeek V4 FRESH N=2,048 MXFP4 Matrix GO
+
+Status: FRESH's promoted MXFP4 routed-down matrix tile now covers complete
+N=2,048 chunks as well as N=4,096. K216 retains both widths, K160 remains
+ineligible, buckets below 16 columns stay scalar, and
+`QWEN_DSV4_PACKED_MXFP4_MATRIX=0` restores scalar GEMV.
+
+- This changes only the authenticated host qualifier. The F32 64x32 tile,
+  MXFP4 decoding, route plan, and mixed scalar remainder are unchanged. Scope
+  remains exact to Apple M4 Max, 1,328 tensors, 104,202,502,492 source bytes,
+  E=256, and N in {2,048, 4,096}.
+- A synthetic N=2,048 control/candidate/control bracket assigns
+  `545.777/217.289/547.867 ms` to routed experts in the two changed layers.
+  The candidate conservatively deletes 328.488 ms of target GPU work and
+  clears the standing 300 ms crossed-width gate. Its uninstrumented ordinary
+  wall is `8,200.486 ms` versus `8,362.604/8,494.477 ms` for the controls;
+  sampled whole-wall order remains noisy and carries no ratio claim.
+- Both arms repeat their own final-logit bits. As expected for the accepted
+  matrix schedule, cross-arm logit hashes differ and later route state may
+  propagate numerically.
+- The established 2,385-token official-chat guard exercises one N=2,048 chunk
+  plus a scalar tail. Control/candidate/control prefill is
+  `13,504.5/11,542.8/11,848.4 ms`; the candidate beats the faster control by
+  305.6 ms, or 2.58%. All three runs preserve the first-token top-eight order,
+  a positive 3.63-3.68 margin, and the same 32-token greedy SHA-256
+  `fb33e4a1...a3ee04d`.
+
+Decision: close the final measured full-width MXFP4 qualification hole without
+retuning the kernel. Claim the conservative 328.488 ms changed-layer deletion
+and 305.6 ms product-prefill saving, not the noisier midpoint or sampled-wall
+ratios. Raw reports are under `target/profiles/dsv4-fresh-n2048-mxfp4-*`.
+
 ## 2026-08-10 - Cooperative CLI Metal Teardown
 
 Status: `qwen` and `qwen-bench` now convert SIGINT and SIGTERM into an

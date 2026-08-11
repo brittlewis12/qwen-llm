@@ -6191,17 +6191,13 @@ fn packed_mxfp4_matrix_scope_qualified(
 ) -> bool {
     device_name == PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE
         && tensor_count == 1_328
+        && (n_tokens == PACKED_MATRIX_MIN_TOKENS || n_tokens == DEEPSEEK_V4_PREFILL_MAX_TOKENS)
         && matches!(
-            (source_bytes, expert_count, n_tokens),
+            (source_bytes, expert_count),
             (
                 PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
                 MOE_EXPERT_COUNT,
-                DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-            ) | (
-                PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES,
-                216,
-                PACKED_MATRIX_MIN_TOKENS | DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-            )
+            ) | (PACKED_Q8_MATRIX_REAP_K216_SOURCE_BYTES, 216,)
         )
 }
 
@@ -13649,18 +13645,18 @@ mod tests {
     }
 
     #[test]
-    fn packed_mxfp4_matrix_scope_covers_fresh_n4096_and_both_k216_full_widths() {
+    fn packed_mxfp4_matrix_scope_covers_both_fresh_and_k216_full_widths() {
         let qualified = |device, tensors, bytes, experts, tokens| {
             packed_mxfp4_matrix_scope_qualified(device, tensors, bytes, experts, tokens)
         };
-        assert!(qualified(
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
-            1_328,
-            PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
-            MOE_EXPERT_COUNT,
-            DEEPSEEK_V4_PREFILL_MAX_TOKENS,
-        ));
         for tokens in [PACKED_MATRIX_MIN_TOKENS, DEEPSEEK_V4_PREFILL_MAX_TOKENS] {
+            assert!(qualified(
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
+                1_328,
+                PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
+                MOE_EXPERT_COUNT,
+                tokens,
+            ));
             assert!(qualified(
                 PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,
                 1_328,
@@ -13718,7 +13714,7 @@ mod tests {
             1_328,
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_SOURCE_BYTES,
             MOE_EXPERT_COUNT,
-            PACKED_MATRIX_MIN_TOKENS,
+            1_024,
         ));
         assert!(!qualified(
             PACKED_Q8_COMPRESSOR_MATRIX_QUALIFIED_DEVICE,

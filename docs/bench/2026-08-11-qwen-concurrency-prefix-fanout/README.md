@@ -74,5 +74,6 @@ Promote for qualifying fixed-chunk Qwen concurrency pairs. The mechanism reuses
 causal work rather than trying to overlap two bandwidth-intensive prefills, and
 it directly addresses
 the long-prompt regime where decode-only concurrency was otherwise a weak
-whole-request win. DeepSeek V4 needs its own transient identity and restored
-logit contract before adopting the same control-plane policy.
+whole-request win. DeepSeek now implements the same policy through its distinct
+transient identity and restored-logit contract, recorded in
+`docs/bench/2026-08-11-dsv4-concurrency-prefix-fanout/README.md`.

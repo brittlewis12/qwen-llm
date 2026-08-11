@@ -1,4 +1,5 @@
 use super::*;
+use qwen_llm::deepseek_v4_metal::DeepSeekV4CausalSnapshot;
 use qwen_llm::runtime::IndependentQueue2SequenceExecutor;
 use std::sync::{Arc, mpsc};
 
@@ -163,7 +164,14 @@ struct DeepSeekPreparedLane {
     logits: Vec<f32>,
     session_ms: f64,
     prefill_mode: &'static str,
+    evaluated_prefill_tokens: usize,
     prefill_ms: f64,
+    prefix_prefill_ms: f64,
+    private_prefill_ms: f64,
+    prefix_snapshot_ms: f64,
+    prefix_restore_ms: f64,
+    prefix_snapshot_payload_bytes: u64,
+    exact_prompt_logits_reused: bool,
 }
 
 struct DeepSeekCompletedLane {
@@ -171,7 +179,14 @@ struct DeepSeekCompletedLane {
     line: usize,
     session_ms: f64,
     prefill_mode: &'static str,
+    evaluated_prefill_tokens: usize,
     prefill_ms: f64,
+    prefix_prefill_ms: f64,
+    private_prefill_ms: f64,
+    prefix_snapshot_ms: f64,
+    prefix_restore_ms: f64,
+    prefix_snapshot_payload_bytes: u64,
+    exact_prompt_logits_reused: bool,
     generation_ms: f64,
     transitions: usize,
     selector_telemetry: DeepSeekV4MultigroupSelectorTelemetry,
@@ -186,8 +201,24 @@ struct DeepSeekPairTelemetry {
     requested_tokens: [usize; WIDTH],
     generated_tokens: usize,
     productive_transitions: usize,
+    common_prefix_tokens: usize,
+    prefix_fanout_tokens: usize,
+    prefix_fanout_reason: &'static str,
+    prefix_fanout_min_tokens: usize,
+    prefix_snapshot_payload_bytes: u64,
+    prefix_snapshot_priced_upper_bytes: u64,
+    prefix_restore_workspace_bytes: u64,
+    prefix_prefill_ms: f64,
+    prefix_snapshot_ms: f64,
+    prefix_restore_ms: f64,
+    private_prefill_ms: f64,
+    exact_prompt_logits_reused: bool,
+    fanout_memory_admission_required_bytes: Option<u64>,
+    fanout_memory_admission_reason: &'static str,
     pair_wall_ms: f64,
-    serial_prefill_ms: f64,
+    prepare_ms: f64,
+    evaluated_prefill_tokens: usize,
+    model_prefill_ms: f64,
     concurrent_generation_ms: f64,
     session_allocation_delta_bytes: u64,
     session_priced_upper_bytes: u64,
@@ -196,11 +227,31 @@ struct DeepSeekPairTelemetry {
     aggregate_transition_tps: f64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 enum DeepSeekWorkerControl {
-    Prepare,
+    PrepareSerial,
+    PrepareSharedSource {
+        prefix_len: usize,
+        model_content_id: DeepSeekV4ModelContentId,
+    },
+    PrepareSharedRestore {
+        prefix_len: usize,
+        model_content_id: DeepSeekV4ModelContentId,
+        snapshot: Arc<DeepSeekV4CausalSnapshot>,
+        prefix_logits: Arc<Vec<f32>>,
+    },
     Generate,
     Abort,
+}
+
+#[derive(Clone)]
+enum DeepSeekPrepareSignal {
+    Ready,
+    SharedSource {
+        snapshot: Arc<DeepSeekV4CausalSnapshot>,
+        prefix_logits: Arc<Vec<f32>>,
+    },
+    Failed,
 }
 
 pub(super) fn validate_cli(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
@@ -481,7 +532,7 @@ fn validate_requests(requests: &[PreparedJsonlRequest], args: &Args) -> Result<(
     Ok(())
 }
 
-fn common_prefix_tokens(left: &[i32], right: &[i32]) -> usize {
+fn common_prefix_tokens<T: PartialEq>(left: &[T], right: &[T]) -> usize {
     left.iter()
         .zip(right)
         .take_while(|(left, right)| left == right)
@@ -1004,6 +1055,88 @@ fn write_outputs(stdout: &mut impl Write, outputs: &[RequestOutput]) -> Result<(
     Ok(())
 }
 
+fn plan_deepseek_prefix_fanout(
+    left: &[u32],
+    right: &[u32],
+    chunk_tokens: usize,
+    enabled: bool,
+) -> PrefixFanoutPlan {
+    let common_prefix_tokens = common_prefix_tokens(left, right);
+    if !enabled {
+        return PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: 0,
+            reason: "disabled",
+        };
+    }
+    if common_prefix_tokens < PREFIX_FANOUT_MIN_TOKENS {
+        return PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: 0,
+            reason: "below_minimum",
+        };
+    }
+    if left == right {
+        return PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: common_prefix_tokens,
+            reason: "selected_identical",
+        };
+    }
+
+    let right_boundaries = deepseek_v4_prefill_chunk_ranges(right.len(), chunk_tokens)
+        .into_iter()
+        .map(|range| range.end)
+        .collect::<std::collections::BTreeSet<_>>();
+    let selected_prefix_tokens = deepseek_v4_prefill_chunk_ranges(left.len(), chunk_tokens)
+        .into_iter()
+        .map(|range| range.end)
+        .filter(|&end| end <= common_prefix_tokens && right_boundaries.contains(&end))
+        .max()
+        .unwrap_or(0);
+    if selected_prefix_tokens < PREFIX_FANOUT_MIN_TOKENS {
+        PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens: 0,
+            reason: "alignment_below_minimum",
+        }
+    } else {
+        PrefixFanoutPlan {
+            common_prefix_tokens,
+            selected_prefix_tokens,
+            reason: if selected_prefix_tokens == common_prefix_tokens {
+                "selected"
+            } else {
+                "selected_chunk_aligned"
+            },
+        }
+    }
+}
+
+fn transient_deepseek_model_content_id(
+    residency: &Arc<DeepSeekV4MetalResidency>,
+    pair_index: usize,
+) -> Result<DeepSeekV4ModelContentId> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock precedes Unix epoch")?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"qwen-dsv4-transient-concurrency-snapshot-v1\0");
+    hasher.update(std::process::id().to_le_bytes());
+    hasher.update((Arc::as_ptr(residency) as usize).to_le_bytes());
+    hasher.update(pair_index.to_le_bytes());
+    hasher.update(now.as_nanos().to_le_bytes());
+    Ok(DeepSeekV4ModelContentId::new(hasher.finalize().into()))
+}
+
+fn deepseek_snapshot_restore_workspace_bytes(residency: &DeepSeekV4MetalResidency) -> Result<u64> {
+    u64::from(residency.config().layer_count)
+        .checked_mul(128)
+        .and_then(|value| value.checked_mul(u64::from(residency.config().key_length)))
+        .and_then(|value| value.checked_mul(std::mem::size_of::<u16>() as u64))
+        .context("DeepSeek snapshot restore workspace byte overflow")
+}
+
 fn prepare_deepseek_lane(
     ctx: &MetalContext,
     residency: &Arc<DeepSeekV4MetalResidency>,
@@ -1020,15 +1153,8 @@ fn prepare_deepseek_lane(
         request.required_forwards,
         residency.session_capacity().forward_limit(),
     );
-    let session_t0 = Instant::now();
-    let mut session = DeepSeekV4Session::new_shared(ctx, residency.clone()).with_context(|| {
-        format!(
-            "create concurrent DeepSeek session for request {}",
-            request.id
-        )
-    })?;
-    selector_plan.seal_session(&mut session, &request.id)?;
-    let session_ms = session_t0.elapsed().as_secs_f64() * 1e3;
+    let (mut session, session_ms) =
+        create_deepseek_lane_session(ctx, residency, selector_plan, &request.id, None)?;
 
     let prefill_t0 = Instant::now();
     let packed_chunk_count =
@@ -1062,12 +1188,223 @@ fn prepare_deepseek_lane(
     deepseek_v4_debug_dump_logits_sha256(&request.id, &logits);
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     Ok(DeepSeekPreparedLane {
+        evaluated_prefill_tokens: request.prompt_token_ids.len(),
         request,
         session,
         logits,
         session_ms,
         prefill_mode,
         prefill_ms,
+        prefix_prefill_ms: 0.0,
+        private_prefill_ms: prefill_ms,
+        prefix_snapshot_ms: 0.0,
+        prefix_restore_ms: 0.0,
+        prefix_snapshot_payload_bytes: 0,
+        exact_prompt_logits_reused: false,
+    })
+}
+
+fn create_deepseek_lane_session(
+    ctx: &MetalContext,
+    residency: &Arc<DeepSeekV4MetalResidency>,
+    selector_plan: &DeepSeekV4MultigroupSelectorPlan,
+    request_id: &str,
+    model_content_id: Option<DeepSeekV4ModelContentId>,
+) -> Result<(DeepSeekV4Session, f64)> {
+    let session_t0 = Instant::now();
+    let mut session = match model_content_id {
+        Some(model_content_id) => DeepSeekV4Session::new_shared_with_model_content_id(
+            ctx,
+            residency.clone(),
+            model_content_id,
+        ),
+        None => DeepSeekV4Session::new_shared(ctx, residency.clone()),
+    }
+    .with_context(|| format!("create concurrent DeepSeek session for request {request_id}"))?;
+    selector_plan.seal_session(&mut session, request_id)?;
+    Ok((session, session_t0.elapsed().as_secs_f64() * 1e3))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_deepseek_shared_source(
+    ctx: &MetalContext,
+    residency: &Arc<DeepSeekV4MetalResidency>,
+    selector_plan: &DeepSeekV4MultigroupSelectorPlan,
+    request: DeepSeekV4PreparedRequest,
+    prefill_chunk_tokens: usize,
+    vocab_size: u32,
+    prefix_len: usize,
+    model_content_id: DeepSeekV4ModelContentId,
+) -> Result<(
+    DeepSeekPreparedLane,
+    Arc<DeepSeekV4CausalSnapshot>,
+    Arc<Vec<f32>>,
+)> {
+    shutdown::checkpoint()?;
+    ensure!(
+        prefix_len > 0 && prefix_len <= request.prompt_token_ids.len(),
+        "request {} shared prefix {} is outside prompt length {}",
+        request.id,
+        prefix_len,
+        request.prompt_token_ids.len()
+    );
+    let (mut session, session_ms) = create_deepseek_lane_session(
+        ctx,
+        residency,
+        selector_plan,
+        &request.id,
+        Some(model_content_id),
+    )?;
+
+    let prefix_t0 = Instant::now();
+    execute_deepseek_v4_prompt_suffix(
+        &mut session,
+        ctx,
+        &request.prompt_token_ids[..prefix_len],
+        prefill_chunk_tokens,
+    )
+    .with_context(|| format!("prefill shared prefix for request {}", request.id))?;
+    let prefix_logits = Arc::new(
+        copy_deepseek_v4_logits(&session, vocab_size, "concurrent shared prefix")
+            .with_context(|| format!("copy request {} shared-prefix logits", request.id))?,
+    );
+    let prefix_prefill_ms = prefix_t0.elapsed().as_secs_f64() * 1e3;
+    shutdown::checkpoint()?;
+
+    let snapshot_t0 = Instant::now();
+    let snapshot = Arc::new(
+        session
+            .capture_causal_snapshot()
+            .with_context(|| format!("capture request {} shared prefix", request.id))?,
+    );
+    let prefix_snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
+    ensure!(
+        snapshot.next_position() as usize == prefix_len
+            && snapshot.prefix_tokens() == &request.prompt_token_ids[..prefix_len],
+        "request {} captured an unexpected shared-prefix frontier",
+        request.id
+    );
+
+    let suffix = &request.prompt_token_ids[prefix_len..];
+    let (logits, private_prefill_ms, prefill_mode) = if suffix.is_empty() {
+        (
+            prefix_logits.as_ref().clone(),
+            0.0,
+            "shared_source_exact_logits",
+        )
+    } else {
+        let suffix_t0 = Instant::now();
+        execute_deepseek_v4_prompt_suffix(&mut session, ctx, suffix, prefill_chunk_tokens)
+            .with_context(|| format!("prefill request {} private suffix", request.id))?;
+        let logits = copy_deepseek_v4_logits(&session, vocab_size, "concurrent private suffix")
+            .with_context(|| format!("copy request {} private-suffix logits", request.id))?;
+        (
+            logits,
+            suffix_t0.elapsed().as_secs_f64() * 1e3,
+            "shared_source_suffix",
+        )
+    };
+    deepseek_v4_debug_dump_logits_sha256(&request.id, &logits);
+    let prefix_snapshot_payload_bytes = snapshot.payload_bytes();
+    Ok((
+        DeepSeekPreparedLane {
+            evaluated_prefill_tokens: request.prompt_token_ids.len(),
+            request,
+            session,
+            logits,
+            session_ms,
+            prefill_mode,
+            prefill_ms: prefix_prefill_ms + private_prefill_ms,
+            prefix_prefill_ms,
+            private_prefill_ms,
+            prefix_snapshot_ms,
+            prefix_restore_ms: 0.0,
+            prefix_snapshot_payload_bytes,
+            exact_prompt_logits_reused: false,
+        },
+        snapshot,
+        prefix_logits,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_deepseek_shared_restore(
+    ctx: &MetalContext,
+    residency: &Arc<DeepSeekV4MetalResidency>,
+    selector_plan: &DeepSeekV4MultigroupSelectorPlan,
+    request: DeepSeekV4PreparedRequest,
+    prefill_chunk_tokens: usize,
+    vocab_size: u32,
+    prefix_len: usize,
+    model_content_id: DeepSeekV4ModelContentId,
+    snapshot: &DeepSeekV4CausalSnapshot,
+    prefix_logits: &[f32],
+) -> Result<DeepSeekPreparedLane> {
+    shutdown::checkpoint()?;
+    ensure!(
+        prefix_len > 0
+            && request.prompt_token_ids.len() >= prefix_len
+            && &request.prompt_token_ids[..prefix_len] == snapshot.prefix_tokens(),
+        "request {} does not match the restored shared prefix",
+        request.id
+    );
+    let (mut session, session_ms) = create_deepseek_lane_session(
+        ctx,
+        residency,
+        selector_plan,
+        &request.id,
+        Some(model_content_id),
+    )?;
+    let restore_t0 = Instant::now();
+    session
+        .restore_causal_snapshot(snapshot)
+        .with_context(|| format!("restore request {} shared prefix", request.id))?;
+    let prefix_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+    ensure!(
+        session.next_position() as usize == prefix_len,
+        "request {} restored an unexpected shared-prefix frontier",
+        request.id
+    );
+    shutdown::checkpoint()?;
+
+    let suffix = &request.prompt_token_ids[prefix_len..];
+    let (logits, private_prefill_ms, prefill_mode, exact_prompt_logits_reused) = if suffix
+        .is_empty()
+    {
+        (
+            prefix_logits.to_vec(),
+            0.0,
+            "shared_restore_exact_logits",
+            true,
+        )
+    } else {
+        let suffix_t0 = Instant::now();
+        execute_deepseek_v4_prompt_suffix(&mut session, ctx, suffix, prefill_chunk_tokens)
+            .with_context(|| format!("prefill request {} restored suffix", request.id))?;
+        let logits = copy_deepseek_v4_logits(&session, vocab_size, "restored private suffix")
+            .with_context(|| format!("copy request {} restored-suffix logits", request.id))?;
+        (
+            logits,
+            suffix_t0.elapsed().as_secs_f64() * 1e3,
+            "shared_restore_suffix",
+            false,
+        )
+    };
+    deepseek_v4_debug_dump_logits_sha256(&request.id, &logits);
+    Ok(DeepSeekPreparedLane {
+        evaluated_prefill_tokens: suffix.len(),
+        request,
+        session,
+        logits,
+        session_ms,
+        prefill_mode,
+        prefill_ms: private_prefill_ms,
+        prefix_prefill_ms: 0.0,
+        private_prefill_ms,
+        prefix_snapshot_ms: 0.0,
+        prefix_restore_ms,
+        prefix_snapshot_payload_bytes: 0,
+        exact_prompt_logits_reused,
     })
 }
 
@@ -1136,7 +1473,14 @@ fn generate_deepseek_lane(
         line: lane.request.line,
         session_ms: lane.session_ms,
         prefill_mode: lane.prefill_mode,
+        evaluated_prefill_tokens: lane.evaluated_prefill_tokens,
         prefill_ms: lane.prefill_ms,
+        prefix_prefill_ms: lane.prefix_prefill_ms,
+        private_prefill_ms: lane.private_prefill_ms,
+        prefix_snapshot_ms: lane.prefix_snapshot_ms,
+        prefix_restore_ms: lane.prefix_restore_ms,
+        prefix_snapshot_payload_bytes: lane.prefix_snapshot_payload_bytes,
+        exact_prompt_logits_reused: lane.exact_prompt_logits_reused,
         generation_ms: generation.wall_ms,
         transitions: generation.transitions,
         selector_telemetry,
@@ -1151,7 +1495,7 @@ fn emit_deepseek_completion(
 ) -> Result<()> {
     selector_plan.emit_completion(&completion.output.id, completion.selector_telemetry)?;
     let prefill_tps = if completion.prefill_ms > 0.0 {
-        completion.output.prompt_tokens as f64 / (completion.prefill_ms / 1e3)
+        completion.evaluated_prefill_tokens as f64 / (completion.prefill_ms / 1e3)
     } else {
         0.0
     };
@@ -1162,7 +1506,7 @@ fn emit_deepseek_completion(
     };
     eprintln!(
         concat!(
-            "deepseek_v4 stats: request={} line={} prompt_kind=raw prefill_mode={} prefill_chunk_cap={} prompt_tokens={} ",
+            "deepseek_v4 stats: request={} line={} prompt_kind=raw prefill_mode={} prefill_chunk_cap={} prompt_tokens={} evaluated_prefill_tokens={} ",
             "generated_tokens={} transitions={} stop_reason={} session_ms={:.1} prefill_ms={:.1} prefill_tps={:.2} ",
             "generation_ms={:.1} decode_tps={:.2} concurrency={} build_commit={} build_dirty={}"
         ),
@@ -1171,6 +1515,7 @@ fn emit_deepseek_completion(
         completion.prefill_mode,
         prefill_chunk_tokens,
         completion.output.prompt_tokens,
+        completion.evaluated_prefill_tokens,
         completion.output.generated_tokens,
         completion.transitions,
         completion.output.stop_reason.as_str(),
@@ -1197,41 +1542,92 @@ fn run_deepseek_worker(
     request: DeepSeekV4PreparedRequest,
     prefill_chunk_tokens: usize,
     control: mpsc::Receiver<DeepSeekWorkerControl>,
-    prepared_tx: mpsc::Sender<bool>,
+    prepared_tx: mpsc::Sender<DeepSeekPrepareSignal>,
 ) -> Result<DeepSeekCompletedLane> {
-    match control
+    let prepare_control = control
         .recv()
-        .context("receive DeepSeek concurrency prepare control")?
-    {
-        DeepSeekWorkerControl::Prepare => {}
-        DeepSeekWorkerControl::Abort => bail!("DeepSeek concurrency worker aborted before prepare"),
+        .context("receive DeepSeek concurrency prepare control")?;
+    let prepared = match prepare_control {
+        DeepSeekWorkerControl::PrepareSerial => prepare_deepseek_lane(
+            ctx,
+            &residency,
+            selector_plan,
+            request,
+            prefill_chunk_tokens,
+            vocab_size,
+        )
+        .map(|lane| (lane, DeepSeekPrepareSignal::Ready)),
+        DeepSeekWorkerControl::PrepareSharedSource {
+            prefix_len,
+            model_content_id,
+        } => prepare_deepseek_shared_source(
+            ctx,
+            &residency,
+            selector_plan,
+            request,
+            prefill_chunk_tokens,
+            vocab_size,
+            prefix_len,
+            model_content_id,
+        )
+        .map(|(lane, snapshot, prefix_logits)| {
+            (
+                lane,
+                DeepSeekPrepareSignal::SharedSource {
+                    snapshot,
+                    prefix_logits,
+                },
+            )
+        }),
+        DeepSeekWorkerControl::PrepareSharedRestore {
+            prefix_len,
+            model_content_id,
+            snapshot,
+            prefix_logits,
+        } => prepare_deepseek_shared_restore(
+            ctx,
+            &residency,
+            selector_plan,
+            request,
+            prefill_chunk_tokens,
+            vocab_size,
+            prefix_len,
+            model_content_id,
+            &snapshot,
+            prefix_logits.as_slice(),
+        )
+        .map(|lane| (lane, DeepSeekPrepareSignal::Ready)),
+        DeepSeekWorkerControl::Abort => {
+            bail!("DeepSeek concurrency worker aborted before prepare")
+        }
         DeepSeekWorkerControl::Generate => {
             bail!("DeepSeek concurrency worker received generation before prepare")
         }
-    }
-    let prepared = prepare_deepseek_lane(
-        ctx,
-        &residency,
-        selector_plan,
-        request,
-        prefill_chunk_tokens,
-        vocab_size,
-    );
+    };
     prepared_tx
-        .send(prepared.is_ok())
+        .send(
+            prepared
+                .as_ref()
+                .map(|(_, signal)| signal.clone())
+                .unwrap_or(DeepSeekPrepareSignal::Failed),
+        )
         .context("publish DeepSeek concurrency prepare status")?;
     match control
         .recv()
         .context("receive DeepSeek concurrency generation control")?
     {
         DeepSeekWorkerControl::Generate => {
-            generate_deepseek_lane(ctx, tokenizer, vocab_size, stop_tokens, prepared?)
+            let (lane, prepare_signal) = prepared?;
+            drop(prepare_signal);
+            generate_deepseek_lane(ctx, tokenizer, vocab_size, stop_tokens, lane)
         }
         DeepSeekWorkerControl::Abort => match prepared {
             Ok(_) => bail!("DeepSeek concurrency worker aborted after peer setup failure"),
             Err(error) => Err(error),
         },
-        DeepSeekWorkerControl::Prepare => {
+        DeepSeekWorkerControl::PrepareSerial
+        | DeepSeekWorkerControl::PrepareSharedSource { .. }
+        | DeepSeekWorkerControl::PrepareSharedRestore { .. } => {
             bail!("DeepSeek concurrency worker received duplicate prepare control")
         }
     }
@@ -1251,6 +1647,48 @@ fn run_deepseek_pair(
 ) -> Result<([DeepSeekCompletedLane; WIDTH], DeepSeekPairTelemetry)> {
     let prompt_tokens = [requests[0].prompt_tokens, requests[1].prompt_tokens];
     let requested_tokens = [requests[0].max_tokens, requests[1].max_tokens];
+    let mut prefix_fanout = plan_deepseek_prefix_fanout(
+        &requests[0].prompt_token_ids,
+        &requests[1].prompt_token_ids,
+        prefill_chunk_tokens,
+        prefix_fanout_enabled(),
+    );
+    let mut prefix_snapshot_priced_upper_bytes = 0u64;
+    let mut prefix_restore_workspace_bytes = 0u64;
+    let mut fanout_memory_admission_required_bytes = None;
+    let mut fanout_memory_admission_reason = "not_requested";
+    let mut transient_model_content_id = None;
+    if prefix_fanout.selected_prefix_tokens > 0 {
+        prefix_snapshot_priced_upper_bytes = causal_snapshot_record_bytes(
+            residency.config(),
+            residency.session_capacity(),
+            u32::try_from(prefix_fanout.selected_prefix_tokens)
+                .context("DeepSeek shared prefix does not fit u32")?,
+            u64::MAX,
+        )
+        .context("estimate DeepSeek concurrent snapshot record")?;
+        prefix_restore_workspace_bytes = deepseek_snapshot_restore_workspace_bytes(residency)?;
+        let incremental_bytes = session_priced_upper_bytes
+            .checked_mul(WIDTH as u64)
+            .and_then(|bytes| bytes.checked_add(prefix_snapshot_priced_upper_bytes))
+            .and_then(|bytes| bytes.checked_add(prefix_restore_workspace_bytes))
+            .context("DeepSeek fanout admission byte overflow")?;
+        let admission = evaluate_metal_memory_admission(
+            incremental_bytes,
+            DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
+            contexts[0].memory_signals(),
+            true,
+        );
+        fanout_memory_admission_required_bytes = admission.required_bytes;
+        fanout_memory_admission_reason = admission.reason.as_str();
+        if admission.admitted {
+            transient_model_content_id =
+                Some(transient_deepseek_model_content_id(residency, pair_index)?);
+        } else {
+            prefix_fanout.selected_prefix_tokens = 0;
+            prefix_fanout.reason = "memory_fallback";
+        }
+    }
     let [left_request, right_request] = requests;
     let pair_t0 = Instant::now();
     let before_sessions = contexts[0].current_allocated_size();
@@ -1258,7 +1696,7 @@ fn run_deepseek_pair(
         .checked_mul(WIDTH as u64)
         .and_then(|bytes| bytes.checked_add(DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES))
         .context("DeepSeek two-session runtime byte overflow")?;
-    let (completed, serial_prefill_ms, concurrent_generation_ms, session_allocation_delta_bytes) =
+    let (completed, prepare_ms, concurrent_generation_ms, session_allocation_delta_bytes) =
         std::thread::scope(|scope| -> Result<_> {
             let (left_control_tx, left_control_rx) = mpsc::channel();
             let (right_control_tx, right_control_rx) = mpsc::channel();
@@ -1296,19 +1734,55 @@ fn run_deepseek_pair(
             });
 
             let prefill_t0 = Instant::now();
+            let prefix_len = prefix_fanout.selected_prefix_tokens;
+            let left_control = match transient_model_content_id {
+                Some(model_content_id) => DeepSeekWorkerControl::PrepareSharedSource {
+                    prefix_len,
+                    model_content_id,
+                },
+                None => DeepSeekWorkerControl::PrepareSerial,
+            };
             left_control_tx
-                .send(DeepSeekWorkerControl::Prepare)
+                .send(left_control)
                 .context("start DeepSeek concurrency lane 0 prefill")?;
-            let left_prepared = left_prepared_rx.recv().unwrap_or(false);
-            let right_prepared = if left_prepared {
+            let left_signal = left_prepared_rx
+                .recv()
+                .unwrap_or(DeepSeekPrepareSignal::Failed);
+            let (left_prepared, right_control) = match (transient_model_content_id, left_signal) {
+                (
+                    Some(model_content_id),
+                    DeepSeekPrepareSignal::SharedSource {
+                        snapshot,
+                        prefix_logits,
+                    },
+                ) => (
+                    true,
+                    Some(DeepSeekWorkerControl::PrepareSharedRestore {
+                        prefix_len,
+                        model_content_id,
+                        snapshot,
+                        prefix_logits,
+                    }),
+                ),
+                (None, DeepSeekPrepareSignal::Ready) => {
+                    (true, Some(DeepSeekWorkerControl::PrepareSerial))
+                }
+                _ => (false, None),
+            };
+            let right_prepared = if let Some(right_control) = right_control {
                 right_control_tx
-                    .send(DeepSeekWorkerControl::Prepare)
+                    .send(right_control)
                     .context("start DeepSeek concurrency lane 1 prefill")?;
-                right_prepared_rx.recv().unwrap_or(false)
+                matches!(
+                    right_prepared_rx
+                        .recv()
+                        .unwrap_or(DeepSeekPrepareSignal::Failed),
+                    DeepSeekPrepareSignal::Ready
+                )
             } else {
                 false
             };
-            let serial_prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+            let prepare_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
             if !left_prepared || !right_prepared {
                 let _ = left_control_tx.send(DeepSeekWorkerControl::Abort);
@@ -1354,7 +1828,7 @@ fn run_deepseek_pair(
                 right_result.map_err(|_| anyhow!("DeepSeek concurrency lane 1 panicked"))??;
             Ok((
                 [left, right],
-                serial_prefill_ms,
+                prepare_ms,
                 concurrent_generation_ms,
                 session_allocation_delta_bytes,
             ))
@@ -1365,6 +1839,32 @@ fn run_deepseek_pair(
         .map(|lane| lane.output.generated_tokens)
         .sum::<usize>();
     let productive_transitions = completed.iter().map(|lane| lane.transitions).sum::<usize>();
+    let evaluated_prefill_tokens = completed
+        .iter()
+        .map(|lane| lane.evaluated_prefill_tokens)
+        .sum::<usize>();
+    let model_prefill_ms = completed.iter().map(|lane| lane.prefill_ms).sum::<f64>();
+    let prefix_prefill_ms = completed
+        .iter()
+        .map(|lane| lane.prefix_prefill_ms)
+        .sum::<f64>();
+    let private_prefill_ms = completed
+        .iter()
+        .map(|lane| lane.private_prefill_ms)
+        .sum::<f64>();
+    let prefix_snapshot_ms = completed
+        .iter()
+        .map(|lane| lane.prefix_snapshot_ms)
+        .sum::<f64>();
+    let prefix_restore_ms = completed
+        .iter()
+        .map(|lane| lane.prefix_restore_ms)
+        .sum::<f64>();
+    let prefix_snapshot_payload_bytes = completed
+        .iter()
+        .map(|lane| lane.prefix_snapshot_payload_bytes)
+        .sum::<u64>();
+    let exact_prompt_logits_reused = completed.iter().any(|lane| lane.exact_prompt_logits_reused);
     ensure!(
         productive_transitions.checked_add(WIDTH) == Some(generated_tokens),
         "DeepSeek concurrent pair violated aggregate N-1 transition semantics"
@@ -1382,15 +1882,31 @@ fn run_deepseek_pair(
     Ok((
         completed,
         DeepSeekPairTelemetry {
-            schema_version: 1,
-            backend: "deepseek_v4_independent_queues_v1",
+            schema_version: 2,
+            backend: "deepseek_v4_independent_queues_v2",
             pair_index,
             prompt_tokens,
             requested_tokens,
             generated_tokens,
             productive_transitions,
+            common_prefix_tokens: prefix_fanout.common_prefix_tokens,
+            prefix_fanout_tokens: prefix_fanout.selected_prefix_tokens,
+            prefix_fanout_reason: prefix_fanout.reason,
+            prefix_fanout_min_tokens: PREFIX_FANOUT_MIN_TOKENS,
+            prefix_snapshot_payload_bytes,
+            prefix_snapshot_priced_upper_bytes,
+            prefix_restore_workspace_bytes,
+            prefix_prefill_ms,
+            prefix_snapshot_ms,
+            prefix_restore_ms,
+            private_prefill_ms,
+            exact_prompt_logits_reused,
+            fanout_memory_admission_required_bytes,
+            fanout_memory_admission_reason,
             pair_wall_ms,
-            serial_prefill_ms,
+            prepare_ms,
+            evaluated_prefill_tokens,
+            model_prefill_ms,
             concurrent_generation_ms,
             session_allocation_delta_bytes,
             session_priced_upper_bytes,
@@ -1616,6 +2132,39 @@ mod tests {
             )
             .reason,
             "below_minimum"
+        );
+    }
+
+    #[test]
+    fn deepseek_prefix_fanout_intersects_real_chunk_boundaries() {
+        let mut right = vec![7u32; 6_650];
+        right[6_475] = 8;
+        assert_eq!(
+            plan_deepseek_prefix_fanout(&vec![7; 6_642], &right, 4_096, true),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 6_475,
+                selected_prefix_tokens: 6_144,
+                reason: "selected_chunk_aligned",
+            }
+        );
+
+        let shorter = vec![7u32; 6_000];
+        let longer = vec![7u32; 8_000];
+        assert_eq!(
+            plan_deepseek_prefix_fanout(&shorter, &longer, 4_096, true),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 6_000,
+                selected_prefix_tokens: 4_096,
+                reason: "selected_chunk_aligned",
+            }
+        );
+        assert_eq!(
+            plan_deepseek_prefix_fanout(&longer, &shorter, 4_096, true),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 6_000,
+                selected_prefix_tokens: 4_096,
+                reason: "selected_chunk_aligned",
+            }
         );
     }
 

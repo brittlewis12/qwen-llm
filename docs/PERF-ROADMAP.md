@@ -2848,6 +2848,16 @@ sampling fixtures match serial output exactly; equal-length sampled generation
 retains `1.280x` aggregate movement. Fail closed when the command-queue-scoped
 DeepSeek residency-set opt-in is active.
 
+DeepSeek concurrency now also composes with pair-local causal-snapshot fanout.
+Identical 6,219-token K216 prompts move pair wall
+`58,106.922 -> 29,248.723 ms` (`1.987x`); a pair with a 6,225-token LCP selects
+the shared 6,144-token packed boundary and moves
+`56,376.329 -> 31,511.527 ms` (`1.789x`). Both preserve complete output rows
+byte-for-byte. Keep the external prefix-logit bridge for exact restores because
+DeepSeek causal snapshots intentionally omit observations, use transient
+same-residency identity rather than full durable model hashing, include the
+restore image in admission, and release the host snapshot before decode.
+
 Qwen A3B static B=8 is closed after a complete whole-model spike. Aggressive
 packed execution reaches `1.43x` and beats B=8 independent queues by about 16%,
 but generated continuation diverges. Restricting the candidate to bitwise-exact

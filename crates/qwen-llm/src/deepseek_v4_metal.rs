@@ -1808,12 +1808,32 @@ impl DeepSeekV4Session {
         ctx: &MetalContext,
         residency: Arc<DeepSeekV4MetalResidency>,
     ) -> Result<Self, DeepSeekV4MetalError> {
+        Self::new_shared_inner(ctx, residency, None)
+    }
+
+    /// Construct a sequence-private shared session whose snapshots are scoped
+    /// by a caller-provided identity. Transient in-process users may bind an
+    /// ephemeral identity; durable users must bind the full model-content ID.
+    #[doc(hidden)]
+    pub fn new_shared_with_model_content_id(
+        ctx: &MetalContext,
+        residency: Arc<DeepSeekV4MetalResidency>,
+        model_content_id: DeepSeekV4ModelContentId,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        Self::new_shared_inner(ctx, residency, Some(model_content_id))
+    }
+
+    fn new_shared_inner(
+        ctx: &MetalContext,
+        residency: Arc<DeepSeekV4MetalResidency>,
+        model_content_id: Option<DeepSeekV4ModelContentId>,
+    ) -> Result<Self, DeepSeekV4MetalError> {
         if residency._residency_set.is_some() {
             return invalid(
                 "shared DeepSeek V4 sessions require QWEN_DSV4_RESIDENCY_SET=0 because residency sets are command-queue scoped",
             );
         }
-        Self::new_inner(ctx, residency, None)
+        Self::new_inner(ctx, residency, model_content_id)
     }
 
     pub fn new_with_model_content_id(

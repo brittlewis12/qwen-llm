@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - DeepSeek V4 Concurrent Prefix Fanout GO
+
+Status: qualifying DeepSeek V4 `--concurrency 2` pairs now prefill one exact
+shared token prefix, capture its causal state, restore the second worker-local
+session, and evaluate only private suffixes. The existing
+`QWEN_CONCURRENCY_PREFIX_FANOUT=0` rollback restores two complete serial
+prefills across both model families.
+
+- DeepSeek partial prefixes select the largest shared boundary produced by both
+  prompts' real packed-chunk schedules. Identical prompts may retain their full
+  boundary. The 256-token minimum remains common with Qwen.
+- Causal snapshots omit observations and logits. The source therefore copies
+  the shared-prefix logits before capture: an exact-prompt restore reuses those
+  logits, while a partial restore evaluates its suffix to produce a fresh
+  observation. A pair-local transient content ID scopes transfer to two sessions
+  over the same immutable residency; nothing enters either durable store.
+- Two identical 6,219-token K216 prompts move model prefill
+  `57,458.312 -> 28,145.338 ms`, pair preparation
+  `57,464.606 -> 28,762.131 ms`, and pair wall
+  `58,106.922 -> 29,248.723 ms`. Preparation improves 1.998x and pair wall
+  improves 1.987x. The 60,621,612-byte snapshot takes 410.532/201.229 ms to
+  capture/restore.
+- A second pair shares 6,225 tokens and selects the common 6,144-token chunk
+  boundary. Model prefill moves `55,860.968 -> 30,418.412 ms`, preparation
+  `55,866.299 -> 30,994.501 ms`, and pair wall
+  `56,376.329 -> 31,511.527 ms`, or 1.789x at the endpoint. Its
+  60,137,472-byte snapshot takes 379.165/191.436 ms to capture/restore.
+- Every complete rollback/candidate output row is byte-identical in both
+  fixtures, including distinct partial-prefix continuations, generated-token
+  SHA-256, decoded text, stop reason, and terminal semantics.
+- Fanout admission prices both 4,390,109,184-byte sessions, the snapshot record
+  upper, a 5,636,096-byte restore image, and the existing transient reserve. The
+  host snapshot is dropped before concurrent decode. Validation returned to 90%
+  free memory, left no model process, and did not increase pre-existing swap.
+
+Decision: promote DeepSeek fanout under the same capability-level policy as
+Qwen. This removes the dominant repeated-prefill wall in the workload where
+decode-only concurrency was otherwise nearly flat, while retaining ordinary
+serial preparation for short, unrelated, disabled, or memory-denied pairs.
+Full protocol and measurements:
+`docs/bench/2026-08-11-dsv4-concurrency-prefix-fanout/README.md`.
+
 ## 2026-08-11 - Qwen Concurrent Prefix Fanout GO
 
 Status: qualifying fixed-chunk `qwen --requests-jsonl FILE --concurrency 2`
@@ -42,8 +84,8 @@ Decision: promote prefix-once fanout as the default policy for qualifying Qwen
 concurrency pairs; ineligible pairs retain serial preparation.
 This converts repeated-system-prompt and shared-document pairs from merely mild
 decode overlap into a substantial whole-request win without changing the
-executor or cache index. DeepSeek fanout remains separate because its durable
-snapshot identity and observation contracts differ. Durable protocol and raw
+executor or cache index. DeepSeek now implements the same policy over its
+distinct snapshot identity and observation contracts. Durable protocol and raw
 rows are in `docs/bench/2026-08-11-qwen-concurrency-prefix-fanout/`.
 
 ## 2026-08-11 - DeepSeek V4 FRESH N=2,048 MXFP4 Matrix GO

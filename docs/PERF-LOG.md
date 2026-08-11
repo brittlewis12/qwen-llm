@@ -23259,3 +23259,37 @@ B=8 remains promoted; independent queues remain the simpler cross-family
 fallback. Reopen only for a materially new exact organization, or a realistic
 functional-equivalence packet that remains at least 10% ahead of queue overlap.
 Full result: `docs/bench/2026-08-11-qwen-moe-b8-cell-kill/README.md`.
+
+## 2026-08-11 — DeepSeek K160 Routed-Expert B=8 Floor KILL
+
+Status: close common-route static batching before a full-session or scheduler
+spike.
+
+The model-backed floor loaded one exact K160 residency and allocated only
+`3,211,264` additional Metal bytes; it constructed no DeepSeek session. Every
+one of eight distinct rows used experts `[0,1,2,3,4,5]` with distinct normalized
+weights. The control encoded eight production fast all-slot Q3_K/Q4_K bodies;
+the candidate read each expert once through gate/up/down N=8 mat-mat, exact
+clamped SwiGLU, row scatter, and one packed weighted sum.
+
+Across twelve counterbalanced pairs, GPU medians moved
+`1.9759999996 -> 1.8629791666 ms/layer` (`1.0606667x`, `0.1130208 ms`
+saved). Dispatches fell `40 -> 31`. Correctness was strong but intentionally
+functional rather than bitwise: minimum row cosine `0.9999999105`, relative RMS
+`4.0486e-4`, maximum absolute error `2.7992e-8`, and 2 of 32,768 elements
+bit-identical.
+
+This was the optimistic route-overlap cell. Current attribution places routed
+experts at about `10.51` of `46.402 ms/token`; applying the measured local saving
+through all 43 layers predicts only about `0.60 ms/token`, or `1.013x` whole-token
+movement. Real route diversity adds grouping work and reduces expert reuse, so a
+production arm cannot recover the gap to the existing `1.37x` K160 B=2
+independent-queue fallback from this mechanism.
+
+Decision: delete the probe and do not build a DeepSeek static scheduler around
+current common-expert Q3_K/Q4_K mat-mat. This does not close every future
+DeepSeek batch organization. Reopen only when a materially different expert
+kernel clears 30% locally, another stage exposes an independently large charged
+ceiling, or shared executor infrastructure makes a low-single-digit increment
+worth carrying. Full result:
+`docs/bench/2026-08-11-dsv4-k160-routed-expert-b8-kill/README.md`.

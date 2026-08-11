@@ -2815,6 +2815,17 @@ below the `125.8` independent-queue control. Do not build a MoE static scheduler
 without a materially new exact organization or a product-approved functional
 equivalence packet that stays at least 10% ahead of queue overlap.
 
+DeepSeek K160 common-route B=8 is also closed at its cheapest model-backed
+floor. Giving all eight rows the same six experts, the production all-slot
+control and six N=8 Q3_K/Q4_K mat-mat chains move `1.9760 -> 1.8630 ms/layer`
+GPU (`1.0607x`). Routed experts account for about `10.51` of `46.40 ms/token`,
+so perfect propagation through all 43 layers predicts only about `1.013x`
+whole-token movement, before realistic route diversity or scheduler cost. Do
+not build a K160 static scheduler around current common-expert mat-mat. Reopen
+for a materially different kernel that clears a 30% routed-stage floor, another
+stage with an independently large whole-token ceiling, or a shared executor
+whose marginal product cost changes the crossover.
+
 Low-cost architectural seams to preserve now:
 
 - Keep mutable target, draft, KV, GDN, and rollback state sequence-owned.

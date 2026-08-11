@@ -1459,6 +1459,16 @@ pub struct MetalModel {
     pub blocks: Vec<MetalBlock>,
 }
 
+impl MetalModel {
+    /// Whether this model relies on a residency set attached to its load queue.
+    /// Such a model cannot be submitted through unrelated command queues until
+    /// those queues receive matching residency-set ownership and teardown.
+    #[doc(hidden)]
+    pub fn has_queue_scoped_residency_set(&self) -> bool {
+        self._residency_set.is_some()
+    }
+}
+
 struct MetalModelResidencySetGuard {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     set: Retained<ProtocolObject<dyn MTLResidencySet>>,

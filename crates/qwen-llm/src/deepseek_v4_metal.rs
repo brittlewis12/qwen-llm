@@ -66,6 +66,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 
 pub const DEEPSEEK_V4_FLASH_0731_TENSOR_COUNT: usize = 1_328;
 const GGUF_BINDING_ALIGNMENT: usize = 32;
@@ -352,16 +353,59 @@ impl DeepSeekV4MemoryPlan {
     }
 
     pub fn admission(&self, signals: MetalMemorySignals) -> MetalMemoryAdmission {
-        evaluate_metal_memory_admission(
-            self.total_priced_upper_bytes,
+        self.admission_for_sessions(signals, 1)
+            .expect("the validated one-session memory plan must not overflow")
+    }
+
+    pub fn priced_upper_bytes_for_sessions(
+        &self,
+        session_count: usize,
+    ) -> Result<u64, DeepSeekV4MetalError> {
+        if session_count == 0 {
+            return invalid("DeepSeek V4 memory admission requires at least one session");
+        }
+        let session_count = u64::try_from(session_count).map_err(|_| {
+            DeepSeekV4MetalError::Invalid("DeepSeek V4 session count exceeds u64".into())
+        })?;
+        let sessions = self
+            .session_priced_upper_bytes
+            .checked_mul(session_count)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "DeepSeek V4 multi-session priced byte total overflow".into(),
+                )
+            })?;
+        self.residency_priced_upper_bytes
+            .checked_add(sessions)
+            .ok_or_else(|| {
+                DeepSeekV4MetalError::Invalid(
+                    "DeepSeek V4 residency plus multi-session byte total overflow".into(),
+                )
+            })
+    }
+
+    pub fn admission_for_sessions(
+        &self,
+        signals: MetalMemorySignals,
+        session_count: usize,
+    ) -> Result<MetalMemoryAdmission, DeepSeekV4MetalError> {
+        Ok(evaluate_metal_memory_admission(
+            self.priced_upper_bytes_for_sessions(session_count)?,
             DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
             signals,
             true,
-        )
+        ))
     }
 
     pub fn required_with_reserve_bytes(&self) -> Result<u64, DeepSeekV4MetalError> {
-        self.total_priced_upper_bytes
+        self.required_with_reserve_bytes_for_sessions(1)
+    }
+
+    pub fn required_with_reserve_bytes_for_sessions(
+        &self,
+        session_count: usize,
+    ) -> Result<u64, DeepSeekV4MetalError> {
+        self.priced_upper_bytes_for_sessions(session_count)?
             .checked_add(DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES)
             .ok_or_else(|| {
                 DeepSeekV4MetalError::Invalid(
@@ -607,10 +651,18 @@ impl DeepSeekV4MetalLoadPlan {
         self,
         signals: MetalMemorySignals,
     ) -> Result<DeepSeekV4AdmittedLoadPlan, DeepSeekV4MetalError> {
-        let admission = self.memory.admission(signals);
+        self.admit_for_sessions(signals, 1)
+    }
+
+    pub fn admit_for_sessions(
+        self,
+        signals: MetalMemorySignals,
+        session_count: usize,
+    ) -> Result<DeepSeekV4AdmittedLoadPlan, DeepSeekV4MetalError> {
+        let admission = self.memory.admission_for_sessions(signals, session_count)?;
         if !admission.admitted {
             return invalid(format!(
-                "DeepSeek V4 memory admission denied before Metal residency: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+                "DeepSeek V4 {session_count}-session memory admission denied before Metal residency: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 admission.reason.as_str(),
                 admission.required_bytes,
                 admission.working_set_headroom_bytes,
@@ -620,6 +672,7 @@ impl DeepSeekV4MetalLoadPlan {
         Ok(DeepSeekV4AdmittedLoadPlan {
             plan: self,
             admission,
+            session_count,
         })
     }
 }
@@ -627,6 +680,7 @@ impl DeepSeekV4MetalLoadPlan {
 pub struct DeepSeekV4AdmittedLoadPlan {
     plan: DeepSeekV4MetalLoadPlan,
     admission: MetalMemoryAdmission,
+    session_count: usize,
 }
 
 impl DeepSeekV4AdmittedLoadPlan {
@@ -636,6 +690,10 @@ impl DeepSeekV4AdmittedLoadPlan {
 
     pub fn memory_plan(&self) -> &DeepSeekV4MemoryPlan {
         &self.plan.memory
+    }
+
+    pub fn session_count(&self) -> usize {
+        self.session_count
     }
 
     pub fn residency_report(&self) -> &DeepSeekV4ResidencyReport {
@@ -677,6 +735,14 @@ pub struct DeepSeekV4MetalResidency {
     report: DeepSeekV4ResidencyReport,
     device_registry_id: u64,
 }
+
+// Metal resources are device-wide and explicitly safe to encode from multiple
+// host threads. This type exposes only immutable tensor access after
+// realization; the optional residency set is mutated only during construction
+// and final Drop, after the last Arc owner is gone. objc2-metal does not encode
+// those framework guarantees in its protocol-object auto traits.
+unsafe impl Send for DeepSeekV4MetalResidency {}
+unsafe impl Sync for DeepSeekV4MetalResidency {}
 
 struct DeepSeekV4ResidencySetGuard {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
@@ -793,6 +859,26 @@ fn create_deepseek_v4_residency_set(
 }
 
 impl DeepSeekV4MetalResidency {
+    fn validate_context(&self, ctx: &MetalContext) -> Result<(), DeepSeekV4MetalError> {
+        if self.device_registry_id != ctx.device.registryID() {
+            return invalid(format!(
+                "DeepSeek V4 residency belongs to Metal device registry {}, context is {}",
+                self.device_registry_id,
+                ctx.device.registryID()
+            ));
+        }
+        if let Some(guard) = &self._residency_set {
+            let required_queue = Retained::as_ptr(&guard.queue).cast::<()>() as usize;
+            let context_queue = Retained::as_ptr(&ctx.queue).cast::<()>() as usize;
+            if required_queue != context_queue {
+                return invalid(
+                    "DeepSeek V4 residency set is attached to a different Metal command queue",
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn plan(
         ctx: &MetalContext,
         gguf: &GgufFile,
@@ -846,6 +932,7 @@ impl DeepSeekV4MetalResidency {
         gguf: &GgufFile,
         admitted: DeepSeekV4AdmittedLoadPlan,
     ) -> Result<DeepSeekV4RealizedLoad, DeepSeekV4MetalError> {
+        let admitted_session_count = admitted.session_count;
         let plan = admitted.plan;
         if plan.device_registry_id != ctx.device.registryID() {
             return invalid(format!(
@@ -875,10 +962,12 @@ impl DeepSeekV4MetalResidency {
         {
             return invalid("DeepSeek V4 memory plan changed before realization");
         }
-        let refreshed_admission = plan.memory.admission(ctx.memory_signals());
+        let refreshed_admission = plan
+            .memory
+            .admission_for_sessions(ctx.memory_signals(), admitted_session_count)?;
         if !refreshed_admission.admitted {
             return invalid(format!(
-                "DeepSeek V4 memory admission changed before realization: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
+                "DeepSeek V4 {admitted_session_count}-session memory admission changed before realization: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
                 refreshed_admission.reason.as_str(),
                 refreshed_admission.required_bytes,
                 refreshed_admission.working_set_headroom_bytes,
@@ -1135,6 +1224,8 @@ pub struct DeepSeekV4WholeTokenProfile {
     pub encode_cpu_ms: f64,
     pub commit_cpu_ms: f64,
     pub commit_wait_wall_ms: f64,
+    pub command_gpu_start_seconds: f64,
+    pub command_gpu_end_seconds: f64,
     pub command_gpu_ms: f64,
     pub command_status_cpu_ms: f64,
     pub record_read_cpu_ms: f64,
@@ -1661,9 +1752,8 @@ impl DeepSeekV4CommandProfile {
 }
 
 pub struct DeepSeekV4Session {
-    residency: DeepSeekV4MetalResidency,
+    residency: Arc<DeepSeekV4MetalResidency>,
     capacity: DeepSeekV4SessionCapacity,
-    device_registry_id: u64,
     token_id: MetalTensor,
     embedding: MetalTensor,
     residual_primary: MetalTensor,
@@ -1707,6 +1797,22 @@ impl DeepSeekV4Session {
         ctx: &MetalContext,
         residency: DeepSeekV4MetalResidency,
     ) -> Result<Self, DeepSeekV4MetalError> {
+        Self::new_inner(ctx, Arc::new(residency), None)
+    }
+
+    /// Construct one sequence-private session over shared immutable weights.
+    /// Mutable cache, routing, scratch, logits, and transcript state remain
+    /// owned by the returned session.
+    #[doc(hidden)]
+    pub fn new_shared(
+        ctx: &MetalContext,
+        residency: Arc<DeepSeekV4MetalResidency>,
+    ) -> Result<Self, DeepSeekV4MetalError> {
+        if residency._residency_set.is_some() {
+            return invalid(
+                "shared DeepSeek V4 sessions require QWEN_DSV4_RESIDENCY_SET=0 because residency sets are command-queue scoped",
+            );
+        }
         Self::new_inner(ctx, residency, None)
     }
 
@@ -1715,21 +1821,15 @@ impl DeepSeekV4Session {
         residency: DeepSeekV4MetalResidency,
         model_content_id: DeepSeekV4ModelContentId,
     ) -> Result<Self, DeepSeekV4MetalError> {
-        Self::new_inner(ctx, residency, Some(model_content_id))
+        Self::new_inner(ctx, Arc::new(residency), Some(model_content_id))
     }
 
     fn new_inner(
         ctx: &MetalContext,
-        residency: DeepSeekV4MetalResidency,
+        residency: Arc<DeepSeekV4MetalResidency>,
         snapshot_model_content_id: Option<DeepSeekV4ModelContentId>,
     ) -> Result<Self, DeepSeekV4MetalError> {
-        if residency.device_registry_id() != ctx.device.registryID() {
-            return invalid(format!(
-                "DeepSeek V4 residency belongs to Metal device registry {}, session context is {}",
-                residency.device_registry_id(),
-                ctx.device.registryID()
-            ));
-        }
+        residency.validate_context(ctx)?;
         validate_session_config(residency.config())?;
         for name in session_required_tensor_names(residency.config()) {
             residency.require_tensor(&name)?;
@@ -1760,7 +1860,6 @@ impl DeepSeekV4Session {
             })?;
 
         Ok(Self {
-            device_registry_id: residency.device_registry_id(),
             residency,
             capacity,
             token_id,
@@ -1814,7 +1913,7 @@ impl DeepSeekV4Session {
     }
 
     pub fn residency(&self) -> &DeepSeekV4MetalResidency {
-        &self.residency
+        self.residency.as_ref()
     }
 
     /// Consumes the session and returns its retained weight residency.
@@ -1826,7 +1925,18 @@ impl DeepSeekV4Session {
     /// path can touch, so recovering the residency from a failed session and
     /// constructing a fresh session is the sanctioned poison-recovery story.
     /// All session-owned scratch, cache, and transcript state is dropped.
-    pub fn into_residency(self) -> DeepSeekV4MetalResidency {
+    pub fn into_residency(self) -> Result<DeepSeekV4MetalResidency, DeepSeekV4MetalError> {
+        match Arc::try_unwrap(self.residency) {
+            Ok(residency) => Ok(residency),
+            Err(_) => invalid(
+                "cannot recover exclusive DeepSeek V4 residency while another shared owner exists",
+            ),
+        }
+    }
+
+    /// Consume a session while retaining shared immutable model ownership.
+    #[doc(hidden)]
+    pub fn into_shared_residency(self) -> Arc<DeepSeekV4MetalResidency> {
         self.residency
     }
 
@@ -2217,13 +2327,7 @@ impl DeepSeekV4Session {
     ) -> Result<&MetalTensor, DeepSeekV4MetalError> {
         let forward_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
         let guards_started = whole_profile.as_ref().map(|_| std::time::Instant::now());
-        if ctx.device.registryID() != self.device_registry_id {
-            return invalid(format!(
-                "DeepSeek V4 session belongs to Metal device registry {}, got {}",
-                self.device_registry_id,
-                ctx.device.registryID()
-            ));
-        }
+        self.residency.validate_context(ctx)?;
         let position = self.phase.ready_position()?;
         if token_id as usize >= DEEPSEEK_V4_VOCAB_SIZE {
             return invalid(format!(
@@ -2236,13 +2340,13 @@ impl DeepSeekV4Session {
             .ok_or_else(|| DeepSeekV4MetalError::Invalid("position overflow".into()))?;
         self.validate_committed_token_append(position, 1)?;
 
+        let begun_position = self.phase.begin_mutation()?;
+        debug_assert_eq!(begun_position, position);
         host_write_i32(&self.token_id, &[token_id as i32], "DeepSeek V4 token ID")?;
         #[cfg(feature = "dsv4-diagnostics")]
         self.decision_diagnostics.begin_forward(position)?;
         #[cfg(feature = "dsv4-diagnostics")]
         self.fp4_shadow_diagnostics.begin_singleton(position)?;
-        let begun_position = self.phase.begin_mutation()?;
-        debug_assert_eq!(begun_position, position);
         if let Some(profile) = whole_profile.as_deref_mut() {
             profile.position = position;
             profile.guards_phase_cpu_ms = guards_started
@@ -3325,6 +3429,8 @@ impl DeepSeekV4Session {
                     command.GPUEndTime()
                 ));
             }
+            profile.command_gpu_start_seconds = command.GPUStartTime();
+            profile.command_gpu_end_seconds = command.GPUEndTime();
             profile.command_gpu_ms = gpu_seconds * 1e3;
             if profile.wait_residual_ms() < -0.25 {
                 return invalid(format!(
@@ -15879,7 +15985,12 @@ mod tests {
                 route_generations,
                 packed_wall_ms,
             };
-            (session.into_residency(), evidence)
+            (
+                session
+                    .into_residency()
+                    .expect("recover exclusive DeepSeek V4 residency"),
+                evidence,
+            )
         }
 
         let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
@@ -16187,7 +16298,12 @@ mod tests {
                 grouped_iq3_invocations: session.packed_grouped_iq3_invocations_for_test(),
                 wall_ms,
             };
-            (session.into_residency(), evidence)
+            (
+                session
+                    .into_residency()
+                    .expect("recover exclusive DeepSeek V4 residency"),
+                evidence,
+            )
         }
 
         fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
@@ -16679,7 +16795,12 @@ mod tests {
                 dispatch_digest,
                 wall_ms,
             };
-            (session.into_residency(), evidence)
+            (
+                session
+                    .into_residency()
+                    .expect("recover exclusive DeepSeek V4 residency"),
+                evidence,
+            )
         }
 
         fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
@@ -17359,7 +17480,12 @@ mod tests {
                 dispatch_digest,
                 wall_ms,
             };
-            (session.into_residency(), evidence)
+            (
+                session
+                    .into_residency()
+                    .expect("recover exclusive DeepSeek V4 residency"),
+                evidence,
+            )
         }
 
         fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
@@ -17956,7 +18082,12 @@ mod tests {
                 dispatch_digest,
                 wall_ms,
             };
-            (session.into_residency(), evidence)
+            (
+                session
+                    .into_residency()
+                    .expect("recover exclusive DeepSeek V4 residency"),
+                evidence,
+            )
         }
 
         fn assert_exact(label: &str, actual: &Evidence, expected: &Evidence) {
@@ -18767,7 +18898,12 @@ mod tests {
                 preterminal,
                 terminal,
             };
-            (session.residency, evidence)
+            (
+                session
+                    .into_residency()
+                    .expect("recover exclusive DeepSeek V4 residency"),
+                evidence,
+            )
         }
 
         let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
@@ -19099,7 +19235,12 @@ mod tests {
                 causal_digest,
                 transcript,
             };
-            (session.residency, evidence)
+            (
+                session
+                    .into_residency()
+                    .expect("recover exclusive DeepSeek V4 residency"),
+                evidence,
+            )
         }
 
         let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
@@ -19280,7 +19421,12 @@ mod tests {
                 causal_digest,
                 transcript,
             };
-            (session.residency, evidence)
+            (
+                session
+                    .into_residency()
+                    .expect("recover exclusive DeepSeek V4 residency"),
+                evidence,
+            )
         }
 
         let model_path = std::env::var_os("DSV4_LEGACY_MODEL")
@@ -19621,7 +19767,12 @@ mod tests {
                 causal_digest,
                 transcript,
             };
-            (session.residency, evidence)
+            (
+                session
+                    .into_residency()
+                    .expect("recover exclusive DeepSeek V4 residency"),
+                evidence,
+            )
         }
 
         let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
@@ -19874,6 +20025,39 @@ mod tests {
             crate::metal::MetalMemoryAdmissionReason::WorkingSetInsufficient
         );
 
+        let three_session_priced = 1_000 + 3 * 500;
+        assert_eq!(
+            plan.priced_upper_bytes_for_sessions(3).unwrap(),
+            three_session_priced
+        );
+        assert_eq!(
+            plan.required_with_reserve_bytes_for_sessions(3).unwrap(),
+            three_session_priced + DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES
+        );
+        let three_required = plan.required_with_reserve_bytes_for_sessions(3).unwrap();
+        let three_exact = plan
+            .admission_for_sessions(
+                MetalMemorySignals {
+                    recommended_max_bytes: baseline + three_required,
+                    current_allocated_bytes: baseline,
+                    process_limit_remaining_bytes: Some(0),
+                },
+                3,
+            )
+            .unwrap();
+        assert!(three_exact.admitted);
+        let error = plan
+            .admission_for_sessions(
+                MetalMemorySignals {
+                    recommended_max_bytes: u64::MAX,
+                    current_allocated_bytes: 0,
+                    process_limit_remaining_bytes: Some(0),
+                },
+                0,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("at least one session"));
+
         let reconciliation = plan
             .reconcile(DeepSeekV4MemorySamples {
                 before_residency_bytes: baseline,
@@ -19898,6 +20082,15 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("first forward delta"));
+    }
+
+    #[test]
+    fn shared_residency_can_cross_dedicated_queue_threads() {
+        fn assert_send<T: Send>() {}
+        fn assert_sync<T: Sync>() {}
+
+        assert_send::<DeepSeekV4MetalResidency>();
+        assert_sync::<DeepSeekV4MetalResidency>();
     }
 
     #[test]
@@ -25875,7 +26068,12 @@ mod tests {
                 after_session_bytes,
                 after_first_forward_bytes,
             };
-            (session.into_residency(), evidence)
+            (
+                session
+                    .into_residency()
+                    .expect("recover exclusive DeepSeek V4 residency"),
+                evidence,
+            )
         }
 
         let model_path = std::env::var_os("DSV4_CURRENT_MODEL")
@@ -25919,7 +26117,9 @@ mod tests {
         let input_snapshot_payload_bytes = snapshot.payload_bytes();
         let input_snapshot_causal_digest = *snapshot.causal_digest();
         let input_snapshot_prefix_digest = *snapshot.prefix_digest();
-        let residency = seed.into_residency();
+        let residency = seed
+            .into_residency()
+            .expect("recover exclusive DeepSeek V4 residency");
 
         let (residency, current_before) =
             execute(&ctx, residency, model_content_id, &snapshot, false);

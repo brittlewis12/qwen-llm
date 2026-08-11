@@ -4397,7 +4397,7 @@ fn run_deepseek_v4_requests_jsonl(
             Ok((generation, generated_bytes, prefill_mode, prefill_ms))
         })();
         let selector_telemetry = session.multigroup_selector_telemetry();
-        residency_slot = Some(session.into_residency());
+        residency_slot = Some(session.into_residency()?);
         let (generation, generated_bytes, prefill_mode, prefill_ms) = request_execution
             .with_context(|| format!("execute request {} at line {}", request.id, request.line))?;
         selector_plan.emit_completion(&request.id, selector_telemetry)?;

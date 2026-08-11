@@ -10493,13 +10493,7 @@ impl DeepSeekV4Session {
         if self.prefill.moe.expert_count != MOE_EXPERT_COUNT && route_policy.uses_gpu() {
             return invalid("packed GPU routing is not enabled for compact-expert DeepSeek V4");
         }
-        if ctx.device.registryID() != self.device_registry_id {
-            return invalid(format!(
-                "DeepSeek V4 session belongs to Metal device registry {}, got {}",
-                self.device_registry_id,
-                ctx.device.registryID()
-            ));
-        }
+        self.residency.validate_context(ctx)?;
         let n_tokens = checked_token_count(token_ids.len())?;
         let device_name = ctx.device.name().to_string();
         let residency_tensor_count = self.residency.report().tensor_count;

@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "report_kind": "cross_family_queue_overlap_probe",
+  "build": {
+    "build_commit": "595e142eee8e2c224796fa9df2ae12e0c56e2c47",
+    "build_commit_short": "595e142ee",
+    "build_dirty": true,
+    "build_source_state": "git-source-sha256-v2:2ace0ae62d2b470448751650abbe19e181744e3aeb0ca4153b42a8db9f39045b",
+    "overrides": [],
+    "problems": [
+      "dirty"
+    ],
+    "runtime_commit": "595e142eee8e2c224796fa9df2ae12e0c56e2c47",
+    "runtime_dirty": true,
+    "runtime_source_state": "git-source-sha256-v2:2ace0ae62d2b470448751650abbe19e181744e3aeb0ca4153b42a8db9f39045b",
+    "schema_version": 2,
+    "stamp_error": null,
+    "stamp_source": "git",
+    "status": "dirty"
+  },
+  "model": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+  "family": "qwen35moe",
+  "device": "Apple M4 Max",
+  "target_context": 1,
+  "decode_tokens_per_client": 1,
+  "runs": 2,
+  "warmup_pairs": 1,
+  "token_policy": "backend_native_prompt_deterministic_teacher_forced_decode_distinct_per_client",
+  "workload_kind": "independent_singleton_requests",
+  "scheduler_policy": "per_step_lockstep",
+  "graph_policy": "monolithic_encode_single_token_argmax",
+  "host_submission_policy": "single_host_thread_encode_all_then_commit_all",
+  "measurement_authority": "diagnostic_queue_overlap_not_production_throughput",
+  "capabilities": [
+    {
+      "mode": "resident_serialized",
+      "state": "production_lifecycle",
+      "detail": "one loaded model and private sequence state; probe graph is reported separately"
+    },
+    {
+      "mode": "independent_queues",
+      "state": "probe_only",
+      "detail": "complete singleton graphs overlap without dispatch-level weight reuse"
+    },
+    {
+      "mode": "static_layer_batch",
+      "state": "primitive_only",
+      "detail": "projection and guarded block replay exist; full-model static backend required"
+    },
+    {
+      "mode": "continuous_ragged",
+      "state": "blocked",
+      "detail": "requires a promoted static layer-batch backend"
+    }
+  ],
+  "rows": [
+    {
+      "clients": 2,
+      "samples": [
+        {
+          "order": "serialized_independent",
+          "serialized": {
+            "wall_ms": 20.335208,
+            "aggregate_tokens_per_second": 98.3515880437515,
+            "makespan_tokens_per_second_per_client": 49.17579402187575,
+            "gpu_sum_ms": 19.392208332646987,
+            "gpu_span_ms": null,
+            "gpu_concurrency_factor": null,
+            "metal_allocated_before_sessions": 22124298240,
+            "metal_allocated_after_sessions": 22292955136,
+            "metal_session_delta_bytes": 168656896
+          },
+          "independent_queues": {
+            "wall_ms": 14.361125000000001,
+            "aggregate_tokens_per_second": 139.26485564327305,
+            "makespan_tokens_per_second_per_client": 69.63242782163653,
+            "gpu_sum_ms": 26.389708333226736,
+            "gpu_span_ms": 13.672208333446179,
+            "gpu_concurrency_factor": 1.9301716072208959,
+            "metal_allocated_before_sessions": 22124298240,
+            "metal_allocated_after_sessions": 22292955136,
+            "metal_session_delta_bytes": 168656896
+          },
+          "evidence_match": true
+        },
+        {
+          "order": "independent_serialized",
+          "serialized": {
+            "wall_ms": 20.407042,
+            "aggregate_tokens_per_second": 98.00538461184134,
+            "makespan_tokens_per_second_per_client": 49.00269230592067,
+            "gpu_sum_ms": 19.4554583322315,
+            "gpu_span_ms": null,
+            "gpu_concurrency_factor": null,
+            "metal_allocated_before_sessions": 22124298240,
+            "metal_allocated_after_sessions": 22292955136,
+            "metal_session_delta_bytes": 168656896
+          },
+          "independent_queues": {
+            "wall_ms": 13.374834,
+            "aggregate_tokens_per_second": 149.5345661860177,
+            "makespan_tokens_per_second_per_client": 74.76728309300886,
+            "gpu_sum_ms": 25.302791666035773,
+            "gpu_span_ms": 12.809875001039472,
+            "gpu_concurrency_factor": 1.9752567190532733,
+            "metal_allocated_before_sessions": 22124298240,
+            "metal_allocated_after_sessions": 22292955136,
+            "metal_session_delta_bytes": 168656896
+          },
+          "evidence_match": true
+        }
+      ],
+      "medians": {
+        "serialized_aggregate_tokens_per_second": 98.17848632779642,
+        "independent_aggregate_tokens_per_second": 144.39971091464537,
+        "aggregate_speedup": 1.4708844948014437,
+        "independent_gpu_concurrency_factor": 1.9527141631370846
+      },
+      "all_evidence_match": true,
+      "planned_session_bytes_each": 4295172096
+    }
+  ]
+}

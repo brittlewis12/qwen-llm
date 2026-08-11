@@ -19,6 +19,8 @@
 mod attn_capture;
 mod attn_stage_floor;
 #[cfg(feature = "dsv4-diagnostics")]
+mod batch_probe;
+#[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_mhc_delete;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_prefill;
@@ -470,6 +472,10 @@ enum Cmd {
     AttnCapture(attn_capture::AttnCaptureArgs),
     /// Price the fixed 32K compressed-KV matrix staging floor.
     AttnStageFloor(attn_stage_floor::AttnStageFloorArgs),
+    /// Compare resident serialized execution with independent queue overlap
+    /// across every supported model family. This is not yet layer batching.
+    #[cfg(feature = "dsv4-diagnostics")]
+    QueueOverlapProbe(batch_probe::QueueOverlapProbeArgs),
     /// Report compiled and runtime source identity without initializing Metal
     /// or loading a model.
     BuildInfo(BuildInfoArgs),
@@ -2746,6 +2752,10 @@ fn run() -> Result<()> {
         }
         Cmd::AttnStageFloor(a) => {
             attn_stage_floor::run(a, serde_json::to_value(qwen_build_identity_packet())?)
+        }
+        #[cfg(feature = "dsv4-diagnostics")]
+        Cmd::QueueOverlapProbe(a) => {
+            batch_probe::run(a, serde_json::to_value(qwen_build_identity_packet())?)
         }
         Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::GgufStoragePlan(a) => run_gguf_storage_plan(a),

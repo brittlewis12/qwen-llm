@@ -1200,9 +1200,13 @@ fn allocation_identity_matches(expected: &SessionAllocation, observed: &SessionA
         && observed.delta_bytes == expected.delta_bytes
 }
 
-fn return_residency(residency: &mut Option<DeepSeekV4MetalResidency>, session: DeepSeekV4Session) {
+fn return_residency(
+    residency: &mut Option<DeepSeekV4MetalResidency>,
+    session: DeepSeekV4Session,
+) -> Result<()> {
     debug_assert!(residency.is_none());
-    *residency = Some(session.into_residency());
+    *residency = Some(session.into_residency()?);
+    Ok(())
 }
 
 fn capture_record(
@@ -1266,7 +1270,7 @@ fn acquire_capture(
 ) -> Result<(DeepSeekV4MhcVerifiedCapture, CaptureRecord)> {
     let (mut session, allocation) = new_session(ctx, residency, model_content_id, contract)?;
     let result = session.capture_mhc_delete_oracle(ctx, tokens, CONTINUATION_TOKEN);
-    return_residency(residency, session);
+    return_residency(residency, session)?;
     let (capture, profile) = result.context("capture and verify mHC oracle")?;
     let record = capture_record(&capture, profile, allocation, campaign)?;
     Ok((capture, record))
@@ -1286,7 +1290,7 @@ fn run_ordinary_preflight(
     let trace = kernel_trace_snapshot();
     drop(trace_guard);
     let rows = dispatch_census_take();
-    return_residency(residency, session);
+    return_residency(residency, session)?;
     result.context("execute ordinary mHC collector-off preflight")?;
     Ok(PreflightRecord {
         arm: "ordinary",
@@ -1312,7 +1316,7 @@ fn run_capture_preflight(
     let trace = kernel_trace_snapshot();
     drop(trace_guard);
     let rows = dispatch_census_take();
-    return_residency(residency, session);
+    return_residency(residency, session)?;
     let profile = result.context("execute structural C preflight")?;
     Ok(PreflightRecord {
         arm: "C",
@@ -1340,7 +1344,7 @@ fn run_arm_preflight(
     let trace = kernel_trace_snapshot();
     drop(trace_guard);
     let rows = dispatch_census_take();
-    return_residency(residency, session);
+    return_residency(residency, session)?;
     let profile =
         result.with_context(|| format!("execute structural {} preflight", arm.label()))?;
     Ok(PreflightRecord {
@@ -1369,7 +1373,7 @@ fn run_correctness_arm(
         Ok(_) => session.capture_mhc_delete_endpoint_evidence(ctx, CONTINUATION_TOKEN),
         Err(error) => Err(error),
     };
-    return_residency(residency, session);
+    return_residency(residency, session)?;
     let evidence = evidence.with_context(|| format!("capture {} correctness", arm.label()))?;
     let matches_capture = evidence == *reference;
     Ok(CorrectnessRecord {
@@ -1395,7 +1399,7 @@ fn run_warmup_arm(
 ) -> Result<WarmupRecord> {
     let (mut session, allocation) = new_session(ctx, residency, model_content_id, contract)?;
     let result = session.execute_mhc_delete_arm(ctx, tokens, arm.engine(), oracle);
-    return_residency(residency, session);
+    return_residency(residency, session)?;
     let profile = result
         .map(profile_record)
         .with_context(|| format!("execute {} pipeline warmup", arm.label()))?;
@@ -1428,7 +1432,7 @@ fn run_timed_arm(
             .map(|endpoint| (profile, endpoint)),
         Err(error) => Err(error),
     };
-    return_residency(residency, session);
+    return_residency(residency, session)?;
     let (profile, endpoint) =
         endpoint.with_context(|| format!("execute timed {} arm {ordinal}", arm.label()))?;
     Ok(TimedObservation {

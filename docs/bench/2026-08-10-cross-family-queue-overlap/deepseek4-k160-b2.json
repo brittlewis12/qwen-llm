@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "report_kind": "cross_family_queue_overlap_probe",
+  "build": {
+    "build_commit": "595e142eee8e2c224796fa9df2ae12e0c56e2c47",
+    "build_commit_short": "595e142ee",
+    "build_dirty": true,
+    "build_source_state": "git-source-sha256-v2:2ace0ae62d2b470448751650abbe19e181744e3aeb0ca4153b42a8db9f39045b",
+    "overrides": [],
+    "problems": [
+      "dirty"
+    ],
+    "runtime_commit": "595e142eee8e2c224796fa9df2ae12e0c56e2c47",
+    "runtime_dirty": true,
+    "runtime_source_state": "git-source-sha256-v2:2ace0ae62d2b470448751650abbe19e181744e3aeb0ca4153b42a8db9f39045b",
+    "schema_version": 2,
+    "stamp_error": null,
+    "stamp_source": "git",
+    "status": "dirty"
+  },
+  "model": "/Users/tito/models/deepseek-v4-flash-0731-reap-k160/DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf",
+  "family": "deepseek4",
+  "device": "Apple M4 Max",
+  "target_context": 1,
+  "decode_tokens_per_client": 1,
+  "runs": 2,
+  "warmup_pairs": 1,
+  "token_policy": "backend_native_prompt_deterministic_teacher_forced_decode_distinct_per_client",
+  "workload_kind": "independent_singleton_requests",
+  "scheduler_policy": "per_step_lockstep",
+  "graph_policy": "forward_token_whole_profiled",
+  "host_submission_policy": "one_host_thread_per_client_lockstep",
+  "measurement_authority": "diagnostic_queue_overlap_not_production_throughput",
+  "capabilities": [
+    {
+      "mode": "resident_serialized",
+      "state": "production_lifecycle",
+      "detail": "one loaded model and private sequence state; probe graph is reported separately"
+    },
+    {
+      "mode": "independent_queues",
+      "state": "probe_only",
+      "detail": "complete singleton graphs overlap without dispatch-level weight reuse"
+    },
+    {
+      "mode": "static_layer_batch",
+      "state": "primitive_only",
+      "detail": "shared immutable residency exists; layer-synchronous backend required"
+    },
+    {
+      "mode": "continuous_ragged",
+      "state": "blocked",
+      "detail": "requires a promoted static layer-batch backend"
+    }
+  ],
+  "rows": [
+    {
+      "clients": 2,
+      "samples": [
+        {
+          "order": "serialized_independent",
+          "serialized": {
+            "wall_ms": 71.045708,
+            "aggregate_tokens_per_second": 28.150891254402023,
+            "makespan_tokens_per_second_per_client": 14.075445627201011,
+            "gpu_sum_ms": 68.38929166769958,
+            "gpu_span_ms": null,
+            "gpu_concurrency_factor": null,
+            "metal_allocated_before_sessions": 89921699840,
+            "metal_allocated_after_sessions": 98636349440,
+            "metal_session_delta_bytes": 8714649600
+          },
+          "independent_queues": {
+            "wall_ms": 53.40775,
+            "aggregate_tokens_per_second": 37.447748688158555,
+            "makespan_tokens_per_second_per_client": 18.723874344079277,
+            "gpu_sum_ms": 104.17283333299565,
+            "gpu_span_ms": 52.14591666663182,
+            "gpu_concurrency_factor": 1.997717942115607,
+            "metal_allocated_before_sessions": 89921699840,
+            "metal_allocated_after_sessions": 98636349440,
+            "metal_session_delta_bytes": 8714649600
+          },
+          "evidence_match": true
+        },
+        {
+          "order": "independent_serialized",
+          "serialized": {
+            "wall_ms": 69.919,
+            "aggregate_tokens_per_second": 28.604528096797726,
+            "makespan_tokens_per_second_per_client": 14.302264048398863,
+            "gpu_sum_ms": 67.66220833196712,
+            "gpu_span_ms": null,
+            "gpu_concurrency_factor": null,
+            "metal_allocated_before_sessions": 89921699840,
+            "metal_allocated_after_sessions": 98636349440,
+            "metal_session_delta_bytes": 8714649600
+          },
+          "independent_queues": {
+            "wall_ms": 49.70533399999999,
+            "aggregate_tokens_per_second": 40.23713028464913,
+            "makespan_tokens_per_second_per_client": 20.118565142324567,
+            "gpu_sum_ms": 96.20541666663485,
+            "gpu_span_ms": 48.41029166709632,
+            "gpu_concurrency_factor": 1.98729264694813,
+            "metal_allocated_before_sessions": 89921699840,
+            "metal_allocated_after_sessions": 98636349440,
+            "metal_session_delta_bytes": 8714649600
+          },
+          "evidence_match": true
+        }
+      ],
+      "medians": {
+        "serialized_aggregate_tokens_per_second": 28.377709675599874,
+        "independent_aggregate_tokens_per_second": 38.84243948640385,
+        "aggregate_speedup": 1.3684604327321697,
+        "independent_gpu_concurrency_factor": 1.9925052945318686
+      },
+      "all_evidence_match": true,
+      "planned_session_bytes_each": 4362551296
+    }
+  ]
+}

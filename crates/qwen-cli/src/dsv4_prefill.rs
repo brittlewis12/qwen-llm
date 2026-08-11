@@ -783,7 +783,7 @@ fn execute_ordinary_request(
     }
     let wall_ms = request_started.elapsed().as_secs_f64() * 1e3;
     let logits = copy_logit_bits(&session)?;
-    *residency = Some(session.into_residency());
+    *residency = Some(session.into_residency()?);
     Ok((
         Dsv4PrefillOrdinaryRun {
             wall_ms,
@@ -831,7 +831,7 @@ fn execute_profiled_request(
     let wall_ms = request_started.elapsed().as_secs_f64() * 1e3;
     let logits = copy_logit_bits(&session)?;
     let run = summarize_run(wall_ms, chunks, ordinary_reference_wall_ms);
-    *residency = Some(session.into_residency());
+    *residency = Some(session.into_residency()?);
     Ok((run, logits))
 }
 

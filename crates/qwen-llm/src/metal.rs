@@ -1175,6 +1175,20 @@ impl MetalContext {
         })
     }
 
+    /// Create another command-queue view over the same device, library,
+    /// pipeline cache, and process lease. This is the host-side primitive for
+    /// independent sequence concurrency; it does not duplicate model state.
+    pub fn with_new_command_queue(&self) -> Result<Self, MetalError> {
+        let queue = self.device.newCommandQueue().ok_or(MetalError::NoQueue)?;
+        Ok(Self {
+            device: self.device.clone(),
+            queue,
+            library: self.library.clone(),
+            pso_cache: self.pso_cache.clone(),
+            _process_lease: self._process_lease.clone(),
+        })
+    }
+
     /// Look up a kernel function by name, compiling its pipeline state
     /// object on first request and caching it thereafter.
     pub fn pipeline(&self, name: &str) -> Result<Pipeline, MetalError> {

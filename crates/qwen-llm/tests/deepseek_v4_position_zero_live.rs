@@ -1771,7 +1771,12 @@ fn current_deepseek_v4_fp4_selection_counterfactual_packet() {
             repeated_singleton_gpu_ms,
             restore_probe: retained_restore_probe,
         };
-        (session.into_residency(), run)
+        (
+            session
+                .into_residency()
+                .expect("recover exclusive DeepSeek V4 residency"),
+            run,
+        )
     }
 
     fn assert_f32_bits_equal(label: &str, left: &[f32], right: &[f32]) {
@@ -3139,7 +3144,9 @@ fn current_deepseek_v4_fp4_collapsed_position_3070_packet() {
     let expected_tokens = token_stream[..FORWARD_LIMIT].to_vec();
     assert_eq!(candidate.committed_tokens(), expected_tokens);
     let candidate_committed_tokens = candidate.committed_tokens().to_vec();
-    let residency = candidate.into_residency();
+    let residency = candidate
+        .into_residency()
+        .expect("recover exclusive DeepSeek V4 residency");
 
     let run_control = |residency: DeepSeekV4MetalResidency| {
         let mut session = DeepSeekV4PositionZeroForward::new_with_model_content_id(
@@ -3203,7 +3210,9 @@ fn current_deepseek_v4_fp4_collapsed_position_3070_packet() {
             .capture_causal_snapshot()
             .expect("capture final restored F16 state");
         let committed_tokens = session.committed_tokens().to_vec();
-        let residency = session.into_residency();
+        let residency = session
+            .into_residency()
+            .expect("recover exclusive DeepSeek V4 residency");
         (
             residency,
             ControlRun {
@@ -3838,7 +3847,9 @@ fn native_deepseek_v4_packed_callback_unwind_poison_is_fail_stop() {
         Ok(_) => panic!("poisoned session unexpectedly accepted a token"),
     };
     assert!(error.to_string().contains("poisoned"));
-    let residency = session.into_residency();
+    let residency = session
+        .into_residency()
+        .expect("recover exclusive DeepSeek V4 residency");
     let mut fresh =
         DeepSeekV4PositionZeroForward::new(&ctx, residency).expect("rebuild after poison");
     fresh

@@ -80,8 +80,10 @@ no stdout, and named the incompatible rollback.
 - Preserve serial JSONL unchanged when `--batch-size` is absent.
 - Keep finished-lane physical state disposable and observable through padding
   telemetry.
-- Require a representative long-context continuation before considering any
-  automatic batching policy.
+- The representative 16K implementation gate is now closed by
+  `../2026-08-11-dense-b8-long-context/`; its dirty-build evidence is not a
+  canonical family-board cell. Retain explicit opt-in until cohort formation
+  and underfill policy are separately qualified.
 - Let MoE and DeepSeek qualify family-specific executors behind the same cohort
   concept; do not route them through the dense implementation.
 

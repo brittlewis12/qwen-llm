@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "parent_commit": "2906ca3749d6bd33189e9fa6cbe3a72bfb047aea",
+  "build_identity": {
+    "schema_version": 2,
+    "build_commit": "2906ca3749d6bd33189e9fa6cbe3a72bfb047aea",
+    "build_commit_short": "2906ca374",
+    "build_dirty": true,
+    "build_source_state": "git-source-sha256-v2:4ac4dbf279fed9b29b45dc71931c5e3bad314a4f85d27626e26caf6bea77ca4e",
+    "stamp_source": "git",
+    "stamp_error": null,
+    "runtime_commit": "2906ca3749d6bd33189e9fa6cbe3a72bfb047aea",
+    "runtime_dirty": true,
+    "runtime_source_state": "git-source-sha256-v2:4ac4dbf279fed9b29b45dc71931c5e3bad314a4f85d27626e26caf6bea77ca4e",
+    "status": "dirty",
+    "problems": ["dirty"],
+    "overrides": ["allow_dirty"],
+    "canonical_family_board_run": false
+  },
+  "candidate_source_sha256": {
+    "crates/qwen-cli/src/dense_whole_batch.rs": "e41fc1ec06886e7b8869a42cfdfad6792f1120ac06cf956ff186a5ba5d734797"
+  },
+  "raw_output_sha256": "1e77fbc9d203cb385b8d35dcffdc090af7c24467ebc12bd16137a5b59f101e1b",
+  "model": {
+    "path": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+    "size_bytes": 16817244384,
+    "kind": "dense",
+    "quant": "Q4_K_M",
+    "sha256": "5ed60d0af4650a854b1755bd392f9aef4872643dc25a254bc68043fa638392a0"
+  },
+  "command": {
+    "frontier_tokens": 16384,
+    "prefill_chunk": 1024,
+    "warmup_steps": 1,
+    "measured_steps": 4,
+    "ramp_ms": 500,
+    "seed": 1,
+    "checks_enforced": true,
+    "allow_dirty": true,
+    "qwen_environment_names": []
+  },
+  "authority": {
+    "evidence_scope": "restored_16k_checked",
+    "snapshot_identity_scope": "in_process_abi_only",
+    "source_restore_exact": true,
+    "shared_prefix_across_lanes": true,
+    "distinct_continuation_tokens": true
+  },
+  "setup": {
+    "frontier_prefill_ms": 74476.244,
+    "frontier_restore_setup_ms": 1009.81,
+    "snapshot_bytes": 1230700672,
+    "session_allocation_bytes": 1127137280,
+    "scratch_upper_bytes": 2026295336,
+    "post_setup_metal_allocation_delta_bytes": 19134431232
+  },
+  "performance": {
+    "serial_median_wall_ms": 357.2499,
+    "static_median_wall_ms": 166.929,
+    "paired_median_wall_speedup": 2.1406,
+    "serial_aggregate_tps": 22.393,
+    "static_aggregate_tps": 47.925,
+    "serial_median_gpu_sum_ms": 353.5366,
+    "static_median_gpu_ms": 164.0712,
+    "gpu_speedup": 2.1548
+  },
+  "correctness": {
+    "argmax_decisions_compared": 40,
+    "argmax_mismatches": 0,
+    "worst_min_cos_logits": 0.999999965,
+    "worst_max_abs_logits": 0.005765,
+    "worst_max_relative_rms_logits": 0.000269747,
+    "worst_min_cos_residual": 0.999999972,
+    "worst_max_abs_residual": 0.065063,
+    "worst_max_relative_rms_residual": 0.000292126,
+    "min_cos_state": 0.99999994,
+    "max_abs_state": 0.000956,
+    "min_cos_conv": 0.999999923,
+    "max_abs_conv": 0.004951,
+    "min_cos_kv_continuation": 0.999999881,
+    "max_abs_kv_continuation": 0.03125
+  },
+  "scope_notes": [
+    "The restored 16K prefix is common across lanes.",
+    "Only continuation KV rows are included in the final KV metric.",
+    "An unrelated dirty DeepSeek-prefill file was not reachable from this dense execution path.",
+    "The dirty-build override makes this non-canonical under the family-board policy."
+  ],
+  "post_run_swap": {
+    "source": "sysctl vm.swapusage immediately after process exit",
+    "used_mib": 0.06
+  }
+}

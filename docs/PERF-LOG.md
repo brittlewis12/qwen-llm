@@ -6,6 +6,30 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Exact Q6 B=16 Two-Token Reuse KILL
+
+Status: grouping two B=16 LM-head rows into one threadgroup remains bit-exact but
+does not move whole-model throughput. Experimental code was deleted.
+
+- Isolated projection timing puts 16 singleton Q6_K heads at `13.2133 ms` GPU
+  versus `1.7833 ms` for the non-exact matrix head. The exact head is therefore a
+  real 11.4 ms pocket, not a guessed target. Its repeated-byte accounting already
+  reaches `505.2 GB/s`, indicating cache/fabric reuse above the stream anchor.
+- A T=2 kernel visits each Q6 output-row pair once for two activation rows while
+  preserving each token's quant extraction, accumulation grouping, and reduction
+  order. A B=16, three-block, odd-output-tail GPU test is bit-exact against the
+  singleton and existing token-axis kernels.
+- A 16-step control/candidate/control whole-model screen reports
+  `138.133 / 137.662 / 136.575` candidate token/s. The T=2 arm is only `1.0022x`
+  the interpolated controls, far below the predeclared 2% mechanism line. All 18
+  generated transitions, logits, residuals, and final causal snapshots remain
+  exact.
+
+Decision: do not try T=4 or retain a selector. The wider threadgroup's extra live
+state cancels any additional local weight reuse; the current token-axis grid
+already benefits from shared cache/fabric traffic. Full result:
+`docs/bench/2026-08-11-qwen-moe-q6-t2-kill/README.md`.
+
 ## 2026-08-11 - Exact Qwen MoE B=16 Reopen HOLD
 
 Status: correctness is green, but productization remains HOLD. After charging

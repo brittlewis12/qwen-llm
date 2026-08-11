@@ -2880,6 +2880,14 @@ complete-model probe, but do not spend the remaining scheduler/JSONL work withou
 an exact measured gain that leaves integration margin or materially cheaper
 shared executor machinery.
 
+The first exact reopen attempt is closed. The Q6_K head has an isolated
+`13.2133 -> 1.7833 ms` non-exact matrix ceiling, but a two-token exact work unit
+lands between whole-model controls at `137.662` versus `138.133/136.575` token/s
+(`1.0022x` interpolated). It is bit-exact, so correctness is not the issue; the
+existing token-axis grid already realizes cache/fabric reuse, and added live state
+consumes the proposed gain. Do not widen to T=4 without a different measured
+mechanism.
+
 DeepSeek K160 common-route B=8 is also closed at its cheapest model-backed
 floor. Giving all eight rows the same six experts, the production all-slot
 control and six N=8 Q3_K/Q4_K mat-mat chains move `1.9760 -> 1.8630 ms/layer`

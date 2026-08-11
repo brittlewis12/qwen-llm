@@ -11933,7 +11933,11 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
-    fn encode_attn_after_projections(
+    /// Complete one attention mixer from already-populated Q/K/V projection
+    /// buffers. Exposed for diagnostics that batch only the immutable-weight
+    /// front projections while retaining sequence-private KV state.
+    #[doc(hidden)]
+    pub fn encode_attn_after_projections(
         &self,
         enc: &KernelEncoder,
         ab: &MetalAttnBlock,

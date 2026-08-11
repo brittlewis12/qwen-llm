@@ -480,6 +480,9 @@ enum Cmd {
     /// Execute one complete dense GDN block over independent static slots,
     /// batching every large projection while retaining private recurrent state.
     DecodeDenseBlockBatch(dense_block_batch::DecodeDenseBlockBatchArgs),
+    /// Execute one complete dense attention block over independent static
+    /// slots, batching front and FFN projections while retaining private KV.
+    DecodeDenseAttnBatch(dense_block_batch::DecodeDenseAttnBatchArgs),
     /// Report compiled and runtime source identity without initializing Metal
     /// or loading a model.
     BuildInfo(BuildInfoArgs),
@@ -2762,6 +2765,7 @@ fn run() -> Result<()> {
             batch_probe::run(a, serde_json::to_value(qwen_build_identity_packet())?)
         }
         Cmd::DecodeDenseBlockBatch(a) => dense_block_batch::run(a),
+        Cmd::DecodeDenseAttnBatch(a) => dense_block_batch::run_attention(a),
         Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::GgufStoragePlan(a) => run_gguf_storage_plan(a),
         Cmd::GgufArenaFloor(a) => {

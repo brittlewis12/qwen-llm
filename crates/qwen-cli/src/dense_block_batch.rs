@@ -12,10 +12,10 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::Model;
 use qwen_llm::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalTensor, encode_add_inplace_f32,
-    encode_ffn_swiglu_q4_K_f32, encode_silu_mul_f32,
+    encode_ffn_swiglu_q4_K_f32, encode_rms_norm_mul_f32, encode_silu_mul_f32,
 };
 use qwen_llm::metal_forward::{
-    MetalBlock, MetalForward, MetalModel, MetalSession, encode_mat_mat_dispatch,
+    MetalAttnBlock, MetalBlock, MetalForward, MetalModel, MetalSession, encode_mat_mat_dispatch,
     encode_mat_vec_dispatch,
 };
 use qwen_llm::model::ArchKind;
@@ -32,6 +32,31 @@ pub struct DecodeDenseBlockBatchArgs {
     #[arg(long, value_delimiter = ',', default_value = "2,4,6,8")]
     batches: Vec<usize>,
     /// Optional absolute GDN block index; defaults to the first GDN block.
+    #[arg(long)]
+    block: Option<usize>,
+    /// Timed repetitions after warmup.
+    #[arg(long, default_value = "7")]
+    iters: usize,
+    /// Untimed warmup repetitions.
+    #[arg(long, default_value = "2")]
+    warmup: usize,
+    /// High-occupancy device ramp before the first timed batch.
+    #[arg(long, default_value = "500")]
+    ramp_ms: u64,
+    /// Skip the baseline/candidate state comparison.
+    #[arg(long)]
+    no_check: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct DecodeDenseAttnBatchArgs {
+    /// Path to a dense Qwen GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Independent static batch sizes to measure.
+    #[arg(long, value_delimiter = ',', default_value = "2,4,6,8")]
+    batches: Vec<usize>,
+    /// Optional absolute attention block index; defaults to the first.
     #[arg(long)]
     block: Option<usize>,
     /// Timed repetitions after warmup.
@@ -640,6 +665,697 @@ pub fn run(args: DecodeDenseBlockBatchArgs) -> Result<()> {
                         hidden,
                         conv_dim,
                         value_dim,
+                        ffn,
+                    )
+                },
+            )
+        };
+        let mut baseline_samples = ArmSamples::default();
+        let mut candidate_samples = ArmSamples::default();
+        let order = if ordinal.is_multiple_of(2) {
+            baseline_samples.append(baseline_timing(&mut baseline)?);
+            candidate_samples.append(candidate_timing(&mut candidate)?);
+            candidate_samples.append(candidate_timing(&mut candidate)?);
+            baseline_samples.append(baseline_timing(&mut baseline)?);
+            "ABBA"
+        } else {
+            candidate_samples.append(candidate_timing(&mut candidate)?);
+            baseline_samples.append(baseline_timing(&mut baseline)?);
+            baseline_samples.append(baseline_timing(&mut baseline)?);
+            candidate_samples.append(candidate_timing(&mut candidate)?);
+            "BAAB"
+        };
+        let baseline_stats = baseline_samples.summarize();
+        let candidate_stats = candidate_samples.summarize();
+        let speedup = baseline_stats.avg_gpu_ms / candidate_stats.avg_gpu_ms;
+        let saving_pct = (1.0 - candidate_stats.avg_gpu_ms / baseline_stats.avg_gpu_ms) * 100.0;
+        println!(
+            "baseline_serial\t{batch}\t{order}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t1.0000\t0.0",
+            baseline_stats.avg_wall_ms,
+            baseline_stats.avg_gpu_ms,
+            baseline_stats.p50_gpu_ms,
+            baseline_stats.p90_gpu_ms,
+            baseline_stats.avg_gpu_ms / batch as f64,
+        );
+        println!(
+            "static_layer_batch\t{batch}\t{order}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{speedup:.4}\t{saving_pct:.1}",
+            candidate_stats.avg_wall_ms,
+            candidate_stats.avg_gpu_ms,
+            candidate_stats.p50_gpu_ms,
+            candidate_stats.p90_gpu_ms,
+            candidate_stats.avg_gpu_ms / batch as f64,
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct SelectedAttnLayer<'a> {
+    block_index: usize,
+    attn_index: usize,
+    block: &'a MetalAttnBlock,
+}
+
+fn collect_attention_layers(model: &MetalModel) -> Vec<SelectedAttnLayer<'_>> {
+    model
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(block_index, block)| match block {
+            MetalBlock::Attn(block) => Some((block_index, block)),
+            MetalBlock::Gdn(_) => None,
+        })
+        .enumerate()
+        .map(|(attn_index, (block_index, block))| SelectedAttnLayer {
+            block_index,
+            attn_index,
+            block,
+        })
+        .collect()
+}
+
+struct DenseAttnBatchScratch {
+    h: MetalTensor,
+    q: MetalTensor,
+    k: MetalTensor,
+    v: MetalTensor,
+}
+
+impl DenseAttnBatchScratch {
+    fn new(
+        ctx: &MetalContext,
+        max_batch: usize,
+        hidden: usize,
+        q_out: usize,
+        kv_dim: usize,
+    ) -> Result<Self> {
+        let elements = |width: usize, label: &str| {
+            max_batch
+                .checked_mul(width)
+                .with_context(|| format!("dense attention {label} scratch overflow"))
+        };
+        Ok(Self {
+            h: MetalTensor::zeros_f32(ctx, vec![elements(hidden, "hidden")? as u64])?,
+            q: MetalTensor::zeros_f32(ctx, vec![elements(q_out, "query")? as u64])?,
+            k: MetalTensor::zeros_f32(ctx, vec![elements(kv_dim, "key")? as u64])?,
+            v: MetalTensor::zeros_f32(ctx, vec![elements(kv_dim, "value")? as u64])?,
+        })
+    }
+}
+
+fn encode_dense_ffn_serial(
+    ctx: &MetalContext,
+    encoder: &KernelEncoder,
+    block: &MetalAttnBlock,
+    sessions: &mut [MetalSession],
+    hidden: usize,
+    ffn: usize,
+) -> Result<()> {
+    for session in sessions {
+        if block.ffn_gate.dtype == GgmlType::Q4_K && block.ffn_up.dtype == GgmlType::Q4_K {
+            encode_ffn_swiglu_q4_K_f32(
+                ctx,
+                encoder,
+                &block.ffn_gate,
+                &block.ffn_up,
+                &session.h,
+                &session.ffn_inner,
+                hidden,
+                ffn,
+            )?;
+        } else {
+            encode_mat_vec_dispatch(
+                ctx,
+                encoder,
+                &block.ffn_gate,
+                &session.h,
+                &session.ffn_gate,
+                hidden,
+                ffn,
+            )?;
+            encode_mat_vec_dispatch(
+                ctx,
+                encoder,
+                &block.ffn_up,
+                &session.h,
+                &session.ffn_up,
+                hidden,
+                ffn,
+            )?;
+            encode_silu_mul_f32(
+                ctx,
+                encoder,
+                &session.ffn_gate,
+                &session.ffn_up,
+                &session.ffn_inner,
+            )?;
+        }
+        encode_mat_vec_dispatch(
+            ctx,
+            encoder,
+            &block.ffn_down,
+            &session.ffn_inner,
+            &session.ffn_out,
+            ffn,
+            hidden,
+        )?;
+        encode_add_inplace_f32(ctx, encoder, &session.x, &session.ffn_out)?;
+    }
+    Ok(())
+}
+
+fn encode_dense_attention_baseline(
+    ctx: &MetalContext,
+    forward: &MetalForward<'_>,
+    encoder: &KernelEncoder,
+    layer: SelectedAttnLayer<'_>,
+    sessions: &mut [MetalSession],
+    hidden: usize,
+    ffn: usize,
+) -> Result<()> {
+    for session in sessions.iter_mut() {
+        encode_rms_norm_mul_f32(
+            ctx,
+            encoder,
+            &session.x,
+            &layer.block.attn_norm,
+            &session.h,
+            1e-6,
+        )?;
+        forward.encode_attn(encoder, layer.block, layer.attn_index, 0, session)?;
+        encode_add_inplace_f32(ctx, encoder, &session.x, &session.mixer_out)?;
+        encode_rms_norm_mul_f32(
+            ctx,
+            encoder,
+            &session.x,
+            &layer.block.post_attn_norm,
+            &session.h,
+            1e-6,
+        )?;
+    }
+    encode_dense_ffn_serial(ctx, encoder, layer.block, sessions, hidden, ffn)
+}
+
+fn encode_dense_ffn_batch_attention(
+    ctx: &MetalContext,
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    block: &MetalAttnBlock,
+    sessions: &[MetalSession],
+    scratch: &DenseFfnBatchScratch,
+    hidden: usize,
+    ffn: usize,
+) -> Result<()> {
+    let batch = sessions.len();
+    let hidden_row_bytes = u64::try_from(
+        hidden
+            .checked_mul(std::mem::size_of::<f32>())
+            .context("dense attention FFN row overflow")?,
+    )?;
+    let blit = BlitEncoder::begin(command);
+    for (slot, session) in sessions.iter().enumerate() {
+        blit.copy_buffer(
+            &session.h.buffer,
+            session.h.offset,
+            &scratch.h.buffer,
+            scratch.h.offset + slot as u64 * hidden_row_bytes,
+            hidden_row_bytes,
+        );
+    }
+    blit.end();
+    let h = scratch.h.view_subrange(0, vec![(batch * hidden) as u64]);
+    let gate = scratch.gate.view_subrange(0, vec![(batch * ffn) as u64]);
+    let up = scratch.up.view_subrange(0, vec![(batch * ffn) as u64]);
+    let inner = scratch.inner.view_subrange(0, vec![(batch * ffn) as u64]);
+    let out = scratch.out.view_subrange(0, vec![(batch * hidden) as u64]);
+    let encoder = KernelEncoder::begin(command);
+    encode_mat_mat_dispatch(
+        ctx,
+        &encoder,
+        &block.ffn_gate,
+        &h,
+        &gate,
+        hidden,
+        ffn,
+        batch,
+    )?;
+    encode_mat_mat_dispatch(ctx, &encoder, &block.ffn_up, &h, &up, hidden, ffn, batch)?;
+    encode_silu_mul_f32(ctx, &encoder, &gate, &up, &inner)?;
+    encode_mat_mat_dispatch(
+        ctx,
+        &encoder,
+        &block.ffn_down,
+        &inner,
+        &out,
+        ffn,
+        hidden,
+        batch,
+    )?;
+    for (slot, session) in sessions.iter().enumerate() {
+        let out_row = scratch
+            .out
+            .view_subrange((slot * hidden) as u64, vec![hidden as u64]);
+        encode_add_inplace_f32(ctx, &encoder, &session.x, &out_row)?;
+    }
+    encoder.end();
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_dense_attention_batch(
+    ctx: &MetalContext,
+    forward: &MetalForward<'_>,
+    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    layer: SelectedAttnLayer<'_>,
+    sessions: &mut [MetalSession],
+    attention_scratch: &DenseAttnBatchScratch,
+    ffn_scratch: &DenseFfnBatchScratch,
+    hidden: usize,
+    q_dim: usize,
+    kv_dim: usize,
+    ffn: usize,
+) -> Result<()> {
+    let batch = sessions.len();
+    let encoder = KernelEncoder::begin(command);
+    for session in sessions.iter() {
+        encode_rms_norm_mul_f32(
+            ctx,
+            &encoder,
+            &session.x,
+            &layer.block.attn_norm,
+            &session.h,
+            1e-6,
+        )?;
+    }
+    encoder.end();
+
+    let hidden_row_bytes = (hidden * std::mem::size_of::<f32>()) as u64;
+    let blit = BlitEncoder::begin(command);
+    for (slot, session) in sessions.iter().enumerate() {
+        blit.copy_buffer(
+            &session.h.buffer,
+            session.h.offset,
+            &attention_scratch.h.buffer,
+            attention_scratch.h.offset + slot as u64 * hidden_row_bytes,
+            hidden_row_bytes,
+        );
+    }
+    blit.end();
+
+    let h = attention_scratch
+        .h
+        .view_subrange(0, vec![(batch * hidden) as u64]);
+    let q = attention_scratch
+        .q
+        .view_subrange(0, vec![(batch * 2 * q_dim) as u64]);
+    let k = attention_scratch
+        .k
+        .view_subrange(0, vec![(batch * kv_dim) as u64]);
+    let v = attention_scratch
+        .v
+        .view_subrange(0, vec![(batch * kv_dim) as u64]);
+    let encoder = KernelEncoder::begin(command);
+    encode_mat_mat_dispatch(
+        ctx,
+        &encoder,
+        &layer.block.q,
+        &h,
+        &q,
+        hidden,
+        2 * q_dim,
+        batch,
+    )?;
+    encode_mat_mat_dispatch(ctx, &encoder, &layer.block.k, &h, &k, hidden, kv_dim, batch)?;
+    encode_mat_mat_dispatch(ctx, &encoder, &layer.block.v, &h, &v, hidden, kv_dim, batch)?;
+    encoder.end();
+
+    let q_row_bytes = (2 * q_dim * std::mem::size_of::<f32>()) as u64;
+    let kv_row_bytes = (kv_dim * std::mem::size_of::<f32>()) as u64;
+    let blit = BlitEncoder::begin(command);
+    for (slot, session) in sessions.iter().enumerate() {
+        blit.copy_buffer(
+            &attention_scratch.q.buffer,
+            attention_scratch.q.offset + slot as u64 * q_row_bytes,
+            &session.attn_q_full.buffer,
+            session.attn_q_full.offset,
+            q_row_bytes,
+        );
+        blit.copy_buffer(
+            &attention_scratch.k.buffer,
+            attention_scratch.k.offset + slot as u64 * kv_row_bytes,
+            &session.attn_k_now.buffer,
+            session.attn_k_now.offset,
+            kv_row_bytes,
+        );
+        blit.copy_buffer(
+            &attention_scratch.v.buffer,
+            attention_scratch.v.offset + slot as u64 * kv_row_bytes,
+            &session.attn_v_now.buffer,
+            session.attn_v_now.offset,
+            kv_row_bytes,
+        );
+    }
+    blit.end();
+
+    let encoder = KernelEncoder::begin(command);
+    for session in sessions.iter_mut() {
+        forward.encode_attn_after_projections(
+            &encoder,
+            layer.block,
+            layer.attn_index,
+            0,
+            session,
+        )?;
+        encode_add_inplace_f32(ctx, &encoder, &session.x, &session.mixer_out)?;
+        encode_rms_norm_mul_f32(
+            ctx,
+            &encoder,
+            &session.x,
+            &layer.block.post_attn_norm,
+            &session.h,
+            1e-6,
+        )?;
+    }
+    encoder.end();
+    encode_dense_ffn_batch_attention(
+        ctx,
+        command,
+        layer.block,
+        sessions,
+        ffn_scratch,
+        hidden,
+        ffn,
+    )
+}
+
+fn reset_attention_sessions(sessions: &mut [MetalSession], attn_index: usize) -> Result<()> {
+    for (slot, session) in sessions.iter_mut().enumerate() {
+        write_pattern(&session.x, slot, 11, 0.03125 + slot as f32 * 0.0005, 1e-5)?;
+        session.kv_n_pos[attn_index] = 0;
+    }
+    Ok(())
+}
+
+fn time_attention_with_reset(
+    ctx: &MetalContext,
+    warmup: usize,
+    iters: usize,
+    sessions: &mut [MetalSession],
+    attn_index: usize,
+    mut encode: impl FnMut(
+        &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        &mut [MetalSession],
+    ) -> Result<()>,
+) -> Result<ArmSamples> {
+    let mut samples = ArmSamples::default();
+    for repetition in 0..warmup + iters {
+        crate::shutdown::checkpoint()?;
+        reset_attention_sessions(sessions, attn_index)?;
+        let started = Instant::now();
+        let command = ctx
+            .queue
+            .commandBuffer()
+            .context("dense attention timed command")?;
+        encode(&command, sessions)?;
+        wait_success(&command, "dense attention timed")?;
+        let start = command.GPUStartTime();
+        let end = command.GPUEndTime();
+        ensure!(
+            start.is_finite() && end.is_finite() && start > 0.0 && end > start,
+            "invalid dense attention GPU interval: start={start} end={end}"
+        );
+        if repetition >= warmup {
+            samples.wall_ms.push(started.elapsed().as_secs_f64() * 1e3);
+            samples.gpu_ms.push((end - start) * 1e3);
+        }
+    }
+    Ok(samples)
+}
+
+fn read_f16_prefix(tensor: &MetalTensor, elements: usize) -> Result<Vec<f32>> {
+    ensure!(
+        tensor.dtype == GgmlType::F16,
+        "attention probe requires F16 KV"
+    );
+    ensure!(tensor.offset.is_multiple_of(2), "unaligned F16 KV tensor");
+    ensure!(
+        elements as u64 * 2 <= tensor.n_bytes(),
+        "attention KV prefix exceeds tensor bytes"
+    );
+    let offset = usize::try_from(tensor.offset / 2)?;
+    let ptr = tensor.buffer.contents().as_ptr().cast::<u16>();
+    ensure!(!ptr.is_null(), "attention KV tensor is not CPU visible");
+    Ok((0..elements)
+        .map(|index| half::f16::from_bits(unsafe { *ptr.add(offset + index) }).to_f32())
+        .collect())
+}
+
+pub fn run_attention(args: DecodeDenseAttnBatchArgs) -> Result<()> {
+    ensure!(args.iters > 0, "--iters must be nonzero");
+    ensure!(!args.batches.is_empty(), "--batches must not be empty");
+    ensure!(
+        args.batches.iter().all(|batch| (1..=16).contains(batch)),
+        "--batches values must be in 1..=16"
+    );
+    let mut batches = args.batches;
+    batches.sort_unstable();
+    batches.dedup();
+    let max_batch = *batches.last().expect("validated nonempty batches");
+    let ctx = MetalContext::new().context("create dense attention Metal context")?;
+    let gguf = GgufFile::open(&args.model)
+        .with_context(|| format!("open dense attention model {}", args.model.display()))?;
+    let bound = Model::from_gguf(&gguf).context("bind dense attention model")?;
+    let model = MetalModel::load(&ctx, &gguf, &bound).context("load dense attention model")?;
+    ensure!(
+        model.arch.kind == ArchKind::Dense,
+        "decode-dense-attn-batch requires a dense Qwen model"
+    );
+    let layers = collect_attention_layers(&model);
+    let layer = if let Some(block) = args.block {
+        *layers
+            .iter()
+            .find(|layer| layer.block_index == block)
+            .ok_or_else(|| anyhow!("block {block} is not an attention block"))?
+    } else {
+        *layers
+            .first()
+            .context("dense model has no attention block")?
+    };
+    let hidden = model.arch.hidden_size as usize;
+    let q_dim = model.arch.n_q_heads as usize * model.arch.attn_head_dim as usize;
+    let kv_dim = model.arch.n_kv_heads as usize * model.arch.attn_head_dim as usize;
+    let ffn = model.arch.intermediate_size as usize;
+    let forward = MetalForward::new(&ctx, &model);
+    let attention_scratch = DenseAttnBatchScratch::new(&ctx, max_batch, hidden, 2 * q_dim, kv_dim)?;
+    let ffn_scratch = DenseFfnBatchScratch::new(&ctx, max_batch, hidden, ffn)?;
+
+    if !args.no_check {
+        for &batch in &batches {
+            let mut baseline = fresh_gdn_replay_sessions(&ctx, &model, batch)?;
+            let mut candidate = fresh_gdn_replay_sessions(&ctx, &model, batch)?;
+            reset_attention_sessions(&mut baseline, layer.attn_index)?;
+            reset_attention_sessions(&mut candidate, layer.attn_index)?;
+            let command = ctx
+                .queue
+                .commandBuffer()
+                .context("dense attention baseline command")?;
+            let encoder = KernelEncoder::begin(&command);
+            encode_dense_attention_baseline(
+                &ctx,
+                &forward,
+                &encoder,
+                layer,
+                &mut baseline,
+                hidden,
+                ffn,
+            )?;
+            encoder.end();
+            wait_success(&command, "dense attention baseline")?;
+            let command = ctx
+                .queue
+                .commandBuffer()
+                .context("dense attention candidate command")?;
+            encode_dense_attention_batch(
+                &ctx,
+                &forward,
+                &command,
+                layer,
+                &mut candidate,
+                &attention_scratch,
+                &ffn_scratch,
+                hidden,
+                q_dim,
+                kv_dim,
+                ffn,
+            )?;
+            wait_success(&command, "dense attention candidate")?;
+            let mut min_cos_x = 1.0f64;
+            let mut max_abs_x = 0.0f32;
+            let mut max_relative_rms_x = 0.0f64;
+            let mut min_cos_kv = 1.0f64;
+            let mut max_abs_kv = 0.0f32;
+            let mut min_cos_projection = 1.0f64;
+            let mut max_abs_projection = 0.0f32;
+            for slot in 0..batch {
+                ensure!(
+                    baseline[slot].kv_n_pos[layer.attn_index] == 1
+                        && candidate[slot].kv_n_pos[layer.attn_index] == 1,
+                    "dense attention KV position mismatch"
+                );
+                let baseline_x = read_f32_tensor(&baseline[slot].x);
+                let candidate_x = read_f32_tensor(&candidate[slot].x);
+                let baseline_k = read_f16_prefix(&baseline[slot].kv_k[layer.attn_index], kv_dim)?;
+                let candidate_k = read_f16_prefix(&candidate[slot].kv_k[layer.attn_index], kv_dim)?;
+                let baseline_v = read_f16_prefix(&baseline[slot].kv_v[layer.attn_index], kv_dim)?;
+                let candidate_v = read_f16_prefix(&candidate[slot].kv_v[layer.attn_index], kv_dim)?;
+                let baseline_q_projection = read_f32_tensor(&baseline[slot].attn_q_full);
+                let candidate_q_projection = read_f32_tensor(&candidate[slot].attn_q_full);
+                let baseline_k_projection = read_f32_tensor(&baseline[slot].attn_k_now);
+                let candidate_k_projection = read_f32_tensor(&candidate[slot].attn_k_now);
+                let baseline_v_projection = read_f32_tensor(&baseline[slot].attn_v_now);
+                let candidate_v_projection = read_f32_tensor(&candidate[slot].attn_v_now);
+                for (label, values) in [
+                    ("baseline x", baseline_x.as_slice()),
+                    ("candidate x", candidate_x.as_slice()),
+                    ("baseline K", baseline_k.as_slice()),
+                    ("candidate K", candidate_k.as_slice()),
+                    ("baseline V", baseline_v.as_slice()),
+                    ("candidate V", candidate_v.as_slice()),
+                    ("baseline Q projection", baseline_q_projection.as_slice()),
+                    ("candidate Q projection", candidate_q_projection.as_slice()),
+                    ("baseline K projection", baseline_k_projection.as_slice()),
+                    ("candidate K projection", candidate_k_projection.as_slice()),
+                    ("baseline V projection", baseline_v_projection.as_slice()),
+                    ("candidate V projection", candidate_v_projection.as_slice()),
+                ] {
+                    ensure_finite(label, values)?;
+                }
+                let (cos_x, abs_x) = cosine_max_abs(&baseline_x, &candidate_x);
+                let baseline_rms = (baseline_x
+                    .iter()
+                    .map(|value| (*value as f64).powi(2))
+                    .sum::<f64>()
+                    / baseline_x.len() as f64)
+                    .sqrt();
+                let relative_rms = f32_rms_delta(&baseline_x, &candidate_x) / baseline_rms;
+                let (cos_k, abs_k) = cosine_max_abs(&baseline_k, &candidate_k);
+                let (cos_v, abs_v) = cosine_max_abs(&baseline_v, &candidate_v);
+                min_cos_x = min_cos_x.min(cos_x);
+                max_abs_x = max_abs_x.max(abs_x);
+                max_relative_rms_x = max_relative_rms_x.max(relative_rms);
+                min_cos_kv = min_cos_kv.min(cos_k).min(cos_v);
+                max_abs_kv = max_abs_kv.max(abs_k).max(abs_v);
+                for (baseline_projection, candidate_projection) in [
+                    (&baseline_q_projection, &candidate_q_projection),
+                    (&baseline_k_projection, &candidate_k_projection),
+                    (&baseline_v_projection, &candidate_v_projection),
+                ] {
+                    let (cos, max_abs) = cosine_max_abs(baseline_projection, candidate_projection);
+                    min_cos_projection = min_cos_projection.min(cos);
+                    max_abs_projection = max_abs_projection.max(max_abs);
+                }
+            }
+            println!(
+                "check\tblock={}\tbatch={batch}\tmin_cos_x={min_cos_x:.9}\tmax_abs_x={max_abs_x:.6}\tmax_relative_rms_x={max_relative_rms_x:.9}\tmin_cos_projection={min_cos_projection:.9}\tmax_abs_projection={max_abs_projection:.6}\tmin_cos_kv={min_cos_kv:.9}\tmax_abs_kv={max_abs_kv:.6}",
+                layer.block_index,
+            );
+            ensure!(
+                min_cos_x >= 0.99999
+                    && max_abs_x <= 0.2
+                    && max_relative_rms_x <= 1e-3
+                    && min_cos_projection >= 0.99999
+                    && max_abs_projection <= 0.2
+                    && min_cos_kv >= 0.999
+                    && max_abs_kv <= 0.1,
+                "dense attention correctness gate failed at batch {batch}"
+            );
+        }
+    }
+
+    let mut ramp_sessions = fresh_gdn_replay_sessions(&ctx, &model, max_batch)?;
+    let ramp_started = Instant::now();
+    let mut ramp_repetitions = 0usize;
+    while ramp_repetitions == 0
+        || ramp_started.elapsed() < std::time::Duration::from_millis(args.ramp_ms)
+    {
+        reset_attention_sessions(&mut ramp_sessions, layer.attn_index)?;
+        let command = ctx
+            .queue
+            .commandBuffer()
+            .context("dense attention ramp command")?;
+        encode_dense_attention_batch(
+            &ctx,
+            &forward,
+            &command,
+            layer,
+            &mut ramp_sessions,
+            &attention_scratch,
+            &ffn_scratch,
+            hidden,
+            q_dim,
+            kv_dim,
+            ffn,
+        )?;
+        wait_success(&command, "dense attention ramp")?;
+        ramp_repetitions += 1;
+    }
+    drop(ramp_sessions);
+    println!(
+        "[decode-dense-attn-batch] model={} block={} attn_i={} position=0 attention_scope=single_key batches={} ramp_ms={} ramp_repetitions={} warmup={} iters={} batched_projections=6 singleton_o_projection=1",
+        args.model.display(),
+        layer.block_index,
+        layer.attn_index,
+        batches
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+        args.ramp_ms,
+        ramp_repetitions,
+        args.warmup,
+        args.iters,
+    );
+    println!(
+        "mode\tbatch\torder\tavg_wall_ms\tavg_gpu_ms\tp50_gpu_ms\tp90_gpu_ms\tavg_gpu_ms_per_slot\taggregate_speedup\tsaving_pct"
+    );
+    for (ordinal, batch) in batches.into_iter().enumerate() {
+        let mut baseline = fresh_gdn_replay_sessions(&ctx, &model, batch)?;
+        let mut candidate = fresh_gdn_replay_sessions(&ctx, &model, batch)?;
+        let baseline_timing = |sessions: &mut [MetalSession]| {
+            time_attention_with_reset(
+                &ctx,
+                args.warmup,
+                args.iters,
+                sessions,
+                layer.attn_index,
+                |command, sessions| {
+                    let encoder = KernelEncoder::begin(command);
+                    encode_dense_attention_baseline(
+                        &ctx, &forward, &encoder, layer, sessions, hidden, ffn,
+                    )?;
+                    encoder.end();
+                    Ok(())
+                },
+            )
+        };
+        let candidate_timing = |sessions: &mut [MetalSession]| {
+            time_attention_with_reset(
+                &ctx,
+                args.warmup,
+                args.iters,
+                sessions,
+                layer.attn_index,
+                |command, sessions| {
+                    encode_dense_attention_batch(
+                        &ctx,
+                        &forward,
+                        command,
+                        layer,
+                        sessions,
+                        &attention_scratch,
+                        &ffn_scratch,
+                        hidden,
+                        q_dim,
+                        kv_dim,
                         ffn,
                     )
                 },

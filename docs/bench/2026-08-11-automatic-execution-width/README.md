@@ -1,5 +1,9 @@
 # Automatic JSONL Execution Width
 
+Update (2026-08-11): selected B=8/B=16 backends now use baseline-safe
+prefix-aware cohort packing. See
+`docs/bench/2026-08-11-fixed-cohort-prefix-packing/README.md`.
+
 Date: 2026-08-11
 
 Status: product `GO` for an opt-in, fail-closed selector over existing exact

@@ -1,5 +1,9 @@
 # Qwen MoE B=16 Product Integration
 
+Update (2026-08-11): prefix-aware packing now clusters complete reusable B=16
+groups before depth fallback. See
+`docs/bench/2026-08-11-fixed-cohort-prefix-packing/README.md`.
+
 Update (2026-08-11): fixed cohorts now admit heterogeneous per-request generation
 limits under the utilization gate documented in
 `docs/bench/2026-08-11-fixed-cohort-mixed-limits/README.md`. The original

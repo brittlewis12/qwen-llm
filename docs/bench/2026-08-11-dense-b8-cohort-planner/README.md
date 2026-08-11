@@ -1,5 +1,9 @@
 # Dense B=8 cohort planner and underfill fallback
 
+Update (2026-08-11): prefix-aware packing now clusters complete reusable groups
+before applying this depth planner, with per-bucket baseline fallback. See
+`docs/bench/2026-08-11-fixed-cohort-prefix-packing/README.md`.
+
 Update (2026-08-11): generation limits are no longer part of compatibility after
 the mixed-limit qualification in
 `docs/bench/2026-08-11-fixed-cohort-mixed-limits/README.md`. The original result

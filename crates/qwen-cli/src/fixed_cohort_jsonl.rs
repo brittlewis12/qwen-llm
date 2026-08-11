@@ -10,6 +10,7 @@ const MIN_REQUESTED_TRANSITION_UTILIZATION_NUMERATOR: usize = 3;
 const MIN_REQUESTED_TRANSITION_UTILIZATION_DENOMINATOR: usize = 4;
 const DENSE_PREFIX_FANOUT_ENV: &str = "QWEN_DENSE_BATCH8_PREFIX_FANOUT";
 const MOE_PREFIX_FANOUT_ENV: &str = "QWEN_MOE_BATCH16_PREFIX_FANOUT";
+const PREFIX_PACKING_ENV: &str = "QWEN_FIXED_COHORT_PREFIX_PACKING";
 
 #[derive(Clone, Copy, Debug)]
 struct FixedCohortStep<const WIDTH: usize> {
@@ -52,7 +53,7 @@ impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_>
     const DISPLAY_NAME: &'static str = "dense B=8";
     const PREFIX_FANOUT_ENV: &'static str = DENSE_PREFIX_FANOUT_ENV;
     const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v3";
-    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v2";
+    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v3";
     const TELEMETRY_PREFIX: &'static str = "dense_batch8";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "dense_batch8_planner";
     const TELEMETRY_SCHEMA_VERSION: u32 = 3;
@@ -90,7 +91,7 @@ impl FixedCohortExecutor<MOE_BATCH16_WIDTH> for MoeBatch16SequenceExecutor<'_> {
     const DISPLAY_NAME: &'static str = "MoE B=16";
     const PREFIX_FANOUT_ENV: &'static str = MOE_PREFIX_FANOUT_ENV;
     const COHORT_BACKEND: &'static str = "qwen_moe_capability_batch16_v3";
-    const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v2";
+    const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v3";
     const TELEMETRY_PREFIX: &'static str = "moe_batch16";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "moe_batch16_planner";
     const TELEMETRY_SCHEMA_VERSION: u32 = 4;
@@ -155,11 +156,15 @@ impl<const WIDTH: usize> PlannedWork<WIDTH> {
 #[derive(Debug)]
 struct CohortPlan<const WIDTH: usize> {
     work: Vec<PlannedWork<WIDTH>>,
+    prefix_packing_enabled: bool,
     compatibility_buckets: usize,
     candidate_cohorts: usize,
+    prefix_affinity_cohorts: usize,
+    prefix_plan_fallback_buckets: usize,
     full_cohorts: usize,
     economics_rejected_cohorts: usize,
     serial_fallback_requests: usize,
+    estimated_physical_transition_slots: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -329,13 +334,18 @@ struct PlannerTelemetry {
     schema_version: u32,
     backend: &'static str,
     requests: usize,
+    prefix_packing_enabled: bool,
     compatibility_buckets: usize,
     candidate_cohorts: usize,
+    prefix_affinity_cohorts: usize,
+    prefix_plan_fallback_buckets: usize,
     full_cohorts: usize,
     economics_rejected_cohorts: usize,
     batched_requests: usize,
     serial_fallback_requests: usize,
+    estimated_physical_transition_slots: usize,
     minimum_requested_transition_utilization: &'static str,
+    packing_order: &'static str,
     output_order: &'static str,
 }
 
@@ -407,6 +417,55 @@ fn parse_prefix_fanout_enabled(value: Option<&OsStr>) -> bool {
     )
 }
 
+fn parse_prefix_packing_enabled(value: Option<&str>, default_enabled: bool) -> Result<bool> {
+    let Some(value) = value else {
+        return Ok(default_enabled);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => bail!("{PREFIX_PACKING_ENV} must be a boolean"),
+    }
+}
+
+fn prefix_packing_enabled(default_enabled: bool) -> Result<bool> {
+    let value = std::env::var_os(PREFIX_PACKING_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow!("{PREFIX_PACKING_ENV} must be valid UTF-8"))
+        })
+        .transpose()?;
+    parse_prefix_packing_enabled(value.as_deref(), default_enabled)
+}
+
+fn fixed_cohort_fanout_enabled<const WIDTH: usize>() -> bool {
+    let env_name = match WIDTH {
+        DENSE_BATCH8_WIDTH => DENSE_PREFIX_FANOUT_ENV,
+        MOE_BATCH16_WIDTH => MOE_PREFIX_FANOUT_ENV,
+        _ => return false,
+    };
+    parse_prefix_fanout_enabled(std::env::var_os(env_name).as_deref())
+}
+
+fn selected_cohort_prefix_tokens<const WIDTH: usize>(
+    indices: &[usize; WIDTH],
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+) -> usize {
+    let PrefillChunkArg::Fixed(chunk) = args.prefill_chunk else {
+        return 0;
+    };
+    let request_refs = indices.map(|index| &requests[index]);
+    let prompt_tokens = request_refs[0].prompt_ids.len();
+    align_prefix_fanout(
+        plan_prefix_fanout(&request_refs, fixed_cohort_fanout_enabled::<WIDTH>()),
+        prompt_tokens,
+        chunk.min(prompt_tokens.max(1)),
+    )
+    .selected_prefix_tokens
+}
+
 fn cohort_compatibility(
     request: &PreparedJsonlRequest,
     args: &Args,
@@ -472,9 +531,92 @@ fn requested_transition_utilization_qualifies<const WIDTH: usize>(
             .context("fixed-cohort utilization comparison overflow")?)
 }
 
+#[derive(Debug)]
+struct BucketWorkPlan<const WIDTH: usize> {
+    work: Vec<PlannedWork<WIDTH>>,
+    candidate_cohorts: usize,
+    prefix_affinity_cohorts: usize,
+    full_cohorts: usize,
+    economics_rejected_cohorts: usize,
+    serial_fallback_requests: usize,
+    physical_transition_slots: usize,
+}
+
+fn estimated_transition_slots<const WIDTH: usize>(
+    work: &[PlannedWork<WIDTH>],
+    requested_tokens: &[usize],
+) -> Result<usize> {
+    work.iter().try_fold(0usize, |total, item| {
+        let slots = match item {
+            PlannedWork::Batch(indices) => indices
+                .iter()
+                .map(|&index| requested_tokens[index].saturating_sub(1))
+                .max()
+                .unwrap_or(0)
+                .checked_mul(WIDTH)
+                .context("fixed-cohort batch transition estimate overflow")?,
+            PlannedWork::Serial(index) => requested_tokens[*index].saturating_sub(1),
+        };
+        total
+            .checked_add(slots)
+            .context("fixed-cohort transition estimate overflow")
+    })
+}
+
+fn plan_depth_bucket<const WIDTH: usize>(
+    mut indices: Vec<usize>,
+    requested_tokens: &[usize],
+) -> Result<BucketWorkPlan<WIDTH>> {
+    indices.sort_by_key(|&index| (requested_tokens[index], index));
+    let mut work = Vec::new();
+    let mut candidate_cohorts = 0usize;
+    let mut full_cohorts = 0usize;
+    let mut economics_rejected_cohorts = 0usize;
+    let mut serial_fallback_requests = 0usize;
+    let mut cohorts = indices.chunks_exact(WIDTH);
+    for cohort in &mut cohorts {
+        let cohort: [usize; WIDTH] = cohort
+            .try_into()
+            .expect("exact fixed-cohort depth planner chunk");
+        candidate_cohorts += 1;
+        if requested_transition_utilization_qualifies(&cohort, requested_tokens)? {
+            work.push(PlannedWork::Batch(cohort));
+            full_cohorts += 1;
+        } else {
+            economics_rejected_cohorts += 1;
+            for index in cohort {
+                work.push(PlannedWork::Serial(index));
+                serial_fallback_requests += 1;
+            }
+        }
+    }
+    for &index in cohorts.remainder() {
+        work.push(PlannedWork::Serial(index));
+        serial_fallback_requests += 1;
+    }
+    let physical_transition_slots = estimated_transition_slots(&work, requested_tokens)?;
+    Ok(BucketWorkPlan {
+        work,
+        candidate_cohorts,
+        prefix_affinity_cohorts: 0,
+        full_cohorts,
+        economics_rejected_cohorts,
+        serial_fallback_requests,
+        physical_transition_slots,
+    })
+}
+
 fn plan_request_work<const WIDTH: usize>(
     requests: &[PreparedJsonlRequest],
     args: &Args,
+) -> Result<CohortPlan<WIDTH>> {
+    plan_request_work_configured(requests, args, prefix_packing_enabled(true)?)
+}
+
+fn plan_request_work_configured<const WIDTH: usize>(
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+    prefix_packing: bool,
 ) -> Result<CohortPlan<WIDTH>> {
     ensure!(WIDTH > 0, "fixed-cohort planner width must be nonzero");
     let requested_tokens = requests
@@ -494,31 +636,81 @@ fn plan_request_work<const WIDTH: usize>(
     let compatibility_buckets = buckets.len();
     let mut work = Vec::new();
     let mut candidate_cohorts = 0usize;
+    let mut prefix_affinity_cohorts = 0usize;
+    let mut prefix_plan_fallback_buckets = 0usize;
     let mut full_cohorts = 0usize;
     let mut economics_rejected_cohorts = 0usize;
     let mut serial_fallback_requests = 0usize;
-    for (_, mut indices) in buckets {
-        indices.sort_by_key(|&index| (requested_tokens[index], index));
-        let mut cohorts = indices.chunks_exact(WIDTH);
-        for cohort in &mut cohorts {
-            let cohort: [usize; WIDTH] =
-                cohort.try_into().expect("exact fixed-cohort planner chunk");
-            candidate_cohorts += 1;
-            if requested_transition_utilization_qualifies(&cohort, &requested_tokens)? {
-                work.push(PlannedWork::Batch(cohort));
-                full_cohorts += 1;
-            } else {
-                economics_rejected_cohorts += 1;
-                for index in cohort {
-                    work.push(PlannedWork::Serial(index));
-                    serial_fallback_requests += 1;
+    let mut estimated_physical_transition_slots = 0usize;
+    for (_, indices) in buckets {
+        let baseline = plan_depth_bucket::<WIDTH>(indices.clone(), &requested_tokens)?;
+        let selected = if prefix_packing {
+            let mut indices = indices;
+            indices.sort_by(|&left, &right| {
+                requests[left]
+                    .prompt_ids
+                    .cmp(&requests[right].prompt_ids)
+                    .then_with(|| requested_tokens[left].cmp(&requested_tokens[right]))
+                    .then_with(|| left.cmp(&right))
+            });
+            let mut prefix_work = Vec::new();
+            let mut prefix_affinity_cohorts = 0usize;
+            let mut remaining = Vec::new();
+            let mut prefix_cohorts = indices.chunks_exact(WIDTH);
+            for cohort in &mut prefix_cohorts {
+                let cohort: [usize; WIDTH] = cohort
+                    .try_into()
+                    .expect("exact fixed-cohort prefix planner chunk");
+                if selected_cohort_prefix_tokens(&cohort, requests, args) > 0
+                    && requested_transition_utilization_qualifies(&cohort, &requested_tokens)?
+                {
+                    prefix_work.push(PlannedWork::Batch(cohort));
+                    prefix_affinity_cohorts += 1;
+                } else {
+                    remaining.extend(cohort);
                 }
             }
-        }
-        for &index in cohorts.remainder() {
-            work.push(PlannedWork::Serial(index));
-            serial_fallback_requests += 1;
-        }
+            remaining.extend(prefix_cohorts.remainder());
+            let depth = plan_depth_bucket::<WIDTH>(remaining, &requested_tokens)?;
+            let mut candidate_work = prefix_work;
+            candidate_work.extend(depth.work);
+            let candidate = BucketWorkPlan {
+                physical_transition_slots: estimated_transition_slots(
+                    &candidate_work,
+                    &requested_tokens,
+                )?,
+                work: candidate_work,
+                candidate_cohorts: prefix_affinity_cohorts + depth.candidate_cohorts,
+                prefix_affinity_cohorts,
+                full_cohorts: prefix_affinity_cohorts + depth.full_cohorts,
+                economics_rejected_cohorts: depth.economics_rejected_cohorts,
+                serial_fallback_requests: depth.serial_fallback_requests,
+            };
+            let safe = candidate.prefix_affinity_cohorts > 0
+                && (candidate.full_cohorts > baseline.full_cohorts
+                    || (candidate.full_cohorts == baseline.full_cohorts
+                        && candidate.physical_transition_slots
+                            <= baseline.physical_transition_slots));
+            if safe {
+                candidate
+            } else {
+                if candidate.prefix_affinity_cohorts > 0 {
+                    prefix_plan_fallback_buckets += 1;
+                }
+                baseline
+            }
+        } else {
+            baseline
+        };
+        candidate_cohorts += selected.candidate_cohorts;
+        prefix_affinity_cohorts += selected.prefix_affinity_cohorts;
+        full_cohorts += selected.full_cohorts;
+        economics_rejected_cohorts += selected.economics_rejected_cohorts;
+        serial_fallback_requests += selected.serial_fallback_requests;
+        estimated_physical_transition_slots = estimated_physical_transition_slots
+            .checked_add(selected.physical_transition_slots)
+            .context("fixed-cohort plan transition estimate overflow")?;
+        work.extend(selected.work);
     }
     work.sort_by_key(PlannedWork::first_request_index);
     ensure!(
@@ -530,11 +722,15 @@ fn plan_request_work<const WIDTH: usize>(
     );
     Ok(CohortPlan {
         work,
+        prefix_packing_enabled: prefix_packing,
         compatibility_buckets,
         candidate_cohorts,
+        prefix_affinity_cohorts,
+        prefix_plan_fallback_buckets,
         full_cohorts,
         economics_rejected_cohorts,
         serial_fallback_requests,
+        estimated_physical_transition_slots,
     })
 }
 
@@ -738,16 +934,25 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         .stop_token_ids()
         .context("load producer-declared stop tokens")?;
     let planner_telemetry = PlannerTelemetry {
-        schema_version: 2,
+        schema_version: 3,
         backend: E::PLANNER_BACKEND,
         requests: requests.len(),
+        prefix_packing_enabled: plan.prefix_packing_enabled,
         compatibility_buckets: plan.compatibility_buckets,
         candidate_cohorts: plan.candidate_cohorts,
+        prefix_affinity_cohorts: plan.prefix_affinity_cohorts,
+        prefix_plan_fallback_buckets: plan.prefix_plan_fallback_buckets,
         full_cohorts: plan.full_cohorts,
         economics_rejected_cohorts: plan.economics_rejected_cohorts,
         batched_requests: plan.full_cohorts * WIDTH,
         serial_fallback_requests: plan.serial_fallback_requests,
+        estimated_physical_transition_slots: plan.estimated_physical_transition_slots,
         minimum_requested_transition_utilization: "3/4",
+        packing_order: if plan.prefix_affinity_cohorts > 0 {
+            "prefix_affinity_then_generation_depth"
+        } else {
+            "generation_depth"
+        },
         output_order: "input",
     };
     let mut pending_outputs = std::iter::repeat_with(|| None)
@@ -1423,6 +1628,128 @@ mod tests {
         requests[5].sampling.temperature = 0.0;
         requests[6].request.cache_prefix_tokens = Some(1);
         assert!(validate_requests(&requests, &args).is_err());
+    }
+
+    #[test]
+    fn prefix_packing_recovers_interleaved_dense_cohorts() {
+        let mut args = test_args();
+        args.prefill_chunk = PrefillChunkArg::Fixed(256);
+        let requests = (0..(DENSE_BATCH8_WIDTH * 2))
+            .map(|slot| {
+                let mut prompt = vec![if slot.is_multiple_of(2) { 1 } else { 2 }; 1_024];
+                prompt.push(i32::try_from(slot).unwrap() + 10);
+                let mut request = prepared(&format!("slot-{slot}"), &prompt);
+                request.request.tokens = Some(32);
+                request
+            })
+            .collect::<Vec<_>>();
+
+        let control =
+            plan_request_work_configured::<DENSE_BATCH8_WIDTH>(&requests, &args, false).unwrap();
+        assert_eq!(control.full_cohorts, 2);
+        assert_eq!(control.prefix_affinity_cohorts, 0);
+
+        let candidate =
+            plan_request_work_configured::<DENSE_BATCH8_WIDTH>(&requests, &args, true).unwrap();
+        assert_eq!(candidate.full_cohorts, 2);
+        assert_eq!(candidate.prefix_affinity_cohorts, 2);
+        assert_eq!(
+            candidate.work,
+            vec![
+                PlannedWork::Batch([0, 2, 4, 6, 8, 10, 12, 14]),
+                PlannedWork::Batch([1, 3, 5, 7, 9, 11, 13, 15]),
+            ]
+        );
+    }
+
+    #[test]
+    fn prefix_packing_policy_is_strict_and_rollbackable() {
+        assert!(!parse_prefix_packing_enabled(None, false).unwrap());
+        assert!(parse_prefix_packing_enabled(None, true).unwrap());
+        assert!(parse_prefix_packing_enabled(Some("on"), false).unwrap());
+        assert!(!parse_prefix_packing_enabled(Some("NO"), true).unwrap());
+        assert!(parse_prefix_packing_enabled(Some("sometimes"), true).is_err());
+    }
+
+    #[test]
+    fn prefix_packing_preserves_depth_groups_without_reusable_prefixes() {
+        let args = test_args();
+        let requests = (0..(DENSE_BATCH8_WIDTH * 2))
+            .map(|slot| {
+                let mut prompt = vec![i32::try_from(slot).unwrap() + 1; 32];
+                prompt.push(99);
+                let mut request = prepared(&format!("slot-{slot}"), &prompt);
+                request.request.tokens = Some(24 + slot);
+                request
+            })
+            .collect::<Vec<_>>();
+        let control =
+            plan_request_work_configured::<DENSE_BATCH8_WIDTH>(&requests, &args, false).unwrap();
+        let candidate =
+            plan_request_work_configured::<DENSE_BATCH8_WIDTH>(&requests, &args, true).unwrap();
+        assert_eq!(candidate.work, control.work);
+        assert_eq!(candidate.full_cohorts, control.full_cohorts);
+        assert_eq!(candidate.economics_rejected_cohorts, 0);
+        assert_eq!(candidate.prefix_affinity_cohorts, 0);
+    }
+
+    fn assert_prefix_fragmentation_falls_back<const WIDTH: usize>() {
+        let mut args = test_args();
+        args.prefill_chunk = PrefillChunkArg::Fixed(256);
+        let mut before_prefix = 1i32;
+        let mut after_prefix = 200i32;
+        let prefix_low = WIDTH / 4;
+        let prefix_high_end = WIDTH * 2 + WIDTH * 3 / 4;
+        let before_prefix_end = WIDTH + WIDTH / 4;
+        let requests = (0..(WIDTH * 3))
+            .map(|slot| {
+                let prefix_family =
+                    slot < prefix_low || (WIDTH * 2..prefix_high_end).contains(&slot);
+                let first = if prefix_family {
+                    100
+                } else if (prefix_low..before_prefix_end).contains(&slot) {
+                    let value = before_prefix;
+                    before_prefix += 1;
+                    value
+                } else {
+                    let value = after_prefix;
+                    after_prefix += 1;
+                    value
+                };
+                let mut prompt = vec![first; 300];
+                prompt.push(i32::try_from(slot).unwrap() + 1_000);
+                let mut request = prepared(&format!("slot-{slot}"), &prompt);
+                request.request.tokens = Some(if slot < WIDTH {
+                    2
+                } else if slot < WIDTH * 2 {
+                    5
+                } else {
+                    11
+                });
+                request
+            })
+            .collect::<Vec<_>>();
+        let baseline = plan_request_work_configured::<WIDTH>(&requests, &args, false).unwrap();
+        let candidate = plan_request_work_configured::<WIDTH>(&requests, &args, true).unwrap();
+        assert_eq!(baseline.full_cohorts, 3);
+        assert_eq!(candidate.work, baseline.work);
+        assert_eq!(candidate.full_cohorts, 3);
+        assert_eq!(candidate.prefix_affinity_cohorts, 0);
+        assert_eq!(candidate.prefix_plan_fallback_buckets, 1);
+        assert_eq!(
+            candidate.estimated_physical_transition_slots,
+            baseline.estimated_physical_transition_slots
+        );
+    }
+
+    #[test]
+    fn dense_prefix_packing_falls_back_when_it_fragments_depth_cohorts() {
+        assert_prefix_fragmentation_falls_back::<DENSE_BATCH8_WIDTH>();
+    }
+
+    #[test]
+    fn moe_prefix_packing_falls_back_when_it_fragments_depth_cohorts() {
+        assert_prefix_fragmentation_falls_back::<MOE_BATCH16_WIDTH>();
     }
 
     #[test]

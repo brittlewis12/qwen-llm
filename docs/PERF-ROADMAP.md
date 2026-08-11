@@ -2953,6 +2953,16 @@ serial and lets auto choose B=2 at `1.078x`. Keep this as bounded
 logical-termination flexibility, not evidence for lane refill or variable prompt
 frontiers.
 
+Fixed B=8/B=16 planning now tries complete lexically adjacent prefix groups
+before generation-depth packing. Adopt a prefix candidate per prompt-length
+bucket only when it increases full cohorts, or preserves cohort count without
+increasing estimated physical transitions; otherwise restore the baseline plan.
+Two interleaved prefix families move dense 0.8B wall `4.79 -> 1.34 s` (`3.575x`)
+and Qwen A3B Q4 wall `25.45 -> 7.62 s` (`3.340x`), both byte-exact. Keep
+`QWEN_FIXED_COHORT_PREFIX_PACKING=0` as rollback. Overlapping prefix windows may
+recover additional groups later, but missed affinity now degrades to the prior
+depth plan rather than serial work.
+
 Seekable Qwen B=2 files now plan pairs inside independent 16-request windows.
 Prefer the largest actually restorable prefix edges, then pair remaining requests
 by adjacent generation depth; preserve stdout input order with a hard window-sized

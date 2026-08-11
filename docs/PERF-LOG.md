@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Prefix-Aware Fixed Cohort Packing GO
+
+Status: dense B=8 and qualified Qwen MoE B=16 now cluster complete reusable
+prefix groups before falling back to generation-depth packing. A per-bucket
+baseline guard rejects any prefix plan that reduces full cohorts or, at equal
+coverage, increases estimated physical transitions.
+
+- Two interleaved eight-request 2,048-token families on dense Qwen3.5 0.8B move
+  from zero to two prefix cohorts. Summed prefill moves `4.007 -> 0.578 s`
+  (`6.936x`) and process wall moves `4.79 -> 1.34 s` (`3.575x`) with
+  byte-identical stdout.
+- Two interleaved sixteen-request 1,024-token families on Qwen3.6 A3B Q4 move
+  summed prefill `19.442 -> 1.432 s` (`13.573x`) and process wall
+  `25.45 -> 7.62 s` (`3.340x`). Decode is flat and stdout remains byte-identical.
+- Adversarial B=8/B=16 tests verify that a reusable mixed-depth prefix family
+  cannot fragment three healthy baseline cohorts into serial work. No-prefix
+  files reproduce the prior depth plan exactly.
+- Planner schema 3 exposes enablement, selected prefix cohorts, safety fallbacks,
+  and estimated physical transitions. `QWEN_FIXED_COHORT_PREFIX_PACKING=0`
+  restores depth-only planning; malformed values fail closed.
+
+Decision: promote this bounded planner composition before broader scheduler or
+kernel work. Full evidence:
+`docs/bench/2026-08-11-fixed-cohort-prefix-packing/README.md`.
+
 ## 2026-08-11 - Qwen B=2 Pair-Affinity Planner GO
 
 Status: seekable Qwen `--concurrency 2` files now pair requests within bounded

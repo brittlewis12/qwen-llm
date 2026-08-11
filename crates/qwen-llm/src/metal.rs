@@ -20102,6 +20102,79 @@ pub fn encode_mat_vec_q6_k_f32(
     Ok(())
 }
 
+/// Token-axis Q6_K GEMV with the exact singleton accumulation body.
+pub fn encode_mat_vec_q6_k_batch_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_tokens: usize,
+) -> Result<(), MetalError> {
+    let expected_weight = n_in.checked_mul(n_out);
+    let expected_input = n_tokens.checked_mul(n_in);
+    let expected_output = n_tokens.checked_mul(n_out);
+    if n_tokens == 0
+        || n_in == 0
+        || n_out == 0
+        || !n_in.is_multiple_of(256)
+        || weight.dtype != GgmlType::Q6_K
+        || x.dtype != GgmlType::F32
+        || y.dtype != GgmlType::F32
+        || expected_weight.is_none_or(|expected| weight.n_elements() as usize != expected)
+        || expected_input.is_none_or(|expected| x.n_elements() as usize != expected)
+        || expected_output.is_none_or(|expected| y.n_elements() as usize != expected)
+        || u32::try_from(n_in).is_err()
+        || u32::try_from(n_out).is_err()
+        || u32::try_from(n_tokens).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q6_k_batch",
+            detail: format!(
+                "expected Q6_K weight and F32 [{n_tokens},{n_in}] -> [{n_tokens},{n_out}], got {:?} x={} y={}",
+                weight.dtype,
+                x.n_elements(),
+                y.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_mat_vec_q6_K_f32_batch")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    const NR0: usize = 2;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: n_tokens,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Q6_K mat-mat: same shape contract as [`encode_mat_mat_q4_k_f32`].
 ///
 /// Lifts the same 64×32×32 simdgroup_matrix tile from llama.cpp,
@@ -28623,6 +28696,89 @@ mod tests {
                 i % n_cols,
                 batched[i],
                 per_row[i]
+            );
+        }
+    }
+
+    #[test]
+    fn mat_vec_q6_k_batch_matches_singleton_bits() {
+        let ctx = match MetalContext::new() {
+            Ok(context) => context,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("init failed: {error}"),
+        };
+        let n_in = 768usize;
+        let n_out = 7usize;
+        let n_tokens = 16usize;
+        let blocks_per_row = n_in / 256;
+        let row_bytes = blocks_per_row * 210;
+        let mut weight = vec![0u8; n_out * row_bytes];
+        for row in 0..n_out {
+            for block_index in 0..blocks_per_row {
+                let start = row * row_bytes + block_index * 210;
+                let block = &mut weight[start..start + 210];
+                for (index, value) in block[..192].iter_mut().enumerate() {
+                    *value = (index as u8)
+                        .wrapping_mul(17)
+                        .wrapping_add(row as u8)
+                        .wrapping_add(block_index as u8 * 11);
+                }
+                for (index, value) in block[192..208].iter_mut().enumerate() {
+                    *value = (index as i8 - 8 + row as i8 + block_index as i8) as u8;
+                }
+                block[208..210].copy_from_slice(&0x3c00u16.to_le_bytes());
+            }
+        }
+        let input = (0..n_tokens * n_in)
+            .map(|index| ((index % 29) as f32 - 14.0) * 0.03125)
+            .collect::<Vec<_>>();
+        let weight = MetalTensor::from_bytes(
+            &ctx,
+            &weight,
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q6_K,
+        )
+        .unwrap();
+        let input = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&input),
+            vec![n_tokens as u64, n_in as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let batched = MetalTensor::zeros_f32(&ctx, vec![(n_tokens * n_out) as u64]).unwrap();
+        let singleton = MetalTensor::zeros_f32(&ctx, vec![(n_tokens * n_out) as u64]).unwrap();
+        one_shot(&ctx, |encoder| {
+            encode_mat_vec_q6_k_batch_f32(
+                &ctx, encoder, &weight, &input, &batched, n_in, n_out, n_tokens,
+            )
+        })
+        .unwrap();
+        one_shot(&ctx, |encoder| {
+            for token in 0..n_tokens {
+                let input_row = input.view_subrange((token * n_in) as u64, vec![n_in as u64]);
+                let output_row =
+                    singleton.view_subrange((token * n_out) as u64, vec![n_out as u64]);
+                encode_mat_vec_q6_k_f32(
+                    &ctx,
+                    encoder,
+                    &weight,
+                    &input_row,
+                    &output_row,
+                    n_in,
+                    n_out,
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let batched = read_back_f32(&batched.buffer, n_tokens * n_out);
+        let singleton = read_back_f32(&singleton.buffer, n_tokens * n_out);
+        for (index, (batched, singleton)) in batched.iter().zip(&singleton).enumerate() {
+            assert_eq!(
+                batched.to_bits(),
+                singleton.to_bits(),
+                "Q6 batch mismatch at {index}: {batched} != {singleton}"
             );
         }
     }

@@ -6,6 +6,47 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Exact Qwen MoE B=16 Reopen HOLD
+
+Status: correctness is green, but productization remains HOLD. After charging
+host argmax readback, five source-identical exact processes put median B=16 at
+`140.880` token/s, or `1.119784x` the frozen queue control. That misses the
+predeclared `1.12x` gate by `0.0272` token/s. No product surface changes in this
+packet.
+
+- The first wider-cohort result was incorrectly closed as a width-driven
+  numerical failure. Its complete-model candidate also used serial MoE FFN tails
+  instead of production's concurrent-shared wave, so both root attribution and
+  product economics were confounded. A production-schedule hook now mirrors the
+  real route and FFN tail in the benchmark.
+- Projection ablations localize the causal drift to the GDN mat-mat schedule.
+  Replacing only qkv, z, out, or qkv+z leaves measurable residual drift; replacing
+  all three with the existing token-axis Q8 GEMV produces bit-exact block
+  residuals at `6.9261 ms/token`, versus `6.7413` for the non-exact B=16 replay.
+  Exact out alone is faster (`172.814` whole-model token/s) but diverges at
+  generated step 15 and remains closed.
+- The remaining difference was the Q6_K LM head. Singleton heads are exact but
+  reduce B=16 to `140.213` token/s. A new token-axis Q6_K kernel preserves the
+  singleton lane map, quant extraction, accumulation grouping, and reduction in
+  one B-wide dispatch. Its B=16, three-block, odd-tail GPU unit test is bit-exact.
+- The hardened final packet alternates serial/candidate order for two warmups and
+  64 measured transitions. Across all 66 same-history steps, every finite logit
+  and final residual is bit-exact; 1,056 selected IDs and their SHA-256 match.
+  Final per-lane snapshots compare identity, consumed and pending tokens,
+  positions, active K/V, GDN convolution/recurrent state, and logits byte-for-byte.
+- B=32 preserves generated continuation and rounded numerical probes, but lacks
+  B=16's hardened bitwise snapshot packet. A matched earlier probe moves
+  `144.538 -> 143.462` token/s from B=16 to B=32 while doubling cohort and state
+  width. B=16 is the measured candidate point.
+
+Decision: all five runs pass the exactness gate and the four-of-five `1.10x`
+guard, but the primary median gate fails. Retain the exact token-axis primitives
+and complete-model probe; do not build the JSONL executor yet. Reopen for a
+measured exact candidate improvement with enough margin to survive scheduler
+integration, or for shared executor work that materially lowers marginal product
+cost. Full result:
+`docs/bench/2026-08-11-qwen-moe-b16-exact-reopen/README.md`.
+
 ## 2026-08-11 - DeepSeek V4 Concurrent Prefix Fanout GO
 
 Status: qualifying DeepSeek V4 `--concurrency 2` pairs now prefill one exact

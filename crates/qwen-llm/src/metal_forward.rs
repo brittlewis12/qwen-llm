@@ -7497,6 +7497,47 @@ impl<'a> MetalForward<'a> {
         self.encode_moe_ffn_apply_gpu(enc, session, ffn_gate, ffn_up, ffn_down, moe)
     }
 
+    /// Bench hook: run the route and MoE FFN tail with the production
+    /// concurrent-shared policy after a caller has computed the mixer and norm.
+    #[doc(hidden)]
+    pub fn encode_moe_ffn_after_mixer_production_by_index(
+        &self,
+        command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        block_idx: usize,
+        session: &mut MetalSession,
+    ) -> Result<(), MfError> {
+        let (block, _) = self.moe_block_slot_by_index(block_idx)?;
+        let (ffn_gate, ffn_up, ffn_down, moe) = match block {
+            MetalBlock::Gdn(block) => (
+                &block.ffn_gate,
+                &block.ffn_up,
+                &block.ffn_down,
+                block.ffn_moe.as_ref(),
+            ),
+            MetalBlock::Attn(block) => (
+                &block.ffn_gate,
+                &block.ffn_up,
+                &block.ffn_down,
+                block.ffn_moe.as_ref(),
+            ),
+        };
+        let moe = moe.ok_or(MfError::UnsupportedMoe)?;
+        if concurrent_shared_moe_decode_enabled() {
+            let encoder = KernelEncoder::begin(command);
+            self.encode_moe_route_prepare(&encoder, session, moe)?;
+            encoder.end();
+            self.encode_moe_ffn_apply_gpu_concurrent_shared(
+                command, session, ffn_gate, ffn_up, ffn_down, moe,
+            )
+        } else {
+            let encoder = KernelEncoder::begin(command);
+            self.encode_moe_route_prepare(&encoder, session, moe)?;
+            self.encode_moe_ffn_apply_gpu(&encoder, session, ffn_gate, ffn_up, ffn_down, moe)?;
+            encoder.end();
+            Ok(())
+        }
+    }
+
     fn encode_moe_mixer_prep(
         &self,
         enc: &KernelEncoder,

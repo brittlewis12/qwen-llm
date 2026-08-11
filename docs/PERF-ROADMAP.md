@@ -2858,14 +2858,27 @@ DeepSeek causal snapshots intentionally omit observations, use transient
 same-residency identity rather than full durable model hashing, include the
 restore image in admission, and release the host snapshot before decode.
 
-Qwen A3B static B=8 is closed after a complete whole-model spike. Aggressive
-packed execution reaches `1.43x` and beats B=8 independent queues by about 16%,
-but generated continuation diverges. Restricting the candidate to bitwise-exact
-incremental Q4 expert gate/up batching leaves only `1.2066x` over serial,
-`1.0335x` over the existing GDN replay, and about `123.7` aggregate token/s,
-below the `125.8` independent-queue control. Do not build a MoE static scheduler
-without a materially new exact organization or a product-approved functional
-equivalence packet that stays at least 10% ahead of queue overlap.
+Qwen A3B static B=8 remains closed after a complete whole-model spike. Aggressive
+packed execution reaches `1.43x` but changes continuation; its bitwise-incremental
+repair reaches only `123.7` aggregate token/s, below the `125.81` independent-
+queue control. Width alone did not fix that organization.
+
+A materially new exact B=16 organization now reopens the product lane. The first
+wider complete-model probe was confounded by a non-production serial MoE FFN tail
+and non-exact GDN mat-mat projections. Mirroring production route/concurrent-
+shared FFN waves, retaining sequence-private attention and recurrent state, and
+using token-axis exact Q8 GEMV for all GDN qkv/z/out projections produces exact
+residual state. A token-axis Q6_K head with singleton-identical lane mapping and
+accumulation then preserves every logit bit. The 66-transition packet has exact
+generated-ID hashes and byte-identical final active KV, GDN state, convolution
+state, tokens, and logits. Corrected timing charges host argmax readback across
+five source-identical processes. All exactness checks pass and all five runs
+clear the old `1.10x` queue line, but median candidate throughput is `140.880`
+token/s (`1.119784x` the queue control), missing the frozen `1.12x` gate by
+`0.0272` token/s. Keep productization HOLD: retain the exact primitives and
+complete-model probe, but do not spend the remaining scheduler/JSONL work without
+an exact measured gain that leaves integration margin or materially cheaper
+shared executor machinery.
 
 DeepSeek K160 common-route B=8 is also closed at its cheapest model-backed
 floor. Giving all eight rows the same six experts, the production all-slot

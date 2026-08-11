@@ -33,6 +33,7 @@ mod host_validity;
 mod integrated_grammar_row;
 mod lm_head_screening_oracle;
 mod messages;
+mod moe_gdn_repair;
 mod q4_mma_ceiling;
 mod response_shape_runtime;
 mod shutdown;
@@ -66,7 +67,8 @@ use qwen_llm::{
         encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g8_t2_q4_c64_f32,
         encode_attn_prefill_v4_g16_t4_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q4_c64_f32,
         encode_fill_f32, encode_gdn_decay_chain_f32, encode_get_rows_f32,
-        encode_mat_vec_f32_sigmoid, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
+        encode_mat_vec_f32_sigmoid, encode_mat_vec_q8_0_batch_f32,
+        encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
         encode_moe_fused_routed_q4q5_token_f32, encode_moe_swiglu_q4_K_f32,
         encode_moe_swiglu_q4_K_f32_packed_slots, encode_mul_f32, encode_residual_rms_norm_mul_f32,
@@ -488,6 +490,8 @@ enum Cmd {
     /// Execute a complete dense model over a fixed eight-slot cohort,
     /// comparing production serialization with layer-major weight reuse.
     DecodeDenseWholeBatch(dense_whole_batch::DecodeDenseWholeBatchArgs),
+    /// Localize and repair Qwen MoE GDN replay schedule drift at B=16.
+    DecodeMoeGdnRepair(moe_gdn_repair::DecodeMoeGdnRepairArgs),
     /// Report compiled and runtime source identity without initializing Metal
     /// or loading a model.
     BuildInfo(BuildInfoArgs),
@@ -2772,6 +2776,7 @@ fn run() -> Result<()> {
         Cmd::DecodeDenseBlockBatch(a) => dense_block_batch::run(a),
         Cmd::DecodeDenseAttnBatch(a) => dense_block_batch::run_attention(a),
         Cmd::DecodeDenseWholeBatch(a) => dense_whole_batch::run(a),
+        Cmd::DecodeMoeGdnRepair(a) => moe_gdn_repair::run(a),
         Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::GgufStoragePlan(a) => run_gguf_storage_plan(a),
         Cmd::GgufArenaFloor(a) => {
@@ -5442,6 +5447,16 @@ fn gdn_replay_beta_projection_fused(gb: &qwen_llm::metal_forward::MetalGdnBlock)
         && !env_flag_enabled("QWEN_DECODE_GDN_NOOP_BETA")
 }
 
+fn gdn_replay_exact_projection(name: &str) -> bool {
+    let Ok(value) = std::env::var("QWEN_BENCH_GDN_REPLAY_EXACT") else {
+        return false;
+    };
+    value.split(',').any(|item| {
+        let item = item.trim();
+        item == "all" || item == name || (item == "front" && matches!(name, "qkv" | "z"))
+    })
+}
+
 fn read_f32_tensor(t: &MetalTensor) -> Vec<f32> {
     let n = t.n_elements() as usize;
     let mut xs = vec![0.0f32; n];
@@ -5676,17 +5691,43 @@ fn encode_gdn_layer_replay_with_post_norm(
     let z_pack = scratch
         .z_pack
         .view_subrange(0, vec![(tokens * v_dim) as u64]);
-    encode_mat_mat_dispatch(
-        ctx,
-        &enc,
-        &gb.in_proj_qkv,
-        &h_pack,
-        &qkv_pack,
-        h,
-        conv_dim,
-        tokens,
-    )?;
-    encode_mat_mat_dispatch(ctx, &enc, &gb.in_proj_z, &h_pack, &z_pack, h, v_dim, tokens)?;
+    if gdn_replay_exact_projection("qkv") {
+        encode_mat_vec_q8_0_batch_f32(
+            ctx,
+            &enc,
+            &gb.in_proj_qkv,
+            &h_pack,
+            &qkv_pack,
+            h,
+            conv_dim,
+            tokens,
+        )?;
+    } else {
+        encode_mat_mat_dispatch(
+            ctx,
+            &enc,
+            &gb.in_proj_qkv,
+            &h_pack,
+            &qkv_pack,
+            h,
+            conv_dim,
+            tokens,
+        )?;
+    }
+    if gdn_replay_exact_projection("z") {
+        encode_mat_vec_q8_0_batch_f32(
+            ctx,
+            &enc,
+            &gb.in_proj_z,
+            &h_pack,
+            &z_pack,
+            h,
+            v_dim,
+            tokens,
+        )?;
+    } else {
+        encode_mat_mat_dispatch(ctx, &enc, &gb.in_proj_z, &h_pack, &z_pack, h, v_dim, tokens)?;
+    }
 
     for (tok, s) in sessions.iter_mut().enumerate() {
         if gdn_replay_beta_projection_fused(gb) {
@@ -5752,16 +5793,29 @@ fn encode_gdn_layer_replay_with_post_norm(
         .normed_pack
         .view_subrange(0, vec![(tokens * v_dim) as u64]);
     let out_pack = scratch.out_pack.view_subrange(0, vec![(tokens * h) as u64]);
-    encode_mat_mat_dispatch(
-        ctx,
-        &enc,
-        &gb.out_proj,
-        &normed_pack,
-        &out_pack,
-        v_dim,
-        h,
-        tokens,
-    )?;
+    if gdn_replay_exact_projection("out") {
+        encode_mat_vec_q8_0_batch_f32(
+            ctx,
+            &enc,
+            &gb.out_proj,
+            &normed_pack,
+            &out_pack,
+            v_dim,
+            h,
+            tokens,
+        )?;
+    } else {
+        encode_mat_mat_dispatch(
+            ctx,
+            &enc,
+            &gb.out_proj,
+            &normed_pack,
+            &out_pack,
+            v_dim,
+            h,
+            tokens,
+        )?;
+    }
 
     for (tok, s) in sessions.iter().enumerate() {
         let out_row = scratch

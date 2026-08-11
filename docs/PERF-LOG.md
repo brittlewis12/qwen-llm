@@ -6,6 +6,32 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - DeepSeek Packed Scratch Overlay KILL
+
+Status: a phase-disjoint query-to-MoE scratch overlay saves exactly 512 MiB per
+DeepSeek session in the tested K160 fixtures, whose outputs remain byte-identical,
+but slows the packed prefill path. The experimental allocator and selector were
+deleted.
+
+- The candidate reuses one 512 MiB raw-query allocation after the pre-expert
+  command completes for routed expert outputs plus routed and final hidden rows.
+  Compact GPU routing remains incompatible because it can merge those phases.
+- One-session 4,201-token control/candidate/control output is byte-identical. The
+  candidate averages about `16,369.9 ms` prefill versus `16,219.6 ms` control,
+  a roughly `0.9%` regression while saving exactly `536,870,912` allocated bytes.
+- A longer concurrency-two bracket with prefix fanout disabled saves exactly
+  `1,073,741,824` session bytes and about 1 GiB peak footprint. Candidate prefill
+  is `34,150.1 ms` versus `33,136.6 ms` interpolated controls, a `3.06%`
+  regression; complete pair wall also regresses about `2.7%`. All three output
+  streams have the same SHA-256.
+
+Decision: KILL shared-resource scratch aliasing as active performance work. A
+fixed 512 MiB/session saving does not pay for slower inference or the added
+lifetime complexity. Reopen only for chunk-sized allocation or another
+representation that removes capacity without changing hot resource topology.
+Full protocol and measurements:
+`docs/bench/2026-08-11-dsv4-packed-scratch-overlay-kill/README.md`.
+
 ## 2026-08-11 - Qwen MoE B=16 Capability Plan GO
 
 Status: replace the single A3B-Q4 allowlist with an immutable per-stage plan.

@@ -2868,6 +2868,14 @@ DeepSeek causal snapshots intentionally omit observations, use transient
 same-residency identity rather than full durable model hashing, include the
 restore image in admission, and release the host snapshot before decode.
 
+Packed-scratch aliasing is closed as a concurrency-memory lever. Reusing the
+512 MiB raw-query allocation for phase-disjoint MoE outputs produced
+byte-identical output in the tested fixtures and saves exactly 512 MiB/session,
+but regresses a full-chunk single session by about `0.9%` and a long B=2 prefill
+by `3.06%`. The implementation was deleted. Reopen only for chunk-sized
+allocation or a representation that reduces capacity without imposing
+shared-resource alias cost on the hot path.
+
 Qwen A3B static B=8 remains closed after a complete whole-model spike. Aggressive
 packed execution reaches `1.43x` but changes continuation; its bitwise-incremental
 repair reaches only `123.7` aggregate token/s, below the `125.81` independent-

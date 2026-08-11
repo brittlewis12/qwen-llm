@@ -47,6 +47,7 @@ pub mod metal_forward;
 pub mod metal_mtp;
 pub mod model;
 pub mod model_family;
+pub mod moe_batch16;
 pub mod pid_metrics;
 pub mod prefetch;
 pub mod prefix_cache;

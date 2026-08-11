@@ -28,6 +28,7 @@ use crate::metal_forward::{
     MfError, SessionSnapshot, SnapshotIdentity, SnapshotValidationError,
 };
 use crate::model::Arch;
+use crate::moe_batch16::{MOE_BATCH16_WIDTH, MoeBatch16Error, MoeBatch16Executor, MoeBatch16Step};
 use crate::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS, prefetch_fd};
 use crate::prefix_cache::{DEFAULT_MAX_BYTES, PrefixCache, PrefixCacheStats};
 pub use crate::qwen_queue2::QwenQueue2Error as IndependentQueue2Error;
@@ -99,6 +100,8 @@ pub enum RuntimeError {
     CheckpointSizeOverflow,
     #[error("dense B=8 execution: {0}")]
     DenseBatch8(#[from] DenseBatch8Error),
+    #[error("MoE B=16 execution: {0}")]
+    MoeBatch16(#[from] MoeBatch16Error),
     #[error("independent queue execution: {0}")]
     IndependentQueue2(#[from] IndependentQueue2Error),
 }
@@ -1152,6 +1155,16 @@ impl LoadedModel {
         })
     }
 
+    /// Create the qualified fixed-width Qwen MoE B=16 decode executor.
+    pub fn create_moe_batch16_executor(
+        &self,
+    ) -> Result<MoeBatch16SequenceExecutor<'_>, RuntimeError> {
+        Ok(MoeBatch16SequenceExecutor {
+            inner: MoeBatch16Executor::new(self.context(), &self.metal_model)?,
+            owner: Arc::clone(&self.owner),
+        })
+    }
+
     /// Price two independent sequence sessions and the largest serial prefill
     /// scratch that can coexist with them before allocating either session.
     pub fn admit_independent_queue2(
@@ -1573,6 +1586,12 @@ pub struct DenseBatch8SequenceExecutor<'a> {
     owner: Arc<ModelOwnerToken>,
 }
 
+/// Provenance-preserving wrapper around the fixed MoE B=16 backend.
+pub struct MoeBatch16SequenceExecutor<'a> {
+    inner: MoeBatch16Executor<'a>,
+    owner: Arc<ModelOwnerToken>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IndependentQueue2Step {
     pub argmax_ids: [i32; QWEN_QUEUE2_WIDTH],
@@ -1713,6 +1732,79 @@ impl DenseBatch8SequenceExecutor<'_> {
         s6.position += 1;
         s7.position += 1;
         Ok(step)
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.inner.is_poisoned()
+    }
+}
+
+impl MoeBatch16SequenceExecutor<'_> {
+    fn validate_cohort(
+        &self,
+        sequences: &[&mut Sequence; MOE_BATCH16_WIDTH],
+    ) -> Result<usize, RuntimeError> {
+        let position = sequences[0].position;
+        let capacity = sequences[0].max_context_tokens;
+        for (slot, sequence) in sequences.iter().enumerate() {
+            ensure_same_model_owner(&self.owner, &sequence.owner)?;
+            if sequence.position != position {
+                return Err(MoeBatch16Error::Validation(format!(
+                    "slot {slot} position {} != cohort position {position}",
+                    sequence.position
+                ))
+                .into());
+            }
+            if sequence.max_context_tokens != capacity {
+                return Err(MoeBatch16Error::Validation(format!(
+                    "slot {slot} capacity {} != cohort capacity {capacity}",
+                    sequence.max_context_tokens
+                ))
+                .into());
+            }
+            sequence.ensure_can_append(1)?;
+        }
+        Ok(position)
+    }
+
+    /// Validate model provenance, logical frontiers, capacity, and backend state.
+    pub fn validate(
+        &self,
+        token_ids: [i32; MOE_BATCH16_WIDTH],
+        mut sequences: [&mut Sequence; MOE_BATCH16_WIDTH],
+    ) -> Result<(), RuntimeError> {
+        let position = self.validate_cohort(&sequences)?;
+        let position = u32::try_from(position)
+            .map_err(|_| MoeBatch16Error::Validation("cohort position does not fit u32".into()))?;
+        let mut states = sequences.each_mut().map(|sequence| &mut sequence.state);
+        self.inner.validate_refs(token_ids, position, &mut states)?;
+        Ok(())
+    }
+
+    /// Consume one pending token in every lane and return product greedy choices.
+    /// Logical positions advance only after successful backend completion.
+    pub fn step_greedy(
+        &mut self,
+        token_ids: [i32; MOE_BATCH16_WIDTH],
+        mut sequences: [&mut Sequence; MOE_BATCH16_WIDTH],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<MoeBatch16Step, RuntimeError> {
+        let position = self.validate_cohort(&sequences)?;
+        let position = u32::try_from(position)
+            .map_err(|_| MoeBatch16Error::Validation("cohort position does not fit u32".into()))?;
+        let step = {
+            let mut states = sequences.each_mut().map(|sequence| &mut sequence.state);
+            self.inner
+                .step_greedy_refs(token_ids, position, &mut states, cancelled)?
+        };
+        for sequence in sequences {
+            sequence.position += 1;
+        }
+        Ok(step)
+    }
+
+    pub fn scratch_bytes(&self) -> u64 {
+        self.inner.scratch_bytes()
     }
 
     pub fn is_poisoned(&self) -> bool {

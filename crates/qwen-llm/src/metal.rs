@@ -3125,6 +3125,7 @@ impl Drop for KernelEncoder {
 /// compute pass once `endEncoding` has been called on the compute encoder).
 pub struct BlitEncoder {
     pub raw: Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>,
+    ended: bool,
 }
 
 impl BlitEncoder {
@@ -3132,15 +3133,22 @@ impl BlitEncoder {
         cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     ) -> Result<Self, MetalError> {
         let raw = cmd.blitCommandEncoder().ok_or(MetalError::NoBlitEncoder)?;
-        Ok(Self { raw })
+        Ok(Self { raw, ended: false })
     }
 
     pub fn begin(cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Self {
         Self::try_begin(cmd).expect("blit encoder")
     }
 
-    pub fn end(self) {
-        self.raw.endEncoding();
+    fn finish(&mut self) {
+        if !self.ended {
+            self.ended = true;
+            self.raw.endEncoding();
+        }
+    }
+
+    pub fn end(mut self) {
+        self.finish();
     }
 
     /// Device-to-device buffer copy.
@@ -3210,6 +3218,12 @@ impl BlitEncoder {
             dst.offset,
             src.n_bytes(),
         );
+    }
+}
+
+impl Drop for BlitEncoder {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 

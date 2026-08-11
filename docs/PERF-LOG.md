@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Qwen MoE B=16 Product GO
+
+Status: the exact packed-gate/up organization now ships through ordinary
+`qwen --requests-jsonl FILE --batch-size 16` for the qualified 35B-A3B profile.
+The adapter preserves input order, fans out common prefixes, rejects unsupported
+model/quant/state contracts, and sends incomplete cohorts through serial
+inference rather than synthetic padding.
+
+- A 16-request, 32-token product comparison emits 512 tokens byte-identically to
+  serial JSONL. B=16 decode is `3,290.190 ms` or `155.614` aggregate token/s;
+  complete process wall moves `9.437 -> 7.663 s` (`1.231x`) while retaining 16
+  serial short prefills and model load on both sides.
+- A 443-token identical-prefix fixture prefills once, snapshots in `25.839 ms`,
+  restores 15 lanes in `52.322 ms`, and completes cohort prefill in `437.705 ms`.
+  Complete wall moves `7.898 -> 3.399 s` (`2.324x`) with byte-identical output.
+- An 18-request fixture forms one exact B=16 cohort plus two serial fallbacks in
+  three compatibility buckets. Every JSON row remains byte-identical and in
+  original input order.
+- The backend keeps F16 KV and all causal state sequence-owned, restores frontiers
+  on any pre-commit exit, and poisons the cohort after committed GPU/readback
+  failure. Its persistent scratch is `17,597,056` bytes; memory admission prices
+  the remaining 15 sessions, optional snapshot, and a 2 GiB reserve without
+  double-charging already allocated executor state.
+
+Decision: promote fixed B=16 as a secondary Qwen MoE serving capability. Keep
+the architecture and quant envelope explicit; unsupported MoE models remain on
+serial or independent-queue paths. Full integration contract and measurements:
+`docs/bench/2026-08-11-qwen-moe-b16-product/README.md`.
+
 ## 2026-08-11 - Exact Qwen MoE B=16 Packed Gate/Up GO
 
 Status: compose the repaired exact GDN/Q6 organization with bitwise packed Q4

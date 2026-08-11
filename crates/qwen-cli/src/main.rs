@@ -2,9 +2,9 @@
 
 mod cli;
 mod concurrent_jsonl;
-mod dense_batch8_jsonl;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_temporal;
+mod fixed_cohort_jsonl;
 mod messages;
 mod shutdown;
 
@@ -389,7 +389,7 @@ struct Args {
     #[arg(long, hide_short_help = true, conflicts_with_all = ["prompt", "prompt_file", "messages"])]
     requests_jsonl: Option<PathBuf>,
 
-    /// Decode fixed-width JSONL cohorts; currently supports 8 on dense Qwen.
+    /// Decode fixed JSONL cohorts: 8 on dense Qwen or 16 on Qwen MoE.
     #[arg(long, hide_short_help = true, requires = "requests_jsonl")]
     batch_size: Option<usize>,
 
@@ -2296,7 +2296,7 @@ fn run() -> Result<()> {
     validate_sampling_attribution_mode(&args)?;
     validate_sampled_structural_mode(&args)?;
     validate_durable_prefix_cache_mode(&args)?;
-    dense_batch8_jsonl::validate_cli(&args, explicit_options)?;
+    fixed_cohort_jsonl::validate_cli(&args, explicit_options)?;
     concurrent_jsonl::validate_cli(&args, explicit_options)?;
     if args.request_stats_jsonl.is_some() && args.info {
         bail!(
@@ -2357,7 +2357,7 @@ fn run() -> Result<()> {
     let gguf = GgufFile::open(&model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
     let model_family = ModelFamily::detect(&gguf);
-    dense_batch8_jsonl::validate_model_family(args.batch_size, model_family)?;
+    fixed_cohort_jsonl::validate_model_family(args.batch_size, model_family)?;
     concurrent_jsonl::validate_model_family(&args, model_family)?;
     validate_deepseek_v4_multigroup_selector_family(
         args.deepseek_v4_multigroup_selector,
@@ -6429,7 +6429,7 @@ fn run_requests_jsonl(
             &mut stdout,
         )?;
     } else if args.batch_size.is_some() {
-        n_requests += dense_batch8_jsonl::run_file(
+        n_requests += fixed_cohort_jsonl::run_file(
             &loaded,
             &tokenizer,
             requests_path,

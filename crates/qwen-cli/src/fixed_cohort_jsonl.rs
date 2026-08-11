@@ -1,11 +1,116 @@
 use super::*;
 use qwen_llm::dense_batch8::DENSE_BATCH8_WIDTH;
-use qwen_llm::runtime::DenseBatch8SequenceExecutor;
+use qwen_llm::moe_batch16::MOE_BATCH16_WIDTH;
+use qwen_llm::runtime::{DenseBatch8SequenceExecutor, MoeBatch16SequenceExecutor, RuntimeError};
 
 const PAD_TOKEN: i32 = 0;
 const TRANSIENT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const PREFIX_FANOUT_MIN_TOKENS: usize = 256;
-const PREFIX_FANOUT_ENV: &str = "QWEN_DENSE_BATCH8_PREFIX_FANOUT";
+const DENSE_PREFIX_FANOUT_ENV: &str = "QWEN_DENSE_BATCH8_PREFIX_FANOUT";
+const MOE_PREFIX_FANOUT_ENV: &str = "QWEN_MOE_BATCH16_PREFIX_FANOUT";
+
+#[derive(Clone, Copy, Debug)]
+struct FixedCohortStep<const WIDTH: usize> {
+    argmax_ids: [i32; WIDTH],
+    gpu_ms: Option<f64>,
+}
+
+trait FixedCohortExecutor<const WIDTH: usize> {
+    const DISPLAY_NAME: &'static str;
+    const PREFIX_FANOUT_ENV: &'static str;
+    const COHORT_BACKEND: &'static str;
+    const PLANNER_BACKEND: &'static str;
+    const TELEMETRY_PREFIX: &'static str;
+    const PLANNER_TELEMETRY_PREFIX: &'static str;
+
+    fn validate(
+        &self,
+        token_ids: [i32; WIDTH],
+        sequences: [&mut Sequence; WIDTH],
+    ) -> Result<(), RuntimeError>;
+
+    fn step_greedy(
+        &mut self,
+        token_ids: [i32; WIDTH],
+        sequences: [&mut Sequence; WIDTH],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<FixedCohortStep<WIDTH>, RuntimeError>;
+
+    fn scratch_bytes(&self) -> Option<u64> {
+        None
+    }
+}
+
+impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_> {
+    const DISPLAY_NAME: &'static str = "dense B=8";
+    const PREFIX_FANOUT_ENV: &'static str = DENSE_PREFIX_FANOUT_ENV;
+    const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v2";
+    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v1";
+    const TELEMETRY_PREFIX: &'static str = "dense_batch8";
+    const PLANNER_TELEMETRY_PREFIX: &'static str = "dense_batch8_planner";
+
+    fn validate(
+        &self,
+        token_ids: [i32; DENSE_BATCH8_WIDTH],
+        sequences: [&mut Sequence; DENSE_BATCH8_WIDTH],
+    ) -> Result<(), RuntimeError> {
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = sequences;
+        DenseBatch8SequenceExecutor::validate(self, token_ids, [s0, s1, s2, s3, s4, s5, s6, s7])
+    }
+
+    fn step_greedy(
+        &mut self,
+        token_ids: [i32; DENSE_BATCH8_WIDTH],
+        sequences: [&mut Sequence; DENSE_BATCH8_WIDTH],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<FixedCohortStep<DENSE_BATCH8_WIDTH>, RuntimeError> {
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = sequences;
+        let step = DenseBatch8SequenceExecutor::step_greedy(
+            self,
+            token_ids,
+            [s0, s1, s2, s3, s4, s5, s6, s7],
+            cancelled,
+        )?;
+        Ok(FixedCohortStep {
+            argmax_ids: step.argmax_ids,
+            gpu_ms: step.gpu_ms,
+        })
+    }
+}
+
+impl FixedCohortExecutor<MOE_BATCH16_WIDTH> for MoeBatch16SequenceExecutor<'_> {
+    const DISPLAY_NAME: &'static str = "MoE B=16";
+    const PREFIX_FANOUT_ENV: &'static str = MOE_PREFIX_FANOUT_ENV;
+    const COHORT_BACKEND: &'static str = "qwen_moe_static_batch16_v1";
+    const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v1";
+    const TELEMETRY_PREFIX: &'static str = "moe_batch16";
+    const PLANNER_TELEMETRY_PREFIX: &'static str = "moe_batch16_planner";
+
+    fn validate(
+        &self,
+        token_ids: [i32; MOE_BATCH16_WIDTH],
+        sequences: [&mut Sequence; MOE_BATCH16_WIDTH],
+    ) -> Result<(), RuntimeError> {
+        MoeBatch16SequenceExecutor::validate(self, token_ids, sequences)
+    }
+
+    fn step_greedy(
+        &mut self,
+        token_ids: [i32; MOE_BATCH16_WIDTH],
+        sequences: [&mut Sequence; MOE_BATCH16_WIDTH],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<FixedCohortStep<MOE_BATCH16_WIDTH>, RuntimeError> {
+        let step = MoeBatch16SequenceExecutor::step_greedy(self, token_ids, sequences, cancelled)?;
+        Ok(FixedCohortStep {
+            argmax_ids: step.argmax_ids,
+            gpu_ms: step.gpu_ms,
+        })
+    }
+
+    fn scratch_bytes(&self) -> Option<u64> {
+        Some(MoeBatch16SequenceExecutor::scratch_bytes(self))
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PrefixFanoutPlan {
@@ -21,12 +126,12 @@ struct CohortCompatibility {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum PlannedWork {
-    Batch([usize; DENSE_BATCH8_WIDTH]),
+enum PlannedWork<const WIDTH: usize> {
+    Batch([usize; WIDTH]),
     Serial(usize),
 }
 
-impl PlannedWork {
+impl<const WIDTH: usize> PlannedWork<WIDTH> {
     fn first_request_index(&self) -> usize {
         match self {
             Self::Batch(indices) => indices[0],
@@ -36,8 +141,8 @@ impl PlannedWork {
 }
 
 #[derive(Debug)]
-struct CohortPlan {
-    work: Vec<PlannedWork>,
+struct CohortPlan<const WIDTH: usize> {
+    work: Vec<PlannedWork<WIDTH>>,
     compatibility_buckets: usize,
     full_cohorts: usize,
     serial_fallback_requests: usize,
@@ -79,11 +184,11 @@ impl LaneProgress {
     fn record_selection(&mut self, token: i32, stop_tokens: &[i32]) -> Result<bool> {
         ensure!(
             self.is_active(),
-            "cannot select into a finished dense B=8 lane"
+            "cannot select into a finished fixed-cohort lane"
         );
         ensure!(
             self.generated.len() < self.max_tokens,
-            "dense B=8 lane exceeded its token limit"
+            "fixed-cohort lane exceeded its token limit"
         );
         self.generated.push(token);
         if stop_tokens.contains(&token) {
@@ -104,7 +209,7 @@ impl LaneProgress {
     ) -> Result<bool> {
         ensure!(
             was_active == self.is_active(),
-            "dense B=8 active-lane snapshot drifted"
+            "fixed-cohort active-lane snapshot drifted"
         );
         if was_active {
             self.logical_transitions += 1;
@@ -118,15 +223,15 @@ impl LaneProgress {
     fn validate_complete(&self, physical_batch_steps: usize) -> Result<()> {
         ensure!(
             self.stop_reason.is_some(),
-            "dense B=8 lane did not terminate"
+            "fixed-cohort lane did not terminate"
         );
         ensure!(
             self.logical_transitions.checked_add(1) == Some(self.generated.len()),
-            "dense B=8 lane violated N-1 transition semantics"
+            "fixed-cohort lane violated N-1 transition semantics"
         );
         ensure!(
             self.logical_transitions + self.padding_transitions == physical_batch_steps,
-            "dense B=8 physical transition accounting drifted"
+            "fixed-cohort physical transition accounting drifted"
         );
         Ok(())
     }
@@ -173,6 +278,10 @@ struct CohortTelemetry {
     memory_admission_reserve_bytes: u64,
     memory_admission_required_bytes: Option<u64>,
     memory_admission_reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executor_scratch_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    executor_scratch_incremental_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -266,7 +375,11 @@ fn cohort_compatibility(
     })
 }
 
-fn plan_request_work(requests: &[PreparedJsonlRequest], args: &Args) -> Result<CohortPlan> {
+fn plan_request_work<const WIDTH: usize>(
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+) -> Result<CohortPlan<WIDTH>> {
+    ensure!(WIDTH > 0, "fixed-cohort planner width must be nonzero");
     let mut buckets: Vec<(CohortCompatibility, Vec<usize>)> = Vec::new();
     for (index, request) in requests.iter().enumerate() {
         let key = cohort_compatibility(request, args)?;
@@ -282,10 +395,10 @@ fn plan_request_work(requests: &[PreparedJsonlRequest], args: &Args) -> Result<C
     let mut full_cohorts = 0usize;
     let mut serial_fallback_requests = 0usize;
     for (_, indices) in buckets {
-        let mut cohorts = indices.chunks_exact(DENSE_BATCH8_WIDTH);
+        let mut cohorts = indices.chunks_exact(WIDTH);
         for cohort in &mut cohorts {
             work.push(PlannedWork::Batch(
-                cohort.try_into().expect("exact dense B=8 planner chunk"),
+                cohort.try_into().expect("exact fixed-cohort planner chunk"),
             ));
             full_cohorts += 1;
         }
@@ -297,10 +410,10 @@ fn plan_request_work(requests: &[PreparedJsonlRequest], args: &Args) -> Result<C
     work.sort_by_key(PlannedWork::first_request_index);
     ensure!(
         full_cohorts
-            .checked_mul(DENSE_BATCH8_WIDTH)
+            .checked_mul(WIDTH)
             .and_then(|batched| batched.checked_add(serial_fallback_requests))
             == Some(requests.len()),
-        "dense B=8 planner request accounting drifted"
+        "fixed-cohort planner request accounting drifted"
     );
     Ok(CohortPlan {
         work,
@@ -315,8 +428,8 @@ pub(super) fn validate_cli(args: &Args, explicit: ExplicitCliOptions) -> Result<
         return Ok(());
     };
     ensure!(
-        batch_size == DENSE_BATCH8_WIDTH,
-        "--batch-size currently requires {DENSE_BATCH8_WIDTH}, got {batch_size}"
+        matches!(batch_size, DENSE_BATCH8_WIDTH | MOE_BATCH16_WIDTH),
+        "--batch-size supports only {DENSE_BATCH8_WIDTH} (dense Qwen) or {MOE_BATCH16_WIDTH} (Qwen MoE), got {batch_size}"
     );
     ensure!(!args.info, "--batch-size cannot be used with --info");
     let requests_path = args
@@ -357,15 +470,21 @@ pub(super) fn validate_cli(args: &Args, explicit: ExplicitCliOptions) -> Result<
         args.durable_prefix_cache.is_none(),
         "--batch-size does not yet compose with durable prefix caching"
     );
-    validate_greedy_gpu_mode(configured_greedy_gpu_argmax_mode())?;
+    validate_greedy_gpu_mode(configured_greedy_gpu_argmax_mode(), args.batch_size)?;
     Ok(())
 }
 
-fn validate_greedy_gpu_mode(mode: GreedyGpuArgmaxMode) -> Result<()> {
-    ensure!(
-        mode != GreedyGpuArgmaxMode::ExplicitRollback,
-        "{GREEDY_GPU_ARGMAX_ENV}=0 disables --batch-size because fixed B=8 requires GPU greedy selection"
-    );
+fn validate_greedy_gpu_mode(mode: GreedyGpuArgmaxMode, batch_size: Option<usize>) -> Result<()> {
+    if mode == GreedyGpuArgmaxMode::ExplicitRollback {
+        if batch_size == Some(DENSE_BATCH8_WIDTH) {
+            bail!(
+                "{GREEDY_GPU_ARGMAX_ENV}=0 disables --batch-size because fixed B=8 requires GPU greedy selection"
+            );
+        }
+        bail!(
+            "{GREEDY_GPU_ARGMAX_ENV}=0 disables --batch-size because MoE B=16 requires GPU greedy selection"
+        );
+    }
     Ok(())
 }
 
@@ -374,8 +493,13 @@ pub(super) fn validate_model_family(
     model_family: Option<ModelFamily>,
 ) -> Result<()> {
     ensure!(
-        batch_size.is_none() || model_family == Some(ModelFamily::Qwen35),
-        "--batch-size currently requires a dense Qwen model"
+        match batch_size {
+            None => true,
+            Some(DENSE_BATCH8_WIDTH) => model_family == Some(ModelFamily::Qwen35),
+            Some(MOE_BATCH16_WIDTH) => model_family == Some(ModelFamily::Qwen35Moe),
+            Some(_) => false,
+        },
+        "unsupported --batch-size/model combination: batch size 8 requires qwen35 (dense), and batch size 16 requires qwen35moe"
     );
     Ok(())
 }
@@ -388,30 +512,88 @@ pub(super) fn run_file(
     greedy_gpu_mode: GreedyGpuArgmaxMode,
     stdout: &mut impl Write,
 ) -> Result<usize> {
-    validate_greedy_gpu_mode(greedy_gpu_mode)?;
+    validate_greedy_gpu_mode(greedy_gpu_mode, args.batch_size)?;
+    let requests_metadata = std::fs::metadata(requests_path)
+        .with_context(|| format!("inspect requests JSONL {}", requests_path.display()))?;
+    ensure!(
+        requests_metadata.is_file(),
+        "--batch-size requires a regular JSONL file, got {}",
+        requests_path.display()
+    );
     let requests = prepare_jsonl_requests(requests_path, tokenizer, args)?;
     validate_requests(&requests, args)?;
-    let plan = plan_request_work(&requests, args)?;
+    match args.batch_size {
+        Some(DENSE_BATCH8_WIDTH) => {
+            let plan = plan_request_work::<DENSE_BATCH8_WIDTH>(&requests, args)?;
+            let executor = if plan.full_cohorts > 0 {
+                Some(
+                    loaded
+                        .create_dense_batch8_executor()
+                        .context("create dense B=8 executor")?,
+                )
+            } else {
+                None
+            };
+            run_fixed_cohort_file(
+                loaded,
+                tokenizer,
+                &requests,
+                args,
+                greedy_gpu_mode,
+                stdout,
+                plan,
+                executor,
+            )
+        }
+        Some(MOE_BATCH16_WIDTH) => {
+            let plan = plan_request_work::<MOE_BATCH16_WIDTH>(&requests, args)?;
+            let executor = if plan.full_cohorts > 0 {
+                Some(
+                    loaded
+                        .create_moe_batch16_executor()
+                        .context("create MoE B=16 executor")?,
+                )
+            } else {
+                None
+            };
+            run_fixed_cohort_file(
+                loaded,
+                tokenizer,
+                &requests,
+                args,
+                greedy_gpu_mode,
+                stdout,
+                plan,
+                executor,
+            )
+        }
+        Some(batch_size) => bail!("unsupported fixed-cohort batch size {batch_size}"),
+        None => bail!("fixed-cohort JSONL execution requires --batch-size"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
+    loaded: &LoadedModel,
+    tokenizer: &Tokenizer,
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+    greedy_gpu_mode: GreedyGpuArgmaxMode,
+    stdout: &mut impl Write,
+    plan: CohortPlan<WIDTH>,
+    mut executor: Option<E>,
+) -> Result<usize> {
     let stop_tokens = loaded
         .gguf()
         .stop_token_ids()
         .context("load producer-declared stop tokens")?;
-    let mut executor = if plan.full_cohorts > 0 {
-        Some(
-            loaded
-                .create_dense_batch8_executor()
-                .context("create dense B=8 executor")?,
-        )
-    } else {
-        None
-    };
     let planner_telemetry = PlannerTelemetry {
         schema_version: 1,
-        backend: "dense_qwen_fixed_cohort_planner_v1",
+        backend: E::PLANNER_BACKEND,
         requests: requests.len(),
         compatibility_buckets: plan.compatibility_buckets,
         full_cohorts: plan.full_cohorts,
-        batched_requests: plan.full_cohorts * DENSE_BATCH8_WIDTH,
+        batched_requests: plan.full_cohorts * WIDTH,
         serial_fallback_requests: plan.serial_fallback_requests,
         output_order: "input",
     };
@@ -429,32 +611,38 @@ pub(super) fn run_file(
                 let (outputs, telemetry) = run_cohort(
                     loaded,
                     tokenizer,
-                    executor.as_mut().expect("planned dense B=8 executor"),
+                    executor.as_mut().expect("planned fixed-cohort executor"),
                     &cohort,
                     args,
                     &stop_tokens,
                     cohort_index,
                 )
-                .with_context(|| format!("run dense B=8 cohort {cohort_index}"))?;
+                .with_context(|| format!("run {} cohort {cohort_index}", E::DISPLAY_NAME))?;
                 for (index, output) in indices.into_iter().zip(outputs) {
                     ensure!(
                         pending_outputs[index].replace(output).is_none(),
-                        "dense B=8 planner produced request {index} twice"
+                        "{} planner produced request {index} twice",
+                        E::DISPLAY_NAME
                     );
                 }
                 eprintln!(
-                    "dense_batch8: {}",
-                    serde_json::to_string(&telemetry).context("serialize dense B=8 telemetry")?
+                    "{}: {}",
+                    E::TELEMETRY_PREFIX,
+                    serde_json::to_string(&telemetry)
+                        .with_context(|| format!("serialize {} telemetry", E::DISPLAY_NAME))?
                 );
                 cohort_index += 1;
             }
             PlannedWork::Serial(index) => {
                 let (output, _) =
                     run_jsonl_request(loaded, tokenizer, &requests[index], args, greedy_gpu_mode)
-                        .with_context(|| format!("run dense B=8 serial fallback request {index}"))?;
+                        .with_context(|| {
+                        format!("run {} serial fallback request {index}", E::DISPLAY_NAME)
+                    })?;
                 ensure!(
                     pending_outputs[index].replace(output).is_none(),
-                    "dense B=8 planner produced request {index} twice"
+                    "{} planner produced request {index} twice",
+                    E::DISPLAY_NAME
                 );
             }
         }
@@ -463,13 +651,15 @@ pub(super) fn run_file(
     }
     ensure!(
         completed == requests.len() && next_output == requests.len(),
-        "dense B=8 planner completed {completed}/{} requests",
+        "{} planner completed {completed}/{} requests",
+        E::DISPLAY_NAME,
         requests.len()
     );
     eprintln!(
-        "dense_batch8_planner: {}",
+        "{}: {}",
+        E::PLANNER_TELEMETRY_PREFIX,
         serde_json::to_string(&planner_telemetry)
-            .context("serialize dense B=8 planner telemetry")?
+            .with_context(|| format!("serialize {} planner telemetry", E::DISPLAY_NAME))?
     );
     Ok(completed)
 }
@@ -489,7 +679,7 @@ fn flush_ready_outputs(
     if !encoded.is_empty() {
         stdout
             .write_all(&encoded)
-            .context("write dense B=8 ordered outputs")?;
+            .context("write fixed-cohort ordered outputs")?;
         stdout.flush()?;
     }
     Ok(*next - start)
@@ -498,7 +688,7 @@ fn flush_ready_outputs(
 fn validate_requests(requests: &[PreparedJsonlRequest], args: &Args) -> Result<()> {
     ensure!(
         !requests.is_empty(),
-        "--batch-size {DENSE_BATCH8_WIDTH} requires at least one request"
+        "--batch-size requires at least one request"
     );
     for request in requests {
         ensure!(
@@ -514,7 +704,7 @@ fn validate_requests(requests: &[PreparedJsonlRequest], args: &Args) -> Result<(
         );
         ensure!(
             request.auto_cache_prefix_tokens.is_none() && request.auto_cache_future_hits == 0,
-            "request {} carried prefix-cache lookahead into dense B=8 admission",
+            "request {} carried prefix-cache lookahead into fixed-cohort admission",
             request.id
         );
         jsonl_generation_capacity(request, args)?;
@@ -522,11 +712,11 @@ fn validate_requests(requests: &[PreparedJsonlRequest], args: &Args) -> Result<(
     Ok(())
 }
 
-fn run_cohort(
+fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     loaded: &LoadedModel,
     tokenizer: &Tokenizer,
-    executor: &mut DenseBatch8SequenceExecutor<'_>,
-    requests: &[&PreparedJsonlRequest; DENSE_BATCH8_WIDTH],
+    executor: &mut E,
+    requests: &[&PreparedJsonlRequest; WIDTH],
     args: &Args,
     stop_tokens: &[i32],
     cohort_index: usize,
@@ -535,34 +725,48 @@ fn run_cohort(
     let (requested_tokens, capacity) = jsonl_generation_capacity(requests[0], args)?;
     let chunk = match args.prefill_chunk {
         PrefillChunkArg::Fixed(requested) => requested.min(prompt_tokens.max(1)),
-        PrefillChunkArg::Auto => bail!("dense B=8 requires a fixed prefill chunk"),
+        PrefillChunkArg::Auto => bail!("{} requires a fixed prefill chunk", E::DISPLAY_NAME),
     };
-    ensure!(chunk > 0, "dense B=8 prefill chunk must be nonzero");
+    ensure!(
+        chunk > 0,
+        "{} prefill chunk must be nonzero",
+        E::DISPLAY_NAME
+    );
     let mut prefix_fanout = align_prefix_fanout(
         plan_prefix_fanout(
             requests,
-            parse_prefix_fanout_enabled(std::env::var_os(PREFIX_FANOUT_ENV).as_deref()),
+            parse_prefix_fanout_enabled(std::env::var_os(E::PREFIX_FANOUT_ENV).as_deref()),
         ),
         prompt_tokens,
         chunk,
     );
 
     let mut scratch = allocate_legacy_prefill_scratch(loaded, chunk, prompt_tokens)?;
-    let mut sequences = Vec::with_capacity(DENSE_BATCH8_WIDTH);
+    let mut sequences = Vec::with_capacity(WIDTH);
     let before_first_sequence = loaded.context().current_allocated_size();
     sequences.push(
         loaded
             .create_sequence(SequenceConfig::new(capacity))
-            .context("allocate first dense B=8 sequence")?,
+            .with_context(|| format!("allocate first {} sequence", E::DISPLAY_NAME))?,
     );
     let after_first_sequence = loaded.context().current_allocated_size();
     let sequence_allocation_delta_bytes = after_first_sequence
         .checked_sub(before_first_sequence)
         .filter(|&bytes| bytes > 0)
-        .context("dense B=8 sequence allocation did not produce a valid Metal byte delta")?;
+        .with_context(|| {
+            format!(
+                "{} sequence allocation did not produce a valid Metal byte delta",
+                E::DISPLAY_NAME
+            )
+        })?;
     let remaining_sequence_required_bytes = sequence_allocation_delta_bytes
-        .checked_mul((DENSE_BATCH8_WIDTH - 1) as u64)
-        .context("dense B=8 remaining sequence byte estimate overflow")?;
+        .checked_mul((WIDTH - 1) as u64)
+        .with_context(|| {
+            format!(
+                "{} remaining sequence byte estimate overflow",
+                E::DISPLAY_NAME
+            )
+        })?;
     let mut prefix_snapshot_required_bytes = if prefix_fanout.selected_prefix_tokens > 0 {
         loaded
             .estimate_checkpoint_boundary_sizes(
@@ -571,14 +775,14 @@ fn run_cohort(
                 false,
                 false,
             )
-            .context("estimate dense B=8 prefix fanout snapshot")?
+            .with_context(|| format!("estimate {} prefix fanout snapshot", E::DISPLAY_NAME))?
             .snapshot_bytes
     } else {
         0
     };
     let mut memory_admission_incremental_bytes = remaining_sequence_required_bytes
         .checked_add(prefix_snapshot_required_bytes)
-        .context("dense B=8 fanout admission byte overflow")?;
+        .with_context(|| format!("{} fanout admission byte overflow", E::DISPLAY_NAME))?;
     let mut memory_admission = evaluate_metal_memory_admission(
         memory_admission_incremental_bytes,
         TRANSIENT_RESERVE_BYTES,
@@ -602,23 +806,24 @@ fn run_cohort(
     }
     ensure!(
         memory_admission.admitted,
-        "dense B=8 memory admission denied: reason={} required_bytes={:?} working_set_headroom_bytes={:?} process_limit_remaining_bytes={:?}",
+        "{} memory admission denied: reason={} required_bytes={:?} working_set_headroom_bytes={:?} process_limit_remaining_bytes={:?}",
+        E::DISPLAY_NAME,
         memory_admission.reason.as_str(),
         memory_admission.required_bytes,
         memory_admission.working_set_headroom_bytes,
         memory_admission.signals.process_limit_remaining_bytes,
     );
-    for _ in 1..DENSE_BATCH8_WIDTH {
+    for _ in 1..WIDTH {
         sequences.push(
             loaded
                 .create_sequence(SequenceConfig::new(capacity))
-                .context("allocate admitted dense B=8 sequence")?,
+                .with_context(|| format!("allocate admitted {} sequence", E::DISPLAY_NAME))?,
         );
     }
 
     let forward = loaded.forward();
     let prefill_t0 = Instant::now();
-    let mut prompt_logits = Vec::with_capacity(DENSE_BATCH8_WIDTH);
+    let mut prompt_logits = Vec::with_capacity(WIDTH);
     let mut prefix_snapshot_bytes = 0u64;
     let mut prefix_prefill_ms = 0.0;
     let mut prefix_snapshot_ms = 0.0;
@@ -633,7 +838,7 @@ fn run_cohort(
             &requests[0].prompt_ids[..prefix_len],
             0,
         )
-        .context("prefill dense B=8 shared prefix")?;
+        .with_context(|| format!("prefill {} shared prefix", E::DISPLAY_NAME))?;
         prefix_prefill_ms = ms;
 
         let snapshot_t0 = Instant::now();
@@ -644,17 +849,18 @@ fn run_cohort(
                 None,
                 None,
             )
-            .context("capture dense B=8 shared prefix")?;
+            .with_context(|| format!("capture {} shared prefix", E::DISPLAY_NAME))?;
         prefix_snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
         prefix_snapshot_bytes = prepared.snapshot_bytes();
         ensure!(
             prefix_snapshot_bytes == prefix_snapshot_required_bytes,
-            "dense B=8 prefix snapshot bytes {} != estimate {}",
+            "{} prefix snapshot bytes {} != estimate {}",
+            E::DISPLAY_NAME,
             prefix_snapshot_bytes,
             prefix_snapshot_required_bytes,
         );
 
-        for slot in 0..DENSE_BATCH8_WIDTH {
+        for slot in 0..WIDTH {
             shutdown::checkpoint()?;
             if slot > 0 {
                 let restore_t0 = Instant::now();
@@ -664,12 +870,15 @@ fn run_cohort(
                         &mut sequences[slot],
                         &requests[slot].prompt_ids,
                     )
-                    .with_context(|| format!("restore dense B=8 shared prefix into slot {slot}"))?;
+                    .with_context(|| {
+                        format!("restore {} shared prefix into slot {slot}", E::DISPLAY_NAME)
+                    })?;
                 prefix_restore_ms += restore_t0.elapsed().as_secs_f64() * 1e3;
                 ensure!(
                     restored.matched_prefix_len == prefix_len
                         && restored.restored_prefix_len == prefix_len,
-                    "dense B=8 slot {slot} restored an unexpected prefix boundary"
+                    "{} slot {slot} restored an unexpected prefix boundary",
+                    E::DISPLAY_NAME
                 );
             }
             let suffix = &requests[slot].prompt_ids[prefix_len..];
@@ -683,7 +892,9 @@ fn run_cohort(
                     suffix,
                     prefix_len,
                 )
-                .with_context(|| format!("prefill dense B=8 cohort suffix slot {slot}"))?;
+                .with_context(|| {
+                    format!("prefill {} cohort suffix slot {slot}", E::DISPLAY_NAME)
+                })?;
                 suffix_prefill_ms += ms;
                 prompt_logits.push(logits);
             }
@@ -693,7 +904,7 @@ fn run_cohort(
             shutdown::checkpoint()?;
             let (logits, ms) =
                 prefill_span(&forward, sequence, &mut scratch, &request.prompt_ids, 0)
-                    .with_context(|| format!("prefill dense B=8 cohort slot {slot}"))?;
+                    .with_context(|| format!("prefill {} cohort slot {slot}", E::DISPLAY_NAME))?;
             suffix_prefill_ms += ms;
             prompt_logits.push(logits);
         }
@@ -701,27 +912,23 @@ fn run_cohort(
     let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
     drop(scratch);
     {
-        let sequences: &mut [Sequence; DENSE_BATCH8_WIDTH] = sequences
+        let sequences: &mut [Sequence; WIDTH] = sequences
             .as_mut_slice()
             .try_into()
-            .expect("dense B=8 sequence width");
-        let [s0, s1, s2, s3, s4, s5, s6, s7] = sequences;
+            .expect("fixed-cohort sequence width");
         executor
-            .validate(
-                [PAD_TOKEN; DENSE_BATCH8_WIDTH],
-                [s0, s1, s2, s3, s4, s5, s6, s7],
-            )
-            .context("validate dense B=8 cohort backend")?;
+            .validate([PAD_TOKEN; WIDTH], sequences.each_mut())
+            .with_context(|| format!("validate {} cohort backend", E::DISPLAY_NAME))?;
     }
 
     let decode_t0 = Instant::now();
-    let mut lanes = Vec::with_capacity(DENSE_BATCH8_WIDTH);
+    let mut lanes = Vec::with_capacity(WIDTH);
     for ((request, sequence), logits) in requests.iter().zip(sequences).zip(prompt_logits) {
-        let mut sampler =
-            Sampler::new(request.sampling).context("initialize dense B=8 greedy sampler")?;
+        let mut sampler = Sampler::new(request.sampling)
+            .with_context(|| format!("initialize {} greedy sampler", E::DISPLAY_NAME))?;
         let first = sampler
             .sample(&logits)
-            .context("select dense B=8 first token")?
+            .with_context(|| format!("select {} first token", E::DISPLAY_NAME))?
             .token;
         let mut progress = LaneProgress::new(requested_tokens);
         let visible = progress.record_selection(first, stop_tokens)?;
@@ -743,29 +950,18 @@ fn run_cohort(
     let mut executor_gpu_ms = Some(0.0);
     while lanes.iter().any(|lane| lane.progress.is_active()) {
         shutdown::checkpoint()?;
-        let active: [bool; DENSE_BATCH8_WIDTH] =
-            std::array::from_fn(|slot| lanes[slot].progress.is_active());
-        let token_ids: [i32; DENSE_BATCH8_WIDTH] =
+        let active: [bool; WIDTH] = std::array::from_fn(|slot| lanes[slot].progress.is_active());
+        let token_ids: [i32; WIDTH] =
             std::array::from_fn(|slot| lanes[slot].progress.transition_token());
         let transition_t0 = Instant::now();
         let step = {
-            let lanes: &mut [Lane; DENSE_BATCH8_WIDTH] = lanes
+            let lanes: &mut [Lane; WIDTH] = lanes
                 .as_mut_slice()
                 .try_into()
-                .expect("dense B=8 lane width");
-            let [l0, l1, l2, l3, l4, l5, l6, l7] = lanes;
+                .expect("fixed-cohort lane width");
             executor.step_greedy(
                 token_ids,
-                [
-                    &mut l0.sequence,
-                    &mut l1.sequence,
-                    &mut l2.sequence,
-                    &mut l3.sequence,
-                    &mut l4.sequence,
-                    &mut l5.sequence,
-                    &mut l6.sequence,
-                    &mut l7.sequence,
-                ],
+                lanes.each_mut().map(|lane| &mut lane.sequence),
                 || shutdown::checkpoint().is_err(),
             )?
         };
@@ -806,20 +1002,21 @@ fn run_cohort(
     } else {
         0.0
     };
-    let mut outputs = Vec::with_capacity(DENSE_BATCH8_WIDTH);
+    let mut outputs = Vec::with_capacity(WIDTH);
     for lane in lanes {
         lane.progress
             .validate_complete(physical_batch_steps)
-            .with_context(|| format!("validate dense B=8 lane {}", lane.id))?;
+            .with_context(|| format!("validate {} lane {}", E::DISPLAY_NAME, lane.id))?;
         ensure!(
             lane.sequence.position() == lane.prompt_tokens + physical_batch_steps,
-            "dense B=8 lane {} sequence frontier drifted",
+            "{} lane {} sequence frontier drifted",
+            E::DISPLAY_NAME,
             lane.id
         );
         let stop_reason = lane
             .progress
             .stop_reason
-            .expect("validated dense B=8 lane termination");
+            .expect("validated fixed-cohort lane termination");
         outputs.push(RequestOutput {
             id: lane.id,
             prompt_tokens: lane.prompt_tokens,
@@ -834,9 +1031,9 @@ fn run_cohort(
         outputs,
         CohortTelemetry {
             schema_version: 2,
-            backend: "dense_qwen_static_batch8_v2",
+            backend: E::COHORT_BACKEND,
             cohort_index,
-            width: DENSE_BATCH8_WIDTH,
+            width: WIDTH,
             prompt_tokens_per_request: prompt_tokens,
             requested_tokens_per_request: requested_tokens,
             generated_tokens,
@@ -864,6 +1061,12 @@ fn run_cohort(
             memory_admission_reserve_bytes: memory_admission.reserve_bytes,
             memory_admission_required_bytes: memory_admission.required_bytes,
             memory_admission_reason: memory_admission.reason.as_str(),
+            executor_scratch_bytes: executor.scratch_bytes(),
+            // The executor is created before the first sequence delta and this
+            // admission snapshot, so its persistent Metal arena is already in
+            // current_allocated_size and memory_signals. Adding it here would
+            // charge the MoE scratch twice.
+            executor_scratch_incremental_bytes: executor.scratch_bytes().map(|_| 0),
         },
     ))
 }
@@ -926,13 +1129,34 @@ mod tests {
         validate_model_family(args.batch_size, Some(ModelFamily::Qwen35)).unwrap();
         assert!(validate_model_family(args.batch_size, Some(ModelFamily::Qwen35Moe)).is_err());
         assert!(validate_model_family(args.batch_size, Some(ModelFamily::DeepSeek4)).is_err());
+        validate_model_family(Some(16), Some(ModelFamily::Qwen35Moe)).unwrap();
+        assert!(validate_model_family(Some(16), Some(ModelFamily::Qwen35)).is_err());
+        assert!(validate_model_family(Some(16), Some(ModelFamily::DeepSeek4)).is_err());
+        let mut moe_args = test_args();
+        moe_args.batch_size = Some(MOE_BATCH16_WIDTH);
+        validate_cli(&moe_args, ExplicitCliOptions::default()).unwrap();
         assert_eq!(
             parse_greedy_gpu_argmax_mode(Some(OsStr::new("0"))),
             GreedyGpuArgmaxMode::ExplicitRollback
         );
-        assert!(validate_greedy_gpu_mode(GreedyGpuArgmaxMode::ExplicitRollback).is_err());
-        validate_greedy_gpu_mode(GreedyGpuArgmaxMode::DefaultOff).unwrap();
-        validate_greedy_gpu_mode(GreedyGpuArgmaxMode::ForceEnabled).unwrap();
+        assert!(
+            validate_greedy_gpu_mode(
+                GreedyGpuArgmaxMode::ExplicitRollback,
+                Some(DENSE_BATCH8_WIDTH)
+            )
+            .is_err()
+        );
+        assert!(
+            validate_greedy_gpu_mode(
+                GreedyGpuArgmaxMode::ExplicitRollback,
+                Some(MOE_BATCH16_WIDTH)
+            )
+            .is_err()
+        );
+        validate_greedy_gpu_mode(GreedyGpuArgmaxMode::DefaultOff, Some(DENSE_BATCH8_WIDTH))
+            .unwrap();
+        validate_greedy_gpu_mode(GreedyGpuArgmaxMode::ForceEnabled, Some(MOE_BATCH16_WIDTH))
+            .unwrap();
 
         let mut invalid = test_args();
         invalid.batch_size = Some(4);
@@ -972,7 +1196,7 @@ mod tests {
         requests.push(prepared("a-underfill", &[1, 2]));
         requests.push(prepared("c-underfill", &[1, 2, 3, 4]));
         validate_requests(&requests, &args).unwrap();
-        let plan = plan_request_work(&requests, &args).unwrap();
+        let plan = plan_request_work::<DENSE_BATCH8_WIDTH>(&requests, &args).unwrap();
         assert_eq!(plan.compatibility_buckets, 3);
         assert_eq!(plan.full_cohorts, 2);
         assert_eq!(plan.serial_fallback_requests, 2);
@@ -985,7 +1209,7 @@ mod tests {
                 PlannedWork::Serial(17),
             ]
         );
-        let underfill = plan_request_work(&requests[..7], &args).unwrap();
+        let underfill = plan_request_work::<DENSE_BATCH8_WIDTH>(&requests[..7], &args).unwrap();
         assert_eq!(underfill.full_cohorts, 0);
         assert_eq!(underfill.serial_fallback_requests, 7);
 
@@ -997,10 +1221,42 @@ mod tests {
     }
 
     #[test]
-    fn prefix_fanout_requires_an_eight_way_minimum_prefix() {
+    fn planner_forms_exact_sixteen_way_cohorts_and_serializes_remainders() {
+        let mut args = test_args();
+        args.batch_size = Some(MOE_BATCH16_WIDTH);
+        let mut requests = (0..MOE_BATCH16_WIDTH)
+            .map(|slot| prepared(&format!("full-{slot}"), &[1, 2, 3]))
+            .collect::<Vec<_>>();
+        let mut heterogeneous = prepared("heterogeneous", &[1, 2, 3, 4]);
+        heterogeneous.request.tokens = Some(7);
+        requests.push(heterogeneous);
+        requests.push(prepared("underfill", &[1, 2, 3]));
+
+        let plan = plan_request_work::<MOE_BATCH16_WIDTH>(&requests, &args).unwrap();
+        assert_eq!(plan.compatibility_buckets, 2);
+        assert_eq!(plan.full_cohorts, 1);
+        assert_eq!(plan.serial_fallback_requests, 2);
+        assert_eq!(
+            plan.work,
+            vec![
+                PlannedWork::Batch([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
+                PlannedWork::Serial(16),
+                PlannedWork::Serial(17),
+            ]
+        );
+
+        let underfill = plan_request_work::<MOE_BATCH16_WIDTH>(&requests[..15], &args).unwrap();
+        assert_eq!(underfill.full_cohorts, 0);
+        assert_eq!(underfill.serial_fallback_requests, 15);
+    }
+
+    #[test]
+    fn prefix_fanout_requires_and_aligns_a_shared_minimum_prefix() {
         assert!(parse_prefix_fanout_enabled(None));
         assert!(parse_prefix_fanout_enabled(Some(OsStr::new("1"))));
         assert!(!parse_prefix_fanout_enabled(Some(OsStr::new("off"))));
+        assert_eq!(DENSE_PREFIX_FANOUT_ENV, "QWEN_DENSE_BATCH8_PREFIX_FANOUT");
+        assert_eq!(MOE_PREFIX_FANOUT_ENV, "QWEN_MOE_BATCH16_PREFIX_FANOUT");
         let shared = (0..PREFIX_FANOUT_MIN_TOKENS as i32).collect::<Vec<_>>();
         let requests = (0..DENSE_BATCH8_WIDTH)
             .map(|slot| {

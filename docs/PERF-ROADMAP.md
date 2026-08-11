@@ -2813,6 +2813,16 @@ decode reaches `2.57x` aggregate throughput at short context and `2.14x` at 16K.
 Independent-queue overlap remains the cross-family fallback (`1.44x` 0.8B,
 `1.47x` A3B, `1.37x` DeepSeek K160 at B=2).
 
+Qualified Qwen 35B-A3B now also ships an exact fixed B=16 executor. The product
+path preserves serial JSON byte-for-byte, reaches `155.614` aggregate token/s on
+16 x 32-token generation, and improves complete process wall
+`9.437 -> 7.663 s` (`1.231x`) despite serial per-lane prefill. Common-prefix
+fanout composes directly: a 443-token identical-prefix fixture moves
+`7.898 -> 3.399 s` (`2.324x`). Keep width 16, the frozen architecture/quant
+envelope, F16 KV, full-cohort requirement, model-derived admission, and serial
+remainders. The exact executor is a serving capability, not a replacement for
+single-stream decode.
+
 The fallback now clears a generated-continuation gate rather than only a
 teacher-forced transition. Across two distinct 32-step greedy streams, A3B
 retains exact IDs and final logits at `1.378x`; DeepSeek K160 retains exact IDs
@@ -2888,7 +2898,7 @@ existing token-axis grid already realizes cache/fabric reuse, and added live sta
 consumes the proposed gain. Do not widen to T=4 without a different measured
 mechanism.
 
-Exact packed Q4 routed gate/up now changes the Qwen MoE B=16 product decision.
+Exact packed Q4 routed gate/up changed the Qwen MoE B=16 product decision.
 Keep route/top-k, Q5 down, shared experts, attention, GDN, and the Q6 head on their
 exact production-compatible organizations; pack only hidden rows plus ordered
 top-k IDs, compute bitwise routed inners once across the cohort, then return each
@@ -2897,8 +2907,9 @@ inner to its owning session before production down/final waves. Three final
 `150.300` is `1.194659x` the frozen queue control, and every logit, residual,
 generated hash, and final causal snapshot is exact. Authorize a sibling fixed-
 B=16 Qwen MoE JSONL executor with prefix fanout, admission, ordered output,
-cancellation/poisoning, and incomplete-cohort serial fallback. Require the
-integrated path to retain a practical lead over independent queues.
+cancellation/poisoning, and incomplete-cohort serial fallback. The integrated
+path now clears that gate at `155.614` aggregate token/s and `1.231x` complete
+process wall over ordinary serial JSONL, with byte-identical outputs.
 
 DeepSeek K160 common-route B=8 is also closed at its cheapest model-backed
 floor. Giving all eight rows the same six experts, the production all-slot
@@ -2962,10 +2973,10 @@ for aggregate throughput.
   residency control
   for the unexplained first-prefill gap; do not infer a residency program from
   the aggregate gap alone.
-- Dense fixed-cohort B=8 and shared-prefix fanout are active secondary serving
-  capabilities. Qwen MoE static B=8 is closed as described above; independent
-  streams and future paged attention remain in this lane. Their serving evidence
-  does not rank against serial BS=1.
+- Dense fixed-cohort B=8, qualified Qwen MoE B=16, and shared-prefix fanout are
+  active secondary serving capabilities. Qwen MoE static B=8 remains closed as
+  described above; independent streams and future paged attention remain in
+  this lane. Their serving evidence does not rank against serial BS=1.
 - Defer ICB/MTL4, binary archives, no-copy loading, and residency sets as warm
   throughput priorities. Revisit them for process-cold load or memory objectives.
 

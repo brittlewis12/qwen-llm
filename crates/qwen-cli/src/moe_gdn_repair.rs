@@ -11,7 +11,8 @@ use qwen_llm::{
     loader::Model,
     metal::{
         BlitEncoder, KernelEncoder, MetalContext, MetalTensor, encode_argmax_f32,
-        encode_get_rows_f32, encode_mat_vec_q6_k_batch_f32, encode_rms_norm_mul_f32,
+        encode_get_rows_f32, encode_mat_vec_q6_k_batch_f32,
+        encode_moe_swiglu_q4_K_f32_packed_slots, encode_rms_norm_mul_f32,
         evaluate_metal_memory_admission,
     },
     metal_dflash::prefill_tokens_with_multi_hidden,
@@ -52,6 +53,8 @@ struct Scratch {
     rows: MetalTensor,
     logits: MetalTensor,
     argmax: MetalTensor,
+    moe_topk_idx: MetalTensor,
+    moe_inner: MetalTensor,
     gdn: GdnLayerReplayScratch,
 }
 
@@ -63,6 +66,8 @@ impl Scratch {
         let head_dim = model.arch.gdn_head_dim as usize;
         let conv_dim = (2 * n_k + n_v) * head_dim;
         let v_dim = n_v * head_dim;
+        let topk = model.arch.expert_used_count.min(model.arch.expert_count) as usize;
+        let f_exp = model.arch.expert_feed_forward_length as usize;
         Ok(Self {
             ids: MetalTensor::zeros_i32(ctx, vec![BATCH as u64])?,
             rows: MetalTensor::zeros_f32(ctx, vec![(BATCH * h) as u64])?,
@@ -71,6 +76,8 @@ impl Scratch {
                 vec![(BATCH * model.arch.vocab_size as usize) as u64],
             )?,
             argmax: MetalTensor::zeros_i32(ctx, vec![BATCH as u64])?,
+            moe_topk_idx: MetalTensor::zeros_i32(ctx, vec![(BATCH * topk) as u64])?,
+            moe_inner: MetalTensor::zeros_f32(ctx, vec![(BATCH * topk * f_exp) as u64])?,
             gdn: GdnLayerReplayScratch::new(ctx, BATCH, h, conv_dim, v_dim)?,
         })
     }
@@ -230,7 +237,7 @@ fn encode_production_blocks(
     model: &MetalModel,
     command: &objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn MTLCommandBuffer>>,
     sessions: &mut [MetalSession],
-    scratch: &GdnLayerReplayScratch,
+    scratch: &Scratch,
     position: u32,
     h: usize,
     conv_dim: usize,
@@ -246,7 +253,16 @@ fn encode_production_blocks(
                     .context("repair GDN index missing")?
                     .gdn_i;
                 encode_gdn_layer_replay(
-                    ctx, forward, command, gdn, gdn_i, sessions, scratch, h, conv_dim, v_dim,
+                    ctx,
+                    forward,
+                    command,
+                    gdn,
+                    gdn_i,
+                    sessions,
+                    &scratch.gdn,
+                    h,
+                    conv_dim,
+                    v_dim,
                 )?;
             }
             MetalBlock::Attn(_) => {
@@ -257,9 +273,112 @@ fn encode_production_blocks(
                 encoder.end();
             }
         }
-        for session in sessions.iter_mut() {
-            forward.encode_moe_ffn_after_mixer_production_by_index(command, block_i, session)?;
+        if packed_gateup_enabled() {
+            encode_packed_gateup_tail(
+                forward, model, command, block, block_i, sessions, scratch, h,
+            )?;
+        } else {
+            for session in sessions.iter_mut() {
+                forward
+                    .encode_moe_ffn_after_mixer_production_by_index(command, block_i, session)?;
+            }
         }
+    }
+    Ok(())
+}
+
+fn encode_packed_gateup_tail(
+    forward: &MetalForward<'_>,
+    model: &MetalModel,
+    command: &objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn MTLCommandBuffer>>,
+    block: &MetalBlock,
+    block_i: usize,
+    sessions: &mut [MetalSession],
+    scratch: &Scratch,
+    h: usize,
+) -> Result<()> {
+    let moe = match block {
+        MetalBlock::Gdn(block) => block.ffn_moe.as_ref(),
+        MetalBlock::Attn(block) => block.ffn_moe.as_ref(),
+    }
+    .context("packed gate/up requires MoE weights")?;
+    ensure!(
+        moe.gate_exps.dtype == qwen_llm::tensor::GgmlType::Q4_K
+            && moe.up_exps.dtype == qwen_llm::tensor::GgmlType::Q4_K,
+        "packed gate/up requires Q4_K/Q4_K expert banks"
+    );
+    let topk = model.arch.expert_used_count.min(model.arch.expert_count) as usize;
+    let f_exp = model.arch.expert_feed_forward_length as usize;
+    let n_expert = model.arch.expert_count as usize;
+    let hidden_bytes = (h * std::mem::size_of::<f32>()) as u64;
+    let idx_bytes = (topk * std::mem::size_of::<i32>()) as u64;
+    let inner_bytes = (topk * f_exp * std::mem::size_of::<f32>()) as u64;
+
+    let encoder = KernelEncoder::begin(command);
+    for session in sessions.iter_mut() {
+        forward.encode_moe_route_prepare_by_index(&encoder, block_i, session)?;
+    }
+    encoder.end();
+
+    let blit = BlitEncoder::begin(command);
+    for (slot, session) in sessions.iter().enumerate() {
+        blit.copy_buffer(
+            &session.h.buffer,
+            session.h.offset,
+            &scratch.rows.buffer,
+            scratch.rows.offset + slot as u64 * hidden_bytes,
+            hidden_bytes,
+        );
+        blit.copy_buffer(
+            &session.moe_topk_idx.buffer,
+            session.moe_topk_idx.offset,
+            &scratch.moe_topk_idx.buffer,
+            scratch.moe_topk_idx.offset + slot as u64 * idx_bytes,
+            idx_bytes,
+        );
+    }
+    blit.end();
+
+    let encoder = KernelEncoder::begin_concurrent(command);
+    encode_moe_swiglu_q4_K_f32_packed_slots(
+        forward.ctx,
+        &encoder,
+        &moe.gate_exps,
+        &moe.up_exps,
+        &scratch.rows,
+        &scratch.moe_topk_idx,
+        &scratch.moe_inner,
+        h,
+        f_exp,
+        n_expert,
+        topk,
+        BATCH,
+    )?;
+    let shared_inner_fused = sessions
+        .iter_mut()
+        .map(|session| forward.encode_moe_shared_gate_up_by_index(&encoder, block_i, session))
+        .collect::<Result<Vec<_>, _>>()?;
+    encoder.end();
+
+    let blit = BlitEncoder::begin(command);
+    for (slot, session) in sessions.iter().enumerate() {
+        blit.copy_buffer(
+            &scratch.moe_inner.buffer,
+            scratch.moe_inner.offset + slot as u64 * inner_bytes,
+            &session.moe_inner.buffer,
+            session.moe_inner.offset,
+            inner_bytes,
+        );
+    }
+    blit.end();
+
+    for (session, shared_inner_fused) in sessions.iter_mut().zip(shared_inner_fused) {
+        forward.encode_moe_ffn_after_external_routed_inner_by_index(
+            command,
+            block_i,
+            session,
+            shared_inner_fused,
+        )?;
     }
     Ok(())
 }
@@ -309,16 +428,7 @@ fn candidate_step(
     }
     blit.end();
     encode_production_blocks(
-        ctx,
-        forward,
-        model,
-        &command,
-        sessions,
-        &scratch.gdn,
-        position,
-        h,
-        conv_dim,
-        v_dim,
+        ctx, forward, model, &command, sessions, scratch, position, h, conv_dim, v_dim,
     )?;
     let encoder = KernelEncoder::begin(&command);
     for session in sessions.iter() {
@@ -396,6 +506,13 @@ fn batched_head_enabled() -> bool {
     !matches!(
         std::env::var("QWEN_BENCH_MOE_BATCHED_HEAD").as_deref(),
         Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO")
+    )
+}
+
+fn packed_gateup_enabled() -> bool {
+    matches!(
+        std::env::var("QWEN_BENCH_MOE_PACKED_GATEUP").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
     )
 }
 
@@ -689,10 +806,15 @@ pub fn run(args: DecodeMoeGdnRepairArgs) -> Result<()> {
         std::env::var("QWEN_BENCH_GDN_REPLAY_EXACT").unwrap_or_else(|_| "none".into());
     let batched_head = batched_head_enabled();
     let strict_exact = exact_selector == "all" && !batched_head;
+    ensure!(
+        !packed_gateup_enabled() || strict_exact,
+        "packed gate/up requires exact=all and the exact Q6 head"
+    );
     println!(
-        "[decode-moe-gdn-repair] exact={} batch={BATCH} batched_head={} strict_exact={} frontier={} prefill_ms={:.3} restore_ms={:.3} snapshot_bytes={} steps={} warmup={} build_commit={} build_dirty={} build_source_state={} qwen_environment_names={} generated_id_hash_scope=warmup_plus_measured_step_major_lane_major_i32le",
+        "[decode-moe-gdn-repair] exact={} batch={BATCH} batched_head={} packed_gateup={} strict_exact={} frontier={} prefill_ms={:.3} restore_ms={:.3} snapshot_bytes={} steps={} warmup={} build_commit={} build_dirty={} build_source_state={} qwen_environment_names={} generated_id_hash_scope=warmup_plus_measured_step_major_lane_major_i32le",
         exact_selector,
         batched_head,
+        packed_gateup_enabled(),
         strict_exact,
         args.frontier_tokens,
         setup.prefill_ms,

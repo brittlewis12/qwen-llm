@@ -2888,6 +2888,18 @@ existing token-axis grid already realizes cache/fabric reuse, and added live sta
 consumes the proposed gain. Do not widen to T=4 without a different measured
 mechanism.
 
+Exact packed Q4 routed gate/up now changes the Qwen MoE B=16 product decision.
+Keep route/top-k, Q5 down, shared experts, attention, GDN, and the Q6 head on their
+exact production-compatible organizations; pack only hidden rows plus ordered
+top-k IDs, compute bitwise routed inners once across the cohort, then return each
+inner to its owning session before production down/final waves. Three final
+66-transition processes reach `147.562/150.820/150.300` token/s; median
+`150.300` is `1.194659x` the frozen queue control, and every logit, residual,
+generated hash, and final causal snapshot is exact. Authorize a sibling fixed-
+B=16 Qwen MoE JSONL executor with prefix fanout, admission, ordered output,
+cancellation/poisoning, and incomplete-cohort serial fallback. Require the
+integrated path to retain a practical lead over independent queues.
+
 DeepSeek K160 common-route B=8 is also closed at its cheapest model-backed
 floor. Giving all eight rows the same six experts, the production all-slot
 control and six N=8 Q3_K/Q4_K mat-mat chains move `1.9760 -> 1.8630 ms/layer`

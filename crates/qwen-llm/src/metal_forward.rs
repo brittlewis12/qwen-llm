@@ -7538,6 +7538,56 @@ impl<'a> MetalForward<'a> {
         }
     }
 
+    /// Bench hook: encode only the shared-expert gate/up half of the production
+    /// concurrent wave after route preparation. The routed inner may be supplied
+    /// by an exact cross-lane kernel before the remaining tail is encoded.
+    #[doc(hidden)]
+    pub fn encode_moe_shared_gate_up_by_index(
+        &self,
+        encoder: &KernelEncoder,
+        block_idx: usize,
+        session: &mut MetalSession,
+    ) -> Result<bool, MfError> {
+        let (block, _) = self.moe_block_slot_by_index(block_idx)?;
+        let (ffn_gate, ffn_up) = match block {
+            MetalBlock::Gdn(block) => (&block.ffn_gate, &block.ffn_up),
+            MetalBlock::Attn(block) => (&block.ffn_gate, &block.ffn_up),
+        };
+        self.encode_moe_shared_ffn_gate_up_gpu(encoder, session, ffn_gate, ffn_up)
+    }
+
+    /// Bench hook: finish production shared/routed down and final waves after a
+    /// caller has supplied the exact routed inner and encoded shared gate/up.
+    #[doc(hidden)]
+    pub fn encode_moe_ffn_after_external_routed_inner_by_index(
+        &self,
+        command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        block_idx: usize,
+        session: &mut MetalSession,
+        shared_inner_fused: bool,
+    ) -> Result<(), MfError> {
+        let (block, _) = self.moe_block_slot_by_index(block_idx)?;
+        let (ffn_down, moe) = match block {
+            MetalBlock::Gdn(block) => (&block.ffn_down, block.ffn_moe.as_ref()),
+            MetalBlock::Attn(block) => (&block.ffn_down, block.ffn_moe.as_ref()),
+        };
+        let moe = moe.ok_or(MfError::UnsupportedMoe)?;
+        if !shared_inner_fused {
+            let encoder = KernelEncoder::begin(command);
+            self.encode_moe_shared_ffn_silu_gpu(&encoder, session)?;
+            encoder.end();
+        }
+        let routed_weighted_sum_is_pending =
+            self.encode_moe_ffn_down_wave_gpu(command, session, ffn_down, moe, None, None)?;
+        self.encode_moe_ffn_final_wave_gpu(
+            command,
+            session,
+            routed_weighted_sum_is_pending,
+            None,
+            None,
+        )
+    }
+
     fn encode_moe_mixer_prep(
         &self,
         enc: &KernelEncoder,

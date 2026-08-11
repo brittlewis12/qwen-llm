@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Exact Qwen MoE B=16 Packed Gate/Up GO
+
+Status: compose the repaired exact GDN/Q6 organization with bitwise packed Q4
+routed gate/up. Three final processes reach median `150.300` aggregate token/s,
+`1.194659x` the frozen independent-queue control. This clears the preregistered
+product-spike gate and authorizes a guarded Qwen MoE B=16 JSONL executor.
+
+- The loaded-once route floor moves all 40 routed gate/up layers from `0.9649`
+  to `0.6254 ms/token` at B=16, a 35.2% stage reduction and a predicted 5.4 ms
+  cohort-step saving. Q5 down remains on the production singleton organization.
+- The candidate evaluates production routes, packs hidden rows and ordered top-k
+  IDs, runs the existing exact Q4 packed kernel concurrently with independent
+  shared gate/up, copies each routed inner back to its owner, then resumes
+  production down/final waves. KV, GDN, route weights, and pending state remain
+  sequence-owned.
+- A short bracket improves `138.997/137.656 -> 148.082` token/s. A full bracket
+  improves `141.768/136.381 -> 145.126`; both controls surround the candidate and
+  every 18/66-transition causal check is exact.
+- The frozen final campaign records `147.562`, `150.820`, and `150.300` token/s.
+  Every run exceeds the `140.9072` per-process floor and `1.25x` paired speedup;
+  median exceeds the `143.4234` gate by `6.8766` token/s. Across 198 transitions,
+  all finite logits/residuals, generated hashes, and final active KV/GDN/conv
+  snapshots are bit-exact.
+
+Decision: build a sibling fixed-B=16 Qwen MoE executor with shared-prefix fanout,
+model-derived admission, input-order emission, cancellation/poisoning, and serial
+fallback for incomplete cohorts. Requalify integrated scheduler overhead before
+promotion. Full result:
+`docs/bench/2026-08-11-qwen-moe-b16-packed-gateup-go/README.md`.
+
 ## 2026-08-11 - Exact Q6 B=16 Two-Token Reuse KILL
 
 Status: grouping two B=16 LM-head rows into one threadgroup remains bit-exact but

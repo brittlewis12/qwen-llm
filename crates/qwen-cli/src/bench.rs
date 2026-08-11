@@ -20,6 +20,7 @@ mod attn_capture;
 mod attn_stage_floor;
 #[cfg(feature = "dsv4-diagnostics")]
 mod batch_probe;
+mod dense_block_batch;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_mhc_delete;
 #[cfg(feature = "dsv4-diagnostics")]
@@ -476,6 +477,9 @@ enum Cmd {
     /// across every supported model family. This is not yet layer batching.
     #[cfg(feature = "dsv4-diagnostics")]
     QueueOverlapProbe(batch_probe::QueueOverlapProbeArgs),
+    /// Execute one complete dense GDN block over independent static slots,
+    /// batching every large projection while retaining private recurrent state.
+    DecodeDenseBlockBatch(dense_block_batch::DecodeDenseBlockBatchArgs),
     /// Report compiled and runtime source identity without initializing Metal
     /// or loading a model.
     BuildInfo(BuildInfoArgs),
@@ -2757,6 +2761,7 @@ fn run() -> Result<()> {
         Cmd::QueueOverlapProbe(a) => {
             batch_probe::run(a, serde_json::to_value(qwen_build_identity_packet())?)
         }
+        Cmd::DecodeDenseBlockBatch(a) => dense_block_batch::run(a),
         Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::GgufStoragePlan(a) => run_gguf_storage_plan(a),
         Cmd::GgufArenaFloor(a) => {

@@ -1,0 +1,16 @@
+[metal-load] native quantized token embedding policy: auto-promoted (Q4_K [5120, 248320])
+[metal-load-ledger] source=851/16806250496 direct_copy=851/16806250496 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+check	block=0	batch=2	min_cos_x=0.999999998	max_abs_x=0.019852	max_relative_rms_x=0.000194204	min_cos_state=1.000000000	max_abs_state=0.000000	min_cos_conv=1.000000000	max_abs_conv=0.000000
+check	block=0	batch=4	min_cos_x=0.999999998	max_abs_x=0.019852	max_relative_rms_x=0.000194204	min_cos_state=1.000000000	max_abs_state=0.000000	min_cos_conv=1.000000000	max_abs_conv=0.000000
+check	block=0	batch=6	min_cos_x=0.999999963	max_abs_x=0.088913	max_relative_rms_x=0.000870737	min_cos_state=0.999999626	max_abs_state=0.000085	min_cos_conv=0.999999952	max_abs_conv=0.002967
+check	block=0	batch=8	min_cos_x=0.999999983	max_abs_x=0.016182	max_relative_rms_x=0.000220441	min_cos_state=0.999999895	max_abs_state=0.000041	min_cos_conv=0.999999978	max_abs_conv=0.001545
+[decode-dense-block-batch] model=/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf block=0 gdn_i=0 batches=2,4,6,8 ramp_ms=500 ramp_repetitions=103 warmup=2 iters=7 batched_projections=6
+mode	batch	order	avg_wall_ms	avg_gpu_ms	p50_gpu_ms	p90_gpu_ms	avg_gpu_ms_per_slot	aggregate_speedup	saving_pct
+baseline_serial	2	ABBA	1.5193	1.2942	1.2644	1.4537	0.6471	1.0000	0.0
+static_layer_batch	2	ABBA	1.4491	1.2772	1.2767	1.2839	0.6386	1.0134	1.3
+baseline_serial	4	BAAB	2.6928	2.5154	2.5156	2.5341	0.6289	1.0000	0.0
+static_layer_batch	4	BAAB	2.3030	2.1339	2.1338	2.1490	0.5335	1.1788	15.2
+baseline_serial	6	ABBA	4.7354	4.0650	4.0576	4.1228	0.6775	1.0000	0.0
+static_layer_batch	6	ABBA	4.0599	3.4205	3.4347	3.4574	0.5701	1.1884	15.9
+baseline_serial	8	BAAB	6.0452	5.3701	5.4020	5.4386	0.6713	1.0000	0.0
+static_layer_batch	8	BAAB	2.6382	1.9821	1.9995	2.0380	0.2478	2.7094	63.1

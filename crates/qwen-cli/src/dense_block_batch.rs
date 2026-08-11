@@ -1,7 +1,7 @@
 use super::{
     GdnLayerReplayScratch, collect_gdn_layers, cosine_max_abs, encode_gdn_layer_baseline,
-    encode_gdn_layer_replay, env_flag_enabled, f32_rms_delta, fresh_gdn_replay_sessions,
-    read_f32_tensor,
+    encode_gdn_layer_replay_with_post_norm, env_flag_enabled, f32_rms_delta,
+    fresh_gdn_replay_sessions, read_f32_tensor,
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use clap::Parser;
@@ -12,7 +12,8 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::Model;
 use qwen_llm::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalTensor, encode_add_inplace_f32,
-    encode_ffn_swiglu_q4_K_f32, encode_rms_norm_mul_f32, encode_silu_mul_f32,
+    encode_ffn_swiglu_q4_K_f32, encode_residual_rms_norm_mul_f32, encode_rms_norm_mul_f32,
+    encode_silu_mul_f32,
 };
 use qwen_llm::metal_forward::{
     MetalAttnBlock, MetalBlock, MetalForward, MetalModel, MetalSession, encode_mat_mat_dispatch,
@@ -73,7 +74,7 @@ pub struct DecodeDenseAttnBatchArgs {
     no_check: bool,
 }
 
-struct DenseFfnBatchScratch {
+pub(super) struct DenseFfnBatchScratch {
     h: MetalTensor,
     gate: MetalTensor,
     up: MetalTensor,
@@ -82,7 +83,12 @@ struct DenseFfnBatchScratch {
 }
 
 impl DenseFfnBatchScratch {
-    fn new(ctx: &MetalContext, max_batch: usize, hidden: usize, ffn: usize) -> Result<Self> {
+    pub(super) fn new(
+        ctx: &MetalContext,
+        max_batch: usize,
+        hidden: usize,
+        ffn: usize,
+    ) -> Result<Self> {
         let hidden_elements = max_batch
             .checked_mul(hidden)
             .context("dense static-batch hidden scratch overflow")?;
@@ -167,7 +173,7 @@ fn encode_dense_block_baseline(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode_dense_block_batch(
+pub(super) fn encode_dense_block_batch(
     ctx: &MetalContext,
     forward: &MetalForward<'_>,
     command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -180,12 +186,13 @@ fn encode_dense_block_batch(
     conv_dim: usize,
     value_dim: usize,
     ffn: usize,
+    fused_post_norm: bool,
 ) -> Result<()> {
     let MetalBlock::Gdn(gdn) = block else {
         return Err(anyhow!("dense static-batch candidate requires a GDN block"));
     };
     let batch = sessions.len();
-    encode_gdn_layer_replay(
+    encode_gdn_layer_replay_with_post_norm(
         ctx,
         forward,
         command,
@@ -196,6 +203,7 @@ fn encode_dense_block_batch(
         hidden,
         conv_dim,
         value_dim,
+        fused_post_norm,
     )?;
 
     let hidden_row_bytes = u64::try_from(
@@ -515,6 +523,7 @@ pub fn run(args: DecodeDenseBlockBatchArgs) -> Result<()> {
                 conv_dim,
                 value_dim,
                 ffn,
+                false,
             )?;
             wait_success(&command, "dense static-batch candidate")?;
 
@@ -597,6 +606,7 @@ pub fn run(args: DecodeDenseBlockBatchArgs) -> Result<()> {
                 conv_dim,
                 value_dim,
                 ffn,
+                false,
             )
         },
     )?;
@@ -666,6 +676,7 @@ pub fn run(args: DecodeDenseBlockBatchArgs) -> Result<()> {
                         conv_dim,
                         value_dim,
                         ffn,
+                        false,
                     )
                 },
             )
@@ -734,7 +745,7 @@ fn collect_attention_layers(model: &MetalModel) -> Vec<SelectedAttnLayer<'_>> {
         .collect()
 }
 
-struct DenseAttnBatchScratch {
+pub(super) struct DenseAttnBatchScratch {
     h: MetalTensor,
     q: MetalTensor,
     k: MetalTensor,
@@ -742,7 +753,7 @@ struct DenseAttnBatchScratch {
 }
 
 impl DenseAttnBatchScratch {
-    fn new(
+    pub(super) fn new(
         ctx: &MetalContext,
         max_batch: usize,
         hidden: usize,
@@ -921,11 +932,12 @@ fn encode_dense_ffn_batch_attention(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn encode_dense_attention_batch(
+pub(super) fn encode_dense_attention_batch(
     ctx: &MetalContext,
     forward: &MetalForward<'_>,
     command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-    layer: SelectedAttnLayer<'_>,
+    block: &MetalAttnBlock,
+    attn_index: usize,
     sessions: &mut [MetalSession],
     attention_scratch: &DenseAttnBatchScratch,
     ffn_scratch: &DenseFfnBatchScratch,
@@ -933,6 +945,8 @@ fn encode_dense_attention_batch(
     q_dim: usize,
     kv_dim: usize,
     ffn: usize,
+    position: u32,
+    fused_post_norm: bool,
 ) -> Result<()> {
     let batch = sessions.len();
     let encoder = KernelEncoder::begin(command);
@@ -941,7 +955,7 @@ fn encode_dense_attention_batch(
             ctx,
             &encoder,
             &session.x,
-            &layer.block.attn_norm,
+            &block.attn_norm,
             &session.h,
             1e-6,
         )?;
@@ -974,18 +988,9 @@ fn encode_dense_attention_batch(
         .v
         .view_subrange(0, vec![(batch * kv_dim) as u64]);
     let encoder = KernelEncoder::begin(command);
-    encode_mat_mat_dispatch(
-        ctx,
-        &encoder,
-        &layer.block.q,
-        &h,
-        &q,
-        hidden,
-        2 * q_dim,
-        batch,
-    )?;
-    encode_mat_mat_dispatch(ctx, &encoder, &layer.block.k, &h, &k, hidden, kv_dim, batch)?;
-    encode_mat_mat_dispatch(ctx, &encoder, &layer.block.v, &h, &v, hidden, kv_dim, batch)?;
+    encode_mat_mat_dispatch(ctx, &encoder, &block.q, &h, &q, hidden, 2 * q_dim, batch)?;
+    encode_mat_mat_dispatch(ctx, &encoder, &block.k, &h, &k, hidden, kv_dim, batch)?;
+    encode_mat_mat_dispatch(ctx, &encoder, &block.v, &h, &v, hidden, kv_dim, batch)?;
     encoder.end();
 
     let q_row_bytes = (2 * q_dim * std::mem::size_of::<f32>()) as u64;
@@ -1018,33 +1023,31 @@ fn encode_dense_attention_batch(
 
     let encoder = KernelEncoder::begin(command);
     for session in sessions.iter_mut() {
-        forward.encode_attn_after_projections(
-            &encoder,
-            layer.block,
-            layer.attn_index,
-            0,
-            session,
-        )?;
-        encode_add_inplace_f32(ctx, &encoder, &session.x, &session.mixer_out)?;
-        encode_rms_norm_mul_f32(
-            ctx,
-            &encoder,
-            &session.x,
-            &layer.block.post_attn_norm,
-            &session.h,
-            1e-6,
-        )?;
+        forward.encode_attn_after_projections(&encoder, block, attn_index, position, session)?;
+        if fused_post_norm {
+            encode_residual_rms_norm_mul_f32(
+                ctx,
+                &encoder,
+                &session.x,
+                &session.mixer_out,
+                &block.post_attn_norm,
+                &session.h,
+                1e-6,
+            )?;
+        } else {
+            encode_add_inplace_f32(ctx, &encoder, &session.x, &session.mixer_out)?;
+            encode_rms_norm_mul_f32(
+                ctx,
+                &encoder,
+                &session.x,
+                &block.post_attn_norm,
+                &session.h,
+                1e-6,
+            )?;
+        }
     }
     encoder.end();
-    encode_dense_ffn_batch_attention(
-        ctx,
-        command,
-        layer.block,
-        sessions,
-        ffn_scratch,
-        hidden,
-        ffn,
-    )
+    encode_dense_ffn_batch_attention(ctx, command, block, sessions, ffn_scratch, hidden, ffn)
 }
 
 fn reset_attention_sessions(sessions: &mut [MetalSession], attn_index: usize) -> Result<()> {
@@ -1091,7 +1094,7 @@ fn time_attention_with_reset(
     Ok(samples)
 }
 
-fn read_f16_prefix(tensor: &MetalTensor, elements: usize) -> Result<Vec<f32>> {
+pub(super) fn read_f16_prefix(tensor: &MetalTensor, elements: usize) -> Result<Vec<f32>> {
     ensure!(
         tensor.dtype == GgmlType::F16,
         "attention probe requires F16 KV"
@@ -1178,7 +1181,8 @@ pub fn run_attention(args: DecodeDenseAttnBatchArgs) -> Result<()> {
                 &ctx,
                 &forward,
                 &command,
-                layer,
+                layer.block,
+                layer.attn_index,
                 &mut candidate,
                 &attention_scratch,
                 &ffn_scratch,
@@ -1186,6 +1190,8 @@ pub fn run_attention(args: DecodeDenseAttnBatchArgs) -> Result<()> {
                 q_dim,
                 kv_dim,
                 ffn,
+                0,
+                false,
             )?;
             wait_success(&command, "dense attention candidate")?;
             let mut min_cos_x = 1.0f64;
@@ -1286,7 +1292,8 @@ pub fn run_attention(args: DecodeDenseAttnBatchArgs) -> Result<()> {
             &ctx,
             &forward,
             &command,
-            layer,
+            layer.block,
+            layer.attn_index,
             &mut ramp_sessions,
             &attention_scratch,
             &ffn_scratch,
@@ -1294,6 +1301,8 @@ pub fn run_attention(args: DecodeDenseAttnBatchArgs) -> Result<()> {
             q_dim,
             kv_dim,
             ffn,
+            0,
+            false,
         )?;
         wait_success(&command, "dense attention ramp")?;
         ramp_repetitions += 1;
@@ -1349,7 +1358,8 @@ pub fn run_attention(args: DecodeDenseAttnBatchArgs) -> Result<()> {
                         &ctx,
                         &forward,
                         command,
-                        layer,
+                        layer.block,
+                        layer.attn_index,
                         sessions,
                         &attention_scratch,
                         &ffn_scratch,
@@ -1357,6 +1367,8 @@ pub fn run_attention(args: DecodeDenseAttnBatchArgs) -> Result<()> {
                         q_dim,
                         kv_dim,
                         ffn,
+                        0,
+                        false,
                     )
                 },
             )

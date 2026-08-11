@@ -215,14 +215,19 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn capabilities(family: ModelFamily) -> Vec<ModeCapability> {
-    let static_detail = match family {
-        ModelFamily::Qwen35 => "projection primitives exist; full-model static backend required",
-        ModelFamily::Qwen35Moe => {
-            "projection and guarded block replay exist; full-model static backend required"
-        }
-        ModelFamily::DeepSeek4 => {
-            "shared immutable residency exists; layer-synchronous backend required"
-        }
+    let (static_state, static_detail) = match family {
+        ModelFamily::Qwen35 => (
+            "whole_model_probe",
+            "fixed B=8 dense whole-model reuse is measured; product scheduling remains pending",
+        ),
+        ModelFamily::Qwen35Moe => (
+            "primitive_only",
+            "projection and guarded block replay exist; full-model static backend required",
+        ),
+        ModelFamily::DeepSeek4 => (
+            "primitive_only",
+            "shared immutable residency exists; layer-synchronous backend required",
+        ),
     };
     vec![
         ModeCapability {
@@ -237,7 +242,7 @@ fn capabilities(family: ModelFamily) -> Vec<ModeCapability> {
         },
         ModeCapability {
             mode: "static_layer_batch",
-            state: "primitive_only",
+            state: static_state,
             detail: static_detail,
         },
         ModeCapability {

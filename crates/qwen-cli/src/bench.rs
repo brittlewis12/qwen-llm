@@ -21,6 +21,7 @@ mod attn_stage_floor;
 #[cfg(feature = "dsv4-diagnostics")]
 mod batch_probe;
 mod dense_block_batch;
+mod dense_whole_batch;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_mhc_delete;
 #[cfg(feature = "dsv4-diagnostics")]
@@ -68,13 +69,14 @@ use qwen_llm::{
         encode_mat_vec_f32_sigmoid, encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
         encode_moe_fused_routed_q4q5_token_f32, encode_moe_swiglu_q4_K_f32,
-        encode_moe_swiglu_q4_K_f32_packed_slots, encode_mul_f32, encode_rms_norm_batched_f32,
-        encode_rms_norm_mul_f32, encode_roofline_fma_f32, encode_roofline_stream_f32,
-        encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive, encode_rope_neox_pair_f32,
-        encode_scatter_offset_f32_to_f16, encode_scatter_offset_f32_to_f16_kv,
-        encode_scatter_offset_f32_to_q8_0_kv, encode_sigmoid_f32, encode_sigmoid_mul_f32,
-        encode_split_q_gate_f32, encode_touch_bytes_f32, host_page_size_bytes, kernel_trace_begin,
-        kernel_trace_snapshot, plan_retained_storage, with_attn_v4_group_tile_override,
+        encode_moe_swiglu_q4_K_f32_packed_slots, encode_mul_f32, encode_residual_rms_norm_mul_f32,
+        encode_rms_norm_batched_f32, encode_rms_norm_mul_f32, encode_roofline_fma_f32,
+        encode_roofline_stream_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
+        encode_rope_neox_pair_f32, encode_scatter_offset_f32_to_f16,
+        encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_q8_0_kv,
+        encode_sigmoid_f32, encode_sigmoid_mul_f32, encode_split_q_gate_f32,
+        encode_touch_bytes_f32, host_page_size_bytes, kernel_trace_begin, kernel_trace_snapshot,
+        plan_retained_storage, with_attn_v4_group_tile_override,
     },
     metal_dflash::{
         DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
@@ -483,6 +485,9 @@ enum Cmd {
     /// Execute one complete dense attention block over independent static
     /// slots, batching front and FFN projections while retaining private KV.
     DecodeDenseAttnBatch(dense_block_batch::DecodeDenseAttnBatchArgs),
+    /// Execute a complete dense model over a fixed eight-slot cohort,
+    /// comparing production serialization with layer-major weight reuse.
+    DecodeDenseWholeBatch(dense_whole_batch::DecodeDenseWholeBatchArgs),
     /// Report compiled and runtime source identity without initializing Metal
     /// or loading a model.
     BuildInfo(BuildInfoArgs),
@@ -2766,6 +2771,7 @@ fn run() -> Result<()> {
         }
         Cmd::DecodeDenseBlockBatch(a) => dense_block_batch::run(a),
         Cmd::DecodeDenseAttnBatch(a) => dense_block_batch::run_attention(a),
+        Cmd::DecodeDenseWholeBatch(a) => dense_whole_batch::run(a),
         Cmd::BuildInfo(a) => run_build_info(a),
         Cmd::GgufStoragePlan(a) => run_gguf_storage_plan(a),
         Cmd::GgufArenaFloor(a) => {
@@ -5623,6 +5629,25 @@ fn encode_gdn_layer_replay(
     conv_dim: usize,
     v_dim: usize,
 ) -> Result<()> {
+    encode_gdn_layer_replay_with_post_norm(
+        ctx, mf, cmd, gb, gdn_i, sessions, scratch, h, conv_dim, v_dim, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_gdn_layer_replay_with_post_norm(
+    ctx: &MetalContext,
+    mf: &MetalForward<'_>,
+    cmd: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    gb: &qwen_llm::metal_forward::MetalGdnBlock,
+    gdn_i: usize,
+    sessions: &mut [MetalSession],
+    scratch: &GdnLayerReplayScratch,
+    h: usize,
+    conv_dim: usize,
+    v_dim: usize,
+    fused_post_norm: bool,
+) -> Result<()> {
     let tokens = sessions.len();
     let enc = KernelEncoder::begin(cmd);
     for s in sessions.iter() {
@@ -5742,8 +5767,20 @@ fn encode_gdn_layer_replay(
         let out_row = scratch
             .out_pack
             .view_subrange((tok * h) as u64, vec![h as u64]);
-        encode_add_inplace_f32(ctx, &enc, &s.x, &out_row)?;
-        encode_rms_norm_mul_f32(ctx, &enc, &s.x, &gb.post_attn_norm, &s.h, RMS_EPS)?;
+        if fused_post_norm {
+            encode_residual_rms_norm_mul_f32(
+                ctx,
+                &enc,
+                &s.x,
+                &out_row,
+                &gb.post_attn_norm,
+                &s.h,
+                RMS_EPS,
+            )?;
+        } else {
+            encode_add_inplace_f32(ctx, &enc, &s.x, &out_row)?;
+            encode_rms_norm_mul_f32(ctx, &enc, &s.x, &gb.post_attn_norm, &s.h, RMS_EPS)?;
+        }
     }
     enc.end();
     Ok(())

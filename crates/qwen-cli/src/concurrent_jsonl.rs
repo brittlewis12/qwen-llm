@@ -254,6 +254,12 @@ enum DeepSeekPrepareSignal {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct QwenExecutionAdmissionRequirements {
+    pub max_capacity: usize,
+    pub prefill_scratch_upper_bytes: u64,
+}
+
 pub(super) fn validate_cli(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
     let Some(concurrency) = args.concurrency else {
         return Ok(());
@@ -361,31 +367,32 @@ pub(super) fn run_file(
     greedy_gpu_mode: GreedyGpuArgmaxMode,
     stdout: &mut impl Write,
 ) -> Result<usize> {
-    validate_greedy_gpu_mode(greedy_gpu_mode)?;
     let requests = prepare_jsonl_requests(requests_path, tokenizer, args)?;
-    validate_requests(&requests, args)?;
-    let max_capacity = requests
-        .iter()
-        .map(|request| jsonl_generation_capacity(request, args).map(|(_, capacity)| capacity))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .max()
-        .context("concurrent JSONL file contained no requests")?;
-    let prefill_scratch_upper_bytes = requests
-        .iter()
-        .map(|request| prefill_scratch_upper_bytes(loaded, request, args))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .max()
-        .context("concurrent JSONL file contained no requests")?;
+    run_prepared(loaded, tokenizer, &requests, args, greedy_gpu_mode, stdout)
+}
+
+pub(super) fn run_prepared(
+    loaded: &LoadedModel,
+    tokenizer: &Tokenizer,
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+    greedy_gpu_mode: GreedyGpuArgmaxMode,
+    stdout: &mut impl Write,
+) -> Result<usize> {
+    validate_greedy_gpu_mode(greedy_gpu_mode)?;
+    validate_requests(requests, args)?;
+    let requirements = qwen_execution_admission_requirements(loaded, requests, args)?;
     let pair_count = requests.len() / WIDTH;
     let mut executor = if pair_count > 0 {
         let admission = loaded
-            .admit_independent_queue2(max_capacity, prefill_scratch_upper_bytes)
+            .admit_independent_queue2(
+                requirements.max_capacity,
+                requirements.prefill_scratch_upper_bytes,
+            )
             .context("admit two independent Qwen sessions")?;
         eprintln!(
             "concurrency_admission: width={WIDTH} prefill_scratch_upper_bytes={} reason={} required_bytes={:?} working_set_headroom_bytes={:?}",
-            prefill_scratch_upper_bytes,
+            requirements.prefill_scratch_upper_bytes,
             admission.reason.as_str(),
             admission.required_bytes,
             admission.working_set_headroom_bytes,
@@ -439,6 +446,31 @@ pub(super) fn run_file(
         requests.len()
     );
     Ok(completed)
+}
+
+pub(super) fn qwen_execution_admission_requirements(
+    loaded: &LoadedModel,
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+) -> Result<QwenExecutionAdmissionRequirements> {
+    let max_capacity = requests
+        .iter()
+        .map(|request| jsonl_generation_capacity(request, args).map(|(_, capacity)| capacity))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .max()
+        .context("Qwen execution plan contained no requests")?;
+    let prefill_scratch_upper_bytes = requests
+        .iter()
+        .map(|request| prefill_scratch_upper_bytes(loaded, request, args))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .max()
+        .context("Qwen execution plan contained no requests")?;
+    Ok(QwenExecutionAdmissionRequirements {
+        max_capacity,
+        prefill_scratch_upper_bytes,
+    })
 }
 
 fn price_prefill_scratch_plan(

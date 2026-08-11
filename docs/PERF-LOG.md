@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Automatic JSONL Execution Width GO
+
+Status: `--execution-mode auto` now selects one existing exact JSONL backend
+from request shape, family capability, measured composition economics, and
+pre-allocation memory admission. Omit the flag for unchanged serial behavior.
+
+- Dense Qwen chooses a ready B=8 cohort or admitted B=2 underfill. DeepSeek V4
+  chooses B=2 only after its complete two-session load plan admits. Qualified
+  Qwen feature conflicts and memory denial preserve serial execution; options
+  already unsupported by a JSONL family remain fail-closed before selection.
+- Qwen MoE planning is allocation-free and filename-independent. The exact A3B
+  geometry plus 30 Q8 GDN blocks, 40 packed Q4 blocks, and a Q6 head selects
+  B=16. The corresponding 40-IQ3-fallback composition selects B=2. MTP and
+  unmeasured/A10B compositions remain serial.
+- The selector prepares a file once, does not benchmark online, disables only an
+  empty RAM cache for accelerated execution, and emits schema-v1 decision
+  telemetry before allocating executor or sequence state.
+- Product smokes reproduce the committed Q4 and IQ4 stdout hashes at `154.188`
+  B=16 and roughly `147-152` B=2 aggregate token/s. Dense 0.8B selects B=8;
+  DeepSeek K160 selects B=2; an MTP-tagged Q4 asset deliberately stays serial.
+
+Decision: promote the selector as an opt-in convenience layer, not a continuous
+batch scheduler or broadened model allowlist. Full contract and evidence:
+`docs/bench/2026-08-11-automatic-execution-width/README.md`.
+
 ## 2026-08-11 - DeepSeek Packed Scratch Overlay KILL
 
 Status: a phase-disjoint query-to-MoE scratch overlay saves exactly 512 MiB per

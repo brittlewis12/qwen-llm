@@ -159,6 +159,12 @@ struct CohortPlan<const WIDTH: usize> {
     serial_fallback_requests: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct CohortPlanSummary {
+    pub full_cohorts: usize,
+    pub serial_fallback_requests: usize,
+}
+
 #[derive(Debug)]
 struct LaneProgress {
     max_tokens: usize,
@@ -444,6 +450,17 @@ fn plan_request_work<const WIDTH: usize>(
     })
 }
 
+pub(super) fn plan_summary<const WIDTH: usize>(
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+) -> Result<CohortPlanSummary> {
+    let plan = plan_request_work::<WIDTH>(requests, args)?;
+    Ok(CohortPlanSummary {
+        full_cohorts: plan.full_cohorts,
+        serial_fallback_requests: plan.serial_fallback_requests,
+    })
+}
+
 pub(super) fn validate_cli(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
     let Some(batch_size) = args.batch_size else {
         return Ok(());
@@ -533,7 +550,10 @@ pub(super) fn run_file(
     greedy_gpu_mode: GreedyGpuArgmaxMode,
     stdout: &mut impl Write,
 ) -> Result<usize> {
-    validate_greedy_gpu_mode(greedy_gpu_mode, args.batch_size)?;
+    let batch_size = args
+        .batch_size
+        .context("fixed-cohort JSONL execution requires --batch-size")?;
+    validate_greedy_gpu_mode(greedy_gpu_mode, Some(batch_size))?;
     let requests_metadata = std::fs::metadata(requests_path)
         .with_context(|| format!("inspect requests JSONL {}", requests_path.display()))?;
     ensure!(
@@ -542,10 +562,31 @@ pub(super) fn run_file(
         requests_path.display()
     );
     let requests = prepare_jsonl_requests(requests_path, tokenizer, args)?;
-    validate_requests(&requests, args)?;
-    match args.batch_size {
-        Some(DENSE_BATCH8_WIDTH) => {
-            let plan = plan_request_work::<DENSE_BATCH8_WIDTH>(&requests, args)?;
+    run_prepared(
+        loaded,
+        tokenizer,
+        &requests,
+        args,
+        greedy_gpu_mode,
+        stdout,
+        batch_size,
+    )
+}
+
+pub(super) fn run_prepared(
+    loaded: &LoadedModel,
+    tokenizer: &Tokenizer,
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+    greedy_gpu_mode: GreedyGpuArgmaxMode,
+    stdout: &mut impl Write,
+    batch_size: usize,
+) -> Result<usize> {
+    validate_greedy_gpu_mode(greedy_gpu_mode, Some(batch_size))?;
+    validate_requests(requests, args)?;
+    match batch_size {
+        DENSE_BATCH8_WIDTH => {
+            let plan = plan_request_work::<DENSE_BATCH8_WIDTH>(requests, args)?;
             let executor = if plan.full_cohorts > 0 {
                 Some(
                     loaded
@@ -558,7 +599,7 @@ pub(super) fn run_file(
             run_fixed_cohort_file(
                 loaded,
                 tokenizer,
-                &requests,
+                requests,
                 args,
                 greedy_gpu_mode,
                 stdout,
@@ -566,8 +607,8 @@ pub(super) fn run_file(
                 executor,
             )
         }
-        Some(MOE_BATCH16_WIDTH) => {
-            let plan = plan_request_work::<MOE_BATCH16_WIDTH>(&requests, args)?;
+        MOE_BATCH16_WIDTH => {
+            let plan = plan_request_work::<MOE_BATCH16_WIDTH>(requests, args)?;
             let executor = if plan.full_cohorts > 0 {
                 Some(
                     loaded
@@ -580,7 +621,7 @@ pub(super) fn run_file(
             run_fixed_cohort_file(
                 loaded,
                 tokenizer,
-                &requests,
+                requests,
                 args,
                 greedy_gpu_mode,
                 stdout,
@@ -588,8 +629,7 @@ pub(super) fn run_file(
                 executor,
             )
         }
-        Some(batch_size) => bail!("unsupported fixed-cohort batch size {batch_size}"),
-        None => bail!("fixed-cohort JSONL execution requires --batch-size"),
+        _ => bail!("unsupported fixed-cohort batch size {batch_size}"),
     }
 }
 

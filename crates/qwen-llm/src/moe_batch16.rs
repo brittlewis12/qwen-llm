@@ -48,6 +48,8 @@ pub struct MoeBatch16PlanTelemetry {
     pub packed_q4_gate_up_blocks: usize,
     pub per_lane_gdn_blocks: usize,
     pub per_lane_gate_up_blocks: usize,
+    pub per_lane_iq3_gate_up_blocks: usize,
+    pub per_lane_other_gate_up_blocks: usize,
     pub head_mode: HeadMode,
 }
 
@@ -61,6 +63,7 @@ enum MixerMode {
 struct BlockExecutionPlan {
     mixer: MixerMode,
     routed: RoutedGateUpMode,
+    routed_dtype: GgmlType,
 }
 
 #[derive(Debug)]
@@ -854,7 +857,11 @@ fn build_execution_plan(model: &MetalModel) -> Result<MoeBatch16ExecutionPlan, M
             &format!("block {index} shared down projection"),
             &[shared_ffn, hidden],
         )?;
-        blocks.push(BlockExecutionPlan { mixer, routed });
+        blocks.push(BlockExecutionPlan {
+            mixer,
+            routed,
+            routed_dtype: moe.gate_exps.dtype,
+        });
     }
     let telemetry = MoeBatch16PlanTelemetry {
         q8_batched_gdn_blocks: blocks
@@ -872,6 +879,20 @@ fn build_execution_plan(model: &MetalModel) -> Result<MoeBatch16ExecutionPlan, M
         per_lane_gate_up_blocks: blocks
             .iter()
             .filter(|block| block.routed == RoutedGateUpMode::PerLane)
+            .count(),
+        per_lane_iq3_gate_up_blocks: blocks
+            .iter()
+            .filter(|block| {
+                block.routed == RoutedGateUpMode::PerLane
+                    && matches!(block.routed_dtype, GgmlType::IQ3_XXS | GgmlType::IQ3_S)
+            })
+            .count(),
+        per_lane_other_gate_up_blocks: blocks
+            .iter()
+            .filter(|block| {
+                block.routed == RoutedGateUpMode::PerLane
+                    && !matches!(block.routed_dtype, GgmlType::IQ3_XXS | GgmlType::IQ3_S)
+            })
             .count(),
         head_mode: head,
     };
@@ -892,6 +913,12 @@ fn build_execution_plan(model: &MetalModel) -> Result<MoeBatch16ExecutionPlan, M
         head,
         telemetry,
     })
+}
+
+pub(crate) fn inspect_execution_plan(
+    model: &MetalModel,
+) -> Result<MoeBatch16PlanTelemetry, MoeBatch16Error> {
+    Ok(build_execution_plan(model)?.telemetry)
 }
 
 pub(crate) struct MoeBatch16Executor<'a> {

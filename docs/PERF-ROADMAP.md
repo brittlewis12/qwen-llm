@@ -2931,6 +2931,16 @@ stage can batch, while measured whole-plan economics decide which width a future
 scheduler selects. Do not replace that distinction with another filename
 allowlist. A10B remains `HOLD` pending a memory-safe exact probe against B=8/B=2.
 
+An opt-in automatic selector now operationalizes that boundary for regular-file
+JSONL. It prepares requests once, inspects Qwen MoE plans without allocating
+executor scratch, prices complete candidate state before selection, and chooses
+serial, independent B=2, dense B=8, or qualified MoE B=16. The measured A3B Q4
+composition prefers B=16, the exact IQ3-routed composition prefers B=2, and MTP,
+A10B, or unmeasured MoE plans remain serial. Dense and DeepSeek use their
+family-supported defaults with memory fallback. Keep explicit width flags as
+operator overrides and keep auto opt-in until continuous arrival scheduling has
+its own latency/throughput policy.
+
 DeepSeek K160 common-route B=8 is also closed at its cheapest model-backed
 floor. Giving all eight rows the same six experts, the production all-slot
 control and six N=8 Q3_K/Q4_K mat-mat chains move `1.9760 -> 1.8630 ms/layer`

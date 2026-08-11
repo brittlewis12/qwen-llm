@@ -14,7 +14,7 @@ use crate::metal_forward::{
     ATTN_V4_MAX_NWG, MetalAttnBlock, MetalBlock, MetalForward, MetalGdnBlock, MetalModel,
     MetalSession, MfError, RMS_EPS, encode_mat_mat_dispatch,
 };
-use crate::model::ArchKind;
+use crate::model::{Arch, ArchKind};
 use crate::sampling::{GreedySelection, SamplingError};
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
@@ -99,6 +99,46 @@ fn checked_elements(width: usize, label: &str) -> Result<u64, DenseBatch8Error> 
         .ok_or_else(|| DenseBatch8Error::Validation(format!("{label} scratch size overflow")))
 }
 
+/// Logical bytes allocated by the executor's persistent B=8 scratch tensors.
+pub fn dense_batch8_scratch_bytes(arch: &Arch) -> Result<u64, DenseBatch8Error> {
+    let hidden = arch.hidden_size as usize;
+    let ffn = arch.intermediate_size as usize;
+    let n_v = arch.gdn_n_v_heads as usize;
+    let n_k = arch.gdn_n_k_heads as usize;
+    let head_dim = arch.gdn_head_dim as usize;
+    let conv_dim = n_k
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(n_v))
+        .and_then(|value| value.checked_mul(head_dim))
+        .ok_or_else(|| DenseBatch8Error::Validation("GDN scratch width overflow".into()))?;
+    let value_dim = n_v
+        .checked_mul(head_dim)
+        .ok_or_else(|| DenseBatch8Error::Validation("GDN value width overflow".into()))?;
+    let q_dim = (arch.n_q_heads as usize)
+        .checked_mul(arch.attn_head_dim as usize)
+        .ok_or_else(|| DenseBatch8Error::Validation("attention Q width overflow".into()))?;
+    let kv_dim = (arch.n_kv_heads as usize)
+        .checked_mul(arch.attn_head_dim as usize)
+        .ok_or_else(|| DenseBatch8Error::Validation("attention KV width overflow".into()))?;
+    let f32_width = hidden
+        .checked_mul(6)
+        .and_then(|value| value.checked_add(arch.vocab_size as usize))
+        .and_then(|value| value.checked_add(conv_dim))
+        .and_then(|value| value.checked_add(value_dim.checked_mul(2)?))
+        .and_then(|value| value.checked_add(ffn.checked_mul(3)?))
+        .and_then(|value| value.checked_add(q_dim.checked_mul(2)?))
+        .and_then(|value| value.checked_add(kv_dim.checked_mul(2)?))
+        .ok_or_else(|| DenseBatch8Error::Validation("dense B=8 scratch size overflow".into()))?;
+    let f32_bytes = checked_elements(f32_width, "dense B=8 scratch")?
+        .checked_mul(4)
+        .ok_or_else(|| DenseBatch8Error::Validation("dense B=8 scratch bytes overflow".into()))?;
+    let i32_bytes = u64::try_from(DENSE_BATCH8_WIDTH * 2 * std::mem::size_of::<i32>())
+        .map_err(|_| DenseBatch8Error::Validation("dense B=8 I32 scratch overflow".into()))?;
+    f32_bytes
+        .checked_add(i32_bytes)
+        .ok_or_else(|| DenseBatch8Error::Validation("dense B=8 scratch bytes overflow".into()))
+}
+
 fn require_writable_tensor(
     tensor: &MetalTensor,
     name: &str,
@@ -151,6 +191,7 @@ impl DenseBatch8Scratch {
             .checked_mul(arch.attn_head_dim as usize)
             .ok_or_else(|| DenseBatch8Error::Validation("attention KV width overflow".into()))?;
         let vocab = arch.vocab_size as usize;
+        dense_batch8_scratch_bytes(arch)?;
         Ok(Self {
             ids: MetalTensor::zeros_i32(ctx, vec![DENSE_BATCH8_WIDTH as u64])?,
             rows: MetalTensor::zeros_f32(ctx, vec![checked_elements(hidden, "hidden")?])?,
@@ -192,32 +233,38 @@ pub struct DenseBatch8Executor<'a> {
     poisoned: bool,
 }
 
+pub fn inspect_dense_batch8(model: &MetalModel) -> Result<(), DenseBatch8Error> {
+    if model.arch.kind != ArchKind::Dense {
+        return Err(DenseBatch8Error::Unsupported(
+            "model architecture is not dense Qwen".into(),
+        ));
+    }
+    if model.has_queue_scoped_residency_set() {
+        return Err(DenseBatch8Error::Unsupported(
+            "model residency is scoped to another command queue".into(),
+        ));
+    }
+    for flag in [
+        "QWEN_DECODE_GDN_NOOP_FRONT",
+        "QWEN_DECODE_GDN_NOOP_OUT",
+        "QWEN_DECODE_GDN_NOOP_QKV",
+        "QWEN_DECODE_GDN_NOOP_Z",
+        "QWEN_DECODE_GDN_NOOP_BETA",
+        "QWEN_DECODE_GDN_NOOP_ALPHA",
+    ] {
+        if read_default_off(flag) {
+            return Err(DenseBatch8Error::Unsupported(format!(
+                "diagnostic flag {flag} changes the production graph"
+            )));
+        }
+    }
+    dense_batch8_scratch_bytes(&model.arch)?;
+    Ok(())
+}
+
 impl<'a> DenseBatch8Executor<'a> {
     pub fn new(ctx: &'a MetalContext, model: &'a MetalModel) -> Result<Self, DenseBatch8Error> {
-        if model.arch.kind != ArchKind::Dense {
-            return Err(DenseBatch8Error::Unsupported(
-                "model architecture is not dense Qwen".into(),
-            ));
-        }
-        if model.has_queue_scoped_residency_set() {
-            return Err(DenseBatch8Error::Unsupported(
-                "model residency is scoped to another command queue".into(),
-            ));
-        }
-        for flag in [
-            "QWEN_DECODE_GDN_NOOP_FRONT",
-            "QWEN_DECODE_GDN_NOOP_OUT",
-            "QWEN_DECODE_GDN_NOOP_QKV",
-            "QWEN_DECODE_GDN_NOOP_Z",
-            "QWEN_DECODE_GDN_NOOP_BETA",
-            "QWEN_DECODE_GDN_NOOP_ALPHA",
-        ] {
-            if read_default_off(flag) {
-                return Err(DenseBatch8Error::Unsupported(format!(
-                    "diagnostic flag {flag} changes the production graph"
-                )));
-            }
-        }
+        inspect_dense_batch8(model)?;
         Ok(Self {
             forward: MetalForward::new(ctx, model),
             scratch: DenseBatch8Scratch::new(ctx, model)?,
@@ -1067,5 +1114,16 @@ impl<'a> DenseBatch8Executor<'a> {
         }
         blit.end();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::QWEN3_0_8B;
+
+    #[test]
+    fn scratch_accounting_is_stable_for_dense_0_8b() {
+        assert_eq!(dense_batch8_scratch_bytes(&QWEN3_0_8B).unwrap(), 8_978_496);
     }
 }

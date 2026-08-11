@@ -4,6 +4,7 @@ mod cli;
 mod concurrent_jsonl;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_temporal;
+mod execution_selector;
 mod fixed_cohort_jsonl;
 mod messages;
 mod shutdown;
@@ -34,6 +35,7 @@ use qwen_llm::deepseek_v4_metal::{
     DeepSeekV4StageProfile, causal_snapshot_record_bytes, load_causal_snapshot_file,
     publish_causal_snapshot_file,
 };
+use qwen_llm::dense_batch8::DENSE_BATCH8_WIDTH;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
     MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
@@ -50,6 +52,7 @@ use qwen_llm::metal_forward::{
 };
 use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::model_family::ModelFamily;
+use qwen_llm::moe_batch16::MOE_BATCH16_WIDTH;
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
 use qwen_llm::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS};
 use qwen_llm::prompt_lookup::{DRAFT_TOKENS, PromptLookupProposer, terminal_draft_window};
@@ -401,6 +404,19 @@ struct Args {
         conflicts_with = "batch_size"
     )]
     concurrency: Option<usize>,
+
+    /// Select serial or qualified automatic JSONL width planning.
+    ///
+    /// Accelerated modes use pair/cohort prefix fanout instead of RAM-cache
+    /// lookahead admission.
+    #[arg(
+        long,
+        hide_short_help = true,
+        requires = "requests_jsonl",
+        conflicts_with_all = ["batch_size", "concurrency"],
+        value_enum
+    )]
+    execution_mode: Option<execution_selector::ExecutionModeArg>,
 
     /// Maximum number of tokens to generate.
     #[arg(short = 'n', long, hide_short_help = true, default_value_t = 64)]
@@ -2387,7 +2403,7 @@ fn run() -> Result<()> {
     }
 
     if let Some(path) = args.requests_jsonl.as_ref() {
-        return run_requests_jsonl(&model_path, path, gguf, &args);
+        return run_requests_jsonl(&model_path, path, gguf, &args, explicit_options);
     }
 
     unreachable!("request mode was validated above")
@@ -4248,7 +4264,39 @@ fn run_deepseek_v4_requests_jsonl(
     let memory_plan = load_plan.memory_plan().clone();
     let initial_memory_signals = ctx.memory_signals();
     eprintln!("deepseek_v4: memory plan; {memory_plan}");
-    let session_count = if args.concurrency.is_some() { 2 } else { 1 };
+    let auto_mode = args.execution_mode == Some(execution_selector::ExecutionModeArg::Auto);
+    let auto_selection = if auto_mode {
+        let request_count = prepared.as_ref().map_or(0, Vec::len);
+        let two_session_memory_admitted = memory_plan
+            .admission_for_sessions(initial_memory_signals, 2)
+            .context("evaluate automatic DeepSeek V4 two-session admission")?
+            .admitted;
+        let selection =
+            execution_selector::select_deepseek(execution_selector::DeepSeekSelectionInput {
+                mode: args.execution_mode,
+                request_count,
+                stdin: stdin_mode,
+                residency_set: qwen_llm::env_flag::read_default_off("QWEN_DSV4_RESIDENCY_SET"),
+                two_session_memory_admitted,
+            });
+        eprintln!(
+            "execution_selection: {}",
+            serde_json::to_string(&execution_selector::ExecutionSelectionRecord::new(
+                Some(ModelFamily::DeepSeek4),
+                (!stdin_mode).then_some(request_count),
+                selection,
+            ))
+            .context("serialize DeepSeek V4 execution selection")?
+        );
+        Some(selection)
+    } else {
+        None
+    };
+    let use_concurrency = args.concurrency.is_some()
+        || auto_selection.is_some_and(|selection| {
+            selection.selected == execution_selector::SelectedExecution::Concurrency2
+        });
+    let session_count = if use_concurrency { 2 } else { 1 };
     let admitted_load_plan = load_plan
         .admit_for_sessions(initial_memory_signals, session_count)
         .context("admit strict DeepSeek V4 Metal residency and session")?;
@@ -4285,7 +4333,7 @@ fn run_deepseek_v4_requests_jsonl(
         residency.report(),
     );
 
-    if args.concurrency.is_some() {
+    if use_concurrency {
         let prepared = prepared.expect("DeepSeek concurrency requires file lookahead");
         let executed = concurrent_jsonl::run_deepseek_file(
             &ctx,
@@ -6369,6 +6417,7 @@ fn run_requests_jsonl(
     requests_path: &Path,
     gguf: GgufFile,
     args: &Args,
+    explicit: ExplicitCliOptions,
 ) -> Result<()> {
     args.prefill_chunk.validate()?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
@@ -6412,11 +6461,137 @@ fn run_requests_jsonl(
     let mut stdout = std::io::stdout().lock();
     let mut n_requests = 0usize;
 
+    let model_family = match loaded.arch().kind {
+        ArchKind::Dense => Some(ModelFamily::Qwen35),
+        ArchKind::Moe => Some(ModelFamily::Qwen35Moe),
+    };
+    let auto_mode = args.execution_mode == Some(execution_selector::ExecutionModeArg::Auto);
+    let mut auto_prepared = if auto_mode && requests_path != Path::new("-") {
+        Some(prepare_jsonl_requests(requests_path, &tokenizer, args)?)
+    } else {
+        None
+    };
+    let auto_selection = if auto_mode {
+        let requests = auto_prepared.as_deref().unwrap_or(&[]);
+        let all_requests_accelerable = !requests.is_empty()
+            && requests.iter().all(|request| {
+                request.sampling.temperature == 0.0
+                    && request.request.cache_prefix_tokens.is_none()
+                    && request.auto_cache_prefix_tokens.is_none()
+                    && request.auto_cache_future_hits == 0
+            });
+        let dense_summary = if requests.is_empty() {
+            fixed_cohort_jsonl::CohortPlanSummary {
+                full_cohorts: 0,
+                serial_fallback_requests: 0,
+            }
+        } else {
+            fixed_cohort_jsonl::plan_summary::<DENSE_BATCH8_WIDTH>(requests, args)?
+        };
+        let moe_summary = if requests.is_empty() {
+            fixed_cohort_jsonl::CohortPlanSummary {
+                full_cohorts: 0,
+                serial_fallback_requests: 0,
+            }
+        } else {
+            fixed_cohort_jsonl::plan_summary::<MOE_BATCH16_WIDTH>(requests, args)?
+        };
+        let moe_plan = if model_family == Some(ModelFamily::Qwen35Moe) {
+            loaded.inspect_moe_batch16_plan().ok()
+        } else {
+            None
+        };
+        let admission_requirements = if requests.is_empty() {
+            None
+        } else {
+            Some(concurrent_jsonl::qwen_execution_admission_requirements(
+                &loaded, requests, args,
+            )?)
+        };
+        let admission = |width: usize, executor_scratch_upper_bytes: u64| -> Result<bool> {
+            let Some(requirements) = admission_requirements else {
+                return Ok(false);
+            };
+            Ok(loaded
+                .qwen_execution_memory_admission(
+                    width,
+                    requirements.max_capacity,
+                    requirements.prefill_scratch_upper_bytes,
+                    executor_scratch_upper_bytes,
+                )?
+                .admitted)
+        };
+        let concurrency2_memory_admitted = admission(2, 1024 * 1024)?;
+        let dense_batch8_memory_admitted =
+            if model_family == Some(ModelFamily::Qwen35) && loaded.inspect_dense_batch8().is_ok() {
+                admission(
+                    DENSE_BATCH8_WIDTH,
+                    loaded
+                        .dense_batch8_scratch_bytes()?
+                        .saturating_add(1024 * 1024),
+                )?
+            } else {
+                false
+            };
+        let moe_batch16_memory_admitted =
+            if model_family == Some(ModelFamily::Qwen35Moe) && moe_plan.is_some() {
+                admission(
+                    MOE_BATCH16_WIDTH,
+                    loaded
+                        .moe_batch16_scratch_bytes()?
+                        .saturating_add(1024 * 1024),
+                )?
+            } else {
+                false
+            };
+        let selection = execution_selector::select_qwen(execution_selector::QwenSelectionInput {
+            mode: args.execution_mode,
+            family: model_family,
+            arch: loaded.arch(),
+            request_count: requests.len(),
+            all_requests_accelerable,
+            fixed_prefill_chunk: execution_selector::fixed_prefill_chunk(args.prefill_chunk),
+            acceleration_blocker: if requests_path == Path::new("-") {
+                Some("streaming_input")
+            } else {
+                execution_selector::qwen_acceleration_blocker(args, explicit, greedy_gpu_mode)
+            },
+            dense_full_cohorts: dense_summary.full_cohorts,
+            dense_serial_remainders: dense_summary.serial_fallback_requests,
+            moe_full_cohorts: moe_summary.full_cohorts,
+            moe_serial_remainders: moe_summary.serial_fallback_requests,
+            concurrency2_memory_admitted,
+            dense_batch8_memory_admitted,
+            moe_batch16_memory_admitted,
+            moe_plan,
+        });
+        eprintln!(
+            "execution_selection: {}",
+            serde_json::to_string(&execution_selector::ExecutionSelectionRecord::new(
+                model_family,
+                (!requests.is_empty()).then_some(requests.len()),
+                selection,
+            ))
+            .context("serialize execution selection")?
+        );
+        if selection.selected.accelerated() {
+            let stats = loaded.set_prefix_cache_max_bytes(0);
+            ensure!(
+                stats.entries == 0 && stats.indexed_bytes == 0,
+                "automatic execution selection found a populated prefix cache before request execution"
+            );
+        }
+        Some(selection)
+    } else {
+        None
+    };
+    let effective_prefix_cache_max_bytes = loaded.prefix_cache_stats().max_indexed_bytes;
+
     eprintln!(
         "loaded {} in {:.1} ms; prefix_cache_max_mib={}",
         model_path.display(),
         load_ms,
-        prefix_cache_max_bytes / (1024 * 1024),
+        effective_prefix_cache_max_bytes / (1024 * 1024),
     );
 
     if args.concurrency.is_some() {
@@ -6437,6 +6612,43 @@ fn run_requests_jsonl(
             greedy_gpu_mode,
             &mut stdout,
         )?;
+    } else if let Some(selection) = auto_selection
+        && selection.selected.accelerated()
+    {
+        let requests = auto_prepared
+            .as_deref()
+            .expect("accelerated automatic selection requires file lookahead");
+        n_requests += match selection.selected {
+            execution_selector::SelectedExecution::Concurrency2 => concurrent_jsonl::run_prepared(
+                &loaded,
+                &tokenizer,
+                requests,
+                args,
+                greedy_gpu_mode,
+                &mut stdout,
+            )?,
+            execution_selector::SelectedExecution::DenseBatch8 => fixed_cohort_jsonl::run_prepared(
+                &loaded,
+                &tokenizer,
+                requests,
+                args,
+                greedy_gpu_mode,
+                &mut stdout,
+                DENSE_BATCH8_WIDTH,
+            )?,
+            execution_selector::SelectedExecution::MoeBatch16 => fixed_cohort_jsonl::run_prepared(
+                &loaded,
+                &tokenizer,
+                requests,
+                args,
+                greedy_gpu_mode,
+                &mut stdout,
+                MOE_BATCH16_WIDTH,
+            )?,
+            execution_selector::SelectedExecution::Serial => {
+                unreachable!("accelerated selection checked above")
+            }
+        };
     } else if requests_path == Path::new("-") {
         shutdown::checkpoint()?;
         let stdin = std::io::stdin();
@@ -6484,33 +6696,19 @@ fn run_requests_jsonl(
             n_requests += 1;
         }
     } else {
-        let mut prepared = prepare_jsonl_requests(requests_path, &tokenizer, args)?;
-        discover_auto_cache_prefixes(&mut prepared, args.cache_prefix_auto_min_tokens);
-
-        for prepared_request in &prepared {
-            let (output, stats) =
-                run_jsonl_request(&loaded, &tokenizer, prepared_request, args, greedy_gpu_mode)
-                    .with_context(|| format!("run request {}", prepared_request.id))?;
-
-            serde_json::to_writer(&mut stdout, &output).context("write request output")?;
-            writeln!(stdout)?;
-            stdout.flush()?;
-
-            if let Some(file) = stats_file.as_mut() {
-                serde_json::to_writer(&mut *file, &stats).context("write request stats")?;
-                writeln!(file)?;
-                file.flush()?;
-            }
-            if let Some(path) = args.trace_request.as_ref() {
-                append_request_trace(
-                    path,
-                    unix_epoch_ms()?,
-                    stats.prompt_tokens,
-                    stats.generated_tokens,
-                )?;
-            }
-            n_requests += 1;
-        }
+        let mut prepared = match auto_prepared.take() {
+            Some(prepared) => prepared,
+            None => prepare_jsonl_requests(requests_path, &tokenizer, args)?,
+        };
+        n_requests += run_prepared_jsonl_serial(
+            &loaded,
+            &tokenizer,
+            &mut prepared,
+            args,
+            greedy_gpu_mode,
+            &mut stdout,
+            &mut stats_file,
+        )?;
     }
 
     ensure!(
@@ -6528,6 +6726,45 @@ fn run_requests_jsonl(
         stats.max_indexed_bytes as f64 / 1024.0 / 1024.0,
     );
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_prepared_jsonl_serial(
+    loaded: &LoadedModel,
+    tokenizer: &Tokenizer,
+    prepared: &mut [PreparedJsonlRequest],
+    args: &Args,
+    greedy_gpu_mode: GreedyGpuArgmaxMode,
+    stdout: &mut impl Write,
+    stats_file: &mut Option<std::fs::File>,
+) -> Result<usize> {
+    discover_auto_cache_prefixes(prepared, args.cache_prefix_auto_min_tokens);
+    let mut completed = 0usize;
+    for prepared_request in prepared {
+        let (output, stats) =
+            run_jsonl_request(loaded, tokenizer, prepared_request, args, greedy_gpu_mode)
+                .with_context(|| format!("run request {}", prepared_request.id))?;
+
+        serde_json::to_writer(&mut *stdout, &output).context("write request output")?;
+        writeln!(stdout)?;
+        stdout.flush()?;
+
+        if let Some(file) = stats_file.as_mut() {
+            serde_json::to_writer(&mut *file, &stats).context("write request stats")?;
+            writeln!(file)?;
+            file.flush()?;
+        }
+        if let Some(path) = args.trace_request.as_ref() {
+            append_request_trace(
+                path,
+                unix_epoch_ms()?,
+                stats.prompt_tokens,
+                stats.generated_tokens,
+            )?;
+        }
+        completed += 1;
+    }
+    Ok(completed)
 }
 
 fn prepare_jsonl_requests(

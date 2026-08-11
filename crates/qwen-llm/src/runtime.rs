@@ -17,6 +17,7 @@ use crate::checkpoint_store::{
 };
 use crate::dense_batch8::{
     DENSE_BATCH8_WIDTH, DenseBatch8Error, DenseBatch8Executor, DenseBatch8Step,
+    dense_batch8_scratch_bytes, inspect_dense_batch8,
 };
 use crate::gguf::{GgufError, GgufFile, GgufShard};
 use crate::loader::{LoadError, Model};
@@ -29,7 +30,8 @@ use crate::metal_forward::{
 };
 use crate::model::Arch;
 use crate::moe_batch16::{
-    MOE_BATCH16_WIDTH, MoeBatch16Error, MoeBatch16Executor, MoeBatch16PlanTelemetry, MoeBatch16Step,
+    MOE_BATCH16_WIDTH, MoeBatch16Error, MoeBatch16Executor, MoeBatch16PlanTelemetry,
+    MoeBatch16Step, inspect_execution_plan, moe_batch16_scratch_bytes,
 };
 use crate::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS, prefetch_fd};
 use crate::prefix_cache::{DEFAULT_MAX_BYTES, PrefixCache, PrefixCacheStats};
@@ -1157,6 +1159,23 @@ impl LoadedModel {
         })
     }
 
+    /// Validate the MoE B=16 capability plan without allocating executor scratch.
+    pub fn inspect_moe_batch16_plan(&self) -> Result<MoeBatch16PlanTelemetry, RuntimeError> {
+        Ok(inspect_execution_plan(&self.metal_model)?)
+    }
+
+    pub fn dense_batch8_scratch_bytes(&self) -> Result<u64, RuntimeError> {
+        Ok(dense_batch8_scratch_bytes(&self.metal_model.arch)?)
+    }
+
+    pub fn inspect_dense_batch8(&self) -> Result<(), RuntimeError> {
+        Ok(inspect_dense_batch8(&self.metal_model)?)
+    }
+
+    pub fn moe_batch16_scratch_bytes(&self) -> Result<u64, RuntimeError> {
+        Ok(moe_batch16_scratch_bytes(&self.metal_model.arch)?)
+    }
+
     /// Create the qualified fixed-width Qwen MoE B=16 decode executor.
     pub fn create_moe_batch16_executor(
         &self,
@@ -1174,26 +1193,12 @@ impl LoadedModel {
         max_context_tokens: usize,
         prefill_scratch_upper_bytes: u64,
     ) -> Result<MetalMemoryAdmission, RuntimeError> {
-        let per_session =
-            qwen_queue2_session_upper_bytes(self.context(), &self.metal_model, max_context_tokens)?;
-        let session_bytes = per_session
-            .checked_mul(QWEN_QUEUE2_WIDTH as u64)
-            .ok_or_else(|| {
-                QwenQueue2Error::Validation("two-session byte estimate overflow".into())
-            })?;
-        let incremental_bytes = session_bytes
-            .checked_add(prefill_scratch_upper_bytes)
-            .ok_or_else(|| {
-                QwenQueue2Error::Validation(
-                    "two-session plus prefill-scratch byte estimate overflow".into(),
-                )
-            })?;
-        let admission = evaluate_metal_memory_admission(
-            incremental_bytes,
-            QWEN_QUEUE2_DYNAMIC_RESERVE_BYTES,
-            self.context().memory_signals(),
-            true,
-        );
+        let admission = self.qwen_execution_memory_admission(
+            QWEN_QUEUE2_WIDTH,
+            max_context_tokens,
+            prefill_scratch_upper_bytes,
+            0,
+        )?;
         if !admission.admitted {
             return Err(QwenQueue2Error::Validation(format!(
                 "memory admission denied: reason={} required={:?} working_set_headroom={:?} process_remaining={:?}",
@@ -1205,6 +1210,41 @@ impl LoadedModel {
             .into());
         }
         Ok(admission)
+    }
+
+    /// Conservatively price a Qwen multi-sequence execution mode before any
+    /// executor scratch or mutable sequence state is allocated.
+    pub fn qwen_execution_memory_admission(
+        &self,
+        width: usize,
+        max_context_tokens: usize,
+        prefill_scratch_upper_bytes: u64,
+        executor_scratch_upper_bytes: u64,
+    ) -> Result<MetalMemoryAdmission, RuntimeError> {
+        if width == 0 {
+            return Err(
+                QwenQueue2Error::Validation("execution width must be positive".into()).into(),
+            );
+        }
+        let per_session =
+            qwen_queue2_session_upper_bytes(self.context(), &self.metal_model, max_context_tokens)?;
+        let session_bytes = per_session
+            .checked_mul(width as u64)
+            .ok_or_else(|| QwenQueue2Error::Validation("session byte estimate overflow".into()))?;
+        let incremental_bytes = session_bytes
+            .checked_add(prefill_scratch_upper_bytes)
+            .and_then(|value| value.checked_add(executor_scratch_upper_bytes))
+            .ok_or_else(|| {
+                QwenQueue2Error::Validation(
+                    "sessions plus execution scratch byte estimate overflow".into(),
+                )
+            })?;
+        Ok(evaluate_metal_memory_admission(
+            incremental_bytes,
+            QWEN_QUEUE2_DYNAMIC_RESERVE_BYTES,
+            self.context().memory_signals(),
+            true,
+        ))
     }
 
     pub fn create_independent_queue2_executor(

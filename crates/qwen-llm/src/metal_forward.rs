@@ -1333,6 +1333,8 @@ pub enum MfError {
     Snapshot(#[from] SnapshotValidationError),
     #[error("Metal command buffer failed: status={status} error={error}")]
     CommandBuffer { status: String, error: String },
+    #[error("Metal session is poisoned: {reason}")]
+    SessionPoisoned { reason: &'static str },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5364,6 +5366,7 @@ impl MetalModel {
 /// layer), KV cache (one set per attn layer), and a small pool of
 /// scratch activation tensors that are reused across layers.
 pub struct MetalSession {
+    poison_reason: Option<&'static str>,
     /// (kernel-1) * conv_dim per GDN layer, F32, contiguous.
     pub gdn_conv: Vec<MetalTensor>,
     /// n_v_heads * head_dim * head_dim per GDN layer, F32.
@@ -5425,6 +5428,17 @@ pub struct MetalSession {
 }
 
 impl MetalSession {
+    pub(crate) fn ensure_usable(&self) -> Result<(), MfError> {
+        match self.poison_reason {
+            Some(reason) => Err(MfError::SessionPoisoned { reason }),
+            None => Ok(()),
+        }
+    }
+
+    pub(crate) fn poison(&mut self, reason: &'static str) {
+        self.poison_reason = Some(reason);
+    }
+
     fn any_mutable_tensor(&self, mut predicate: impl FnMut(&MetalTensor) -> bool) -> bool {
         self.gdn_conv.iter().any(&mut predicate)
             || self.gdn_state.iter().any(&mut predicate)
@@ -5608,6 +5622,7 @@ impl MetalSession {
         }
 
         Ok(Self {
+            poison_reason: None,
             gdn_conv,
             gdn_state,
             kv_k,
@@ -7512,6 +7527,7 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<Vec<f32>, MfError> {
+        session.ensure_usable()?;
         if self.model.arch.kind == ArchKind::Moe {
             return self.single_token_moe(token_id, position, session);
         }
@@ -9470,6 +9486,7 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<i32, MfError> {
+        session.ensure_usable()?;
         let (argmax, _) = self.single_token_argmax_profiled(token_id, position, session)?;
         Ok(argmax)
     }
@@ -9480,6 +9497,7 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<GreedySelection, MfError> {
+        session.ensure_usable()?;
         let (raw, _) = self.single_token_reduced_profiled(
             token_id,
             position,
@@ -9555,6 +9573,7 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(i32, TokenProfile), MfError> {
+        session.ensure_usable()?;
         self.single_token_reduced_profiled(
             token_id,
             position,
@@ -11718,6 +11737,7 @@ impl<'a> MetalForward<'a> {
         position: u32,
         session: &mut MetalSession,
     ) -> Result<(Vec<f32>, TokenProfile), MfError> {
+        session.ensure_usable()?;
         if self.model.arch.kind == ArchKind::Moe {
             return if concurrent_gdn_moe_decode_enabled() {
                 self.single_token_profiled_concurrent_gdn_moe(token_id, position, session)
@@ -11741,6 +11761,7 @@ impl<'a> MetalForward<'a> {
         position: u32,
         s: &mut MetalSession,
     ) -> Result<(), MfError> {
+        s.ensure_usable()?;
         // Pre-mixer norm.
         let attn_norm = match block {
             MetalBlock::Gdn(g) => &g.attn_norm,
@@ -13958,6 +13979,7 @@ impl MetalSession {
         prefix_tokens: Vec<i32>,
         final_logits: Option<Vec<f32>>,
     ) -> Result<SessionSnapshot, MfError> {
+        self.ensure_usable()?;
         let prefix_len = prefix_tokens.len();
         let n_attn = self.kv_k.len();
         let n_gdn = self.gdn_state.len();
@@ -14146,6 +14168,7 @@ impl MetalSession {
                 &snap.gdn_state_arena[off_s..off_s + gdn_state_per],
             );
         }
+        self.poison_reason = None;
         Ok(())
     }
 }

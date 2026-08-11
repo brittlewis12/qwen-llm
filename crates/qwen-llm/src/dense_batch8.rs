@@ -7,13 +7,15 @@
 use crate::env_flag::read_default_off;
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, encode_add_inplace_f32,
-    encode_argmax_f32, encode_get_rows_f32, encode_rms_norm_mul_f32, encode_silu_mul_f32,
+    encode_argmax_f32, encode_argmax_f32_greedy, encode_get_rows_f32, encode_rms_norm_mul_f32,
+    encode_silu_mul_f32,
 };
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, MetalAttnBlock, MetalBlock, MetalForward, MetalGdnBlock, MetalModel,
     MetalSession, MfError, RMS_EPS, encode_mat_mat_dispatch,
 };
 use crate::model::ArchKind;
+use crate::sampling::{GreedySelection, SamplingError};
 use crate::tensor::GgmlType;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -37,12 +39,24 @@ pub enum DenseBatch8Error {
     Metal(#[from] MetalError),
     #[error("dense B=8 forward: {0}")]
     Forward(#[from] MfError),
+    #[error("dense B=8 greedy selection failed in slot {slot}: {source}")]
+    GreedySelection {
+        slot: usize,
+        #[source]
+        source: SamplingError,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct DenseBatch8Step {
     pub argmax_ids: [i32; DENSE_BATCH8_WIDTH],
     pub gpu_ms: Option<f64>,
+}
+
+#[derive(Clone, Copy)]
+enum Reduction {
+    LowestIndex,
+    GreedyTotal,
 }
 
 struct GdnScratch {
@@ -237,6 +251,68 @@ impl<'a> DenseBatch8Executor<'a> {
         if cancelled() {
             return Err(DenseBatch8Error::CancelledBeforeCommit);
         }
+        if sessions.len() != DENSE_BATCH8_WIDTH {
+            return Err(DenseBatch8Error::Validation(format!(
+                "session width {} != {DENSE_BATCH8_WIDTH}",
+                sessions.len()
+            )));
+        }
+        let sessions: &mut [MetalSession; DENSE_BATCH8_WIDTH] = sessions
+            .try_into()
+            .map_err(|_| DenseBatch8Error::Validation("session width changed".into()))?;
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = sessions;
+        let mut refs = [s0, s1, s2, s3, s4, s5, s6, s7];
+        self.step_refs_with_cancel(
+            token_ids,
+            position,
+            &mut refs,
+            Reduction::LowestIndex,
+            cancelled,
+        )
+    }
+
+    pub fn step_greedy_refs(
+        &mut self,
+        token_ids: [i32; DENSE_BATCH8_WIDTH],
+        position: u32,
+        sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<DenseBatch8Step, DenseBatch8Error> {
+        self.step_refs_with_cancel(
+            token_ids,
+            position,
+            sessions,
+            Reduction::GreedyTotal,
+            cancelled,
+        )
+    }
+
+    pub fn validate_refs(
+        &self,
+        token_ids: [i32; DENSE_BATCH8_WIDTH],
+        position: u32,
+        sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
+    ) -> Result<(), DenseBatch8Error> {
+        if self.poisoned {
+            return Err(DenseBatch8Error::Poisoned);
+        }
+        self.validate_step(&token_ids, position, sessions)
+    }
+
+    fn step_refs_with_cancel(
+        &mut self,
+        token_ids: [i32; DENSE_BATCH8_WIDTH],
+        position: u32,
+        sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
+        reduction: Reduction,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<DenseBatch8Step, DenseBatch8Error> {
+        if self.poisoned {
+            return Err(DenseBatch8Error::Poisoned);
+        }
+        if cancelled() {
+            return Err(DenseBatch8Error::CancelledBeforeCommit);
+        }
         self.validate_step(&token_ids, position, sessions)?;
         self.write_ids(&token_ids)?;
         let command = self
@@ -245,7 +321,7 @@ impl<'a> DenseBatch8Executor<'a> {
             .queue
             .commandBuffer()
             .ok_or_else(|| DenseBatch8Error::Validation("command buffer unavailable".into()))?;
-        if let Err(error) = self.encode_step(&command, position, sessions) {
+        if let Err(error) = self.encode_step(&command, position, sessions, reduction) {
             Self::restore_frontiers(sessions, position as usize);
             return Err(error);
         }
@@ -259,12 +335,32 @@ impl<'a> DenseBatch8Executor<'a> {
         let error = command.error();
         if status != MTLCommandBufferStatus::Completed || error.is_some() {
             self.poisoned = true;
+            Self::poison_sessions(sessions, "a committed dense B=8 command failed");
             return Err(DenseBatch8Error::CommandBuffer {
                 status: format!("{status:?}"),
                 error: format!("{error:?}"),
             });
         }
-        let argmax_ids = self.read_argmax()?;
+        let mut argmax_ids = match self.read_argmax() {
+            Ok(ids) => ids,
+            Err(error) => {
+                self.poisoned = true;
+                Self::poison_sessions(sessions, "dense B=8 argmax readback failed");
+                return Err(error);
+            }
+        };
+        if matches!(reduction, Reduction::GreedyTotal) {
+            for (slot, raw) in argmax_ids.iter_mut().enumerate() {
+                match GreedySelection::from_encoded(*raw).into_token() {
+                    Ok(token) => *raw = token,
+                    Err(source) => {
+                        self.poisoned = true;
+                        Self::poison_sessions(sessions, "dense B=8 greedy selection failed");
+                        return Err(DenseBatch8Error::GreedySelection { slot, source });
+                    }
+                }
+            }
+        }
         let start = command.GPUStartTime();
         let end = command.GPUEndTime();
         let gpu_ms = (start.is_finite() && end.is_finite() && start > 0.0 && end > start)
@@ -273,10 +369,10 @@ impl<'a> DenseBatch8Executor<'a> {
     }
 
     fn validate_step(
-        &mut self,
+        &self,
         token_ids: &[i32; DENSE_BATCH8_WIDTH],
         position: u32,
-        sessions: &[MetalSession],
+        sessions: &[&mut MetalSession; DENSE_BATCH8_WIDTH],
     ) -> Result<(), DenseBatch8Error> {
         if sessions.len() != DENSE_BATCH8_WIDTH {
             return Err(DenseBatch8Error::Validation(format!(
@@ -335,6 +431,8 @@ impl<'a> DenseBatch8Executor<'a> {
         let vocab = arch.vocab_size as usize;
         let position = position as usize;
         for (slot, session) in sessions.iter().enumerate() {
+            let session = &**session;
+            session.ensure_usable()?;
             if session.has_internal_mutable_alias() {
                 return Err(DenseBatch8Error::Validation(format!(
                     "slot {slot} aliases mutable storage internally"
@@ -457,7 +555,7 @@ impl<'a> DenseBatch8Executor<'a> {
         }
         for left in 0..DENSE_BATCH8_WIDTH {
             for right in left + 1..DENSE_BATCH8_WIDTH {
-                if sessions[left].aliases_mutable_session(&sessions[right]) {
+                if sessions[left].aliases_mutable_session(sessions[right]) {
                     return Err(DenseBatch8Error::Validation(format!(
                         "slots {left} and {right} alias mutable session storage"
                     )));
@@ -467,9 +565,18 @@ impl<'a> DenseBatch8Executor<'a> {
         Ok(())
     }
 
-    fn restore_frontiers(sessions: &mut [MetalSession], position: usize) {
+    fn restore_frontiers(sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH], position: usize) {
         for session in sessions {
             session.kv_n_pos.fill(position);
+        }
+    }
+
+    fn poison_sessions(
+        sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
+        reason: &'static str,
+    ) {
+        for session in sessions {
+            session.poison(reason);
         }
     }
 
@@ -516,7 +623,8 @@ impl<'a> DenseBatch8Executor<'a> {
         &self,
         command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         position: u32,
-        sessions: &mut [MetalSession],
+        sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
+        reduction: Reduction,
     ) -> Result<(), DenseBatch8Error> {
         let arch = &self.forward.model.arch;
         let hidden = arch.hidden_size as usize;
@@ -587,14 +695,24 @@ impl<'a> DenseBatch8Executor<'a> {
             vocab,
             DENSE_BATCH8_WIDTH,
         )?;
-        encode_argmax_f32(
-            self.forward.ctx,
-            &encoder,
-            &self.scratch.logits,
-            &self.scratch.argmax,
-            DENSE_BATCH8_WIDTH,
-            vocab,
-        )?;
+        match reduction {
+            Reduction::LowestIndex => encode_argmax_f32(
+                self.forward.ctx,
+                &encoder,
+                &self.scratch.logits,
+                &self.scratch.argmax,
+                DENSE_BATCH8_WIDTH,
+                vocab,
+            )?,
+            Reduction::GreedyTotal => encode_argmax_f32_greedy(
+                self.forward.ctx,
+                &encoder,
+                &self.scratch.logits,
+                &self.scratch.argmax,
+                DENSE_BATCH8_WIDTH,
+                vocab,
+            )?,
+        }
         encoder.end();
         self.blit_logits_to_sessions(command, sessions, vocab)?;
         Ok(())
@@ -604,7 +722,7 @@ impl<'a> DenseBatch8Executor<'a> {
         &self,
         command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         source: &MetalTensor,
-        sessions: &[MetalSession],
+        sessions: &[&mut MetalSession; DENSE_BATCH8_WIDTH],
         destination: impl Fn(&MetalSession) -> &MetalTensor,
     ) -> Result<(), DenseBatch8Error> {
         let width = self.forward.model.arch.hidden_size as usize;
@@ -628,7 +746,7 @@ impl<'a> DenseBatch8Executor<'a> {
     fn blit_rows_from_sessions(
         &self,
         command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        sessions: &[MetalSession],
+        sessions: &[&mut MetalSession; DENSE_BATCH8_WIDTH],
         destination: &MetalTensor,
         source: impl Fn(&MetalSession) -> &MetalTensor,
     ) -> Result<(), DenseBatch8Error> {
@@ -655,7 +773,7 @@ impl<'a> DenseBatch8Executor<'a> {
         command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         block: &MetalGdnBlock,
         gdn_index: usize,
-        sessions: &mut [MetalSession],
+        sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
         hidden: usize,
         conv_dim: usize,
         value_dim: usize,
@@ -759,7 +877,7 @@ impl<'a> DenseBatch8Executor<'a> {
         block: &MetalAttnBlock,
         attn_index: usize,
         position: u32,
-        sessions: &mut [MetalSession],
+        sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
         hidden: usize,
         q_dim: usize,
         kv_dim: usize,
@@ -874,7 +992,7 @@ impl<'a> DenseBatch8Executor<'a> {
         gate_weight: &MetalTensor,
         up_weight: &MetalTensor,
         down_weight: &MetalTensor,
-        sessions: &[MetalSession],
+        sessions: &[&mut MetalSession; DENSE_BATCH8_WIDTH],
         hidden: usize,
         ffn: usize,
     ) -> Result<(), DenseBatch8Error> {
@@ -932,7 +1050,7 @@ impl<'a> DenseBatch8Executor<'a> {
     fn blit_logits_to_sessions(
         &self,
         command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        sessions: &[MetalSession],
+        sessions: &[&mut MetalSession; DENSE_BATCH8_WIDTH],
         vocab: usize,
     ) -> Result<(), DenseBatch8Error> {
         let row_bytes = u64::try_from(vocab * std::mem::size_of::<f32>())

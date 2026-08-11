@@ -1,6 +1,7 @@
 //! `qwen` — interactive CLI for the qwen-llm engine.
 
 mod cli;
+mod dense_batch8_jsonl;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_temporal;
 mod messages;
@@ -386,6 +387,10 @@ struct Args {
     /// Read JSONL request objects from a file or '-' while keeping one model loaded.
     #[arg(long, hide_short_help = true, conflicts_with_all = ["prompt", "prompt_file", "messages"])]
     requests_jsonl: Option<PathBuf>,
+
+    /// Decode fixed-width JSONL cohorts; currently supports 8 on dense Qwen.
+    #[arg(long, hide_short_help = true, requires = "requests_jsonl")]
+    batch_size: Option<usize>,
 
     /// Maximum number of tokens to generate.
     #[arg(short = 'n', long, hide_short_help = true, default_value_t = 64)]
@@ -2281,6 +2286,7 @@ fn run() -> Result<()> {
     validate_sampling_attribution_mode(&args)?;
     validate_sampled_structural_mode(&args)?;
     validate_durable_prefix_cache_mode(&args)?;
+    dense_batch8_jsonl::validate_cli(&args, explicit_options)?;
     if args.request_stats_jsonl.is_some() && args.info {
         bail!(
             "--request-stats-jsonl is not applicable with --info; only DeepSeek V4 single-turn generation emits the sidecar today"
@@ -2340,6 +2346,7 @@ fn run() -> Result<()> {
     let gguf = GgufFile::open(&model_path)
         .with_context(|| format!("open model {}", model_path.display()))?;
     let model_family = ModelFamily::detect(&gguf);
+    dense_batch8_jsonl::validate_model_family(args.batch_size, model_family)?;
     validate_deepseek_v4_multigroup_selector_family(
         args.deepseek_v4_multigroup_selector,
         model_family,
@@ -6346,11 +6353,16 @@ fn run_requests_jsonl(
 
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
+    let prefix_cache_max_bytes = if args.batch_size.is_some() {
+        0
+    } else {
+        prefix_cache_max_bytes(args)?
+    };
     let loaded = runtime
         .load_open_model_with_config(
             gguf,
             LoadedModelConfig {
-                prefix_cache_max_bytes: prefix_cache_max_bytes(args)?,
+                prefix_cache_max_bytes,
                 ..LoadedModelConfig::default()
             },
         )
@@ -6374,10 +6386,19 @@ fn run_requests_jsonl(
         "loaded {} in {:.1} ms; prefix_cache_max_mib={}",
         model_path.display(),
         load_ms,
-        args.prefix_cache_max_mib,
+        prefix_cache_max_bytes / (1024 * 1024),
     );
 
-    if requests_path == Path::new("-") {
+    if args.batch_size.is_some() {
+        n_requests += dense_batch8_jsonl::run_file(
+            &loaded,
+            &tokenizer,
+            requests_path,
+            args,
+            greedy_gpu_mode,
+            &mut stdout,
+        )?;
+    } else if requests_path == Path::new("-") {
         shutdown::checkpoint()?;
         let stdin = std::io::stdin();
         let reader = stdin.lock();
@@ -6513,7 +6534,7 @@ fn prepare_jsonl_request_line(
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return Ok(None);
     }
-    let request: JsonlRequest =
+    let mut request: JsonlRequest =
         serde_json::from_str(trimmed).with_context(|| format!("parse requests line {line_no}"))?;
     let id = request
         .id
@@ -6529,6 +6550,8 @@ fn prepare_jsonl_request_line(
     let sampling = request_sampling_config(&request, args)?;
     validate_sampling_decode_policy(sampling, args.prompt_lookup)
         .with_context(|| format!("validate decode policy for request {id}"))?;
+    request.prompt = None;
+    request.prompt_file = None;
     Ok(Some(PreparedJsonlRequest {
         request,
         id,
@@ -6614,6 +6637,36 @@ fn selected_cache_prefix_from_value(
     (Some(n.min(prompt_len)).filter(|&n| n > 0), source)
 }
 
+fn jsonl_generation_capacity(
+    prepared: &PreparedJsonlRequest,
+    args: &Args,
+) -> Result<(usize, usize)> {
+    let n_generate = prepared.request.tokens.unwrap_or(args.tokens);
+    ensure!(
+        n_generate > 0,
+        "tokens must be >= 1 for request {}",
+        prepared.id
+    );
+    let prompt_and_generation = prepared
+        .prompt_ids
+        .len()
+        .checked_add(n_generate)
+        .context("sequence capacity overflow")?;
+    let min_capacity = prompt_and_generation
+        .checked_add(16)
+        .context("sequence capacity overflow")?;
+    let capacity = args.max_context_tokens.unwrap_or(min_capacity);
+    ensure!(
+        capacity >= prompt_and_generation,
+        "max context {} is smaller than prompt {} + generation {} for request {}",
+        capacity,
+        prepared.prompt_ids.len(),
+        n_generate,
+        prepared.id,
+    );
+    Ok((n_generate, capacity))
+}
+
 fn run_jsonl_request(
     loaded: &LoadedModel,
     tokenizer: &Tokenizer,
@@ -6627,22 +6680,7 @@ fn run_jsonl_request(
     let total_t0 = Instant::now();
     let prompt_ids = &prepared.prompt_ids;
 
-    let n_generate = request.tokens.unwrap_or(args.tokens);
-    ensure!(n_generate > 0, "tokens must be >= 1 for request {id}");
-    let min_capacity = prompt_ids
-        .len()
-        .checked_add(n_generate)
-        .and_then(|v| v.checked_add(16))
-        .context("sequence capacity overflow")?;
-    let capacity = args.max_context_tokens.unwrap_or(min_capacity);
-    ensure!(
-        capacity >= prompt_ids.len() + n_generate,
-        "max context {} is smaller than prompt {} + generation {} for request {}",
-        capacity,
-        prompt_ids.len(),
-        n_generate,
-        id,
-    );
+    let (n_generate, capacity) = jsonl_generation_capacity(prepared, args)?;
 
     let (cache_prefix_tokens, cache_prefix_source) = selected_cache_prefix(
         request,

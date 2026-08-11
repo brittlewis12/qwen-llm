@@ -15,6 +15,9 @@ use crate::checkpoint_identity::{
 use crate::checkpoint_store::{
     CheckpointStoreError, DurableCheckpointStore, PublishReport, StoreContext,
 };
+use crate::dense_batch8::{
+    DENSE_BATCH8_WIDTH, DenseBatch8Error, DenseBatch8Executor, DenseBatch8Step,
+};
 use crate::gguf::{GgufError, GgufFile, GgufShard};
 use crate::loader::{LoadError, Model};
 use crate::metal::{MetalContext, MetalError};
@@ -80,6 +83,8 @@ pub enum RuntimeError {
     CheckpointStore(#[from] CheckpointStoreError),
     #[error("checkpoint size estimate overflow")]
     CheckpointSizeOverflow,
+    #[error("dense B=8 execution: {0}")]
+    DenseBatch8(#[from] DenseBatch8Error),
 }
 
 struct RuntimeInner {
@@ -1089,6 +1094,19 @@ impl LoadedModel {
         MetalForward::new(self.context(), &self.metal_model)
     }
 
+    /// Create the fixed-width dense-Qwen decode executor over this model.
+    ///
+    /// The returned wrapper keeps model provenance and logical sequence
+    /// frontiers synchronized with committed Metal state.
+    pub fn create_dense_batch8_executor(
+        &self,
+    ) -> Result<DenseBatch8SequenceExecutor<'_>, RuntimeError> {
+        Ok(DenseBatch8SequenceExecutor {
+            inner: DenseBatch8Executor::new(self.context(), &self.metal_model)?,
+            owner: Arc::clone(&self.owner),
+        })
+    }
+
     pub fn snapshot_identity(&self, sequence: &Sequence) -> Result<SnapshotIdentity, RuntimeError> {
         self.ensure_owns(sequence)?;
         let &(model_id, tokenizer_id) = self.identity_parts.get_or_init(|| {
@@ -1394,6 +1412,111 @@ impl LoadedModel {
             exact_final_logits,
             stats_at_lookup: stats,
         }))
+    }
+}
+
+/// Provenance-preserving wrapper around the fixed dense B=8 backend.
+pub struct DenseBatch8SequenceExecutor<'a> {
+    inner: DenseBatch8Executor<'a>,
+    owner: Arc<ModelOwnerToken>,
+}
+
+impl DenseBatch8SequenceExecutor<'_> {
+    /// Validate a complete cohort without encoding or advancing any state.
+    pub fn validate(
+        &self,
+        token_ids: [i32; DENSE_BATCH8_WIDTH],
+        sequences: [&mut Sequence; DENSE_BATCH8_WIDTH],
+    ) -> Result<(), RuntimeError> {
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = sequences;
+        let position = s0.position;
+        for (slot, sequence) in [&*s0, &*s1, &*s2, &*s3, &*s4, &*s5, &*s6, &*s7]
+            .into_iter()
+            .enumerate()
+        {
+            ensure_same_model_owner(&self.owner, &sequence.owner)?;
+            if sequence.position != position {
+                return Err(DenseBatch8Error::Validation(format!(
+                    "slot {slot} position {} != cohort position {position}",
+                    sequence.position
+                ))
+                .into());
+            }
+            sequence.ensure_can_append(1)?;
+        }
+        let position = u32::try_from(position)
+            .map_err(|_| DenseBatch8Error::Validation("cohort position does not fit u32".into()))?;
+        let mut states = [
+            &mut s0.state,
+            &mut s1.state,
+            &mut s2.state,
+            &mut s3.state,
+            &mut s4.state,
+            &mut s5.state,
+            &mut s6.state,
+            &mut s7.state,
+        ];
+        self.inner
+            .validate_refs(token_ids, position, &mut states)
+            .map_err(RuntimeError::from)
+    }
+
+    /// Consume one token in every lane and return the next greedy selections.
+    ///
+    /// All eight sequences must share this executor's model and logical
+    /// position. Their positions advance only after the Metal command completes
+    /// successfully; committed failures poison the underlying sessions.
+    pub fn step_greedy(
+        &mut self,
+        token_ids: [i32; DENSE_BATCH8_WIDTH],
+        sequences: [&mut Sequence; DENSE_BATCH8_WIDTH],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<DenseBatch8Step, RuntimeError> {
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = sequences;
+        let position = s0.position;
+        for (slot, sequence) in [&*s0, &*s1, &*s2, &*s3, &*s4, &*s5, &*s6, &*s7]
+            .into_iter()
+            .enumerate()
+        {
+            ensure_same_model_owner(&self.owner, &sequence.owner)?;
+            if sequence.position != position {
+                return Err(DenseBatch8Error::Validation(format!(
+                    "slot {slot} position {} != cohort position {position}",
+                    sequence.position
+                ))
+                .into());
+            }
+            sequence.ensure_can_append(1)?;
+        }
+        let position = u32::try_from(position)
+            .map_err(|_| DenseBatch8Error::Validation("cohort position does not fit u32".into()))?;
+        let step = {
+            let mut states = [
+                &mut s0.state,
+                &mut s1.state,
+                &mut s2.state,
+                &mut s3.state,
+                &mut s4.state,
+                &mut s5.state,
+                &mut s6.state,
+                &mut s7.state,
+            ];
+            self.inner
+                .step_greedy_refs(token_ids, position, &mut states, cancelled)?
+        };
+        s0.position += 1;
+        s1.position += 1;
+        s2.position += 1;
+        s3.position += 1;
+        s4.position += 1;
+        s5.position += 1;
+        s6.position += 1;
+        s7.position += 1;
+        Ok(step)
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.inner.is_poisoned()
     }
 }
 

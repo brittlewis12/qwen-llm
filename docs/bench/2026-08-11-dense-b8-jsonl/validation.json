@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "parent_commit": "322b63db0baa9dc7c097dbbc4c3254fd44490d9c",
+  "model": {
+    "path": "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf",
+    "sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"
+  },
+  "request_sha256": "892a8c8e11ae88a1fe937aee8d476e195d43fc4e113c087d7fa22e8696fa8c28",
+  "qwen_environment": {
+    "present_variables": []
+  },
+  "candidate_source_sha256": {
+    "crates/qwen-cli/src/main.rs": "9d8e515f788ffb52e2571184a1a40609b69f07ecc89157a13c7815261322c247",
+    "crates/qwen-cli/src/dense_batch8_jsonl.rs": "c592067bb89a4ef05ffcbfceb6e0d780b9ebca58bdd169054b36817c8fb6a161",
+    "crates/qwen-llm/src/dense_batch8.rs": "d54cdce06cf481b41a48930a0b65e6636b12d417f14383085fd3d804e46e0f0b",
+    "crates/qwen-llm/src/metal_forward.rs": "a9607e3a1be98e2034c2b36f65c537b364383df131f857024a052cd3e86f83bd",
+    "crates/qwen-llm/src/runtime.rs": "972f39330a79850f918f7ec3f133413e864ec5285e2155443e2bf3b186e304b8"
+  },
+  "batch_output_sha256": "e9f1287192c417fce23f3cee0b2065555b39c7346807f4abc354626035e54e78",
+  "serial_output_sha256": "e9f1287192c417fce23f3cee0b2065555b39c7346807f4abc354626035e54e78",
+  "exact_output_rows": 8,
+  "distinct_generated_token_hashes": 8,
+  "rollback_probe": {
+    "environment": "QWEN_GREEDY_GPU_ARGMAX=0",
+    "exit_nonzero": true,
+    "stdout_empty": true,
+    "error": "QWEN_GREEDY_GPU_ARGMAX=0 disables --batch-size because fixed B=8 requires GPU greedy selection"
+  },
+  "telemetry": {
+    "prompt_tokens_per_request": 7,
+    "requested_tokens_per_request": 12,
+    "generated_tokens": 96,
+    "productive_transitions": 88,
+    "padding_transitions": 0,
+    "physical_batch_steps": 11,
+    "prefill_ms": 130.287708,
+    "decode_ms": 159.209542,
+    "batch_transition_ms": 148.541959,
+    "executor_gpu_ms": 133.8333750027232,
+    "aggregate_generated_tps": 602.9789345163746,
+    "sequence_allocation_delta_bytes": 30605312,
+    "remaining_sequence_required_bytes": 214237184,
+    "memory_admission_reason": "admitted_process_budget_omitted"
+  }
+}

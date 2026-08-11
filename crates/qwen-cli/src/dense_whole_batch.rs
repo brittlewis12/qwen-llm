@@ -1,31 +1,21 @@
-use super::dense_block_batch::{
-    DenseAttnBatchScratch, DenseFfnBatchScratch, encode_dense_attention_batch,
-    encode_dense_block_batch, read_f16_prefix,
-};
+use super::dense_block_batch::read_f16_prefix;
 use super::{
-    GdnLayerReplayScratch, cosine_max_abs, env_flag_default_on, env_flag_enabled, f32_rms_delta,
+    cosine_max_abs, env_flag_default_on, env_flag_enabled, f32_rms_delta,
     fresh_gdn_replay_sessions_with_capacity, read_f32_tensor,
 };
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue};
+use qwen_llm::dense_batch8::{DENSE_BATCH8_WIDTH, DenseBatch8Executor};
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::Model;
-use qwen_llm::metal::{
-    BlitEncoder, KernelEncoder, MetalContext, MetalTensor, encode_argmax_f32, encode_get_rows_f32,
-    encode_rms_norm_mul_f32, evaluate_metal_memory_admission,
-};
-use qwen_llm::metal_forward::{
-    MetalBlock, MetalForward, MetalModel, MetalSession, RMS_EPS, encode_mat_mat_dispatch,
-};
+use qwen_llm::metal::{MetalContext, evaluate_metal_memory_admission};
+use qwen_llm::metal_forward::{MetalForward, MetalModel, MetalSession};
 use qwen_llm::model::ArchKind;
 use qwen_llm::tensor::GgmlType;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-const BATCH: usize = 8;
+const BATCH: usize = DENSE_BATCH8_WIDTH;
 const SESSION_ADMISSION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const DYNAMIC_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const RAMP_CAPACITY: usize = 512;
@@ -50,41 +40,6 @@ pub struct DecodeDenseWholeBatchArgs {
     /// Report numerical evidence without enforcing the diagnostic gates.
     #[arg(long)]
     no_check: bool,
-}
-
-struct DenseWholeBatchScratch {
-    ids: MetalTensor,
-    rows: MetalTensor,
-    logits: MetalTensor,
-    argmax: MetalTensor,
-    gdn: GdnLayerReplayScratch,
-    ffn: DenseFfnBatchScratch,
-    attn: DenseAttnBatchScratch,
-}
-
-impl DenseWholeBatchScratch {
-    fn new(ctx: &MetalContext, model: &MetalModel) -> Result<Self> {
-        let arch = &model.arch;
-        let hidden = arch.hidden_size as usize;
-        let ffn = arch.intermediate_size as usize;
-        let n_v = arch.gdn_n_v_heads as usize;
-        let n_k = arch.gdn_n_k_heads as usize;
-        let gdn_head_dim = arch.gdn_head_dim as usize;
-        let conv_dim = (2 * n_k + n_v) * gdn_head_dim;
-        let value_dim = n_v * gdn_head_dim;
-        let q_dim = arch.n_q_heads as usize * arch.attn_head_dim as usize;
-        let kv_dim = arch.n_kv_heads as usize * arch.attn_head_dim as usize;
-        let vocab = arch.vocab_size as usize;
-        Ok(Self {
-            ids: MetalTensor::zeros_i32(ctx, vec![BATCH as u64])?,
-            rows: MetalTensor::zeros_f32(ctx, vec![(BATCH * hidden) as u64])?,
-            logits: MetalTensor::zeros_f32(ctx, vec![(BATCH * vocab) as u64])?,
-            argmax: MetalTensor::zeros_i32(ctx, vec![BATCH as u64])?,
-            gdn: GdnLayerReplayScratch::new(ctx, BATCH, hidden, conv_dim, value_dim)?,
-            ffn: DenseFfnBatchScratch::new(ctx, BATCH, hidden, ffn)?,
-            attn: DenseAttnBatchScratch::new(ctx, BATCH, hidden, 2 * q_dim, kv_dim)?,
-        })
-    }
 }
 
 struct StepResult {
@@ -125,70 +80,6 @@ fn tokens_for(seed: u64, position: usize, vocab: usize) -> [i32; BATCH] {
     std::array::from_fn(|slot| token_for(seed, slot, position, vocab))
 }
 
-fn write_i32_tensor(tensor: &MetalTensor, values: &[i32]) -> Result<()> {
-    ensure!(tensor.dtype == GgmlType::I32, "token tensor must be I32");
-    ensure!(
-        tensor.offset.is_multiple_of(4),
-        "token tensor offset is not I32 aligned"
-    );
-    ensure!(
-        tensor.n_elements() as usize == values.len(),
-        "token tensor length mismatch"
-    );
-    let ptr = tensor.buffer.contents().as_ptr().cast::<i32>();
-    ensure!(!ptr.is_null(), "token tensor is not CPU visible");
-    let offset = usize::try_from(tensor.offset / 4)?;
-    unsafe {
-        std::ptr::copy_nonoverlapping(values.as_ptr(), ptr.add(offset), values.len());
-    }
-    Ok(())
-}
-
-fn read_i32_tensor(tensor: &MetalTensor) -> Result<Vec<i32>> {
-    ensure!(tensor.dtype == GgmlType::I32, "output tensor must be I32");
-    ensure!(
-        tensor.offset.is_multiple_of(4),
-        "output tensor offset is not I32 aligned"
-    );
-    let elements = tensor.n_elements() as usize;
-    let mut values = vec![0i32; elements];
-    let ptr = tensor.buffer.contents().as_ptr().cast::<i32>();
-    ensure!(!ptr.is_null(), "output tensor is not CPU visible");
-    let offset = usize::try_from(tensor.offset / 4)?;
-    unsafe {
-        std::ptr::copy_nonoverlapping(ptr.add(offset), values.as_mut_ptr(), elements);
-    }
-    Ok(values)
-}
-
-fn read_f32_rows(tensor: &MetalTensor, rows: usize, width: usize) -> Result<Vec<Vec<f32>>> {
-    ensure!(tensor.dtype == GgmlType::F32, "row tensor must be F32");
-    ensure!(
-        tensor.offset.is_multiple_of(4),
-        "row tensor offset is not F32 aligned"
-    );
-    ensure!(
-        tensor.n_elements() as usize == rows * width,
-        "row tensor shape mismatch"
-    );
-    let ptr = tensor.buffer.contents().as_ptr().cast::<f32>();
-    ensure!(!ptr.is_null(), "row tensor is not CPU visible");
-    let offset = usize::try_from(tensor.offset / 4)?;
-    let mut output = Vec::with_capacity(rows);
-    for row in 0..rows {
-        let mut values = vec![0.0f32; width];
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                ptr.add(offset + row * width),
-                values.as_mut_ptr(),
-                width,
-            );
-        }
-        output.push(values);
-    }
-    Ok(output)
-}
-
 fn ensure_frontier(sessions: &[MetalSession], expected: usize, label: &str) -> Result<()> {
     for (slot, session) in sessions.iter().enumerate() {
         ensure!(
@@ -203,209 +94,26 @@ fn ensure_frontier(sessions: &[MetalSession], expected: usize, label: &str) -> R
     Ok(())
 }
 
-fn wait_success(
-    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-    label: &str,
-) -> Result<f64> {
-    command.commit();
-    command.waitUntilCompleted();
-    ensure!(
-        command.error().is_none(),
-        "{label} command failed: {:?}",
-        command.error()
-    );
-    let start = command.GPUStartTime();
-    let end = command.GPUEndTime();
-    ensure!(
-        start.is_finite() && end.is_finite() && start > 0.0 && end > start,
-        "invalid {label} GPU interval: start={start} end={end}"
-    );
-    Ok((end - start) * 1e3)
-}
-
-fn encode_static_whole(
-    ctx: &MetalContext,
-    forward: &MetalForward<'_>,
-    command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-    sessions: &mut [MetalSession],
-    scratch: &DenseWholeBatchScratch,
-    position: u32,
-    fused_post_norm: bool,
-) -> Result<()> {
-    ensure!(
-        sessions.len() == BATCH,
-        "static whole-model batch must be 8"
-    );
-    ensure_frontier(sessions, position as usize, "static pre-encode")?;
-    let arch = &forward.model.arch;
-    let hidden = arch.hidden_size as usize;
-    let ffn = arch.intermediate_size as usize;
-    let n_v = arch.gdn_n_v_heads as usize;
-    let n_k = arch.gdn_n_k_heads as usize;
-    let gdn_head_dim = arch.gdn_head_dim as usize;
-    let conv_dim = (2 * n_k + n_v) * gdn_head_dim;
-    let value_dim = n_v * gdn_head_dim;
-    let q_dim = arch.n_q_heads as usize * arch.attn_head_dim as usize;
-    let kv_dim = arch.n_kv_heads as usize * arch.attn_head_dim as usize;
-    let vocab = arch.vocab_size as usize;
-
-    let encoder = KernelEncoder::begin(command);
-    encode_get_rows_f32(
-        ctx,
-        &encoder,
-        &forward.model.token_embd,
-        &scratch.ids,
-        &scratch.rows,
-        BATCH,
-        hidden,
-    )?;
-    encoder.end();
-
-    let hidden_row_bytes = u64::try_from(hidden * std::mem::size_of::<f32>())?;
-    let blit = BlitEncoder::begin(command);
-    for (slot, session) in sessions.iter().enumerate() {
-        blit.copy_buffer(
-            &scratch.rows.buffer,
-            scratch.rows.offset + slot as u64 * hidden_row_bytes,
-            &session.x.buffer,
-            session.x.offset,
-            hidden_row_bytes,
-        );
-    }
-    blit.end();
-
-    let mut gdn_index = 0usize;
-    let mut attn_index = 0usize;
-    for block in &forward.model.blocks {
-        match block {
-            MetalBlock::Gdn(_) => {
-                encode_dense_block_batch(
-                    ctx,
-                    forward,
-                    command,
-                    block,
-                    gdn_index,
-                    sessions,
-                    &scratch.gdn,
-                    &scratch.ffn,
-                    hidden,
-                    conv_dim,
-                    value_dim,
-                    ffn,
-                    fused_post_norm,
-                )?;
-                gdn_index += 1;
-            }
-            MetalBlock::Attn(block) => {
-                encode_dense_attention_batch(
-                    ctx,
-                    forward,
-                    command,
-                    block,
-                    attn_index,
-                    sessions,
-                    &scratch.attn,
-                    &scratch.ffn,
-                    hidden,
-                    q_dim,
-                    kv_dim,
-                    ffn,
-                    position,
-                    fused_post_norm,
-                )?;
-                attn_index += 1;
-            }
-        }
-    }
-    ensure!(
-        gdn_index == sessions[0].gdn_state.len() && attn_index == sessions[0].kv_n_pos.len(),
-        "static whole-model block/state inventory mismatch"
-    );
-
-    let encoder = KernelEncoder::begin(command);
-    for session in sessions.iter() {
-        encode_rms_norm_mul_f32(
-            ctx,
-            &encoder,
-            &session.x,
-            &forward.model.output_norm,
-            &session.h,
-            RMS_EPS,
-        )?;
-    }
-    encoder.end();
-
-    let blit = BlitEncoder::begin(command);
-    for (slot, session) in sessions.iter().enumerate() {
-        blit.copy_buffer(
-            &session.h.buffer,
-            session.h.offset,
-            &scratch.rows.buffer,
-            scratch.rows.offset + slot as u64 * hidden_row_bytes,
-            hidden_row_bytes,
-        );
-    }
-    blit.end();
-
-    let encoder = KernelEncoder::begin(command);
-    encode_mat_mat_dispatch(
-        ctx,
-        &encoder,
-        &forward.model.lm_head,
-        &scratch.rows,
-        &scratch.logits,
-        hidden,
-        vocab,
-        BATCH,
-    )?;
-    encode_argmax_f32(
-        ctx,
-        &encoder,
-        &scratch.logits,
-        &scratch.argmax,
-        BATCH,
-        vocab,
-    )?;
-    encoder.end();
-    Ok(())
-}
-
 fn run_static_step(
-    ctx: &MetalContext,
-    forward: &MetalForward<'_>,
+    executor: &mut DenseBatch8Executor<'_>,
     sessions: &mut [MetalSession],
-    scratch: &DenseWholeBatchScratch,
     tokens: &[i32; BATCH],
     position: u32,
-    fused_post_norm: bool,
 ) -> Result<StepResult> {
     let started = Instant::now();
-    write_i32_tensor(&scratch.ids, tokens)?;
-    let command = ctx
-        .queue
-        .commandBuffer()
-        .context("static whole-model command")?;
-    encode_static_whole(
-        ctx,
-        forward,
-        &command,
-        sessions,
-        scratch,
-        position,
-        fused_post_norm,
-    )?;
-    let gpu_ms = wait_success(&command, "static whole-model")?;
-    let argmax = read_i32_tensor(&scratch.argmax)?;
+    let step = executor.step_with_cancel(*tokens, position, sessions, || {
+        crate::shutdown::checkpoint().is_err()
+    })?;
     let wall_ms = started.elapsed().as_secs_f64() * 1e3;
-    let logits = read_f32_rows(
-        &scratch.logits,
-        BATCH,
-        forward.model.arch.vocab_size as usize,
-    )?;
+    let gpu_ms = step.gpu_ms.context("static whole-model GPU timestamp")?;
+    let logits = sessions
+        .iter()
+        .map(|session| read_f32_tensor(&session.logits))
+        .collect();
     Ok(StepResult {
         wall_ms,
         gpu_ms,
-        argmax,
+        argmax: step.argmax_ids.to_vec(),
         logits,
     })
 }
@@ -622,10 +330,9 @@ fn median(values: &[f64]) -> f64 {
 fn ramp_static(
     ctx: &MetalContext,
     forward: &MetalForward<'_>,
-    scratch: &DenseWholeBatchScratch,
+    executor: &mut DenseBatch8Executor<'_>,
     ramp_ms: u64,
     seed: u64,
-    fused_post_norm: bool,
 ) -> Result<usize> {
     let mut sessions =
         fresh_gdn_replay_sessions_with_capacity(ctx, forward.model, BATCH, RAMP_CAPACITY)?;
@@ -641,21 +348,9 @@ fn ramp_static(
     while position == 0 || (started.elapsed() < target && position < RAMP_CAPACITY) {
         crate::shutdown::checkpoint()?;
         let tokens = tokens_for(seed, position, forward.model.arch.vocab_size as usize);
-        write_i32_tensor(&scratch.ids, &tokens)?;
-        let command = ctx
-            .queue
-            .commandBuffer()
-            .context("whole-model ramp command")?;
-        encode_static_whole(
-            ctx,
-            forward,
-            &command,
-            &mut sessions,
-            scratch,
-            position as u32,
-            fused_post_norm,
-        )?;
-        wait_success(&command, "whole-model ramp")?;
+        executor.step_with_cancel(tokens, position as u32, &mut sessions, || {
+            crate::shutdown::checkpoint().is_err()
+        })?;
         position += 1;
     }
     Ok(position)
@@ -719,15 +414,16 @@ pub fn run(args: DecodeDenseWholeBatchArgs) -> Result<()> {
     );
 
     let forward = MetalForward::new(&ctx, &model);
-    let scratch = DenseWholeBatchScratch::new(&ctx, &model)?;
+    let mut ramp_executor = DenseBatch8Executor::new(&ctx, &model)?;
     let ramp_repetitions = ramp_static(
         &ctx,
         &forward,
-        &scratch,
+        &mut ramp_executor,
         args.ramp_ms,
         args.seed.wrapping_add(0x9e37_79b9),
-        fused_post_norm,
     )?;
+    drop(ramp_executor);
+    let mut executor = DenseBatch8Executor::new(&ctx, &model)?;
 
     let capacity = total_steps
         .checked_add(1)
@@ -775,27 +471,12 @@ pub fn run(args: DecodeDenseWholeBatchArgs) -> Result<()> {
         let (serial_step, static_step, order) = if position.is_multiple_of(2) {
             (
                 run_serial_step(&forward, &mut serial, &tokens, position as u32)?,
-                run_static_step(
-                    &ctx,
-                    &forward,
-                    &mut static_batch,
-                    &scratch,
-                    &tokens,
-                    position as u32,
-                    fused_post_norm,
-                )?,
+                run_static_step(&mut executor, &mut static_batch, &tokens, position as u32)?,
                 "serial_static",
             )
         } else {
-            let static_step = run_static_step(
-                &ctx,
-                &forward,
-                &mut static_batch,
-                &scratch,
-                &tokens,
-                position as u32,
-                fused_post_norm,
-            )?;
+            let static_step =
+                run_static_step(&mut executor, &mut static_batch, &tokens, position as u32)?;
             let serial_step = run_serial_step(&forward, &mut serial, &tokens, position as u32)?;
             (serial_step, static_step, "static_serial")
         };

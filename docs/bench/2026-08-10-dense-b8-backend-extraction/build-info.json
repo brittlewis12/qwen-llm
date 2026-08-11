@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "build_commit": "65ae00d7973c78decf81cf8e0f83654dceadd5cf",
+  "build_commit_short": "65ae00d79",
+  "build_dirty": true,
+  "build_source_state": "git-source-sha256-v2:80af9f674f1401b7a9d185150da67accf8d5fb47e5b84d20774eeb180b984f53",
+  "stamp_source": "git",
+  "stamp_error": null,
+  "runtime_commit": "65ae00d7973c78decf81cf8e0f83654dceadd5cf",
+  "runtime_dirty": true,
+  "runtime_source_state": "git-source-sha256-v2:80af9f674f1401b7a9d185150da67accf8d5fb47e5b84d20774eeb180b984f53",
+  "status": "dirty",
+  "problems": [
+    "dirty"
+  ],
+  "overrides": []
+}

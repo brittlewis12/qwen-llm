@@ -5425,14 +5425,11 @@ pub struct MetalSession {
 }
 
 impl MetalSession {
-    pub(crate) fn aliases_mutable_buffer(&self, candidate: &MetalTensor) -> bool {
-        let same = |tensor: &MetalTensor| {
-            Retained::as_ptr(&candidate.buffer) == Retained::as_ptr(&tensor.buffer)
-        };
-        self.gdn_conv.iter().any(&same)
-            || self.gdn_state.iter().any(&same)
-            || self.kv_k.iter().any(&same)
-            || self.kv_v.iter().any(&same)
+    fn any_mutable_tensor(&self, mut predicate: impl FnMut(&MetalTensor) -> bool) -> bool {
+        self.gdn_conv.iter().any(&mut predicate)
+            || self.gdn_state.iter().any(&mut predicate)
+            || self.kv_k.iter().any(&mut predicate)
+            || self.kv_v.iter().any(&mut predicate)
             || [
                 &self.x,
                 &self.h,
@@ -5473,7 +5470,24 @@ impl MetalSession {
                 &self.ids_buf,
             ]
             .into_iter()
-            .any(same)
+            .any(predicate)
+    }
+
+    pub(crate) fn aliases_mutable_buffer(&self, candidate: &MetalTensor) -> bool {
+        self.any_mutable_tensor(|tensor| {
+            Retained::as_ptr(&candidate.buffer) == Retained::as_ptr(&tensor.buffer)
+        })
+    }
+
+    pub(crate) fn aliases_mutable_session(&self, other: &Self) -> bool {
+        other.any_mutable_tensor(|tensor| self.aliases_mutable_buffer(tensor))
+    }
+
+    pub(crate) fn has_internal_mutable_alias(&self) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        self.any_mutable_tensor(|tensor| {
+            !seen.insert(Retained::as_ptr(&tensor.buffer) as *const () as usize)
+        })
     }
 
     pub fn fresh(
@@ -11752,6 +11766,35 @@ impl<'a> MetalForward<'a> {
         Ok(())
     }
 
+    /// Apply the active production residual/post-norm organization to a
+    /// caller-provided mixer row. Batch executors use this seam so rollback
+    /// flags cannot silently diverge from singleton decode.
+    #[doc(hidden)]
+    pub fn encode_post_mixer_norm(
+        &self,
+        enc: &KernelEncoder,
+        residual: &MetalTensor,
+        mixer_output: &MetalTensor,
+        norm: &MetalTensor,
+        normalized: &MetalTensor,
+    ) -> Result<(), MfError> {
+        if decode_fused_residual_rmsnorm_enabled() {
+            encode_residual_rms_norm_mul_f32(
+                self.ctx,
+                enc,
+                residual,
+                mixer_output,
+                norm,
+                normalized,
+                RMS_EPS,
+            )?;
+        } else {
+            encode_add_inplace_f32(self.ctx, enc, residual, mixer_output)?;
+            encode_rms_norm_mul_f32(self.ctx, enc, residual, norm, normalized, RMS_EPS)?;
+        }
+        Ok(())
+    }
+
     fn encode_post_mixer_ffn(
         &self,
         enc: &KernelEncoder,
@@ -11766,20 +11809,7 @@ impl<'a> MetalForward<'a> {
             MetalBlock::Gdn(g) => &g.post_attn_norm,
             MetalBlock::Attn(a) => &a.post_attn_norm,
         };
-        if decode_fused_residual_rmsnorm_enabled() {
-            encode_residual_rms_norm_mul_f32(
-                self.ctx,
-                enc,
-                &s.x,
-                &s.mixer_out,
-                post_norm,
-                &s.h,
-                RMS_EPS,
-            )?;
-        } else {
-            encode_add_inplace_f32(self.ctx, enc, &s.x, &s.mixer_out)?;
-            encode_rms_norm_mul_f32(self.ctx, enc, &s.x, post_norm, &s.h, RMS_EPS)?;
-        }
+        self.encode_post_mixer_norm(enc, &s.x, &s.mixer_out, post_norm, &s.h)?;
 
         // SwiGLU FFN.
         let (g_w, u_w, d_w) = match block {
@@ -11910,6 +11940,85 @@ impl<'a> MetalForward<'a> {
                 h,
             )?;
         }
+        Ok(())
+    }
+
+    /// Complete the stateful GDN body after a batch executor has produced
+    /// QKV and Z rows. Small alpha/beta projections remain sequence-private;
+    /// the caller may batch the final output projection from `normed_output`.
+    #[doc(hidden)]
+    pub fn encode_gdn_after_batched_front(
+        &self,
+        enc: &KernelEncoder,
+        gb: &MetalGdnBlock,
+        gdn_i: usize,
+        session: &mut MetalSession,
+        qkv: &MetalTensor,
+        z: &MetalTensor,
+        normed_output: &MetalTensor,
+    ) -> Result<(), MfError> {
+        let h = self.model.arch.hidden_size as usize;
+        let n_v = self.model.arch.gdn_n_v_heads as usize;
+        if decode_gdn_noop_beta_enabled() {
+            encode_fill_f32(self.ctx, enc, &session.gdn_b, 0.0)?;
+        } else if gdn_beta_projection_fused(gb) {
+            encode_mat_vec_f32_sigmoid(
+                self.ctx,
+                enc,
+                &gb.beta_proj,
+                &session.h,
+                &session.gdn_beta,
+                h,
+                n_v,
+            )?;
+        } else {
+            encode_mat_vec_dispatch(
+                self.ctx,
+                enc,
+                &gb.beta_proj,
+                &session.h,
+                &session.gdn_b,
+                h,
+                n_v,
+            )?;
+        }
+        if decode_gdn_noop_alpha_enabled() {
+            encode_fill_f32(self.ctx, enc, &session.gdn_a, 0.0)?;
+        } else {
+            encode_mat_vec_dispatch(
+                self.ctx,
+                enc,
+                &gb.alpha_proj,
+                &session.h,
+                &session.gdn_a,
+                h,
+                n_v,
+            )?;
+        }
+        if !gdn_beta_projection_fused(gb) {
+            encode_sigmoid_f32(self.ctx, enc, &session.gdn_b, &session.gdn_beta)?;
+        }
+        encode_gdn_decay_chain_f32(
+            self.ctx,
+            enc,
+            &session.gdn_a,
+            &gb.dt_bias,
+            &gb.a_log,
+            &session.gdn_alpha,
+        )?;
+        let alpha = session.gdn_alpha.clone();
+        let beta = session.gdn_beta.clone();
+        self.encode_gdn_tail(
+            enc,
+            gb,
+            gdn_i,
+            session,
+            qkv,
+            z,
+            &alpha,
+            &beta,
+            normed_output,
+        )?;
         Ok(())
     }
 

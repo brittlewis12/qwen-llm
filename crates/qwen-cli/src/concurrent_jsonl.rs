@@ -53,6 +53,22 @@ struct PairPlannerTelemetry {
     output_order: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+struct QwenPairPlannerTelemetry {
+    schema_version: u32,
+    backend: &'static str,
+    enabled: bool,
+    requests: usize,
+    prefix_affinity_pairs: usize,
+    depth_balanced_pairs: usize,
+    serial_requests: usize,
+    planning_window: usize,
+    strategy: &'static str,
+    output_order: &'static str,
+    prefix_fanout_boundary_policy: &'static str,
+    private_suffix_singleton_max_tokens: usize,
+}
+
 #[derive(Debug)]
 struct LaneProgress {
     max_tokens: usize,
@@ -167,6 +183,7 @@ struct PairTelemetry {
     common_prefix_tokens: usize,
     prefix_fanout_tokens: usize,
     prefix_fanout_reason: &'static str,
+    prefix_fanout_boundary_policy: &'static str,
     prefix_fanout_min_tokens: usize,
     prefix_snapshot_bytes: u64,
     prefix_prefill_ms: f64,
@@ -441,13 +458,20 @@ pub(super) fn run_prepared(
         .collect::<Vec<_>>();
     let planner_enabled = pair_planner_enabled(true)?;
     let fanout_enabled = prefix_fanout_enabled();
+    let prefix_boundary_policy = qwen_prefix_fanout_boundary_policy()?;
     let schedule = plan_request_pairs(
         &prompt_refs,
         &requested_tokens,
         planner_enabled,
         |left, right| {
-            plan_prefix_fanout(left, right, args.prefill_chunk, fanout_enabled)
-                .selected_prefix_tokens
+            plan_prefix_fanout(
+                left,
+                right,
+                args.prefill_chunk,
+                fanout_enabled,
+                prefix_boundary_policy,
+            )
+            .selected_prefix_tokens
         },
     )?;
     let pair_count = schedule
@@ -457,9 +481,9 @@ pub(super) fn run_prepared(
         .count();
     eprintln!(
         "concurrency_planner: {}",
-        serde_json::to_string(&PairPlannerTelemetry {
-            schema_version: 1,
-            backend: "qwen_pair_affinity_v1",
+        serde_json::to_string(&QwenPairPlannerTelemetry {
+            schema_version: 2,
+            backend: "qwen_pair_affinity_v2",
             enabled: planner_enabled,
             requests: requests.len(),
             prefix_affinity_pairs: schedule.prefix_affinity_pairs,
@@ -472,6 +496,8 @@ pub(super) fn run_prepared(
                 "input_order"
             },
             output_order: "input",
+            prefix_fanout_boundary_policy: prefix_boundary_policy.as_str(),
+            private_suffix_singleton_max_tokens: PRIVATE_SUFFIX_SINGLETON_MAX_TOKENS,
         })
         .context("serialize Qwen concurrency planner telemetry")?
     );
@@ -523,6 +549,7 @@ pub(super) fn run_prepared(
                     &stop_tokens,
                     pair_index,
                     indices,
+                    prefix_boundary_policy,
                 )
                 .with_context(|| format!("run concurrent request pair {pair_index}"))?;
                 for (index, output) in indices.into_iter().zip(outputs) {
@@ -832,6 +859,7 @@ fn plan_prefix_fanout(
     right: &[i32],
     prefill_chunk: PrefillChunkArg,
     enabled: bool,
+    boundary_policy: QwenPrefixFanoutBoundaryPolicy,
 ) -> PrefixFanoutPlan {
     let common_prefix_tokens = common_prefix_tokens(left, right);
     if !enabled {
@@ -862,7 +890,22 @@ fn plan_prefix_fanout(
             reason: "selected_identical",
         };
     }
-    let selected_prefix_tokens = common_prefix_tokens / chunk * chunk;
+    let chunk_aligned_prefix_tokens = common_prefix_tokens / chunk * chunk;
+    let max_private_suffix_tokens = left
+        .len()
+        .saturating_sub(common_prefix_tokens)
+        .max(right.len().saturating_sub(common_prefix_tokens));
+    let selected_prefix_tokens = match boundary_policy {
+        QwenPrefixFanoutBoundaryPolicy::ChunkAligned => chunk_aligned_prefix_tokens,
+        QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp
+            if chunk_aligned_prefix_tokens >= PREFIX_FANOUT_MIN_TOKENS
+                && max_private_suffix_tokens <= PRIVATE_SUFFIX_SINGLETON_MAX_TOKENS =>
+        {
+            common_prefix_tokens
+        }
+        QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp => chunk_aligned_prefix_tokens,
+        QwenPrefixFanoutBoundaryPolicy::ExactLcp => common_prefix_tokens,
+    };
     if selected_prefix_tokens < PREFIX_FANOUT_MIN_TOKENS {
         PrefixFanoutPlan {
             common_prefix_tokens,
@@ -873,10 +916,22 @@ fn plan_prefix_fanout(
         PrefixFanoutPlan {
             common_prefix_tokens,
             selected_prefix_tokens,
-            reason: if selected_prefix_tokens == common_prefix_tokens {
-                "selected"
-            } else {
-                "selected_chunk_aligned"
+            reason: match boundary_policy {
+                QwenPrefixFanoutBoundaryPolicy::ExactLcp => "selected_exact_lcp",
+                QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp
+                    if selected_prefix_tokens == common_prefix_tokens
+                        && selected_prefix_tokens != chunk_aligned_prefix_tokens =>
+                {
+                    "selected_tiny_suffix_exact_lcp"
+                }
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned
+                | QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp
+                    if selected_prefix_tokens == common_prefix_tokens =>
+                {
+                    "selected"
+                }
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned
+                | QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp => "selected_chunk_aligned",
             },
         }
     }
@@ -939,12 +994,14 @@ fn prepare_pair(
     loaded: &LoadedModel,
     requests: [&PreparedJsonlRequest; WIDTH],
     args: &Args,
+    prefix_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
 ) -> Result<PreparedPair> {
     let mut plan = plan_prefix_fanout(
         &requests[0].prompt_ids,
         &requests[1].prompt_ids,
         args.prefill_chunk,
         prefix_fanout_enabled(),
+        prefix_boundary_policy,
     );
     if plan.selected_prefix_tokens == 0 {
         let (left, left_prefill_ms) = prepare_lane(loaded, requests[0], args)?;
@@ -1196,9 +1253,10 @@ fn run_pair(
     stop_tokens: &[i32],
     pair_index: usize,
     request_indices: [usize; WIDTH],
+    prefix_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
 ) -> Result<([RequestOutput; WIDTH], PairTelemetry)> {
     let prepare_t0 = Instant::now();
-    let prepared = prepare_pair(loaded, requests, args)?;
+    let prepared = prepare_pair(loaded, requests, args, prefix_boundary_policy)?;
     let [left, right] = prepared.lanes;
     let requested_tokens = [left.max_tokens, right.max_tokens];
     let prepare_ms = prepare_t0.elapsed().as_secs_f64() * 1e3;
@@ -1324,8 +1382,8 @@ fn run_pair(
     Ok((
         outputs,
         PairTelemetry {
-            schema_version: 4,
-            backend: "qwen_independent_queues_v4",
+            schema_version: 5,
+            backend: "qwen_independent_queues_v5",
             pair_index,
             request_indices,
             prompt_tokens: [requests[0].prompt_ids.len(), requests[1].prompt_ids.len()],
@@ -1337,6 +1395,7 @@ fn run_pair(
             common_prefix_tokens: prepared.plan.common_prefix_tokens,
             prefix_fanout_tokens: prepared.plan.selected_prefix_tokens,
             prefix_fanout_reason: prepared.plan.reason,
+            prefix_fanout_boundary_policy: prefix_boundary_policy.as_str(),
             prefix_fanout_min_tokens: PREFIX_FANOUT_MIN_TOKENS,
             prefix_snapshot_bytes: prepared.prefix_snapshot_bytes,
             prefix_prefill_ms: prepared.prefix_prefill_ms,
@@ -2625,7 +2684,13 @@ mod tests {
     fn prefix_fanout_requires_a_stable_shared_boundary() {
         let identical = vec![7; 300];
         assert_eq!(
-            plan_prefix_fanout(&identical, &identical, PrefillChunkArg::Fixed(512), true,),
+            plan_prefix_fanout(
+                &identical,
+                &identical,
+                PrefillChunkArg::Fixed(512),
+                true,
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            ),
             PrefixFanoutPlan {
                 common_prefix_tokens: 300,
                 selected_prefix_tokens: 300,
@@ -2636,11 +2701,62 @@ mod tests {
         let mut right = vec![7; 900];
         right[700] = 8;
         assert_eq!(
-            plan_prefix_fanout(&vec![7; 900], &right, PrefillChunkArg::Fixed(512), true,),
+            plan_prefix_fanout(
+                &vec![7; 900],
+                &right,
+                PrefillChunkArg::Fixed(512),
+                true,
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            ),
             PrefixFanoutPlan {
                 common_prefix_tokens: 700,
                 selected_prefix_tokens: 512,
                 reason: "selected_chunk_aligned",
+            }
+        );
+        assert_eq!(
+            plan_prefix_fanout(
+                &vec![7; 900],
+                &right,
+                PrefillChunkArg::Fixed(512),
+                true,
+                QwenPrefixFanoutBoundaryPolicy::ExactLcp,
+            ),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 700,
+                selected_prefix_tokens: 700,
+                reason: "selected_exact_lcp",
+            }
+        );
+        assert_eq!(
+            plan_prefix_fanout(
+                &vec![7; 900],
+                &right,
+                PrefillChunkArg::Fixed(512),
+                true,
+                QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp,
+            ),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 700,
+                selected_prefix_tokens: 512,
+                reason: "selected_chunk_aligned",
+            }
+        );
+        let tiny_left = vec![7; 705];
+        let mut tiny_right = tiny_left.clone();
+        tiny_right[700] = 8;
+        assert_eq!(
+            plan_prefix_fanout(
+                &tiny_left,
+                &tiny_right,
+                PrefillChunkArg::Fixed(512),
+                true,
+                QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp,
+            ),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 700,
+                selected_prefix_tokens: 700,
+                reason: "selected_tiny_suffix_exact_lcp",
             }
         );
 
@@ -2652,12 +2768,85 @@ mod tests {
             reason: "alignment_below_minimum",
         };
         assert_eq!(
-            plan_prefix_fanout(&shorter, &longer, PrefillChunkArg::Fixed(512), true,),
+            plan_prefix_fanout(
+                &shorter,
+                &longer,
+                PrefillChunkArg::Fixed(512),
+                true,
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            ),
             expected
         );
         assert_eq!(
-            plan_prefix_fanout(&longer, &shorter, PrefillChunkArg::Fixed(512), true,),
+            plan_prefix_fanout(
+                &longer,
+                &shorter,
+                PrefillChunkArg::Fixed(512),
+                true,
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            ),
             expected
+        );
+    }
+
+    #[test]
+    fn tiny_suffix_exact_lcp_policy_freezes_six_token_boundary() {
+        fn plan(
+            common_prefix_tokens: usize,
+            private_suffix_tokens: usize,
+            boundary_policy: QwenPrefixFanoutBoundaryPolicy,
+        ) -> PrefixFanoutPlan {
+            let left = vec![7; common_prefix_tokens + private_suffix_tokens];
+            let mut right = left.clone();
+            right[common_prefix_tokens] = 8;
+            plan_prefix_fanout(
+                &left,
+                &right,
+                PrefillChunkArg::Fixed(512),
+                true,
+                boundary_policy,
+            )
+        }
+
+        assert_eq!(
+            plan(513, 6, QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 513,
+                selected_prefix_tokens: 513,
+                reason: "selected_tiny_suffix_exact_lcp",
+            }
+        );
+        assert_eq!(
+            plan(513, 7, QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 513,
+                selected_prefix_tokens: 512,
+                reason: "selected_chunk_aligned",
+            }
+        );
+        assert_eq!(
+            plan(513, 6, QwenPrefixFanoutBoundaryPolicy::ChunkAligned),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 513,
+                selected_prefix_tokens: 512,
+                reason: "selected_chunk_aligned",
+            }
+        );
+        assert_eq!(
+            plan(300, 5, QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 300,
+                selected_prefix_tokens: 0,
+                reason: "alignment_below_minimum",
+            }
+        );
+        assert_eq!(
+            plan(300, 5, QwenPrefixFanoutBoundaryPolicy::ExactLcp),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 300,
+                selected_prefix_tokens: 300,
+                reason: "selected_exact_lcp",
+            }
         );
     }
 
@@ -2665,11 +2854,25 @@ mod tests {
     fn prefix_fanout_fails_closed_for_policy_controls() {
         let prompt = vec![7; 512];
         assert_eq!(
-            plan_prefix_fanout(&prompt, &prompt, PrefillChunkArg::Fixed(512), false).reason,
+            plan_prefix_fanout(
+                &prompt,
+                &prompt,
+                PrefillChunkArg::Fixed(512),
+                false,
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            )
+            .reason,
             "disabled"
         );
         assert_eq!(
-            plan_prefix_fanout(&prompt, &prompt, PrefillChunkArg::Auto, true).reason,
+            plan_prefix_fanout(
+                &prompt,
+                &prompt,
+                PrefillChunkArg::Auto,
+                true,
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            )
+            .reason,
             "auto_chunk_unsupported"
         );
         assert_eq!(
@@ -2678,6 +2881,7 @@ mod tests {
                 &vec![7; PREFIX_FANOUT_MIN_TOKENS - 1],
                 PrefillChunkArg::Fixed(128),
                 true,
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
             )
             .reason,
             "below_minimum"

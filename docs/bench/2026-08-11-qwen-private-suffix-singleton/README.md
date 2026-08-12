@@ -1,5 +1,9 @@
 # Qwen Private-Suffix Singleton Replay
 
+Update (2026-08-11): fanout now selects the exact LCP when this measured
+six-token pocket would remain after restore. See
+`docs/bench/2026-08-11-qwen-exact-lcp-tiny-suffix/README.md`.
+
 Date: 2026-08-11
 
 Status: product `GO` for restored Qwen private suffixes of at most six tokens in

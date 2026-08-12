@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Bounded Exact-LCP Fanout GO
+
+Status: Qwen B=2/B=8/B=16 now snapshots the exact token LCP when ordinary
+aligned fanout already qualifies and every exact private suffix is at most six
+tokens. `QWEN_PREFIX_FANOUT_EXACT_LCP=0` restores alignment; `1` is a broad
+diagnostic.
+
+- Dense 27B B=8 prefill moves `23.623 -> 8.307 s` (`2.844x`) and process wall
+  `27.60 -> 12.43 s` with byte-identical output.
+- A3B Q4 B=16 prefill moves `7.237 -> 1.827 s` (`3.961x`) and process wall
+  `11.54 -> 6.25 s`; B=2 prefill moves `1.480 -> 1.078 s`.
+- Dense 0.8B B=8 prefill moves `1.144 -> 0.360 s` (`3.176x`).
+- Unconditional exact matching is falsified: a one-token alignment gain with a
+  long suffix regresses prefill `1.757 -> 1.800 s`. The default policy remains
+  aligned there and does not broaden the existing 256-token admission envelope.
+- Pair/cohort telemetry names the captured policy. DeepSeek retains its distinct
+  real-chunk-boundary contract.
+
+Decision: promote only the measured tiny-suffix pocket. Full evidence:
+`docs/bench/2026-08-11-qwen-exact-lcp-tiny-suffix/README.md`.
+
 ## 2026-08-11 - Qwen Private-Suffix Singleton Replay GO
 
 Status: restored Qwen private suffixes of at most six tokens now use

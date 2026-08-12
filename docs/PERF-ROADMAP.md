@@ -2953,6 +2953,16 @@ serial and lets auto choose B=2 at `1.078x`. Keep this as bounded
 logical-termination flexibility, not evidence for lane refill or variable prompt
 frontiers.
 
+Qwen fanout now promotes the exact token LCP when the aligned boundary already
+qualifies and every exact private suffix fits the six-token singleton pocket.
+Dense 27B B=8 prefill moves `23.623 -> 8.307 s`, A3B B=16 moves
+`7.237 -> 1.827 s`, A3B B=2 moves `1.480 -> 1.078 s`, and dense 0.8B B=8
+moves `1.144 -> 0.360 s`; all outputs remain byte-exact. Preserve
+`QWEN_PREFIX_FANOUT_EXACT_LCP=0` as aligned rollback. Broad exact matching stays
+diagnostic because a one-token alignment gain with a long suffix regresses
+`1.757 -> 1.800 s`. Do not broaden fanout admission or transfer this boundary
+policy to DeepSeek.
+
 Restored Qwen private suffixes now use singleton teacher forcing through six
 tokens in B=2/B=8/B=16. Dense 27B suffix wall moves `3.325 -> 1.899 s`, A3B
 B=16 moves `1.968 -> 0.741 s`, and A3B B=2 moves `0.246 -> 0.093 s`; all

@@ -52,11 +52,11 @@ trait FixedCohortExecutor<const WIDTH: usize> {
 impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_> {
     const DISPLAY_NAME: &'static str = "dense B=8";
     const PREFIX_FANOUT_ENV: &'static str = DENSE_PREFIX_FANOUT_ENV;
-    const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v4";
-    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v3";
+    const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v5";
+    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v4";
     const TELEMETRY_PREFIX: &'static str = "dense_batch8";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "dense_batch8_planner";
-    const TELEMETRY_SCHEMA_VERSION: u32 = 4;
+    const TELEMETRY_SCHEMA_VERSION: u32 = 5;
 
     fn validate(
         &self,
@@ -90,11 +90,11 @@ impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_>
 impl FixedCohortExecutor<MOE_BATCH16_WIDTH> for MoeBatch16SequenceExecutor<'_> {
     const DISPLAY_NAME: &'static str = "MoE B=16";
     const PREFIX_FANOUT_ENV: &'static str = MOE_PREFIX_FANOUT_ENV;
-    const COHORT_BACKEND: &'static str = "qwen_moe_capability_batch16_v4";
-    const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v3";
+    const COHORT_BACKEND: &'static str = "qwen_moe_capability_batch16_v5";
+    const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v4";
     const TELEMETRY_PREFIX: &'static str = "moe_batch16";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "moe_batch16_planner";
-    const TELEMETRY_SCHEMA_VERSION: u32 = 5;
+    const TELEMETRY_SCHEMA_VERSION: u32 = 6;
 
     fn validate(
         &self,
@@ -157,6 +157,7 @@ impl<const WIDTH: usize> PlannedWork<WIDTH> {
 struct CohortPlan<const WIDTH: usize> {
     work: Vec<PlannedWork<WIDTH>>,
     prefix_packing_enabled: bool,
+    prefix_fanout_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
     compatibility_buckets: usize,
     candidate_cohorts: usize,
     prefix_affinity_cohorts: usize,
@@ -291,6 +292,7 @@ struct CohortTelemetry {
     common_prefix_tokens: usize,
     prefix_fanout_tokens: usize,
     prefix_fanout_reason: &'static str,
+    prefix_fanout_boundary_policy: &'static str,
     prefix_fanout_min_tokens: usize,
     prefix_snapshot_bytes: u64,
     prefix_prefill_ms: f64,
@@ -340,6 +342,7 @@ struct PlannerTelemetry {
     backend: &'static str,
     requests: usize,
     prefix_packing_enabled: bool,
+    prefix_fanout_boundary_policy: &'static str,
     compatibility_buckets: usize,
     candidate_cohorts: usize,
     prefix_affinity_cohorts: usize,
@@ -397,11 +400,24 @@ fn align_prefix_fanout(
     mut plan: PrefixFanoutPlan,
     prompt_tokens: usize,
     prefill_chunk: usize,
+    boundary_policy: QwenPrefixFanoutBoundaryPolicy,
 ) -> PrefixFanoutPlan {
     if plan.selected_prefix_tokens == 0 || plan.selected_prefix_tokens == prompt_tokens {
         return plan;
     }
     let aligned = plan.selected_prefix_tokens / prefill_chunk * prefill_chunk;
+    if boundary_policy == QwenPrefixFanoutBoundaryPolicy::ExactLcp {
+        plan.reason = "selected_exact_lcp";
+        return plan;
+    }
+    if boundary_policy == QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp
+        && aligned >= PREFIX_FANOUT_MIN_TOKENS
+        && prompt_tokens.saturating_sub(plan.selected_prefix_tokens)
+            <= PRIVATE_SUFFIX_SINGLETON_MAX_TOKENS
+    {
+        plan.reason = "selected_tiny_suffix_exact_lcp";
+        return plan;
+    }
     if aligned < PREFIX_FANOUT_MIN_TOKENS {
         plan.selected_prefix_tokens = 0;
         plan.reason = "alignment_below_minimum";
@@ -457,6 +473,7 @@ fn selected_cohort_prefix_tokens<const WIDTH: usize>(
     indices: &[usize; WIDTH],
     requests: &[PreparedJsonlRequest],
     args: &Args,
+    boundary_policy: QwenPrefixFanoutBoundaryPolicy,
 ) -> usize {
     let PrefillChunkArg::Fixed(chunk) = args.prefill_chunk else {
         return 0;
@@ -467,6 +484,7 @@ fn selected_cohort_prefix_tokens<const WIDTH: usize>(
         plan_prefix_fanout(&request_refs, fixed_cohort_fanout_enabled::<WIDTH>()),
         prompt_tokens,
         chunk.min(prompt_tokens.max(1)),
+        boundary_policy,
     )
     .selected_prefix_tokens
 }
@@ -615,13 +633,19 @@ fn plan_request_work<const WIDTH: usize>(
     requests: &[PreparedJsonlRequest],
     args: &Args,
 ) -> Result<CohortPlan<WIDTH>> {
-    plan_request_work_configured(requests, args, prefix_packing_enabled(true)?)
+    plan_request_work_configured(
+        requests,
+        args,
+        prefix_packing_enabled(true)?,
+        qwen_prefix_fanout_boundary_policy()?,
+    )
 }
 
 fn plan_request_work_configured<const WIDTH: usize>(
     requests: &[PreparedJsonlRequest],
     args: &Args,
     prefix_packing: bool,
+    prefix_fanout_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
 ) -> Result<CohortPlan<WIDTH>> {
     ensure!(WIDTH > 0, "fixed-cohort planner width must be nonzero");
     let requested_tokens = requests
@@ -666,7 +690,12 @@ fn plan_request_work_configured<const WIDTH: usize>(
                 let cohort: [usize; WIDTH] = cohort
                     .try_into()
                     .expect("exact fixed-cohort prefix planner chunk");
-                if selected_cohort_prefix_tokens(&cohort, requests, args) > 0
+                if selected_cohort_prefix_tokens(
+                    &cohort,
+                    requests,
+                    args,
+                    prefix_fanout_boundary_policy,
+                ) > 0
                     && requested_transition_utilization_qualifies(&cohort, &requested_tokens)?
                 {
                     prefix_work.push(PlannedWork::Batch(cohort));
@@ -728,6 +757,7 @@ fn plan_request_work_configured<const WIDTH: usize>(
     Ok(CohortPlan {
         work,
         prefix_packing_enabled: prefix_packing,
+        prefix_fanout_boundary_policy,
         compatibility_buckets,
         candidate_cohorts,
         prefix_affinity_cohorts,
@@ -939,10 +969,11 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         .stop_token_ids()
         .context("load producer-declared stop tokens")?;
     let planner_telemetry = PlannerTelemetry {
-        schema_version: 3,
+        schema_version: 4,
         backend: E::PLANNER_BACKEND,
         requests: requests.len(),
         prefix_packing_enabled: plan.prefix_packing_enabled,
+        prefix_fanout_boundary_policy: plan.prefix_fanout_boundary_policy.as_str(),
         compatibility_buckets: plan.compatibility_buckets,
         candidate_cohorts: plan.candidate_cohorts,
         prefix_affinity_cohorts: plan.prefix_affinity_cohorts,
@@ -979,6 +1010,7 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                     args,
                     &stop_tokens,
                     cohort_index,
+                    plan.prefix_fanout_boundary_policy,
                 )
                 .with_context(|| format!("run {} cohort {cohort_index}", E::DISPLAY_NAME))?;
                 for (index, output) in indices.into_iter().zip(outputs) {
@@ -1083,6 +1115,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     args: &Args,
     stop_tokens: &[i32],
     cohort_index: usize,
+    prefix_fanout_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
 ) -> Result<(Vec<RequestOutput>, CohortTelemetry)> {
     let generation_plan = cohort_generation_plan(requests, args)?;
     let prompt_tokens = generation_plan.prompt_tokens;
@@ -1103,6 +1136,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         ),
         prompt_tokens,
         chunk,
+        prefix_fanout_boundary_policy,
     );
 
     let mut scratch = allocate_legacy_prefill_scratch(loaded, chunk, prompt_tokens)?;
@@ -1452,6 +1486,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             common_prefix_tokens: prefix_fanout.common_prefix_tokens,
             prefix_fanout_tokens: prefix_fanout.selected_prefix_tokens,
             prefix_fanout_reason: prefix_fanout.reason,
+            prefix_fanout_boundary_policy: prefix_fanout_boundary_policy.as_str(),
             prefix_fanout_min_tokens: PREFIX_FANOUT_MIN_TOKENS,
             prefix_snapshot_bytes,
             prefix_prefill_ms,
@@ -1668,13 +1703,23 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let control =
-            plan_request_work_configured::<DENSE_BATCH8_WIDTH>(&requests, &args, false).unwrap();
+        let control = plan_request_work_configured::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            false,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+        )
+        .unwrap();
         assert_eq!(control.full_cohorts, 2);
         assert_eq!(control.prefix_affinity_cohorts, 0);
 
-        let candidate =
-            plan_request_work_configured::<DENSE_BATCH8_WIDTH>(&requests, &args, true).unwrap();
+        let candidate = plan_request_work_configured::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            true,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+        )
+        .unwrap();
         assert_eq!(candidate.full_cohorts, 2);
         assert_eq!(candidate.prefix_affinity_cohorts, 2);
         assert_eq!(
@@ -1707,10 +1752,20 @@ mod tests {
                 request
             })
             .collect::<Vec<_>>();
-        let control =
-            plan_request_work_configured::<DENSE_BATCH8_WIDTH>(&requests, &args, false).unwrap();
-        let candidate =
-            plan_request_work_configured::<DENSE_BATCH8_WIDTH>(&requests, &args, true).unwrap();
+        let control = plan_request_work_configured::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            false,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+        )
+        .unwrap();
+        let candidate = plan_request_work_configured::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            true,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+        )
+        .unwrap();
         assert_eq!(candidate.work, control.work);
         assert_eq!(candidate.full_cohorts, control.full_cohorts);
         assert_eq!(candidate.economics_rejected_cohorts, 0);
@@ -1753,8 +1808,20 @@ mod tests {
                 request
             })
             .collect::<Vec<_>>();
-        let baseline = plan_request_work_configured::<WIDTH>(&requests, &args, false).unwrap();
-        let candidate = plan_request_work_configured::<WIDTH>(&requests, &args, true).unwrap();
+        let baseline = plan_request_work_configured::<WIDTH>(
+            &requests,
+            &args,
+            false,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+        )
+        .unwrap();
+        let candidate = plan_request_work_configured::<WIDTH>(
+            &requests,
+            &args,
+            true,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+        )
+        .unwrap();
         assert_eq!(baseline.full_cohorts, 3);
         assert_eq!(candidate.work, baseline.work);
         assert_eq!(candidate.full_cohorts, 3);
@@ -1916,7 +1983,12 @@ mod tests {
             }
         );
         assert_eq!(
-            align_prefix_fanout(plan_prefix_fanout(&request_refs, true), 257, 128),
+            align_prefix_fanout(
+                plan_prefix_fanout(&request_refs, true),
+                257,
+                128,
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            ),
             PrefixFanoutPlan {
                 common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
                 selected_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
@@ -1938,7 +2010,12 @@ mod tests {
             .collect::<Vec<_>>();
         let wider_refs = wider.iter().collect::<Vec<_>>();
         assert_eq!(
-            align_prefix_fanout(plan_prefix_fanout(&wider_refs, true), 261, 256),
+            align_prefix_fanout(
+                plan_prefix_fanout(&wider_refs, true),
+                261,
+                256,
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            ),
             PrefixFanoutPlan {
                 common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS + 4,
                 selected_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS,
@@ -1946,7 +2023,38 @@ mod tests {
             }
         );
         assert_eq!(
-            align_prefix_fanout(plan_prefix_fanout(&wider_refs, true), 261, 200),
+            align_prefix_fanout(
+                plan_prefix_fanout(&wider_refs, true),
+                261,
+                256,
+                QwenPrefixFanoutBoundaryPolicy::ExactLcp,
+            ),
+            PrefixFanoutPlan {
+                common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS + 4,
+                selected_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS + 4,
+                reason: "selected_exact_lcp",
+            }
+        );
+        assert_eq!(
+            align_prefix_fanout(
+                plan_prefix_fanout(&wider_refs, true),
+                261,
+                256,
+                QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp,
+            ),
+            PrefixFanoutPlan {
+                common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS + 4,
+                selected_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS + 4,
+                reason: "selected_tiny_suffix_exact_lcp",
+            }
+        );
+        assert_eq!(
+            align_prefix_fanout(
+                plan_prefix_fanout(&wider_refs, true),
+                261,
+                200,
+                QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            ),
             PrefixFanoutPlan {
                 common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS + 4,
                 selected_prefix_tokens: 0,
@@ -1966,6 +2074,67 @@ mod tests {
                 common_prefix_tokens: PREFIX_FANOUT_MIN_TOKENS - 1,
                 selected_prefix_tokens: 0,
                 reason: "below_minimum",
+            }
+        );
+    }
+
+    #[test]
+    fn fixed_fanout_tiny_suffix_policy_freezes_six_token_boundary() {
+        fn plan(
+            common_prefix_tokens: usize,
+            prompt_tokens: usize,
+            boundary_policy: QwenPrefixFanoutBoundaryPolicy,
+        ) -> PrefixFanoutPlan {
+            align_prefix_fanout(
+                PrefixFanoutPlan {
+                    common_prefix_tokens,
+                    selected_prefix_tokens: common_prefix_tokens,
+                    reason: "selected",
+                },
+                prompt_tokens,
+                512,
+                boundary_policy,
+            )
+        }
+
+        assert_eq!(
+            plan(513, 519, QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 513,
+                selected_prefix_tokens: 513,
+                reason: "selected_tiny_suffix_exact_lcp",
+            }
+        );
+        assert_eq!(
+            plan(513, 520, QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 513,
+                selected_prefix_tokens: 512,
+                reason: "selected_chunk_aligned",
+            }
+        );
+        assert_eq!(
+            plan(513, 519, QwenPrefixFanoutBoundaryPolicy::ChunkAligned),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 513,
+                selected_prefix_tokens: 512,
+                reason: "selected_chunk_aligned",
+            }
+        );
+        assert_eq!(
+            plan(300, 305, QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 300,
+                selected_prefix_tokens: 0,
+                reason: "alignment_below_minimum",
+            }
+        );
+        assert_eq!(
+            plan(300, 305, QwenPrefixFanoutBoundaryPolicy::ExactLcp),
+            PrefixFanoutPlan {
+                common_prefix_tokens: 300,
+                selected_prefix_tokens: 300,
+                reason: "selected_exact_lcp",
             }
         );
     }

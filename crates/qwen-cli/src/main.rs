@@ -7281,6 +7281,50 @@ fn prefill_span(
     Ok((logits, t0.elapsed().as_secs_f64() * 1e3))
 }
 
+const QWEN_PREFIX_FANOUT_EXACT_LCP_ENV: &str = "QWEN_PREFIX_FANOUT_EXACT_LCP";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QwenPrefixFanoutBoundaryPolicy {
+    ChunkAligned,
+    TinySuffixExactLcp,
+    ExactLcp,
+}
+
+impl QwenPrefixFanoutBoundaryPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ChunkAligned => "chunk_aligned",
+            Self::TinySuffixExactLcp => "tiny_suffix_exact_lcp",
+            Self::ExactLcp => "exact_lcp",
+        }
+    }
+}
+
+fn parse_qwen_prefix_fanout_boundary_policy(
+    value: Option<&str>,
+) -> Result<QwenPrefixFanoutBoundaryPolicy> {
+    let Some(value) = value else {
+        return Ok(QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp),
+        "0" | "false" | "no" | "off" => Ok(QwenPrefixFanoutBoundaryPolicy::ChunkAligned),
+        "1" | "true" | "yes" | "on" => Ok(QwenPrefixFanoutBoundaryPolicy::ExactLcp),
+        _ => bail!("{QWEN_PREFIX_FANOUT_EXACT_LCP_ENV} must be auto or a boolean"),
+    }
+}
+
+fn qwen_prefix_fanout_boundary_policy() -> Result<QwenPrefixFanoutBoundaryPolicy> {
+    let value = std::env::var_os(QWEN_PREFIX_FANOUT_EXACT_LCP_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow!("{QWEN_PREFIX_FANOUT_EXACT_LCP_ENV} must be valid UTF-8"))
+        })
+        .transpose()?;
+    parse_qwen_prefix_fanout_boundary_policy(value.as_deref())
+}
+
 const PRIVATE_SUFFIX_SINGLETON_ENV: &str = "QWEN_PRIVATE_SUFFIX_SINGLETON";
 const PRIVATE_SUFFIX_SINGLETON_MAX_TOKENS: usize = 6;
 
@@ -8733,6 +8777,27 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn exact_lcp_fanout_policy_is_bounded_by_default_and_strict() {
+        assert_eq!(
+            parse_qwen_prefix_fanout_boundary_policy(None).unwrap(),
+            QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp
+        );
+        assert_eq!(
+            parse_qwen_prefix_fanout_boundary_policy(Some("auto")).unwrap(),
+            QwenPrefixFanoutBoundaryPolicy::TinySuffixExactLcp
+        );
+        assert_eq!(
+            parse_qwen_prefix_fanout_boundary_policy(Some("YES")).unwrap(),
+            QwenPrefixFanoutBoundaryPolicy::ExactLcp
+        );
+        assert_eq!(
+            parse_qwen_prefix_fanout_boundary_policy(Some("off")).unwrap(),
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned
+        );
+        assert!(parse_qwen_prefix_fanout_boundary_policy(Some("sometimes")).is_err());
+    }
 
     #[test]
     fn private_suffix_singleton_policy_is_strict_and_rollbackable() {

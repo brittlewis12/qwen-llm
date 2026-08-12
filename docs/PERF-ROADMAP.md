@@ -6625,3 +6625,14 @@ Next: <one concrete follow-up>
   refill as a separate next experiment rather than silently broadening this
   capability. Evidence:
   `docs/bench/2026-08-12-qwen-fixed-file-root/README.md`.
+
+
+## Held — Root-Aware Dense Refill
+
+- A realistic distinct-task trace gives B2+root `7.27 s` and static B8+root
+  `7.42 s`. Perfect refill scheduling can remove only 14 measured B8 steps, for
+  an optimistic `7.165 s` endpoint (`1.015x`) before replacement overhead.
+- This is a transition-only projection, not a formal ceiling; refill could also
+  remove some setup work. Keep the composition held until profiles expose enough
+  non-transition duplication or B8/B2 economics materially change. Evidence:
+  `docs/bench/2026-08-12-qwen-root-aware-refill-screen/README.md`.

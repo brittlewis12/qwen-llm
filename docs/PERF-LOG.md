@@ -23939,3 +23939,19 @@ Dense and Qwen MoE default on behind
 `14.58 -> 12.20 s` (`1.195x`) across four B16 cohorts with byte-identical
 output. Refill composition remains out of scope. Evidence:
 `docs/bench/2026-08-12-qwen-fixed-file-root/README.md`.
+
+
+## 2026-08-12 — Root-Aware Dense Refill HOLD
+
+Status: hold before implementation. A 16-request trace shares one 6,144-token
+file root but uses distinct post-root tasks, preventing B2 from receiving deeper
+identical-prompt reuse. Measured B2 takes `7.27 s`; static B8 takes `7.42 s` and
+81 physical steps.
+
+Perfect longest-first refill needs 67 steps. At the measured `18.189 ms` per B8
+step, crediting all 14 eliminated steps with zero replacement overhead yields an
+optimistic `7.165 s`, only `1.015x` over B2. This cannot clear the `1.10x` gate.
+This transition-only projection is not a formal ceiling because refill may also
+remove some setup work. It is nevertheless too weak to authorize more scheduler
+code at current leverage. Evidence:
+`docs/bench/2026-08-12-qwen-root-aware-refill-screen/README.md`.

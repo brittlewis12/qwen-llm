@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "head_commit": "4be53a755ea9be2804374274e217d2e2a4fb7003",
+  "fixture_sha256": "c906b864b7b7f7785413138ce7917da5538b04089b9494a6a2adb6f735b25801",
+  "model": "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf",
+  "b2_root": {
+    "wall_seconds": 7.27,
+    "stdout_sha256": "65709a87bf72d0516808380b03f9faaebfe081eb8cfcc4666e6232bcc8b57be2"
+  },
+  "static_b8_root": {
+    "wall_seconds": 7.42,
+    "stdout_sha256": "246006a33ecc1e7ea01239f4ffca653037af4f2b454624c0e0ae0231acf877e1",
+    "physical_steps": 81,
+    "transition_ms": 1473.333953,
+    "mean_step_ms": 18.1893080617
+  },
+  "optimistic_refill": {
+    "physical_steps": 67,
+    "saved_ms": 254.650313,
+    "wall_seconds": 7.165349687,
+    "speedup_over_b2": 1.014605053
+  },
+  "schedule_equivalence": {
+    "matching_requests": 15,
+    "differing_requests": 1,
+    "note": "15/16 greedy completions match across B2 and B8 schedules. The screen makes no causal claim about the one mismatch and does not use cross-schedule exactness as evidence."
+  },
+  "decision": "hold_not_implemented",
+  "gate": 1.1,
+  "host": "Apple M4 Max",
+  "commands": {
+    "b2": "target/release/qwen --model MODEL --requests-jsonl requests.jsonl --concurrency 2 --temp 0 --prefill-chunk 1024",
+    "static_b8": "QWEN_DENSE_BATCH8_REFILL=0 QWEN_FIXED_COHORT_RAGGED_PROMPTS=1 target/release/qwen --model MODEL --requests-jsonl requests.jsonl --batch-size 8 --temp 0 --prefill-chunk 1024",
+    "common": "serialized warm-mmap runs; fixed file-root default-on"
+  },
+  "root_selection": {
+    "common_prefix_tokens": 6482,
+    "selected_prefix_tokens": 6144,
+    "b2_pairs": 8,
+    "selected_identical_pairs": 0
+  },
+  "per_request": [
+    {
+      "id": "root-refill-distinct-0",
+      "requested_tokens": 8,
+      "b2_sha256": "1b322db03c2b730f03ee87b01b0963e97019daa7f5b08241a23ea7f7a33ccddb",
+      "static_b8_sha256": "1b322db03c2b730f03ee87b01b0963e97019daa7f5b08241a23ea7f7a33ccddb",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-1",
+      "requested_tokens": 9,
+      "b2_sha256": "1461606a6a28e7d8dcac35305fc036d5bf940df061b32aab9769ee00721953e4",
+      "static_b8_sha256": "1461606a6a28e7d8dcac35305fc036d5bf940df061b32aab9769ee00721953e4",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-2",
+      "requested_tokens": 10,
+      "b2_sha256": "e02e79d3bb7be31ae635466856b89373b8cd3f01519ac94c5ecb52bf53738597",
+      "static_b8_sha256": "e02e79d3bb7be31ae635466856b89373b8cd3f01519ac94c5ecb52bf53738597",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-3",
+      "requested_tokens": 11,
+      "b2_sha256": "3428f400a7397b2993c6d0c8f88ae08b6030649f0c4ef400aff66577666890da",
+      "static_b8_sha256": "3428f400a7397b2993c6d0c8f88ae08b6030649f0c4ef400aff66577666890da",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-4",
+      "requested_tokens": 12,
+      "b2_sha256": "535bb2292c4a7970675993339ff8f6695c813c5ea286007e2f813f1a19321649",
+      "static_b8_sha256": "535bb2292c4a7970675993339ff8f6695c813c5ea286007e2f813f1a19321649",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-5",
+      "requested_tokens": 13,
+      "b2_sha256": "5300caa0b2ae9855d4c39dd6415c62a4c246d2c57e3fd035c88c9327f40a72ce",
+      "static_b8_sha256": "5300caa0b2ae9855d4c39dd6415c62a4c246d2c57e3fd035c88c9327f40a72ce",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-6",
+      "requested_tokens": 14,
+      "b2_sha256": "0aa20b43d0a725e8978b67191e6c94aa6b425bc51bf016a5bdbdb68503109a7c",
+      "static_b8_sha256": "0aa20b43d0a725e8978b67191e6c94aa6b425bc51bf016a5bdbdb68503109a7c",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-7",
+      "requested_tokens": 15,
+      "b2_sha256": "db2e228f1a142f524235e341c07f6ac8dd18297b9d5d46259e53855b14a8ba24",
+      "static_b8_sha256": "db2e228f1a142f524235e341c07f6ac8dd18297b9d5d46259e53855b14a8ba24",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-8",
+      "requested_tokens": 40,
+      "b2_sha256": "d918eb33d0edaa22150e525f2d2d539625ac5e625842e3c71c2394b591702367",
+      "static_b8_sha256": "d918eb33d0edaa22150e525f2d2d539625ac5e625842e3c71c2394b591702367",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-9",
+      "requested_tokens": 44,
+      "b2_sha256": "8cda733df826f8c23cc8941e23cb0159f3ea8dcb74ffdb896fbc0a0bc573d72b",
+      "static_b8_sha256": "da7e99aa1d041f6e337f02d87a0b70d9e0b335e1d27a19ae49e1e3c11b471b44",
+      "match": false,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-10",
+      "requested_tokens": 48,
+      "b2_sha256": "f657d02a42abd8c92ab1ce01a4c40fdf04b22191187347588df34e9781d3a7ce",
+      "static_b8_sha256": "f657d02a42abd8c92ab1ce01a4c40fdf04b22191187347588df34e9781d3a7ce",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-11",
+      "requested_tokens": 52,
+      "b2_sha256": "47a67a4a7dd6c01f87950f33cfe3ed71ed528cb5ae9cea4be08dc711a95e3070",
+      "static_b8_sha256": "47a67a4a7dd6c01f87950f33cfe3ed71ed528cb5ae9cea4be08dc711a95e3070",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-12",
+      "requested_tokens": 56,
+      "b2_sha256": "9b3d969c0ec13449b33fdf3cbb794d32ebe95b74f77e9968ea7e0a32538c5a7e",
+      "static_b8_sha256": "9b3d969c0ec13449b33fdf3cbb794d32ebe95b74f77e9968ea7e0a32538c5a7e",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-13",
+      "requested_tokens": 60,
+      "b2_sha256": "d63681b5d7e878fcac99bf0b3e3a87b4076febe66682ff0d9498ce2b18d84c7d",
+      "static_b8_sha256": "d63681b5d7e878fcac99bf0b3e3a87b4076febe66682ff0d9498ce2b18d84c7d",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-14",
+      "requested_tokens": 64,
+      "b2_sha256": "88394ba3806407973120974e5b87fc1660d22b29e4264a4f107b33cde3196851",
+      "static_b8_sha256": "88394ba3806407973120974e5b87fc1660d22b29e4264a4f107b33cde3196851",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    },
+    {
+      "id": "root-refill-distinct-15",
+      "requested_tokens": 68,
+      "b2_sha256": "c954ed1a68ca5752c40dd1d7817e954a5aaf56cfc2f5f01c00d6b53d5c949a8f",
+      "static_b8_sha256": "c954ed1a68ca5752c40dd1d7817e954a5aaf56cfc2f5f01c00d6b53d5c949a8f",
+      "match": true,
+      "b2_stop_reason": "token_limit",
+      "static_b8_stop_reason": "token_limit"
+    }
+  ],
+  "all_reached_token_limit": true
+}

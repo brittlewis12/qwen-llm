@@ -6484,23 +6484,23 @@ fn run_requests_jsonl(
                     && request.auto_cache_prefix_tokens.is_none()
                     && request.auto_cache_future_hits == 0
             });
-        let dense_summary = if requests.is_empty() {
-            fixed_cohort_jsonl::CohortPlanSummary {
-                full_cohorts: 0,
-                economics_rejected_cohorts: 0,
-                serial_fallback_requests: 0,
-            }
-        } else {
-            fixed_cohort_jsonl::plan_summary::<DENSE_BATCH8_WIDTH>(requests, args)?
-        };
-        let moe_summary = if requests.is_empty() {
-            fixed_cohort_jsonl::CohortPlanSummary {
-                full_cohorts: 0,
-                economics_rejected_cohorts: 0,
-                serial_fallback_requests: 0,
-            }
-        } else {
-            fixed_cohort_jsonl::plan_summary::<MOE_BATCH16_WIDTH>(requests, args)?
+        let (dense_summary, moe_summary) = match (model_family, requests.is_empty()) {
+            (_, true) => (
+                fixed_cohort_jsonl::CohortPlanSummary::default(),
+                fixed_cohort_jsonl::CohortPlanSummary::default(),
+            ),
+            (Some(ModelFamily::Qwen35), false) => (
+                fixed_cohort_jsonl::plan_summary::<DENSE_BATCH8_WIDTH>(requests, args)?,
+                fixed_cohort_jsonl::CohortPlanSummary::default(),
+            ),
+            (Some(ModelFamily::Qwen35Moe), false) => (
+                fixed_cohort_jsonl::CohortPlanSummary::default(),
+                fixed_cohort_jsonl::plan_summary::<MOE_BATCH16_WIDTH>(requests, args)?,
+            ),
+            (Some(ModelFamily::DeepSeek4) | None, false) => (
+                fixed_cohort_jsonl::CohortPlanSummary::default(),
+                fixed_cohort_jsonl::CohortPlanSummary::default(),
+            ),
         };
         let moe_plan = if model_family == Some(ModelFamily::Qwen35Moe) {
             loaded.inspect_moe_batch16_plan().ok()
@@ -6514,24 +6514,34 @@ fn run_requests_jsonl(
                 &loaded, requests, args,
             )?)
         };
-        let admission = |width: usize, executor_scratch_upper_bytes: u64| -> Result<bool> {
+        let admission = |width: usize,
+                         max_capacity: usize,
+                         executor_scratch_upper_bytes: u64|
+         -> Result<bool> {
             let Some(requirements) = admission_requirements else {
                 return Ok(false);
             };
             Ok(loaded
                 .qwen_execution_memory_admission(
                     width,
-                    requirements.max_capacity,
+                    max_capacity,
                     requirements.prefill_scratch_upper_bytes,
                     executor_scratch_upper_bytes,
                 )?
                 .admitted)
         };
-        let concurrency2_memory_admitted = admission(2, 1024 * 1024)?;
+        let concurrency2_memory_admitted = admission(
+            2,
+            admission_requirements
+                .map(|requirements| requirements.max_capacity)
+                .unwrap_or(0),
+            1024 * 1024,
+        )?;
         let dense_batch8_memory_admitted =
             if model_family == Some(ModelFamily::Qwen35) && loaded.inspect_dense_batch8().is_ok() {
                 admission(
                     DENSE_BATCH8_WIDTH,
+                    dense_summary.max_execution_capacity,
                     loaded
                         .dense_batch8_scratch_bytes()?
                         .saturating_add(1024 * 1024),
@@ -6543,6 +6553,7 @@ fn run_requests_jsonl(
             if model_family == Some(ModelFamily::Qwen35Moe) && moe_plan.is_some() {
                 admission(
                     MOE_BATCH16_WIDTH,
+                    moe_summary.max_execution_capacity,
                     loaded
                         .moe_batch16_scratch_bytes()?
                         .saturating_add(1024 * 1024),

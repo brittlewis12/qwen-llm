@@ -281,13 +281,15 @@ struct CohortPlan<const WIDTH: usize> {
     refill_effective: bool,
     refill_arenas: usize,
     refill_requests: usize,
+    max_execution_capacity: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct CohortPlanSummary {
     pub full_cohorts: usize,
     pub economics_rejected_cohorts: usize,
     pub serial_fallback_requests: usize,
+    pub max_execution_capacity: usize,
 }
 
 #[derive(Debug)]
@@ -732,7 +734,10 @@ fn parse_ragged_prompts_enabled(value: Option<&str>, default_enabled: bool) -> R
     }
 }
 
-fn dense_refill_policy(ragged_prompts: bool) -> Result<DenseRefillPolicy> {
+fn dense_refill_policy(
+    ragged_prompts: bool,
+    automatic_execution: bool,
+) -> Result<DenseRefillPolicy> {
     let value = std::env::var_os(DENSE_REFILL_ENV)
         .map(|value| {
             value
@@ -740,12 +745,13 @@ fn dense_refill_policy(ragged_prompts: bool) -> Result<DenseRefillPolicy> {
                 .map_err(|_| anyhow!("{DENSE_REFILL_ENV} must be valid UTF-8"))
         })
         .transpose()?;
-    parse_dense_refill_policy(value.as_deref(), ragged_prompts)
+    parse_dense_refill_policy(value.as_deref(), ragged_prompts, automatic_execution)
 }
 
 fn parse_dense_refill_policy(
     value: Option<&str>,
     ragged_prompts: bool,
+    automatic_execution: bool,
 ) -> Result<DenseRefillPolicy> {
     let Some(value) = value else {
         return Ok(if ragged_prompts {
@@ -755,9 +761,28 @@ fn parse_dense_refill_policy(
         });
     };
     match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(DenseRefillPolicy::Forced),
+        "1" | "true" | "yes" | "on" => Ok(if automatic_execution {
+            if ragged_prompts {
+                DenseRefillPolicy::Disabled
+            } else {
+                DenseRefillPolicy::ShortSerialFallbackRescue
+            }
+        } else {
+            DenseRefillPolicy::Forced
+        }),
         "0" | "false" | "no" | "off" => Ok(DenseRefillPolicy::Disabled),
         _ => bail!("{DENSE_REFILL_ENV} must be a boolean"),
+    }
+}
+
+fn fixed_cohort_refill_policy<const WIDTH: usize>(
+    ragged_prompts: bool,
+    automatic_execution: bool,
+) -> Result<DenseRefillPolicy> {
+    if WIDTH == DENSE_BATCH8_WIDTH {
+        dense_refill_policy(ragged_prompts, automatic_execution)
+    } else {
+        Ok(DenseRefillPolicy::Disabled)
     }
 }
 
@@ -1175,13 +1200,9 @@ fn plan_request_work<const WIDTH: usize>(
     args: &Args,
 ) -> Result<CohortPlan<WIDTH>> {
     let ragged_prompts = ragged_prompts_enabled(false)?;
-    let refill_policy = if WIDTH == DENSE_BATCH8_WIDTH
-        && args.execution_mode != Some(execution_selector::ExecutionModeArg::Auto)
-    {
-        dense_refill_policy(ragged_prompts)?
-    } else {
-        DenseRefillPolicy::Disabled
-    };
+    let automatic_execution =
+        args.execution_mode == Some(execution_selector::ExecutionModeArg::Auto);
+    let refill_policy = fixed_cohort_refill_policy::<WIDTH>(ragged_prompts, automatic_execution)?;
     plan_request_work_configured(
         requests,
         args,
@@ -1358,6 +1379,15 @@ fn plan_request_work_configured<const WIDTH: usize>(
         ragged_packing_strategy = ragged_packing_strategy.merge(bucket_ragged_strategy);
     }
     work.sort_by_key(PlannedWork::first_request_index);
+    let max_execution_capacity = work
+        .iter()
+        .filter_map(|item| match item {
+            PlannedWork::RefillArena(plan) => Some(plan.shared_capacity),
+            PlannedWork::Batch(_) | PlannedWork::Serial(_) => None,
+        })
+        .chain(capacities.iter().copied())
+        .max()
+        .unwrap_or(0);
     ensure!(
         full_cohorts
             .checked_mul(WIDTH)
@@ -1384,6 +1414,7 @@ fn plan_request_work_configured<const WIDTH: usize>(
         refill_effective: refill_arenas > 0,
         refill_arenas,
         refill_requests,
+        max_execution_capacity,
     })
 }
 
@@ -1391,18 +1422,20 @@ pub(super) fn plan_summary<const WIDTH: usize>(
     requests: &[PreparedJsonlRequest],
     args: &Args,
 ) -> Result<CohortPlanSummary> {
+    let ragged_prompts = ragged_prompts_enabled(false)?;
     let plan = plan_request_work_configured::<WIDTH>(
         requests,
         args,
         prefix_packing_enabled(true)?,
         qwen_prefix_fanout_boundary_policy()?,
-        ragged_prompts_enabled(false)?,
-        false,
+        ragged_prompts,
+        fixed_cohort_refill_policy::<WIDTH>(ragged_prompts, true)?,
     )?;
     Ok(CohortPlanSummary {
         full_cohorts: plan.full_cohorts,
         economics_rejected_cohorts: plan.economics_rejected_cohorts,
         serial_fallback_requests: plan.serial_fallback_requests,
+        max_execution_capacity: plan.max_execution_capacity,
     })
 }
 
@@ -3305,22 +3338,22 @@ mod tests {
     #[test]
     fn dense_refill_policy_defaults_to_short_serial_rescue_and_moe_stays_closed() {
         assert_eq!(
-            parse_dense_refill_policy(None, false).unwrap(),
+            parse_dense_refill_policy(None, false, false).unwrap(),
             DenseRefillPolicy::ShortSerialFallbackRescue
         );
         assert_eq!(
-            parse_dense_refill_policy(None, true).unwrap(),
+            parse_dense_refill_policy(None, true, false).unwrap(),
             DenseRefillPolicy::Disabled
         );
         assert_eq!(
-            parse_dense_refill_policy(Some("on"), false).unwrap(),
+            parse_dense_refill_policy(Some("on"), false, false).unwrap(),
             DenseRefillPolicy::Forced
         );
         assert_eq!(
-            parse_dense_refill_policy(Some("0"), false).unwrap(),
+            parse_dense_refill_policy(Some("0"), false, false).unwrap(),
             DenseRefillPolicy::Disabled
         );
-        assert!(parse_dense_refill_policy(Some("sometimes"), false).is_err());
+        assert!(parse_dense_refill_policy(Some("sometimes"), false, false).is_err());
 
         let args = test_args();
         let limits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 16, 20, 24, 28, 32, 40]
@@ -3473,7 +3506,31 @@ mod tests {
     }
 
     #[test]
-    fn automatic_execution_never_configures_refill() {
+    fn automatic_refill_never_expands_to_forced_policy() {
+        assert_eq!(
+            parse_dense_refill_policy(None, false, true).unwrap(),
+            DenseRefillPolicy::ShortSerialFallbackRescue
+        );
+        assert_eq!(
+            parse_dense_refill_policy(Some("1"), false, true).unwrap(),
+            DenseRefillPolicy::ShortSerialFallbackRescue
+        );
+        assert_eq!(
+            parse_dense_refill_policy(Some("1"), true, true).unwrap(),
+            DenseRefillPolicy::Disabled
+        );
+        assert_eq!(
+            parse_dense_refill_policy(Some("0"), false, true).unwrap(),
+            DenseRefillPolicy::Disabled
+        );
+        assert_eq!(
+            parse_dense_refill_policy(Some("1"), false, false).unwrap(),
+            DenseRefillPolicy::Forced
+        );
+    }
+
+    #[test]
+    fn automatic_dense_execution_uses_the_same_bounded_refill_policy() {
         let mut args = test_args();
         args.execution_mode = Some(execution_selector::ExecutionModeArg::Auto);
         let limits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 16, 20, 24, 28, 32, 40]
@@ -3491,9 +3548,23 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let plan = plan_request_work::<DENSE_BATCH8_WIDTH>(&requests, &args).unwrap();
-        assert_eq!(plan.refill_policy, DenseRefillPolicy::Disabled);
-        assert!(!plan.refill_configured);
-        assert!(!plan.refill_effective);
+        assert_eq!(
+            plan.refill_policy,
+            DenseRefillPolicy::ShortSerialFallbackRescue
+        );
+        assert!(plan.refill_configured);
+        assert!(plan.refill_effective);
+        assert_eq!(plan.refill_arenas, 2);
+        assert_eq!(plan.refill_requests, 32);
+
+        let summary = plan_summary::<DENSE_BATCH8_WIDTH>(&requests, &args).unwrap();
+        assert_eq!(summary.full_cohorts, 4);
+        assert_eq!(summary.serial_fallback_requests, 0);
+        assert_eq!(summary.max_execution_capacity, 349);
+        assert_eq!(
+            fixed_cohort_refill_policy::<MOE_BATCH16_WIDTH>(false, true).unwrap(),
+            DenseRefillPolicy::Disabled
+        );
     }
 
     #[test]

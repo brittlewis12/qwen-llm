@@ -6675,3 +6675,14 @@ Next: <one concrete follow-up>
   hierarchy only when real files lose meaningful reuse to differing pair-local
   maxima; do not add it for symmetry with Qwen. Evidence:
   `docs/bench/2026-08-12-deepseek-file-root/README.md`.
+## Recent Promotion — Automatic Dense Serial-Tail Rescue
+
+- Automatic dense selection now uses the same bounded B8 refill policy during
+  lookahead and execution. Same-binary wall moves `2.16 -> 1.76 s` (`1.227x`)
+  on 0.8B and `19.76 -> 15.89 s` (`1.244x`) on 27B with byte-identical output.
+- Keep the promotion narrow: short equal-frontier work with static serial tails,
+  two waves, existing utilization/step gates, and prompt cap 64. Ragged, fully
+  batched, long-prompt, broad forced, and MoE refill remain outside auto.
+- Selector admission prices refill shared capacity before choosing B8; `=0`
+  remains strict rollback. Evidence:
+  `docs/bench/2026-08-12-automatic-dense-refill/README.md`.

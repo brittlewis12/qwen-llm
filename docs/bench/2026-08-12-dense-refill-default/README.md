@@ -5,6 +5,11 @@ Date: 2026-08-12
 Status: product GO for measured short-prompt serial-tail rescue; broader refill
 remains explicit.
 
+Update (2026-08-12): the bounded rescue now also composes with opt-in automatic
+dense execution. See
+`docs/bench/2026-08-12-automatic-dense-refill/README.md`. The original
+`auto_mode: false` record below describes this packet's then-current policy.
+
 ## Question
 
 When should the bounded dense B8 refill mechanism become automatic inside an

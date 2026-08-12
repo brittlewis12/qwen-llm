@@ -24039,3 +24039,22 @@ workspace. Denial preserves pair-local execution. Keep
 `QWEN_CONCURRENCY_FILE_ROOT_FANOUT=0` as strict rollback. V1 intentionally
 rejects differing pair maxima rather than adding a root-to-pair bridge hierarchy.
 Evidence: `docs/bench/2026-08-12-deepseek-file-root/README.md`.
+## 2026-08-12 — Automatic Dense Refill Composition GO
+
+Status: opt-in `--execution-mode auto` now carries the qualified dense B8
+short-serial-tail rescue through both selector lookahead and fixed execution.
+Absent `QWEN_DENSE_BATCH8_REFILL` or explicit `=1` remains bounded rescue;
+`=0` is rollback. Ragged auto, forced broad refill, and Qwen MoE remain closed.
+
+On the 32-request 11-token fixture, same-binary auto wall moves `2.16 -> 1.76 s`
+(`1.227x`) on Qwen3.5 0.8B Q8 and `19.76 -> 15.89 s` (`1.244x`) on Qwen3.6
+27B Q4. The candidate replaces two static B8 cohorts plus 16 serial requests with
+two refill arenas covering all 32 requests. Complete JSONL stays byte-identical
+and every process reports zero swaps.
+
+A fully batched threshold falsifier run with auto and explicit refill `=1`
+remains static at `0.90 s`: policy telemetry reports bounded rescue but no arena
+because no serial fallback exists. Selector admission now prices the plan's
+maximum execution capacity, and model-family-specific lookahead prevents the
+dense refill variable from affecting MoE automatic commands. Evidence:
+`docs/bench/2026-08-12-automatic-dense-refill/README.md`.

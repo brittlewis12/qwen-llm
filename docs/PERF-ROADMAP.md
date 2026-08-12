@@ -6597,11 +6597,13 @@ Next: <one concrete follow-up>
   proposed cohort, more full cohorts than incumbent planning, no serial file
   remainder, and unchanged utilization/memory gates.
   `QWEN_FIXED_COHORT_RAGGED_PROMPTS=0` is rollback.
-- Keep automatic MoE ragged selection on HOLD. Counterbalancing removes load
-  warmth from the earlier apparent win and leaves A3B B16 at `1.086x`, below the
-  1.10 product bar. Explicit `=1` retains the broader mechanism. This frontier
-  contract remains the substrate for future refill/continuous batching. Evidence:
-  `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
+- Automatic MoE ragged selection is KILLED at the current executor. At 128
+  requested tokens, counterbalanced A3B B16 reaches only `1.090x`; decode alone
+  measures `1.0998x` before private prefill is charged. Explicit `=1` retains
+  the exact mechanism. Reopen only after B16 decode improves relative to B2,
+  replacement prefill overlaps active decode, or a changed executor has an
+  independently measured whole-request ceiling above `1.10x`. Evidence:
+  `docs/bench/2026-08-12-qwen-moe-ragged-128-screen/README.md`.
 
 
 ## Recent Confirmed Capability — Bounded Dense Refill
@@ -6705,7 +6707,10 @@ Next: <one concrete follow-up>
   selector gates serve both measured dense scales. Equal-frontier work retains
   its incumbent plan, and envelope, charge, utilization, cohort-gain, or memory
   failure preserves incumbent planning before mutable execution; selector memory
-denial narrows to B2 and later cohort-memory denial remains serial fallback.
-- A3B B16 remains explicit after counterbalanced execution reaches only `1.086x`.
-  Do not infer a MoE default from the original load-confounded whole-wall row.
-  Evidence: `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
+  denial narrows to B2 and later cohort-memory denial remains serial fallback.
+- A3B B16 remains explicit. A 128-token counterbalanced screen reaches only
+  `1.090x`, and decode alone is `1.0998x`; do not spend another length sweep on
+  the current executor. Reopen only for faster B16 decode, overlapped replacement
+  prefill, or a changed executor with a measured whole-request ceiling above
+  `1.10x`. Evidence:
+  `docs/bench/2026-08-12-qwen-moe-ragged-128-screen/README.md`.

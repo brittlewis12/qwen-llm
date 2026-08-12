@@ -1,7 +1,7 @@
 # Qwen Ragged Fixed Cohorts
 
 Date: 2026-08-12
-Status: dense automatic slice GO; MoE automatic admission HOLD
+Status: dense automatic slice GO; MoE automatic admission KILL at current executor
 
 ## Question
 
@@ -176,7 +176,9 @@ Retain incumbent equal-length/refill planning when the envelope, per-cohort
 charge, cohort-gain, or utilization gate fails. Selector memory denial narrows
 to B2; a later per-cohort denial falls back to input-ordered serial execution.
 Keep automatic MoE ragged
-selection on HOLD: B=16 is exact and useful, but the counterbalanced gain does
-not clear the 1.10x product bar. The next architectural step remains refill or
-continuous batching over the same per-request frontier contract, not another
-model-specific executor.
+selection closed at the current executor: a follow-up 128-token screen reaches
+only `1.090x`, with decode itself measuring `1.0998x`. Reopen only after B16
+decode improves relative to B2, replacement prefill overlaps active decode, or
+a changed executor has an independently measured whole-request ceiling above
+`1.10x`. The next architectural step remains refill or continuous batching over
+the same per-request frontier contract, not another model-specific executor.

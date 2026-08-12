@@ -24093,3 +24093,28 @@ closed admission decisions. The exact automatic 0.8B product cell moves
 `2.06 -> 1.53 s` (`1.346x`) with SHA-256
 `312f47f66e2242ee865648ff56fe9d2321213c3c60ebe3f0f60491d1aead8023`.
 Evidence: `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
+
+## 2026-08-12 — Qwen MoE Ragged B16 128-Token KILL
+
+Status: keep automatic Qwen MoE ragged admission closed at the current
+executor. The existing A3B Q4 fixture was extended to 128 requested output
+tokens and run counterbalanced B16/B2 then B2/B16 with one release binary
+embedding commit `4238acd`, dirty bit `1`, and exact source-state digest
+`git-source-sha256-v2:0c155730c47ffb4e99a0caa0cd37c69d3e04dfe62c247b2ed51010b90b1af7b4`.
+The dirty bit includes two pre-existing user-owned untracked documents; the
+packet claims same-binary rather than portable clean-build authority.
+
+B16 execution takes `15,260.044/15,304.856 ms`; B2 takes
+`16,677.467/16,640.817 ms`. Median speedup is `1.09008x`, with paired ratios
+`1.09288x/1.08729x`, below the frozen `1.10x` product gate. All four complete
+JSONL outputs are byte-identical and every process reports zero swaps.
+
+Decode alone is `30,027.420 / 27,302.575 = 1.09980x` across both repeats.
+The measured decode ratio lands 0.02% below the product gate before private
+prefill is charged. A 256-token packet has too little expected decision value
+to justify another product run at the current executor.
+Retain explicit `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1`. Reopen only after B16
+decode materially improves relative to B2, replacement prefill overlaps active
+decode, or a changed executor has an independent whole-request ceiling above
+`1.10x`. Evidence:
+`docs/bench/2026-08-12-qwen-moe-ragged-128-screen/README.md`.

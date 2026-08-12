@@ -1,0 +1,26 @@
+[metal-load] native quantized token embedding policy: auto-promoted (Q8_0 [2048, 248320])
+[2m2026-08-12T14:05:53.065703Z[0m [32m INFO[0m [2mqwen_llm::runtime[0m[2m:[0m prefetch: skipped (already warm) [3mshard[0m[2m=[0m/Users/tito/models/Qwen3.5-35B-A3B-Q4_K_M.gguf [3mresident_pct[0m[2m=[0m100.0
+[metal-load-ledger] source=733/22005033472 direct_copy=733/22005033472 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+loaded /Users/tito/models/Qwen3.5-35B-A3B-Q4_K_M.gguf in 2339.6 ms; prefix_cache_max_mib=0
+moe_batch16: {"schema_version":8,"backend":"qwen_moe_capability_batch16_v6","cohort_index":0,"width":16,"prompt_tokens_per_lane":[10,11,12,13,15,17,21,25,33,41,51,59,75,91,107,139],"min_prompt_tokens":10,"max_prompt_tokens":139,"requested_tokens_per_lane":[128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128],"shared_capacity_tokens":283,"generated_tokens_per_lane":[128,128,128,128,128,128,128,128,128,128,128,128,128,128,128,128],"productive_transitions_per_lane":[127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127],"padding_transitions_per_lane":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"generated_tokens":2048,"productive_transitions":2032,"padding_transitions":0,"physical_batch_steps":127,"physical_transition_utilization":1.0,"common_prefix_tokens":2,"prefix_fanout_tokens":0,"prefix_fanout_reason":"below_minimum","prefix_fanout_boundary_policy":"tiny_suffix_exact_lcp","prefix_fanout_min_tokens":256,"prefix_snapshot_bytes":0,"prefix_prefill_ms":0.0,"prefix_snapshot_ms":0.0,"prefix_restore_ms":0.0,"suffix_prefill_ms":1626.3834559999998,"private_suffix_singleton_max_tokens":6,"private_suffix_singleton_lanes":0,"private_suffix_singleton_tokens":0,"private_suffix_packed_lanes":0,"private_suffix_packed_tokens":0,"prefill_ms":1626.40525,"decode_ms":13633.638958000001,"batch_transition_ms":13620.492587000002,"executor_gpu_ms":13090.287708328106,"aggregate_generated_tps":150.21668142372704,"sequence_allocation_delta_bytes":89964544,"remaining_sequence_required_bytes":1349468160,"prefix_snapshot_required_bytes":0,"memory_admission_incremental_bytes":1349468160,"memory_admission_reserve_bytes":2147483648,"memory_admission_required_bytes":3496951808,"memory_admission_reason":"admitted_process_budget_omitted","executor_scratch_bytes":17597056,"executor_scratch_incremental_bytes":0,"moe_q8_batched_gdn_blocks":30,"moe_packed_q4_gate_up_blocks":40,"moe_per_lane_gdn_blocks":0,"moe_per_lane_gate_up_blocks":0,"moe_per_lane_iq3_gate_up_blocks":0,"moe_per_lane_other_gate_up_blocks":0,"moe_head_mode":"batched_q6"}
+fixed_cohort_file_root: {"schema_version":1,"backend":"qwen_fixed_file_root_v1","enabled":true,"requests":16,"planned_cohorts":1,"common_prefix_tokens":2,"selected_prefix_tokens":0,"planned_avoided_prefix_evaluations":0,"planned_avoided_prompt_tokens":0,"minimum_tokens":1024,"reason":"below_minimum_uses","outcome":"not_selected","actual_cohort_uses":0,"actual_avoided_prefix_evaluations":0,"actual_avoided_prompt_tokens":0,"excluded_requests":0,"snapshot_required_bytes":0,"max_cohort_snapshot_required_bytes":0,"additional_memory_bytes":0,"memory_admission_required_bytes":null,"memory_admission_reason":"not_requested","snapshot_bytes":0,"prefill_ms":0.0,"snapshot_ms":0.0}
+moe_batch16_planner: {"schema_version":6,"backend":"qwen_moe_fixed_cohort_planner_v6","requests":16,"prefix_packing_configured":true,"prefix_packing_effective":false,"prefix_fanout_boundary_policy":"tiny_suffix_exact_lcp","ragged_prompts_enabled":true,"ragged_prompt_policy":"explicit","ragged_prompt_plan_decision":"explicit","ragged_packing_strategy":"generation_depth","compatibility_buckets":1,"planned_candidate_cohorts":1,"realized_prefix_affinity_cohorts":0,"planned_prefix_fallback_buckets":0,"planned_full_cohorts":1,"planned_batched_requests":16,"realized_full_cohorts":1,"planned_economics_rejected_cohorts":0,"realized_memory_rejected_cohorts":0,"realized_batched_requests":16,"realized_serial_fallback_requests":0,"realized_estimated_physical_transition_slots":2032,"realized_estimated_capacity_slots":4528,"minimum_requested_transition_utilization":"3/4","packing_order":"ragged_pareto","output_order":"input"}
+stats: requests=16 cache_entries=0 cache_mib=0.0/0.0
+       17.86 real         1.59 user         1.82 sys
+         44265914368  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2702329  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   4  voluntary context switches
+                1802  involuntary context switches
+         43037106569  instructions retired
+         14722976268  cycles elapsed
+         23895572472  peak memory footprint

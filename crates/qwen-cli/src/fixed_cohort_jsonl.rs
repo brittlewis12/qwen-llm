@@ -52,11 +52,11 @@ trait FixedCohortExecutor<const WIDTH: usize> {
 impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_> {
     const DISPLAY_NAME: &'static str = "dense B=8";
     const PREFIX_FANOUT_ENV: &'static str = DENSE_PREFIX_FANOUT_ENV;
-    const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v3";
+    const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v4";
     const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v3";
     const TELEMETRY_PREFIX: &'static str = "dense_batch8";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "dense_batch8_planner";
-    const TELEMETRY_SCHEMA_VERSION: u32 = 3;
+    const TELEMETRY_SCHEMA_VERSION: u32 = 4;
 
     fn validate(
         &self,
@@ -90,11 +90,11 @@ impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_>
 impl FixedCohortExecutor<MOE_BATCH16_WIDTH> for MoeBatch16SequenceExecutor<'_> {
     const DISPLAY_NAME: &'static str = "MoE B=16";
     const PREFIX_FANOUT_ENV: &'static str = MOE_PREFIX_FANOUT_ENV;
-    const COHORT_BACKEND: &'static str = "qwen_moe_capability_batch16_v3";
+    const COHORT_BACKEND: &'static str = "qwen_moe_capability_batch16_v4";
     const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v3";
     const TELEMETRY_PREFIX: &'static str = "moe_batch16";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "moe_batch16_planner";
-    const TELEMETRY_SCHEMA_VERSION: u32 = 4;
+    const TELEMETRY_SCHEMA_VERSION: u32 = 5;
 
     fn validate(
         &self,
@@ -297,6 +297,11 @@ struct CohortTelemetry {
     prefix_snapshot_ms: f64,
     prefix_restore_ms: f64,
     suffix_prefill_ms: f64,
+    private_suffix_singleton_max_tokens: usize,
+    private_suffix_singleton_lanes: usize,
+    private_suffix_singleton_tokens: usize,
+    private_suffix_packed_lanes: usize,
+    private_suffix_packed_tokens: usize,
     prefill_ms: f64,
     decode_ms: f64,
     batch_transition_ms: f64,
@@ -1188,6 +1193,10 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     let mut prefix_snapshot_ms = 0.0;
     let mut prefix_restore_ms = 0.0;
     let mut suffix_prefill_ms = 0.0;
+    let mut private_suffix_singleton_lanes = 0usize;
+    let mut private_suffix_singleton_tokens = 0usize;
+    let mut private_suffix_packed_lanes = 0usize;
+    let mut private_suffix_packed_tokens = 0usize;
     if prefix_fanout.selected_prefix_tokens > 0 {
         let prefix_len = prefix_fanout.selected_prefix_tokens;
         let (prefix_logits, ms) = prefill_span(
@@ -1244,7 +1253,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             if suffix.is_empty() {
                 prompt_logits.push(prefix_logits.clone());
             } else {
-                let (logits, ms) = prefill_span(
+                let result = prefill_private_suffix(
                     &forward,
                     &mut sequences[slot],
                     &mut scratch,
@@ -1254,8 +1263,18 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                 .with_context(|| {
                     format!("prefill {} cohort suffix slot {slot}", E::DISPLAY_NAME)
                 })?;
-                suffix_prefill_ms += ms;
-                prompt_logits.push(logits);
+                suffix_prefill_ms += result.ms;
+                match result.mode {
+                    PrivateSuffixExecutionMode::Packed => {
+                        private_suffix_packed_lanes += 1;
+                        private_suffix_packed_tokens += suffix.len();
+                    }
+                    PrivateSuffixExecutionMode::Singleton => {
+                        private_suffix_singleton_lanes += 1;
+                        private_suffix_singleton_tokens += suffix.len();
+                    }
+                }
+                prompt_logits.push(result.logits);
             }
         }
     } else {
@@ -1439,6 +1458,11 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             prefix_snapshot_ms,
             prefix_restore_ms,
             suffix_prefill_ms,
+            private_suffix_singleton_max_tokens: PRIVATE_SUFFIX_SINGLETON_MAX_TOKENS,
+            private_suffix_singleton_lanes,
+            private_suffix_singleton_tokens,
+            private_suffix_packed_lanes,
+            private_suffix_packed_tokens,
             prefill_ms,
             decode_ms,
             batch_transition_ms,

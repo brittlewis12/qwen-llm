@@ -6,6 +6,29 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Qwen Private-Suffix Singleton Replay GO
+
+Status: restored Qwen private suffixes of at most six tokens now use
+teacher-forced singleton transitions in B=2/B=8/B=16. Longer suffixes and full
+prompts retain packed prefill; `QWEN_PRIVATE_SUFFIX_SINGLETON=0` rolls back.
+
+- Dense 27B B=8 six-token suffixes move `3.325 -> 1.899 s` (`1.751x`), total
+  prefill `7.642 -> 6.211 s`, and warm process wall `11.70 -> 10.23 s` with
+  byte-identical output.
+- The dense crossover closes broader policy: eight tokens slightly regress
+  `2.488 -> 2.537 s`; sixteen regress `2.887 -> 5.070 s`. The automatic cutoff
+  is therefore six rather than the benchmark's older generic 64.
+- A3B Q4 B=16 five-token suffixes move `1.968 -> 0.741 s`; total prefill moves
+  `2.730 -> 1.503 s` and process wall `7.20 -> 5.98 s`, byte-identically.
+- A3B Q4 B=2 five-token suffixes move `0.246 -> 0.093 s`; prefill moves
+  `0.918 -> 0.780 s` and process wall `3.95 -> 3.80 s`, byte-identically.
+- Capacity, full range, and final `u32` position are checked before mutation.
+  Pair/cohort telemetry reports cutoff, lane counts, and token counts.
+
+Decision: promote the measured six-token pocket without changing packed scratch
+admission or claiming intermediate bit equality. Full evidence:
+`docs/bench/2026-08-11-qwen-private-suffix-singleton/README.md`.
+
 ## 2026-08-11 - Prefix-Aware Fixed Cohort Packing GO
 
 Status: dense B=8 and qualified Qwen MoE B=16 now cluster complete reusable

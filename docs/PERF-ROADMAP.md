@@ -2953,6 +2953,14 @@ serial and lets auto choose B=2 at `1.078x`. Keep this as bounded
 logical-termination flexibility, not evidence for lane refill or variable prompt
 frontiers.
 
+Restored Qwen private suffixes now use singleton teacher forcing through six
+tokens in B=2/B=8/B=16. Dense 27B suffix wall moves `3.325 -> 1.899 s`, A3B
+B=16 moves `1.968 -> 0.741 s`, and A3B B=2 moves `0.246 -> 0.093 s`; all
+product outputs remain byte-exact. Dense crossover screens keep packed execution
+at seven or more tokens: eight is slightly slower and sixteen materially slower.
+Keep `QWEN_PRIVATE_SUFFIX_SINGLETON=0` as rollback and retain packed scratch
+admission. Exact-LCP fanout remains a separate segmentation-equivalence question.
+
 Fixed B=8/B=16 planning now tries complete lexically adjacent prefix groups
 before generation-depth packing. Adopt a prefix candidate per prompt-length
 bucket only when it increases full cohorts, or preserves cohort count without

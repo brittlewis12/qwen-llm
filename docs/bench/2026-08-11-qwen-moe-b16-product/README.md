@@ -1,5 +1,9 @@
 # Qwen MoE B=16 Product Integration
 
+Update (2026-08-11): restored private suffixes of at most six tokens now use the
+measured singleton path. See
+`docs/bench/2026-08-11-qwen-private-suffix-singleton/README.md`.
+
 Update (2026-08-11): prefix-aware packing now clusters complete reusable B=16
 groups before depth fallback. See
 `docs/bench/2026-08-11-fixed-cohort-prefix-packing/README.md`.

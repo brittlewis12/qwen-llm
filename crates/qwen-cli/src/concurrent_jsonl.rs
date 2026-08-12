@@ -173,6 +173,11 @@ struct PairTelemetry {
     prefix_snapshot_ms: f64,
     prefix_restore_ms: f64,
     private_prefill_ms: f64,
+    private_suffix_singleton_max_tokens: usize,
+    private_suffix_singleton_lanes: usize,
+    private_suffix_singleton_tokens: usize,
+    private_suffix_packed_lanes: usize,
+    private_suffix_packed_tokens: usize,
     prefix_snapshot_required_bytes: u64,
     prefix_memory_admission_required_bytes: Option<u64>,
     prefix_memory_admission_reason: &'static str,
@@ -192,6 +197,10 @@ struct PreparedPair {
     prefix_snapshot_ms: f64,
     prefix_restore_ms: f64,
     private_prefill_ms: f64,
+    private_suffix_singleton_lanes: usize,
+    private_suffix_singleton_tokens: usize,
+    private_suffix_packed_lanes: usize,
+    private_suffix_packed_tokens: usize,
     prefix_snapshot_required_bytes: u64,
     prefix_memory_admission_required_bytes: Option<u64>,
     prefix_memory_admission_reason: &'static str,
@@ -948,6 +957,10 @@ fn prepare_pair(
             prefix_snapshot_ms: 0.0,
             prefix_restore_ms: 0.0,
             private_prefill_ms: left_prefill_ms + right_prefill_ms,
+            private_suffix_singleton_lanes: 0,
+            private_suffix_singleton_tokens: 0,
+            private_suffix_packed_lanes: 0,
+            private_suffix_packed_tokens: 0,
             prefix_snapshot_required_bytes: 0,
             prefix_memory_admission_required_bytes: None,
             prefix_memory_admission_reason: "not_requested",
@@ -1024,6 +1037,10 @@ fn prepare_pair(
             prefix_snapshot_ms: 0.0,
             prefix_restore_ms: 0.0,
             private_prefill_ms,
+            private_suffix_singleton_lanes: 0,
+            private_suffix_singleton_tokens: 0,
+            private_suffix_packed_lanes: 0,
+            private_suffix_packed_tokens: 0,
             prefix_snapshot_required_bytes,
             prefix_memory_admission_required_bytes,
             prefix_memory_admission_reason,
@@ -1071,10 +1088,14 @@ fn prepare_pair(
     shutdown::checkpoint()?;
 
     let mut private_prefill_ms = 0.0;
+    let mut private_suffix_singleton_lanes = 0usize;
+    let mut private_suffix_singleton_tokens = 0usize;
+    let mut private_suffix_packed_lanes = 0usize;
+    let mut private_suffix_packed_tokens = 0usize;
     let left_logits = if requests[0].prompt_ids.len() == prefix_len {
         prefix_logits.clone()
     } else {
-        let (logits, ms) = prefill_span(
+        let result = prefill_private_suffix(
             &forward,
             &mut sequences[0],
             &mut scratch,
@@ -1082,14 +1103,24 @@ fn prepare_pair(
             prefix_len,
         )
         .context("prefill concurrent shared-prefix lane 0 suffix")?;
-        private_prefill_ms += ms;
-        logits
+        private_prefill_ms += result.ms;
+        match result.mode {
+            PrivateSuffixExecutionMode::Packed => {
+                private_suffix_packed_lanes += 1;
+                private_suffix_packed_tokens += requests[0].prompt_ids.len() - prefix_len;
+            }
+            PrivateSuffixExecutionMode::Singleton => {
+                private_suffix_singleton_lanes += 1;
+                private_suffix_singleton_tokens += requests[0].prompt_ids.len() - prefix_len;
+            }
+        }
+        result.logits
     };
     shutdown::checkpoint()?;
     let right_logits = if requests[1].prompt_ids.len() == prefix_len {
         prefix_logits
     } else {
-        let (logits, ms) = prefill_span(
+        let result = prefill_private_suffix(
             &forward,
             &mut sequences[1],
             &mut scratch,
@@ -1097,8 +1128,18 @@ fn prepare_pair(
             prefix_len,
         )
         .context("prefill concurrent shared-prefix lane 1 suffix")?;
-        private_prefill_ms += ms;
-        logits
+        private_prefill_ms += result.ms;
+        match result.mode {
+            PrivateSuffixExecutionMode::Packed => {
+                private_suffix_packed_lanes += 1;
+                private_suffix_packed_tokens += requests[1].prompt_ids.len() - prefix_len;
+            }
+            PrivateSuffixExecutionMode::Singleton => {
+                private_suffix_singleton_lanes += 1;
+                private_suffix_singleton_tokens += requests[1].prompt_ids.len() - prefix_len;
+            }
+        }
+        result.logits
     };
     drop(prepared);
     drop(scratch);
@@ -1115,6 +1156,10 @@ fn prepare_pair(
         prefix_snapshot_ms,
         prefix_restore_ms,
         private_prefill_ms,
+        private_suffix_singleton_lanes,
+        private_suffix_singleton_tokens,
+        private_suffix_packed_lanes,
+        private_suffix_packed_tokens,
         prefix_snapshot_required_bytes,
         prefix_memory_admission_required_bytes,
         prefix_memory_admission_reason,
@@ -1279,8 +1324,8 @@ fn run_pair(
     Ok((
         outputs,
         PairTelemetry {
-            schema_version: 3,
-            backend: "qwen_independent_queues_v3",
+            schema_version: 4,
+            backend: "qwen_independent_queues_v4",
             pair_index,
             request_indices,
             prompt_tokens: [requests[0].prompt_ids.len(), requests[1].prompt_ids.len()],
@@ -1298,6 +1343,11 @@ fn run_pair(
             prefix_snapshot_ms: prepared.prefix_snapshot_ms,
             prefix_restore_ms: prepared.prefix_restore_ms,
             private_prefill_ms: prepared.private_prefill_ms,
+            private_suffix_singleton_max_tokens: PRIVATE_SUFFIX_SINGLETON_MAX_TOKENS,
+            private_suffix_singleton_lanes: prepared.private_suffix_singleton_lanes,
+            private_suffix_singleton_tokens: prepared.private_suffix_singleton_tokens,
+            private_suffix_packed_lanes: prepared.private_suffix_packed_lanes,
+            private_suffix_packed_tokens: prepared.private_suffix_packed_tokens,
             prefix_snapshot_required_bytes: prepared.prefix_snapshot_required_bytes,
             prefix_memory_admission_required_bytes: prepared.prefix_memory_admission_required_bytes,
             prefix_memory_admission_reason: prepared.prefix_memory_admission_reason,

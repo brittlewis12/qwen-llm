@@ -7281,6 +7281,114 @@ fn prefill_span(
     Ok((logits, t0.elapsed().as_secs_f64() * 1e3))
 }
 
+const PRIVATE_SUFFIX_SINGLETON_ENV: &str = "QWEN_PRIVATE_SUFFIX_SINGLETON";
+const PRIVATE_SUFFIX_SINGLETON_MAX_TOKENS: usize = 6;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrivateSuffixExecutionMode {
+    Packed,
+    Singleton,
+}
+
+struct PrivateSuffixResult {
+    logits: Vec<f32>,
+    ms: f64,
+    mode: PrivateSuffixExecutionMode,
+}
+
+fn parse_private_suffix_singleton_enabled(
+    value: Option<&str>,
+    default_enabled: bool,
+) -> Result<bool> {
+    let Some(value) = value else {
+        return Ok(default_enabled);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => bail!("{PRIVATE_SUFFIX_SINGLETON_ENV} must be a boolean"),
+    }
+}
+
+fn private_suffix_singleton_enabled(default_enabled: bool) -> Result<bool> {
+    let value = std::env::var_os(PRIVATE_SUFFIX_SINGLETON_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow!("{PRIVATE_SUFFIX_SINGLETON_ENV} must be valid UTF-8"))
+        })
+        .transpose()?;
+    parse_private_suffix_singleton_enabled(value.as_deref(), default_enabled)
+}
+
+fn choose_private_suffix_execution_mode(
+    enabled: bool,
+    suffix_tokens: usize,
+) -> PrivateSuffixExecutionMode {
+    if enabled && suffix_tokens <= PRIVATE_SUFFIX_SINGLETON_MAX_TOKENS {
+        PrivateSuffixExecutionMode::Singleton
+    } else {
+        PrivateSuffixExecutionMode::Packed
+    }
+}
+
+fn prefill_private_suffix(
+    forward: &MetalForward<'_>,
+    sequence: &mut Sequence,
+    scratch: &mut MetalDFlashLayerMajorScratch,
+    token_ids: &[i32],
+    start_position: usize,
+) -> Result<PrivateSuffixResult> {
+    ensure!(
+        !token_ids.is_empty(),
+        "cannot prefill an empty private suffix"
+    );
+    let mode = choose_private_suffix_execution_mode(
+        private_suffix_singleton_enabled(true)?,
+        token_ids.len(),
+    );
+    if mode == PrivateSuffixExecutionMode::Packed {
+        let (logits, ms) = prefill_span(forward, sequence, scratch, token_ids, start_position)?;
+        return Ok(PrivateSuffixResult {
+            logits,
+            ms,
+            mode: PrivateSuffixExecutionMode::Packed,
+        });
+    }
+
+    shutdown::checkpoint()?;
+    sequence.check_position(start_position)?;
+    sequence.ensure_can_append(token_ids.len())?;
+    let final_position = start_position
+        .checked_add(token_ids.len() - 1)
+        .context("private suffix final position overflow")?;
+    u32::try_from(final_position).context("private suffix final position does not fit u32")?;
+    let t0 = Instant::now();
+    let mut logits = None;
+    for (offset, &token) in token_ids.iter().enumerate() {
+        shutdown::checkpoint()?;
+        let position = start_position
+            .checked_add(offset)
+            .context("private suffix position overflow")?;
+        logits = Some(
+            forward
+                .single_token(
+                    token,
+                    u32::try_from(position).context("private suffix position does not fit u32")?,
+                    unsafe { sequence.metal_session_mut() },
+                )
+                .context("consume private suffix token")?,
+        );
+        sequence.advance_by(1)?;
+        shutdown::checkpoint()?;
+    }
+    Ok(PrivateSuffixResult {
+        logits: logits.expect("nonempty private suffix produced final logits"),
+        ms: t0.elapsed().as_secs_f64() * 1e3,
+        mode: PrivateSuffixExecutionMode::Singleton,
+    })
+}
+
 #[derive(Debug)]
 struct GenerationResult {
     tokens: Vec<i32>,
@@ -8625,6 +8733,27 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn private_suffix_singleton_policy_is_strict_and_rollbackable() {
+        assert!(parse_private_suffix_singleton_enabled(None, true).unwrap());
+        assert!(!parse_private_suffix_singleton_enabled(None, false).unwrap());
+        assert!(!parse_private_suffix_singleton_enabled(Some("off"), true).unwrap());
+        assert!(parse_private_suffix_singleton_enabled(Some("YES"), false).unwrap());
+        assert!(parse_private_suffix_singleton_enabled(Some("sometimes"), true).is_err());
+        assert_eq!(
+            choose_private_suffix_execution_mode(true, 6),
+            PrivateSuffixExecutionMode::Singleton
+        );
+        assert_eq!(
+            choose_private_suffix_execution_mode(true, 7),
+            PrivateSuffixExecutionMode::Packed
+        );
+        assert_eq!(
+            choose_private_suffix_execution_mode(false, 1),
+            PrivateSuffixExecutionMode::Packed
+        );
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     enum AllocationEvent {

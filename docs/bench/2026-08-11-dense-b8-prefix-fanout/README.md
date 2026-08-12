@@ -1,5 +1,9 @@
 # Dense B=8 shared-prefix fanout
 
+Update (2026-08-11): restored private suffixes of at most six tokens now use the
+measured singleton path. See
+`docs/bench/2026-08-11-qwen-private-suffix-singleton/README.md`.
+
 ## Question
 
 Can a fixed dense-Qwen cohort prefill one exact common token prefix, fork its

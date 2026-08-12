@@ -9,12 +9,61 @@ const PREFIX_FANOUT_ENV: &str = "QWEN_CONCURRENCY_PREFIX_FANOUT";
 const PAIR_PLANNER_ENV: &str = "QWEN_CONCURRENCY_PAIR_PLANNER";
 const PAIR_PLANNER_WINDOW: usize = 16;
 const PREFIX_FANOUT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const FILE_ROOT_FANOUT_ENV: &str = "QWEN_CONCURRENCY_FILE_ROOT_FANOUT";
+const FILE_ROOT_MIN_TOKENS: usize = 1024;
+const FILE_ROOT_MIN_PAIRS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PrefixFanoutPlan {
     common_prefix_tokens: usize,
     selected_prefix_tokens: usize,
     reason: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileRootPlan {
+    enabled: bool,
+    common_prefix_tokens: usize,
+    selected_prefix_tokens: usize,
+    planned_pair_uses: usize,
+    planned_avoided_prefix_evaluations: usize,
+    planned_avoided_prompt_tokens: usize,
+    reason: &'static str,
+}
+
+struct PreparedFileRoot {
+    plan: FileRootPlan,
+    checkpoint: PreparedCheckpoint,
+}
+
+#[derive(Debug, Serialize)]
+struct FileRootTelemetry {
+    schema_version: u32,
+    backend: &'static str,
+    enabled: bool,
+    requests: usize,
+    planned_pairs: usize,
+    common_prefix_tokens: usize,
+    selected_prefix_tokens: usize,
+    planned_pair_uses: usize,
+    planned_avoided_prefix_evaluations: usize,
+    planned_avoided_prompt_tokens: usize,
+    minimum_tokens: usize,
+    minimum_pairs: usize,
+    reason: &'static str,
+    outcome: &'static str,
+    actual_pair_uses: usize,
+    actual_avoided_prefix_evaluations: usize,
+    actual_avoided_prompt_tokens: usize,
+    excluded_serial_requests: usize,
+    snapshot_required_bytes: u64,
+    max_pair_snapshot_required_bytes: u64,
+    additional_memory_bytes: u64,
+    memory_admission_required_bytes: Option<u64>,
+    memory_admission_reason: &'static str,
+    snapshot_bytes: u64,
+    prefill_ms: f64,
+    snapshot_ms: f64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,6 +235,7 @@ struct PairTelemetry {
     prefix_fanout_boundary_policy: &'static str,
     prefix_fanout_min_tokens: usize,
     prefix_snapshot_bytes: u64,
+    prefix_prefill_tokens: usize,
     prefix_prefill_ms: f64,
     prefix_snapshot_ms: f64,
     prefix_restore_ms: f64,
@@ -198,6 +248,9 @@ struct PairTelemetry {
     prefix_snapshot_required_bytes: u64,
     prefix_memory_admission_required_bytes: Option<u64>,
     prefix_memory_admission_reason: &'static str,
+    file_root_tokens: usize,
+    file_root_restores: usize,
+    file_root_restore_ms: f64,
     prepare_ms: f64,
     prefill_ms: f64,
     decode_ms: f64,
@@ -210,6 +263,7 @@ struct PreparedPair {
     lanes: [PreparedLane; WIDTH],
     plan: PrefixFanoutPlan,
     prefix_snapshot_bytes: u64,
+    prefix_prefill_tokens: usize,
     prefix_prefill_ms: f64,
     prefix_snapshot_ms: f64,
     prefix_restore_ms: f64,
@@ -221,6 +275,9 @@ struct PreparedPair {
     prefix_snapshot_required_bytes: u64,
     prefix_memory_admission_required_bytes: Option<u64>,
     prefix_memory_admission_reason: &'static str,
+    file_root_tokens: usize,
+    file_root_restores: usize,
+    file_root_restore_ms: f64,
 }
 
 struct DeepSeekPreparedLane {
@@ -501,16 +558,129 @@ pub(super) fn run_prepared(
         })
         .context("serialize Qwen concurrency planner telemetry")?
     );
+    let paired_prompt_refs = schedule
+        .work
+        .iter()
+        .filter_map(|work| match *work {
+            PairWork::Pair(indices) => Some(indices),
+            PairWork::Serial(_) => None,
+        })
+        .flatten()
+        .map(|index| requests[index].prompt_ids.as_slice())
+        .collect::<Vec<_>>();
+    let root_plan = plan_file_root(
+        &paired_prompt_refs,
+        args.prefill_chunk,
+        pair_count,
+        file_root_fanout_enabled(true)?,
+    );
+    let mut file_root = None;
+    let mut root_telemetry = FileRootTelemetry {
+        schema_version: 1,
+        backend: "qwen_file_root_v1",
+        enabled: root_plan.enabled,
+        requests: requests.len(),
+        planned_pairs: pair_count,
+        common_prefix_tokens: root_plan.common_prefix_tokens,
+        selected_prefix_tokens: root_plan.selected_prefix_tokens,
+        planned_pair_uses: root_plan.planned_pair_uses,
+        planned_avoided_prefix_evaluations: root_plan.planned_avoided_prefix_evaluations,
+        planned_avoided_prompt_tokens: root_plan.planned_avoided_prompt_tokens,
+        minimum_tokens: FILE_ROOT_MIN_TOKENS,
+        minimum_pairs: FILE_ROOT_MIN_PAIRS,
+        reason: root_plan.reason,
+        outcome: "not_selected",
+        actual_pair_uses: 0,
+        actual_avoided_prefix_evaluations: 0,
+        actual_avoided_prompt_tokens: 0,
+        excluded_serial_requests: requests.len() - pair_count * WIDTH,
+        snapshot_required_bytes: 0,
+        max_pair_snapshot_required_bytes: 0,
+        additional_memory_bytes: 0,
+        memory_admission_required_bytes: None,
+        memory_admission_reason: "not_requested",
+        snapshot_bytes: 0,
+        prefill_ms: 0.0,
+        snapshot_ms: 0.0,
+    };
     let mut executor = if pair_count > 0 {
-        let admission = loaded
-            .admit_independent_queue2(
+        let admission = if root_plan.selected_prefix_tokens > 0 {
+            let root_snapshot_required_bytes = loaded
+                .estimate_checkpoint_boundary_sizes_unallocated(
+                    requirements.max_capacity,
+                    root_plan.selected_prefix_tokens,
+                    false,
+                    true,
+                )
+                .context("estimate file-root checkpoint")?
+                .snapshot_bytes;
+            let max_pair_snapshot_required_bytes = max_file_root_pair_snapshot_bytes(
+                loaded,
+                requests,
+                &schedule,
+                args,
+                prefix_boundary_policy,
+                root_plan.selected_prefix_tokens,
                 requirements.max_capacity,
-                requirements.prefill_scratch_upper_bytes,
-            )
-            .context("admit two independent Qwen sessions")?;
+            )?;
+            let additional_memory_bytes = root_snapshot_required_bytes
+                .checked_add(max_pair_snapshot_required_bytes)
+                .context("file-root plus pair checkpoint bytes overflow")?;
+            let admission = loaded
+                .qwen_execution_memory_admission_with_additional_bytes(
+                    WIDTH,
+                    requirements.max_capacity,
+                    requirements.prefill_scratch_upper_bytes,
+                    0,
+                    additional_memory_bytes,
+                )
+                .context("price file-root Qwen execution")?;
+            root_telemetry.snapshot_required_bytes = root_snapshot_required_bytes;
+            root_telemetry.max_pair_snapshot_required_bytes = max_pair_snapshot_required_bytes;
+            root_telemetry.additional_memory_bytes = additional_memory_bytes;
+            root_telemetry.memory_admission_required_bytes = admission.required_bytes;
+            root_telemetry.memory_admission_reason = admission.reason.as_str();
+            if admission.admitted {
+                let root_prompt = paired_prompt_refs
+                    .first()
+                    .copied()
+                    .context("file-root plan has no paired source prompt")?;
+                let (prepared, prefill_ms, snapshot_ms) = prepare_file_root(
+                    loaded,
+                    root_prompt,
+                    args,
+                    root_plan,
+                    requirements.max_capacity,
+                    root_snapshot_required_bytes,
+                )?;
+                root_telemetry.outcome = "prepared";
+                root_telemetry.snapshot_bytes = prepared.checkpoint.snapshot_bytes();
+                root_telemetry.prefill_ms = prefill_ms;
+                root_telemetry.snapshot_ms = snapshot_ms;
+                file_root = Some(prepared);
+                admission
+            } else {
+                root_telemetry.outcome = "memory_fallback";
+                root_telemetry.additional_memory_bytes = 0;
+                loaded
+                    .admit_independent_queue2(
+                        requirements.max_capacity,
+                        requirements.prefill_scratch_upper_bytes,
+                    )
+                    .context("admit two independent Qwen sessions after root fallback")?
+            }
+        } else {
+            loaded
+                .admit_independent_queue2(
+                    requirements.max_capacity,
+                    requirements.prefill_scratch_upper_bytes,
+                )
+                .context("admit two independent Qwen sessions")?
+        };
         eprintln!(
-            "concurrency_admission: width={WIDTH} prefill_scratch_upper_bytes={} reason={} required_bytes={:?} working_set_headroom_bytes={:?}",
+            "concurrency_admission: width={WIDTH} prefill_scratch_upper_bytes={} additional_memory_bytes={} reason={} required_bytes={:?} working_set_headroom_bytes={:?}",
             requirements.prefill_scratch_upper_bytes,
+            root_telemetry.additional_memory_bytes,
             admission.reason.as_str(),
             admission.required_bytes,
             admission.working_set_headroom_bytes,
@@ -550,6 +720,7 @@ pub(super) fn run_prepared(
                     pair_index,
                     indices,
                     prefix_boundary_policy,
+                    file_root.as_ref(),
                 )
                 .with_context(|| format!("run concurrent request pair {pair_index}"))?;
                 for (index, output) in indices.into_iter().zip(outputs) {
@@ -562,6 +733,14 @@ pub(super) fn run_prepared(
                     "concurrency_pair: {}",
                     serde_json::to_string(&telemetry).context("serialize concurrency telemetry")?
                 );
+                if telemetry.file_root_restores > 0 {
+                    root_telemetry.actual_pair_uses += 1;
+                    root_telemetry.actual_avoided_prefix_evaluations =
+                        root_telemetry.actual_pair_uses.saturating_sub(1);
+                    root_telemetry.actual_avoided_prompt_tokens = root_telemetry
+                        .selected_prefix_tokens
+                        .saturating_mul(root_telemetry.actual_avoided_prefix_evaluations);
+                }
                 completed += WIDTH;
                 buffered_outputs = buffered_outputs
                     .checked_add(WIDTH)
@@ -604,6 +783,10 @@ pub(super) fn run_prepared(
             && buffered_outputs == 0
             && pending_outputs.iter().all(Option::is_none),
         "concurrent JSONL output reorder buffer did not drain"
+    );
+    eprintln!(
+        "concurrency_file_root: {}",
+        serde_json::to_string(&root_telemetry).context("serialize Qwen file-root telemetry")?
     );
     Ok(completed)
 }
@@ -729,6 +912,120 @@ fn common_prefix_tokens<T: PartialEq>(left: &[T], right: &[T]) -> usize {
         .zip(right)
         .take_while(|(left, right)| left == right)
         .count()
+}
+
+fn file_root_fanout_enabled(default_enabled: bool) -> Result<bool> {
+    let value = std::env::var_os(FILE_ROOT_FANOUT_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow!("{FILE_ROOT_FANOUT_ENV} must be valid UTF-8"))
+        })
+        .transpose()?;
+    parse_file_root_fanout_enabled(value.as_deref(), default_enabled)
+}
+
+fn parse_file_root_fanout_enabled(value: Option<&str>, default_enabled: bool) -> Result<bool> {
+    let Some(value) = value else {
+        return Ok(default_enabled);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => bail!("{FILE_ROOT_FANOUT_ENV} must be a boolean"),
+    }
+}
+
+fn plan_file_root(
+    prompts: &[&[i32]],
+    prefill_chunk: PrefillChunkArg,
+    pair_count: usize,
+    enabled: bool,
+) -> FileRootPlan {
+    let common_prefix_tokens = prompts
+        .split_first()
+        .map(|(first, rest)| {
+            rest.iter().fold(first.len(), |common, prompt| {
+                common_prefix_tokens(&first[..common], prompt)
+            })
+        })
+        .unwrap_or(0);
+    let rejected = |reason| FileRootPlan {
+        enabled,
+        common_prefix_tokens,
+        selected_prefix_tokens: 0,
+        planned_pair_uses: 0,
+        planned_avoided_prefix_evaluations: 0,
+        planned_avoided_prompt_tokens: 0,
+        reason,
+    };
+    if !enabled {
+        return rejected("disabled");
+    }
+    if pair_count < FILE_ROOT_MIN_PAIRS {
+        return rejected("below_minimum_pairs");
+    }
+    let PrefillChunkArg::Fixed(chunk) = prefill_chunk else {
+        return rejected("auto_chunk_unsupported");
+    };
+    let selected_prefix_tokens = common_prefix_tokens / chunk * chunk;
+    if selected_prefix_tokens < FILE_ROOT_MIN_TOKENS {
+        return rejected("alignment_below_minimum");
+    }
+    let avoided_prefix_evaluations = pair_count.saturating_sub(1);
+    let Some(avoided_prompt_tokens) =
+        selected_prefix_tokens.checked_mul(avoided_prefix_evaluations)
+    else {
+        return rejected("saved_token_count_overflow");
+    };
+    FileRootPlan {
+        enabled,
+        common_prefix_tokens,
+        selected_prefix_tokens,
+        planned_pair_uses: pair_count,
+        planned_avoided_prefix_evaluations: avoided_prefix_evaluations,
+        planned_avoided_prompt_tokens: avoided_prompt_tokens,
+        reason: "selected_chunk_aligned",
+    }
+}
+
+fn max_file_root_pair_snapshot_bytes(
+    loaded: &LoadedModel,
+    requests: &[PreparedJsonlRequest],
+    schedule: &PairSchedule,
+    args: &Args,
+    boundary_policy: QwenPrefixFanoutBoundaryPolicy,
+    root_tokens: usize,
+    max_capacity: usize,
+) -> Result<u64> {
+    let mut maximum = 0;
+    for work in &schedule.work {
+        let PairWork::Pair([left, right]) = *work else {
+            continue;
+        };
+        let pair_plan = plan_prefix_fanout(
+            &requests[left].prompt_ids,
+            &requests[right].prompt_ids,
+            args.prefill_chunk,
+            prefix_fanout_enabled(),
+            boundary_policy,
+        );
+        let prefix_tokens = pair_plan.selected_prefix_tokens.max(root_tokens);
+        if prefix_tokens <= root_tokens {
+            continue;
+        }
+        let bytes = loaded
+            .estimate_checkpoint_boundary_sizes_unallocated(
+                max_capacity,
+                prefix_tokens,
+                false,
+                false,
+            )
+            .context("estimate pair checkpoint above file root")?
+            .snapshot_bytes;
+        maximum = maximum.max(bytes);
+    }
+    Ok(maximum)
 }
 
 fn pair_planner_enabled(default_enabled: bool) -> Result<bool> {
@@ -990,11 +1287,62 @@ fn prepare_lane(
     ))
 }
 
+fn prepare_file_root(
+    loaded: &LoadedModel,
+    root_prompt: &[i32],
+    args: &Args,
+    plan: FileRootPlan,
+    max_capacity: usize,
+    snapshot_required_bytes: u64,
+) -> Result<(PreparedFileRoot, f64, f64)> {
+    let PrefillChunkArg::Fixed(requested_chunk) = args.prefill_chunk else {
+        unreachable!("file-root planner rejects automatic chunks")
+    };
+    let prefix_len = plan.selected_prefix_tokens;
+    let chunk = requested_chunk.min(prefix_len);
+    let mut scratch = allocate_legacy_prefill_scratch(loaded, chunk, prefix_len)
+        .context("allocate file-root prefill scratch")?;
+    let mut sequence = loaded
+        .create_sequence(SequenceConfig::new(max_capacity))
+        .context("allocate file-root source sequence")?;
+    let forward = loaded.forward();
+    let (prefix_logits, prefill_ms) = prefill_span(
+        &forward,
+        &mut sequence,
+        &mut scratch,
+        &root_prompt[..prefix_len],
+        0,
+    )
+    .context("prefill file-scoped shared root")?;
+    shutdown::checkpoint()?;
+    let snapshot_t0 = Instant::now();
+    let checkpoint = loaded
+        .prepare_checkpoint_boundary(
+            &sequence,
+            root_prompt[..prefix_len].to_vec(),
+            None,
+            Some(prefix_logits),
+        )
+        .context("capture file-scoped shared root")?;
+    let snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
+    ensure!(
+        checkpoint.snapshot_bytes() == snapshot_required_bytes,
+        "file-root snapshot bytes {} != estimate {snapshot_required_bytes}",
+        checkpoint.snapshot_bytes(),
+    );
+    Ok((
+        PreparedFileRoot { plan, checkpoint },
+        prefill_ms,
+        snapshot_ms,
+    ))
+}
+
 fn prepare_pair(
     loaded: &LoadedModel,
     requests: [&PreparedJsonlRequest; WIDTH],
     args: &Args,
     prefix_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
+    file_root: Option<&PreparedFileRoot>,
 ) -> Result<PreparedPair> {
     let mut plan = plan_prefix_fanout(
         &requests[0].prompt_ids,
@@ -1003,6 +1351,13 @@ fn prepare_pair(
         prefix_fanout_enabled(),
         prefix_boundary_policy,
     );
+    let file_root_tokens = file_root
+        .map(|root| root.plan.selected_prefix_tokens)
+        .unwrap_or(0);
+    if file_root_tokens > plan.selected_prefix_tokens {
+        plan.selected_prefix_tokens = file_root_tokens;
+        plan.reason = "selected_file_root";
+    }
     if plan.selected_prefix_tokens == 0 {
         let (left, left_prefill_ms) = prepare_lane(loaded, requests[0], args)?;
         let (right, right_prefill_ms) = prepare_lane(loaded, requests[1], args)?;
@@ -1010,6 +1365,7 @@ fn prepare_pair(
             lanes: [left, right],
             plan,
             prefix_snapshot_bytes: 0,
+            prefix_prefill_tokens: 0,
             prefix_prefill_ms: 0.0,
             prefix_snapshot_ms: 0.0,
             prefix_restore_ms: 0.0,
@@ -1021,6 +1377,9 @@ fn prepare_pair(
             prefix_snapshot_required_bytes: 0,
             prefix_memory_admission_required_bytes: None,
             prefix_memory_admission_reason: "not_requested",
+            file_root_tokens: 0,
+            file_root_restores: 0,
+            file_root_restore_ms: 0.0,
         });
     }
 
@@ -1047,19 +1406,36 @@ fn prepare_pair(
     ];
 
     let prefix_len = plan.selected_prefix_tokens;
-    let prefix_snapshot_required_bytes = loaded
-        .estimate_checkpoint_boundary_sizes(&sequences[0], prefix_len, false, false)
-        .context("estimate concurrent shared-prefix snapshot")?
-        .snapshot_bytes;
-    let prefix_memory_admission = evaluate_metal_memory_admission(
-        prefix_snapshot_required_bytes,
-        PREFIX_FANOUT_RESERVE_BYTES,
-        loaded.context().memory_signals(),
-        true,
-    );
-    let prefix_memory_admission_required_bytes = prefix_memory_admission.required_bytes;
-    let prefix_memory_admission_reason = prefix_memory_admission.reason.as_str();
-    if !prefix_memory_admission.admitted {
+    let pair_snapshot_needed = prefix_len > file_root_tokens;
+    let prefix_snapshot_required_bytes = if pair_snapshot_needed {
+        loaded
+            .estimate_checkpoint_boundary_sizes(&sequences[0], prefix_len, false, false)
+            .context("estimate concurrent shared-prefix snapshot")?
+            .snapshot_bytes
+    } else {
+        0
+    };
+    let prefix_memory_admission = if file_root.is_some() {
+        None
+    } else {
+        Some(evaluate_metal_memory_admission(
+            prefix_snapshot_required_bytes,
+            PREFIX_FANOUT_RESERVE_BYTES,
+            loaded.context().memory_signals(),
+            true,
+        ))
+    };
+    let prefix_memory_admission_required_bytes = prefix_memory_admission
+        .as_ref()
+        .and_then(|admission| admission.required_bytes);
+    let prefix_memory_admission_reason = prefix_memory_admission
+        .as_ref()
+        .map(|admission| admission.reason.as_str())
+        .unwrap_or("file_root_pre_admitted");
+    if prefix_memory_admission
+        .as_ref()
+        .is_some_and(|admission| !admission.admitted)
+    {
         plan.selected_prefix_tokens = 0;
         plan.reason = "memory_fallback";
         let forward = loaded.forward();
@@ -1090,6 +1466,7 @@ fn prepare_pair(
             ],
             plan,
             prefix_snapshot_bytes: 0,
+            prefix_prefill_tokens: 0,
             prefix_prefill_ms: 0.0,
             prefix_snapshot_ms: 0.0,
             prefix_restore_ms: 0.0,
@@ -1101,48 +1478,130 @@ fn prepare_pair(
             prefix_snapshot_required_bytes,
             prefix_memory_admission_required_bytes,
             prefix_memory_admission_reason,
+            file_root_tokens: 0,
+            file_root_restores: 0,
+            file_root_restore_ms: 0.0,
         });
     }
 
     shutdown::checkpoint()?;
     let forward = loaded.forward();
-    let (prefix_logits, prefix_prefill_ms) = prefill_span(
-        &forward,
-        &mut sequences[0],
-        &mut scratch,
-        &requests[0].prompt_ids[..prefix_len],
-        0,
-    )
-    .context("prefill concurrent shared prefix")?;
-    shutdown::checkpoint()?;
-
-    let snapshot_t0 = Instant::now();
-    let prepared = loaded
-        .prepare_checkpoint_boundary(
-            &sequences[0],
-            requests[0].prompt_ids[..prefix_len].to_vec(),
-            None,
-            None,
+    let mut file_root_restores = 0usize;
+    let mut file_root_restore_ms = 0.0;
+    let (source_prefix_logits, prefix_prefill_ms) = if let Some(file_root) = file_root {
+        let restore_t0 = Instant::now();
+        let restored = loaded
+            .restore_prepared_checkpoint(
+                &file_root.checkpoint,
+                &mut sequences[0],
+                &requests[0].prompt_ids,
+            )
+            .context("restore file root into concurrent source lane")?;
+        file_root_restore_ms += restore_t0.elapsed().as_secs_f64() * 1e3;
+        file_root_restores += 1;
+        ensure!(
+            restored.matched_prefix_len == file_root_tokens
+                && restored.restored_prefix_len == file_root_tokens,
+            "file-root restore selected an unexpected source boundary"
+        );
+        if prefix_len == file_root_tokens {
+            (restored.exact_final_logits, 0.0)
+        } else {
+            let (logits, bridge_ms) = prefill_span(
+                &forward,
+                &mut sequences[0],
+                &mut scratch,
+                &requests[0].prompt_ids[file_root_tokens..prefix_len],
+                file_root_tokens,
+            )
+            .context("prefill pair prefix above file root")?;
+            (Some(logits), bridge_ms)
+        }
+    } else {
+        let (logits, prefill_ms) = prefill_span(
+            &forward,
+            &mut sequences[0],
+            &mut scratch,
+            &requests[0].prompt_ids[..prefix_len],
+            0,
         )
-        .context("capture concurrent shared prefix")?;
-    let prefix_snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
-    let prefix_snapshot_bytes = prepared.snapshot_bytes();
-    ensure!(
-        prefix_snapshot_bytes == prefix_snapshot_required_bytes,
-        "concurrent prefix snapshot bytes {prefix_snapshot_bytes} != estimate {prefix_snapshot_required_bytes}"
-    );
+        .context("prefill concurrent shared prefix")?;
+        (Some(logits), prefill_ms)
+    };
     shutdown::checkpoint()?;
 
-    let restore_t0 = Instant::now();
-    let restored = loaded
-        .restore_prepared_checkpoint(&prepared, &mut sequences[1], &requests[1].prompt_ids)
-        .context("restore concurrent shared prefix")?;
-    let prefix_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
-    ensure!(
-        restored.matched_prefix_len == prefix_len && restored.restored_prefix_len == prefix_len,
-        "concurrent shared-prefix restore selected an unexpected boundary"
-    );
+    let mut pair_checkpoint = None;
+    let mut prefix_snapshot_ms = 0.0;
+    let mut prefix_snapshot_bytes = 0;
+    if pair_snapshot_needed {
+        let snapshot_t0 = Instant::now();
+        let prepared = loaded
+            .prepare_checkpoint_boundary(
+                &sequences[0],
+                requests[0].prompt_ids[..prefix_len].to_vec(),
+                None,
+                None,
+            )
+            .context("capture concurrent shared prefix")?;
+        prefix_snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
+        prefix_snapshot_bytes = prepared.snapshot_bytes();
+        ensure!(
+            prefix_snapshot_bytes == prefix_snapshot_required_bytes,
+            "concurrent prefix snapshot bytes {prefix_snapshot_bytes} != estimate {prefix_snapshot_required_bytes}"
+        );
+        pair_checkpoint = Some(prepared);
+    }
     shutdown::checkpoint()?;
+
+    let (prefix_restore_ms, target_prefix_logits) = if let Some(prepared) = pair_checkpoint.as_ref()
+    {
+        let restore_t0 = Instant::now();
+        let restored = loaded
+            .restore_prepared_checkpoint(prepared, &mut sequences[1], &requests[1].prompt_ids)
+            .context("restore concurrent shared prefix")?;
+        let prefix_restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+        ensure!(
+            restored.matched_prefix_len == prefix_len && restored.restored_prefix_len == prefix_len,
+            "concurrent shared-prefix restore selected an unexpected boundary"
+        );
+        (prefix_restore_ms, None)
+    } else {
+        let file_root = file_root.expect("root-only pair has file root");
+        let restore_t0 = Instant::now();
+        let restored = loaded
+            .restore_prepared_checkpoint(
+                &file_root.checkpoint,
+                &mut sequences[1],
+                &requests[1].prompt_ids,
+            )
+            .context("restore file root into concurrent restore lane")?;
+        let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+        file_root_restore_ms += restore_ms;
+        file_root_restores += 1;
+        ensure!(
+            restored.matched_prefix_len == prefix_len && restored.restored_prefix_len == prefix_len,
+            "file-root restore selected an unexpected target boundary"
+        );
+        (0.0, restored.exact_final_logits)
+    };
+    shutdown::checkpoint()?;
+
+    let source_prefix_logits = if requests[0].prompt_ids.len() == prefix_len {
+        Some(source_prefix_logits.context("exact source prefix omitted final logits")?)
+    } else {
+        source_prefix_logits
+    };
+    let target_prefix_logits = if requests[1].prompt_ids.len() == prefix_len {
+        Some(match target_prefix_logits {
+            Some(logits) => logits,
+            None => source_prefix_logits
+                .as_ref()
+                .context("exact restored prefix omitted final logits")?
+                .clone(),
+        })
+    } else {
+        target_prefix_logits
+    };
 
     let mut private_prefill_ms = 0.0;
     let mut private_suffix_singleton_lanes = 0usize;
@@ -1150,7 +1609,7 @@ fn prepare_pair(
     let mut private_suffix_packed_lanes = 0usize;
     let mut private_suffix_packed_tokens = 0usize;
     let left_logits = if requests[0].prompt_ids.len() == prefix_len {
-        prefix_logits.clone()
+        source_prefix_logits.expect("validated exact source logits")
     } else {
         let result = prefill_private_suffix(
             &forward,
@@ -1175,7 +1634,7 @@ fn prepare_pair(
     };
     shutdown::checkpoint()?;
     let right_logits = if requests[1].prompt_ids.len() == prefix_len {
-        prefix_logits
+        target_prefix_logits.expect("validated exact target logits")
     } else {
         let result = prefill_private_suffix(
             &forward,
@@ -1198,7 +1657,7 @@ fn prepare_pair(
         }
         result.logits
     };
-    drop(prepared);
+    drop(pair_checkpoint);
     drop(scratch);
     let [left_sequence, right_sequence] = sequences;
 
@@ -1209,6 +1668,7 @@ fn prepare_pair(
         ],
         plan,
         prefix_snapshot_bytes,
+        prefix_prefill_tokens: prefix_len.saturating_sub(file_root_tokens),
         prefix_prefill_ms,
         prefix_snapshot_ms,
         prefix_restore_ms,
@@ -1220,6 +1680,9 @@ fn prepare_pair(
         prefix_snapshot_required_bytes,
         prefix_memory_admission_required_bytes,
         prefix_memory_admission_reason,
+        file_root_tokens,
+        file_root_restores,
+        file_root_restore_ms,
     })
 }
 
@@ -1254,9 +1717,10 @@ fn run_pair(
     pair_index: usize,
     request_indices: [usize; WIDTH],
     prefix_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
+    file_root: Option<&PreparedFileRoot>,
 ) -> Result<([RequestOutput; WIDTH], PairTelemetry)> {
     let prepare_t0 = Instant::now();
-    let prepared = prepare_pair(loaded, requests, args, prefix_boundary_policy)?;
+    let prepared = prepare_pair(loaded, requests, args, prefix_boundary_policy, file_root)?;
     let [left, right] = prepared.lanes;
     let requested_tokens = [left.max_tokens, right.max_tokens];
     let prepare_ms = prepare_t0.elapsed().as_secs_f64() * 1e3;
@@ -1382,8 +1846,8 @@ fn run_pair(
     Ok((
         outputs,
         PairTelemetry {
-            schema_version: 5,
-            backend: "qwen_independent_queues_v5",
+            schema_version: 6,
+            backend: "qwen_independent_queues_v6",
             pair_index,
             request_indices,
             prompt_tokens: [requests[0].prompt_ids.len(), requests[1].prompt_ids.len()],
@@ -1398,6 +1862,7 @@ fn run_pair(
             prefix_fanout_boundary_policy: prefix_boundary_policy.as_str(),
             prefix_fanout_min_tokens: PREFIX_FANOUT_MIN_TOKENS,
             prefix_snapshot_bytes: prepared.prefix_snapshot_bytes,
+            prefix_prefill_tokens: prepared.prefix_prefill_tokens,
             prefix_prefill_ms: prepared.prefix_prefill_ms,
             prefix_snapshot_ms: prepared.prefix_snapshot_ms,
             prefix_restore_ms: prepared.prefix_restore_ms,
@@ -1410,6 +1875,9 @@ fn run_pair(
             prefix_snapshot_required_bytes: prepared.prefix_snapshot_required_bytes,
             prefix_memory_admission_required_bytes: prepared.prefix_memory_admission_required_bytes,
             prefix_memory_admission_reason: prepared.prefix_memory_admission_reason,
+            file_root_tokens: prepared.file_root_tokens,
+            file_root_restores: prepared.file_root_restores,
+            file_root_restore_ms: prepared.file_root_restore_ms,
             prepare_ms,
             prefill_ms,
             decode_ms,
@@ -2655,6 +3123,89 @@ mod tests {
         assert!(!parse_pair_planner_enabled(Some("off"), true).unwrap());
         assert!(parse_pair_planner_enabled(Some("YES"), false).unwrap());
         assert!(parse_pair_planner_enabled(Some("maybe"), true).is_err());
+    }
+
+    #[test]
+    fn file_root_planner_requires_reuse_across_multiple_pairs() {
+        let base = vec![7; 1_600];
+        let prompts = [
+            base.as_slice(),
+            &base[..1_500],
+            &base[..1_400],
+            &base[..1_300],
+        ];
+        assert_eq!(
+            plan_file_root(&prompts, PrefillChunkArg::Fixed(512), 2, true),
+            FileRootPlan {
+                enabled: true,
+                common_prefix_tokens: 1_300,
+                selected_prefix_tokens: 1_024,
+                planned_pair_uses: 2,
+                planned_avoided_prefix_evaluations: 1,
+                planned_avoided_prompt_tokens: 1_024,
+                reason: "selected_chunk_aligned",
+            }
+        );
+        assert_eq!(
+            plan_file_root(&prompts, PrefillChunkArg::Fixed(512), 1, true).reason,
+            "below_minimum_pairs"
+        );
+    }
+
+    #[test]
+    fn file_root_inputs_can_exclude_a_nonparticipating_serial_tail() {
+        let paired = [
+            vec![7; 1_500],
+            vec![7; 1_400],
+            vec![7; 1_300],
+            vec![7; 1_200],
+        ];
+        let outlier = vec![8; 1_500];
+        let paired_refs = paired.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let mut all_refs = paired_refs.clone();
+        all_refs.push(outlier.as_slice());
+        assert_eq!(
+            plan_file_root(&paired_refs, PrefillChunkArg::Fixed(512), 2, true)
+                .selected_prefix_tokens,
+            1_024
+        );
+        assert_eq!(
+            plan_file_root(&all_refs, PrefillChunkArg::Fixed(512), 2, true).selected_prefix_tokens,
+            0
+        );
+    }
+
+    #[test]
+    fn file_root_planner_fails_closed_for_controls_and_short_roots() {
+        let prompts = [
+            vec![7; 1_500],
+            vec![7; 1_400],
+            vec![7; 1_300],
+            vec![7; 1_200],
+        ];
+        let refs = prompts.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        assert_eq!(
+            plan_file_root(&refs, PrefillChunkArg::Fixed(512), 2, false).reason,
+            "disabled"
+        );
+        assert_eq!(
+            plan_file_root(&refs, PrefillChunkArg::Auto, 2, true).reason,
+            "auto_chunk_unsupported"
+        );
+        let short = [
+            vec![7; 1_000],
+            vec![7; 1_000],
+            vec![7; 1_000],
+            vec![7; 1_000],
+        ];
+        let short_refs = short.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        assert_eq!(
+            plan_file_root(&short_refs, PrefillChunkArg::Fixed(512), 2, true).reason,
+            "alignment_below_minimum"
+        );
+        assert!(parse_file_root_fanout_enabled(None, true).unwrap());
+        assert!(!parse_file_root_fanout_enabled(Some("off"), true).unwrap());
+        assert!(parse_file_root_fanout_enabled(Some("maybe"), true).is_err());
     }
 
     #[test]

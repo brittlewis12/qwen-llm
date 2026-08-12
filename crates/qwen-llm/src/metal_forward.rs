@@ -77,7 +77,7 @@ use std::{
 /// Sets the size of session-resident partial buffers; see
 /// `attn_v4_choose_nwg` for the selection heuristic.
 pub const ATTN_V4_MAX_NWG: usize = 1024;
-use crate::tensor::{GgmlType, TensorDesc};
+use crate::tensor::{GgmlType, TensorDesc, ggml_type_layout_raw};
 
 /// Single source of truth for which weight dtypes the loader keeps in
 /// their native form (vs. dequant'ing to F32). Used by both `load_weight`
@@ -1462,6 +1462,62 @@ pub struct MetalModel {
 }
 
 impl MetalModel {
+    pub fn snapshot_abi(&self) -> SnapshotAbi {
+        let n_attn_layers = self
+            .blocks
+            .iter()
+            .filter(|block| matches!(block, MetalBlock::Attn(_)))
+            .count() as u32;
+        let n_gdn_layers = self
+            .blocks
+            .iter()
+            .filter(|block| matches!(block, MetalBlock::Gdn(_)))
+            .count() as u32;
+        let arch = &self.arch;
+        let kv_dim_elements = if n_attn_layers == 0 {
+            0
+        } else {
+            arch.n_kv_heads * arch.attn_head_dim
+        };
+        let (kv_bytes_per_token, kv_storage_kind) = match kv_cache_dtype_for_arch(arch) {
+            _ if n_attn_layers == 0 => (0, SnapshotKvStorageKind::None),
+            GgmlType::F16 => (kv_dim_elements * 2, SnapshotKvStorageKind::F16),
+            GgmlType::Q8_0 => {
+                let (block, bytes) =
+                    ggml_type_layout_raw(GgmlType::Q8_0 as u32).expect("Q8_0 layout is defined");
+                assert!(u64::from(kv_dim_elements).is_multiple_of(block));
+                (
+                    u32::try_from(u64::from(kv_dim_elements) / block * bytes)
+                        .expect("Q8_0 KV bytes per token fit u32"),
+                    SnapshotKvStorageKind::Q8_0,
+                )
+            }
+            _ => unreachable!("unsupported snapshot KV storage"),
+        };
+        let gdn_conv_elements_per_layer = if n_gdn_layers == 0 {
+            0
+        } else {
+            arch.gdn_conv_kernel.saturating_sub(1)
+                * (2 * arch.gdn_n_k_heads + arch.gdn_n_v_heads)
+                * arch.gdn_head_dim
+        };
+        let gdn_state_elements_per_layer = if n_gdn_layers == 0 {
+            0
+        } else {
+            arch.gdn_n_v_heads * arch.gdn_head_dim * arch.gdn_head_dim
+        };
+        SnapshotAbi {
+            layout_version: SNAPSHOT_LAYOUT_VERSION,
+            n_attn_layers,
+            n_gdn_layers,
+            kv_dim_elements,
+            kv_bytes_per_token,
+            kv_storage_kind,
+            gdn_state_elements_per_layer,
+            gdn_conv_elements_per_layer,
+        }
+    }
+
     /// Whether this model relies on a residency set attached to its load queue.
     /// Such a model cannot be submitted through unrelated command queues until
     /// those queues receive matching residency-set ownership and teardown.

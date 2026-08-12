@@ -22,11 +22,11 @@ use crate::dense_batch8::{
 use crate::gguf::{GgufError, GgufFile, GgufShard};
 use crate::loader::{LoadError, Model};
 use crate::metal::{
-    MetalContext, MetalError, MetalMemoryAdmission, evaluate_metal_memory_admission,
+    MetalContext, MetalError, MetalMemoryAdmission, evaluate_metal_memory_admission_with_cpu_bytes,
 };
 use crate::metal_forward::{
     MetalForward, MetalLoadPrefetchAdvice, MetalModel, MetalModelLoadOptions, MetalSession,
-    MfError, SessionSnapshot, SnapshotIdentity, SnapshotValidationError,
+    MfError, SessionSnapshot, SnapshotAbi, SnapshotIdentity, SnapshotValidationError,
 };
 use crate::model::Arch;
 use crate::moe_batch16::{
@@ -554,6 +554,28 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_size_helper_prices_all_payload_sections() {
+        let abi = SnapshotAbi {
+            layout_version: 4,
+            n_attn_layers: 2,
+            n_gdn_layers: 3,
+            kv_dim_elements: 8,
+            kv_bytes_per_token: 16,
+            kv_storage_kind: crate::metal_forward::SnapshotKvStorageKind::F16,
+            gdn_state_elements_per_layer: 5,
+            gdn_conv_elements_per_layer: 7,
+        };
+        let estimate =
+            estimate_checkpoint_boundary_sizes_from_abi(abi, 11, 13, true, true).unwrap();
+        let expected_snapshot = 2 * 2 * 13 * 16 + 4 * 3 * (5 + 7) + 4 * 13 + 4 + 8 * 2 + 4 * 11;
+        assert_eq!(estimate.snapshot_bytes, expected_snapshot);
+        assert_eq!(
+            estimate.record_bytes,
+            expected_snapshot - 4 + SNAPSHOT_RECORD_FIXED_BYTES
+        );
+    }
+
+    #[test]
     fn prepared_checkpoint_matching_includes_pending_boundary_token() {
         assert!(checkpoint_matches_request(&[1, 2], None, &[1, 2]));
         assert!(checkpoint_matches_request(&[1, 2], None, &[1, 2, 3]));
@@ -1005,6 +1027,41 @@ pub struct CheckpointBoundarySizeEstimate {
     pub record_bytes: u64,
 }
 
+fn estimate_checkpoint_boundary_sizes_from_abi(
+    abi: SnapshotAbi,
+    vocab_size: u32,
+    prefix_len: usize,
+    has_pending_token: bool,
+    has_final_logits: bool,
+) -> Result<CheckpointBoundarySizeEstimate, RuntimeError> {
+    let prefix_len = prefix_len as u128;
+    let n_attn = abi.n_attn_layers as u128;
+    let n_gdn = abi.n_gdn_layers as u128;
+    let kv_bytes = 2u128 * n_attn * prefix_len * abi.kv_bytes_per_token as u128;
+    let gdn_bytes = 4u128
+        * n_gdn
+        * (abi.gdn_conv_elements_per_layer as u128 + abi.gdn_state_elements_per_layer as u128);
+    let token_bytes = 4u128 * prefix_len + 4u128 * u128::from(has_pending_token);
+    let position_bytes = 8u128 * n_attn;
+    let logits_bytes = if has_final_logits {
+        4u128 * vocab_size as u128
+    } else {
+        0
+    };
+    let snapshot_bytes =
+        u64::try_from(kv_bytes + gdn_bytes + token_bytes + position_bytes + logits_bytes)
+            .map_err(|_| RuntimeError::CheckpointSizeOverflow)?;
+    let pending_memory_bytes = 4 * u64::from(has_pending_token);
+    let record_bytes = snapshot_bytes
+        .checked_sub(pending_memory_bytes)
+        .and_then(|bytes| bytes.checked_add(SNAPSHOT_RECORD_FIXED_BYTES))
+        .ok_or(RuntimeError::CheckpointSizeOverflow)?;
+    Ok(CheckpointBoundarySizeEstimate {
+        snapshot_bytes,
+        record_bytes,
+    })
+}
+
 impl PreparedCheckpoint {
     pub fn snapshot_bytes(&self) -> u64 {
         self.snapshot.n_bytes()
@@ -1133,6 +1190,7 @@ impl LoadedModel {
         }
         let state =
             MetalSession::fresh(self.context(), &self.metal_model, config.max_context_tokens)?;
+        debug_assert_eq!(state.snapshot_abi(), self.metal_model.snapshot_abi());
         Ok(Sequence {
             max_context_tokens: config.max_context_tokens,
             position: 0,
@@ -1221,6 +1279,23 @@ impl LoadedModel {
         prefill_scratch_upper_bytes: u64,
         executor_scratch_upper_bytes: u64,
     ) -> Result<MetalMemoryAdmission, RuntimeError> {
+        self.qwen_execution_memory_admission_with_additional_bytes(
+            width,
+            max_context_tokens,
+            prefill_scratch_upper_bytes,
+            executor_scratch_upper_bytes,
+            0,
+        )
+    }
+
+    pub fn qwen_execution_memory_admission_with_additional_bytes(
+        &self,
+        width: usize,
+        max_context_tokens: usize,
+        prefill_scratch_upper_bytes: u64,
+        executor_scratch_upper_bytes: u64,
+        additional_bytes: u64,
+    ) -> Result<MetalMemoryAdmission, RuntimeError> {
         if width == 0 {
             return Err(
                 QwenQueue2Error::Validation("execution width must be positive".into()).into(),
@@ -1231,7 +1306,7 @@ impl LoadedModel {
         let session_bytes = per_session
             .checked_mul(width as u64)
             .ok_or_else(|| QwenQueue2Error::Validation("session byte estimate overflow".into()))?;
-        let incremental_bytes = session_bytes
+        let metal_incremental_bytes = session_bytes
             .checked_add(prefill_scratch_upper_bytes)
             .and_then(|value| value.checked_add(executor_scratch_upper_bytes))
             .ok_or_else(|| {
@@ -1239,8 +1314,9 @@ impl LoadedModel {
                     "sessions plus execution scratch byte estimate overflow".into(),
                 )
             })?;
-        Ok(evaluate_metal_memory_admission(
-            incremental_bytes,
+        Ok(evaluate_metal_memory_admission_with_cpu_bytes(
+            metal_incremental_bytes,
+            additional_bytes,
             QWEN_QUEUE2_DYNAMIC_RESERVE_BYTES,
             self.context().memory_signals(),
             true,
@@ -1381,33 +1457,36 @@ impl LoadedModel {
             }
             .into());
         }
-        let abi = sequence.snapshot_abi();
-        let prefix_len = prefix_len as u128;
-        let n_attn = abi.n_attn_layers as u128;
-        let n_gdn = abi.n_gdn_layers as u128;
-        let kv_bytes = 2u128 * n_attn * prefix_len * abi.kv_bytes_per_token as u128;
-        let gdn_bytes = 4u128
-            * n_gdn
-            * (abi.gdn_conv_elements_per_layer as u128 + abi.gdn_state_elements_per_layer as u128);
-        let token_bytes = 4u128 * prefix_len + 4u128 * u128::from(has_pending_token);
-        let position_bytes = 8u128 * n_attn;
-        let logits_bytes = if has_final_logits {
-            4u128 * self.metal_model.arch.vocab_size as u128
-        } else {
-            0
-        };
-        let snapshot_bytes =
-            u64::try_from(kv_bytes + gdn_bytes + token_bytes + position_bytes + logits_bytes)
-                .map_err(|_| RuntimeError::CheckpointSizeOverflow)?;
-        let pending_memory_bytes = 4 * u64::from(has_pending_token);
-        let record_bytes = snapshot_bytes
-            .checked_sub(pending_memory_bytes)
-            .and_then(|bytes| bytes.checked_add(SNAPSHOT_RECORD_FIXED_BYTES))
-            .ok_or(RuntimeError::CheckpointSizeOverflow)?;
-        Ok(CheckpointBoundarySizeEstimate {
-            snapshot_bytes,
-            record_bytes,
-        })
+        estimate_checkpoint_boundary_sizes_from_abi(
+            sequence.snapshot_abi(),
+            self.metal_model.arch.vocab_size,
+            prefix_len,
+            has_pending_token,
+            has_final_logits,
+        )
+    }
+
+    pub fn estimate_checkpoint_boundary_sizes_unallocated(
+        &self,
+        max_context_tokens: usize,
+        prefix_len: usize,
+        has_pending_token: bool,
+        has_final_logits: bool,
+    ) -> Result<CheckpointBoundarySizeEstimate, RuntimeError> {
+        if prefix_len > max_context_tokens {
+            return Err(SnapshotValidationError::PrefixCapacity {
+                prefix_len,
+                capacity: max_context_tokens,
+            }
+            .into());
+        }
+        estimate_checkpoint_boundary_sizes_from_abi(
+            self.metal_model.snapshot_abi(),
+            self.metal_model.arch.vocab_size,
+            prefix_len,
+            has_pending_token,
+            has_final_logits,
+        )
     }
 
     /// Index a prepared boundary in the process-local cache without cloning its

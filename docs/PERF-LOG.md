@@ -23849,3 +23849,26 @@ inventory. The odd tail reconciles one session and reports concurrency one.
 queue-scoped. Validation exits return memory to 92-93% free with swap unchanged
 at 2.44 MiB. Full result:
 `docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.
+
+
+## 2026-08-11 — Qwen B2 File-Scoped Root Fanout GO
+
+Status: regular-file Qwen `--concurrency 2` now captures one chunk-aligned
+common-root checkpoint when at least two planned pairs share 1,024 or more
+tokens. Pair-local checkpoints remain available above that root; odd serial
+tails neither constrain nor consume it.
+
+A four-request realistic ring0 fixture shares 6,482 tokens and selects a 6,144-
+token root. Across two reversed-order comparisons and a final reviewed-code
+repeat, wall moves `2.59 -> 2.09/2.10/2.11 s` (`1.239x/1.233x/1.227x`).
+Pair-local prefix evaluation falls
+from 12,705 to 417 tokens while complete JSONL output remains byte-identical.
+The root costs one `~96.7 MB` retained CPU snapshot; three restores total
+`15.845 ms` in the first sample.
+
+Admission separates CPU checkpoint bytes from Metal working-set pressure while
+including both in the process budget. The simultaneous root plus deepest pair
+snapshot is priced before allocation; denial falls back to prior B2 behavior.
+`QWEN_CONCURRENCY_FILE_ROOT_FANOUT=0` is strict rollback. Final adversarial
+review: GO. Full packet:
+`docs/bench/2026-08-11-qwen-b2-file-root-fanout/README.md`.

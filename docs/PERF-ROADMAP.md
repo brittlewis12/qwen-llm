@@ -6535,6 +6535,17 @@ Acceptance gates:
 - Exact-token A/B paths (`--full-logits-decode`) and argmax regression tests stay
   green while decode work proceeds.
 
+## Recent Confirmed Win — Qwen B2 File Root
+
+- One chunk-aligned checkpoint now spans all pair-participating requests in a
+  regular Qwen B2 JSONL file. A realistic four-request fixture moves
+  `2.59 -> 2.09/2.10 s` with byte-identical output by reducing pair-local root
+  evaluation from 12,705 to 417 tokens.
+- Keep this as a bounded execution optimization, not a second cache index. The
+  next cache/scheduler synthesis should share checkpoint discovery across B2,
+  fixed cohorts, and serial execution rather than growing B2-local policy.
+- Evidence: `docs/bench/2026-08-11-qwen-b2-file-root-fanout/README.md`.
+
 ## Deprioritized For Now
 
 - FFN mega-fusion as a first move: prior layer-major fusion produced too little

@@ -1033,24 +1033,33 @@ pub struct MetalMemoryAdmission {
     pub working_set_headroom_bytes: Option<u64>,
 }
 
-pub fn evaluate_metal_memory_admission(
-    scratch_upper_bytes: u64,
+pub fn evaluate_metal_memory_admission_with_cpu_bytes(
+    metal_upper_bytes: u64,
+    cpu_upper_bytes: u64,
     reserve_bytes: u64,
     signals: MetalMemorySignals,
     allow_zero_process_budget: bool,
 ) -> MetalMemoryAdmission {
-    let required_bytes = scratch_upper_bytes.checked_add(reserve_bytes);
+    let required_bytes = metal_upper_bytes
+        .checked_add(cpu_upper_bytes)
+        .and_then(|bytes| bytes.checked_add(reserve_bytes));
+    let metal_required_bytes = metal_upper_bytes.checked_add(reserve_bytes);
     let working_set_headroom_bytes = signals
         .recommended_max_bytes
         .checked_sub(signals.current_allocated_bytes);
-    let reason = match (required_bytes, working_set_headroom_bytes) {
-        (None, _) => MetalMemoryAdmissionReason::RequiredBytesOverflow,
-        (Some(_), _) if signals.recommended_max_bytes == 0 => {
+    let reason = match (
+        required_bytes,
+        metal_required_bytes,
+        working_set_headroom_bytes,
+    ) {
+        (None, _, _) | (_, None, _) => MetalMemoryAdmissionReason::RequiredBytesOverflow,
+        (Some(_), Some(_), _) if signals.recommended_max_bytes == 0 => {
             MetalMemoryAdmissionReason::InvalidWorkingSetSignal
         }
-        (Some(_), None) => MetalMemoryAdmissionReason::InvalidWorkingSetSignal,
-        (Some(required), Some(working_set_headroom)) => {
-            let working_set_fits = working_set_headroom > 0 && required <= working_set_headroom;
+        (Some(_), Some(_), None) => MetalMemoryAdmissionReason::InvalidWorkingSetSignal,
+        (Some(required), Some(metal_required), Some(working_set_headroom)) => {
+            let working_set_fits =
+                working_set_headroom > 0 && metal_required <= working_set_headroom;
             match signals.process_limit_remaining_bytes {
                 None => MetalMemoryAdmissionReason::ProcessSignalUnavailable,
                 Some(0) => match (working_set_fits, allow_zero_process_budget) {
@@ -1077,12 +1086,27 @@ pub fn evaluate_metal_memory_admission(
                 | MetalMemoryAdmissionReason::AdmittedProcessBudgetOmitted
         ),
         reason,
-        scratch_upper_bytes,
+        scratch_upper_bytes: metal_upper_bytes.saturating_add(cpu_upper_bytes),
         reserve_bytes,
         required_bytes,
         signals,
         working_set_headroom_bytes,
     }
+}
+
+pub fn evaluate_metal_memory_admission(
+    scratch_upper_bytes: u64,
+    reserve_bytes: u64,
+    signals: MetalMemorySignals,
+    allow_zero_process_budget: bool,
+) -> MetalMemoryAdmission {
+    evaluate_metal_memory_admission_with_cpu_bytes(
+        scratch_upper_bytes,
+        0,
+        reserve_bytes,
+        signals,
+        allow_zero_process_budget,
+    )
 }
 
 // SAFETY: `Retained<ProtocolObject<dyn MTL*>>` are thread-safe per Apple's
@@ -23333,6 +23357,26 @@ mod tests {
         assert!(
             coverage >= 0.99,
             "no-copy coverage {coverage:.6} is below 99%"
+        );
+    }
+
+    #[test]
+    fn cpu_only_admission_bytes_do_not_consume_metal_headroom() {
+        let signals = MetalMemorySignals {
+            recommended_max_bytes: 1_000,
+            current_allocated_bytes: 700,
+            process_limit_remaining_bytes: Some(1_000),
+        };
+        let decision = evaluate_metal_memory_admission_with_cpu_bytes(200, 400, 50, signals, false);
+        assert!(decision.admitted);
+        assert_eq!(decision.required_bytes, Some(650));
+        assert_eq!(decision.working_set_headroom_bytes, Some(300));
+
+        let denied = evaluate_metal_memory_admission_with_cpu_bytes(200, 800, 50, signals, false);
+        assert!(!denied.admitted);
+        assert_eq!(
+            denied.reason,
+            MetalMemoryAdmissionReason::ProcessInsufficient
         );
     }
 

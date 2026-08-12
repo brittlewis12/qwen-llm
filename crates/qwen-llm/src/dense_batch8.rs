@@ -99,8 +99,7 @@ fn checked_elements(width: usize, label: &str) -> Result<u64, DenseBatch8Error> 
         .ok_or_else(|| DenseBatch8Error::Validation(format!("{label} scratch size overflow")))
 }
 
-/// Logical bytes allocated by the executor's persistent B=8 scratch tensors.
-pub fn dense_batch8_scratch_bytes(arch: &Arch) -> Result<u64, DenseBatch8Error> {
+fn dense_batch8_scratch_logical_buffers(arch: &Arch) -> Result<Vec<u64>, DenseBatch8Error> {
     let hidden = arch.hidden_size as usize;
     let ffn = arch.intermediate_size as usize;
     let n_v = arch.gdn_n_v_heads as usize;
@@ -120,23 +119,59 @@ pub fn dense_batch8_scratch_bytes(arch: &Arch) -> Result<u64, DenseBatch8Error> 
     let kv_dim = (arch.n_kv_heads as usize)
         .checked_mul(arch.attn_head_dim as usize)
         .ok_or_else(|| DenseBatch8Error::Validation("attention KV width overflow".into()))?;
-    let f32_width = hidden
-        .checked_mul(6)
-        .and_then(|value| value.checked_add(arch.vocab_size as usize))
-        .and_then(|value| value.checked_add(conv_dim))
-        .and_then(|value| value.checked_add(value_dim.checked_mul(2)?))
-        .and_then(|value| value.checked_add(ffn.checked_mul(3)?))
-        .and_then(|value| value.checked_add(q_dim.checked_mul(2)?))
-        .and_then(|value| value.checked_add(kv_dim.checked_mul(2)?))
-        .ok_or_else(|| DenseBatch8Error::Validation("dense B=8 scratch size overflow".into()))?;
-    let f32_bytes = checked_elements(f32_width, "dense B=8 scratch")?
-        .checked_mul(4)
-        .ok_or_else(|| DenseBatch8Error::Validation("dense B=8 scratch bytes overflow".into()))?;
-    let i32_bytes = u64::try_from(DENSE_BATCH8_WIDTH * 2 * std::mem::size_of::<i32>())
-        .map_err(|_| DenseBatch8Error::Validation("dense B=8 I32 scratch overflow".into()))?;
-    f32_bytes
-        .checked_add(i32_bytes)
-        .ok_or_else(|| DenseBatch8Error::Validation("dense B=8 scratch bytes overflow".into()))
+    let f32 = |width, label| {
+        checked_elements(width, label)?
+            .checked_mul(4)
+            .ok_or_else(|| DenseBatch8Error::Validation(format!("{label} bytes overflow")))
+    };
+    Ok(vec![
+        u64::try_from(DENSE_BATCH8_WIDTH * std::mem::size_of::<i32>())
+            .map_err(|_| DenseBatch8Error::Validation("ID scratch overflow".into()))?,
+        f32(hidden, "hidden")?,
+        f32(arch.vocab_size as usize, "logits")?,
+        u64::try_from(DENSE_BATCH8_WIDTH * std::mem::size_of::<i32>())
+            .map_err(|_| DenseBatch8Error::Validation("argmax scratch overflow".into()))?,
+        f32(hidden, "GDN hidden")?,
+        f32(conv_dim, "GDN QKV")?,
+        f32(value_dim, "GDN Z")?,
+        f32(value_dim, "GDN normalized")?,
+        f32(hidden, "GDN output")?,
+        f32(hidden, "FFN hidden")?,
+        f32(ffn, "FFN gate")?,
+        f32(ffn, "FFN up")?,
+        f32(ffn, "FFN inner")?,
+        f32(hidden, "FFN output")?,
+        f32(hidden, "attention hidden")?,
+        f32(2 * q_dim, "attention Q")?,
+        f32(kv_dim, "attention K")?,
+        f32(kv_dim, "attention V")?,
+    ])
+}
+
+/// Logical bytes allocated by the executor's persistent B=8 scratch tensors.
+pub fn dense_batch8_scratch_bytes(arch: &Arch) -> Result<u64, DenseBatch8Error> {
+    dense_batch8_scratch_logical_buffers(arch)?
+        .into_iter()
+        .try_fold(0u64, |total, bytes| {
+            total.checked_add(bytes).ok_or_else(|| {
+                DenseBatch8Error::Validation("dense B=8 scratch bytes overflow".into())
+            })
+        })
+}
+
+/// Metal-allocation upper bound for the executor's independent scratch buffers.
+pub fn dense_batch8_scratch_upper_bytes(
+    ctx: &MetalContext,
+    arch: &Arch,
+) -> Result<u64, DenseBatch8Error> {
+    dense_batch8_scratch_logical_buffers(arch)?
+        .into_iter()
+        .try_fold(0u64, |total, bytes| {
+            let priced = ctx.shared_buffer_size_and_align(bytes)?.size;
+            total.checked_add(priced).ok_or_else(|| {
+                DenseBatch8Error::Validation("dense B=8 priced scratch overflow".into())
+            })
+        })
 }
 
 fn require_writable_tensor(
@@ -311,7 +346,7 @@ impl<'a> DenseBatch8Executor<'a> {
         let mut refs = [s0, s1, s2, s3, s4, s5, s6, s7];
         self.step_refs_with_cancel(
             token_ids,
-            position,
+            [position; DENSE_BATCH8_WIDTH],
             &mut refs,
             Reduction::LowestIndex,
             cancelled,
@@ -321,13 +356,13 @@ impl<'a> DenseBatch8Executor<'a> {
     pub fn step_greedy_refs(
         &mut self,
         token_ids: [i32; DENSE_BATCH8_WIDTH],
-        position: u32,
+        positions: [u32; DENSE_BATCH8_WIDTH],
         sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
         cancelled: impl Fn() -> bool,
     ) -> Result<DenseBatch8Step, DenseBatch8Error> {
         self.step_refs_with_cancel(
             token_ids,
-            position,
+            positions,
             sessions,
             Reduction::GreedyTotal,
             cancelled,
@@ -337,19 +372,19 @@ impl<'a> DenseBatch8Executor<'a> {
     pub fn validate_refs(
         &self,
         token_ids: [i32; DENSE_BATCH8_WIDTH],
-        position: u32,
+        positions: [u32; DENSE_BATCH8_WIDTH],
         sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
     ) -> Result<(), DenseBatch8Error> {
         if self.poisoned {
             return Err(DenseBatch8Error::Poisoned);
         }
-        self.validate_step(&token_ids, position, sessions)
+        self.validate_step(&token_ids, positions, sessions)
     }
 
     fn step_refs_with_cancel(
         &mut self,
         token_ids: [i32; DENSE_BATCH8_WIDTH],
-        position: u32,
+        positions: [u32; DENSE_BATCH8_WIDTH],
         sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
         reduction: Reduction,
         cancelled: impl Fn() -> bool,
@@ -360,7 +395,7 @@ impl<'a> DenseBatch8Executor<'a> {
         if cancelled() {
             return Err(DenseBatch8Error::CancelledBeforeCommit);
         }
-        self.validate_step(&token_ids, position, sessions)?;
+        self.validate_step(&token_ids, positions, sessions)?;
         self.write_ids(&token_ids)?;
         let command = self
             .forward
@@ -368,12 +403,12 @@ impl<'a> DenseBatch8Executor<'a> {
             .queue
             .commandBuffer()
             .ok_or_else(|| DenseBatch8Error::Validation("command buffer unavailable".into()))?;
-        if let Err(error) = self.encode_step(&command, position, sessions, reduction) {
-            Self::restore_frontiers(sessions, position as usize);
+        if let Err(error) = self.encode_step(&command, positions, sessions, reduction) {
+            Self::restore_frontiers(sessions, positions);
             return Err(error);
         }
         if cancelled() {
-            Self::restore_frontiers(sessions, position as usize);
+            Self::restore_frontiers(sessions, positions);
             return Err(DenseBatch8Error::CancelledBeforeCommit);
         }
         command.commit();
@@ -418,7 +453,7 @@ impl<'a> DenseBatch8Executor<'a> {
     fn validate_step(
         &self,
         token_ids: &[i32; DENSE_BATCH8_WIDTH],
-        position: u32,
+        positions: [u32; DENSE_BATCH8_WIDTH],
         sessions: &[&mut MetalSession; DENSE_BATCH8_WIDTH],
     ) -> Result<(), DenseBatch8Error> {
         if sessions.len() != DENSE_BATCH8_WIDTH {
@@ -476,8 +511,8 @@ impl<'a> DenseBatch8Executor<'a> {
             .and_then(|value| value.checked_mul(2))
             .ok_or_else(|| DenseBatch8Error::Validation("attention ML partial overflow".into()))?;
         let vocab = arch.vocab_size as usize;
-        let position = position as usize;
         for (slot, session) in sessions.iter().enumerate() {
+            let position = positions[slot] as usize;
             let session = &**session;
             session.ensure_usable()?;
             if session.has_internal_mutable_alias() {
@@ -612,9 +647,12 @@ impl<'a> DenseBatch8Executor<'a> {
         Ok(())
     }
 
-    fn restore_frontiers(sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH], position: usize) {
-        for session in sessions {
-            session.kv_n_pos.fill(position);
+    fn restore_frontiers(
+        sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
+        positions: [u32; DENSE_BATCH8_WIDTH],
+    ) {
+        for (slot, session) in sessions.iter_mut().enumerate() {
+            session.kv_n_pos.fill(positions[slot] as usize);
         }
     }
 
@@ -669,7 +707,7 @@ impl<'a> DenseBatch8Executor<'a> {
     fn encode_step(
         &self,
         command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        position: u32,
+        positions: [u32; DENSE_BATCH8_WIDTH],
         sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
         reduction: Reduction,
     ) -> Result<(), DenseBatch8Error> {
@@ -710,7 +748,7 @@ impl<'a> DenseBatch8Executor<'a> {
                 }
                 MetalBlock::Attn(block) => {
                     self.encode_attn_block(
-                        command, block, attn_index, position, sessions, hidden, q_dim, kv_dim, ffn,
+                        command, block, attn_index, positions, sessions, hidden, q_dim, kv_dim, ffn,
                     )?;
                     attn_index += 1;
                 }
@@ -923,7 +961,7 @@ impl<'a> DenseBatch8Executor<'a> {
         command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         block: &MetalAttnBlock,
         attn_index: usize,
-        position: u32,
+        positions: [u32; DENSE_BATCH8_WIDTH],
         sessions: &mut [&mut MetalSession; DENSE_BATCH8_WIDTH],
         hidden: usize,
         q_dim: usize,
@@ -1010,9 +1048,14 @@ impl<'a> DenseBatch8Executor<'a> {
         blit.end();
 
         let encoder = KernelEncoder::begin(command);
-        for session in sessions.iter_mut() {
-            self.forward
-                .encode_attn_after_projections(&encoder, block, attn_index, position, session)?;
+        for (slot, session) in sessions.iter_mut().enumerate() {
+            self.forward.encode_attn_after_projections(
+                &encoder,
+                block,
+                attn_index,
+                positions[slot],
+                session,
+            )?;
             self.forward.encode_post_mixer_norm(
                 &encoder,
                 &session.x,

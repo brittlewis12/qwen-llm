@@ -17,7 +17,7 @@ use crate::checkpoint_store::{
 };
 use crate::dense_batch8::{
     DENSE_BATCH8_WIDTH, DenseBatch8Error, DenseBatch8Executor, DenseBatch8Step,
-    dense_batch8_scratch_bytes, inspect_dense_batch8,
+    dense_batch8_scratch_bytes, dense_batch8_scratch_upper_bytes, inspect_dense_batch8,
 };
 use crate::gguf::{GgufError, GgufFile, GgufShard};
 use crate::loader::{LoadError, Model};
@@ -32,6 +32,7 @@ use crate::model::Arch;
 use crate::moe_batch16::{
     MOE_BATCH16_WIDTH, MoeBatch16Error, MoeBatch16Executor, MoeBatch16PlanTelemetry,
     MoeBatch16Step, inspect_execution_plan, moe_batch16_scratch_bytes,
+    moe_batch16_scratch_upper_bytes,
 };
 use crate::prefetch::{DEFAULT_CHUNK_BYTES, DEFAULT_WORKERS, prefetch_fd};
 use crate::prefix_cache::{DEFAULT_MAX_BYTES, PrefixCache, PrefixCacheStats};
@@ -1226,12 +1227,26 @@ impl LoadedModel {
         Ok(dense_batch8_scratch_bytes(&self.metal_model.arch)?)
     }
 
+    pub fn dense_batch8_scratch_upper_bytes(&self) -> Result<u64, RuntimeError> {
+        Ok(dense_batch8_scratch_upper_bytes(
+            self.context(),
+            &self.metal_model.arch,
+        )?)
+    }
+
     pub fn inspect_dense_batch8(&self) -> Result<(), RuntimeError> {
         Ok(inspect_dense_batch8(&self.metal_model)?)
     }
 
     pub fn moe_batch16_scratch_bytes(&self) -> Result<u64, RuntimeError> {
         Ok(moe_batch16_scratch_bytes(&self.metal_model.arch)?)
+    }
+
+    pub fn moe_batch16_scratch_upper_bytes(&self) -> Result<u64, RuntimeError> {
+        Ok(moe_batch16_scratch_upper_bytes(
+            self.context(),
+            &self.metal_model.arch,
+        )?)
     }
 
     /// Create the qualified fixed-width Qwen MoE B=16 decode executor.
@@ -1769,23 +1784,15 @@ impl DenseBatch8SequenceExecutor<'_> {
         sequences: [&mut Sequence; DENSE_BATCH8_WIDTH],
     ) -> Result<(), RuntimeError> {
         let [s0, s1, s2, s3, s4, s5, s6, s7] = sequences;
-        let position = s0.position;
-        for (slot, sequence) in [&*s0, &*s1, &*s2, &*s3, &*s4, &*s5, &*s6, &*s7]
-            .into_iter()
-            .enumerate()
-        {
+        let sequences = [&*s0, &*s1, &*s2, &*s3, &*s4, &*s5, &*s6, &*s7];
+        let mut positions = [0; DENSE_BATCH8_WIDTH];
+        for (slot, sequence) in sequences.into_iter().enumerate() {
             ensure_same_model_owner(&self.owner, &sequence.owner)?;
-            if sequence.position != position {
-                return Err(DenseBatch8Error::Validation(format!(
-                    "slot {slot} position {} != cohort position {position}",
-                    sequence.position
-                ))
-                .into());
-            }
             sequence.ensure_can_append(1)?;
+            positions[slot] = u32::try_from(sequence.position).map_err(|_| {
+                DenseBatch8Error::Validation(format!("slot {slot} position does not fit u32"))
+            })?;
         }
-        let position = u32::try_from(position)
-            .map_err(|_| DenseBatch8Error::Validation("cohort position does not fit u32".into()))?;
         let mut states = [
             &mut s0.state,
             &mut s1.state,
@@ -1797,14 +1804,14 @@ impl DenseBatch8SequenceExecutor<'_> {
             &mut s7.state,
         ];
         self.inner
-            .validate_refs(token_ids, position, &mut states)
+            .validate_refs(token_ids, positions, &mut states)
             .map_err(RuntimeError::from)
     }
 
     /// Consume one token in every lane and return the next greedy selections.
     ///
-    /// All eight sequences must share this executor's model and logical
-    /// position. Their positions advance only after the Metal command completes
+    /// All eight sequences must share this executor's model. Their independent
+    /// positions advance only after the Metal command completes
     /// successfully; committed failures poison the underlying sessions.
     pub fn step_greedy(
         &mut self,
@@ -1813,23 +1820,15 @@ impl DenseBatch8SequenceExecutor<'_> {
         cancelled: impl Fn() -> bool,
     ) -> Result<DenseBatch8Step, RuntimeError> {
         let [s0, s1, s2, s3, s4, s5, s6, s7] = sequences;
-        let position = s0.position;
-        for (slot, sequence) in [&*s0, &*s1, &*s2, &*s3, &*s4, &*s5, &*s6, &*s7]
-            .into_iter()
-            .enumerate()
-        {
+        let sequences = [&*s0, &*s1, &*s2, &*s3, &*s4, &*s5, &*s6, &*s7];
+        let mut positions = [0; DENSE_BATCH8_WIDTH];
+        for (slot, sequence) in sequences.into_iter().enumerate() {
             ensure_same_model_owner(&self.owner, &sequence.owner)?;
-            if sequence.position != position {
-                return Err(DenseBatch8Error::Validation(format!(
-                    "slot {slot} position {} != cohort position {position}",
-                    sequence.position
-                ))
-                .into());
-            }
             sequence.ensure_can_append(1)?;
+            positions[slot] = u32::try_from(sequence.position).map_err(|_| {
+                DenseBatch8Error::Validation(format!("slot {slot} position does not fit u32"))
+            })?;
         }
-        let position = u32::try_from(position)
-            .map_err(|_| DenseBatch8Error::Validation("cohort position does not fit u32".into()))?;
         let step = {
             let mut states = [
                 &mut s0.state,
@@ -1842,7 +1841,7 @@ impl DenseBatch8SequenceExecutor<'_> {
                 &mut s7.state,
             ];
             self.inner
-                .step_greedy_refs(token_ids, position, &mut states, cancelled)?
+                .step_greedy_refs(token_ids, positions, &mut states, cancelled)?
         };
         s0.position += 1;
         s1.position += 1;
@@ -1864,18 +1863,11 @@ impl MoeBatch16SequenceExecutor<'_> {
     fn validate_cohort(
         &self,
         sequences: &[&mut Sequence; MOE_BATCH16_WIDTH],
-    ) -> Result<usize, RuntimeError> {
-        let position = sequences[0].position;
+    ) -> Result<[u32; MOE_BATCH16_WIDTH], RuntimeError> {
         let capacity = sequences[0].max_context_tokens;
+        let mut positions = [0; MOE_BATCH16_WIDTH];
         for (slot, sequence) in sequences.iter().enumerate() {
             ensure_same_model_owner(&self.owner, &sequence.owner)?;
-            if sequence.position != position {
-                return Err(MoeBatch16Error::Validation(format!(
-                    "slot {slot} position {} != cohort position {position}",
-                    sequence.position
-                ))
-                .into());
-            }
             if sequence.max_context_tokens != capacity {
                 return Err(MoeBatch16Error::Validation(format!(
                     "slot {slot} capacity {} != cohort capacity {capacity}",
@@ -1884,8 +1876,11 @@ impl MoeBatch16SequenceExecutor<'_> {
                 .into());
             }
             sequence.ensure_can_append(1)?;
+            positions[slot] = u32::try_from(sequence.position).map_err(|_| {
+                MoeBatch16Error::Validation(format!("slot {slot} position does not fit u32"))
+            })?;
         }
-        Ok(position)
+        Ok(positions)
     }
 
     /// Validate model provenance, logical frontiers, capacity, and backend state.
@@ -1894,11 +1889,10 @@ impl MoeBatch16SequenceExecutor<'_> {
         token_ids: [i32; MOE_BATCH16_WIDTH],
         mut sequences: [&mut Sequence; MOE_BATCH16_WIDTH],
     ) -> Result<(), RuntimeError> {
-        let position = self.validate_cohort(&sequences)?;
-        let position = u32::try_from(position)
-            .map_err(|_| MoeBatch16Error::Validation("cohort position does not fit u32".into()))?;
+        let positions = self.validate_cohort(&sequences)?;
         let mut states = sequences.each_mut().map(|sequence| &mut sequence.state);
-        self.inner.validate_refs(token_ids, position, &mut states)?;
+        self.inner
+            .validate_refs(token_ids, positions, &mut states)?;
         Ok(())
     }
 
@@ -1910,13 +1904,11 @@ impl MoeBatch16SequenceExecutor<'_> {
         mut sequences: [&mut Sequence; MOE_BATCH16_WIDTH],
         cancelled: impl Fn() -> bool,
     ) -> Result<MoeBatch16Step, RuntimeError> {
-        let position = self.validate_cohort(&sequences)?;
-        let position = u32::try_from(position)
-            .map_err(|_| MoeBatch16Error::Validation("cohort position does not fit u32".into()))?;
+        let positions = self.validate_cohort(&sequences)?;
         let step = {
             let mut states = sequences.each_mut().map(|sequence| &mut sequence.state);
             self.inner
-                .step_greedy_refs(token_ids, position, &mut states, cancelled)?
+                .step_greedy_refs(token_ids, positions, &mut states, cancelled)?
         };
         for sequence in sequences {
             sequence.position += 1;

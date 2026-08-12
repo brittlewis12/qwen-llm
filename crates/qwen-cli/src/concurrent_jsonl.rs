@@ -832,7 +832,7 @@ fn price_prefill_scratch_plan(
         .map_err(anyhow::Error::from)
 }
 
-fn prefill_scratch_upper_bytes(
+pub(super) fn prefill_scratch_upper_bytes(
     loaded: &LoadedModel,
     request: &PreparedJsonlRequest,
     args: &Args,

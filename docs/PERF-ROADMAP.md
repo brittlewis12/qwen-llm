@@ -6581,3 +6581,18 @@ Impact: <models / contexts affected>
 Risk: <remaining validation gap>
 Next: <one concrete follow-up>
 ```
+
+
+## Recent Confirmed Capability — Ragged Qwen Fixed Cohorts
+
+- Dense B=8 and Qwen MoE B=16 no longer require equal prompt frontiers under an
+  explicit experimental gate. Final exact cells improve whole-file wall by
+  `1.709x` on dense short prompts, `1.153x` on dense shared-root prompts, and
+  `1.298x` on A3B short prompts.
+- Keep default off until private-suffix prefill cost joins transition utilization
+  in admission; an A3B long-suffix cell was flat. Memory denial already falls
+  back to serial instead of failing the workload.
+- This establishes the per-request frontier contract needed by refill/continuous
+  batching. Prefer that capability-wide next step over another model-specific
+  fixed-width executor. Evidence:
+  `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.

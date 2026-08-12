@@ -23872,3 +23872,26 @@ snapshot is priced before allocation; denial falls back to prior B2 behavior.
 `QWEN_CONCURRENCY_FILE_ROOT_FANOUT=0` is strict rollback. Final adversarial
 review: GO. Full packet:
 `docs/bench/2026-08-11-qwen-b2-file-root-fanout/README.md`.
+
+
+## 2026-08-12 — Ragged Qwen Fixed-Cohort Capability GO
+
+Status: dense B=8 and Qwen MoE B=16 can now decode requests at independent
+prompt frontiers under the explicit `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1` gate.
+Each lane carries its own position through attention/mixer encoding and rollback;
+complete candidate JSONL output remains byte-identical to serial execution.
+
+Final reviewed-code cells move dense 0.8B heterogeneous short prompts
+`2.82 -> 1.65 s` (`1.709x`), dense shared-root prompts `2.64 -> 2.29 s`
+(`1.153x`), and A3B heterogeneous short prompts `14.21 -> 10.95 s`
+(`1.298x`). A prior A3B long-private-suffix cell was flat (`1.006x`), so the
+capability remains default-off rather than overclaiming a universal policy win.
+
+Admission now prices shared-capacity sessions, prefill scratch, each independent
+executor buffer at Metal allocation size, transient reserve, and optional CPU
+checkpoint before mutable GPU allocation. Denied cohorts degrade to original-
+order serial requests. Capacity-first grouping is used only when it preserves
+cohort count, does not add transition slots, and strictly reduces capacity slots.
+Planner schema 5 distinguishes configured/effective prefix packing and planned/
+realized outcomes. Final adversarial review: GO. Full evidence:
+`docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.

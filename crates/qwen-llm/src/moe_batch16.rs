@@ -148,9 +148,7 @@ fn geometry(arch: &Arch) -> Result<(usize, usize, usize, usize, usize), MoeBatch
     Ok((hidden, topk, experts, expert_ffn, value_dim))
 }
 
-/// Logical bytes allocated by the executor's persistent B=16 scratch arena.
-/// This excludes model weights and sequence-owned causal state.
-pub fn moe_batch16_scratch_bytes(arch: &Arch) -> Result<u64, MoeBatch16Error> {
+fn moe_batch16_scratch_logical_buffers(arch: &Arch) -> Result<Vec<u64>, MoeBatch16Error> {
     let (hidden, topk, _, expert_ffn, value_dim) = geometry(arch)?;
     let conv_heads = (arch.gdn_n_k_heads as usize)
         .checked_mul(2)
@@ -160,30 +158,56 @@ pub fn moe_batch16_scratch_bytes(arch: &Arch) -> Result<u64, MoeBatch16Error> {
         &[conv_heads, arch.gdn_head_dim as usize],
         "GDN scratch geometry",
     )?;
-    let vocab = arch.vocab_size as usize;
-    let f32_elements = [
-        hidden, // embedding/final-head rows
-        vocab,  // logits
-        topk * expert_ffn,
-        hidden, // GDN normalized input rows
-        conv_dim,
-        value_dim,
-        value_dim,
-        hidden,
-    ]
-    .into_iter()
-    .try_fold(0usize, |sum, width| {
-        let elements = checked_mul(&[MOE_BATCH16_WIDTH, width], "scratch elements")?;
-        sum.checked_add(elements)
-            .ok_or_else(|| MoeBatch16Error::Validation("scratch element sum overflow".into()))
-    })?;
-    let i32_elements = checked_mul(&[MOE_BATCH16_WIDTH, 2 + topk], "I32 scratch")?;
-    let bytes = (f32_elements as u128)
-        .checked_mul(4)
-        .and_then(|value| value.checked_add((i32_elements as u128) * 4))
-        .ok_or_else(|| MoeBatch16Error::Validation("scratch byte count overflow".into()))?;
-    u64::try_from(bytes)
-        .map_err(|_| MoeBatch16Error::Validation("scratch byte count exceeds u64".into()))
+    let f32 = |width, label| {
+        batch_elements(width, label)?
+            .checked_mul(4)
+            .ok_or_else(|| MoeBatch16Error::Validation(format!("{label} bytes overflow")))
+    };
+    let i32 = |width, label| {
+        batch_elements(width, label)?
+            .checked_mul(4)
+            .ok_or_else(|| MoeBatch16Error::Validation(format!("{label} bytes overflow")))
+    };
+    Ok(vec![
+        i32(1, "ID scratch")?,
+        f32(hidden, "row scratch")?,
+        f32(arch.vocab_size as usize, "logit scratch")?,
+        i32(1, "selection scratch")?,
+        i32(topk, "top-k scratch")?,
+        f32(topk * expert_ffn, "routed-inner scratch")?,
+        f32(hidden, "GDN H scratch")?,
+        f32(conv_dim, "GDN QKV scratch")?,
+        f32(value_dim, "GDN Z scratch")?,
+        f32(value_dim, "GDN normed scratch")?,
+        f32(hidden, "GDN out scratch")?,
+    ])
+}
+
+/// Logical bytes allocated by the executor's persistent B=16 scratch arena.
+/// This excludes model weights and sequence-owned causal state.
+pub fn moe_batch16_scratch_bytes(arch: &Arch) -> Result<u64, MoeBatch16Error> {
+    moe_batch16_scratch_logical_buffers(arch)?
+        .into_iter()
+        .try_fold(0u64, |total, bytes| {
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| MoeBatch16Error::Validation("scratch byte count overflow".into()))
+        })
+}
+
+/// Metal-allocation upper bound for the executor's independent scratch buffers.
+pub fn moe_batch16_scratch_upper_bytes(
+    ctx: &MetalContext,
+    arch: &Arch,
+) -> Result<u64, MoeBatch16Error> {
+    moe_batch16_scratch_logical_buffers(arch)?
+        .into_iter()
+        .try_fold(0u64, |total, bytes| {
+            let priced = ctx.shared_buffer_size_and_align(bytes)?.size;
+            total.checked_add(priced).ok_or_else(|| {
+                MoeBatch16Error::Validation("priced scratch byte count overflow".into())
+            })
+        })
 }
 
 struct GdnScratch {
@@ -958,19 +982,19 @@ impl<'a> MoeBatch16Executor<'a> {
     pub(crate) fn validate_refs(
         &self,
         token_ids: [i32; MOE_BATCH16_WIDTH],
-        position: u32,
+        positions: [u32; MOE_BATCH16_WIDTH],
         sessions: &mut [&mut MetalSession; MOE_BATCH16_WIDTH],
     ) -> Result<(), MoeBatch16Error> {
         if self.poisoned {
             return Err(MoeBatch16Error::Poisoned);
         }
-        self.validate_step(&token_ids, position, sessions)
+        self.validate_step(&token_ids, positions, sessions)
     }
 
     pub(crate) fn step_greedy_refs(
         &mut self,
         token_ids: [i32; MOE_BATCH16_WIDTH],
-        position: u32,
+        positions: [u32; MOE_BATCH16_WIDTH],
         sessions: &mut [&mut MetalSession; MOE_BATCH16_WIDTH],
         cancelled: impl Fn() -> bool,
     ) -> Result<MoeBatch16Step, MoeBatch16Error> {
@@ -980,7 +1004,7 @@ impl<'a> MoeBatch16Executor<'a> {
         if cancelled() {
             return Err(MoeBatch16Error::CancelledBeforeCommit);
         }
-        self.validate_step(&token_ids, position, sessions)?;
+        self.validate_step(&token_ids, positions, sessions)?;
         // IDs are staged before any command encoding can mutate host frontiers.
         self.write_ids(&token_ids)?;
         if cancelled() {
@@ -993,21 +1017,21 @@ impl<'a> MoeBatch16Executor<'a> {
             .commandBuffer()
             .ok_or_else(|| MoeBatch16Error::Validation("command buffer unavailable".into()))?;
         let encoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.encode_step(&command, position, sessions)?;
+            self.encode_step(&command, positions, sessions)?;
             Ok::<bool, MoeBatch16Error>(cancelled())
         }));
         match encoded {
             Ok(Ok(false)) => {}
             Ok(Ok(true)) => {
-                Self::restore_frontiers(sessions, position as usize);
+                Self::restore_frontiers(sessions, positions);
                 return Err(MoeBatch16Error::CancelledBeforeCommit);
             }
             Ok(Err(error)) => {
-                Self::restore_frontiers(sessions, position as usize);
+                Self::restore_frontiers(sessions, positions);
                 return Err(error);
             }
             Err(payload) => {
-                Self::restore_frontiers(sessions, position as usize);
+                Self::restore_frontiers(sessions, positions);
                 std::panic::resume_unwind(payload);
             }
         }
@@ -1051,7 +1075,7 @@ impl<'a> MoeBatch16Executor<'a> {
     fn validate_step(
         &self,
         token_ids: &[i32; MOE_BATCH16_WIDTH],
-        position: u32,
+        positions: [u32; MOE_BATCH16_WIDTH],
         sessions: &[&mut MetalSession; MOE_BATCH16_WIDTH],
     ) -> Result<(), MoeBatch16Error> {
         let arch = &self.forward.model.arch;
@@ -1119,7 +1143,6 @@ impl<'a> MoeBatch16Executor<'a> {
             .filter(|block| matches!(block, MetalBlock::Gdn(_)))
             .count();
         let expected_attn = self.forward.model.blocks.len() - expected_gdn;
-        let position = position as usize;
         let capacity = sessions[0].kv_capacity;
         for (slot, token) in token_ids.iter().copied().enumerate() {
             if token < 0 || token as u32 >= arch.vocab_size {
@@ -1131,6 +1154,7 @@ impl<'a> MoeBatch16Executor<'a> {
         }
         for (slot, session) in sessions.iter().enumerate() {
             let session = &**session;
+            let position = positions[slot] as usize;
             session.ensure_usable()?;
             if session.has_internal_mutable_alias() {
                 return Err(MoeBatch16Error::Validation(format!(
@@ -1403,7 +1427,7 @@ impl<'a> MoeBatch16Executor<'a> {
     fn encode_step(
         &self,
         command: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        position: u32,
+        positions: [u32; MOE_BATCH16_WIDTH],
         sessions: &mut [&mut MetalSession; MOE_BATCH16_WIDTH],
     ) -> Result<(), MoeBatch16Error> {
         let arch = &self.forward.model.arch;
@@ -1445,11 +1469,11 @@ impl<'a> MoeBatch16Executor<'a> {
                 }
                 (MetalBlock::Gdn(_), MixerMode::Gdn(GdnMixerMode::PerLane)) => {
                     let encoder = KernelEncoder::begin(command);
-                    for session in sessions.iter_mut() {
+                    for (slot, session) in sessions.iter_mut().enumerate() {
                         self.forward.encode_moe_mixer_prep_by_index(
                             &encoder,
                             block_index,
-                            position,
+                            positions[slot],
                             session,
                         )?;
                     }
@@ -1458,11 +1482,11 @@ impl<'a> MoeBatch16Executor<'a> {
                 }
                 (MetalBlock::Attn(_), MixerMode::Attention) => {
                     let encoder = KernelEncoder::begin(command);
-                    for session in sessions.iter_mut() {
+                    for (slot, session) in sessions.iter_mut().enumerate() {
                         self.forward.encode_moe_mixer_prep_by_index(
                             &encoder,
                             block_index,
-                            position,
+                            positions[slot],
                             session,
                         )?;
                     }
@@ -1859,9 +1883,12 @@ impl<'a> MoeBatch16Executor<'a> {
         Ok(())
     }
 
-    fn restore_frontiers(sessions: &mut [&mut MetalSession; MOE_BATCH16_WIDTH], position: usize) {
-        for session in sessions {
-            session.kv_n_pos.fill(position);
+    fn restore_frontiers(
+        sessions: &mut [&mut MetalSession; MOE_BATCH16_WIDTH],
+        positions: [u32; MOE_BATCH16_WIDTH],
+    ) {
+        for (slot, session) in sessions.iter_mut().enumerate() {
+            session.kv_n_pos.fill(positions[slot] as usize);
         }
     }
 

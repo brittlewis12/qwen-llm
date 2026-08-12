@@ -40,6 +40,7 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::{
     MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
     MetalPipelineCacheMetrics, evaluate_metal_memory_admission,
+    evaluate_metal_memory_admission_with_cpu_bytes,
 };
 use qwen_llm::metal_dflash::{
     MetalDFlashLayerMajorScratch, MetalDFlashVerifyScratch, PrefillScratchConfig,

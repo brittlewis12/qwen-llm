@@ -6714,3 +6714,23 @@ Next: <one concrete follow-up>
   prefill, or a changed executor with a measured whole-request ceiling above
   `1.10x`. Evidence:
   `docs/bench/2026-08-12-qwen-moe-ragged-128-screen/README.md`.
+
+## Recent Promotion — Automatic Dense Ragged Refill
+
+- Automatic dense B8 now combines heterogeneous prompt frontiers with bounded
+  two-wave refill for mixed generation limits. Final-source median wall improves
+  `1.205x` on 0.8B and `1.445x` on 27B, with byte-identical output and zero
+  swaps.
+- Keep admission measured and file-scoped: at least two complete refill arenas,
+  prompt cap 256, generation cap 40, one-chunk prefill, no static/serial
+  remainder, local 90% utilization and 15% idealized-step savings, local 32x
+  charge, and whole-file 9x charge.
+- Runtime memory denial restores the complete planner baseline atomically.
+  Selector v3 and planner v9 expose policy, envelope, planned/realized work, the
+  physically denied arena count, and transaction outcome. Both ragged and refill
+  rollback variables independently close the path.
+- This productizes an existing exact executor before a generic scheduler. Keep
+  synchronous MoE refill killed and root-aware refill held; the next scheduler
+  investment should target more than two waves or overlapped replacement prefill,
+  not reproduce this bounded slice. Evidence:
+  `docs/bench/2026-08-12-automatic-dense-ragged-refill/README.md`.

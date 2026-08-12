@@ -145,6 +145,12 @@ pub(super) struct ExecutionSelectionRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     ragged_prompt_plan_decision: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    refill_policy: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planned_refill_arenas: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planned_refill_requests: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     moe_plan: Option<MoePlanRecord>,
 }
 
@@ -155,10 +161,13 @@ impl ExecutionSelectionRecord {
         selection: ExecutionSelection,
         ragged_prompt_policy: Option<&'static str>,
         ragged_prompt_plan_decision: Option<&'static str>,
+        refill_policy: Option<&'static str>,
+        planned_refill_arenas: Option<usize>,
+        planned_refill_requests: Option<usize>,
     ) -> Self {
         Self {
-            schema_version: 2,
-            backend: "execution_selector_v2",
+            schema_version: 3,
+            backend: "execution_selector_v3",
             requested_mode: "auto",
             family: match family {
                 Some(ModelFamily::Qwen35) => "qwen35",
@@ -175,6 +184,9 @@ impl ExecutionSelectionRecord {
             serial_remainder_requests: selection.serial_remainder_requests,
             ragged_prompt_policy,
             ragged_prompt_plan_decision,
+            refill_policy,
+            planned_refill_arenas,
+            planned_refill_requests,
             moe_plan: selection.moe_plan.map(Into::into),
         }
     }
@@ -587,6 +599,84 @@ mod tests {
             ..input
         };
         assert_eq!(select_qwen(input).reason, "memory_narrowed_to_pair");
+    }
+
+    #[test]
+    fn selector_v3_scopes_dense_refill_fields() {
+        let dense = ExecutionSelectionRecord::new(
+            Some(ModelFamily::Qwen35),
+            Some(32),
+            ExecutionSelection {
+                selected: SelectedExecution::DenseBatch8,
+                reason: "supported_family_default",
+                profile: "dense_qwen",
+                full_cohorts: 4,
+                serial_remainder_requests: 0,
+                moe_plan: None,
+            },
+            Some("automatic_dense_charged"),
+            Some("automatic_dense_refill_admitted"),
+            Some("automatic_charged_ragged"),
+            Some(2),
+            Some(32),
+        );
+        let dense = serde_json::to_value(dense).unwrap();
+        assert_eq!(dense["schema_version"], 3);
+        assert_eq!(dense["backend"], "execution_selector_v3");
+        assert_eq!(dense["refill_policy"], "automatic_charged_ragged");
+        assert_eq!(dense["planned_refill_arenas"], 2);
+        assert_eq!(dense["planned_refill_requests"], 32);
+
+        let moe_selection = select_qwen(qwen_input(q4_plan()));
+        let moe = serde_json::to_value(ExecutionSelectionRecord::new(
+            Some(ModelFamily::Qwen35Moe),
+            Some(16),
+            moe_selection,
+            Some("disabled"),
+            Some("disabled"),
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+        for key in [
+            "refill_policy",
+            "planned_refill_arenas",
+            "planned_refill_requests",
+        ] {
+            assert!(moe.get(key).is_none(), "MoE selector retained {key}");
+        }
+
+        let deepseek_selection = select_deepseek(DeepSeekSelectionInput {
+            mode: Some(ExecutionModeArg::Auto),
+            request_count: 2,
+            stdin: false,
+            residency_set: false,
+            two_session_memory_admitted: true,
+        });
+        let deepseek = serde_json::to_value(ExecutionSelectionRecord::new(
+            Some(ModelFamily::DeepSeek4),
+            Some(2),
+            deepseek_selection,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ))
+        .unwrap();
+        for key in [
+            "ragged_prompt_policy",
+            "ragged_prompt_plan_decision",
+            "refill_policy",
+            "planned_refill_arenas",
+            "planned_refill_requests",
+        ] {
+            assert!(
+                deepseek.get(key).is_none(),
+                "DeepSeek selector retained {key}"
+            );
+        }
     }
 
     #[test]

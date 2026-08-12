@@ -14,6 +14,14 @@ const DEFAULT_REFILL_MAX_PROMPT_TOKENS: usize = 64;
 const AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS: usize = 256;
 const AUTOMATIC_DENSE_RAGGED_MIN_GENERATION_TOKENS: usize = 32;
 const AUTOMATIC_DENSE_RAGGED_MAX_PREFILL_PER_TRANSITION: usize = 2;
+const AUTOMATIC_DENSE_RAGGED_REFILL_MAX_GENERATION_TOKENS: usize = 40;
+const AUTOMATIC_DENSE_RAGGED_REFILL_MIN_ARENAS: usize = 2;
+const AUTOMATIC_DENSE_RAGGED_REFILL_MAX_PREFILL_PER_TRANSITION: usize = 9;
+const AUTOMATIC_DENSE_RAGGED_REFILL_MAX_ARENA_PREFILL_PER_TRANSITION: usize = 32;
+const AUTOMATIC_DENSE_RAGGED_REFILL_MIN_UTILIZATION_NUMERATOR: usize = 9;
+const AUTOMATIC_DENSE_RAGGED_REFILL_MIN_UTILIZATION_DENOMINATOR: usize = 10;
+const AUTOMATIC_DENSE_RAGGED_REFILL_MIN_SAVINGS_NUMERATOR: usize = 3;
+const AUTOMATIC_DENSE_RAGGED_REFILL_MIN_SAVINGS_DENOMINATOR: usize = 20;
 const DENSE_PREFIX_FANOUT_ENV: &str = "QWEN_DENSE_BATCH8_PREFIX_FANOUT";
 const MOE_PREFIX_FANOUT_ENV: &str = "QWEN_MOE_BATCH16_PREFIX_FANOUT";
 const PREFIX_PACKING_ENV: &str = "QWEN_FIXED_COHORT_PREFIX_PACKING";
@@ -68,11 +76,11 @@ impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_>
     const DISPLAY_NAME: &'static str = "dense B=8";
     const PREFIX_FANOUT_ENV: &'static str = DENSE_PREFIX_FANOUT_ENV;
     const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v6";
-    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v8";
+    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v9";
     const TELEMETRY_PREFIX: &'static str = "dense_batch8";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "dense_batch8_planner";
     const TELEMETRY_SCHEMA_VERSION: u32 = 7;
-    const PLANNER_TELEMETRY_SCHEMA_VERSION: u32 = 8;
+    const PLANNER_TELEMETRY_SCHEMA_VERSION: u32 = 9;
     const REFILL_TELEMETRY: bool = true;
 
     fn executor_scratch_upper_bytes(loaded: &LoadedModel) -> Result<u64> {
@@ -204,6 +212,11 @@ enum RaggedPromptDecision {
     AutomaticEnvelopeRejected,
     AutomaticChargeRejected,
     AutomaticNoCohortGain,
+    AutomaticRefillAdmitted,
+    AutomaticRefillDisabled,
+    AutomaticRefillEnvelopeRejected,
+    AutomaticRefillChargeRejected,
+    AutomaticRefillNoCohortGain,
 }
 
 impl RaggedPromptDecision {
@@ -223,6 +236,11 @@ impl RaggedPromptDecision {
             Self::AutomaticEnvelopeRejected => "automatic_dense_envelope_rejected",
             Self::AutomaticChargeRejected => "automatic_dense_charge_rejected",
             Self::AutomaticNoCohortGain => "automatic_dense_no_cohort_gain",
+            Self::AutomaticRefillAdmitted => "automatic_dense_refill_admitted",
+            Self::AutomaticRefillDisabled => "automatic_dense_refill_disabled",
+            Self::AutomaticRefillEnvelopeRejected => "automatic_dense_refill_envelope_rejected",
+            Self::AutomaticRefillChargeRejected => "automatic_dense_refill_charge_rejected",
+            Self::AutomaticRefillNoCohortGain => "automatic_dense_refill_no_cohort_gain",
         }
     }
 }
@@ -237,6 +255,7 @@ enum RefillFallback<const WIDTH: usize> {
 enum DenseRefillPolicy {
     Disabled,
     ShortSerialFallbackRescue,
+    AutomaticChargedRagged,
     Forced,
 }
 
@@ -249,12 +268,17 @@ impl DenseRefillPolicy {
         match self {
             Self::Disabled => "disabled",
             Self::ShortSerialFallbackRescue => "short_serial_fallback_rescue",
+            Self::AutomaticChargedRagged => "automatic_charged_ragged",
             Self::Forced => "forced",
         }
     }
 
     fn default_max_prompt_tokens(self) -> Option<usize> {
-        (self == Self::ShortSerialFallbackRescue).then_some(DEFAULT_REFILL_MAX_PROMPT_TOKENS)
+        match self {
+            Self::ShortSerialFallbackRescue => Some(DEFAULT_REFILL_MAX_PROMPT_TOKENS),
+            Self::AutomaticChargedRagged => Some(AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS),
+            Self::Disabled | Self::Forced => None,
+        }
     }
 }
 
@@ -327,6 +351,12 @@ impl RaggedPackingStrategy {
 }
 
 #[derive(Debug)]
+struct AutomaticRefillFallback<const WIDTH: usize> {
+    work: Vec<PlannedWork<WIDTH>>,
+    prefix_affinity_batches: Vec<[usize; WIDTH]>,
+}
+
+#[derive(Debug)]
 struct CohortPlan<const WIDTH: usize> {
     work: Vec<PlannedWork<WIDTH>>,
     prefix_packing_configured: bool,
@@ -348,12 +378,16 @@ struct CohortPlan<const WIDTH: usize> {
     refill_arenas: usize,
     refill_requests: usize,
     max_execution_capacity: usize,
+    automatic_refill_fallback: Option<AutomaticRefillFallback<WIDTH>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct CohortPlanSummary {
     pub ragged_prompt_policy: Option<&'static str>,
     pub ragged_prompt_plan_decision: Option<&'static str>,
+    pub refill_policy: Option<&'static str>,
+    pub planned_refill_arenas: Option<usize>,
+    pub planned_refill_requests: Option<usize>,
     pub full_cohorts: usize,
     pub economics_rejected_cohorts: usize,
     pub serial_fallback_requests: usize,
@@ -623,7 +657,25 @@ struct PlannerTelemetry {
     #[serde(skip_serializing_if = "Option::is_none")]
     realized_refill_requests: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    realized_refill_memory_denied_arenas: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     realized_refill_memory_fallback_arenas: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic_refill_transaction_outcome: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic_refill_min_arenas: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic_refill_max_prompt_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic_refill_max_generation_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic_refill_max_file_prefill_per_transition: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic_refill_max_arena_prefill_per_transition: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic_refill_min_transition_utilization: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    automatic_refill_min_idealized_step_savings: Option<&'static str>,
     compatibility_buckets: usize,
     planned_candidate_cohorts: usize,
     realized_prefix_affinity_cohorts: usize,
@@ -1301,6 +1353,157 @@ fn automatic_dense_ragged_envelope_qualifies<const WIDTH: usize>(
         && requested_tokens.all(|tokens| tokens == first_requested_tokens)
 }
 
+fn automatic_dense_ragged_refill_enabled() -> Result<bool> {
+    let value = std::env::var_os(DENSE_REFILL_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow!("{DENSE_REFILL_ENV} must be valid UTF-8"))
+        })
+        .transpose()?;
+    let Some(value) = value else {
+        return Ok(true);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => bail!("{DENSE_REFILL_ENV} must be a boolean"),
+    }
+}
+
+fn automatic_dense_ragged_refill_applicable<const WIDTH: usize>(
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+) -> bool {
+    let mut requested_tokens = requests
+        .iter()
+        .map(|request| request.request.tokens.unwrap_or(args.tokens));
+    let Some(first) = requested_tokens.next() else {
+        return false;
+    };
+    WIDTH == DENSE_BATCH8_WIDTH
+        && requests.len() >= WIDTH * 2 * AUTOMATIC_DENSE_RAGGED_REFILL_MIN_ARENAS
+        && requested_tokens.any(|tokens| tokens != first)
+}
+
+fn automatic_dense_ragged_refill_envelope_qualifies<const WIDTH: usize>(
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+) -> bool {
+    let max_prompt_tokens = requests
+        .iter()
+        .map(|request| request.prompt_ids.len())
+        .max()
+        .unwrap_or(0);
+    let PrefillChunkArg::Fixed(prefill_chunk) = args.prefill_chunk else {
+        return false;
+    };
+    WIDTH == DENSE_BATCH8_WIDTH
+        && requests.len() >= WIDTH * 2 * AUTOMATIC_DENSE_RAGGED_REFILL_MIN_ARENAS
+        && max_prompt_tokens <= AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS
+        && prefill_chunk >= max_prompt_tokens
+        && requests.iter().all(|request| {
+            request.request.tokens.unwrap_or(args.tokens)
+                <= AUTOMATIC_DENSE_RAGGED_REFILL_MAX_GENERATION_TOKENS
+        })
+}
+
+fn automatic_dense_ragged_refill_arena_schedule_qualifies<const WIDTH: usize>(
+    arena: &RefillArenaPlan<WIDTH>,
+    requests: &[PreparedJsonlRequest],
+) -> Result<bool> {
+    let physical_slots = arena
+        .simulated_physical_steps
+        .checked_mul(WIDTH)
+        .context("automatic ragged refill physical slot overflow")?;
+    let utilization_qualifies = arena
+        .simulated_productive_transitions
+        .checked_mul(AUTOMATIC_DENSE_RAGGED_REFILL_MIN_UTILIZATION_DENOMINATOR)
+        .context("automatic ragged refill utilization overflow")?
+        >= physical_slots
+            .checked_mul(AUTOMATIC_DENSE_RAGGED_REFILL_MIN_UTILIZATION_NUMERATOR)
+            .context("automatic ragged refill utilization overflow")?;
+    let savings_qualifies = arena
+        .simulated_physical_steps
+        .checked_mul(AUTOMATIC_DENSE_RAGGED_REFILL_MIN_SAVINGS_DENOMINATOR)
+        .context("automatic ragged refill savings overflow")?
+        <= arena
+            .requested_two_wave_steps
+            .checked_mul(
+                AUTOMATIC_DENSE_RAGGED_REFILL_MIN_SAVINGS_DENOMINATOR
+                    - AUTOMATIC_DENSE_RAGGED_REFILL_MIN_SAVINGS_NUMERATOR,
+            )
+            .context("automatic ragged refill savings overflow")?;
+    let charged_prefill_tokens =
+        arena
+            .request_indices
+            .iter()
+            .try_fold(0usize, |total, &index| {
+                total
+                    .checked_add(requests[index].prompt_ids.len())
+                    .context("automatic ragged refill arena charge overflow")
+            })?;
+    let arena_charge_qualifies = arena.simulated_productive_transitions > 0
+        && charged_prefill_tokens
+            <= arena
+                .simulated_productive_transitions
+                .checked_mul(AUTOMATIC_DENSE_RAGGED_REFILL_MAX_ARENA_PREFILL_PER_TRANSITION)
+                .context("automatic ragged refill arena charge comparison overflow")?;
+    Ok(utilization_qualifies && savings_qualifies && arena_charge_qualifies)
+}
+
+fn automatic_dense_ragged_refill_file_charge_qualifies(
+    charged_prefill_tokens: usize,
+    productive_transitions: usize,
+) -> Result<bool> {
+    Ok(productive_transitions > 0
+        && charged_prefill_tokens
+            <= productive_transitions
+                .checked_mul(AUTOMATIC_DENSE_RAGGED_REFILL_MAX_PREFILL_PER_TRANSITION)
+                .context("automatic ragged refill charge comparison overflow")?)
+}
+
+fn automatic_dense_ragged_refill_charge_qualifies<const WIDTH: usize>(
+    plan: &CohortPlan<WIDTH>,
+    requests: &[PreparedJsonlRequest],
+) -> Result<bool> {
+    if plan.refill_arenas < AUTOMATIC_DENSE_RAGGED_REFILL_MIN_ARENAS
+        || plan.refill_requests != requests.len()
+        || plan.serial_fallback_requests > 0
+        || plan
+            .work
+            .iter()
+            .any(|work| !matches!(work, PlannedWork::RefillArena(_)))
+    {
+        return Ok(false);
+    }
+    let mut productive_transitions = 0usize;
+    for work in &plan.work {
+        let PlannedWork::RefillArena(arena) = work else {
+            unreachable!("automatic ragged refill charge checked arena-only work")
+        };
+        if !automatic_dense_ragged_refill_arena_schedule_qualifies(arena, requests)? {
+            return Ok(false);
+        }
+        productive_transitions = productive_transitions
+            .checked_add(arena.simulated_productive_transitions)
+            .context("automatic ragged refill transition charge overflow")?;
+    }
+    let charged_prefill_tokens = requests.iter().try_fold(0usize, |total, request| {
+        total
+            .checked_add(request.prompt_ids.len())
+            .context("automatic ragged refill prefill charge overflow")
+    })?;
+    // Selection and publication are file-wide, and prompt prefill is additive
+    // across arenas. Keep schedule quality local, but charge the measured whole
+    // file so a shallow arena can be amortized by a deeper arena in the same
+    // admitted transaction.
+    automatic_dense_ragged_refill_file_charge_qualifies(
+        charged_prefill_tokens,
+        productive_transitions,
+    )
+}
+
 fn automatic_dense_ragged_charge_qualifies<const WIDTH: usize>(
     work: &[PlannedWork<WIDTH>],
     requests: &[PreparedJsonlRequest],
@@ -1355,7 +1558,7 @@ fn plan_request_work_with_policy<const WIDTH: usize>(
     let prefix_packing = prefix_packing_enabled(true)?;
     let prefix_fanout_boundary_policy = qwen_prefix_fanout_boundary_policy()?;
     if ragged_prompt_policy == RaggedPromptPolicy::AutomaticDenseCharged {
-        let baseline = plan_request_work_configured(
+        let mut baseline = plan_request_work_configured(
             requests,
             args,
             prefix_packing,
@@ -1363,30 +1566,68 @@ fn plan_request_work_with_policy<const WIDTH: usize>(
             RaggedPromptPolicy::Disabled,
             fixed_cohort_refill_policy::<WIDTH>(false, automatic_execution)?,
         )?;
-        if !automatic_dense_ragged_envelope_qualifies::<WIDTH>(requests, args) {
-            let mut baseline = baseline;
+        if automatic_dense_ragged_envelope_qualifies::<WIDTH>(requests, args) {
+            let candidate = plan_request_work_configured(
+                requests,
+                args,
+                prefix_packing,
+                prefix_fanout_boundary_policy,
+                ragged_prompt_policy,
+                DenseRefillPolicy::Disabled,
+            )?;
+            if candidate.full_cohorts > baseline.full_cohorts
+                && candidate.serial_fallback_requests == 0
+            {
+                if automatic_dense_ragged_charge_qualifies(&candidate.work, requests, args)? {
+                    return Ok(candidate);
+                }
+                baseline.ragged_prompt_plan_decision =
+                    RaggedPromptDecision::AutomaticChargeRejected;
+            } else {
+                baseline.ragged_prompt_plan_decision = RaggedPromptDecision::AutomaticNoCohortGain;
+            }
+        } else {
             baseline.ragged_prompt_plan_decision = RaggedPromptDecision::AutomaticEnvelopeRejected;
+        }
+        if !automatic_dense_ragged_refill_applicable::<WIDTH>(requests, args) {
             return Ok(baseline);
         }
-        let candidate = plan_request_work_configured(
+        if !automatic_dense_ragged_refill_enabled()? {
+            baseline.ragged_prompt_plan_decision = RaggedPromptDecision::AutomaticRefillDisabled;
+            return Ok(baseline);
+        }
+        if !automatic_dense_ragged_refill_envelope_qualifies::<WIDTH>(requests, args) {
+            baseline.ragged_prompt_plan_decision =
+                RaggedPromptDecision::AutomaticRefillEnvelopeRejected;
+            return Ok(baseline);
+        }
+        let mut candidate = plan_request_work_configured(
             requests,
             args,
             prefix_packing,
             prefix_fanout_boundary_policy,
             ragged_prompt_policy,
-            DenseRefillPolicy::Disabled,
+            DenseRefillPolicy::AutomaticChargedRagged,
         )?;
-        if candidate.full_cohorts <= baseline.full_cohorts || candidate.serial_fallback_requests > 0
+        if baseline.full_cohorts > 0
+            || baseline.serial_fallback_requests != requests.len()
+            || candidate.full_cohorts <= baseline.full_cohorts
+            || candidate.serial_fallback_requests > 0
         {
-            let mut baseline = baseline;
-            baseline.ragged_prompt_plan_decision = RaggedPromptDecision::AutomaticNoCohortGain;
+            baseline.ragged_prompt_plan_decision =
+                RaggedPromptDecision::AutomaticRefillNoCohortGain;
             return Ok(baseline);
         }
-        if !automatic_dense_ragged_charge_qualifies(&candidate.work, requests, args)? {
-            let mut baseline = baseline;
-            baseline.ragged_prompt_plan_decision = RaggedPromptDecision::AutomaticChargeRejected;
+        if !automatic_dense_ragged_refill_charge_qualifies(&candidate, requests)? {
+            baseline.ragged_prompt_plan_decision =
+                RaggedPromptDecision::AutomaticRefillChargeRejected;
             return Ok(baseline);
         }
+        candidate.ragged_prompt_plan_decision = RaggedPromptDecision::AutomaticRefillAdmitted;
+        candidate.automatic_refill_fallback = Some(AutomaticRefillFallback {
+            work: baseline.work,
+            prefix_affinity_batches: baseline.prefix_affinity_batches,
+        });
         return Ok(candidate);
     }
     plan_request_work_configured(
@@ -1605,6 +1846,7 @@ fn plan_request_work_configured<const WIDTH: usize>(
         refill_arenas,
         refill_requests,
         max_execution_capacity,
+        automatic_refill_fallback: None,
     })
 }
 
@@ -1613,9 +1855,13 @@ pub(super) fn plan_summary<const WIDTH: usize>(
     args: &Args,
 ) -> Result<CohortPlanSummary> {
     let plan = plan_request_work::<WIDTH>(requests, args)?;
+    let dense_refill = WIDTH == DENSE_BATCH8_WIDTH;
     Ok(CohortPlanSummary {
         ragged_prompt_policy: Some(plan.ragged_prompt_policy.as_str()),
         ragged_prompt_plan_decision: Some(plan.ragged_prompt_plan_decision.as_str()),
+        refill_policy: dense_refill.then_some(plan.refill_policy.as_str()),
+        planned_refill_arenas: dense_refill.then_some(plan.refill_arenas),
+        planned_refill_requests: dense_refill.then_some(plan.refill_requests),
         full_cohorts: plan.full_cohorts,
         economics_rejected_cohorts: plan.economics_rejected_cohorts,
         serial_fallback_requests: plan.serial_fallback_requests,
@@ -1865,6 +2111,41 @@ fn refill_arena_memory_admission<const WIDTH: usize, E: FixedCohortExecutor<WIDT
         .map_err(anyhow::Error::from)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AutomaticRefillAdmission {
+    NotApplicable,
+    Admitted,
+    PlannerBaselineFallback { rejected_arenas: usize },
+}
+
+fn admit_automatic_refill_plan<const WIDTH: usize>(
+    mut plan: CohortPlan<WIDTH>,
+    mut admitted: impl FnMut(&RefillArenaPlan<WIDTH>) -> Result<bool>,
+) -> Result<(CohortPlan<WIDTH>, AutomaticRefillAdmission)> {
+    if plan.automatic_refill_fallback.is_none() {
+        return Ok((plan, AutomaticRefillAdmission::NotApplicable));
+    }
+    for work in &plan.work {
+        if let PlannedWork::RefillArena(arena) = work
+            && !admitted(arena)?
+        {
+            let rejected_arenas = plan.refill_arenas;
+            let fallback = plan
+                .automatic_refill_fallback
+                .take()
+                .expect("automatic refill plan carried a planner baseline fallback");
+            plan.work = fallback.work;
+            plan.prefix_affinity_batches = fallback.prefix_affinity_batches;
+            return Ok((
+                plan,
+                AutomaticRefillAdmission::PlannerBaselineFallback { rejected_arenas },
+            ));
+        }
+    }
+    plan.automatic_refill_fallback = None;
+    Ok((plan, AutomaticRefillAdmission::Admitted))
+}
+
 fn rewrite_unadmitted_refill_arenas<const WIDTH: usize>(
     work: Vec<PlannedWork<WIDTH>>,
     mut admitted: impl FnMut(&RefillArenaPlan<WIDTH>) -> Result<bool>,
@@ -1967,18 +2248,35 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         .context("load producer-declared stop tokens")?;
     let mut denied_admissions = Vec::new();
     let mut denied_refill_admissions = Vec::new();
-    let (planned_work, rejected_refill_arenas) =
-        rewrite_unadmitted_refill_arenas(plan.work, |arena| {
-            let admission =
-                refill_arena_memory_admission::<WIDTH, E>(loaded, requests, args, arena)?;
-            if !admission.admitted {
-                denied_refill_admissions.push((
-                    arena.request_indices.first().copied().unwrap_or(0),
-                    admission,
-                ));
-            }
-            Ok(admission.admitted)
-        })?;
+    let (plan, automatic_refill_admission) = admit_automatic_refill_plan(plan, |arena| {
+        let admission = refill_arena_memory_admission::<WIDTH, E>(loaded, requests, args, arena)?;
+        if !admission.admitted {
+            denied_refill_admissions.push((
+                arena.request_indices.first().copied().unwrap_or(0),
+                admission,
+            ));
+        }
+        Ok(admission.admitted)
+    })?;
+    let (planned_work, rejected_refill_arenas) = match automatic_refill_admission {
+        AutomaticRefillAdmission::Admitted => (plan.work, 0),
+        AutomaticRefillAdmission::PlannerBaselineFallback { rejected_arenas } => {
+            (plan.work, rejected_arenas)
+        }
+        AutomaticRefillAdmission::NotApplicable => {
+            rewrite_unadmitted_refill_arenas(plan.work, |arena| {
+                let admission =
+                    refill_arena_memory_admission::<WIDTH, E>(loaded, requests, args, arena)?;
+                if !admission.admitted {
+                    denied_refill_admissions.push((
+                        arena.request_indices.first().copied().unwrap_or(0),
+                        admission,
+                    ));
+                }
+                Ok(admission.admitted)
+            })?
+        }
+    };
     let (planned_work, rejected_batches) = rewrite_unadmitted_batches(planned_work, |indices| {
         let cohort = indices.map(|index| &requests[index]);
         let admission = fixed_cohort_memory_admission::<WIDTH, E>(
@@ -1993,6 +2291,7 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         Ok(admission.admitted)
     })?;
     let memory_rejected_cohorts = rejected_batches.len();
+    let denied_refill_arena_count = denied_refill_admissions.len();
     for (indices, admission) in denied_admissions {
         eprintln!(
             "{}_admission: cohort_first_request={} outcome=serial_fallback reason={} required_bytes={:?} working_set_headroom_bytes={:?} process_limit_remaining_bytes={:?}",
@@ -2006,7 +2305,15 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     }
     for (first_request, admission) in denied_refill_admissions {
         eprintln!(
-            "dense_batch8_refill_admission: arena_first_request={first_request} outcome=cohort_fallback reason={} required_bytes={:?} working_set_headroom_bytes={:?} process_limit_remaining_bytes={:?}",
+            "dense_batch8_refill_admission: arena_first_request={first_request} outcome={} reason={} required_bytes={:?} working_set_headroom_bytes={:?} process_limit_remaining_bytes={:?}",
+            if matches!(
+                automatic_refill_admission,
+                AutomaticRefillAdmission::PlannerBaselineFallback { .. }
+            ) {
+                "automatic_planner_baseline_fallback"
+            } else {
+                "cohort_fallback"
+            },
             admission.reason.as_str(),
             admission.required_bytes,
             admission.working_set_headroom_bytes,
@@ -2210,8 +2517,29 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         planned_refill_requests: refill_telemetry_enabled.then_some(plan.refill_requests),
         realized_refill_arenas: refill_telemetry_enabled.then_some(realized_refill_arenas),
         realized_refill_requests: refill_telemetry_enabled.then_some(realized_refill_requests),
+        realized_refill_memory_denied_arenas: refill_telemetry_enabled
+            .then_some(denied_refill_arena_count),
         realized_refill_memory_fallback_arenas: refill_telemetry_enabled
             .then_some(rejected_refill_arenas),
+        automatic_refill_transaction_outcome: match automatic_refill_admission {
+            AutomaticRefillAdmission::NotApplicable => None,
+            AutomaticRefillAdmission::Admitted => Some("admitted"),
+            AutomaticRefillAdmission::PlannerBaselineFallback { .. } => {
+                Some("planner_baseline_fallback")
+            }
+        },
+        automatic_refill_min_arenas: refill_telemetry_enabled
+            .then_some(AUTOMATIC_DENSE_RAGGED_REFILL_MIN_ARENAS),
+        automatic_refill_max_prompt_tokens: refill_telemetry_enabled
+            .then_some(AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS),
+        automatic_refill_max_generation_tokens: refill_telemetry_enabled
+            .then_some(AUTOMATIC_DENSE_RAGGED_REFILL_MAX_GENERATION_TOKENS),
+        automatic_refill_max_file_prefill_per_transition: refill_telemetry_enabled
+            .then_some(AUTOMATIC_DENSE_RAGGED_REFILL_MAX_PREFILL_PER_TRANSITION),
+        automatic_refill_max_arena_prefill_per_transition: refill_telemetry_enabled
+            .then_some(AUTOMATIC_DENSE_RAGGED_REFILL_MAX_ARENA_PREFILL_PER_TRANSITION),
+        automatic_refill_min_transition_utilization: refill_telemetry_enabled.then_some("9/10"),
+        automatic_refill_min_idealized_step_savings: refill_telemetry_enabled.then_some("3/20"),
         compatibility_buckets: plan.compatibility_buckets,
         planned_candidate_cohorts: plan.candidate_cohorts,
         realized_prefix_affinity_cohorts,
@@ -3506,6 +3834,246 @@ mod tests {
         assert_eq!(explicit.full_cohorts, 1);
     }
 
+    fn automatic_ragged_refill_requests(
+        max_prompt_tokens: usize,
+        max_generation_tokens: usize,
+    ) -> Vec<PreparedJsonlRequest> {
+        let prompt_tokens = [14, 15, 17, 21, 29, 45, 77, max_prompt_tokens];
+        let measured_limits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 16, 20, 24, 28, 32, 40];
+        measured_limits
+            .into_iter()
+            .cycle()
+            .take(DENSE_BATCH8_WIDTH * 4)
+            .enumerate()
+            .map(|(index, limit)| {
+                let mut request = prepared(
+                    &format!("auto-refill-{index}"),
+                    &vec![7; prompt_tokens[index % prompt_tokens.len()]],
+                );
+                request.request.tokens = Some(limit.min(max_generation_tokens));
+                request
+            })
+            .collect()
+    }
+
+    #[test]
+    fn automatic_dense_ragged_refill_is_bounded_and_charged() {
+        let mut args = test_args();
+        args.execution_mode = Some(execution_selector::ExecutionModeArg::Auto);
+        args.prefill_chunk = PrefillChunkArg::Fixed(AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS);
+        let requests = automatic_ragged_refill_requests(
+            AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS,
+            AUTOMATIC_DENSE_RAGGED_REFILL_MAX_GENERATION_TOKENS,
+        );
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticRefillAdmitted
+        );
+        assert_eq!(
+            plan.refill_policy,
+            DenseRefillPolicy::AutomaticChargedRagged
+        );
+        assert_eq!(plan.refill_arenas, 2);
+        assert_eq!(plan.refill_requests, requests.len());
+        assert_eq!(plan.serial_fallback_requests, 0);
+        assert!(plan.automatic_refill_fallback.is_some());
+        assert!(
+            plan.work
+                .iter()
+                .all(|work| matches!(work, PlannedWork::RefillArena(_)))
+        );
+
+        let summary = plan_summary::<DENSE_BATCH8_WIDTH>(&requests, &args).unwrap();
+        assert_eq!(
+            summary.ragged_prompt_plan_decision,
+            Some("automatic_dense_refill_admitted")
+        );
+        assert_eq!(summary.full_cohorts, 4);
+        assert_eq!(summary.serial_fallback_requests, 0);
+
+        let underfilled = automatic_ragged_refill_requests(
+            AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS,
+            AUTOMATIC_DENSE_RAGGED_REFILL_MAX_GENERATION_TOKENS,
+        )
+        .into_iter()
+        .take(DENSE_BATCH8_WIDTH * 4 - 1)
+        .collect::<Vec<_>>();
+        assert!(!automatic_dense_ragged_refill_applicable::<
+            DENSE_BATCH8_WIDTH,
+        >(&underfilled, &args,));
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &underfilled,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_ne!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticRefillAdmitted
+        );
+
+        let mut too_long = automatic_ragged_refill_requests(
+            AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS,
+            AUTOMATIC_DENSE_RAGGED_REFILL_MAX_GENERATION_TOKENS,
+        );
+        too_long[7].prompt_ids.push(7);
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &too_long,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticRefillEnvelopeRejected
+        );
+
+        let mut too_much_generation = automatic_ragged_refill_requests(
+            AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS,
+            AUTOMATIC_DENSE_RAGGED_REFILL_MAX_GENERATION_TOKENS,
+        );
+        too_much_generation[0].request.tokens =
+            Some(AUTOMATIC_DENSE_RAGGED_REFILL_MAX_GENERATION_TOKENS + 1);
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &too_much_generation,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticRefillEnvelopeRejected
+        );
+
+        let expensive =
+            automatic_ragged_refill_requests(AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS, 8);
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &expensive,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticRefillChargeRejected
+        );
+    }
+
+    #[test]
+    fn automatic_dense_ragged_refill_schedule_boundaries_are_inclusive() {
+        let requests = (0..DENSE_BATCH8_WIDTH * 2)
+            .map(|index| prepared(&format!("arena-boundary-{index}"), &[7; 18]))
+            .collect::<Vec<_>>();
+        let arena = |simulated_physical_steps, simulated_productive_transitions, two_wave| {
+            RefillArenaPlan::<DENSE_BATCH8_WIDTH> {
+                fallback_work: Vec::new(),
+                request_indices: (0..DENSE_BATCH8_WIDTH * 2).collect(),
+                shared_capacity: 64,
+                simulated_physical_steps,
+                simulated_productive_transitions,
+                requested_two_wave_steps: two_wave,
+            }
+        };
+        assert!(
+            automatic_dense_ragged_refill_arena_schedule_qualifies(&arena(10, 72, 12), &requests,)
+                .unwrap()
+        );
+        assert!(
+            !automatic_dense_ragged_refill_arena_schedule_qualifies(&arena(10, 71, 12), &requests,)
+                .unwrap()
+        );
+        assert!(
+            automatic_dense_ragged_refill_arena_schedule_qualifies(&arena(17, 136, 20), &requests,)
+                .unwrap()
+        );
+        assert!(
+            !automatic_dense_ragged_refill_arena_schedule_qualifies(
+                &arena(18, 144, 20),
+                &requests,
+            )
+            .unwrap()
+        );
+
+        let maximum_arena_charge = (0..DENSE_BATCH8_WIDTH * 2)
+            .map(|index| prepared(&format!("arena-charge-{index}"), &[7; 32]))
+            .collect::<Vec<_>>();
+        assert!(
+            automatic_dense_ragged_refill_arena_schedule_qualifies(
+                &arena(2, 16, 4),
+                &maximum_arena_charge,
+            )
+            .unwrap()
+        );
+        let above_arena_charge = (0..DENSE_BATCH8_WIDTH * 2)
+            .map(|index| {
+                let length = if index == 0 { 33 } else { 32 };
+                prepared(&format!("arena-charge-over-{index}"), &vec![7; length])
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !automatic_dense_ragged_refill_arena_schedule_qualifies(
+                &arena(2, 16, 4),
+                &above_arena_charge,
+            )
+            .unwrap()
+        );
+
+        assert!(automatic_dense_ragged_refill_file_charge_qualifies(90, 10).unwrap());
+        assert!(!automatic_dense_ragged_refill_file_charge_qualifies(91, 10).unwrap());
+        assert!(!automatic_dense_ragged_refill_file_charge_qualifies(0, 0).unwrap());
+    }
+
+    #[test]
+    fn automatic_dense_ragged_refill_memory_denial_restores_planner_baseline() {
+        let mut args = test_args();
+        args.execution_mode = Some(execution_selector::ExecutionModeArg::Auto);
+        args.prefill_chunk = PrefillChunkArg::Fixed(AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS);
+        let requests = automatic_ragged_refill_requests(
+            AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS,
+            AUTOMATIC_DENSE_RAGGED_REFILL_MAX_GENERATION_TOKENS,
+        );
+        let candidate = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        let baseline = plan_request_work_configured::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            true,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            RaggedPromptPolicy::Disabled,
+            DenseRefillPolicy::ShortSerialFallbackRescue,
+        )
+        .unwrap();
+        let mut admission_calls = 0usize;
+        let (fallback, admission) = admit_automatic_refill_plan(candidate, |_| {
+            admission_calls += 1;
+            Ok(admission_calls == 1)
+        })
+        .unwrap();
+        assert_eq!(admission_calls, 2);
+        assert_eq!(
+            admission,
+            AutomaticRefillAdmission::PlannerBaselineFallback { rejected_arenas: 2 }
+        );
+        assert_eq!(fallback.work, baseline.work);
+        assert_eq!(fallback.refill_arenas, 2);
+        assert_eq!(fallback.refill_requests, requests.len());
+        assert_eq!(
+            fallback.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticRefillAdmitted
+        );
+        assert!(fallback.automatic_refill_fallback.is_none());
+    }
+
     #[test]
     fn automatic_dense_ragged_charges_every_proposed_cohort() {
         let mut args = test_args();
@@ -3816,9 +4384,9 @@ mod tests {
     ) -> PlannerTelemetry {
         let policy = refill_telemetry.then_some(policy).flatten();
         PlannerTelemetry {
-            schema_version: if refill_telemetry { 8 } else { 6 },
+            schema_version: if refill_telemetry { 9 } else { 6 },
             backend: if refill_telemetry {
-                "dense_qwen_fixed_cohort_planner_v8"
+                "dense_qwen_fixed_cohort_planner_v9"
             } else {
                 "qwen_moe_fixed_cohort_planner_v6"
             },
@@ -3839,7 +4407,21 @@ mod tests {
             planned_refill_requests: refill_telemetry.then_some(0),
             realized_refill_arenas: refill_telemetry.then_some(0),
             realized_refill_requests: refill_telemetry.then_some(0),
+            realized_refill_memory_denied_arenas: refill_telemetry.then_some(0),
             realized_refill_memory_fallback_arenas: refill_telemetry.then_some(0),
+            automatic_refill_transaction_outcome: None,
+            automatic_refill_min_arenas: refill_telemetry
+                .then_some(AUTOMATIC_DENSE_RAGGED_REFILL_MIN_ARENAS),
+            automatic_refill_max_prompt_tokens: refill_telemetry
+                .then_some(AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS),
+            automatic_refill_max_generation_tokens: refill_telemetry
+                .then_some(AUTOMATIC_DENSE_RAGGED_REFILL_MAX_GENERATION_TOKENS),
+            automatic_refill_max_file_prefill_per_transition: refill_telemetry
+                .then_some(AUTOMATIC_DENSE_RAGGED_REFILL_MAX_PREFILL_PER_TRANSITION),
+            automatic_refill_max_arena_prefill_per_transition: refill_telemetry
+                .then_some(AUTOMATIC_DENSE_RAGGED_REFILL_MAX_ARENA_PREFILL_PER_TRANSITION),
+            automatic_refill_min_transition_utilization: refill_telemetry.then_some("9/10"),
+            automatic_refill_min_idealized_step_savings: refill_telemetry.then_some("3/20"),
             compatibility_buckets: 1,
             planned_candidate_cohorts: 2,
             realized_prefix_affinity_cohorts: 0,
@@ -3866,7 +4448,7 @@ mod tests {
             true,
         ))
         .unwrap();
-        assert_eq!(bounded["schema_version"], 8);
+        assert_eq!(bounded["schema_version"], 9);
         assert_eq!(bounded["refill_policy"], "short_serial_fallback_rescue");
         assert_eq!(bounded["refill_default_max_prompt_tokens"], 64);
 
@@ -3896,7 +4478,16 @@ mod tests {
             "planned_refill_requests",
             "realized_refill_arenas",
             "realized_refill_requests",
+            "realized_refill_memory_denied_arenas",
             "realized_refill_memory_fallback_arenas",
+            "automatic_refill_transaction_outcome",
+            "automatic_refill_min_arenas",
+            "automatic_refill_max_prompt_tokens",
+            "automatic_refill_max_generation_tokens",
+            "automatic_refill_max_file_prefill_per_transition",
+            "automatic_refill_max_arena_prefill_per_transition",
+            "automatic_refill_min_transition_utilization",
+            "automatic_refill_min_idealized_step_savings",
         ] {
             assert!(moe.get(key).is_none(), "MoE telemetry retained {key}");
         }

@@ -24118,3 +24118,32 @@ decode materially improves relative to B2, replacement prefill overlaps active
 decode, or a changed executor has an independent whole-request ceiling above
 `1.10x`. Evidence:
 `docs/bench/2026-08-12-qwen-moe-ragged-128-screen/README.md`.
+
+## 2026-08-12 — Automatic Dense Ragged Refill GO
+
+Status: `--execution-mode auto` now composes charged ragged-frontier planning
+with bounded two-wave dense B8 refill for one measured mixed-limit slice. The
+candidate must cover the complete file with at least two 16-request arenas,
+keep prompts at or below 256 tokens and generation limits at or below 40, fit
+prefill in one chunk, and leave no static or serial remainder. Every arena must
+clear 90% simulated utilization, 15% idealized two-wave step savings, and a 32x
+prompt/transition cap; the complete file must clear a 9x charge.
+
+Final-source counterbalanced same-binary wall moves `2.14/2.15 -> 1.78/1.78 s`
+on Qwen3.5 0.8B Q8, a median `1.205x`, and
+`27.91/28.19 -> 19.12/19.71 s` on Qwen3.6 27B Q4, a median `1.445x`.
+Complete JSONL is byte-identical and every process reports zero swaps. Phrase the authority as bounded median qualification.
+
+The file-wide charge is intentional. A measured 256-token boundary improves
+`2.35 -> 1.99 s` (`1.181x`) while its shallow/deep arena charges are 31.54x and
+5.10x and its whole-file charge is 8.79x. The local 32x cap bounds subsidy while
+preserving that authority. A one-arena charged cell reaches only median `1.110x`, which
+freezes two arenas as the automatic minimum.
+
+Selector schema 3 and dense planner schema 9 expose the joint decision and full
+envelope. Runtime admission is all-or-nothing for automatic joint plans: one
+denial restores the captured planner baseline, with physical denial, transaction
+fallback, and planned/realized counts reported separately. Either
+`QWEN_FIXED_COHORT_RAGGED_PROMPTS=0` or `QWEN_DENSE_BATCH8_REFILL=0` is rollback.
+Qwen MoE and root-aware refill remain closed. Evidence:
+`docs/bench/2026-08-12-automatic-dense-ragged-refill/README.md`.

@@ -8,11 +8,15 @@ const TRANSIENT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const PREFIX_FANOUT_MIN_TOKENS: usize = 256;
 const MIN_REQUESTED_TRANSITION_UTILIZATION_NUMERATOR: usize = 3;
 const MIN_REQUESTED_TRANSITION_UTILIZATION_DENOMINATOR: usize = 4;
+const REFILL_MIN_STEP_SAVINGS_NUMERATOR: usize = 1;
+const REFILL_MIN_STEP_SAVINGS_DENOMINATOR: usize = 10;
 const DENSE_PREFIX_FANOUT_ENV: &str = "QWEN_DENSE_BATCH8_PREFIX_FANOUT";
 const MOE_PREFIX_FANOUT_ENV: &str = "QWEN_MOE_BATCH16_PREFIX_FANOUT";
 const PREFIX_PACKING_ENV: &str = "QWEN_FIXED_COHORT_PREFIX_PACKING";
 // Experimental and default-off until private-suffix prefill has a cost model.
 const RAGGED_PROMPTS_ENV: &str = "QWEN_FIXED_COHORT_RAGGED_PROMPTS";
+// Charged only for dense B8; synchronous MoE B16 refill loses to B2.
+const DENSE_REFILL_ENV: &str = "QWEN_DENSE_BATCH8_REFILL";
 
 #[derive(Clone, Copy, Debug)]
 struct FixedCohortStep<const WIDTH: usize> {
@@ -29,6 +33,7 @@ trait FixedCohortExecutor<const WIDTH: usize> {
     const PLANNER_TELEMETRY_PREFIX: &'static str;
     const TELEMETRY_SCHEMA_VERSION: u32;
     const PLANNER_TELEMETRY_SCHEMA_VERSION: u32;
+    const REFILL_TELEMETRY: bool = false;
 
     fn executor_scratch_upper_bytes(loaded: &LoadedModel) -> Result<u64>;
 
@@ -58,11 +63,12 @@ impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_>
     const DISPLAY_NAME: &'static str = "dense B=8";
     const PREFIX_FANOUT_ENV: &'static str = DENSE_PREFIX_FANOUT_ENV;
     const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v6";
-    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v5";
+    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v6";
     const TELEMETRY_PREFIX: &'static str = "dense_batch8";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "dense_batch8_planner";
     const TELEMETRY_SCHEMA_VERSION: u32 = 6;
-    const PLANNER_TELEMETRY_SCHEMA_VERSION: u32 = 5;
+    const PLANNER_TELEMETRY_SCHEMA_VERSION: u32 = 6;
+    const REFILL_TELEMETRY: bool = true;
 
     fn executor_scratch_upper_bytes(loaded: &LoadedModel) -> Result<u64> {
         Ok(loaded.dense_batch8_scratch_upper_bytes()?)
@@ -154,9 +160,26 @@ enum CohortCompatibility {
     RaggedPrompts,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RefillFallback<const WIDTH: usize> {
+    Batch([usize; WIDTH]),
+    Serial(usize),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RefillArenaPlan<const WIDTH: usize> {
+    fallback_work: Vec<RefillFallback<WIDTH>>,
+    request_indices: Vec<usize>,
+    shared_capacity: usize,
+    simulated_physical_steps: usize,
+    simulated_productive_transitions: usize,
+    requested_two_wave_steps: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum PlannedWork<const WIDTH: usize> {
     Batch([usize; WIDTH]),
+    RefillArena(RefillArenaPlan<WIDTH>),
     Serial(usize),
 }
 
@@ -164,6 +187,11 @@ impl<const WIDTH: usize> PlannedWork<WIDTH> {
     fn first_request_index(&self) -> usize {
         match self {
             Self::Batch(indices) => *indices.iter().min().expect("nonempty fixed cohort"),
+            Self::RefillArena(plan) => *plan
+                .request_indices
+                .iter()
+                .min()
+                .expect("nonempty refill arena"),
             Self::Serial(index) => *index,
         }
     }
@@ -211,6 +239,10 @@ struct CohortPlan<const WIDTH: usize> {
     economics_rejected_cohorts: usize,
     serial_fallback_requests: usize,
     prefix_affinity_batches: Vec<[usize; WIDTH]>,
+    refill_configured: bool,
+    refill_effective: bool,
+    refill_arenas: usize,
+    refill_requests: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -292,7 +324,7 @@ impl LaneProgress {
         }
     }
 
-    fn validate_complete(&self, physical_batch_steps: usize) -> Result<()> {
+    fn validate_request_complete(&self) -> Result<()> {
         ensure!(
             self.stop_reason.is_some(),
             "fixed-cohort lane did not terminate"
@@ -301,6 +333,11 @@ impl LaneProgress {
             self.logical_transitions.checked_add(1) == Some(self.generated.len()),
             "fixed-cohort lane violated N-1 transition semantics"
         );
+        Ok(())
+    }
+
+    fn validate_complete(&self, physical_batch_steps: usize) -> Result<()> {
+        self.validate_request_complete()?;
         ensure!(
             self.logical_transitions + self.padding_transitions == physical_batch_steps,
             "fixed-cohort physical transition accounting drifted"
@@ -310,6 +347,7 @@ impl LaneProgress {
 }
 
 struct Lane {
+    request_index: usize,
     id: String,
     prompt_tokens: usize,
     sequence: Sequence,
@@ -384,6 +422,37 @@ struct CohortTelemetry {
 }
 
 #[derive(Debug, Serialize)]
+struct RefillTelemetry {
+    schema_version: u32,
+    backend: &'static str,
+    arena_index: usize,
+    width: usize,
+    requests: usize,
+    shared_capacity_tokens: usize,
+    simulated_physical_steps: usize,
+    simulated_productive_transitions: usize,
+    requested_two_wave_steps: usize,
+    physical_batch_steps: usize,
+    productive_transitions: usize,
+    padding_transitions: usize,
+    physical_transition_utilization: f64,
+    replacements: usize,
+    prefill_tokens: usize,
+    initial_prefill_model_ms: f64,
+    initial_prepare_wall_ms: f64,
+    replacement_prefill_model_ms: f64,
+    replacement_prepare_wall_ms: f64,
+    arena_wall_ms: f64,
+    transition_and_refill_wall_ms: f64,
+    batch_transition_ms: f64,
+    executor_gpu_ms: Option<f64>,
+    generated_tokens: usize,
+    productive_transition_tps: f64,
+    arena_generated_tps: f64,
+    output_order: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 struct PlannerTelemetry {
     schema_version: u32,
     backend: &'static str,
@@ -393,6 +462,20 @@ struct PlannerTelemetry {
     prefix_fanout_boundary_policy: &'static str,
     ragged_prompts_enabled: bool,
     ragged_packing_strategy: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refill_configured: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refill_effective: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planned_refill_arenas: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    planned_refill_requests: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    realized_refill_arenas: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    realized_refill_requests: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    realized_refill_memory_fallback_arenas: Option<usize>,
     compatibility_buckets: usize,
     planned_candidate_cohorts: usize,
     realized_prefix_affinity_cohorts: usize,
@@ -569,6 +652,28 @@ fn parse_ragged_prompts_enabled(value: Option<&str>, default_enabled: bool) -> R
     }
 }
 
+fn dense_refill_enabled(default_enabled: bool) -> Result<bool> {
+    let value = std::env::var_os(DENSE_REFILL_ENV)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| anyhow!("{DENSE_REFILL_ENV} must be valid UTF-8"))
+        })
+        .transpose()?;
+    parse_dense_refill_enabled(value.as_deref(), default_enabled)
+}
+
+fn parse_dense_refill_enabled(value: Option<&str>, default_enabled: bool) -> Result<bool> {
+    let Some(value) = value else {
+        return Ok(default_enabled);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => bail!("{DENSE_REFILL_ENV} must be a boolean"),
+    }
+}
+
 fn cohort_compatibility(
     request: &PreparedJsonlRequest,
     args: &Args,
@@ -667,6 +772,10 @@ fn estimated_transition_slots<const WIDTH: usize>(
                 .unwrap_or(0)
                 .checked_mul(WIDTH)
                 .context("fixed-cohort batch transition estimate overflow")?,
+            PlannedWork::RefillArena(plan) => plan
+                .simulated_physical_steps
+                .checked_mul(WIDTH)
+                .context("refill arena transition estimate overflow")?,
             PlannedWork::Serial(index) => requested_tokens[*index].saturating_sub(1),
         };
         total
@@ -688,6 +797,10 @@ fn estimate_capacity_slots<const WIDTH: usize>(
                 .unwrap_or(0)
                 .checked_mul(WIDTH)
                 .context("fixed-cohort batch capacity estimate overflow")?,
+            PlannedWork::RefillArena(plan) => plan
+                .shared_capacity
+                .checked_mul(WIDTH)
+                .context("refill arena capacity estimate overflow")?,
             PlannedWork::Serial(index) => capacities[*index],
         };
         total
@@ -758,6 +871,213 @@ fn plan_capacity_bucket<const WIDTH: usize>(
     plan_ordered_bucket(indices, requested_tokens, capacities)
 }
 
+fn simulate_refill_steps<const WIDTH: usize>(
+    request_indices: &[usize],
+    requested_tokens: &[usize],
+) -> Result<(usize, usize)> {
+    ensure!(WIDTH > 0, "refill width must be nonzero");
+    let mut loads = [0usize; WIDTH];
+    let mut productive = 0usize;
+    for &index in request_indices {
+        let transitions = requested_tokens[index].saturating_sub(1);
+        productive = productive
+            .checked_add(transitions)
+            .context("refill productive transition overflow")?;
+        let slot = loads
+            .iter()
+            .enumerate()
+            .min_by_key(|&(slot, load)| (*load, slot))
+            .map(|(slot, _)| slot)
+            .expect("nonzero refill width");
+        loads[slot] = loads[slot]
+            .checked_add(transitions)
+            .context("refill slot transition overflow")?;
+    }
+    Ok((loads.into_iter().max().unwrap_or(0), productive))
+}
+
+struct DenseRefillRewrite<const WIDTH: usize> {
+    work: Vec<PlannedWork<WIDTH>>,
+    arenas: usize,
+    requests: usize,
+    absorbed_serial_requests: usize,
+}
+
+fn plan_dense_refill<const WIDTH: usize>(
+    work: Vec<PlannedWork<WIDTH>>,
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+    prefix_fanout_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
+    requested_tokens: &[usize],
+    capacities: &[usize],
+    prefix_affinity_batches: &[[usize; WIDTH]],
+    enabled: bool,
+) -> Result<DenseRefillRewrite<WIDTH>> {
+    if !enabled || WIDTH != DENSE_BATCH8_WIDTH {
+        return Ok(DenseRefillRewrite {
+            work,
+            arenas: 0,
+            requests: 0,
+            absorbed_serial_requests: 0,
+        });
+    }
+    let mut output = Vec::with_capacity(work.len());
+    let mut arenas = 0usize;
+    let mut refill_requests = 0usize;
+    let mut absorbed_serial_requests = 0usize;
+    let mut cursor = 0usize;
+    while cursor < work.len() {
+        let mut end = cursor;
+        let mut request_count = 0usize;
+        while end < work.len() && request_count < WIDTH * 2 {
+            request_count += match &work[end] {
+                PlannedWork::Batch(_) => WIDTH,
+                PlannedWork::Serial(_) => 1,
+                PlannedWork::RefillArena(_) => unreachable!("nested refill plan"),
+            };
+            end += 1;
+        }
+        if request_count != WIDTH * 2 {
+            output.push(work[cursor].clone());
+            cursor += 1;
+            continue;
+        }
+        let fallback_slice = &work[cursor..end];
+        if fallback_slice.iter().any(|item| {
+            matches!(item, PlannedWork::Batch(indices) if prefix_affinity_batches.contains(indices))
+        }) {
+            output.push(work[cursor].clone());
+            cursor += 1;
+            continue;
+        }
+        let mut request_indices = Vec::with_capacity(WIDTH * 2);
+        let mut fallback_work = Vec::with_capacity(fallback_slice.len());
+        let mut candidate_serial_requests = 0usize;
+        for item in fallback_slice {
+            match item {
+                PlannedWork::Batch(indices) => {
+                    if selected_cohort_prefix_tokens(
+                        indices,
+                        requests,
+                        args,
+                        prefix_fanout_boundary_policy,
+                    ) > 0
+                    {
+                        request_indices.clear();
+                        break;
+                    }
+                    request_indices.extend(indices);
+                    fallback_work.push(RefillFallback::Batch(*indices));
+                }
+                PlannedWork::Serial(index) => {
+                    request_indices.push(*index);
+                    fallback_work.push(RefillFallback::Serial(*index));
+                    candidate_serial_requests += 1;
+                }
+                PlannedWork::RefillArena(_) => unreachable!("nested refill plan"),
+            }
+        }
+        if request_indices.len() != WIDTH * 2 {
+            output.push(work[cursor].clone());
+            cursor += 1;
+            continue;
+        }
+        let mut requested_order = request_indices.clone();
+        requested_order.sort_by_key(|&index| (requested_tokens[index], capacities[index], index));
+        let requested_two_wave_steps = requested_order[..WIDTH]
+            .iter()
+            .map(|&index| requested_tokens[index].saturating_sub(1))
+            .max()
+            .unwrap_or(0)
+            .checked_add(
+                requested_order[WIDTH..]
+                    .iter()
+                    .map(|&index| requested_tokens[index].saturating_sub(1))
+                    .max()
+                    .unwrap_or(0),
+            )
+            .context("refill requested two-wave transition overflow")?;
+        request_indices.sort_by_key(|&index| {
+            (
+                std::cmp::Reverse(requested_tokens[index]),
+                capacities[index],
+                index,
+            )
+        });
+        let (simulated_physical_steps, simulated_productive_transitions) =
+            simulate_refill_steps::<WIDTH>(&request_indices, requested_tokens)?;
+        let physical_slots = simulated_physical_steps
+            .checked_mul(WIDTH)
+            .context("refill physical slot overflow")?;
+        let utilization_qualifies = simulated_productive_transitions
+            .checked_mul(MIN_REQUESTED_TRANSITION_UTILIZATION_DENOMINATOR)
+            .context("refill utilization overflow")?
+            >= physical_slots
+                .checked_mul(MIN_REQUESTED_TRANSITION_UTILIZATION_NUMERATOR)
+                .context("refill utilization overflow")?;
+        let savings_qualifies = simulated_physical_steps
+            .checked_mul(REFILL_MIN_STEP_SAVINGS_DENOMINATOR)
+            .context("refill savings overflow")?
+            <= requested_two_wave_steps
+                .checked_mul(
+                    REFILL_MIN_STEP_SAVINGS_DENOMINATOR - REFILL_MIN_STEP_SAVINGS_NUMERATOR,
+                )
+                .context("refill savings overflow")?;
+        if simulated_physical_steps == 0 || !utilization_qualifies || !savings_qualifies {
+            output.push(work[cursor].clone());
+            cursor += 1;
+            continue;
+        }
+        let required_refill_capacity = request_indices
+            .iter()
+            .map(|&index| {
+                requests[index]
+                    .prompt_ids
+                    .len()
+                    .checked_add(simulated_productive_transitions)
+                    .and_then(|value| value.checked_add(1))
+                    .context("refill shared capacity overflow")
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+        if args
+            .max_context_tokens
+            .is_some_and(|explicit| required_refill_capacity > explicit)
+        {
+            output.push(work[cursor].clone());
+            cursor += 1;
+            continue;
+        }
+        let shared_capacity = required_refill_capacity.max(
+            request_indices
+                .iter()
+                .map(|&index| capacities[index])
+                .max()
+                .unwrap_or(0),
+        );
+        arenas += 1;
+        refill_requests += request_indices.len();
+        absorbed_serial_requests += candidate_serial_requests;
+        output.push(PlannedWork::RefillArena(RefillArenaPlan {
+            fallback_work,
+            request_indices,
+            shared_capacity,
+            simulated_physical_steps,
+            simulated_productive_transitions,
+            requested_two_wave_steps,
+        }));
+        cursor = end;
+    }
+    Ok(DenseRefillRewrite {
+        work: output,
+        arenas,
+        requests: refill_requests,
+        absorbed_serial_requests,
+    })
+}
+
 fn plan_request_work<const WIDTH: usize>(
     requests: &[PreparedJsonlRequest],
     args: &Args,
@@ -768,6 +1088,9 @@ fn plan_request_work<const WIDTH: usize>(
         prefix_packing_enabled(true)?,
         qwen_prefix_fanout_boundary_policy()?,
         ragged_prompts_enabled(false)?,
+        WIDTH == DENSE_BATCH8_WIDTH
+            && args.execution_mode != Some(execution_selector::ExecutionModeArg::Auto)
+            && dense_refill_enabled(false)?,
     )
 }
 
@@ -777,6 +1100,7 @@ fn plan_request_work_configured<const WIDTH: usize>(
     prefix_packing: bool,
     prefix_fanout_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
     ragged_prompts: bool,
+    refill_configured: bool,
 ) -> Result<CohortPlan<WIDTH>> {
     ensure!(WIDTH > 0, "fixed-cohort planner width must be nonzero");
     let generation = requests
@@ -812,6 +1136,8 @@ fn plan_request_work_configured<const WIDTH: usize>(
     let mut estimated_capacity_slots = 0usize;
     let mut prefix_affinity_batches = Vec::new();
     let mut ragged_packing_strategy = RaggedPackingStrategy::Disabled;
+    let mut refill_arenas = 0usize;
+    let mut refill_requests = 0usize;
     for (_, indices) in buckets {
         let baseline = plan_depth_bucket::<WIDTH>(indices.clone(), &requested_tokens, &capacities)?;
         let mut bucket_ragged_strategy = RaggedPackingStrategy::Disabled;
@@ -864,7 +1190,7 @@ fn plan_request_work_configured<const WIDTH: usize>(
                 .iter()
                 .filter_map(|work| match work {
                     PlannedWork::Batch(indices) => Some(*indices),
-                    PlannedWork::Serial(_) => None,
+                    PlannedWork::RefillArena(_) | PlannedWork::Serial(_) => None,
                 })
                 .collect();
             let mut candidate_work = prefix_work;
@@ -899,19 +1225,38 @@ fn plan_request_work_configured<const WIDTH: usize>(
         } else {
             baseline
         };
-        ragged_packing_strategy = ragged_packing_strategy.merge(bucket_ragged_strategy);
+        let refill = plan_dense_refill(
+            selected.work,
+            requests,
+            args,
+            prefix_fanout_boundary_policy,
+            &requested_tokens,
+            &capacities,
+            &selected.prefix_affinity_batches,
+            refill_configured,
+        )?;
+        let rescued_cohort_equivalents = refill
+            .absorbed_serial_requests
+            .checked_div(WIDTH)
+            .context("refill width must be nonzero")?;
         candidate_cohorts += selected.candidate_cohorts;
-        full_cohorts += selected.full_cohorts;
+        full_cohorts += selected.full_cohorts + rescued_cohort_equivalents;
         economics_rejected_cohorts += selected.economics_rejected_cohorts;
-        serial_fallback_requests += selected.serial_fallback_requests;
+        serial_fallback_requests += selected
+            .serial_fallback_requests
+            .checked_sub(refill.absorbed_serial_requests)
+            .context("refill absorbed more serial requests than planned")?;
         estimated_physical_transition_slots = estimated_physical_transition_slots
-            .checked_add(selected.physical_transition_slots)
+            .checked_add(estimated_transition_slots(&refill.work, &requested_tokens)?)
             .context("fixed-cohort plan transition estimate overflow")?;
         estimated_capacity_slots = estimated_capacity_slots
-            .checked_add(selected.capacity_slots)
+            .checked_add(estimate_capacity_slots(&refill.work, &capacities)?)
             .context("fixed-cohort plan capacity estimate overflow")?;
+        refill_arenas += refill.arenas;
+        refill_requests += refill.requests;
         prefix_affinity_batches.extend(selected.prefix_affinity_batches);
-        work.extend(selected.work);
+        work.extend(refill.work);
+        ragged_packing_strategy = ragged_packing_strategy.merge(bucket_ragged_strategy);
     }
     work.sort_by_key(PlannedWork::first_request_index);
     ensure!(
@@ -935,6 +1280,10 @@ fn plan_request_work_configured<const WIDTH: usize>(
         economics_rejected_cohorts,
         serial_fallback_requests,
         prefix_affinity_batches,
+        refill_configured,
+        refill_effective: refill_arenas > 0,
+        refill_arenas,
+        refill_requests,
     })
 }
 
@@ -942,7 +1291,14 @@ pub(super) fn plan_summary<const WIDTH: usize>(
     requests: &[PreparedJsonlRequest],
     args: &Args,
 ) -> Result<CohortPlanSummary> {
-    let plan = plan_request_work::<WIDTH>(requests, args)?;
+    let plan = plan_request_work_configured::<WIDTH>(
+        requests,
+        args,
+        prefix_packing_enabled(true)?,
+        qwen_prefix_fanout_boundary_policy()?,
+        ragged_prompts_enabled(false)?,
+        false,
+    )?;
     Ok(CohortPlanSummary {
         full_cohorts: plan.full_cohorts,
         economics_rejected_cohorts: plan.economics_rejected_cohorts,
@@ -1168,6 +1524,52 @@ fn fixed_cohort_memory_admission<const WIDTH: usize, E: FixedCohortExecutor<WIDT
         .map_err(anyhow::Error::from)
 }
 
+fn refill_arena_memory_admission<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
+    loaded: &LoadedModel,
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+    plan: &RefillArenaPlan<WIDTH>,
+) -> Result<qwen_llm::metal::MetalMemoryAdmission> {
+    let prefill_scratch_upper_bytes = plan
+        .request_indices
+        .iter()
+        .map(|&index| concurrent_jsonl::prefill_scratch_upper_bytes(loaded, &requests[index], args))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .max()
+        .context("refill arena contained no prefill scratch estimate")?;
+    loaded
+        .qwen_execution_memory_admission(
+            WIDTH,
+            plan.shared_capacity,
+            prefill_scratch_upper_bytes,
+            E::executor_scratch_upper_bytes(loaded)?,
+        )
+        .map_err(anyhow::Error::from)
+}
+
+fn rewrite_unadmitted_refill_arenas<const WIDTH: usize>(
+    work: Vec<PlannedWork<WIDTH>>,
+    mut admitted: impl FnMut(&RefillArenaPlan<WIDTH>) -> Result<bool>,
+) -> Result<(Vec<PlannedWork<WIDTH>>, usize)> {
+    let mut rewritten = Vec::with_capacity(work.len());
+    let mut rejected = 0usize;
+    for item in work {
+        match item {
+            PlannedWork::RefillArena(plan) if !admitted(&plan)? => {
+                rejected += 1;
+                rewritten.extend(plan.fallback_work.into_iter().map(|item| match item {
+                    RefillFallback::Batch(indices) => PlannedWork::Batch(indices),
+                    RefillFallback::Serial(index) => PlannedWork::Serial(index),
+                }));
+            }
+            item => rewritten.push(item),
+        }
+    }
+    rewritten.sort_by_key(PlannedWork::first_request_index);
+    Ok((rewritten, rejected))
+}
+
 fn rewrite_unadmitted_batches<const WIDTH: usize>(
     work: Vec<PlannedWork<WIDTH>>,
     mut admitted: impl FnMut(&[usize; WIDTH]) -> Result<bool>,
@@ -1203,7 +1605,20 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         .stop_token_ids()
         .context("load producer-declared stop tokens")?;
     let mut denied_admissions = Vec::new();
-    let (planned_work, rejected_batches) = rewrite_unadmitted_batches(plan.work, |indices| {
+    let mut denied_refill_admissions = Vec::new();
+    let (planned_work, rejected_refill_arenas) =
+        rewrite_unadmitted_refill_arenas(plan.work, |arena| {
+            let admission =
+                refill_arena_memory_admission::<WIDTH, E>(loaded, requests, args, arena)?;
+            if !admission.admitted {
+                denied_refill_admissions.push((
+                    arena.request_indices.first().copied().unwrap_or(0),
+                    admission,
+                ));
+            }
+            Ok(admission.admitted)
+        })?;
+    let (planned_work, rejected_batches) = rewrite_unadmitted_batches(planned_work, |indices| {
         let cohort = indices.map(|index| &requests[index]);
         let admission = fixed_cohort_memory_admission::<WIDTH, E>(
             loaded,
@@ -1217,9 +1632,6 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         Ok(admission.admitted)
     })?;
     let memory_rejected_cohorts = rejected_batches.len();
-    let memory_fallback_requests = memory_rejected_cohorts
-        .checked_mul(WIDTH)
-        .context("fixed-cohort memory fallback count overflow")?;
     for (indices, admission) in denied_admissions {
         eprintln!(
             "{}_admission: cohort_first_request={} outcome=serial_fallback reason={} required_bytes={:?} working_set_headroom_bytes={:?} process_limit_remaining_bytes={:?}",
@@ -1231,14 +1643,30 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             admission.signals.process_limit_remaining_bytes,
         );
     }
-    let realized_full_cohorts = plan
-        .full_cohorts
-        .checked_sub(memory_rejected_cohorts)
-        .context("fixed-cohort realized batch count underflow")?;
-    let realized_serial_fallback_requests = plan
-        .serial_fallback_requests
-        .checked_add(memory_fallback_requests)
-        .context("fixed-cohort realized fallback count overflow")?;
+    for (first_request, admission) in denied_refill_admissions {
+        eprintln!(
+            "dense_batch8_refill_admission: arena_first_request={first_request} outcome=cohort_fallback reason={} required_bytes={:?} working_set_headroom_bytes={:?} process_limit_remaining_bytes={:?}",
+            admission.reason.as_str(),
+            admission.required_bytes,
+            admission.working_set_headroom_bytes,
+            admission.signals.process_limit_remaining_bytes,
+        );
+    }
+    let realized_batched_requests = planned_work.iter().try_fold(0usize, |total, work| {
+        let requests = match work {
+            PlannedWork::Batch(_) => WIDTH,
+            PlannedWork::RefillArena(plan) => plan.request_indices.len(),
+            PlannedWork::Serial(_) => 0,
+        };
+        total
+            .checked_add(requests)
+            .context("fixed-cohort realized batch count overflow")
+    })?;
+    let realized_full_cohorts = realized_batched_requests / WIDTH;
+    let realized_serial_fallback_requests = planned_work
+        .iter()
+        .filter(|work| matches!(work, PlannedWork::Serial(_)))
+        .count();
     let realized_transition_slots = estimated_transition_slots(
         &planned_work,
         &requests
@@ -1258,6 +1686,17 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     } else {
         None
     };
+    let realized_refill_arenas = planned_work
+        .iter()
+        .filter(|work| matches!(work, PlannedWork::RefillArena(_)))
+        .count();
+    let realized_refill_requests = planned_work
+        .iter()
+        .filter_map(|work| match work {
+            PlannedWork::RefillArena(plan) => Some(plan.request_indices.len()),
+            _ => None,
+        })
+        .sum();
     let realized_prefix_affinity_cohorts = plan
         .prefix_affinity_batches
         .iter()
@@ -1267,6 +1706,7 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                 .any(|work| matches!(work, PlannedWork::Batch(indices) if indices == *batch))
         })
         .count();
+    let refill_telemetry_enabled = E::REFILL_TELEMETRY;
     let planner_telemetry = PlannerTelemetry {
         schema_version: E::PLANNER_TELEMETRY_SCHEMA_VERSION,
         backend: E::PLANNER_BACKEND,
@@ -1276,6 +1716,14 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         prefix_fanout_boundary_policy: plan.prefix_fanout_boundary_policy.as_str(),
         ragged_prompts_enabled: plan.ragged_prompts_enabled,
         ragged_packing_strategy: plan.ragged_packing_strategy.as_str(),
+        refill_configured: refill_telemetry_enabled.then_some(plan.refill_configured),
+        refill_effective: refill_telemetry_enabled.then_some(plan.refill_effective),
+        planned_refill_arenas: refill_telemetry_enabled.then_some(plan.refill_arenas),
+        planned_refill_requests: refill_telemetry_enabled.then_some(plan.refill_requests),
+        realized_refill_arenas: refill_telemetry_enabled.then_some(realized_refill_arenas),
+        realized_refill_requests: refill_telemetry_enabled.then_some(realized_refill_requests),
+        realized_refill_memory_fallback_arenas: refill_telemetry_enabled
+            .then_some(rejected_refill_arenas),
         compatibility_buckets: plan.compatibility_buckets,
         planned_candidate_cohorts: plan.candidate_cohorts,
         realized_prefix_affinity_cohorts,
@@ -1285,7 +1733,7 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         realized_full_cohorts,
         planned_economics_rejected_cohorts: plan.economics_rejected_cohorts,
         realized_memory_rejected_cohorts: memory_rejected_cohorts,
-        realized_batched_requests: realized_full_cohorts * WIDTH,
+        realized_batched_requests,
         realized_serial_fallback_requests,
         realized_estimated_physical_transition_slots: realized_transition_slots,
         realized_estimated_capacity_slots: realized_capacity_slots,
@@ -1305,6 +1753,7 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     let mut next_output = 0usize;
     let mut completed = 0usize;
     let mut cohort_index = 0usize;
+    let mut refill_arena_index = 0usize;
     for work in planned_work {
         shutdown::checkpoint()?;
         match work {
@@ -1335,6 +1784,31 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                         .with_context(|| format!("serialize {} telemetry", E::DISPLAY_NAME))?
                 );
                 cohort_index += 1;
+            }
+            PlannedWork::RefillArena(plan) => {
+                let (outputs, telemetry) = run_refill_arena(
+                    loaded,
+                    tokenizer,
+                    executor.as_mut().expect("planned dense refill executor"),
+                    requests,
+                    args,
+                    &stop_tokens,
+                    refill_arena_index,
+                    &plan,
+                )
+                .with_context(|| format!("run dense refill arena {refill_arena_index}"))?;
+                for (index, output) in outputs {
+                    ensure!(
+                        pending_outputs[index].replace(output).is_none(),
+                        "refill planner produced request {index} twice"
+                    );
+                }
+                eprintln!(
+                    "dense_batch8_refill: {}",
+                    serde_json::to_string(&telemetry)
+                        .context("serialize dense B=8 refill telemetry")?
+                );
+                refill_arena_index += 1;
             }
             PlannedWork::Serial(index) => {
                 let (output, _) =
@@ -1413,6 +1887,301 @@ fn validate_requests(requests: &[PreparedJsonlRequest], args: &Args) -> Result<(
         jsonl_generation_capacity(request, args)?;
     }
     Ok(())
+}
+
+fn prepare_refill_lane(
+    loaded: &LoadedModel,
+    tokenizer: &Tokenizer,
+    scratch: &mut MetalDFlashLayerMajorScratch,
+    request_index: usize,
+    request: &PreparedJsonlRequest,
+    capacity: usize,
+    args: &Args,
+    stop_tokens: &[i32],
+) -> Result<(Lane, f64)> {
+    shutdown::checkpoint()?;
+    let mut sequence = loaded
+        .create_sequence(SequenceConfig::new(capacity))
+        .with_context(|| format!("allocate refill sequence for request {request_index}"))?;
+    let forward = loaded.forward();
+    let (logits, prefill_ms) =
+        prefill_span(&forward, &mut sequence, scratch, &request.prompt_ids, 0)
+            .with_context(|| format!("prefill refill request {request_index}"))?;
+    let mut sampler = Sampler::new(request.sampling)
+        .with_context(|| format!("initialize refill sampler for request {request_index}"))?;
+    let first = sampler
+        .sample(&logits)
+        .with_context(|| format!("select refill first token for request {request_index}"))?
+        .token;
+    let (requested_tokens, _) = jsonl_generation_capacity(request, args)?;
+    let mut progress = LaneProgress::new(requested_tokens);
+    let visible = progress.record_selection(first, stop_tokens)?;
+    let mut generated_text = String::new();
+    if visible {
+        generated_text.push_str(&tokenizer.decode_piece(first));
+    }
+    Ok((
+        Lane {
+            request_index,
+            id: request.id.clone(),
+            prompt_tokens: request.prompt_ids.len(),
+            sequence,
+            progress,
+            generated_text,
+        },
+        prefill_ms,
+    ))
+}
+
+fn finalize_refill_lane(lane: Lane) -> Result<(usize, RequestOutput)> {
+    lane.progress
+        .validate_request_complete()
+        .with_context(|| format!("validate refill lane {}", lane.id))?;
+    ensure!(
+        lane.sequence.position()
+            == lane.prompt_tokens
+                + lane.progress.logical_transitions
+                + lane.progress.padding_transitions,
+        "refill lane {} sequence frontier drifted",
+        lane.id
+    );
+    let stop_reason = lane
+        .progress
+        .stop_reason
+        .expect("validated refill lane termination");
+    Ok((
+        lane.request_index,
+        RequestOutput {
+            id: lane.id,
+            prompt_tokens: lane.prompt_tokens,
+            generated_tokens: lane.progress.generated.len(),
+            generated_token_sha256: generated_token_sha256(&lane.progress.generated),
+            generated_text: lane.generated_text,
+            stop_reason,
+            terminal_token_target_transition_consumed: false,
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_refill_arena<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
+    loaded: &LoadedModel,
+    tokenizer: &Tokenizer,
+    executor: &mut E,
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+    stop_tokens: &[i32],
+    arena_index: usize,
+    plan: &RefillArenaPlan<WIDTH>,
+) -> Result<(Vec<(usize, RequestOutput)>, RefillTelemetry)> {
+    ensure!(
+        WIDTH == DENSE_BATCH8_WIDTH,
+        "synchronous refill is authorized only for dense B=8"
+    );
+    ensure!(
+        plan.request_indices.len() > WIDTH && plan.request_indices.len() <= WIDTH * 2,
+        "refill arena must contain one initial wave and at most one replacement wave"
+    );
+    let arena_t0 = Instant::now();
+    let max_prompt_tokens = plan
+        .request_indices
+        .iter()
+        .map(|&index| requests[index].prompt_ids.len())
+        .max()
+        .unwrap_or(0);
+    let chunk = match args.prefill_chunk {
+        PrefillChunkArg::Fixed(requested) => requested.min(max_prompt_tokens.max(1)),
+        PrefillChunkArg::Auto => bail!("dense B=8 refill requires a fixed prefill chunk"),
+    };
+    let mut scratch = allocate_legacy_prefill_scratch(loaded, chunk, max_prompt_tokens)?;
+    let mut waiting = plan.request_indices.iter().copied();
+    let prefill_t0 = Instant::now();
+    let mut lanes: [Option<Lane>; WIDTH] = std::array::from_fn(|_| None);
+    let mut initial_prefill_ms = 0.0;
+    let mut prefill_tokens = 0usize;
+    for lane_slot in &mut lanes {
+        let request_index = waiting.next().context("refill initial wave underfilled")?;
+        let request = &requests[request_index];
+        let (lane, ms) = prepare_refill_lane(
+            loaded,
+            tokenizer,
+            &mut scratch,
+            request_index,
+            request,
+            plan.shared_capacity,
+            args,
+            stop_tokens,
+        )?;
+        initial_prefill_ms += ms;
+        prefill_tokens += request.prompt_ids.len();
+        *lane_slot = Some(lane);
+    }
+    let initial_prepare_wall_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+
+    let mut outputs = Vec::with_capacity(plan.request_indices.len());
+    let mut physical_batch_steps = 0usize;
+    let mut productive_transitions = 0usize;
+    let mut padding_transitions = 0usize;
+    let mut replacements = 0usize;
+    let mut replacement_prefill_ms = 0.0;
+    let mut replacement_prepare_wall_ms = 0.0;
+    let mut batch_transition_ms = 0.0;
+    let mut executor_gpu_ms = Some(0.0);
+    let decode_t0 = Instant::now();
+    loop {
+        for lane_slot in &mut lanes {
+            while lane_slot
+                .as_ref()
+                .is_some_and(|lane| !lane.progress.is_active())
+            {
+                let Some(request_index) = waiting.next() else {
+                    break;
+                };
+                let lane = lane_slot.take().expect("finished refill lane");
+                outputs.push(finalize_refill_lane(lane)?);
+                let request = &requests[request_index];
+                let replacement_t0 = Instant::now();
+                let (lane, ms) = prepare_refill_lane(
+                    loaded,
+                    tokenizer,
+                    &mut scratch,
+                    request_index,
+                    request,
+                    plan.shared_capacity,
+                    args,
+                    stop_tokens,
+                )?;
+                replacement_prefill_ms += ms;
+                replacement_prepare_wall_ms += replacement_t0.elapsed().as_secs_f64() * 1e3;
+                prefill_tokens += request.prompt_ids.len();
+                replacements += 1;
+                *lane_slot = Some(lane);
+            }
+        }
+        if lanes
+            .iter()
+            .all(|lane| lane.as_ref().is_none_or(|lane| !lane.progress.is_active()))
+        {
+            break;
+        }
+        shutdown::checkpoint()?;
+        let active: [bool; WIDTH] = std::array::from_fn(|slot| {
+            lanes[slot]
+                .as_ref()
+                .is_some_and(|lane| lane.progress.is_active())
+        });
+        let token_ids: [i32; WIDTH] = std::array::from_fn(|slot| {
+            lanes[slot]
+                .as_ref()
+                .map(|lane| lane.progress.transition_token())
+                .unwrap_or(FINISHED_LANE_FILL_TOKEN)
+        });
+        let transition_t0 = Instant::now();
+        let step = {
+            let lane_refs = lanes.each_mut();
+            executor.step_greedy(
+                token_ids,
+                lane_refs.map(|lane| {
+                    &mut lane
+                        .as_mut()
+                        .expect("refill keeps one physical sequence in every slot")
+                        .sequence
+                }),
+                || shutdown::checkpoint().is_err(),
+            )?
+        };
+        shutdown::checkpoint()?;
+        batch_transition_ms += transition_t0.elapsed().as_secs_f64() * 1e3;
+        executor_gpu_ms = match (executor_gpu_ms, step.gpu_ms) {
+            (Some(total), Some(step)) => Some(total + step),
+            _ => None,
+        };
+        physical_batch_steps += 1;
+        for slot in 0..WIDTH {
+            let lane = lanes[slot].as_mut().expect("refill physical lane");
+            if active[slot] {
+                productive_transitions += 1;
+            } else {
+                padding_transitions += 1;
+            }
+            if lane
+                .progress
+                .record_batch_step(active[slot], step.argmax_ids[slot], stop_tokens)?
+            {
+                lane.generated_text
+                    .push_str(&tokenizer.decode_piece(step.argmax_ids[slot]));
+            }
+        }
+    }
+    for lane in lanes.into_iter().flatten() {
+        outputs.push(finalize_refill_lane(lane)?);
+    }
+    ensure!(
+        outputs.len() == plan.request_indices.len(),
+        "refill completed {}/{} requests",
+        outputs.len(),
+        plan.request_indices.len()
+    );
+    let transition_and_refill_wall_ms = decode_t0.elapsed().as_secs_f64() * 1e3;
+    let arena_wall_ms = arena_t0.elapsed().as_secs_f64() * 1e3;
+    let generated_tokens = outputs
+        .iter()
+        .map(|(_, output)| output.generated_tokens)
+        .sum::<usize>();
+    let physical_slots = physical_batch_steps
+        .checked_mul(WIDTH)
+        .context("refill physical slot overflow")?;
+    ensure!(
+        productive_transitions + padding_transitions == physical_slots,
+        "refill transition accounting drifted"
+    );
+    let physical_transition_utilization = if physical_slots > 0 {
+        productive_transitions as f64 / physical_slots as f64
+    } else {
+        0.0
+    };
+    let productive_transition_tps = if batch_transition_ms > 0.0 {
+        productive_transitions as f64 / (batch_transition_ms / 1e3)
+    } else {
+        0.0
+    };
+    let arena_generated_tps = if arena_wall_ms > 0.0 {
+        generated_tokens as f64 / (arena_wall_ms / 1e3)
+    } else {
+        0.0
+    };
+    Ok((
+        outputs,
+        RefillTelemetry {
+            schema_version: 1,
+            backend: "dense_qwen_refill_b8_v1",
+            arena_index,
+            width: WIDTH,
+            requests: plan.request_indices.len(),
+            shared_capacity_tokens: plan.shared_capacity,
+            simulated_physical_steps: plan.simulated_physical_steps,
+            simulated_productive_transitions: plan.simulated_productive_transitions,
+            requested_two_wave_steps: plan.requested_two_wave_steps,
+            physical_batch_steps,
+            productive_transitions,
+            padding_transitions,
+            physical_transition_utilization,
+            replacements,
+            prefill_tokens,
+            initial_prefill_model_ms: initial_prefill_ms,
+            initial_prepare_wall_ms,
+            replacement_prefill_model_ms: replacement_prefill_ms,
+            replacement_prepare_wall_ms,
+            arena_wall_ms,
+            transition_and_refill_wall_ms,
+            batch_transition_ms,
+            executor_gpu_ms,
+            generated_tokens,
+            productive_transition_tps,
+            arena_generated_tps,
+            output_order: "input",
+        },
+    ))
 }
 
 fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
@@ -1665,6 +2434,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             generated_text.push_str(&tokenizer.decode_piece(first));
         }
         lanes.push(Lane {
+            request_index: slot,
             id: request.id.clone(),
             prompt_tokens: request.prompt_ids.len(),
             sequence,
@@ -2018,6 +2788,7 @@ mod tests {
             true,
             QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(control.full_cohorts, 0);
@@ -2029,6 +2800,7 @@ mod tests {
             true,
             QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
             true,
+            false,
         )
         .unwrap();
         assert!(ragged.ragged_prompts_enabled);
@@ -2065,6 +2837,7 @@ mod tests {
             true,
             QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
             true,
+            false,
         )
         .unwrap();
         let generation = requests
@@ -2142,6 +2915,147 @@ mod tests {
     }
 
     #[test]
+    fn dense_refill_policy_is_strict_default_off_and_moe_closed() {
+        assert!(!parse_dense_refill_enabled(None, false).unwrap());
+        assert!(parse_dense_refill_enabled(Some("on"), false).unwrap());
+        assert!(!parse_dense_refill_enabled(Some("0"), true).unwrap());
+        assert!(parse_dense_refill_enabled(Some("sometimes"), false).is_err());
+
+        let args = test_args();
+        let limits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 16, 20, 24, 28, 32, 40]
+            .into_iter()
+            .cycle()
+            .take(32)
+            .collect::<Vec<_>>();
+        let requests = limits
+            .iter()
+            .enumerate()
+            .map(|(index, &limit)| {
+                let mut request = prepared(&format!("slot-{index}"), &[1, 2]);
+                request.request.tokens = Some(limit);
+                request
+            })
+            .collect::<Vec<_>>();
+        let dense = plan_request_work_configured::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            false,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(dense.refill_effective);
+        assert_eq!(dense.refill_arenas, 2);
+        assert_eq!(dense.refill_requests, 32);
+        let PlannedWork::RefillArena(arena) = &dense.work[0] else {
+            panic!("expected one dense refill arena");
+        };
+        assert_eq!(arena.request_indices.len(), 16);
+        assert!(arena.simulated_physical_steps * 10 <= arena.requested_two_wave_steps * 9);
+        assert_eq!(arena.request_indices[0], 7);
+
+        let moe = plan_request_work_configured::<MOE_BATCH16_WIDTH>(
+            &requests,
+            &args,
+            false,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(!moe.refill_effective);
+        assert_eq!(moe.refill_arenas, 0);
+    }
+
+    #[test]
+    fn explicit_context_limit_rejects_refill_padding_expansion() {
+        let mut args = test_args();
+        args.max_context_tokens = Some(64);
+        let limits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 16, 20, 24, 28, 32, 40]
+            .into_iter()
+            .cycle()
+            .take(32)
+            .collect::<Vec<_>>();
+        let requests = limits
+            .iter()
+            .enumerate()
+            .map(|(index, &limit)| {
+                let mut request = prepared(&format!("slot-{index}"), &[1, 2]);
+                request.request.tokens = Some(limit);
+                request
+            })
+            .collect::<Vec<_>>();
+        let plan = plan_request_work_configured::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            false,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(plan.refill_effective);
+        assert_eq!(plan.refill_arenas, 1);
+        let arenas = plan
+            .work
+            .iter()
+            .filter_map(|work| match work {
+                PlannedWork::RefillArena(arena) => Some(arena),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(arenas.len(), 1);
+        assert!(arenas[0].shared_capacity <= 64);
+        assert!(
+            plan.work
+                .iter()
+                .any(|work| matches!(work, PlannedWork::Serial(_)))
+        );
+    }
+
+    #[test]
+    fn refill_admission_denial_restores_the_exact_static_plan() {
+        let args = test_args();
+        let limits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 16, 20, 24, 28, 32, 40]
+            .into_iter()
+            .cycle()
+            .take(32)
+            .collect::<Vec<_>>();
+        let requests = limits
+            .iter()
+            .enumerate()
+            .map(|(index, &limit)| {
+                let mut request = prepared(&format!("slot-{index}"), &[1, 2]);
+                request.request.tokens = Some(limit);
+                request
+            })
+            .collect::<Vec<_>>();
+        let static_plan = plan_request_work_configured::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            false,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            false,
+            false,
+        )
+        .unwrap();
+        let refill_plan = plan_request_work_configured::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            false,
+            QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            false,
+            true,
+        )
+        .unwrap();
+        let (rewritten, rejected) =
+            rewrite_unadmitted_refill_arenas(refill_plan.work, |_| Ok(false)).unwrap();
+        assert_eq!(rejected, 2);
+        assert_eq!(rewritten, static_plan.work);
+    }
+
+    #[test]
     fn ragged_prompt_policy_is_strict_and_rollbackable() {
         assert!(!parse_ragged_prompts_enabled(None, false).unwrap());
         assert!(parse_ragged_prompts_enabled(Some("on"), false).unwrap());
@@ -2185,6 +3099,7 @@ mod tests {
             false,
             QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(control.full_cohorts, 2);
@@ -2195,6 +3110,7 @@ mod tests {
             &args,
             true,
             QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            false,
             false,
         )
         .unwrap();
@@ -2236,6 +3152,7 @@ mod tests {
             false,
             QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
             false,
+            false,
         )
         .unwrap();
         let candidate = plan_request_work_configured::<DENSE_BATCH8_WIDTH>(
@@ -2243,6 +3160,7 @@ mod tests {
             &args,
             true,
             QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            false,
             false,
         )
         .unwrap();
@@ -2294,6 +3212,7 @@ mod tests {
             false,
             QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
             false,
+            false,
         )
         .unwrap();
         let candidate = plan_request_work_configured::<WIDTH>(
@@ -2301,6 +3220,7 @@ mod tests {
             &args,
             true,
             QwenPrefixFanoutBoundaryPolicy::ChunkAligned,
+            false,
             false,
         )
         .unwrap();

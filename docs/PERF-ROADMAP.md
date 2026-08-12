@@ -6596,3 +6596,17 @@ Next: <one concrete follow-up>
   batching. Prefer that capability-wide next step over another model-specific
   fixed-width executor. Evidence:
   `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
+
+
+## Recent Confirmed Capability — Bounded Dense Refill
+
+- Dense B8 can replace finished lanes across one bounded second wave while
+  preserving exact output. On a 32-request skew trace, wall moves `2.29 ->
+  1.83 s` versus B2 and `2.27 -> 1.83 s` versus static ragged B8.
+- Keep the mechanism explicit and default-off. Its requested-limit simulation is
+  a structural screen, not a general prefill/decode cost model; automatic mode
+  remains unchanged.
+- Do not generalize synchronous refill to MoE: the charged A3B ceiling loses to
+  measured B2. Reopen MoE only with overlapping/chunked replacement prefill or
+  materially different transition economics. Evidence:
+  `docs/bench/2026-08-12-qwen-refill-charged-screen/README.md`.

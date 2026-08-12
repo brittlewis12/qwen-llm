@@ -23895,3 +23895,24 @@ cohort count, does not add transition slots, and strictly reduces capacity slots
 Planner schema 5 distinguishes configured/effective prefix packing and planned/
 realized outcomes. Final adversarial review: GO. Full evidence:
 `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
+
+
+## 2026-08-12 — Bounded Dense B8 Refill Mechanism GO
+
+Status: an explicit dense-only refill scheduler now replaces completed B8 lanes
+between committed decode steps. It operates over at most two waves (16 requests),
+keeps exactly eight live sessions behind `QWEN_DENSE_BATCH8_REFILL=1`;
+heterogeneous prompt lengths additionally require `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1`.
+
+A 32-request skew trace moves `2.76 s` serial, `2.29 s` B2, and `2.27 s`
+static ragged B8 to `1.83 s` with refill: `1.251x` over B2 and `1.240x`
+over same-width static execution. Complete JSONL is byte-identical across all
+four organizations. Two arenas consume 7 and 47 physical B8 steps.
+
+Refill is a post-plan rewrite: prefix/ragged decisions remain authoritative,
+admission failure restores the exact static work before ordinary cohort
+admission, and automatic mode never selects the experiment. Shared capacity
+includes a conservative all-productive-transition frontier bound and never
+exceeds an explicit context override. Synchronous MoE B16 refill remains killed:
+its optimistic charged endpoint is `10.06 s` against measured B2 at `9.06 s`.
+Evidence: `docs/bench/2026-08-12-qwen-refill-charged-screen/README.md`.

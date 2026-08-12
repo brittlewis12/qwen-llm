@@ -23955,3 +23955,23 @@ This transition-only projection is not a formal ceiling because refill may also
 remove some setup work. It is nevertheless too weak to authorize more scheduler
 code at current leverage. Evidence:
 `docs/bench/2026-08-12-qwen-root-aware-refill-screen/README.md`.
+
+## 2026-08-12 — DeepSeek B2 Pair-Affinity Planner GO
+
+Status: enable the existing bounded pair planner by default for DeepSeek V4
+concurrency. A four-request K160 trace is interleaved `A0,B0,A1,B1`: each
+within-family pair shares 6,268 tokens, while adjacent input-order requests share
+only three. The planner changes physical pairs to `[0,2]` and `[1,3]` while
+retaining input-ordered publication.
+
+With pair-local fanout enabled and residency sets disabled, process wall moves
+`114.71 -> 71.57 s` (`1.603x`). Evaluated prompt tokens fall from 25,080 to
+12,792; each selected causal checkpoint is 6,144 tokens and about 60.1 MB.
+Summed decode wall remains effectively flat (`5.042 -> 5.014 s`), isolating the
+gain to prefix-affinity scheduling and snapshot reuse.
+
+Complete JSONL remains byte-identical with SHA-256
+`eb72076dd34ad4f2fa860bc68b72c6aab9c7fb7fec578c623215633ce9cf6acb`.
+Both arms report zero process swaps and no memory fallback. Keep the 16-request
+window, admission checks, and `QWEN_CONCURRENCY_PAIR_PLANNER=0` rollback.
+Evidence: `docs/bench/2026-08-12-deepseek-pair-affinity/README.md`.

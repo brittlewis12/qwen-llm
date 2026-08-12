@@ -2668,7 +2668,7 @@ pub(super) fn run_deepseek_file(
         .iter()
         .map(|request| request.max_tokens)
         .collect::<Vec<_>>();
-    let planner_enabled = pair_planner_enabled(false)?;
+    let planner_enabled = pair_planner_enabled(true)?;
     let fanout_enabled = prefix_fanout_enabled();
     let schedule = plan_request_pairs(
         &prompt_refs,

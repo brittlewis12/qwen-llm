@@ -6636,3 +6636,15 @@ Next: <one concrete follow-up>
   remove some setup work. Keep the composition held until profiles expose enough
   non-transition duplication or B8/B2 economics materially change. Evidence:
   `docs/bench/2026-08-12-qwen-root-aware-refill-screen/README.md`.
+
+## Recent Confirmed Capability — DeepSeek Pair-Affinity Scheduling
+
+- The bounded B2 planner now defaults on for DeepSeek V4. An interleaved K160
+  trace moves `114.71 -> 71.57 s` (`1.603x`) by pairing two 6,268-token affinity
+  groups and selecting a 6,144-token causal checkpoint for each pair.
+- Evaluated prompt tokens fall from 25,080 to 12,792 while complete input-ordered
+  JSONL remains byte-identical. Decode wall is unchanged; the gain is exact
+  prefix organization rather than concurrent-kernel movement.
+- Keep the 16-request window, process-memory admission, input-order publication,
+  and `QWEN_CONCURRENCY_PAIR_PLANNER=0` rollback. Evidence:
+  `docs/bench/2026-08-12-deepseek-pair-affinity/README.md`.

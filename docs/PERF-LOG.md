@@ -6,6 +6,24 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-11 - Equal-Length Batched-Prefill Ceiling KILL
+
+Status: stop before implementing a multi-session packed-prefill executor. On
+dense 27B, one `N=4096` traversal of every charged GDN/attention/dense-FFN
+projection takes `15.772 s` versus `15.697 s` for eight `N=512` traversals
+(`0.995x`). Required pack/scatter moves `16.107 -> 16.314 s` (`0.987x`).
+
+The production-relevant sum excludes the benchmark's full `N=4096` vocabulary
+head because prefill needs only eight final rows. Prompt mat-mat is already large
+enough at `N=512`; flattening sequence rows does not create decode-style weight
+reuse. This misses the `1.10x` projection gate before charging eight private
+attention/GDN bodies, KV scatter, scratch, and lifecycle work.
+
+Decision: do not build the dense B=8 executor or MoE B=16 extension from this
+premise. Reopen only for a kernel that explicitly proves cross-sequence weight
+tile reuse. Full evidence:
+`docs/bench/2026-08-11-qwen-equal-length-batched-prefill-ceiling/README.md`.
+
 ## 2026-08-11 - Bounded Exact-LCP Fanout GO
 
 Status: Qwen B=2/B=8/B=16 now snapshots the exact token LCP when ordinary

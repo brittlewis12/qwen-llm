@@ -2953,6 +2953,14 @@ serial and lets auto choose B=2 at `1.078x`. Keep this as bounded
 logical-termination flexibility, not evidence for lane refill or variable prompt
 frontiers.
 
+Equal-length cross-sequence packed prefill is closed before implementation.
+Dense 27B charged projections take `15.697 s` as eight `N=512` traversals and
+`15.772 s` as one `N=4096` traversal (`0.995x`); required layout moves
+`16.107 -> 16.314 s`. This misses the `1.10x` ceiling before private causal
+mixers and lifecycle cost. Do not build the B=8/B=16 prefill executor around the
+current mat-mat kernels. Reopen only with explicit cross-sequence weight-tile
+reuse or a different mechanism-level proof.
+
 Qwen fanout now promotes the exact token LCP when the aligned boundary already
 qualifies and every exact private suffix fits the six-token singleton pocket.
 Dense 27B B=8 prefill moves `23.623 -> 8.307 s`, A3B B=16 moves

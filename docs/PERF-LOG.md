@@ -24147,3 +24147,50 @@ fallback, and planned/realized counts reported separately. Either
 `QWEN_FIXED_COHORT_RAGGED_PROMPTS=0` or `QWEN_DENSE_BATCH8_REFILL=0` is rollback.
 Qwen MoE and root-aware refill remain closed. Evidence:
 `docs/bench/2026-08-12-automatic-dense-ragged-refill/README.md`.
+
+## 2026-08-12 — DeepSeek V4 DSpark Metal Operating-Point Calibration
+
+Status: an external llama.cpp b10326 n-sweep on the exact 2,385-token
+official-chat prompt re-prices the held qwen DSpark budget. The Metal
+operating point is n=1, not the B200 n=3. No qwen code changed; this is
+calibration evidence only.
+
+- Condition: FRESH UD-IQ3_XXS target plus the 10.90 GB DSpark Q8_0 drafter,
+  `--spec-type draft-dspark`, confidence 0.3, 256 greedy tokens, single-turn,
+  prompt token identity verified at exactly 2,385 (BOS and role markers
+  correct). Two counterbalanced blocks `B n1 n2 n3 | n3 n2 n1 B` with a 120 s
+  cooldown before every timed run, per the A10B-class convention.
+- Generation medians: baseline 28.05 token/s (35.65 ms/token, repeats
+  28.1/28.0), n1 32.6 (1.162x), n2 30.95 (1.103x), n3 29.55 (1.053x). The
+  ordering held in both block directions and in an earlier un-cooled hot pilot
+  (26.5 versus 23.4), so it is not a thermal-order artifact. An un-cooled
+  pilot also demonstrated why the protocol matters: its closing baseline
+  sagged 27.9 to 24.4 before cooldowns were applied.
+- The B200 n=3 optimum inverts on M4 Max Metal: each added draft level costs
+  more verify time than its accepted tokens return. Baseline, n1, and n3
+  outputs are byte-identical after terminal-control normalization; n2
+  reproducibly emits a different greedy stream in both slots, first diverging
+  87% through at a near-tie token. Treat the n2 timing as diagnostic only and
+  count it against unguarded spec exactness on the external engine.
+- Acceptance anchor: the prior calibration's deterministic counts are retained
+  (107/142 accepted, 149 packets, 1.71812 useful tokens per packet). Greedy
+  stream stability across arms supports the transfer; b10297-to-b10326 build
+  drift is the residual caveat, and this build prints no per-run acceptance
+  counters at default verbosity.
+- Re-priced complete-packet budgets at 1.71812 tokens/packet: at most 58.34 ms
+  to beat this session's llama.cpp no-spec by 5%; at most 52.70/50.19 ms to
+  match/beat llama.cpp's own n=1 spec endpoint; at most 73.4-89.0 ms to beat
+  the qwen FRESH singleton by 5% (sweep-rate 44.84 versus floor-packet
+  54.39 ms/token respectively).
+- Verifier implication: a decode-lineage N=2 verifier floor (singleton
+  52.81 ms GPU plus marginal routed columns, drafter, capture, and rollback)
+  sits near 60-68 ms today. That clears the self-anchored budget but misses
+  the external anchors while the singleton decode gap versus llama.cpp
+  (54.4 versus 35.7 ms/token at this position) stands. Decode front-end
+  fusion is therefore upstream of qwen DSpark, and the target work unit
+  simplifies to exactly two verify columns.
+
+Decision: repoint the DSpark hold at an n=1/N=2 work unit against the 58.34 ms
+external budget; do not build for n=3. Raw arms, summary, and the sweep script
+are archived at `target/profiles/dspark-metal-nsweep-2026-08-12/`; rerun
+protocol is counterbalanced blocks with 120 s cooldowns.

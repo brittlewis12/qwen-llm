@@ -1404,11 +1404,19 @@ projection arithmetic and a credible path to the complete wall bar.
    producer. Do not build sealed A/O/Z route replay. Reopen only when a
    producer/consumer fusion independently identifies at least another 53 ms of
    existing GPU work and preserves fail-stop mutation ownership.
-4. **Hold qwen DSpark behind a materially new N2 work unit.** Reopen only when
-   correct two-row causal execution plus measured resident drafter, hidden
-   capture, acceptance, and transaction costs fit inside the 61.09 ms complete
-   packet budget on the maintained snapshot. Do not adapt the current packed
-   path or fund command collapse around its unchanged GPU work.
+4. **Hold qwen DSpark behind a materially new N2 work unit.** The Metal
+   operating point is n=1, not the B200 n=3: the counterbalanced b10326 sweep
+   measures 1.162x/1.103x/1.053x at n=1/2/3 with byte-identical greedy output
+   at n=1 and n=3 and a reproducibly divergent stream at n=2. Reopen only when
+   correct two-column causal execution plus measured resident drafter, hidden
+   capture, acceptance, and transaction costs fit inside the re-priced 58.34 ms
+   external complete-packet budget (73.4-89.0 ms against the qwen singleton
+   anchors) on the maintained snapshot. Do not build for n=3, adapt the current
+   packed path, or fund command collapse around its unchanged GPU work. The
+   singleton front end (item 5) is upstream: closing the 54.4-versus-35.7
+   ms/token decode gap is what moves the verifier floor inside the external
+   budget. Evidence: 2026-08-12 calibration entry;
+   `target/profiles/dspark-metal-nsweep-2026-08-12/`.
 5. **Use the singleton stage front end only for a named work deletion.** K160
    wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus llama.cpp's
    39.2 ms. Attention core, prepare, output, routed, and shared are

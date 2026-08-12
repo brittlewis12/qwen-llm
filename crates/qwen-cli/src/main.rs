@@ -4289,6 +4289,8 @@ fn run_deepseek_v4_requests_jsonl(
                 Some(ModelFamily::DeepSeek4),
                 (!stdin_mode).then_some(request_count),
                 selection,
+                None,
+                None,
             ))
             .context("serialize DeepSeek V4 execution selection")?
         );
@@ -6593,6 +6595,16 @@ fn run_requests_jsonl(
                 model_family,
                 (!requests.is_empty()).then_some(requests.len()),
                 selection,
+                match model_family {
+                    Some(ModelFamily::Qwen35) => dense_summary.ragged_prompt_policy,
+                    Some(ModelFamily::Qwen35Moe) => moe_summary.ragged_prompt_policy,
+                    Some(ModelFamily::DeepSeek4) | None => None,
+                },
+                match model_family {
+                    Some(ModelFamily::Qwen35) => dense_summary.ragged_prompt_plan_decision,
+                    Some(ModelFamily::Qwen35Moe) => moe_summary.ragged_prompt_plan_decision,
+                    Some(ModelFamily::DeepSeek4) | None => None,
+                },
             ))
             .context("serialize execution selection")?
         );

@@ -1,0 +1,26 @@
+[metal-load] native quantized token embedding policy: auto-promoted (Q4_K [5120, 248320])
+[2m2026-08-12T12:57:45.255662Z[0m [32m INFO[0m [2mqwen_llm::runtime[0m[2m:[0m prefetch: skipped (already warm) [3mshard[0m[2m=[0m/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf [3mresident_pct[0m[2m=[0m100.0
+[metal-load-ledger] source=851/16806250496 direct_copy=851/16806250496 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+loaded /Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf in 1983.8 ms; prefix_cache_max_mib=0
+dense_batch8: {"schema_version":7,"backend":"dense_qwen_static_batch8_v6","cohort_index":0,"width":8,"prompt_tokens_per_lane":[10,11,13,17,25,41,73,137],"min_prompt_tokens":10,"max_prompt_tokens":137,"requested_tokens_per_lane":[32,32,32,32,32,32,32,32],"shared_capacity_tokens":185,"generated_tokens_per_lane":[32,32,32,32,32,32,32,32],"productive_transitions_per_lane":[31,31,31,31,31,31,31,31],"padding_transitions_per_lane":[0,0,0,0,0,0,0,0],"generated_tokens":256,"productive_transitions":248,"padding_transitions":0,"physical_batch_steps":31,"physical_transition_utilization":1.0,"common_prefix_tokens":2,"prefix_fanout_tokens":0,"prefix_fanout_reason":"below_minimum","prefix_fanout_boundary_policy":"tiny_suffix_exact_lcp","prefix_fanout_min_tokens":256,"prefix_snapshot_bytes":0,"prefix_prefill_ms":0.0,"prefix_snapshot_ms":0.0,"prefix_restore_ms":0.0,"suffix_prefill_ms":2636.484041,"private_suffix_singleton_max_tokens":6,"private_suffix_singleton_lanes":0,"private_suffix_singleton_tokens":0,"private_suffix_packed_lanes":0,"private_suffix_packed_tokens":0,"prefill_ms":2636.492708,"decode_ms":3780.772209,"batch_transition_ms":3774.2389550000003,"executor_gpu_ms":3689.096541638719,"aggregate_generated_tps":67.71103516646697,"sequence_allocation_delta_bytes":197115904,"remaining_sequence_required_bytes":1379811328,"prefix_snapshot_required_bytes":0,"memory_admission_incremental_bytes":1379811328,"memory_admission_reserve_bytes":2147483648,"memory_admission_required_bytes":3527294976,"memory_admission_reason":"admitted_process_budget_omitted"}
+fixed_cohort_file_root: {"schema_version":1,"backend":"qwen_fixed_file_root_v1","enabled":true,"requests":8,"planned_cohorts":1,"common_prefix_tokens":2,"selected_prefix_tokens":0,"planned_avoided_prefix_evaluations":0,"planned_avoided_prompt_tokens":0,"minimum_tokens":1024,"reason":"below_minimum_uses","outcome":"not_selected","actual_cohort_uses":0,"actual_avoided_prefix_evaluations":0,"actual_avoided_prompt_tokens":0,"excluded_requests":0,"snapshot_required_bytes":0,"max_cohort_snapshot_required_bytes":0,"additional_memory_bytes":0,"memory_admission_required_bytes":null,"memory_admission_reason":"not_requested","snapshot_bytes":0,"prefill_ms":0.0,"snapshot_ms":0.0}
+dense_batch8_planner: {"schema_version":7,"backend":"dense_qwen_fixed_cohort_planner_v7","requests":8,"prefix_packing_configured":true,"prefix_packing_effective":false,"prefix_fanout_boundary_policy":"tiny_suffix_exact_lcp","ragged_prompts_enabled":true,"ragged_packing_strategy":"generation_depth","refill_policy":"disabled","refill_configured":false,"refill_effective":false,"planned_refill_arenas":0,"planned_refill_requests":0,"realized_refill_arenas":0,"realized_refill_requests":0,"realized_refill_memory_fallback_arenas":0,"compatibility_buckets":1,"planned_candidate_cohorts":1,"realized_prefix_affinity_cohorts":0,"planned_prefix_fallback_buckets":0,"planned_full_cohorts":1,"planned_batched_requests":8,"realized_full_cohorts":1,"planned_economics_rejected_cohorts":0,"realized_memory_rejected_cohorts":0,"realized_batched_requests":8,"realized_serial_fallback_requests":0,"realized_estimated_physical_transition_slots":248,"realized_estimated_capacity_slots":1480,"minimum_requested_transition_utilization":"3/4","packing_order":"ragged_pareto","output_order":"input"}
+stats: requests=8 cache_entries=0 cache_mib=0.0/0.0
+        8.59 real         1.05 user         1.32 sys
+         33760313344  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2061118  page reclaims
+                   1  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 898  involuntary context switches
+         24791094227  instructions retired
+          9506324944  cycles elapsed
+         18726511144  peak memory footprint

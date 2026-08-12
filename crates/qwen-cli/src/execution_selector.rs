@@ -141,6 +141,10 @@ pub(super) struct ExecutionSelectionRecord {
     full_cohorts: usize,
     serial_remainder_requests: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    ragged_prompt_policy: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ragged_prompt_plan_decision: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     moe_plan: Option<MoePlanRecord>,
 }
 
@@ -149,10 +153,12 @@ impl ExecutionSelectionRecord {
         family: Option<ModelFamily>,
         requests: Option<usize>,
         selection: ExecutionSelection,
+        ragged_prompt_policy: Option<&'static str>,
+        ragged_prompt_plan_decision: Option<&'static str>,
     ) -> Self {
         Self {
-            schema_version: 1,
-            backend: "execution_selector_v1",
+            schema_version: 2,
+            backend: "execution_selector_v2",
             requested_mode: "auto",
             family: match family {
                 Some(ModelFamily::Qwen35) => "qwen35",
@@ -167,6 +173,8 @@ impl ExecutionSelectionRecord {
             requests,
             full_cohorts: selection.full_cohorts,
             serial_remainder_requests: selection.serial_remainder_requests,
+            ragged_prompt_policy,
+            ragged_prompt_plan_decision,
             moe_plan: selection.moe_plan.map(Into::into),
         }
     }

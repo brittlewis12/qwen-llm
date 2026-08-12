@@ -1,0 +1,26 @@
+[metal-load] native quantized token embedding policy: auto-unpromoted (Q8_0 [1024, 248320])
+[2m2026-08-12T12:30:56.736114Z[0m [32m INFO[0m [2mqwen_llm::runtime[0m[2m:[0m prefetch: skipped (already warm) [3mshard[0m[2m=[0m/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf [3mresident_pct[0m[2m=[0m100.0
+[metal-load-ledger] source=321/1071054080 direct_copy=320/800881920 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=1/270172160/1017118720 derived=0/0
+loaded /Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf in 215.2 ms; prefix_cache_max_mib=0
+dense_batch8: {"schema_version":7,"backend":"dense_qwen_static_batch8_v6","cohort_index":0,"width":8,"prompt_tokens_per_lane":[10,11,13,17,25,41,73,137],"min_prompt_tokens":10,"max_prompt_tokens":137,"requested_tokens_per_lane":[64,64,64,64,64,64,64,64],"shared_capacity_tokens":217,"generated_tokens_per_lane":[64,64,64,64,64,64,64,64],"productive_transitions_per_lane":[63,63,63,63,63,63,63,63],"padding_transitions_per_lane":[0,0,0,0,0,0,0,0],"generated_tokens":512,"productive_transitions":504,"padding_transitions":0,"physical_batch_steps":63,"physical_transition_utilization":1.0,"common_prefix_tokens":2,"prefix_fanout_tokens":0,"prefix_fanout_reason":"below_minimum","prefix_fanout_boundary_policy":"tiny_suffix_exact_lcp","prefix_fanout_min_tokens":256,"prefix_snapshot_bytes":0,"prefix_prefill_ms":0.0,"prefix_snapshot_ms":0.0,"prefix_restore_ms":0.0,"suffix_prefill_ms":144.92595699999998,"private_suffix_singleton_max_tokens":6,"private_suffix_singleton_lanes":0,"private_suffix_singleton_tokens":0,"private_suffix_packed_lanes":0,"private_suffix_packed_tokens":0,"prefill_ms":144.933209,"decode_ms":1100.936666,"batch_transition_ms":1094.590742,"executor_gpu_ms":1035.6970832799561,"aggregate_generated_tps":465.0585413421048,"sequence_allocation_delta_bytes":32768000,"remaining_sequence_required_bytes":229376000,"prefix_snapshot_required_bytes":0,"memory_admission_incremental_bytes":229376000,"memory_admission_reserve_bytes":2147483648,"memory_admission_required_bytes":2376859648,"memory_admission_reason":"admitted_process_budget_omitted"}
+fixed_cohort_file_root: {"schema_version":1,"backend":"qwen_fixed_file_root_v1","enabled":true,"requests":8,"planned_cohorts":1,"common_prefix_tokens":2,"selected_prefix_tokens":0,"planned_avoided_prefix_evaluations":0,"planned_avoided_prompt_tokens":0,"minimum_tokens":1024,"reason":"below_minimum_uses","outcome":"not_selected","actual_cohort_uses":0,"actual_avoided_prefix_evaluations":0,"actual_avoided_prompt_tokens":0,"excluded_requests":0,"snapshot_required_bytes":0,"max_cohort_snapshot_required_bytes":0,"additional_memory_bytes":0,"memory_admission_required_bytes":null,"memory_admission_reason":"not_requested","snapshot_bytes":0,"prefill_ms":0.0,"snapshot_ms":0.0}
+dense_batch8_planner: {"schema_version":7,"backend":"dense_qwen_fixed_cohort_planner_v7","requests":8,"prefix_packing_configured":true,"prefix_packing_effective":false,"prefix_fanout_boundary_policy":"tiny_suffix_exact_lcp","ragged_prompts_enabled":true,"ragged_packing_strategy":"generation_depth","refill_policy":"disabled","refill_configured":false,"refill_effective":false,"planned_refill_arenas":0,"planned_refill_requests":0,"realized_refill_arenas":0,"realized_refill_requests":0,"realized_refill_memory_fallback_arenas":0,"compatibility_buckets":1,"planned_candidate_cohorts":1,"realized_prefix_affinity_cohorts":0,"planned_prefix_fallback_buckets":0,"planned_full_cohorts":1,"planned_batched_requests":8,"realized_full_cohorts":1,"planned_economics_rejected_cohorts":0,"realized_memory_rejected_cohorts":0,"realized_batched_requests":8,"realized_serial_fallback_requests":0,"realized_estimated_physical_transition_slots":504,"realized_estimated_capacity_slots":1736,"minimum_requested_transition_utilization":"3/4","packing_order":"ragged_pareto","output_order":"input"}
+stats: requests=8 cache_entries=0 cache_mib=0.0/0.0
+        1.52 real         0.19 user         0.18 sys
+          2749497344  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              230414  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   4  voluntary context switches
+                 472  involuntary context switches
+          5316076070  instructions retired
+          1583197314  cycles elapsed
+          2392836880  peak memory footprint

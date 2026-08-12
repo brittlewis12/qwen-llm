@@ -23884,8 +23884,9 @@ complete candidate JSONL output remains byte-identical to serial execution.
 Final reviewed-code cells move dense 0.8B heterogeneous short prompts
 `2.82 -> 1.65 s` (`1.709x`), dense shared-root prompts `2.64 -> 2.29 s`
 (`1.153x`), and A3B heterogeneous short prompts `14.21 -> 10.95 s`
-(`1.298x`). A prior A3B long-private-suffix cell was flat (`1.006x`), so the
-capability remains default-off rather than overclaiming a universal policy win.
+(`1.298x`). A prior A3B long-private-suffix cell was flat (`1.006x`), so this
+checkpoint kept the capability default-off. The automatic decision is superseded
+by the charged dense-only promotion recorded below.
 
 Admission now prices shared-capacity sessions, prefill scratch, each independent
 executor buffer at Metal allocation size, transient reserve, and optional CPU
@@ -24004,8 +24005,9 @@ exactly 64 tokens, static-to-refill remains `2.23 -> 1.81 s` (`1.232x`) on 0.8B
 and `23.69 -> 20.17 s` (`1.174x`) on 27B. Freeze 64 as a conservative measured
 boundary, not a claim that token 65 is the crossover.
 
-Automatic execution remains unchanged. Qwen MoE remains closed, ragged prompts
-do not implicitly enable refill, prefix-selected cohorts remain excluded, and
+At this checkpoint automatic execution remained unchanged. Qwen MoE stayed
+closed, ragged prompts did not implicitly enable refill, prefix-selected cohorts
+remained excluded, and
 memory denial restores the exact static plan. Dense planner schema 7 reports the
 tri-state policy and default prompt cap. Evidence:
 `docs/bench/2026-08-12-dense-refill-default/README.md`.
@@ -24044,7 +24046,8 @@ Evidence: `docs/bench/2026-08-12-deepseek-file-root/README.md`.
 Status: opt-in `--execution-mode auto` now carries the qualified dense B8
 short-serial-tail rescue through both selector lookahead and fixed execution.
 Absent `QWEN_DENSE_BATCH8_REFILL` or explicit `=1` remains bounded rescue;
-`=0` is rollback. Ragged auto, forced broad refill, and Qwen MoE remain closed.
+`=0` is rollback. At this checkpoint ragged auto, forced broad refill, and Qwen
+MoE remained closed.
 
 On the 32-request 11-token fixture, same-binary auto wall moves `2.16 -> 1.76 s`
 (`1.227x`) on Qwen3.5 0.8B Q8 and `19.76 -> 15.89 s` (`1.244x`) on Qwen3.6
@@ -24058,3 +24061,35 @@ because no serial fallback exists. Selector admission now prices the plan's
 maximum execution capacity, and model-family-specific lookahead prevents the
 dense refill variable from affecting MoE automatic commands. Evidence:
 `docs/bench/2026-08-12-automatic-dense-refill/README.md`.
+
+## 2026-08-12 — Charged Automatic Dense Ragged Admission GO
+
+Status: `--execution-mode auto` may now select dense B8 for heterogeneous prompt
+frontiers inside a charged short-prompt envelope. Every prompt must be at most
+256 tokens and fit in one configured prefill chunk; requests must share a
+measured generation limit of at least 32 tokens; each proposed B8 cohort may
+charge at most two prompt tokens per productive decode transition. Ragged
+planning must create more full cohorts than the exact incumbent plan, leave no
+serial remainder requests, and preserve the existing 3/4 utilization and memory
+gates.
+
+The real incumbent is automatic B2, not serial execution. On the recovered
+10-137-token fixture, current-source 0.8B execution moves `1,748 -> 1,246 ms`
+(`1.403x`) at 64 output tokens and `943 -> 690 ms` (`1.367x`) at 32. Dense 27B
+moves `20,570 -> 10,333 ms` (`1.991x`) and `11,451 -> 6,417 ms` (`1.784x`) on
+the same cells. Complete outputs are byte-identical and every process reports
+zero swaps.
+
+The MoE result is deliberately not promoted. An initial A3B order suggested
+`14.88 -> 11.00 s`, but model load moved `5.60 -> 2.41 s`. Reverse-order
+execution isolates only `9,060 -> 8,343 ms` (`1.086x`) at 64 output tokens;
+32 and 16 output-token cells reach `1.078x` and `1.058x`. Keep Qwen MoE ragged
+B16 behind explicit `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1`.
+
+Unset enables only the charged automatic dense policy. `=0` is strict rollback
+to equal-frontier/refill/B2 planning; `=1` retains the broad explicit dense and
+MoE experiment. Selector schema 2 and dense planner schema 8 expose policy and
+closed admission decisions. The exact automatic 0.8B product cell moves
+`2.06 -> 1.53 s` (`1.346x`) with SHA-256
+`312f47f66e2242ee865648ff56fe9d2321213c3c60ebe3f0f60491d1aead8023`.
+Evidence: `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.

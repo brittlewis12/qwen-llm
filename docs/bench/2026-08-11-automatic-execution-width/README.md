@@ -1,7 +1,11 @@
 # Automatic JSONL Execution Width
 
-Update (2026-08-11): selected B=8/B=16 backends now use baseline-safe
-prefix-aware cohort packing. See
+Update (2026-08-12): automatic dense B=8 also admits charged short ragged
+frontiers. See
+`docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
+
+Update (2026-08-11): selected B=8/B=16 backends use baseline-safe prefix-aware
+cohort packing. See
 `docs/bench/2026-08-11-fixed-cohort-prefix-packing/README.md`.
 
 Date: 2026-08-11
@@ -13,7 +17,7 @@ executors. Default CLI behavior remains serial.
 
 `qwen --requests-jsonl FILE --execution-mode auto` prepares a regular request
 file once, inspects executable capabilities without allocating sequence state,
-performs conservative memory admission, emits one schema-v1 selection record,
+performs conservative memory admission, emits one schema-v2 selection record,
 then chooses exactly one existing backend:
 
 - dense Qwen fixed B=8 when a complete utilization-qualified cohort is ready;
@@ -24,9 +28,11 @@ then chooses exactly one existing backend:
   command-queue-scoped residency set is off;
 - serial execution otherwise.
 
-Fixed-cohort compatibility now means equal tokenized prompt length; per-request
-generation limits may differ when their requested transition utilization clears
-the three-quarter floor. See
+Fixed-cohort compatibility normally means equal tokenized prompt length;
+automatic dense B=8 may instead admit short ragged prompts after per-cohort
+prefill/decode charging, but that automatic slice requires one equal generation
+limit of at least 32 tokens. Outside it, per-request generation limits may differ
+when requested transition utilization clears the three-quarter floor. See
 `docs/bench/2026-08-11-fixed-cohort-mixed-limits/README.md`.
 
 The MoE preference key is architecture geometry plus immutable capability-plan

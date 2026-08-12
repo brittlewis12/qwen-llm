@@ -11,11 +11,14 @@ const MIN_REQUESTED_TRANSITION_UTILIZATION_DENOMINATOR: usize = 4;
 const REFILL_MIN_STEP_SAVINGS_NUMERATOR: usize = 1;
 const REFILL_MIN_STEP_SAVINGS_DENOMINATOR: usize = 10;
 const DEFAULT_REFILL_MAX_PROMPT_TOKENS: usize = 64;
+const AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS: usize = 256;
+const AUTOMATIC_DENSE_RAGGED_MIN_GENERATION_TOKENS: usize = 32;
+const AUTOMATIC_DENSE_RAGGED_MAX_PREFILL_PER_TRANSITION: usize = 2;
 const DENSE_PREFIX_FANOUT_ENV: &str = "QWEN_DENSE_BATCH8_PREFIX_FANOUT";
 const MOE_PREFIX_FANOUT_ENV: &str = "QWEN_MOE_BATCH16_PREFIX_FANOUT";
 const PREFIX_PACKING_ENV: &str = "QWEN_FIXED_COHORT_PREFIX_PACKING";
 const FILE_ROOT_FANOUT_ENV: &str = "QWEN_FIXED_COHORT_FILE_ROOT_FANOUT";
-// Experimental and default-off until private-suffix prefill has a cost model.
+// Explicitly broadens or disables the charged automatic dense policy.
 const RAGGED_PROMPTS_ENV: &str = "QWEN_FIXED_COHORT_RAGGED_PROMPTS";
 // Charged only for dense B8; synchronous MoE B16 refill loses to B2.
 const DENSE_REFILL_ENV: &str = "QWEN_DENSE_BATCH8_REFILL";
@@ -65,11 +68,11 @@ impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_>
     const DISPLAY_NAME: &'static str = "dense B=8";
     const PREFIX_FANOUT_ENV: &'static str = DENSE_PREFIX_FANOUT_ENV;
     const COHORT_BACKEND: &'static str = "dense_qwen_static_batch8_v6";
-    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v7";
+    const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v8";
     const TELEMETRY_PREFIX: &'static str = "dense_batch8";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "dense_batch8_planner";
     const TELEMETRY_SCHEMA_VERSION: u32 = 7;
-    const PLANNER_TELEMETRY_SCHEMA_VERSION: u32 = 7;
+    const PLANNER_TELEMETRY_SCHEMA_VERSION: u32 = 8;
     const REFILL_TELEMETRY: bool = true;
 
     fn executor_scratch_upper_bytes(loaded: &LoadedModel) -> Result<u64> {
@@ -109,11 +112,11 @@ impl FixedCohortExecutor<MOE_BATCH16_WIDTH> for MoeBatch16SequenceExecutor<'_> {
     const DISPLAY_NAME: &'static str = "MoE B=16";
     const PREFIX_FANOUT_ENV: &'static str = MOE_PREFIX_FANOUT_ENV;
     const COHORT_BACKEND: &'static str = "qwen_moe_capability_batch16_v6";
-    const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v5";
+    const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v6";
     const TELEMETRY_PREFIX: &'static str = "moe_batch16";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "moe_batch16_planner";
     const TELEMETRY_SCHEMA_VERSION: u32 = 8;
-    const PLANNER_TELEMETRY_SCHEMA_VERSION: u32 = 5;
+    const PLANNER_TELEMETRY_SCHEMA_VERSION: u32 = 6;
 
     fn executor_scratch_upper_bytes(loaded: &LoadedModel) -> Result<u64> {
         Ok(loaded.moe_batch16_scratch_upper_bytes()?)
@@ -160,6 +163,68 @@ struct PrefixFanoutPlan {
 enum CohortCompatibility {
     EqualPromptTokens(usize),
     RaggedPrompts,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RaggedPromptPolicy {
+    Disabled,
+    Explicit,
+    AutomaticDenseCharged,
+}
+
+impl RaggedPromptPolicy {
+    fn enabled(self) -> bool {
+        self != Self::Disabled
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Explicit => "explicit",
+            Self::AutomaticDenseCharged => "automatic_dense_charged",
+        }
+    }
+}
+
+impl From<bool> for RaggedPromptPolicy {
+    fn from(enabled: bool) -> Self {
+        if enabled {
+            Self::Explicit
+        } else {
+            Self::Disabled
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RaggedPromptDecision {
+    Disabled,
+    Explicit,
+    AutomaticAdmitted,
+    AutomaticEnvelopeRejected,
+    AutomaticChargeRejected,
+    AutomaticNoCohortGain,
+}
+
+impl RaggedPromptDecision {
+    fn for_policy(policy: RaggedPromptPolicy) -> Self {
+        match policy {
+            RaggedPromptPolicy::Disabled => Self::Disabled,
+            RaggedPromptPolicy::Explicit => Self::Explicit,
+            RaggedPromptPolicy::AutomaticDenseCharged => Self::AutomaticAdmitted,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Explicit => "explicit",
+            Self::AutomaticAdmitted => "automatic_dense_admitted",
+            Self::AutomaticEnvelopeRejected => "automatic_dense_envelope_rejected",
+            Self::AutomaticChargeRejected => "automatic_dense_charge_rejected",
+            Self::AutomaticNoCohortGain => "automatic_dense_no_cohort_gain",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -267,7 +332,8 @@ struct CohortPlan<const WIDTH: usize> {
     prefix_packing_configured: bool,
     prefix_packing_effective: bool,
     prefix_fanout_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
-    ragged_prompts_enabled: bool,
+    ragged_prompt_policy: RaggedPromptPolicy,
+    ragged_prompt_plan_decision: RaggedPromptDecision,
     ragged_packing_strategy: RaggedPackingStrategy,
     compatibility_buckets: usize,
     candidate_cohorts: usize,
@@ -286,6 +352,8 @@ struct CohortPlan<const WIDTH: usize> {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct CohortPlanSummary {
+    pub ragged_prompt_policy: Option<&'static str>,
+    pub ragged_prompt_plan_decision: Option<&'static str>,
     pub full_cohorts: usize,
     pub economics_rejected_cohorts: usize,
     pub serial_fallback_requests: usize,
@@ -535,6 +603,8 @@ struct PlannerTelemetry {
     prefix_packing_effective: bool,
     prefix_fanout_boundary_policy: &'static str,
     ragged_prompts_enabled: bool,
+    ragged_prompt_policy: &'static str,
+    ragged_prompt_plan_decision: &'static str,
     ragged_packing_strategy: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     refill_policy: Option<&'static str>,
@@ -712,7 +782,14 @@ fn selected_cohort_prefix_tokens<const WIDTH: usize>(
     .selected_prefix_tokens
 }
 
-fn ragged_prompts_enabled(default_enabled: bool) -> Result<bool> {
+fn ragged_prompt_policy<const WIDTH: usize>(
+    automatic_execution: bool,
+) -> Result<RaggedPromptPolicy> {
+    let default_policy = if automatic_execution && WIDTH == DENSE_BATCH8_WIDTH {
+        RaggedPromptPolicy::AutomaticDenseCharged
+    } else {
+        RaggedPromptPolicy::Disabled
+    };
     let value = std::env::var_os(RAGGED_PROMPTS_ENV)
         .map(|value| {
             value
@@ -720,16 +797,19 @@ fn ragged_prompts_enabled(default_enabled: bool) -> Result<bool> {
                 .map_err(|_| anyhow!("{RAGGED_PROMPTS_ENV} must be valid UTF-8"))
         })
         .transpose()?;
-    parse_ragged_prompts_enabled(value.as_deref(), default_enabled)
+    parse_ragged_prompt_policy(value.as_deref(), default_policy)
 }
 
-fn parse_ragged_prompts_enabled(value: Option<&str>, default_enabled: bool) -> Result<bool> {
+fn parse_ragged_prompt_policy(
+    value: Option<&str>,
+    default_policy: RaggedPromptPolicy,
+) -> Result<RaggedPromptPolicy> {
     let Some(value) = value else {
-        return Ok(default_enabled);
+        return Ok(default_policy);
     };
     match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
+        "1" | "true" | "yes" | "on" => Ok(RaggedPromptPolicy::Explicit),
+        "0" | "false" | "no" | "off" => Ok(RaggedPromptPolicy::Disabled),
         _ => bail!("{RAGGED_PROMPTS_ENV} must be a boolean"),
     }
 }
@@ -1195,21 +1275,127 @@ fn plan_dense_refill<const WIDTH: usize>(
     })
 }
 
+fn automatic_dense_ragged_envelope_qualifies<const WIDTH: usize>(
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+) -> bool {
+    let max_prompt_tokens = requests
+        .iter()
+        .map(|request| request.prompt_ids.len())
+        .max()
+        .unwrap_or(0);
+    let PrefillChunkArg::Fixed(prefill_chunk) = args.prefill_chunk else {
+        return false;
+    };
+    let mut requested_tokens = requests
+        .iter()
+        .map(|request| request.request.tokens.unwrap_or(args.tokens));
+    let Some(first_requested_tokens) = requested_tokens.clone().next() else {
+        return false;
+    };
+    WIDTH == DENSE_BATCH8_WIDTH
+        && requests.len() >= WIDTH
+        && max_prompt_tokens <= AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS
+        && prefill_chunk >= max_prompt_tokens
+        && first_requested_tokens >= AUTOMATIC_DENSE_RAGGED_MIN_GENERATION_TOKENS
+        && requested_tokens.all(|tokens| tokens == first_requested_tokens)
+}
+
+fn automatic_dense_ragged_charge_qualifies<const WIDTH: usize>(
+    work: &[PlannedWork<WIDTH>],
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+) -> Result<bool> {
+    let mut batches = 0usize;
+    for item in work {
+        let PlannedWork::Batch(indices) = item else {
+            continue;
+        };
+        batches += 1;
+        let charged_prefill_tokens = indices.iter().try_fold(0usize, |total, &index| {
+            total
+                .checked_add(requests[index].prompt_ids.len())
+                .context("automatic ragged prefill charge overflow")
+        })?;
+        let productive_transitions = indices.iter().try_fold(0usize, |total, &index| {
+            let (requested_tokens, _) = jsonl_generation_capacity(&requests[index], args)?;
+            total
+                .checked_add(requested_tokens.saturating_sub(1))
+                .context("automatic ragged transition charge overflow")
+        })?;
+        if productive_transitions == 0
+            || charged_prefill_tokens
+                > productive_transitions
+                    .checked_mul(AUTOMATIC_DENSE_RAGGED_MAX_PREFILL_PER_TRANSITION)
+                    .context("automatic ragged charge comparison overflow")?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(batches > 0)
+}
+
 fn plan_request_work<const WIDTH: usize>(
     requests: &[PreparedJsonlRequest],
     args: &Args,
 ) -> Result<CohortPlan<WIDTH>> {
-    let ragged_prompts = ragged_prompts_enabled(false)?;
     let automatic_execution =
         args.execution_mode == Some(execution_selector::ExecutionModeArg::Auto);
-    let refill_policy = fixed_cohort_refill_policy::<WIDTH>(ragged_prompts, automatic_execution)?;
+    let ragged_prompt_policy = ragged_prompt_policy::<WIDTH>(automatic_execution)?;
+    plan_request_work_with_policy(requests, args, ragged_prompt_policy)
+}
+
+fn plan_request_work_with_policy<const WIDTH: usize>(
+    requests: &[PreparedJsonlRequest],
+    args: &Args,
+    ragged_prompt_policy: RaggedPromptPolicy,
+) -> Result<CohortPlan<WIDTH>> {
+    let automatic_execution =
+        args.execution_mode == Some(execution_selector::ExecutionModeArg::Auto);
+    let prefix_packing = prefix_packing_enabled(true)?;
+    let prefix_fanout_boundary_policy = qwen_prefix_fanout_boundary_policy()?;
+    if ragged_prompt_policy == RaggedPromptPolicy::AutomaticDenseCharged {
+        let baseline = plan_request_work_configured(
+            requests,
+            args,
+            prefix_packing,
+            prefix_fanout_boundary_policy,
+            RaggedPromptPolicy::Disabled,
+            fixed_cohort_refill_policy::<WIDTH>(false, automatic_execution)?,
+        )?;
+        if !automatic_dense_ragged_envelope_qualifies::<WIDTH>(requests, args) {
+            let mut baseline = baseline;
+            baseline.ragged_prompt_plan_decision = RaggedPromptDecision::AutomaticEnvelopeRejected;
+            return Ok(baseline);
+        }
+        let candidate = plan_request_work_configured(
+            requests,
+            args,
+            prefix_packing,
+            prefix_fanout_boundary_policy,
+            ragged_prompt_policy,
+            DenseRefillPolicy::Disabled,
+        )?;
+        if candidate.full_cohorts <= baseline.full_cohorts || candidate.serial_fallback_requests > 0
+        {
+            let mut baseline = baseline;
+            baseline.ragged_prompt_plan_decision = RaggedPromptDecision::AutomaticNoCohortGain;
+            return Ok(baseline);
+        }
+        if !automatic_dense_ragged_charge_qualifies(&candidate.work, requests, args)? {
+            let mut baseline = baseline;
+            baseline.ragged_prompt_plan_decision = RaggedPromptDecision::AutomaticChargeRejected;
+            return Ok(baseline);
+        }
+        return Ok(candidate);
+    }
     plan_request_work_configured(
         requests,
         args,
-        prefix_packing_enabled(true)?,
-        qwen_prefix_fanout_boundary_policy()?,
-        ragged_prompts,
-        refill_policy,
+        prefix_packing,
+        prefix_fanout_boundary_policy,
+        ragged_prompt_policy,
+        fixed_cohort_refill_policy::<WIDTH>(ragged_prompt_policy.enabled(), automatic_execution)?,
     )
 }
 
@@ -1218,10 +1404,13 @@ fn plan_request_work_configured<const WIDTH: usize>(
     args: &Args,
     prefix_packing: bool,
     prefix_fanout_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
-    ragged_prompts: bool,
+    ragged_prompt_policy: impl Into<RaggedPromptPolicy>,
     refill_policy: impl Into<DenseRefillPolicy>,
 ) -> Result<CohortPlan<WIDTH>> {
     ensure!(WIDTH > 0, "fixed-cohort planner width must be nonzero");
+    let ragged_prompt_policy = ragged_prompt_policy.into();
+    let ragged_prompt_plan_decision = RaggedPromptDecision::for_policy(ragged_prompt_policy);
+    let ragged_prompts = ragged_prompt_policy.enabled();
     let refill_policy = refill_policy.into();
     let generation = requests
         .iter()
@@ -1400,7 +1589,8 @@ fn plan_request_work_configured<const WIDTH: usize>(
         prefix_packing_configured: prefix_packing,
         prefix_packing_effective: prefix_packing && !ragged_prompts,
         prefix_fanout_boundary_policy,
-        ragged_prompts_enabled: ragged_prompts,
+        ragged_prompt_policy,
+        ragged_prompt_plan_decision,
         ragged_packing_strategy,
         compatibility_buckets,
         candidate_cohorts,
@@ -1422,16 +1612,10 @@ pub(super) fn plan_summary<const WIDTH: usize>(
     requests: &[PreparedJsonlRequest],
     args: &Args,
 ) -> Result<CohortPlanSummary> {
-    let ragged_prompts = ragged_prompts_enabled(false)?;
-    let plan = plan_request_work_configured::<WIDTH>(
-        requests,
-        args,
-        prefix_packing_enabled(true)?,
-        qwen_prefix_fanout_boundary_policy()?,
-        ragged_prompts,
-        fixed_cohort_refill_policy::<WIDTH>(ragged_prompts, true)?,
-    )?;
+    let plan = plan_request_work::<WIDTH>(requests, args)?;
     Ok(CohortPlanSummary {
+        ragged_prompt_policy: Some(plan.ragged_prompt_policy.as_str()),
+        ragged_prompt_plan_decision: Some(plan.ragged_prompt_plan_decision.as_str()),
         full_cohorts: plan.full_cohorts,
         economics_rejected_cohorts: plan.economics_rejected_cohorts,
         serial_fallback_requests: plan.serial_fallback_requests,
@@ -2012,7 +2196,9 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         prefix_packing_configured: plan.prefix_packing_configured,
         prefix_packing_effective: plan.prefix_packing_effective,
         prefix_fanout_boundary_policy: plan.prefix_fanout_boundary_policy.as_str(),
-        ragged_prompts_enabled: plan.ragged_prompts_enabled,
+        ragged_prompts_enabled: plan.ragged_prompt_policy.enabled(),
+        ragged_prompt_policy: plan.ragged_prompt_policy.as_str(),
+        ragged_prompt_plan_decision: plan.ragged_prompt_plan_decision.as_str(),
         ragged_packing_strategy: plan.ragged_packing_strategy.as_str(),
         refill_policy: refill_telemetry_enabled.then_some(plan.refill_policy.as_str()),
         refill_default_max_prompt_tokens: refill_telemetry_enabled
@@ -2040,7 +2226,7 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         realized_estimated_physical_transition_slots: realized_transition_slots,
         realized_estimated_capacity_slots: realized_capacity_slots,
         minimum_requested_transition_utilization: "3/4",
-        packing_order: if plan.ragged_prompts_enabled {
+        packing_order: if plan.ragged_prompt_policy.enabled() {
             "ragged_pareto"
         } else if realized_prefix_affinity_cohorts > 0 {
             "prefix_affinity_then_generation_depth"
@@ -3188,7 +3374,7 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(ragged.ragged_prompts_enabled);
+        assert!(ragged.ragged_prompt_policy.enabled());
         assert_eq!(ragged.compatibility_buckets, 1);
         assert_eq!(ragged.full_cohorts, 1);
         assert_eq!(ragged.serial_fallback_requests, 0);
@@ -3196,6 +3382,215 @@ mod tests {
             ragged.work,
             vec![PlannedWork::Batch([0, 1, 2, 3, 4, 5, 6, 7])]
         );
+    }
+
+    #[test]
+    fn automatic_dense_ragged_is_charged_and_moe_remains_explicit() {
+        let mut args = test_args();
+        args.execution_mode = Some(execution_selector::ExecutionModeArg::Auto);
+        args.prefill_chunk = PrefillChunkArg::Fixed(512);
+        let make_requests = |requested_tokens: usize, longest_prompt: usize| {
+            let measured_prompt_tokens = [10, 11, 13, 17, 25, 41, 73, longest_prompt];
+            (0..DENSE_BATCH8_WIDTH)
+                .map(|slot| {
+                    let prompt_tokens = measured_prompt_tokens[slot];
+                    let mut request = prepared(
+                        &format!("auto-ragged-{requested_tokens}-{slot}"),
+                        &vec![7; prompt_tokens],
+                    );
+                    request.request.tokens = Some(requested_tokens);
+                    request
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let admitted = make_requests(32, 137);
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &admitted,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.ragged_prompt_policy,
+            RaggedPromptPolicy::AutomaticDenseCharged
+        );
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticAdmitted
+        );
+        assert_eq!(plan.full_cohorts, 1);
+        assert_eq!(plan.compatibility_buckets, 1);
+        assert!(!plan.refill_configured);
+
+        let too_little_decode = make_requests(16, 137);
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &too_little_decode,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(plan.ragged_prompt_policy, RaggedPromptPolicy::Disabled);
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticEnvelopeRejected
+        );
+        assert_eq!(plan.full_cohorts, 0);
+        assert!(plan.refill_configured);
+
+        let mut mixed_limits = make_requests(64, 137);
+        mixed_limits[0].request.tokens = Some(32);
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &mixed_limits,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(plan.ragged_prompt_policy, RaggedPromptPolicy::Disabled);
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticEnvelopeRejected
+        );
+
+        let too_long = make_requests(64, AUTOMATIC_DENSE_RAGGED_MAX_PROMPT_TOKENS + 1);
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &too_long,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(plan.ragged_prompt_policy, RaggedPromptPolicy::Disabled);
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticEnvelopeRejected
+        );
+        assert_eq!(plan.full_cohorts, 0);
+
+        let mut undersized_chunk = test_args();
+        undersized_chunk.execution_mode = Some(execution_selector::ExecutionModeArg::Auto);
+        undersized_chunk.prefill_chunk = PrefillChunkArg::Fixed(64);
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &admitted,
+            &undersized_chunk,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(plan.ragged_prompt_policy, RaggedPromptPolicy::Disabled);
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticEnvelopeRejected
+        );
+
+        let moe_requests = (0..MOE_BATCH16_WIDTH)
+            .map(|slot| {
+                let mut request = prepared(&format!("moe-auto-ragged-{slot}"), &vec![7; 10 + slot]);
+                request.request.tokens = Some(64);
+                request
+            })
+            .collect::<Vec<_>>();
+        let moe = plan_request_work::<MOE_BATCH16_WIDTH>(&moe_requests, &args).unwrap();
+        assert_eq!(moe.ragged_prompt_policy, RaggedPromptPolicy::Disabled);
+        assert_eq!(
+            moe.ragged_prompt_plan_decision,
+            RaggedPromptDecision::Disabled
+        );
+        assert_eq!(moe.full_cohorts, 0);
+
+        let explicit = plan_request_work_with_policy::<MOE_BATCH16_WIDTH>(
+            &moe_requests,
+            &args,
+            RaggedPromptPolicy::Explicit,
+        )
+        .unwrap();
+        assert_eq!(explicit.ragged_prompt_policy, RaggedPromptPolicy::Explicit);
+        assert_eq!(explicit.full_cohorts, 1);
+    }
+
+    #[test]
+    fn automatic_dense_ragged_charges_every_proposed_cohort() {
+        let mut args = test_args();
+        args.execution_mode = Some(execution_selector::ExecutionModeArg::Auto);
+        args.prefill_chunk = PrefillChunkArg::Fixed(512);
+        let mut requests = (0..DENSE_BATCH8_WIDTH)
+            .map(|slot| {
+                let mut request = prepared(&format!("cheap-{slot}"), &vec![7; 8 + slot]);
+                request.request.tokens = Some(32);
+                request
+            })
+            .collect::<Vec<_>>();
+        requests.extend((0..DENSE_BATCH8_WIDTH).map(|slot| {
+            let mut request = prepared(&format!("expensive-{slot}"), &vec![7; 249 + slot]);
+            request.request.tokens = Some(32);
+            request
+        }));
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(plan.ragged_prompt_policy, RaggedPromptPolicy::Disabled);
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticChargeRejected
+        );
+        assert_eq!(plan.full_cohorts, 0);
+        assert_eq!(plan.serial_fallback_requests, requests.len());
+    }
+
+    #[test]
+    fn automatic_dense_ragged_does_not_strand_b2_remainders() {
+        let mut args = test_args();
+        args.execution_mode = Some(execution_selector::ExecutionModeArg::Auto);
+        args.prefill_chunk = PrefillChunkArg::Fixed(512);
+        let requests = (0..DENSE_BATCH8_WIDTH + 1)
+            .map(|slot| {
+                let mut request =
+                    prepared(&format!("ragged-remainder-{slot}"), &vec![7; 10 + slot]);
+                request.request.tokens = Some(64);
+                request
+            })
+            .collect::<Vec<_>>();
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(plan.ragged_prompt_policy, RaggedPromptPolicy::Disabled);
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticNoCohortGain
+        );
+        assert_eq!(plan.full_cohorts, 0);
+        assert_eq!(plan.serial_fallback_requests, requests.len());
+    }
+
+    #[test]
+    fn automatic_dense_ragged_never_replaces_an_equally_full_incumbent() {
+        let mut args = test_args();
+        args.execution_mode = Some(execution_selector::ExecutionModeArg::Auto);
+        args.prefill_chunk = PrefillChunkArg::Fixed(512);
+        let requests = (0..DENSE_BATCH8_WIDTH)
+            .map(|slot| {
+                let mut request = prepared(&format!("equal-{slot}"), &[7; 32]);
+                request.request.tokens = Some(64);
+                request
+            })
+            .collect::<Vec<_>>();
+        let plan = plan_request_work_with_policy::<DENSE_BATCH8_WIDTH>(
+            &requests,
+            &args,
+            RaggedPromptPolicy::AutomaticDenseCharged,
+        )
+        .unwrap();
+        assert_eq!(plan.ragged_prompt_policy, RaggedPromptPolicy::Disabled);
+        assert_eq!(
+            plan.ragged_prompt_plan_decision,
+            RaggedPromptDecision::AutomaticNoCohortGain
+        );
+        assert_eq!(plan.full_cohorts, 1);
+        assert!(plan.refill_configured);
     }
 
     #[test]
@@ -3421,17 +3816,19 @@ mod tests {
     ) -> PlannerTelemetry {
         let policy = refill_telemetry.then_some(policy).flatten();
         PlannerTelemetry {
-            schema_version: if refill_telemetry { 7 } else { 5 },
+            schema_version: if refill_telemetry { 8 } else { 6 },
             backend: if refill_telemetry {
-                "dense_qwen_fixed_cohort_planner_v7"
+                "dense_qwen_fixed_cohort_planner_v8"
             } else {
-                "qwen_moe_fixed_cohort_planner_v5"
+                "qwen_moe_fixed_cohort_planner_v6"
             },
             requests: 16,
             prefix_packing_configured: true,
             prefix_packing_effective: true,
             prefix_fanout_boundary_policy: "tiny_suffix_exact_lcp",
             ragged_prompts_enabled: false,
+            ragged_prompt_policy: "disabled",
+            ragged_prompt_plan_decision: "disabled",
             ragged_packing_strategy: "disabled",
             refill_policy: policy.map(DenseRefillPolicy::as_str),
             refill_default_max_prompt_tokens: policy
@@ -3469,7 +3866,7 @@ mod tests {
             true,
         ))
         .unwrap();
-        assert_eq!(bounded["schema_version"], 7);
+        assert_eq!(bounded["schema_version"], 8);
         assert_eq!(bounded["refill_policy"], "short_serial_fallback_rescue");
         assert_eq!(bounded["refill_default_max_prompt_tokens"], 64);
 
@@ -3755,10 +4152,22 @@ mod tests {
 
     #[test]
     fn ragged_prompt_policy_is_strict_and_rollbackable() {
-        assert!(!parse_ragged_prompts_enabled(None, false).unwrap());
-        assert!(parse_ragged_prompts_enabled(Some("on"), false).unwrap());
-        assert!(!parse_ragged_prompts_enabled(Some("NO"), true).unwrap());
-        assert!(parse_ragged_prompts_enabled(Some("sometimes"), false).is_err());
+        assert_eq!(
+            parse_ragged_prompt_policy(None, RaggedPromptPolicy::AutomaticDenseCharged).unwrap(),
+            RaggedPromptPolicy::AutomaticDenseCharged
+        );
+        assert_eq!(
+            parse_ragged_prompt_policy(Some("on"), RaggedPromptPolicy::Disabled).unwrap(),
+            RaggedPromptPolicy::Explicit
+        );
+        assert_eq!(
+            parse_ragged_prompt_policy(Some("NO"), RaggedPromptPolicy::AutomaticDenseCharged,)
+                .unwrap(),
+            RaggedPromptPolicy::Disabled
+        );
+        assert!(
+            parse_ragged_prompt_policy(Some("sometimes"), RaggedPromptPolicy::Disabled).is_err()
+        );
     }
 
     #[test]

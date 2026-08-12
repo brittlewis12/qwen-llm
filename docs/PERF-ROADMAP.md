@@ -2998,7 +2998,8 @@ decode `1.218 -> 0.982 s` (`1.241x`); both remain byte-exact. Keep
 `QWEN_CONCURRENCY_PAIR_PLANNER=0` as rollback. DeepSeek uses the shared planner
 only when explicitly enabled until a safe K160-class validation can run. This
 cheap scheduling win precedes dynamic B=2 refill; it does not remove the serial
-private-prefill wall or authorize ragged fixed-wide execution.
+private-prefill wall; ragged fixed-wide execution was authorized later only
+inside the charged dense envelope described below.
 
 DeepSeek K160 common-route B=8 is also closed at its cheapest model-backed
 floor. Giving all eight rows the same six experts, the production all-slot
@@ -6583,18 +6584,23 @@ Next: <one concrete follow-up>
 ```
 
 
-## Recent Confirmed Capability — Ragged Qwen Fixed Cohorts
+## Recent Promotion — Charged Dense Ragged Cohorts
 
-- Dense B=8 and Qwen MoE B=16 no longer require equal prompt frontiers under an
-  explicit experimental gate. Final exact cells improve whole-file wall by
-  `1.709x` on dense short prompts, `1.153x` on dense shared-root prompts, and
-  `1.298x` on A3B short prompts.
-- Keep default off until private-suffix prefill cost joins transition utilization
-  in admission; an A3B long-suffix cell was flat. Memory denial already falls
-  back to serial instead of failing the workload.
-- This establishes the per-request frontier contract needed by refill/continuous
-  batching. Prefer that capability-wide next step over another model-specific
-  fixed-width executor. Evidence:
+- Dense B=8 and Qwen MoE B=16 can execute independent prompt frontiers exactly,
+  but only dense clears the automatic product gate against the measured B2
+  incumbent inside the promoted envelope. At 64/32 output tokens, 0.8B execution
+  improves `1.403x/1.367x` and 27B
+  improves `1.991x/1.784x`.
+- Automatic dense admission is intentionally narrow: prompt cap 256, equal
+  generation limits of at least 32 tokens, one-chunk prefill, and at most two
+  prompt tokens charged per productive transition in every
+  proposed cohort, more full cohorts than incumbent planning, no serial file
+  remainder, and unchanged utilization/memory gates.
+  `QWEN_FIXED_COHORT_RAGGED_PROMPTS=0` is rollback.
+- Keep automatic MoE ragged selection on HOLD. Counterbalancing removes load
+  warmth from the earlier apparent win and leaves A3B B16 at `1.086x`, below the
+  1.10 product bar. Explicit `=1` retains the broader mechanism. This frontier
+  contract remains the substrate for future refill/continuous batching. Evidence:
   `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
 
 
@@ -6660,7 +6666,8 @@ Next: <one concrete follow-up>
   would leave serial tails and every prompt is at most 64 tokens; that boundary
   clears `1.232x/1.174x` on 0.8B/27B.
 - `QWEN_DENSE_BATCH8_REFILL=1` keeps broader refill explicit; `=0` is rollback.
-  Auto mode, Qwen MoE, and implicit ragged composition remain closed. Evidence:
+  Qwen MoE and implicit ragged refill composition remain closed; automatic dense
+  ragged cohort selection is governed by the separate charged policy. Evidence:
   `docs/bench/2026-08-12-dense-refill-default/README.md`.
 ## Recent Confirmed Capability — DeepSeek File-Scoped Roots
 
@@ -6681,8 +6688,24 @@ Next: <one concrete follow-up>
   lookahead and execution. Same-binary wall moves `2.16 -> 1.76 s` (`1.227x`)
   on 0.8B and `19.76 -> 15.89 s` (`1.244x`) on 27B with byte-identical output.
 - Keep the promotion narrow: short equal-frontier work with static serial tails,
-  two waves, existing utilization/step gates, and prompt cap 64. Ragged, fully
-  batched, long-prompt, broad forced, and MoE refill remain outside auto.
+  two waves, existing utilization/step gates, and prompt cap 64. Fully batched,
+  long-prompt, broad forced, and MoE refill remain outside this refill policy;
+  charged dense ragged admission is a separate automatic decision.
 - Selector admission prices refill shared capacity before choosing B8; `=0`
   remains strict rollback. Evidence:
   `docs/bench/2026-08-12-automatic-dense-refill/README.md`.
+
+## Recent Promotion — Automatic Dense Ragged Selection
+
+- Automatic execution now composes the existing ragged-frontier executor with a
+  per-cohort prompt/decode charge. Final same-binary 0.8B wall moves
+  `2.06 -> 1.53 s` (`1.346x`); execution-only cells clear `1.367x-1.991x`
+  across 0.8B and 27B.
+- Keep this a dense capability, not a model-name fork: the same B8 executor and
+  selector gates serve both measured dense scales. Equal-frontier work retains
+  its incumbent plan, and envelope, charge, utilization, cohort-gain, or memory
+  failure preserves incumbent planning before mutable execution; selector memory
+denial narrows to B2 and later cohort-memory denial remains serial fallback.
+- A3B B16 remains explicit after counterbalanced execution reaches only `1.086x`.
+  Do not infer a MoE default from the original load-confounded whole-wall row.
+  Evidence: `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.

@@ -24009,3 +24009,33 @@ do not implicitly enable refill, prefix-selected cohorts remain excluded, and
 memory denial restores the exact static plan. Dense planner schema 7 reports the
 tri-state policy and default prompt cap. Evidence:
 `docs/bench/2026-08-12-dense-refill-default/README.md`.
+## 2026-08-12 — DeepSeek File-Scoped Root Fanout GO
+
+Status: DeepSeek V4 B2 now captures one immutable causal root when at least two
+planned pairs select the same restorable boundary of 1,024 or more tokens. Pair
+selection, decode organization, and input-order publication remain unchanged;
+serial tails neither constrain nor consume the root.
+
+An eight-request K160 trace forms four affinity pairs around one 6,144-token
+root. Same-binary rollback-to-candidate wall moves `125.99 -> 67.17 s`
+(`1.876x`), while summed pair wall moves `124.584 -> 33.070 s` (`3.767x`). The
+candidate evaluates 7,112 model prompt tokens instead of 25,544, avoiding 18,432
+exact root-token evaluations.
+
+The root prefill takes `29,993.971 ms`, its 60,137,472-byte snapshot captures in
+`385.251 ms`, and eight restores total about `1.545 s`. Candidate pairs report
+zero pair-local snapshot bytes. Concurrent generation remains flat at about
+`3.106 s` versus `3.154 s`, isolating the gain to prefix reuse.
+
+Complete JSONL remains byte-identical with SHA-256
+`33c34db7d52c3ce49b7a6e12b45bc7784bb18eadc6c628b69bbadf015ce0afb7`.
+Both processes report zero swaps. The candidate paid `3.147 s` warming two
+shards while the later rollback found all four warm, so run order did not create
+the gain.
+
+Admission prices 8,780,218,368 Metal bytes for two live sessions and 66,307,104
+CPU bytes for the retained snapshot, root logits, and one serialized restore
+workspace. Denial preserves pair-local execution. Keep
+`QWEN_CONCURRENCY_FILE_ROOT_FANOUT=0` as strict rollback. V1 intentionally
+rejects differing pair maxima rather than adding a root-to-pair bridge hierarchy.
+Evidence: `docs/bench/2026-08-12-deepseek-file-root/README.md`.

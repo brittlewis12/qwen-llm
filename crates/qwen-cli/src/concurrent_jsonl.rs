@@ -49,6 +49,54 @@ struct FileRootTelemetry {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeepSeekFileRootPlan {
+    enabled: bool,
+    common_prefix_tokens: usize,
+    selected_prefix_tokens: usize,
+    planned_uses: usize,
+    reason: &'static str,
+}
+
+struct DeepSeekFileRoot {
+    plan: DeepSeekFileRootPlan,
+    model_content_id: DeepSeekV4ModelContentId,
+    snapshot: Arc<DeepSeekV4CausalSnapshot>,
+    prefix_logits: Arc<Vec<f32>>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeepSeekFileRootTelemetry {
+    schema_version: u32,
+    backend: &'static str,
+    enabled: bool,
+    requests: usize,
+    planned_pairs: usize,
+    common_prefix_tokens: usize,
+    selected_prefix_tokens: usize,
+    planned_pair_uses: usize,
+    planned_avoided_prefix_evaluations: usize,
+    planned_avoided_prompt_tokens: usize,
+    minimum_tokens: usize,
+    minimum_pairs: usize,
+    reason: &'static str,
+    outcome: &'static str,
+    actual_pair_uses: usize,
+    actual_avoided_prefix_evaluations: usize,
+    actual_avoided_prompt_tokens: usize,
+    excluded_serial_requests: usize,
+    snapshot_record_upper_bytes: u64,
+    prefix_logits_bytes: u64,
+    restore_workspace_bytes: u64,
+    cpu_upper_bytes: u64,
+    metal_upper_bytes: u64,
+    memory_admission_required_bytes: Option<u64>,
+    memory_admission_reason: &'static str,
+    snapshot_payload_bytes: u64,
+    prefill_ms: f64,
+    snapshot_ms: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PairWork {
     Pair([usize; WIDTH]),
     Serial(usize),
@@ -313,6 +361,9 @@ struct DeepSeekPairTelemetry {
     prefix_snapshot_payload_bytes: u64,
     prefix_snapshot_priced_upper_bytes: u64,
     prefix_restore_workspace_bytes: u64,
+    file_root_tokens: usize,
+    file_root_restores: usize,
+    file_root_restore_ms: f64,
     prefix_prefill_ms: f64,
     prefix_snapshot_ms: f64,
     prefix_restore_ms: f64,
@@ -1838,9 +1889,124 @@ fn plan_deepseek_prefix_fanout(
     }
 }
 
+fn plan_deepseek_file_root(
+    requests: &[DeepSeekV4PreparedRequest],
+    schedule: &PairSchedule,
+    prefill_chunk_tokens: usize,
+    enabled: bool,
+) -> DeepSeekFileRootPlan {
+    let pair_indices = schedule
+        .work
+        .iter()
+        .filter_map(|work| match *work {
+            PairWork::Pair(indices) => Some(indices),
+            PairWork::Serial(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let planned_uses = pair_indices.len();
+    if !enabled {
+        return DeepSeekFileRootPlan {
+            enabled,
+            common_prefix_tokens: 0,
+            selected_prefix_tokens: 0,
+            planned_uses: 0,
+            reason: "disabled",
+        };
+    }
+    if planned_uses < 2 {
+        return DeepSeekFileRootPlan {
+            enabled,
+            common_prefix_tokens: 0,
+            selected_prefix_tokens: 0,
+            planned_uses: 0,
+            reason: "below_minimum_pairs",
+        };
+    }
+    let paired_indices = pair_indices.into_iter().flatten().collect::<Vec<_>>();
+    let first = &requests[paired_indices[0]].prompt_token_ids;
+    let common_prefix_tokens = paired_indices[1..]
+        .iter()
+        .fold(first.len(), |common, &index| {
+            common.min(common_prefix_tokens(
+                &first[..common],
+                &requests[index].prompt_token_ids,
+            ))
+        });
+    if common_prefix_tokens < qwen_file_root::MIN_TOKENS {
+        return DeepSeekFileRootPlan {
+            enabled,
+            common_prefix_tokens,
+            selected_prefix_tokens: 0,
+            planned_uses: 0,
+            reason: "below_minimum_tokens",
+        };
+    }
+    let mut selected_prefix_tokens = None;
+    for [left, right] in schedule.work.iter().filter_map(|work| match *work {
+        PairWork::Pair(indices) => Some(indices),
+        PairWork::Serial(_) => None,
+    }) {
+        let pair = plan_deepseek_prefix_fanout(
+            &requests[left].prompt_token_ids,
+            &requests[right].prompt_token_ids,
+            prefill_chunk_tokens,
+            true,
+        );
+        if pair.selected_prefix_tokens == 0 || pair.selected_prefix_tokens > common_prefix_tokens {
+            return DeepSeekFileRootPlan {
+                enabled,
+                common_prefix_tokens,
+                selected_prefix_tokens: 0,
+                planned_uses: 0,
+                reason: "pair_boundary_mismatch",
+            };
+        }
+        match selected_prefix_tokens {
+            None => selected_prefix_tokens = Some(pair.selected_prefix_tokens),
+            Some(selected) if selected == pair.selected_prefix_tokens => {}
+            Some(_) => {
+                return DeepSeekFileRootPlan {
+                    enabled,
+                    common_prefix_tokens,
+                    selected_prefix_tokens: 0,
+                    planned_uses: 0,
+                    reason: "pair_boundary_mismatch",
+                };
+            }
+        }
+    }
+    let selected_prefix_tokens = selected_prefix_tokens.unwrap_or(0);
+    DeepSeekFileRootPlan {
+        enabled,
+        common_prefix_tokens,
+        selected_prefix_tokens,
+        planned_uses: if selected_prefix_tokens > 0 {
+            planned_uses
+        } else {
+            0
+        },
+        reason: if selected_prefix_tokens > 0 {
+            "selected_exact_pair_boundary"
+        } else {
+            "pair_boundary_mismatch"
+        },
+    }
+}
+
+fn deepseek_file_root_cpu_upper_bytes(
+    snapshot_record_upper_bytes: u64,
+    prefix_logits_bytes: u64,
+    restore_workspace_bytes: u64,
+) -> Result<u64> {
+    snapshot_record_upper_bytes
+        .checked_add(prefix_logits_bytes)
+        .and_then(|bytes| bytes.checked_add(restore_workspace_bytes))
+        .context("DeepSeek file-root CPU byte overflow")
+}
+
 fn transient_deepseek_model_content_id(
     residency: &Arc<DeepSeekV4MetalResidency>,
-    pair_index: usize,
+    scope_nonce: usize,
 ) -> Result<DeepSeekV4ModelContentId> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1849,7 +2015,7 @@ fn transient_deepseek_model_content_id(
     hasher.update(b"qwen-dsv4-transient-concurrency-snapshot-v1\0");
     hasher.update(std::process::id().to_le_bytes());
     hasher.update((Arc::as_ptr(residency) as usize).to_le_bytes());
-    hasher.update(pair_index.to_le_bytes());
+    hasher.update(scope_nonce.to_le_bytes());
     hasher.update(now.as_nanos().to_le_bytes());
     Ok(DeepSeekV4ModelContentId::new(hasher.finalize().into()))
 }
@@ -1860,6 +2026,77 @@ fn deepseek_snapshot_restore_workspace_bytes(residency: &DeepSeekV4MetalResidenc
         .and_then(|value| value.checked_mul(u64::from(residency.config().key_length)))
         .and_then(|value| value.checked_mul(std::mem::size_of::<u16>() as u64))
         .context("DeepSeek snapshot restore workspace byte overflow")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_deepseek_file_root(
+    ctx: &MetalContext,
+    residency: &Arc<DeepSeekV4MetalResidency>,
+    selector_plan: &DeepSeekV4MultigroupSelectorPlan,
+    root_prompt: &[u32],
+    prefill_chunk_tokens: usize,
+    vocab_size: u32,
+    plan: DeepSeekFileRootPlan,
+    model_content_id: DeepSeekV4ModelContentId,
+    snapshot_record_upper_bytes: u64,
+) -> Result<(DeepSeekFileRoot, f64, f64)> {
+    let prefix_len = plan.selected_prefix_tokens;
+    ensure!(
+        prefix_len > 0 && prefix_len <= root_prompt.len(),
+        "DeepSeek file root {prefix_len} is outside source prompt {}",
+        root_prompt.len()
+    );
+    let (mut session, _) = create_deepseek_lane_session(
+        ctx,
+        residency,
+        selector_plan,
+        "__file_root__",
+        Some(model_content_id),
+    )?;
+    let prefill_t0 = Instant::now();
+    execute_deepseek_v4_prompt_suffix(
+        &mut session,
+        ctx,
+        &root_prompt[..prefix_len],
+        prefill_chunk_tokens,
+    )
+    .context("prefill DeepSeek file root")?;
+    let prefix_logits = Arc::new(
+        copy_deepseek_v4_logits(&session, vocab_size, "file root")
+            .context("copy DeepSeek file-root logits")?,
+    );
+    let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
+    shutdown::checkpoint()?;
+
+    let snapshot_t0 = Instant::now();
+    let snapshot = Arc::new(
+        session
+            .capture_causal_snapshot()
+            .context("capture DeepSeek file root")?,
+    );
+    let snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
+    ensure!(
+        snapshot.model_content_id() == model_content_id
+            && snapshot.next_position() as usize == prefix_len
+            && snapshot.prefix_tokens() == &root_prompt[..prefix_len]
+            && snapshot.payload_bytes() <= snapshot_record_upper_bytes,
+        "DeepSeek file-root snapshot does not match its planned frontier"
+    );
+    ensure!(
+        prefix_logits.len() == vocab_size as usize,
+        "DeepSeek file-root logits length {} != vocabulary size {vocab_size}",
+        prefix_logits.len()
+    );
+    Ok((
+        DeepSeekFileRoot {
+            plan,
+            model_content_id,
+            snapshot,
+            prefix_logits,
+        },
+        prefill_ms,
+        snapshot_ms,
+    ))
 }
 
 fn prepare_deepseek_lane(
@@ -2370,6 +2607,7 @@ fn run_deepseek_pair(
     session_priced_upper_bytes: u64,
     pair_index: usize,
     request_indices: [usize; WIDTH],
+    file_root: Option<&DeepSeekFileRoot>,
 ) -> Result<([DeepSeekCompletedLane; WIDTH], DeepSeekPairTelemetry)> {
     let prompt_tokens = [requests[0].prompt_tokens, requests[1].prompt_tokens];
     let requested_tokens = [requests[0].max_tokens, requests[1].max_tokens];
@@ -2379,12 +2617,30 @@ fn run_deepseek_pair(
         prefill_chunk_tokens,
         prefix_fanout_enabled(),
     );
+    let file_root_tokens = file_root
+        .map(|root| root.plan.selected_prefix_tokens)
+        .unwrap_or(0);
+    if let Some(root) = file_root {
+        ensure!(
+            prefix_fanout.common_prefix_tokens >= root.plan.selected_prefix_tokens
+                && requests.iter().all(|request| {
+                    &request.prompt_token_ids[..root.plan.selected_prefix_tokens]
+                        == root.snapshot.prefix_tokens()
+                }),
+            "DeepSeek pair does not match the selected file root"
+        );
+        prefix_fanout.selected_prefix_tokens = root.plan.selected_prefix_tokens;
+        prefix_fanout.reason = "selected_file_root";
+    }
     let mut prefix_snapshot_priced_upper_bytes = 0u64;
     let mut prefix_restore_workspace_bytes = 0u64;
     let mut fanout_memory_admission_required_bytes = None;
     let mut fanout_memory_admission_reason = "not_requested";
-    let mut transient_model_content_id = None;
-    if prefix_fanout.selected_prefix_tokens > 0 {
+    let mut transient_model_content_id = file_root.map(|root| root.model_content_id);
+    if file_root.is_some() {
+        prefix_restore_workspace_bytes = deepseek_snapshot_restore_workspace_bytes(residency)?;
+        fanout_memory_admission_reason = "file_root_pre_admitted";
+    } else if prefix_fanout.selected_prefix_tokens > 0 {
         prefix_snapshot_priced_upper_bytes = causal_snapshot_record_bytes(
             residency.config(),
             residency.session_capacity(),
@@ -2461,12 +2717,21 @@ fn run_deepseek_pair(
 
             let prefill_t0 = Instant::now();
             let prefix_len = prefix_fanout.selected_prefix_tokens;
-            let left_control = match transient_model_content_id {
-                Some(model_content_id) => DeepSeekWorkerControl::PrepareSharedSource {
+            let left_control = if let Some(root) = file_root {
+                DeepSeekWorkerControl::PrepareSharedRestore {
                     prefix_len,
-                    model_content_id,
-                },
-                None => DeepSeekWorkerControl::PrepareSerial,
+                    model_content_id: root.model_content_id,
+                    snapshot: root.snapshot.clone(),
+                    prefix_logits: root.prefix_logits.clone(),
+                }
+            } else {
+                match transient_model_content_id {
+                    Some(model_content_id) => DeepSeekWorkerControl::PrepareSharedSource {
+                        prefix_len,
+                        model_content_id,
+                    },
+                    None => DeepSeekWorkerControl::PrepareSerial,
+                }
             };
             left_control_tx
                 .send(left_control)
@@ -2474,27 +2739,38 @@ fn run_deepseek_pair(
             let left_signal = left_prepared_rx
                 .recv()
                 .unwrap_or(DeepSeekPrepareSignal::Failed);
-            let (left_prepared, right_control) = match (transient_model_content_id, left_signal) {
-                (
-                    Some(model_content_id),
-                    DeepSeekPrepareSignal::SharedSource {
-                        snapshot,
-                        prefix_logits,
-                    },
-                ) => (
-                    true,
-                    Some(DeepSeekWorkerControl::PrepareSharedRestore {
-                        prefix_len,
-                        model_content_id,
-                        snapshot,
-                        prefix_logits,
-                    }),
-                ),
-                (None, DeepSeekPrepareSignal::Ready) => {
-                    (true, Some(DeepSeekWorkerControl::PrepareSerial))
-                }
-                _ => (false, None),
-            };
+            let (left_prepared, right_control) =
+                match (file_root, transient_model_content_id, left_signal) {
+                    (Some(root), Some(model_content_id), DeepSeekPrepareSignal::Ready) => (
+                        true,
+                        Some(DeepSeekWorkerControl::PrepareSharedRestore {
+                            prefix_len,
+                            model_content_id,
+                            snapshot: root.snapshot.clone(),
+                            prefix_logits: root.prefix_logits.clone(),
+                        }),
+                    ),
+                    (
+                        None,
+                        Some(model_content_id),
+                        DeepSeekPrepareSignal::SharedSource {
+                            snapshot,
+                            prefix_logits,
+                        },
+                    ) => (
+                        true,
+                        Some(DeepSeekWorkerControl::PrepareSharedRestore {
+                            prefix_len,
+                            model_content_id,
+                            snapshot,
+                            prefix_logits,
+                        }),
+                    ),
+                    (None, None, DeepSeekPrepareSignal::Ready) => {
+                        (true, Some(DeepSeekWorkerControl::PrepareSerial))
+                    }
+                    _ => (false, None),
+                };
             let right_prepared = if let Some(right_control) = right_control {
                 right_control_tx
                     .send(right_control)
@@ -2590,6 +2866,12 @@ fn run_deepseek_pair(
         .iter()
         .map(|lane| lane.prefix_snapshot_payload_bytes)
         .sum::<u64>();
+    let file_root_restores = if file_root.is_some() { WIDTH } else { 0 };
+    let file_root_restore_ms = if file_root.is_some() {
+        prefix_restore_ms
+    } else {
+        0.0
+    };
     let exact_prompt_logits_reused = completed.iter().any(|lane| lane.exact_prompt_logits_reused);
     ensure!(
         productive_transitions.checked_add(WIDTH) == Some(generated_tokens),
@@ -2608,8 +2890,8 @@ fn run_deepseek_pair(
     Ok((
         completed,
         DeepSeekPairTelemetry {
-            schema_version: 3,
-            backend: "deepseek_v4_independent_queues_v3",
+            schema_version: 4,
+            backend: "deepseek_v4_independent_queues_v4",
             pair_index,
             request_indices,
             prompt_tokens,
@@ -2623,6 +2905,9 @@ fn run_deepseek_pair(
             prefix_snapshot_payload_bytes,
             prefix_snapshot_priced_upper_bytes,
             prefix_restore_workspace_bytes,
+            file_root_tokens,
+            file_root_restores,
+            file_root_restore_ms,
             prefix_prefill_ms,
             prefix_snapshot_ms,
             prefix_restore_ms,
@@ -2704,6 +2989,46 @@ pub(super) fn run_deepseek_file(
         })
         .context("serialize DeepSeek concurrency planner telemetry")?
     );
+    let root_plan = plan_deepseek_file_root(
+        &requests,
+        &schedule,
+        prefill_chunk_tokens,
+        qwen_file_root::enabled(FILE_ROOT_FANOUT_ENV, true)?,
+    );
+    let planned_avoided_prefix_evaluations = root_plan.planned_uses.saturating_sub(1);
+    let planned_avoided_prompt_tokens = root_plan
+        .selected_prefix_tokens
+        .saturating_mul(planned_avoided_prefix_evaluations);
+    let mut root_telemetry = DeepSeekFileRootTelemetry {
+        schema_version: 1,
+        backend: "deepseek_v4_file_root_v1",
+        enabled: root_plan.enabled,
+        requests: requests.len(),
+        planned_pairs: pair_count,
+        common_prefix_tokens: root_plan.common_prefix_tokens,
+        selected_prefix_tokens: root_plan.selected_prefix_tokens,
+        planned_pair_uses: root_plan.planned_uses,
+        planned_avoided_prefix_evaluations,
+        planned_avoided_prompt_tokens,
+        minimum_tokens: qwen_file_root::MIN_TOKENS,
+        minimum_pairs: 2,
+        reason: root_plan.reason,
+        outcome: "not_selected",
+        actual_pair_uses: 0,
+        actual_avoided_prefix_evaluations: 0,
+        actual_avoided_prompt_tokens: 0,
+        excluded_serial_requests: requests.len() - pair_count * WIDTH,
+        snapshot_record_upper_bytes: 0,
+        prefix_logits_bytes: 0,
+        restore_workspace_bytes: 0,
+        cpu_upper_bytes: 0,
+        metal_upper_bytes: 0,
+        memory_admission_required_bytes: None,
+        memory_admission_reason: "not_requested",
+        snapshot_payload_bytes: 0,
+        prefill_ms: 0.0,
+        snapshot_ms: 0.0,
+    };
     let contexts = [
         ctx.with_new_command_queue()
             .context("create DeepSeek concurrency queue 0")?,
@@ -2711,6 +3036,72 @@ pub(super) fn run_deepseek_file(
             .context("create DeepSeek concurrency queue 1")?,
     ];
     let residency = Arc::new(residency);
+    let mut file_root = None;
+    if root_plan.selected_prefix_tokens > 0 {
+        let snapshot_record_upper_bytes = causal_snapshot_record_bytes(
+            residency.config(),
+            residency.session_capacity(),
+            u32::try_from(root_plan.selected_prefix_tokens)
+                .context("DeepSeek file root does not fit u32")?,
+            u64::MAX,
+        )
+        .context("estimate DeepSeek file-root snapshot record")?;
+        let prefix_logits_bytes = u64::from(vocab_size)
+            .checked_mul(std::mem::size_of::<f32>() as u64)
+            .context("DeepSeek file-root logits byte overflow")?;
+        let restore_workspace_bytes = deepseek_snapshot_restore_workspace_bytes(&residency)?;
+        let cpu_upper_bytes = deepseek_file_root_cpu_upper_bytes(
+            snapshot_record_upper_bytes,
+            prefix_logits_bytes,
+            restore_workspace_bytes,
+        )?;
+        let metal_upper_bytes = session_priced_upper_bytes
+            .checked_mul(WIDTH as u64)
+            .context("DeepSeek file-root session byte overflow")?;
+        let admission = evaluate_metal_memory_admission_with_cpu_bytes(
+            metal_upper_bytes,
+            cpu_upper_bytes,
+            DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES,
+            contexts[0].memory_signals(),
+            true,
+        );
+        root_telemetry.snapshot_record_upper_bytes = snapshot_record_upper_bytes;
+        root_telemetry.prefix_logits_bytes = prefix_logits_bytes;
+        root_telemetry.restore_workspace_bytes = restore_workspace_bytes;
+        root_telemetry.cpu_upper_bytes = cpu_upper_bytes;
+        root_telemetry.metal_upper_bytes = metal_upper_bytes;
+        root_telemetry.memory_admission_required_bytes = admission.required_bytes;
+        root_telemetry.memory_admission_reason = admission.reason.as_str();
+        if admission.admitted {
+            let model_content_id = transient_deepseek_model_content_id(&residency, usize::MAX)?;
+            let root_prompt = schedule
+                .work
+                .iter()
+                .find_map(|work| match *work {
+                    PairWork::Pair([left, _]) => Some(requests[left].prompt_token_ids.as_slice()),
+                    PairWork::Serial(_) => None,
+                })
+                .context("DeepSeek file root has no paired source prompt")?;
+            let (prepared, prefill_ms, snapshot_ms) = prepare_deepseek_file_root(
+                &contexts[0],
+                &residency,
+                selector_plan,
+                root_prompt,
+                prefill_chunk_tokens,
+                vocab_size,
+                root_plan,
+                model_content_id,
+                snapshot_record_upper_bytes,
+            )?;
+            root_telemetry.outcome = "prepared";
+            root_telemetry.snapshot_payload_bytes = prepared.snapshot.payload_bytes();
+            root_telemetry.prefill_ms = prefill_ms;
+            root_telemetry.snapshot_ms = snapshot_ms;
+            file_root = Some(prepared);
+        } else {
+            root_telemetry.outcome = "memory_fallback";
+        }
+    }
     let stdout_handle = std::io::stdout();
     let mut stdout = stdout_handle.lock();
     let mut executed = 0usize;
@@ -2744,6 +3135,7 @@ pub(super) fn run_deepseek_file(
                     session_priced_upper_bytes,
                     pair_index,
                     indices,
+                    file_root.as_ref(),
                 )?;
                 for lane in &completed {
                     emit_deepseek_completion(selector_plan, lane, prefill_chunk_tokens, WIDTH)?;
@@ -2759,6 +3151,14 @@ pub(super) fn run_deepseek_file(
                     serde_json::to_string(&telemetry)
                         .context("serialize DeepSeek concurrency telemetry")?
                 );
+                if telemetry.file_root_restores > 0 {
+                    root_telemetry.actual_pair_uses += 1;
+                    root_telemetry.actual_avoided_prefix_evaluations =
+                        root_telemetry.actual_pair_uses.saturating_sub(1);
+                    root_telemetry.actual_avoided_prompt_tokens = root_telemetry
+                        .selected_prefix_tokens
+                        .saturating_mul(root_telemetry.actual_avoided_prefix_evaluations);
+                }
                 executed += WIDTH;
                 buffered_outputs = buffered_outputs
                     .checked_add(WIDTH)
@@ -2819,6 +3219,10 @@ pub(super) fn run_deepseek_file(
             && requests.iter().all(Option::is_none)
             && pending_outputs.iter().all(Option::is_none),
         "DeepSeek concurrency planner did not drain every request"
+    );
+    eprintln!(
+        "deepseek_v4 concurrency_file_root: {}",
+        serde_json::to_string(&root_telemetry).context("serialize DeepSeek file-root telemetry")?
     );
     Ok(executed)
 }
@@ -3216,6 +3620,115 @@ mod tests {
             .reason,
             "below_minimum"
         );
+    }
+
+    fn deepseek_request(id: &str, tokens: Vec<u32>) -> DeepSeekV4PreparedRequest {
+        DeepSeekV4PreparedRequest {
+            id: id.into(),
+            line: 1,
+            prompt_tokens: tokens.len(),
+            required_forwards: tokens.len() + 7,
+            prompt_token_ids: tokens,
+            max_tokens: 8,
+            sampling: SamplingConfig {
+                seed: 42,
+                ..SamplingConfig::default()
+            },
+        }
+    }
+
+    #[test]
+    fn deepseek_file_root_requires_one_exact_boundary_across_pairs() {
+        let mut requests = Vec::new();
+        for family in 0..4u32 {
+            for member in 0..2u32 {
+                let mut tokens = vec![7; 6_258];
+                tokens.extend([100 + family, 200 + member, 300]);
+                requests.push(deepseek_request(&format!("{family}-{member}"), tokens));
+            }
+        }
+        let schedule = PairSchedule {
+            work: vec![
+                PairWork::Pair([0, 1]),
+                PairWork::Pair([2, 3]),
+                PairWork::Pair([4, 5]),
+                PairWork::Pair([6, 7]),
+            ],
+            prefix_affinity_pairs: 4,
+            depth_balanced_pairs: 0,
+        };
+        assert_eq!(
+            plan_deepseek_file_root(&requests, &schedule, 4_096, true),
+            DeepSeekFileRootPlan {
+                enabled: true,
+                common_prefix_tokens: 6_258,
+                selected_prefix_tokens: 6_144,
+                planned_uses: 4,
+                reason: "selected_exact_pair_boundary",
+            }
+        );
+    }
+
+    #[test]
+    fn deepseek_file_root_excludes_serial_tails_and_rejects_boundary_drift() {
+        let mut base = vec![7; 6_258];
+        let mut pair_a0 = base.clone();
+        pair_a0.extend([10, 0]);
+        let mut pair_a1 = base.clone();
+        pair_a1.extend([10, 1]);
+        let mut pair_b0 = base.clone();
+        pair_b0.extend([20, 0]);
+        let mut pair_b1 = base.clone();
+        pair_b1.extend([20, 1]);
+        base[0] = 99;
+        let requests = vec![
+            deepseek_request("a0", pair_a0),
+            deepseek_request("a1", pair_a1),
+            deepseek_request("b0", pair_b0),
+            deepseek_request("b1", pair_b1),
+            deepseek_request("serial", base),
+        ];
+        let schedule = PairSchedule {
+            work: vec![
+                PairWork::Pair([0, 1]),
+                PairWork::Pair([2, 3]),
+                PairWork::Serial(4),
+            ],
+            prefix_affinity_pairs: 2,
+            depth_balanced_pairs: 0,
+        };
+        let plan = plan_deepseek_file_root(&requests, &schedule, 4_096, true);
+        assert_eq!(plan.selected_prefix_tokens, 6_144);
+        assert_eq!(plan.planned_uses, 2);
+
+        let mut mismatched = requests;
+        mismatched[3].prompt_token_ids.truncate(5_000);
+        let rejected = plan_deepseek_file_root(&mismatched, &schedule, 4_096, true);
+        assert_eq!(rejected.selected_prefix_tokens, 0);
+        assert_eq!(rejected.planned_uses, 0);
+        assert_eq!(rejected.reason, "pair_boundary_mismatch");
+    }
+
+    #[test]
+    fn deepseek_file_root_policy_and_cpu_pricing_fail_closed() {
+        let requests = vec![
+            deepseek_request("a", vec![7; 2_048]),
+            deepseek_request("b", vec![7; 2_048]),
+        ];
+        let schedule = PairSchedule {
+            work: vec![PairWork::Pair([0, 1])],
+            prefix_affinity_pairs: 1,
+            depth_balanced_pairs: 0,
+        };
+        let too_few = plan_deepseek_file_root(&requests, &schedule, 512, true);
+        assert_eq!(too_few.reason, "below_minimum_pairs");
+        assert_eq!(too_few.planned_uses, 0);
+        let disabled = plan_deepseek_file_root(&requests, &schedule, 512, false);
+        assert_eq!(disabled.reason, "disabled");
+        assert_eq!(disabled.planned_uses, 0);
+
+        assert_eq!(deepseek_file_root_cpu_upper_bytes(10, 20, 30).unwrap(), 60);
+        assert!(deepseek_file_root_cpu_upper_bytes(u64::MAX, 1, 0).is_err());
     }
 
     #[test]

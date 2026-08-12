@@ -6662,3 +6662,16 @@ Next: <one concrete follow-up>
 - `QWEN_DENSE_BATCH8_REFILL=1` keeps broader refill explicit; `=0` is rollback.
   Auto mode, Qwen MoE, and implicit ragged composition remain closed. Evidence:
   `docs/bench/2026-08-12-dense-refill-default/README.md`.
+## Recent Confirmed Capability — DeepSeek File-Scoped Roots
+
+- One immutable DeepSeek causal snapshot can now span multiple independently
+  scheduled B2 pairs when every pair selects the same stable boundary. A
+  four-pair K160 trace moves `125.99 -> 67.17 s` (`1.876x`) with byte-identical
+  output and flat decode organization.
+- Total model prompt evaluation falls from 25,544 to 7,112 tokens. Admission
+  separates 8.78 GB of two-session Metal state from 66.3 MB of CPU root state;
+  denial and `QWEN_CONCURRENCY_FILE_ROOT_FANOUT=0` retain pair-local behavior.
+- Keep V1 exact and shallow. Reopen a longest-common-root plus pair-bridge
+  hierarchy only when real files lose meaningful reuse to differing pair-local
+  maxima; do not add it for symmetry with Qwen. Evidence:
+  `docs/bench/2026-08-12-deepseek-file-root/README.md`.

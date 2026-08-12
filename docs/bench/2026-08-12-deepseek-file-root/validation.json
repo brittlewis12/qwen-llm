@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "base_commit": "ef186cba565a21c9f3b227a539bfca7900118345",
+  "source_sha256_at_measurement": "9c5977aef78a0673e54dbfbc4dcdef6b69b21e99353e201a9f6e225664db52c5",
+  "binary_sha256_at_measurement": "a8b5d7a7afd23f9e2f1b3d9b4eafc2662f97cbba95365749c29e8a14f044c122",
+  "build_commit_reported": "ef186cba565a21c9f3b227a539bfca7900118345",
+  "build_dirty_reported": true,
+  "host": "Apple M4 Max",
+  "model": "/Users/tito/models/deepseek-v4-flash-0731-reap-k160/DeepSeek-V4-Flash-0731-REAP-K160-Q3_K_Q4_K-00001-of-00004.gguf",
+  "common": {
+    "requests": 8,
+    "concurrency": 2,
+    "prefill_chunk_tokens": 4096,
+    "generated_tokens_per_request": 8,
+    "sampling": {
+      "temperature": 0.0,
+      "top_k": 40,
+      "top_p": 0.95,
+      "min_p": 0.0,
+      "seed": 42
+    },
+    "pair_planner": true,
+    "pair_prefix_fanout": true,
+    "residency_set": false,
+    "request_pairs": [
+      [
+        0,
+        1
+      ],
+      [
+        2,
+        3
+      ],
+      [
+        4,
+        5
+      ],
+      [
+        6,
+        7
+      ]
+    ],
+    "common_prefix_tokens_per_pair": [
+      6258,
+      6258,
+      6258,
+      6258
+    ]
+  },
+  "rollback": {
+    "env": "QWEN_CONCURRENCY_FILE_ROOT_FANOUT=0",
+    "process": {
+      "wall_seconds": 125.99,
+      "user_seconds": 6.1,
+      "system_seconds": 11.05,
+      "max_rss_bytes": 3031629824,
+      "page_reclaims": 178345,
+      "swaps": 0
+    },
+    "file_root": {
+      "schema_version": 1,
+      "backend": "deepseek_v4_file_root_v1",
+      "enabled": false,
+      "requests": 8,
+      "planned_pairs": 4,
+      "common_prefix_tokens": 0,
+      "selected_prefix_tokens": 0,
+      "planned_pair_uses": 0,
+      "planned_avoided_prefix_evaluations": 0,
+      "planned_avoided_prompt_tokens": 0,
+      "minimum_tokens": 1024,
+      "minimum_pairs": 2,
+      "reason": "disabled",
+      "outcome": "not_selected",
+      "actual_pair_uses": 0,
+      "actual_avoided_prefix_evaluations": 0,
+      "actual_avoided_prompt_tokens": 0,
+      "excluded_serial_requests": 0,
+      "snapshot_record_upper_bytes": 0,
+      "prefix_logits_bytes": 0,
+      "restore_workspace_bytes": 0,
+      "cpu_upper_bytes": 0,
+      "metal_upper_bytes": 0,
+      "memory_admission_required_bytes": null,
+      "memory_admission_reason": "not_requested",
+      "snapshot_payload_bytes": 0,
+      "prefill_ms": 0.0,
+      "snapshot_ms": 0.0
+    },
+    "model_prefill_ms": 119065.826248,
+    "prepare_ms": 121429.633627,
+    "pair_wall_ms": 124583.820125,
+    "concurrent_generation_ms": 3154.072,
+    "pair_snapshot_payload_bytes": [
+      60137472,
+      60137472,
+      60137472,
+      60137472
+    ],
+    "pair_snapshot_ms": [
+      398.376666,
+      394.26045799999997,
+      379.886208,
+      378.024833
+    ],
+    "pair_restore_ms": [
+      199.819166,
+      193.617792,
+      191.440958,
+      203.912417
+    ],
+    "pair_evaluated_prefill_tokens": 25544,
+    "total_model_prompt_tokens": 25544
+  },
+  "candidate": {
+    "env": "QWEN_CONCURRENCY_FILE_ROOT_FANOUT absent (default on)",
+    "process": {
+      "wall_seconds": 67.17,
+      "user_seconds": 3.25,
+      "system_seconds": 10.52,
+      "max_rss_bytes": 2836103168,
+      "page_reclaims": 205752,
+      "swaps": 0
+    },
+    "file_root": {
+      "schema_version": 1,
+      "backend": "deepseek_v4_file_root_v1",
+      "enabled": true,
+      "requests": 8,
+      "planned_pairs": 4,
+      "common_prefix_tokens": 6258,
+      "selected_prefix_tokens": 6144,
+      "planned_pair_uses": 4,
+      "planned_avoided_prefix_evaluations": 3,
+      "planned_avoided_prompt_tokens": 18432,
+      "minimum_tokens": 1024,
+      "minimum_pairs": 2,
+      "reason": "selected_exact_pair_boundary",
+      "outcome": "prepared",
+      "actual_pair_uses": 4,
+      "actual_avoided_prefix_evaluations": 3,
+      "actual_avoided_prompt_tokens": 18432,
+      "excluded_serial_requests": 0,
+      "snapshot_record_upper_bytes": 60153888,
+      "prefix_logits_bytes": 517120,
+      "restore_workspace_bytes": 5636096,
+      "cpu_upper_bytes": 66307104,
+      "metal_upper_bytes": 8780218368,
+      "memory_admission_required_bytes": 9383396384,
+      "memory_admission_reason": "admitted_process_budget_omitted",
+      "snapshot_payload_bytes": 60137472,
+      "prefill_ms": 29993.971041999997,
+      "snapshot_ms": 385.251083
+    },
+    "model_prefill_ms": 28397.677416,
+    "prepare_ms": 29964.385792,
+    "pair_wall_ms": 33070.149793,
+    "concurrent_generation_ms": 3105.648166,
+    "pair_snapshot_payload_bytes": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "file_root_restores": [
+      2,
+      2,
+      2,
+      2
+    ],
+    "file_root_restore_ms": [
+      385.689291,
+      383.570001,
+      385.683624,
+      390.098251
+    ],
+    "pair_evaluated_suffix_tokens": 968,
+    "root_prefill_tokens": 6144,
+    "total_model_prompt_tokens": 7112
+  },
+  "process_wall_speedup": 1.8756885514366533,
+  "pair_wall_speedup": 3.767259020742955,
+  "avoided_prefill_tokens": 18432,
+  "stdout_sha256": "33c34db7d52c3ce49b7a6e12b45bc7784bb18eadc6c628b69bbadf015ce0afb7",
+  "candidate_rollback_stdout_equal": true,
+  "fixture": "requests.jsonl",
+  "fixture_sha256": "c2690bcd3a47e374a5328ebab52291490fba6d85582fccfad7b9e1e792b01e83",
+  "candidate_stdout": "candidate.stdout.jsonl",
+  "rollback_stdout": "rollback.stdout.jsonl",
+  "candidate_stderr": "candidate.stderr.log",
+  "candidate_stderr_sha256": "a4a1aed86946f3cc76be28b380c07dd8af6d5d9fa714926d5739bbad77636fa4",
+  "rollback_stderr": "rollback.stderr.log",
+  "rollback_stderr_sha256": "5f93acbb895ec85fd7a28a5fd3affa12151b20ac653f5a465de69b0796b54ae5"
+}

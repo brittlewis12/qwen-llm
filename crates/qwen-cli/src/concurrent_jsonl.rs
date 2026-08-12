@@ -10,30 +10,12 @@ const PAIR_PLANNER_ENV: &str = "QWEN_CONCURRENCY_PAIR_PLANNER";
 const PAIR_PLANNER_WINDOW: usize = 16;
 const PREFIX_FANOUT_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const FILE_ROOT_FANOUT_ENV: &str = "QWEN_CONCURRENCY_FILE_ROOT_FANOUT";
-const FILE_ROOT_MIN_TOKENS: usize = 1024;
-const FILE_ROOT_MIN_PAIRS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PrefixFanoutPlan {
     common_prefix_tokens: usize,
     selected_prefix_tokens: usize,
     reason: &'static str,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FileRootPlan {
-    enabled: bool,
-    common_prefix_tokens: usize,
-    selected_prefix_tokens: usize,
-    planned_pair_uses: usize,
-    planned_avoided_prefix_evaluations: usize,
-    planned_avoided_prompt_tokens: usize,
-    reason: &'static str,
-}
-
-struct PreparedFileRoot {
-    plan: FileRootPlan,
-    checkpoint: PreparedCheckpoint,
 }
 
 #[derive(Debug, Serialize)]
@@ -568,12 +550,17 @@ pub(super) fn run_prepared(
         .flatten()
         .map(|index| requests[index].prompt_ids.as_slice())
         .collect::<Vec<_>>();
-    let root_plan = plan_file_root(
+    let root_plan = qwen_file_root::plan(
         &paired_prompt_refs,
         args.prefill_chunk,
         pair_count,
-        file_root_fanout_enabled(true)?,
+        qwen_file_root::enabled(FILE_ROOT_FANOUT_ENV, true)?,
     );
+    let root_reason = if root_plan.reason == "below_minimum_uses" {
+        "below_minimum_pairs"
+    } else {
+        root_plan.reason
+    };
     let mut file_root = None;
     let mut root_telemetry = FileRootTelemetry {
         schema_version: 1,
@@ -583,12 +570,12 @@ pub(super) fn run_prepared(
         planned_pairs: pair_count,
         common_prefix_tokens: root_plan.common_prefix_tokens,
         selected_prefix_tokens: root_plan.selected_prefix_tokens,
-        planned_pair_uses: root_plan.planned_pair_uses,
+        planned_pair_uses: root_plan.planned_uses,
         planned_avoided_prefix_evaluations: root_plan.planned_avoided_prefix_evaluations,
         planned_avoided_prompt_tokens: root_plan.planned_avoided_prompt_tokens,
-        minimum_tokens: FILE_ROOT_MIN_TOKENS,
-        minimum_pairs: FILE_ROOT_MIN_PAIRS,
-        reason: root_plan.reason,
+        minimum_tokens: qwen_file_root::MIN_TOKENS,
+        minimum_pairs: 2,
+        reason: root_reason,
         outcome: "not_selected",
         actual_pair_uses: 0,
         actual_avoided_prefix_evaluations: 0,
@@ -645,10 +632,10 @@ pub(super) fn run_prepared(
                     .first()
                     .copied()
                     .context("file-root plan has no paired source prompt")?;
-                let (prepared, prefill_ms, snapshot_ms) = prepare_file_root(
+                let (prepared, prefill_ms, snapshot_ms) = qwen_file_root::prepare(
                     loaded,
                     root_prompt,
-                    args,
+                    args.prefill_chunk,
                     root_plan,
                     requirements.max_capacity,
                     root_snapshot_required_bytes,
@@ -912,81 +899,6 @@ fn common_prefix_tokens<T: PartialEq>(left: &[T], right: &[T]) -> usize {
         .zip(right)
         .take_while(|(left, right)| left == right)
         .count()
-}
-
-fn file_root_fanout_enabled(default_enabled: bool) -> Result<bool> {
-    let value = std::env::var_os(FILE_ROOT_FANOUT_ENV)
-        .map(|value| {
-            value
-                .into_string()
-                .map_err(|_| anyhow!("{FILE_ROOT_FANOUT_ENV} must be valid UTF-8"))
-        })
-        .transpose()?;
-    parse_file_root_fanout_enabled(value.as_deref(), default_enabled)
-}
-
-fn parse_file_root_fanout_enabled(value: Option<&str>, default_enabled: bool) -> Result<bool> {
-    let Some(value) = value else {
-        return Ok(default_enabled);
-    };
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => bail!("{FILE_ROOT_FANOUT_ENV} must be a boolean"),
-    }
-}
-
-fn plan_file_root(
-    prompts: &[&[i32]],
-    prefill_chunk: PrefillChunkArg,
-    pair_count: usize,
-    enabled: bool,
-) -> FileRootPlan {
-    let common_prefix_tokens = prompts
-        .split_first()
-        .map(|(first, rest)| {
-            rest.iter().fold(first.len(), |common, prompt| {
-                common_prefix_tokens(&first[..common], prompt)
-            })
-        })
-        .unwrap_or(0);
-    let rejected = |reason| FileRootPlan {
-        enabled,
-        common_prefix_tokens,
-        selected_prefix_tokens: 0,
-        planned_pair_uses: 0,
-        planned_avoided_prefix_evaluations: 0,
-        planned_avoided_prompt_tokens: 0,
-        reason,
-    };
-    if !enabled {
-        return rejected("disabled");
-    }
-    if pair_count < FILE_ROOT_MIN_PAIRS {
-        return rejected("below_minimum_pairs");
-    }
-    let PrefillChunkArg::Fixed(chunk) = prefill_chunk else {
-        return rejected("auto_chunk_unsupported");
-    };
-    let selected_prefix_tokens = common_prefix_tokens / chunk * chunk;
-    if selected_prefix_tokens < FILE_ROOT_MIN_TOKENS {
-        return rejected("alignment_below_minimum");
-    }
-    let avoided_prefix_evaluations = pair_count.saturating_sub(1);
-    let Some(avoided_prompt_tokens) =
-        selected_prefix_tokens.checked_mul(avoided_prefix_evaluations)
-    else {
-        return rejected("saved_token_count_overflow");
-    };
-    FileRootPlan {
-        enabled,
-        common_prefix_tokens,
-        selected_prefix_tokens,
-        planned_pair_uses: pair_count,
-        planned_avoided_prefix_evaluations: avoided_prefix_evaluations,
-        planned_avoided_prompt_tokens: avoided_prompt_tokens,
-        reason: "selected_chunk_aligned",
-    }
 }
 
 fn max_file_root_pair_snapshot_bytes(
@@ -1287,62 +1199,12 @@ fn prepare_lane(
     ))
 }
 
-fn prepare_file_root(
-    loaded: &LoadedModel,
-    root_prompt: &[i32],
-    args: &Args,
-    plan: FileRootPlan,
-    max_capacity: usize,
-    snapshot_required_bytes: u64,
-) -> Result<(PreparedFileRoot, f64, f64)> {
-    let PrefillChunkArg::Fixed(requested_chunk) = args.prefill_chunk else {
-        unreachable!("file-root planner rejects automatic chunks")
-    };
-    let prefix_len = plan.selected_prefix_tokens;
-    let chunk = requested_chunk.min(prefix_len);
-    let mut scratch = allocate_legacy_prefill_scratch(loaded, chunk, prefix_len)
-        .context("allocate file-root prefill scratch")?;
-    let mut sequence = loaded
-        .create_sequence(SequenceConfig::new(max_capacity))
-        .context("allocate file-root source sequence")?;
-    let forward = loaded.forward();
-    let (prefix_logits, prefill_ms) = prefill_span(
-        &forward,
-        &mut sequence,
-        &mut scratch,
-        &root_prompt[..prefix_len],
-        0,
-    )
-    .context("prefill file-scoped shared root")?;
-    shutdown::checkpoint()?;
-    let snapshot_t0 = Instant::now();
-    let checkpoint = loaded
-        .prepare_checkpoint_boundary(
-            &sequence,
-            root_prompt[..prefix_len].to_vec(),
-            None,
-            Some(prefix_logits),
-        )
-        .context("capture file-scoped shared root")?;
-    let snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
-    ensure!(
-        checkpoint.snapshot_bytes() == snapshot_required_bytes,
-        "file-root snapshot bytes {} != estimate {snapshot_required_bytes}",
-        checkpoint.snapshot_bytes(),
-    );
-    Ok((
-        PreparedFileRoot { plan, checkpoint },
-        prefill_ms,
-        snapshot_ms,
-    ))
-}
-
 fn prepare_pair(
     loaded: &LoadedModel,
     requests: [&PreparedJsonlRequest; WIDTH],
     args: &Args,
     prefix_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
-    file_root: Option<&PreparedFileRoot>,
+    file_root: Option<&qwen_file_root::Prepared>,
 ) -> Result<PreparedPair> {
     let mut plan = plan_prefix_fanout(
         &requests[0].prompt_ids,
@@ -1717,7 +1579,7 @@ fn run_pair(
     pair_index: usize,
     request_indices: [usize; WIDTH],
     prefix_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
-    file_root: Option<&PreparedFileRoot>,
+    file_root: Option<&qwen_file_root::Prepared>,
 ) -> Result<([RequestOutput; WIDTH], PairTelemetry)> {
     let prepare_t0 = Instant::now();
     let prepared = prepare_pair(loaded, requests, args, prefix_boundary_policy, file_root)?;
@@ -3123,89 +2985,6 @@ mod tests {
         assert!(!parse_pair_planner_enabled(Some("off"), true).unwrap());
         assert!(parse_pair_planner_enabled(Some("YES"), false).unwrap());
         assert!(parse_pair_planner_enabled(Some("maybe"), true).is_err());
-    }
-
-    #[test]
-    fn file_root_planner_requires_reuse_across_multiple_pairs() {
-        let base = vec![7; 1_600];
-        let prompts = [
-            base.as_slice(),
-            &base[..1_500],
-            &base[..1_400],
-            &base[..1_300],
-        ];
-        assert_eq!(
-            plan_file_root(&prompts, PrefillChunkArg::Fixed(512), 2, true),
-            FileRootPlan {
-                enabled: true,
-                common_prefix_tokens: 1_300,
-                selected_prefix_tokens: 1_024,
-                planned_pair_uses: 2,
-                planned_avoided_prefix_evaluations: 1,
-                planned_avoided_prompt_tokens: 1_024,
-                reason: "selected_chunk_aligned",
-            }
-        );
-        assert_eq!(
-            plan_file_root(&prompts, PrefillChunkArg::Fixed(512), 1, true).reason,
-            "below_minimum_pairs"
-        );
-    }
-
-    #[test]
-    fn file_root_inputs_can_exclude_a_nonparticipating_serial_tail() {
-        let paired = [
-            vec![7; 1_500],
-            vec![7; 1_400],
-            vec![7; 1_300],
-            vec![7; 1_200],
-        ];
-        let outlier = vec![8; 1_500];
-        let paired_refs = paired.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        let mut all_refs = paired_refs.clone();
-        all_refs.push(outlier.as_slice());
-        assert_eq!(
-            plan_file_root(&paired_refs, PrefillChunkArg::Fixed(512), 2, true)
-                .selected_prefix_tokens,
-            1_024
-        );
-        assert_eq!(
-            plan_file_root(&all_refs, PrefillChunkArg::Fixed(512), 2, true).selected_prefix_tokens,
-            0
-        );
-    }
-
-    #[test]
-    fn file_root_planner_fails_closed_for_controls_and_short_roots() {
-        let prompts = [
-            vec![7; 1_500],
-            vec![7; 1_400],
-            vec![7; 1_300],
-            vec![7; 1_200],
-        ];
-        let refs = prompts.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        assert_eq!(
-            plan_file_root(&refs, PrefillChunkArg::Fixed(512), 2, false).reason,
-            "disabled"
-        );
-        assert_eq!(
-            plan_file_root(&refs, PrefillChunkArg::Auto, 2, true).reason,
-            "auto_chunk_unsupported"
-        );
-        let short = [
-            vec![7; 1_000],
-            vec![7; 1_000],
-            vec![7; 1_000],
-            vec![7; 1_000],
-        ];
-        let short_refs = short.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        assert_eq!(
-            plan_file_root(&short_refs, PrefillChunkArg::Fixed(512), 2, true).reason,
-            "alignment_below_minimum"
-        );
-        assert!(parse_file_root_fanout_enabled(None, true).unwrap());
-        assert!(!parse_file_root_fanout_enabled(Some("off"), true).unwrap());
-        assert!(parse_file_root_fanout_enabled(Some("maybe"), true).is_err());
     }
 
     #[test]

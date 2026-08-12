@@ -7,6 +7,7 @@ mod dsv4_temporal;
 mod execution_selector;
 mod fixed_cohort_jsonl;
 mod messages;
+mod qwen_file_root;
 mod shutdown;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};

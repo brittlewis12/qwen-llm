@@ -23916,3 +23916,25 @@ includes a conservative all-productive-transition frontier bound and never
 exceeds an explicit context override. Synchronous MoE B16 refill remains killed:
 its optimistic charged endpoint is `10.06 s` against measured B2 at `9.06 s`.
 Evidence: `docs/bench/2026-08-12-qwen-refill-charged-screen/README.md`.
+
+
+## 2026-08-12 — Fixed-Cohort File Root GO
+
+Status: dense B8 now retains one immutable file-scoped Qwen checkpoint across
+all realized static cohorts. Root planning occurs after memory-denied cohorts
+become serial work; refill and serial requests neither constrain nor consume the
+root. B2 and fixed execution share one neutral planner/capture substrate without
+publishing to the RAM prefix index.
+
+A 32-request realistic trace forms four B8 cohorts around a 6,144-token root.
+Cohort-local roots take `16.01 s`; one file root takes `13.81 s` (`1.159x`).
+Complete JSONL is byte-identical. The candidate evaluates the root once in
+`794.229 ms`, captures a `96,716,848`-byte snapshot in `26.026 ms`, and avoids
+18,432 prompt-token evaluations. A two-cohort cell reaches only `1.093x`, so the
+value is correctly understood as cross-cohort amortization rather than a fixed
+per-request speedup.
+
+Dense defaults on behind `QWEN_FIXED_COHORT_FILE_ROOT_FANOUT=0` rollback. MoE
+uses the same capability only when explicitly enabled until a separate exact
+asset cell qualifies it. Refill composition remains out of scope. Evidence:
+`docs/bench/2026-08-12-qwen-fixed-file-root/README.md`.

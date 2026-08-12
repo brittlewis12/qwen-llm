@@ -1079,6 +1079,10 @@ impl PreparedCheckpoint {
     pub fn has_pending_token(&self) -> bool {
         self.snapshot.pending_token.is_some()
     }
+
+    pub fn final_logits(&self) -> Option<&[f32]> {
+        self.snapshot.final_logits.as_deref()
+    }
 }
 
 fn checkpoint_matches_request(

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "base_commit": "2118c6902ae9428a610258d5e4e705ff7544a806",
+  "fixture_sha256": "b1e0f72be403bd3fff09aea4fb152caef04e43aa7dc24b15690ea11758d19f75",
+  "model": "/Users/tito/models/Qwen3.5-0.8B-Q4_K_M.gguf",
+  "host": "Apple M4 Max",
+  "common": {
+    "requests": 32,
+    "fixed_width": 8,
+    "cohorts": 4,
+    "prefill_chunk": 1024,
+    "temperature": 0,
+    "warm_mmap": true
+  },
+  "control": {
+    "env": "QWEN_FIXED_COHORT_FILE_ROOT_FANOUT=0",
+    "wall_seconds": 16.01,
+    "stdout_sha256": "6b74a0226a2efaee8b264c0af0f2416eab67499bec8b3cbcc447e24dba7610d7"
+  },
+  "candidate": {
+    "env": "default-on dense fixed file root",
+    "wall_seconds": 13.81,
+    "stdout_sha256": "6b74a0226a2efaee8b264c0af0f2416eab67499bec8b3cbcc447e24dba7610d7"
+  },
+  "speedup": 1.159304851556843,
+  "file_root": {
+    "common_prefix_tokens": 6482,
+    "selected_prefix_tokens": 6144,
+    "planned_uses": 4,
+    "avoided_prefix_evaluations": 3,
+    "avoided_prompt_tokens": 18432,
+    "snapshot_bytes": 96716848,
+    "prefill_ms": 794.228958,
+    "snapshot_ms": 26.0255
+  },
+  "all_stdout_equal": true
+}

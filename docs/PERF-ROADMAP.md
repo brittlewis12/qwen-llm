@@ -6610,3 +6610,17 @@ Next: <one concrete follow-up>
   measured B2. Reopen MoE only with overlapping/chunked replacement prefill or
   materially different transition economics. Evidence:
   `docs/bench/2026-08-12-qwen-refill-charged-screen/README.md`.
+
+
+## Recent Confirmed Capability — Fixed-Cohort File Roots
+
+- Dense B8 can retain one Qwen root checkpoint across all realized static
+  cohorts. Four realistic cohorts move `16.01 -> 13.81 s` (`1.159x`) with
+  byte-identical output; the same mechanism at only two cohorts is `1.093x`.
+- Root selection excludes serial fallback and refill work, admission prices one
+  retained root plus the largest deeper cohort checkpoint, and memory denial
+  retains cohort-local behavior.
+- Keep dense default-on with rollback. Keep MoE default-off pending its own exact
+  cell, and treat prefix-aware refill as a separate next experiment rather than
+  silently broadening this capability. Evidence:
+  `docs/bench/2026-08-12-qwen-fixed-file-root/README.md`.

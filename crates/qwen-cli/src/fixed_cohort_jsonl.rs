@@ -13,6 +13,7 @@ const REFILL_MIN_STEP_SAVINGS_DENOMINATOR: usize = 10;
 const DENSE_PREFIX_FANOUT_ENV: &str = "QWEN_DENSE_BATCH8_PREFIX_FANOUT";
 const MOE_PREFIX_FANOUT_ENV: &str = "QWEN_MOE_BATCH16_PREFIX_FANOUT";
 const PREFIX_PACKING_ENV: &str = "QWEN_FIXED_COHORT_PREFIX_PACKING";
+const FILE_ROOT_FANOUT_ENV: &str = "QWEN_FIXED_COHORT_FILE_ROOT_FANOUT";
 // Experimental and default-off until private-suffix prefill has a cost model.
 const RAGGED_PROMPTS_ENV: &str = "QWEN_FIXED_COHORT_RAGGED_PROMPTS";
 // Charged only for dense B8; synchronous MoE B16 refill loses to B2.
@@ -66,7 +67,7 @@ impl FixedCohortExecutor<DENSE_BATCH8_WIDTH> for DenseBatch8SequenceExecutor<'_>
     const PLANNER_BACKEND: &'static str = "dense_qwen_fixed_cohort_planner_v6";
     const TELEMETRY_PREFIX: &'static str = "dense_batch8";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "dense_batch8_planner";
-    const TELEMETRY_SCHEMA_VERSION: u32 = 6;
+    const TELEMETRY_SCHEMA_VERSION: u32 = 7;
     const PLANNER_TELEMETRY_SCHEMA_VERSION: u32 = 6;
     const REFILL_TELEMETRY: bool = true;
 
@@ -110,7 +111,7 @@ impl FixedCohortExecutor<MOE_BATCH16_WIDTH> for MoeBatch16SequenceExecutor<'_> {
     const PLANNER_BACKEND: &'static str = "qwen_moe_fixed_cohort_planner_v5";
     const TELEMETRY_PREFIX: &'static str = "moe_batch16";
     const PLANNER_TELEMETRY_PREFIX: &'static str = "moe_batch16_planner";
-    const TELEMETRY_SCHEMA_VERSION: u32 = 7;
+    const TELEMETRY_SCHEMA_VERSION: u32 = 8;
     const PLANNER_TELEMETRY_SCHEMA_VERSION: u32 = 5;
 
     fn executor_scratch_upper_bytes(loaded: &LoadedModel) -> Result<u64> {
@@ -402,6 +403,12 @@ struct CohortTelemetry {
     memory_admission_required_bytes: Option<u64>,
     memory_admission_reason: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    file_root_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_root_restores: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_root_restore_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     executor_scratch_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     executor_scratch_incremental_bytes: Option<u64>,
@@ -419,6 +426,34 @@ struct CohortTelemetry {
     moe_per_lane_other_gate_up_blocks: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     moe_head_mode: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct FixedFileRootTelemetry {
+    schema_version: u32,
+    backend: &'static str,
+    enabled: bool,
+    requests: usize,
+    planned_cohorts: usize,
+    common_prefix_tokens: usize,
+    selected_prefix_tokens: usize,
+    planned_avoided_prefix_evaluations: usize,
+    planned_avoided_prompt_tokens: usize,
+    minimum_tokens: usize,
+    reason: &'static str,
+    outcome: &'static str,
+    actual_cohort_uses: usize,
+    actual_avoided_prefix_evaluations: usize,
+    actual_avoided_prompt_tokens: usize,
+    excluded_requests: usize,
+    snapshot_required_bytes: u64,
+    max_cohort_snapshot_required_bytes: u64,
+    additional_memory_bytes: u64,
+    memory_admission_required_bytes: Option<u64>,
+    memory_admission_reason: &'static str,
+    snapshot_bytes: u64,
+    prefill_ms: f64,
+    snapshot_ms: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -595,6 +630,10 @@ fn prefix_packing_enabled(default_enabled: bool) -> Result<bool> {
         })
         .transpose()?;
     parse_prefix_packing_enabled(value.as_deref(), default_enabled)
+}
+
+fn fixed_file_root_default_enabled<const WIDTH: usize>() -> bool {
+    WIDTH == DENSE_BATCH8_WIDTH
 }
 
 fn fixed_cohort_fanout_enabled<const WIDTH: usize>() -> bool {
@@ -907,10 +946,10 @@ fn plan_dense_refill<const WIDTH: usize>(
     work: Vec<PlannedWork<WIDTH>>,
     requests: &[PreparedJsonlRequest],
     args: &Args,
-    prefix_fanout_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
+    _prefix_fanout_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
     requested_tokens: &[usize],
     capacities: &[usize],
-    prefix_affinity_batches: &[[usize; WIDTH]],
+    _prefix_affinity_batches: &[[usize; WIDTH]],
     enabled: bool,
 ) -> Result<DenseRefillRewrite<WIDTH>> {
     if !enabled || WIDTH != DENSE_BATCH8_WIDTH {
@@ -944,7 +983,7 @@ fn plan_dense_refill<const WIDTH: usize>(
         }
         let fallback_slice = &work[cursor..end];
         if fallback_slice.iter().any(|item| {
-            matches!(item, PlannedWork::Batch(indices) if prefix_affinity_batches.contains(indices))
+            matches!(item, PlannedWork::Batch(indices) if _prefix_affinity_batches.contains(indices))
         }) {
             output.push(work[cursor].clone());
             cursor += 1;
@@ -960,7 +999,7 @@ fn plan_dense_refill<const WIDTH: usize>(
                         indices,
                         requests,
                         args,
-                        prefix_fanout_boundary_policy,
+                        _prefix_fanout_boundary_policy,
                     ) > 0
                     {
                         request_indices.clear();
@@ -1570,6 +1609,50 @@ fn rewrite_unadmitted_refill_arenas<const WIDTH: usize>(
     Ok((rewritten, rejected))
 }
 
+fn fixed_file_root_request_indices<const WIDTH: usize>(work: &[PlannedWork<WIDTH>]) -> Vec<usize> {
+    work.iter()
+        .filter_map(|work| match work {
+            PlannedWork::Batch(indices) => Some(indices.as_slice()),
+            PlannedWork::RefillArena(_) | PlannedWork::Serial(_) => None,
+        })
+        .flatten()
+        .copied()
+        .collect()
+}
+
+fn max_fixed_file_root_snapshot_bytes<const WIDTH: usize>(
+    loaded: &LoadedModel,
+    requests: &[PreparedJsonlRequest],
+    work: &[PlannedWork<WIDTH>],
+    args: &Args,
+    boundary_policy: QwenPrefixFanoutBoundaryPolicy,
+    root_tokens: usize,
+    max_capacity: usize,
+) -> Result<u64> {
+    let mut maximum = 0u64;
+    for item in work {
+        let PlannedWork::Batch(indices) = item else {
+            continue;
+        };
+        let prefix_tokens = selected_cohort_prefix_tokens(indices, requests, args, boundary_policy)
+            .max(root_tokens);
+        if prefix_tokens <= root_tokens {
+            continue;
+        }
+        let bytes = loaded
+            .estimate_checkpoint_boundary_sizes_unallocated(
+                max_capacity,
+                prefix_tokens,
+                false,
+                false,
+            )
+            .context("estimate cohort checkpoint above file root")?
+            .snapshot_bytes;
+        maximum = maximum.max(bytes);
+    }
+    Ok(maximum)
+}
+
 fn rewrite_unadmitted_batches<const WIDTH: usize>(
     work: Vec<PlannedWork<WIDTH>>,
     mut admitted: impl FnMut(&[usize; WIDTH]) -> Result<bool>,
@@ -1674,13 +1757,134 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             .map(|request| jsonl_generation_capacity(request, args).map(|(tokens, _)| tokens))
             .collect::<Result<Vec<_>>>()?,
     )?;
-    let realized_capacity_slots = estimate_capacity_slots(
-        &planned_work,
-        &requests
+    let capacities = requests
+        .iter()
+        .map(|request| jsonl_generation_capacity(request, args).map(|(_, capacity)| capacity))
+        .collect::<Result<Vec<_>>>()?;
+    let realized_capacity_slots = estimate_capacity_slots(&planned_work, &capacities)?;
+    let fixed_cohort_count = planned_work
+        .iter()
+        .filter(|work| matches!(work, PlannedWork::Batch(_)))
+        .count();
+    let root_request_indices = fixed_file_root_request_indices(&planned_work);
+    let root_prompt_refs = root_request_indices
+        .iter()
+        .map(|&index| requests[index].prompt_ids.as_slice())
+        .collect::<Vec<_>>();
+    let root_use_count = fixed_cohort_count;
+    let root_plan = qwen_file_root::plan(
+        &root_prompt_refs,
+        args.prefill_chunk,
+        root_use_count,
+        qwen_file_root::enabled(
+            FILE_ROOT_FANOUT_ENV,
+            fixed_file_root_default_enabled::<WIDTH>(),
+        )?,
+    );
+    let excluded_requests = requests.len().saturating_sub(root_prompt_refs.len());
+    let mut file_root = None;
+    let mut root_telemetry = FixedFileRootTelemetry {
+        schema_version: 1,
+        backend: "qwen_fixed_file_root_v1",
+        enabled: root_plan.enabled,
+        requests: requests.len(),
+        planned_cohorts: root_use_count,
+        common_prefix_tokens: root_plan.common_prefix_tokens,
+        selected_prefix_tokens: root_plan.selected_prefix_tokens,
+        planned_avoided_prefix_evaluations: root_plan.planned_avoided_prefix_evaluations,
+        planned_avoided_prompt_tokens: root_plan.planned_avoided_prompt_tokens,
+        minimum_tokens: qwen_file_root::MIN_TOKENS,
+        reason: root_plan.reason,
+        outcome: "not_selected",
+        actual_cohort_uses: 0,
+        actual_avoided_prefix_evaluations: 0,
+        actual_avoided_prompt_tokens: 0,
+        excluded_requests,
+        snapshot_required_bytes: 0,
+        max_cohort_snapshot_required_bytes: 0,
+        additional_memory_bytes: 0,
+        memory_admission_required_bytes: None,
+        memory_admission_reason: "not_requested",
+        snapshot_bytes: 0,
+        prefill_ms: 0.0,
+        snapshot_ms: 0.0,
+    };
+    if root_plan.selected_prefix_tokens > 0 {
+        let max_capacity = planned_work
             .iter()
-            .map(|request| jsonl_generation_capacity(request, args).map(|(_, capacity)| capacity))
-            .collect::<Result<Vec<_>>>()?,
-    )?;
+            .filter_map(|work| match work {
+                PlannedWork::Batch(indices) => indices.iter().map(|&index| capacities[index]).max(),
+                PlannedWork::RefillArena(_) | PlannedWork::Serial(_) => None,
+            })
+            .max()
+            .context("file-root plan contained no batched capacity")?;
+        let prefill_scratch_upper_bytes = root_request_indices
+            .iter()
+            .map(|&index| {
+                concurrent_jsonl::prefill_scratch_upper_bytes(loaded, &requests[index], args)
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max()
+            .unwrap_or(0);
+        let root_snapshot_required_bytes = loaded
+            .estimate_checkpoint_boundary_sizes_unallocated(
+                max_capacity,
+                root_plan.selected_prefix_tokens,
+                false,
+                true,
+            )
+            .context("estimate fixed-cohort file root")?
+            .snapshot_bytes;
+        let max_cohort_snapshot_required_bytes = max_fixed_file_root_snapshot_bytes(
+            loaded,
+            requests,
+            &planned_work,
+            args,
+            plan.prefix_fanout_boundary_policy,
+            root_plan.selected_prefix_tokens,
+            max_capacity,
+        )?;
+        let additional_memory_bytes = root_snapshot_required_bytes
+            .checked_add(max_cohort_snapshot_required_bytes)
+            .context("file root plus cohort checkpoint bytes overflow")?;
+        let admission = loaded
+            .qwen_execution_memory_admission_with_additional_bytes(
+                WIDTH,
+                max_capacity,
+                prefill_scratch_upper_bytes,
+                E::executor_scratch_upper_bytes(loaded)?,
+                additional_memory_bytes,
+            )
+            .context("price fixed-cohort file root")?;
+        root_telemetry.snapshot_required_bytes = root_snapshot_required_bytes;
+        root_telemetry.max_cohort_snapshot_required_bytes = max_cohort_snapshot_required_bytes;
+        root_telemetry.additional_memory_bytes = additional_memory_bytes;
+        root_telemetry.memory_admission_required_bytes = admission.required_bytes;
+        root_telemetry.memory_admission_reason = admission.reason.as_str();
+        if admission.admitted {
+            let root_prompt = root_prompt_refs
+                .first()
+                .copied()
+                .context("file-root plan has no source prompt")?;
+            let (prepared, prefill_ms, snapshot_ms) = qwen_file_root::prepare(
+                loaded,
+                root_prompt,
+                args.prefill_chunk,
+                root_plan,
+                max_capacity,
+                root_snapshot_required_bytes,
+            )?;
+            root_telemetry.outcome = "prepared";
+            root_telemetry.snapshot_bytes = prepared.checkpoint.snapshot_bytes();
+            root_telemetry.prefill_ms = prefill_ms;
+            root_telemetry.snapshot_ms = snapshot_ms;
+            file_root = Some(prepared);
+        } else {
+            root_telemetry.outcome = "memory_fallback";
+            root_telemetry.additional_memory_bytes = 0;
+        }
+    }
     let mut executor = if realized_full_cohorts > 0 {
         Some(executor_factory()?)
     } else {
@@ -1768,6 +1972,7 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                     &stop_tokens,
                     cohort_index,
                     plan.prefix_fanout_boundary_policy,
+                    file_root.as_ref(),
                 )
                 .with_context(|| format!("run {} cohort {cohort_index}", E::DISPLAY_NAME))?;
                 for (index, output) in indices.into_iter().zip(outputs) {
@@ -1783,6 +1988,9 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                     serde_json::to_string(&telemetry)
                         .with_context(|| format!("serialize {} telemetry", E::DISPLAY_NAME))?
                 );
+                if telemetry.file_root_restores.unwrap_or(0) > 0 {
+                    root_telemetry.actual_cohort_uses += 1;
+                }
                 cohort_index += 1;
             }
             PlannedWork::RefillArena(plan) => {
@@ -1831,6 +2039,16 @@ fn run_fixed_cohort_file<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         "{} planner completed {completed}/{} requests",
         E::DISPLAY_NAME,
         requests.len()
+    );
+    root_telemetry.actual_avoided_prefix_evaluations =
+        root_telemetry.actual_cohort_uses.saturating_sub(1);
+    root_telemetry.actual_avoided_prompt_tokens = root_telemetry
+        .selected_prefix_tokens
+        .saturating_mul(root_telemetry.actual_avoided_prefix_evaluations);
+    eprintln!(
+        "fixed_cohort_file_root: {}",
+        serde_json::to_string(&root_telemetry)
+            .context("serialize fixed-cohort file-root telemetry")?
     );
     eprintln!(
         "{}: {}",
@@ -2193,6 +2411,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     stop_tokens: &[i32],
     cohort_index: usize,
     prefix_fanout_boundary_policy: QwenPrefixFanoutBoundaryPolicy,
+    file_root: Option<&qwen_file_root::Prepared>,
 ) -> Result<(Vec<RequestOutput>, CohortTelemetry)> {
     let generation_plan = cohort_generation_plan(requests, args)?;
     let prompt_tokens_per_lane = &generation_plan.prompt_tokens_per_lane;
@@ -2217,6 +2436,13 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
         chunk,
         prefix_fanout_boundary_policy,
     );
+    if let Some(file_root) = file_root {
+        let root_tokens = file_root.plan.selected_prefix_tokens;
+        if prefix_fanout.selected_prefix_tokens < root_tokens {
+            prefix_fanout.selected_prefix_tokens = root_tokens;
+            prefix_fanout.reason = "selected_file_root";
+        }
+    }
 
     let mut scratch = allocate_legacy_prefill_scratch(loaded, chunk, max_prompt_tokens)?;
     let mut sequences = Vec::with_capacity(WIDTH);
@@ -2244,19 +2470,21 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                 E::DISPLAY_NAME
             )
         })?;
-    let mut prefix_snapshot_required_bytes = if prefix_fanout.selected_prefix_tokens > 0 {
-        loaded
-            .estimate_checkpoint_boundary_sizes(
-                &sequences[0],
-                prefix_fanout.selected_prefix_tokens,
-                false,
-                false,
-            )
-            .with_context(|| format!("estimate {} prefix fanout snapshot", E::DISPLAY_NAME))?
-            .snapshot_bytes
-    } else {
-        0
-    };
+    let file_root_tokens = file_root.map_or(0, |root| root.plan.selected_prefix_tokens);
+    let mut prefix_snapshot_required_bytes =
+        if prefix_fanout.selected_prefix_tokens > file_root_tokens {
+            loaded
+                .estimate_checkpoint_boundary_sizes(
+                    &sequences[0],
+                    prefix_fanout.selected_prefix_tokens,
+                    false,
+                    false,
+                )
+                .with_context(|| format!("estimate {} prefix fanout snapshot", E::DISPLAY_NAME))?
+                .snapshot_bytes
+        } else {
+            0
+        };
     let mut memory_admission_incremental_bytes = remaining_sequence_required_bytes
         .checked_add(prefix_snapshot_required_bytes)
         .with_context(|| format!("{} fanout admission byte overflow", E::DISPLAY_NAME))?;
@@ -2306,6 +2534,8 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     let mut prefix_prefill_ms = 0.0;
     let mut prefix_snapshot_ms = 0.0;
     let mut prefix_restore_ms = 0.0;
+    let mut file_root_restores = 0usize;
+    let mut file_root_restore_ms = 0.0;
     let mut suffix_prefill_ms = 0.0;
     let mut private_suffix_singleton_lanes = 0usize;
     let mut private_suffix_singleton_tokens = 0usize;
@@ -2313,49 +2543,103 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
     let mut private_suffix_packed_tokens = 0usize;
     if prefix_fanout.selected_prefix_tokens > 0 {
         let prefix_len = prefix_fanout.selected_prefix_tokens;
-        let (prefix_logits, ms) = prefill_span(
-            &forward,
-            &mut sequences[0],
-            &mut scratch,
-            &requests[0].prompt_ids[..prefix_len],
-            0,
-        )
-        .with_context(|| format!("prefill {} shared prefix", E::DISPLAY_NAME))?;
+        let (prefix_logits, ms) = if let Some(file_root) = file_root {
+            let restore_t0 = Instant::now();
+            let restored = loaded
+                .restore_prepared_checkpoint(
+                    &file_root.checkpoint,
+                    &mut sequences[0],
+                    &requests[0].prompt_ids,
+                )
+                .with_context(|| format!("restore {} file root", E::DISPLAY_NAME))?;
+            let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+            prefix_restore_ms += restore_ms;
+            file_root_restore_ms += restore_ms;
+            file_root_restores += 1;
+            ensure!(
+                restored.matched_prefix_len == file_root_tokens
+                    && restored.restored_prefix_len == file_root_tokens,
+                "{} restored an unexpected file-root boundary",
+                E::DISPLAY_NAME
+            );
+            if prefix_len == file_root_tokens {
+                (
+                    file_root
+                        .checkpoint
+                        .final_logits()
+                        .context("fixed-cohort file root omitted final logits")?
+                        .to_vec(),
+                    0.0,
+                )
+            } else {
+                prefill_span(
+                    &forward,
+                    &mut sequences[0],
+                    &mut scratch,
+                    &requests[0].prompt_ids[file_root_tokens..prefix_len],
+                    file_root_tokens,
+                )
+                .with_context(|| format!("prefill {} prefix above file root", E::DISPLAY_NAME))?
+            }
+        } else {
+            prefill_span(
+                &forward,
+                &mut sequences[0],
+                &mut scratch,
+                &requests[0].prompt_ids[..prefix_len],
+                0,
+            )
+            .with_context(|| format!("prefill {} shared prefix", E::DISPLAY_NAME))?
+        };
         prefix_prefill_ms = ms;
 
-        let snapshot_t0 = Instant::now();
-        let prepared = loaded
-            .prepare_checkpoint_boundary(
-                &sequences[0],
-                requests[0].prompt_ids[..prefix_len].to_vec(),
-                None,
-                None,
-            )
-            .with_context(|| format!("capture {} shared prefix", E::DISPLAY_NAME))?;
-        prefix_snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
-        prefix_snapshot_bytes = prepared.snapshot_bytes();
-        ensure!(
-            prefix_snapshot_bytes == prefix_snapshot_required_bytes,
-            "{} prefix snapshot bytes {} != estimate {}",
-            E::DISPLAY_NAME,
-            prefix_snapshot_bytes,
-            prefix_snapshot_required_bytes,
-        );
+        let prepared = if prefix_len > file_root_tokens {
+            let snapshot_t0 = Instant::now();
+            let prepared = loaded
+                .prepare_checkpoint_boundary(
+                    &sequences[0],
+                    requests[0].prompt_ids[..prefix_len].to_vec(),
+                    None,
+                    None,
+                )
+                .with_context(|| format!("capture {} shared prefix", E::DISPLAY_NAME))?;
+            prefix_snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;
+            prefix_snapshot_bytes = prepared.snapshot_bytes();
+            ensure!(
+                prefix_snapshot_bytes == prefix_snapshot_required_bytes,
+                "{} prefix snapshot bytes {} != estimate {}",
+                E::DISPLAY_NAME,
+                prefix_snapshot_bytes,
+                prefix_snapshot_required_bytes,
+            );
+            Some(prepared)
+        } else {
+            None
+        };
 
         for slot in 0..WIDTH {
             shutdown::checkpoint()?;
             if slot > 0 {
                 let restore_t0 = Instant::now();
+                let checkpoint = prepared
+                    .as_ref()
+                    .or_else(|| file_root.map(|root| &root.checkpoint))
+                    .expect("selected prefix requires a checkpoint");
                 let restored = loaded
                     .restore_prepared_checkpoint(
-                        &prepared,
+                        checkpoint,
                         &mut sequences[slot],
                         &requests[slot].prompt_ids,
                     )
                     .with_context(|| {
                         format!("restore {} shared prefix into slot {slot}", E::DISPLAY_NAME)
                     })?;
-                prefix_restore_ms += restore_t0.elapsed().as_secs_f64() * 1e3;
+                let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
+                prefix_restore_ms += restore_ms;
+                if prepared.is_none() && file_root.is_some() {
+                    file_root_restore_ms += restore_ms;
+                    file_root_restores += 1;
+                }
                 ensure!(
                     restored.matched_prefix_len == prefix_len
                         && restored.restored_prefix_len == prefix_len,
@@ -2593,6 +2877,9 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             memory_admission_reserve_bytes: memory_admission.reserve_bytes,
             memory_admission_required_bytes: memory_admission.required_bytes,
             memory_admission_reason: memory_admission.reason.as_str(),
+            file_root_tokens: file_root.map(|_| file_root_tokens),
+            file_root_restores: file_root.map(|_| file_root_restores),
+            file_root_restore_ms: file_root.map(|_| file_root_restore_ms),
             executor_scratch_bytes: executor.scratch_bytes(),
             // The executor is created before the first sequence delta and this
             // admission snapshot, so its persistent Metal arena is already in
@@ -2912,6 +3199,42 @@ mod tests {
                 reason: "selected_chunk_aligned",
             }
         );
+    }
+
+    #[test]
+    fn fixed_file_root_policy_is_strict_and_family_defaulted() {
+        assert!(fixed_file_root_default_enabled::<DENSE_BATCH8_WIDTH>());
+        assert!(!fixed_file_root_default_enabled::<MOE_BATCH16_WIDTH>());
+        assert!(
+            qwen_file_root::plan(
+                &[&[7; 1_500], &[7; 1_400]],
+                PrefillChunkArg::Fixed(512),
+                2,
+                true,
+            )
+            .selected_prefix_tokens
+                == 1_024
+        );
+    }
+
+    #[test]
+    fn fixed_file_root_participants_exclude_serial_and_refill_work() {
+        let batch = [0, 1, 2, 3, 4, 5, 6, 7];
+        let refill = RefillArenaPlan {
+            fallback_work: Vec::new(),
+            request_indices: (8..24).collect(),
+            shared_capacity: 64,
+            simulated_physical_steps: 8,
+            simulated_productive_transitions: 64,
+            requested_two_wave_steps: 16,
+        };
+        let work = [
+            PlannedWork::Batch(batch),
+            PlannedWork::RefillArena(refill),
+            PlannedWork::Serial(24),
+        ];
+        let participants = fixed_file_root_request_indices(&work);
+        assert_eq!(participants, batch);
     }
 
     #[test]

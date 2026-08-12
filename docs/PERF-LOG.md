@@ -23934,7 +23934,8 @@ Complete JSONL is byte-identical. The candidate evaluates the root once in
 value is correctly understood as cross-cohort amortization rather than a fixed
 per-request speedup.
 
-Dense defaults on behind `QWEN_FIXED_COHORT_FILE_ROOT_FANOUT=0` rollback. MoE
-uses the same capability only when explicitly enabled until a separate exact
-asset cell qualifies it. Refill composition remains out of scope. Evidence:
+Dense and Qwen MoE default on behind
+`QWEN_FIXED_COHORT_FILE_ROOT_FANOUT=0` rollback. A separate A3B Q4 cell moves
+`14.58 -> 12.20 s` (`1.195x`) across four B16 cohorts with byte-identical
+output. Refill composition remains out of scope. Evidence:
 `docs/bench/2026-08-12-qwen-fixed-file-root/README.md`.

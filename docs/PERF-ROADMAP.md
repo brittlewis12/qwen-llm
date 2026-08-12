@@ -6620,7 +6620,8 @@ Next: <one concrete follow-up>
 - Root selection excludes serial fallback and refill work, admission prices one
   retained root plus the largest deeper cohort checkpoint, and memory denial
   retains cohort-local behavior.
-- Keep dense default-on with rollback. Keep MoE default-off pending its own exact
-  cell, and treat prefix-aware refill as a separate next experiment rather than
-  silently broadening this capability. Evidence:
+- Keep dense and Qwen MoE default-on with rollback: four A3B Q4 B16 cohorts move
+  `14.58 -> 12.20 s` (`1.195x`) with byte-identical output. Treat prefix-aware
+  refill as a separate next experiment rather than silently broadening this
+  capability. Evidence:
   `docs/bench/2026-08-12-qwen-fixed-file-root/README.md`.

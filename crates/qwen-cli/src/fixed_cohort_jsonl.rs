@@ -633,7 +633,7 @@ fn prefix_packing_enabled(default_enabled: bool) -> Result<bool> {
 }
 
 fn fixed_file_root_default_enabled<const WIDTH: usize>() -> bool {
-    WIDTH == DENSE_BATCH8_WIDTH
+    matches!(WIDTH, DENSE_BATCH8_WIDTH | MOE_BATCH16_WIDTH)
 }
 
 fn fixed_cohort_fanout_enabled<const WIDTH: usize>() -> bool {
@@ -3204,7 +3204,7 @@ mod tests {
     #[test]
     fn fixed_file_root_policy_is_strict_and_family_defaulted() {
         assert!(fixed_file_root_default_enabled::<DENSE_BATCH8_WIDTH>());
-        assert!(!fixed_file_root_default_enabled::<MOE_BATCH16_WIDTH>());
+        assert!(fixed_file_root_default_enabled::<MOE_BATCH16_WIDTH>());
         assert!(
             qwen_file_root::plan(
                 &[&[7; 1_500], &[7; 1_400]],

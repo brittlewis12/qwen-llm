@@ -2,8 +2,7 @@
 
 Date: 2026-08-12
 
-Status: dense B8 product GO; Qwen MoE B16 remains explicit/default-off pending
-its own exact performance cell.
+Status: product GO for dense B8 and Qwen MoE B16.
 
 ## Question
 
@@ -29,8 +28,7 @@ sequence, replays only any deeper shared bridge, captures that bridge if needed,
 and restores sibling sequences at the selected boundary.
 
 `QWEN_FIXED_COHORT_FILE_ROOT_FANOUT=0` restores cohort-local behavior. Dense B8
-defaults on. MoE B16 parses the same explicit gate but defaults off until a
-separate asset-specific exact cell clears promotion.
+and Qwen MoE B16 default on behind the same rollback.
 
 ## Result
 
@@ -51,14 +49,24 @@ A two-cohort probe moved `8.35 -> 7.64 s` (`1.093x`), just below the standing
 `1.10x` gate. The four-cohort result demonstrates the intended file-scope
 amortization and clears it without changing model math or fixed decode.
 
+### Qwen MoE B16
+
+Sixty-four identical A3B Q4 requests form four B16 cohorts around a 1,536-token
+file root. Cohort-local roots take `14.58 s`; one retained root takes `12.20 s`
+(`1.195x`). Both outputs have SHA-256
+`fba5ae7dc58a286da1f89b76b5dba7f878f7427513562c2b50969162ac1c516d`.
+The candidate captures a `98,320,464`-byte root and avoids 4,608 prompt-token
+evaluations. This clears
+the same gate and qualifies the shared capability on routed execution.
+
 ## Decision
 
-Promote dense B8 file-root reuse by default inside the already explicit
-`--batch-size 8` mode. Keep the rollback, 1,024-token minimum, fixed-chunk
-boundary, exact restore checks, process-memory admission, and separate telemetry.
+Promote file-root reuse by default inside the already explicit dense B8 and Qwen
+MoE B16 modes. Keep the rollback, 1,024-token minimum, fixed-chunk boundary,
+exact restore checks, process-memory admission, and separate telemetry.
 
 Do not yet compose the root with dense refill. That is a distinct prefix-aware
 refill lane, and the current bounded refill planner intentionally excludes
-prefix-fanout work. Do not infer MoE promotion from the dense cell.
+prefix-fanout work.
 
 Durable fixture and machine-readable validation are in this directory.

@@ -33,5 +33,23 @@
     "prefill_ms": 794.228958,
     "snapshot_ms": 26.0255
   },
-  "all_stdout_equal": true
+  "all_stdout_equal": true,
+  "moe_b16": {
+    "model": "/Users/tito/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
+    "fixture": "moe-requests.jsonl",
+    "fixture_sha256": "a19613dbe073f5ccb0432ca80443488d08d9e043b5caf75513256328e7a484a7",
+    "requests": 64,
+    "cohorts": 4,
+    "common_prefix_tokens": 1684,
+    "selected_prefix_tokens": 1536,
+    "control_wall_seconds": 14.58,
+    "candidate_wall_seconds": 12.2,
+    "speedup": 1.1950819672131148,
+    "stdout_sha256": "fba5ae7dc58a286da1f89b76b5dba7f878f7427513562c2b50969162ac1c516d",
+    "all_stdout_equal": true,
+    "snapshot_bytes": 98320464,
+    "root_prefill_ms": 1021.431958,
+    "root_snapshot_ms": 26.59025,
+    "avoided_prompt_tokens": 4608
+  }
 }

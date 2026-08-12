@@ -6603,9 +6603,10 @@ Next: <one concrete follow-up>
 - Dense B8 can replace finished lanes across one bounded second wave while
   preserving exact output. On a 32-request skew trace, wall moves `2.29 ->
   1.83 s` versus B2 and `2.27 -> 1.83 s` versus static ragged B8.
-- Keep the mechanism explicit and default-off. Its requested-limit simulation is
-  a structural screen, not a general prefill/decode cost model; automatic mode
-  remains unchanged.
+- Explicit dense B8 now defaults only to short serial-tail rescue. Independent
+  11-token cells move 0.8B B2 `2.070 -> 1.685 s` (`1.228x`) and 27B B2
+  `23.79 -> 16.04 s` (`1.483x`). A 64-token boundary remains `1.232x/1.174x`
+  versus static B8 on the same anchors.
 - Do not generalize synchronous refill to MoE: the charged A3B ceiling loses to
   measured B2. Reopen MoE only with overlapping/chunked replacement prefill or
   materially different transition economics. Evidence:
@@ -6648,3 +6649,16 @@ Next: <one concrete follow-up>
 - Keep the 16-request window, process-memory admission, input-order publication,
   and `QWEN_CONCURRENCY_PAIR_PLANNER=0` rollback. Evidence:
   `docs/bench/2026-08-12-deepseek-pair-affinity/README.md`.
+
+## Recent Promotion — Short Dense B8 Serial-Tail Rescue
+
+- A counterbalanced 0.8B cell isolates refill from ragged prompts and prefix
+  reuse. B2 takes `2.08/2.06 s`; refill takes `1.69/1.68 s`, a median `1.228x`
+  gain. The same trace on 27B moves B2 `23.79 -> 16.04 s` (`1.483x`).
+- The exact 10% fully batched threshold reaches only `1.034x`; 1,029-token
+  serial-tail rescue reaches only `1.075x`. Default only when static planning
+  would leave serial tails and every prompt is at most 64 tokens; that boundary
+  clears `1.232x/1.174x` on 0.8B/27B.
+- `QWEN_DENSE_BATCH8_REFILL=1` keeps broader refill explicit; `=0` is rollback.
+  Auto mode, Qwen MoE, and implicit ragged composition remain closed. Evidence:
+  `docs/bench/2026-08-12-dense-refill-default/README.md`.

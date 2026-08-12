@@ -23975,3 +23975,37 @@ Complete JSONL remains byte-identical with SHA-256
 Both arms report zero process swaps and no memory fallback. Keep the 16-request
 window, admission checks, and `QWEN_CONCURRENCY_PAIR_PLANNER=0` rollback.
 Evidence: `docs/bench/2026-08-12-deepseek-pair-affinity/README.md`.
+
+## 2026-08-12 — Short Dense B8 Serial-Tail Rescue GO
+
+Status: promote a measured subset of bounded refill inside explicit dense B8.
+Absent `QWEN_DENSE_BATCH8_REFILL`, the planner now rewrites only two-wave arenas
+that absorb at least one static serial fallback, keep every prompt at or below
+64 tokens, and clear the existing 3/4 utilization and 10% decode-step gates.
+`=1` forces the broader experimental planner; `=0` is strict static rollback.
+
+A 32-request Qwen3.5 0.8B Q8 fixture holds every prompt at 11 tokens and repeats
+generation limits ranging from 1 to 40. B2 takes `2.08/2.06 s`; refill takes
+`1.69/1.68 s`, moving median wall `2.070 -> 1.685 s` (`1.228x`). Static B8 takes
+`2.14 s`. Refill absorbs 16 requests that static planning sends to serial
+fallback. Complete JSONL is byte-identical, no arena fails memory admission, and
+all processes report zero swaps.
+
+The same fixture on Qwen3.6 27B Q4 moves B2 `23.79 -> 16.04 s` (`1.483x`) and
+static B8 `19.73 -> 16.04 s` (`1.230x`) with byte-identical output and flat RSS.
+This brackets the measured dense B8 model range instead of extrapolating from one
+asset.
+
+Two falsifiers narrow the default. A fully batched fixture at the exact 10%
+decode-step threshold moves only `0.90 -> 0.87 s` (`1.034x`), so automatic
+refill requires actual static serial fallback. With 1,029-token non-prefix
+prompts, forced serial-tail refill moves only `6.44 -> 5.99 s` (`1.075x`). At
+exactly 64 tokens, static-to-refill remains `2.23 -> 1.81 s` (`1.232x`) on 0.8B
+and `23.69 -> 20.17 s` (`1.174x`) on 27B. Freeze 64 as a conservative measured
+boundary, not a claim that token 65 is the crossover.
+
+Automatic execution remains unchanged. Qwen MoE remains closed, ragged prompts
+do not implicitly enable refill, prefix-selected cohorts remain excluded, and
+memory denial restores the exact static plan. Dense planner schema 7 reports the
+tri-state policy and default prompt cap. Evidence:
+`docs/bench/2026-08-12-dense-refill-default/README.md`.

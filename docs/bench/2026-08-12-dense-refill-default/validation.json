@@ -1,0 +1,297 @@
+{
+  "schema_version": 2,
+  "base_commit": "ddb2b39cac46ec181086eb3aae4c1cc1df7be9ee",
+  "host": "Apple M4 Max",
+  "policy": {
+    "default": "short_serial_fallback_rescue",
+    "max_prompt_tokens": 64,
+    "requires_static_serial_fallback": true,
+    "minimum_simulated_decode_step_savings": "1/10",
+    "minimum_transition_utilization": "3/4",
+    "maximum_waves": 2,
+    "rollback": "QWEN_DENSE_BATCH8_REFILL=0",
+    "force": "QWEN_DENSE_BATCH8_REFILL=1",
+    "auto_mode": false,
+    "qwen_moe": false,
+    "ragged_default": false
+  },
+  "common_command": [
+    "target/release/qwen",
+    "--model",
+    "MODEL",
+    "--requests-jsonl",
+    "FIXTURE",
+    "--batch-size",
+    "8",
+    "--temp",
+    "0",
+    "--prefill-chunk",
+    "256"
+  ],
+  "short_0_8b": {
+    "model": "/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf",
+    "fixture": "requests.jsonl",
+    "fixture_sha256": "6fddfd3a9d4f09eca0f577f5331f394d583c3108b0c92061b963b395cd285b84",
+    "prompt_tokens": 11,
+    "b2": [
+      {
+        "stderr_sha256": "39a3af2367ba38e6231e9a178ef505155a09259e38e3129f72945995574cbc03",
+        "wall_seconds": 2.08,
+        "max_rss_bytes": 2741420032,
+        "page_reclaims": 231773,
+        "process_swaps": 0
+      },
+      {
+        "stderr_sha256": "6a9f772bd462090d2f90f354989a5cbbfdef5a5b4e13f56a25666a83b948bc7a",
+        "wall_seconds": 2.06,
+        "max_rss_bytes": 2742861824,
+        "page_reclaims": 231847,
+        "process_swaps": 0
+      }
+    ],
+    "static_b8": {
+      "stderr_sha256": "bf141be46a162e1e8b481d4ac2d77f0ccda89ef557d99942c34106766ab6c057",
+      "wall_seconds": 2.14,
+      "max_rss_bytes": 2760818688,
+      "page_reclaims": 232587,
+      "process_swaps": 0
+    },
+    "refill_b8": [
+      {
+        "stderr_sha256": "0584ce3aa85e932cfab71da164f8e1734208acd7a18965d498bd547b3dfae168",
+        "wall_seconds": 1.69,
+        "max_rss_bytes": 2749792256,
+        "page_reclaims": 231952,
+        "process_swaps": 0
+      },
+      {
+        "stderr_sha256": "fe727077388037042fb59fc454202606b86c1a9ad1df9dd27b35b851df53abb4",
+        "wall_seconds": 1.68,
+        "max_rss_bytes": 2749956096,
+        "page_reclaims": 231960,
+        "process_swaps": 0
+      }
+    ],
+    "surrounding_defaults": {
+      "stderr_sha256": "5103258f534837ab60a611427f679739a7ef66910770df3a72b1b1f595e373ea",
+      "wall_seconds": 1.7,
+      "max_rss_bytes": 2750054400,
+      "page_reclaims": 231967,
+      "process_swaps": 0
+    },
+    "output": {
+      "stdout_sha256": "22d3e4ab22276a4e0b7376686f0766b8b376eabb194d8e83bebb3416a8c50d59",
+      "rows": 32
+    },
+    "all_stdout_equal": true,
+    "speedup_vs_b2_median": 1.2284866468842728,
+    "speedup_vs_static_b8": 1.2700296735905046,
+    "arenas": [
+      {
+        "physical_steps": 7,
+        "productive_transitions": 56,
+        "padding_transitions": 0,
+        "replacements": 8
+      },
+      {
+        "physical_steps": 47,
+        "productive_transitions": 346,
+        "padding_transitions": 30,
+        "replacements": 8
+      }
+    ],
+    "memory_fallback_arenas": 0
+  },
+  "short_27b": {
+    "model": "/Users/tito/models/Qwen3.6-27B-Q4_K_M.gguf",
+    "fixture": "requests.jsonl",
+    "fixture_sha256": "6fddfd3a9d4f09eca0f577f5331f394d583c3108b0c92061b963b395cd285b84",
+    "prompt_tokens": 11,
+    "b2": {
+      "stderr_sha256": "fadb2d7a3ce221b2a79f09f493f10f255b82895ef92ab3e39b0d70c5075ce883",
+      "wall_seconds": 23.79,
+      "max_rss_bytes": 33737588736,
+      "page_reclaims": 2061534,
+      "process_swaps": 0
+    },
+    "static_b8": {
+      "stderr_sha256": "c9199b12edcb243bf90d474e5154f3c841c52d559bc3abac2a4f0098fd050d05",
+      "wall_seconds": 19.73,
+      "max_rss_bytes": 33761771520,
+      "page_reclaims": 2062682,
+      "process_swaps": 0
+    },
+    "refill_b8": {
+      "stderr_sha256": "90c5ad88f4bdd9912d69229010a30db73f15c59b36791106679f93dcccbe6c51",
+      "wall_seconds": 16.04,
+      "max_rss_bytes": 33755512832,
+      "page_reclaims": 2062304,
+      "process_swaps": 0
+    },
+    "output": {
+      "stdout_sha256": "6fa252015e0ea7e8524db6756b6ff7115ed8f506b8de052d8d70260771afe648",
+      "rows": 32
+    },
+    "all_stdout_equal": true,
+    "speedup_vs_b2": 1.4831670822942644,
+    "speedup_vs_static_b8": 1.2300498753117208
+  },
+  "boundary_64": {
+    "fixture": "requests-64.jsonl",
+    "fixture_sha256": "82c64436955c4ffad883052084a15a6588dded92b4b9ab9e583f6065b23554af",
+    "prompt_tokens": 64,
+    "qwen_0_8b": {
+      "static_b8": {
+        "stderr_sha256": "d2417fd1d3dfd24c7da2f934e90d0d1228353c2a7ea199a368c6e4afb28421ee",
+        "wall_seconds": 2.23,
+        "max_rss_bytes": 2758000640,
+        "page_reclaims": 232406,
+        "process_swaps": 0
+      },
+      "refill_b8": {
+        "stderr_sha256": "454947e84cdcfd7311bb50f2daf2211460f307cac0f82746fe32e68a579f9b1f",
+        "wall_seconds": 1.81,
+        "max_rss_bytes": 2749857792,
+        "page_reclaims": 231946,
+        "process_swaps": 0
+      },
+      "output": {
+        "stdout_sha256": "14cf6fe01ec4a36af1b3998e0a113d914495d0c617ced9ad4646c790c3845444",
+        "rows": 32
+      },
+      "all_stdout_equal": true,
+      "speedup": 1.2320441988950275
+    },
+    "qwen_27b": {
+      "static_b8": {
+        "stderr_sha256": "bdd33dae9b950b00a7a9406c19b17d715096aa57b0ffe4db1254fc202808e638",
+        "wall_seconds": 23.69,
+        "max_rss_bytes": 33766883328,
+        "page_reclaims": 2062995,
+        "process_swaps": 0
+      },
+      "refill_b8": {
+        "stderr_sha256": "845c078893c7b39168139f5be140a7941b0289eb5ec318168ba21e1ea5bdf518",
+        "wall_seconds": 20.17,
+        "max_rss_bytes": 33751793664,
+        "page_reclaims": 2062074,
+        "process_swaps": 0
+      },
+      "output": {
+        "stdout_sha256": "14cf6fe01ec4a36af1b3998e0a113d914495d0c617ced9ad4646c790c3845444",
+        "rows": 32
+      },
+      "all_stdout_equal": true,
+      "speedup": 1.1745166088249877
+    }
+  },
+  "fully_batched_threshold": {
+    "model": "/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf",
+    "fixture": "requests-threshold.jsonl",
+    "fixture_sha256": "15d90e9a6c2e1d15b3f41c8111667ce0a342118010d392c16d92f45523bf9e63",
+    "prompt_tokens": 11,
+    "requested_two_wave_steps": 20,
+    "refill_physical_steps": 18,
+    "simulated_savings": 0.1,
+    "static_b8": [
+      {
+        "stderr_sha256": "052a9caf82bbe35b5a603bc630f2a9ae74e91f736328c23ace6846b97bd2f288",
+        "wall_seconds": 0.9,
+        "max_rss_bytes": 2754445312,
+        "page_reclaims": 231197,
+        "process_swaps": 0
+      },
+      {
+        "stderr_sha256": "e50c57136c677f46ba95b8a354a5980386b35bed33f9434bffcaf797302f0abd",
+        "wall_seconds": 0.9,
+        "max_rss_bytes": 2758737920,
+        "page_reclaims": 231460,
+        "process_swaps": 0
+      }
+    ],
+    "forced_refill_b8": [
+      {
+        "stderr_sha256": "af01c3eb9f3629431ee00dd1762a5eb1ce6ed91c1691b8d5174aff265911cb40",
+        "wall_seconds": 0.87,
+        "max_rss_bytes": 2748841984,
+        "page_reclaims": 230859,
+        "process_swaps": 0
+      },
+      {
+        "stderr_sha256": "3e94f808fb34a2fd4551266716fc3663a24d83b2d4ee96959a4b4a02b7db85cc",
+        "wall_seconds": 0.87,
+        "max_rss_bytes": 2748678144,
+        "page_reclaims": 230850,
+        "process_swaps": 0
+      }
+    ],
+    "output": {
+      "stdout_sha256": "d1d59bf6948fb213e4e0d249fc72764d2cd5aae562b97140ef44147b557e9bfc",
+      "rows": 16
+    },
+    "all_stdout_equal": true,
+    "speedup": 1.0344827586206897,
+    "decision": "default leaves fully batched work static"
+  },
+  "long_prompt": {
+    "model": "/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf",
+    "fixture": "requests-long.jsonl",
+    "fixture_sha256": "92f29a7548db321f1d6ce15cc07cbd56214c75449dac00096908d477bd8aca96",
+    "prompt_tokens": 1029,
+    "static_b8": {
+      "stderr_sha256": "243bc7db4d13ffaa180bc699c3d2bfbc35b87f1c02359073fa9c970ac4591535",
+      "wall_seconds": 6.44,
+      "max_rss_bytes": 2755821568,
+      "page_reclaims": 232293,
+      "process_swaps": 0
+    },
+    "forced_refill_b8": {
+      "stderr_sha256": "0cef0f34b07457a6a41325557b918a5b9b7f38506e25e36f2537cb6c56cb932c",
+      "wall_seconds": 5.99,
+      "max_rss_bytes": 2754035712,
+      "page_reclaims": 232214,
+      "process_swaps": 0
+    },
+    "output": {
+      "stdout_sha256": "ff7119e81b1d862ce02189ac785f5d2e9f432303d59019946eb95b5cc9396973",
+      "rows": 32
+    },
+    "all_stdout_equal": true,
+    "speedup": 1.0751252086811351,
+    "decision": "default prompt cap leaves this work static"
+  },
+  "candidate_build": {
+    "base_commit": "ddb2b39cac46ec181086eb3aae4c1cc1df7be9ee",
+    "binary_version": "qwen 0.0.1",
+    "candidate_source": "crates/qwen-cli/src/fixed_cohort_jsonl.rs",
+    "candidate_source_sha256": "f8cf379978b29077ca07c4f7e305a1049afaa2893d39140a17bd4869fe63a8f8",
+    "note": "runtime binary hash was captured immediately before the retained run; subsequent evidence-file edits alter the dirty-worktree build stamp and therefore the disposable target binary without changing the candidate source",
+    "runtime_binary_sha256": "48933a99d6def5a6594339c25a61b67f3866b4fda5810396e9ce6387c241c12e",
+    "runtime_binary_retained": false,
+    "source_binding": "base_commit plus candidate_source_sha256"
+  },
+  "current_absent_env_confirmation": {
+    "environment": {
+      "QWEN_DENSE_BATCH8_REFILL": "absent"
+    },
+    "model": "/Users/tito/models/Qwen3.5-0.8B-Q8_0.gguf",
+    "fixture": "requests.jsonl",
+    "stdout_file": "current-default.stdout.jsonl",
+    "stderr_file": "current-default.stderr.log",
+    "stdout_sha256": "22d3e4ab22276a4e0b7376686f0766b8b376eabb194d8e83bebb3416a8c50d59",
+    "stderr_sha256": "9f0a3cf798c74bac9faac25ebeaf638cb8655ab10c8d06d1a48a46af4f49f4ae",
+    "wall_seconds": 1.75,
+    "max_rss_bytes": 2749480960,
+    "page_reclaims": 231581,
+    "process_swaps": 0,
+    "planner_schema_version": 7,
+    "planner_backend": "dense_qwen_fixed_cohort_planner_v7",
+    "refill_policy": "short_serial_fallback_rescue",
+    "refill_default_max_prompt_tokens": 64,
+    "refill_effective": true,
+    "realized_refill_arenas": 2,
+    "realized_refill_requests": 32,
+    "memory_fallback_arenas": 0,
+    "all_stdout_equal": true
+  }
+}

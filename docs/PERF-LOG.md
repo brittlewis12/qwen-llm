@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — DeepSeek V4 Completed-Turn Durable Checkpoints GO
+
+Status: preserve-mode DeepSeek V4 turns now checkpoint the completed
+transcript instead of the prompt boundary, and the durable orchestration
+moved behind a runtime API (`d99fd52`). On an EOS stop the session holds
+every prompt and generated token except the unconsumed terminal EOS — a
+strict prefix of the next preserve-mode turn's re-rendered prompt — so the
+next turn's prefill collapses to the new user message.
+
+- Live two-turn probe on the 89 GB REAP flash model, `--reasoning low
+  --messages-preserve-thinking`: turn 1 (32-token prompt, 63 generated, eos)
+  publishes `capture=completed matched_tokens=94` (16,980,120 B; capture
+  94.2 ms, publish 134.8 ms post-flush). Turn 2 (106-token prompt) restores
+  `matched=94` in 112.0 ms and prefills `suffix_tokens=12` — the EOS plus
+  the new user turn — then publishes its own completed boundary at 166.
+- The reuse depends on byte-faithful history: inline-thinking promotion no
+  longer trims reasoning or visible text (strip keeps its cosmetic trim), so
+  preserve rendering re-emits the exact generated transcript. The live hit
+  is the proof: turn 1's raw headless output re-rendered to a token-exact
+  extension of the checkpoint.
+- Truncated turns publish nothing (`publish=skipped reason=token_limit`): a
+  token-limit boundary can never prefix a retry of the same prompt, so it
+  would only pollute the byte budget. Completed-eligible runs also skip the
+  mid-prefill prompt capture; strip/raw modes keep the prompt-boundary lane.
+- Runtime API: `DeepSeekV4Session::restore_durable_prefix` probes and
+  restores under the session's bound identity,
+  `prepare_durable_checkpoint` bundles the boundary with the config,
+  capacity, and identity that publication needs, and
+  `DeepSeekV4CheckpointStore::publish_prepared` runs after the session is
+  gone. The CLI keeps only policy and telemetry; the durable publish line
+  now reports `capture=prompt|completed` and drops the dead `exact=` and
+  `pending=` fields.
+
+Decision: GO; preserve-mode game arms are no longer structurally penalized
+per turn. Residual: the trajectory-value A/B/C experiment itself, and the
+staging-file cleanup already in flight on the working tree.
+
 ## 2026-08-13 — DeepSeek V4 Durable Prefix Cache GO and Declared Model Identity
 
 Status: DeepSeek V4 single-turn generation now accepts the full

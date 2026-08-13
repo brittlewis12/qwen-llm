@@ -24194,3 +24194,47 @@ Decision: repoint the DSpark hold at an n=1/N=2 work unit against the 58.34 ms
 external budget; do not build for n=3. Raw arms, summary, and the sweep script
 are archived at `target/profiles/dspark-metal-nsweep-2026-08-12/`; rerun
 protocol is counterbalanced blocks with 120 s cooldowns.
+
+## 2026-08-12 — DeepSeek V4 Composed-Stack and REAP Quality Audit Rows
+
+Status: first full-defaults-versus-arithmetic-rollbacks audit of the composed
+numerical stack, plus maintained cross-asset baseline rows. This is stream and
+coherence evidence; value-task fixtures remain the named residual. No engine
+code changed.
+
+- Protocol: one binary at `adf67f7`, twelve runs, three official-chat depths
+  (2,385/6,272/15,675 input tokens), 128-token greedy continuations, seed 42,
+  reasoning none. The exact arm sets eleven numerical-lineage rollbacks
+  (Q8 Q-B and output to `exact`; output-grouped, compressor, shared, and QA-KV
+  matrices, IQ2 F16 staging, MXFP4 matrix, group8 dense, selected online, and
+  batched indexer RoPE to `0`); bit-exact promotions stay on so any divergence
+  attributes to the approximate arithmetic stack specifically. Quality runs are
+  thermally insensitive, so no cooldowns apply. Artifacts and the runner:
+  `target/profiles/dsv4-quality-audit-2026-08-12/`.
+- FRESH defaults versus exact diverge at every depth: generated-ID
+  fingerprints differ, with first text divergence at 22%/40%/90% of the
+  emitted output. Every observed divergence is a mid-sentence near-tie flip;
+  both continuations remain coherent, on-task, and format-clean, and
+  EOS-versus-limit differences follow content divergence (118 versus 128,
+  128 versus 128, 83 versus 82 tokens).
+- Read: the composed stack behaves like its per-promotion evidence, token
+  chaos without observed degradation, but this is stream-plus-coherence
+  evidence on open-ended prompts, not semantic-equivalence certification. The
+  2,385-token row's 22% divergence point is the earliest composed-stack flip
+  recorded so far.
+- Cross-asset rows on the same prompts: K216 defaults stay coherent and
+  on-task at all depths and reach EOS at 2,385 like FRESH. K160 stays coherent
+  but never reaches EOS inside 128 tokens on any of the three prompts,
+  consistent with its earlier longer-math-trace and missed-word-limit rows.
+  These are maintained baseline rows, not equivalence claims.
+- Residual gap for the governance item: no value-task fixture ran, because the
+  five-value ledger and four-key retrieval prompts were per-promotion
+  artifacts that are not maintained fixtures, and the designed v4.1 retention
+  battery remains unimplemented. This audit's runner and artifact layout are
+  the skeleton for those rows.
+
+Decision: keep the REAP quality-governance queue item open but reduced to
+fixture maintenance plus the v4.1 battery implementation. Composed-stack
+divergence is now a recorded fact with located flip points; any future
+approximate default that moves the earliest divergence materially before the
+22% row should trigger a full value battery prior to promotion.

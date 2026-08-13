@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — DeepSeek V4 KV RoPE/Publication Fusion KILL
+
+Status: KILL the narrow decode leaf that fused shared-KV RoPE with F16 ring
+publication. No code is retained.
+
+- The candidate replaced one KV RoPE dispatch plus one F32-to-F16 scatter with
+  one 32-thread dispatch, deleting 43 dispatches/token while leaving query RoPE
+  unchanged. A dedicated rollback restored the exact composition.
+- Under Metal `-ffast-math`, moving the RoPE body into a kernel with publication
+  changed transient F32 KV scratch bits despite expression- and index-equivalent
+  arithmetic. Across positions 0/1/127/128/129/2051/2052/3071/65535/65536/
+  1048575 and both unscaled/YaRN policies, the complete authoritative F16 ring
+  remained bit-identical, including seeded untouched slots and half-rounding
+  adversaries. Generated IDs also stayed identical.
+- The counterbalanced fused/rollback/rollback/fused eight-sample medians were
+  `34.921/35.323/35.559/35.536 ms` wall and
+  `33.737/33.770/34.020/34.024 ms` GPU. This directionally favors the candidate
+  but does not produce a robust GPU saving.
+- A longer 128-token fused/rollback/rollback/fused bracket measured generation
+  `4694.3/4691.8/4697.0/4707.5 ms`. Arm means are 4700.9 versus 4694.4 ms: the
+  candidate is 6.5 ms slower per request, about `0.051 ms/token`, while all arms
+  emit generated-ID SHA-256 `daa06ac9...1903f`.
+
+Decision: remove the candidate rather than retain a numerically broader scratch
+contract for a non-positive product result. Do not reopen KV-only
+RoPE/publication fusion. The next prepare attempt must amortize more work, such
+as a paired Q/KV organization with an independently proven larger ceiling, or
+move to the compressor frontier.
+
 ## 2026-08-13 — DeepSeek V4 Shared-Expert Decode Fusion GO
 
 Status: singleton decode now fuses shared gate, shared up, and DeepSeek's

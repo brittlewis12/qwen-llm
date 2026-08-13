@@ -1421,9 +1421,12 @@ projection arithmetic and a credible path to the complete wall bar.
    census reconciles 2,146 dispatches/token. Grouped output-A removed 301 and
    measured 1.50 ms/token; exact Q6/Q8 shared-expert fusion removes another 86
    and measures 0.240 ms/token wall on warm K160, leaving 1,759 ordinary
-   dispatches/token. Continue with the exact RoPE+KV publication leaf, then
-   broader prepare and compressor frontiers. Reopen mHC pre only with a changed
-   shared/deleted-work premise: the no-slab producer geometry is falsified. Use
+   dispatches/token. The narrow KV RoPE+F16 publication leaf is now KILL: it
+   deletes 43 dispatches but regresses the 128-token product bracket by about
+   0.051 ms/token and broadens transient F32 KV bits under fast-math. Continue
+   only with a larger paired prepare deletion or the compressor frontier. Reopen
+   mHC pre only with a changed shared/deleted-work premise: the no-slab producer
+   geometry is falsified. Use
    separate rollbacks and held-position bitwise differentials; do not resume
    isolated local retunes until structural deletion clears 2 ms/token. Every
    fusion also lowers the DSpark N=2 verifier denominator toward its 58.34 ms

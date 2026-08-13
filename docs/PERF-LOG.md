@@ -6,6 +6,450 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — DeepSeek V4 Durable Prefix Cache GO and Declared Model Identity
+
+Status: DeepSeek V4 single-turn generation now accepts the full
+`--durable-prefix-cache` surface with product parity for the Ring0 game loop
+(`game/play.py` runs unmodified), and durable-identity cold starts no longer
+hash the model when hf download sidecars declare shard SHA-256s. Landed as
+`443d254` (shared store filesystem layer), `cc009da` (declared identity), and
+`5e6a929` (DS4 durable store + CLI + thinking-transcript normalization).
+
+- Store shape: `dsv4-v1/blobs/<compat hex64>/<len>-<digest>.dsv4cp`, keyed by
+  the causal compatibility digest and rolling u32 prefix keys. Entries are
+  observation-less, so lookup restores the longest strict prefix and the CLI
+  re-executes at least one endpoint token; capture is the `prompt_len-1`
+  boundary mid-prefill and publication defers past the response flush. Store,
+  restore-allocation, and admissibility failures all fail open to cold
+  prefill; a one-token prompt logs `skipped=short_prompt` instead of
+  asserting.
+- Live on the 89 GB REAP IQ3_XXS flash model, 32-token turn-1 prompt: cold
+  run publishes the 31-token boundary (13,775,772 B; capture 66.7 ms, publish
+  106.9 ms after flush). Turn 2 (48 tokens) hits `matched=31`
+  (`restore_total_ms=46.7`), promotes 16 tokens to the new 47-token boundary,
+  prefills one endpoint token, and publishes 14,587,868 B. A
+  `--reasoning low --messages-preserve-thinking` rerun of the same history
+  (57 tokens) reuses the chat-mode 31-token blob across encoding modes and
+  publishes its own 56-token boundary.
+- Identity: on a cold identity cache the content root composed from
+  `.cache/huggingface/download` sidecar etags in 18.8 ms with
+  `hashed_bytes=0` (`cache=declared_stored`), versus a full ordered-shard
+  read. Declared and hashed roots are domain-separated; any missing, stale
+  (mtime after stamp), or non-64-hex declaration falls back to hashing, and
+  `QWEN_CHECKPOINT_MODEL_IDENTITY=hashed` forces it. Cached roots are sticky
+  under the fstat key, so existing stores keep their identities. Empty-store
+  runs with no admissible capture now skip identity resolution entirely.
+- Thinking transcripts: `--messages-strip-thinking` normalizes a leading
+  inline think block out of assistant history, including the headless
+  `reasoning</think>text` shape raw thinking output produces;
+  `--messages-preserve-thinking` requires a `--reasoning` tier and promotes
+  inline blocks into the release encoder's structured reasoning field
+  (byte-exact 0731 preserve rendering, fixture-tested). Verified in the live
+  runs: stripped history rendered 48 tokens, promoted history 57.
+- Hardening: store mechanics (namespace/flock/leases/stamps/LRU eviction)
+  now live once in `checkpoint_fs`; the Qwen store suite passed unchanged
+  (26/26) across the extraction. The DS4 store carries the ported adversarial
+  suite (11 tests): LRU eviction under touch-freshness, oversized rejection
+  without namespace mutation, caller-budget failures preserving blobs,
+  corrupt-blob self-heal with fallback, foreign-entry rejection, same-prefix
+  different-state `NamespaceCollision`, and two-thread publisher convergence.
+- Operational note: with pages warm the 89 GB model reloads in ~76-81 ms
+  (`load_ms`), so the per-turn process model needs no resident server; cold
+  first-touch prefetch was 13.1 s.
+
+Decision: GO for game-loop use on both families sharing one cache root.
+Residuals, force-ranked: completed-turn checkpoints for preserve-mode DS4
+(each turn currently re-prefills the prior turn's reasoning), hoisting the
+CLI-inline DS4 durable orchestration into a qwen-llm runtime API, per-family
+namespace budgets stacking on a shared root (up to 2x the flag), and
+crash-orphaned `.tmp-` staging files being unbudgeted in both stores.
+
+## 2026-08-12 — DeepSeek V4 Composed-Stack and REAP Quality Audit Rows
+
+Status: first full-defaults-versus-arithmetic-rollbacks audit of the composed
+numerical stack, plus maintained cross-asset baseline rows. This is stream and
+coherence evidence; value-task fixtures remain the named residual. No engine
+code changed.
+
+- Protocol: one binary at `adf67f7`, twelve runs, three official-chat depths
+  (2,385/6,272/15,675 input tokens), 128-token greedy continuations, seed 42,
+  reasoning none. The exact arm sets eleven numerical-lineage rollbacks
+  (Q8 Q-B and output to `exact`; output-grouped, compressor, shared, and QA-KV
+  matrices, IQ2 F16 staging, MXFP4 matrix, group8 dense, selected online, and
+  batched indexer RoPE to `0`); bit-exact promotions stay on so any divergence
+  attributes to the approximate arithmetic stack specifically. Quality runs are
+  thermally insensitive, so no cooldowns apply. Artifacts and the runner:
+  `target/profiles/dsv4-quality-audit-2026-08-12/`.
+- FRESH defaults versus exact diverge at every depth: generated-ID
+  fingerprints differ, with first text divergence at 22%/40%/90% of the
+  emitted output. Every observed divergence is a mid-sentence near-tie flip;
+  both continuations remain coherent, on-task, and format-clean, and
+  EOS-versus-limit differences follow content divergence (118 versus 128,
+  128 versus 128, 83 versus 82 tokens).
+- Read: the composed stack behaves like its per-promotion evidence, token
+  chaos without observed degradation, but this is stream-plus-coherence
+  evidence on open-ended prompts, not semantic-equivalence certification. The
+  2,385-token row's 22% divergence point is the earliest composed-stack flip
+  recorded so far.
+- Cross-asset rows on the same prompts: K216 defaults stay coherent and
+  on-task at all depths and reach EOS at 2,385 like FRESH. K160 stays coherent
+  but never reaches EOS inside 128 tokens on any of the three prompts,
+  consistent with its earlier longer-math-trace and missed-word-limit rows.
+  These are maintained baseline rows, not equivalence claims.
+- Residual gap for the governance item: no value-task fixture ran, because the
+  five-value ledger and four-key retrieval prompts were per-promotion
+  artifacts that are not maintained fixtures, and the designed v4.1 retention
+  battery remains unimplemented. This audit's runner and artifact layout are
+  the skeleton for those rows.
+
+Decision: keep the REAP quality-governance queue item open but reduced to
+fixture maintenance plus the v4.1 battery implementation. Composed-stack
+divergence is now a recorded fact with located flip points; any future
+approximate default that moves the earliest divergence materially before the
+22% row should trigger a full value battery prior to promotion.
+
+## 2026-08-12 — DeepSeek V4 DSpark Metal Operating-Point Calibration
+
+Status: an external llama.cpp b10326 n-sweep on the exact 2,385-token
+official-chat prompt re-prices the held qwen DSpark budget. The Metal
+operating point is n=1, not the B200 n=3. No qwen code changed; this is
+calibration evidence only.
+
+- Condition: FRESH UD-IQ3_XXS target plus the 10.90 GB DSpark Q8_0 drafter,
+  `--spec-type draft-dspark`, confidence 0.3, 256 greedy tokens, single-turn,
+  prompt token identity verified at exactly 2,385 (BOS and role markers
+  correct). Two counterbalanced blocks `B n1 n2 n3 | n3 n2 n1 B` with a 120 s
+  cooldown before every timed run, per the A10B-class convention.
+- Generation medians: baseline 28.05 token/s (35.65 ms/token, repeats
+  28.1/28.0), n1 32.6 (1.162x), n2 30.95 (1.103x), n3 29.55 (1.053x). The
+  ordering held in both block directions and in an earlier un-cooled hot pilot
+  (26.5 versus 23.4), so it is not a thermal-order artifact. An un-cooled
+  pilot also demonstrated why the protocol matters: its closing baseline
+  sagged 27.9 to 24.4 before cooldowns were applied.
+- The B200 n=3 optimum inverts on M4 Max Metal: each added draft level costs
+  more verify time than its accepted tokens return. Baseline, n1, and n3
+  outputs are byte-identical after terminal-control normalization; n2
+  reproducibly emits a different greedy stream in both slots, first diverging
+  87% through at a near-tie token. Treat the n2 timing as diagnostic only and
+  count it against unguarded spec exactness on the external engine.
+- Acceptance anchor: the prior calibration's deterministic counts are retained
+  (107/142 accepted, 149 packets, 1.71812 useful tokens per packet). Greedy
+  stream stability across arms supports the transfer; b10297-to-b10326 build
+  drift is the residual caveat, and this build prints no per-run acceptance
+  counters at default verbosity.
+- Re-priced complete-packet budgets at 1.71812 tokens/packet: at most 58.34 ms
+  to beat this session's llama.cpp no-spec by 5%; at most 52.70/50.19 ms to
+  match/beat llama.cpp's own n=1 spec endpoint; at most 73.4-89.0 ms to beat
+  the qwen FRESH singleton by 5% (sweep-rate 44.84 versus floor-packet
+  54.39 ms/token respectively).
+- Verifier implication: a decode-lineage N=2 verifier floor (singleton
+  52.81 ms GPU plus marginal routed columns, drafter, capture, and rollback)
+  sits near 60-68 ms today. That clears the self-anchored budget but misses
+  the external anchors while the singleton decode gap versus llama.cpp
+  (54.4 versus 35.7 ms/token at this position) stands. Decode front-end
+  fusion is therefore upstream of qwen DSpark, and the target work unit
+  simplifies to exactly two verify columns.
+
+Decision: repoint the DSpark hold at an n=1/N=2 work unit against the 58.34 ms
+external budget; do not build for n=3. Raw arms, summary, and the sweep script
+are archived at `target/profiles/dspark-metal-nsweep-2026-08-12/`; rerun
+protocol is counterbalanced blocks with 120 s cooldowns.
+
+## 2026-08-12 — Automatic Dense Ragged Refill GO
+
+Status: `--execution-mode auto` now composes charged ragged-frontier planning
+with bounded two-wave dense B8 refill for one measured mixed-limit slice. The
+candidate must cover the complete file with at least two 16-request arenas,
+keep prompts at or below 256 tokens and generation limits at or below 40, fit
+prefill in one chunk, and leave no static or serial remainder. Every arena must
+clear 90% simulated utilization, 15% idealized two-wave step savings, and a 32x
+prompt/transition cap; the complete file must clear a 9x charge.
+
+Final-source counterbalanced same-binary wall moves `2.14/2.15 -> 1.78/1.78 s`
+on Qwen3.5 0.8B Q8, a median `1.205x`, and
+`27.91/28.19 -> 19.12/19.71 s` on Qwen3.6 27B Q4, a median `1.445x`.
+Complete JSONL is byte-identical and every process reports zero swaps. Phrase the authority as bounded median qualification.
+
+The file-wide charge is intentional. A measured 256-token boundary improves
+`2.35 -> 1.99 s` (`1.181x`) while its shallow/deep arena charges are 31.54x and
+5.10x and its whole-file charge is 8.79x. The local 32x cap bounds subsidy while
+preserving that authority. A one-arena charged cell reaches only median `1.110x`, which
+freezes two arenas as the automatic minimum.
+
+Selector schema 3 and dense planner schema 9 expose the joint decision and full
+envelope. Runtime admission is all-or-nothing for automatic joint plans: one
+denial restores the captured planner baseline, with physical denial, transaction
+fallback, and planned/realized counts reported separately. Either
+`QWEN_FIXED_COHORT_RAGGED_PROMPTS=0` or `QWEN_DENSE_BATCH8_REFILL=0` is rollback.
+Qwen MoE and root-aware refill remain closed. Evidence:
+`docs/bench/2026-08-12-automatic-dense-ragged-refill/README.md`.
+
+## 2026-08-12 — Qwen MoE Ragged B16 128-Token KILL
+
+Status: keep automatic Qwen MoE ragged admission closed at the current
+executor. The existing A3B Q4 fixture was extended to 128 requested output
+tokens and run counterbalanced B16/B2 then B2/B16 with one release binary
+embedding commit `4238acd`, dirty bit `1`, and exact source-state digest
+`git-source-sha256-v2:0c155730c47ffb4e99a0caa0cd37c69d3e04dfe62c247b2ed51010b90b1af7b4`.
+The dirty bit includes two pre-existing user-owned untracked documents; the
+packet claims same-binary rather than portable clean-build authority.
+
+B16 execution takes `15,260.044/15,304.856 ms`; B2 takes
+`16,677.467/16,640.817 ms`. Median speedup is `1.09008x`, with paired ratios
+`1.09288x/1.08729x`, below the frozen `1.10x` product gate. All four complete
+JSONL outputs are byte-identical and every process reports zero swaps.
+
+Decode alone is `30,027.420 / 27,302.575 = 1.09980x` across both repeats.
+The measured decode ratio lands 0.02% below the product gate before private
+prefill is charged. A 256-token packet has too little expected decision value
+to justify another product run at the current executor.
+Retain explicit `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1`. Reopen only after B16
+decode materially improves relative to B2, replacement prefill overlaps active
+decode, or a changed executor has an independent whole-request ceiling above
+`1.10x`. Evidence:
+`docs/bench/2026-08-12-qwen-moe-ragged-128-screen/README.md`.
+
+## 2026-08-12 — Charged Automatic Dense Ragged Admission GO
+
+Status: `--execution-mode auto` may now select dense B8 for heterogeneous prompt
+frontiers inside a charged short-prompt envelope. Every prompt must be at most
+256 tokens and fit in one configured prefill chunk; requests must share a
+measured generation limit of at least 32 tokens; each proposed B8 cohort may
+charge at most two prompt tokens per productive decode transition. Ragged
+planning must create more full cohorts than the exact incumbent plan, leave no
+serial remainder requests, and preserve the existing 3/4 utilization and memory
+gates.
+
+The real incumbent is automatic B2, not serial execution. On the recovered
+10-137-token fixture, current-source 0.8B execution moves `1,748 -> 1,246 ms`
+(`1.403x`) at 64 output tokens and `943 -> 690 ms` (`1.367x`) at 32. Dense 27B
+moves `20,570 -> 10,333 ms` (`1.991x`) and `11,451 -> 6,417 ms` (`1.784x`) on
+the same cells. Complete outputs are byte-identical and every process reports
+zero swaps.
+
+The MoE result is deliberately not promoted. An initial A3B order suggested
+`14.88 -> 11.00 s`, but model load moved `5.60 -> 2.41 s`. Reverse-order
+execution isolates only `9,060 -> 8,343 ms` (`1.086x`) at 64 output tokens;
+32 and 16 output-token cells reach `1.078x` and `1.058x`. Keep Qwen MoE ragged
+B16 behind explicit `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1`.
+
+Unset enables only the charged automatic dense policy. `=0` is strict rollback
+to equal-frontier/refill/B2 planning; `=1` retains the broad explicit dense and
+MoE experiment. Selector schema 2 and dense planner schema 8 expose policy and
+closed admission decisions. The exact automatic 0.8B product cell moves
+`2.06 -> 1.53 s` (`1.346x`) with SHA-256
+`312f47f66e2242ee865648ff56fe9d2321213c3c60ebe3f0f60491d1aead8023`.
+Evidence: `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
+
+## 2026-08-12 — Automatic Dense Refill Composition GO
+
+Status: opt-in `--execution-mode auto` now carries the qualified dense B8
+short-serial-tail rescue through both selector lookahead and fixed execution.
+Absent `QWEN_DENSE_BATCH8_REFILL` or explicit `=1` remains bounded rescue;
+`=0` is rollback. At this checkpoint ragged auto, forced broad refill, and Qwen
+MoE remained closed.
+
+On the 32-request 11-token fixture, same-binary auto wall moves `2.16 -> 1.76 s`
+(`1.227x`) on Qwen3.5 0.8B Q8 and `19.76 -> 15.89 s` (`1.244x`) on Qwen3.6
+27B Q4. The candidate replaces two static B8 cohorts plus 16 serial requests with
+two refill arenas covering all 32 requests. Complete JSONL stays byte-identical
+and every process reports zero swaps.
+
+A fully batched threshold falsifier run with auto and explicit refill `=1`
+remains static at `0.90 s`: policy telemetry reports bounded rescue but no arena
+because no serial fallback exists. Selector admission now prices the plan's
+maximum execution capacity, and model-family-specific lookahead prevents the
+dense refill variable from affecting MoE automatic commands. Evidence:
+`docs/bench/2026-08-12-automatic-dense-refill/README.md`.
+
+## 2026-08-12 — DeepSeek File-Scoped Root Fanout GO
+
+Status: DeepSeek V4 B2 now captures one immutable causal root when at least two
+planned pairs select the same restorable boundary of 1,024 or more tokens. Pair
+selection, decode organization, and input-order publication remain unchanged;
+serial tails neither constrain nor consume the root.
+
+An eight-request K160 trace forms four affinity pairs around one 6,144-token
+root. Same-binary rollback-to-candidate wall moves `125.99 -> 67.17 s`
+(`1.876x`), while summed pair wall moves `124.584 -> 33.070 s` (`3.767x`). The
+candidate evaluates 7,112 model prompt tokens instead of 25,544, avoiding 18,432
+exact root-token evaluations.
+
+The root prefill takes `29,993.971 ms`, its 60,137,472-byte snapshot captures in
+`385.251 ms`, and eight restores total about `1.545 s`. Candidate pairs report
+zero pair-local snapshot bytes. Concurrent generation remains flat at about
+`3.106 s` versus `3.154 s`, isolating the gain to prefix reuse.
+
+Complete JSONL remains byte-identical with SHA-256
+`33c34db7d52c3ce49b7a6e12b45bc7784bb18eadc6c628b69bbadf015ce0afb7`.
+Both processes report zero swaps. The candidate paid `3.147 s` warming two
+shards while the later rollback found all four warm, so run order did not create
+the gain.
+
+Admission prices 8,780,218,368 Metal bytes for two live sessions and 66,307,104
+CPU bytes for the retained snapshot, root logits, and one serialized restore
+workspace. Denial preserves pair-local execution. Keep
+`QWEN_CONCURRENCY_FILE_ROOT_FANOUT=0` as strict rollback. V1 intentionally
+rejects differing pair maxima rather than adding a root-to-pair bridge hierarchy.
+Evidence: `docs/bench/2026-08-12-deepseek-file-root/README.md`.
+
+## 2026-08-12 — Short Dense B8 Serial-Tail Rescue GO
+
+Status: promote a measured subset of bounded refill inside explicit dense B8.
+Absent `QWEN_DENSE_BATCH8_REFILL`, the planner now rewrites only two-wave arenas
+that absorb at least one static serial fallback, keep every prompt at or below
+64 tokens, and clear the existing 3/4 utilization and 10% decode-step gates.
+`=1` forces the broader experimental planner; `=0` is strict static rollback.
+
+A 32-request Qwen3.5 0.8B Q8 fixture holds every prompt at 11 tokens and repeats
+generation limits ranging from 1 to 40. B2 takes `2.08/2.06 s`; refill takes
+`1.69/1.68 s`, moving median wall `2.070 -> 1.685 s` (`1.228x`). Static B8 takes
+`2.14 s`. Refill absorbs 16 requests that static planning sends to serial
+fallback. Complete JSONL is byte-identical, no arena fails memory admission, and
+all processes report zero swaps.
+
+The same fixture on Qwen3.6 27B Q4 moves B2 `23.79 -> 16.04 s` (`1.483x`) and
+static B8 `19.73 -> 16.04 s` (`1.230x`) with byte-identical output and flat RSS.
+This brackets the measured dense B8 model range instead of extrapolating from one
+asset.
+
+Two falsifiers narrow the default. A fully batched fixture at the exact 10%
+decode-step threshold moves only `0.90 -> 0.87 s` (`1.034x`), so automatic
+refill requires actual static serial fallback. With 1,029-token non-prefix
+prompts, forced serial-tail refill moves only `6.44 -> 5.99 s` (`1.075x`). At
+exactly 64 tokens, static-to-refill remains `2.23 -> 1.81 s` (`1.232x`) on 0.8B
+and `23.69 -> 20.17 s` (`1.174x`) on 27B. Freeze 64 as a conservative measured
+boundary, not a claim that token 65 is the crossover.
+
+At this checkpoint automatic execution remained unchanged. Qwen MoE stayed
+closed, ragged prompts did not implicitly enable refill, prefix-selected cohorts
+remained excluded, and
+memory denial restores the exact static plan. Dense planner schema 7 reports the
+tri-state policy and default prompt cap. Evidence:
+`docs/bench/2026-08-12-dense-refill-default/README.md`.
+
+## 2026-08-12 — DeepSeek B2 Pair-Affinity Planner GO
+
+Status: enable the existing bounded pair planner by default for DeepSeek V4
+concurrency. A four-request K160 trace is interleaved `A0,B0,A1,B1`: each
+within-family pair shares 6,268 tokens, while adjacent input-order requests share
+only three. The planner changes physical pairs to `[0,2]` and `[1,3]` while
+retaining input-ordered publication.
+
+With pair-local fanout enabled and residency sets disabled, process wall moves
+`114.71 -> 71.57 s` (`1.603x`). Evaluated prompt tokens fall from 25,080 to
+12,792; each selected causal checkpoint is 6,144 tokens and about 60.1 MB.
+Summed decode wall remains effectively flat (`5.042 -> 5.014 s`), isolating the
+gain to prefix-affinity scheduling and snapshot reuse.
+
+Complete JSONL remains byte-identical with SHA-256
+`eb72076dd34ad4f2fa860bc68b72c6aab9c7fb7fec578c623215633ce9cf6acb`.
+Both arms report zero process swaps and no memory fallback. Keep the 16-request
+window, admission checks, and `QWEN_CONCURRENCY_PAIR_PLANNER=0` rollback.
+Evidence: `docs/bench/2026-08-12-deepseek-pair-affinity/README.md`.
+
+## 2026-08-12 — Root-Aware Dense Refill HOLD
+
+Status: hold before implementation. A 16-request trace shares one 6,144-token
+file root but uses distinct post-root tasks, preventing B2 from receiving deeper
+identical-prompt reuse. Measured B2 takes `7.27 s`; static B8 takes `7.42 s` and
+81 physical steps.
+
+Perfect longest-first refill needs 67 steps. At the measured `18.189 ms` per B8
+step, crediting all 14 eliminated steps with zero replacement overhead yields an
+optimistic `7.165 s`, only `1.015x` over B2. This cannot clear the `1.10x` gate.
+This transition-only projection is not a formal ceiling because refill may also
+remove some setup work. It is nevertheless too weak to authorize more scheduler
+code at current leverage. Evidence:
+`docs/bench/2026-08-12-qwen-root-aware-refill-screen/README.md`.
+
+## 2026-08-12 — Fixed-Cohort File Root GO
+
+Status: dense B8 now retains one immutable file-scoped Qwen checkpoint across
+all realized static cohorts. Root planning occurs after memory-denied cohorts
+become serial work; refill and serial requests neither constrain nor consume the
+root. B2 and fixed execution share one neutral planner/capture substrate without
+publishing to the RAM prefix index.
+
+A 32-request realistic trace forms four B8 cohorts around a 6,144-token root.
+Cohort-local roots take `16.01 s`; one file root takes `13.81 s` (`1.159x`).
+Complete JSONL is byte-identical. The candidate evaluates the root once in
+`794.229 ms`, captures a `96,716,848`-byte snapshot in `26.026 ms`, and avoids
+18,432 prompt-token evaluations. A two-cohort cell reaches only `1.093x`, so the
+value is correctly understood as cross-cohort amortization rather than a fixed
+per-request speedup.
+
+Dense and Qwen MoE default on behind
+`QWEN_FIXED_COHORT_FILE_ROOT_FANOUT=0` rollback. A separate A3B Q4 cell moves
+`14.58 -> 12.20 s` (`1.195x`) across four B16 cohorts with byte-identical
+output. Refill composition remains out of scope. Evidence:
+`docs/bench/2026-08-12-qwen-fixed-file-root/README.md`.
+
+## 2026-08-12 — Bounded Dense B8 Refill Mechanism GO
+
+Status: an explicit dense-only refill scheduler now replaces completed B8 lanes
+between committed decode steps. It operates over at most two waves (16 requests),
+keeps exactly eight live sessions behind `QWEN_DENSE_BATCH8_REFILL=1`;
+heterogeneous prompt lengths additionally require `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1`.
+
+A 32-request skew trace moves `2.76 s` serial, `2.29 s` B2, and `2.27 s`
+static ragged B8 to `1.83 s` with refill: `1.251x` over B2 and `1.240x`
+over same-width static execution. Complete JSONL is byte-identical across all
+four organizations. Two arenas consume 7 and 47 physical B8 steps.
+
+Refill is a post-plan rewrite: prefix/ragged decisions remain authoritative,
+admission failure restores the exact static work before ordinary cohort
+admission, and automatic mode never selects the experiment. Shared capacity
+includes a conservative all-productive-transition frontier bound and never
+exceeds an explicit context override. Synchronous MoE B16 refill remains killed:
+its optimistic charged endpoint is `10.06 s` against measured B2 at `9.06 s`.
+Evidence: `docs/bench/2026-08-12-qwen-refill-charged-screen/README.md`.
+
+## 2026-08-12 — Ragged Qwen Fixed-Cohort Capability GO
+
+Status: dense B=8 and Qwen MoE B=16 can now decode requests at independent
+prompt frontiers under the explicit `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1` gate.
+Each lane carries its own position through attention/mixer encoding and rollback;
+complete candidate JSONL output remains byte-identical to serial execution.
+
+Final reviewed-code cells move dense 0.8B heterogeneous short prompts
+`2.82 -> 1.65 s` (`1.709x`), dense shared-root prompts `2.64 -> 2.29 s`
+(`1.153x`), and A3B heterogeneous short prompts `14.21 -> 10.95 s`
+(`1.298x`). A prior A3B long-private-suffix cell was flat (`1.006x`), so this
+checkpoint kept the capability default-off. The automatic decision is superseded
+by the charged dense-only promotion recorded below.
+
+Admission now prices shared-capacity sessions, prefill scratch, each independent
+executor buffer at Metal allocation size, transient reserve, and optional CPU
+checkpoint before mutable GPU allocation. Denied cohorts degrade to original-
+order serial requests. Capacity-first grouping is used only when it preserves
+cohort count, does not add transition slots, and strictly reduces capacity slots.
+Planner schema 5 distinguishes configured/effective prefix packing and planned/
+realized outcomes. Final adversarial review: GO. Full evidence:
+`docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
+
+## 2026-08-11 — Qwen B2 File-Scoped Root Fanout GO
+
+Status: regular-file Qwen `--concurrency 2` now captures one chunk-aligned
+common-root checkpoint when at least two planned pairs share 1,024 or more
+tokens. Pair-local checkpoints remain available above that root; odd serial
+tails neither constrain nor consume it.
+
+A four-request realistic ring0 fixture shares 6,482 tokens and selects a 6,144-
+token root. Across two reversed-order comparisons and a final reviewed-code
+repeat, wall moves `2.59 -> 2.09/2.10/2.11 s` (`1.239x/1.233x/1.227x`).
+Pair-local prefix evaluation falls
+from 12,705 to 417 tokens while complete JSONL output remains byte-identical.
+The root costs one `~96.7 MB` retained CPU snapshot; three restores total
+`15.845 ms` in the first sample.
+
+Admission separates CPU checkpoint bytes from Metal working-set pressure while
+including both in the process budget. The simultaneous root plus deepest pair
+snapshot is priced before allocation; denial falls back to prior B2 behavior.
+`QWEN_CONCURRENCY_FILE_ROOT_FANOUT=0` is strict rollback. Final adversarial
+review: GO. Full packet:
+`docs/bench/2026-08-11-qwen-b2-file-root-fanout/README.md`.
+
 ## 2026-08-11 - Equal-Length Batched-Prefill Ceiling KILL
 
 Status: stop before implementing a multi-session packed-prefill executor. On
@@ -465,6 +909,165 @@ Decision: close the final measured full-width MXFP4 qualification hole without
 retuning the kernel. Claim the conservative 328.488 ms changed-layer deletion
 and 305.6 ms product-prefill saving, not the noisier midpoint or sampled-wall
 ratios. Raw reports are under `target/profiles/dsv4-fresh-n2048-mxfp4-*`.
+
+## 2026-08-11 — DeepSeek Resident Concurrency Product GO
+
+Status: regular-file `--concurrency 2` is now cross-family. DeepSeek V4 uses
+worker-local mutable sessions over one shared immutable residency and two Metal
+queues; no session crosses a host thread boundary.
+
+The first complete-worker organization overlapped both prefill and generation.
+It preserved exact outputs but was killed immediately: K160 pair wall reached
+`2,742.826 ms`, with the two prefills expanding to `2,391/2,450 ms` from roughly
+`1,201/626 ms` serial. The promoted scheduler sends explicit prepare controls one
+worker at a time, verifies both sessions are ready and admitted, then releases
+both workers into concurrent generation. Errors, panic, cancellation, or channel
+closure cannot strand a scoped worker; pair stdout is atomic and input ordered.
+
+K160 greedy serial and concurrent paths match complete outputs and generated-ID
+SHA-256 over heterogeneous 3/8/1-token requests, including an odd tail. A warm
+pair spends `1,789.692 ms` in serial prefill and `309.129 ms` in concurrent
+generation, versus about `343.9 ms` summed serial generation. This tiny fixture
+is prefill-dominated, so whole-pair movement is only about 3-4%; the existing
+32-step `1.402x` packet remains decode authority.
+
+Request-local sampling also composes. Two requests with temperatures `0.7/0.8`,
+different filters, and seeds `123/456` match serial output exactly. Concurrent
+generation moves `230.8 -> 180.358 ms` (`1.280x`), while complete pair wall
+improves about `1.049x`.
+
+The corrected load path carries session count two through initial and refreshed
+admission. K160 requires `99,149,463,552` bytes including reserve; observed
+two-session state is `8,682,995,712` bytes against an `8,691,613,696` priced
+inventory. The odd tail reconciles one session and reports concurrency one.
+`QWEN_DSV4_RESIDENCY_SET=1` fails before model load because the set remains
+queue-scoped. Validation exits return memory to 92-93% free with swap unchanged
+at 2.44 MiB. Full result:
+`docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.
+
+## 2026-08-11 — Qwen Resident Concurrency Product GO
+
+Status: the generated-feedback queue mechanism is now a fail-closed
+regular-file JSONL product path for dense and MoE Qwen.
+
+`qwen --requests-jsonl FILE --concurrency 2` serially prefills heterogeneous
+requests, overlaps two complete singleton decode graphs while both lanes remain
+active, returns a surviving lane to ordinary serial GPU-greedy decode, emits each
+pair in input order, and sends an odd final request through the existing serial
+path. The mode rejects stdin, sampling, dense B=8, prompt lookup, cache mutation,
+request sidecars, and an explicit GPU-greedy rollback.
+
+The runtime prices every allocation made by `MetalSession::fresh`, including
+per-layer GDN state, F16 or Q8 KV, attention partials, MoE scratch, logits, and
+integer buffers. Admission adds two such sessions, the largest Metal-priced
+candidate or fallback prefill scratch in the file, and a 2 GiB transient reserve.
+The resulting required bytes were `2,209,935,920` for 0.8B and `2,456,494,751`
+for A3B, rather than the probe's inherited 10+ GiB fixed allowance. Queue-scoped
+model residency is explicitly attached to both additional command queues and
+removed by guards on teardown.
+
+Release smokes compared normal serial JSONL and concurrency two over the same
+three requests, with 5/10/10 prompt tokens and 3/8/1 output limits. Dense 0.8B
+and A3B both matched every complete output object and generated-token SHA-256.
+The pair executed two overlapping transitions, then five serial-tail
+transitions; the odd request remained in order. This is lifecycle and exactness
+authority, not a new throughput packet. DeepSeek product integration remains a
+separate follow-up because its session memory is materially larger. Full result:
+`docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.
+
+## 2026-08-11 — Cross-Family Generated Queue Continuation GO
+
+Status: independent B=2 Metal queues now clear a 32-step generated greedy
+continuation gate on Qwen MoE and DeepSeek V4, authorizing a narrow resident
+concurrency product spike.
+
+The queue probe now optionally feeds each selected argmax into the next
+transition. Qwen uses its existing GPU argmax output; DeepSeek copies full
+logits, applies a finite tie-stable CPU argmax, and feeds the selected token from
+inside each queue worker. Serialized and independent arms compare every selected
+ID plus final full-logit SHA-256. Teacher-forced mode remains the default.
+
+On Qwen 35B-A3B, two 32-step streams move `98.28 -> 135.48` aggregate token/s
+(`1.3784x`) with a `1.988` GPU concurrency factor. Pair walls are
+`650.343/652.011 ms` serialized and `474.513/470.319 ms` independent. All IDs
+and final logits match; two sessions add `170,229,760` Metal bytes.
+
+On DeepSeek K160, the same causal contract moves `26.87 -> 37.66` aggregate
+token/s (`1.4016x`) with a `1.995` concurrency factor. Pair walls are
+`2,451.020/2,316.198 ms` serialized and `1,738.087/1,662.708 ms` independent.
+All IDs and final logits match. Two sessions add `8,714,649,600` bytes; normal
+exit returns wired memory to baseline, host compression rises, and swap remains
+unchanged.
+
+Decision: proceed to an explicit regular-file JSONL `--concurrency 2` slice.
+Prefill remains serial, decode pairs overlap on independent queues, outputs stay
+in input order, and an odd tail runs serially. Require up-front multi-session
+admission and fail closed with dense B=8, stdin, prompt lookup, and prefix-cache
+mutation. This is resident concurrency, not batching or a daemon. Full result:
+`docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.
+
+## 2026-08-11 — DeepSeek K160 Routed-Expert B=8 Floor KILL
+
+Status: close common-route static batching before a full-session or scheduler
+spike.
+
+The model-backed floor loaded one exact K160 residency and allocated only
+`3,211,264` additional Metal bytes; it constructed no DeepSeek session. Every
+one of eight distinct rows used experts `[0,1,2,3,4,5]` with distinct normalized
+weights. The control encoded eight production fast all-slot Q3_K/Q4_K bodies;
+the candidate read each expert once through gate/up/down N=8 mat-mat, exact
+clamped SwiGLU, row scatter, and one packed weighted sum.
+
+Across twelve counterbalanced pairs, GPU medians moved
+`1.9759999996 -> 1.8629791666 ms/layer` (`1.0606667x`, `0.1130208 ms`
+saved). Dispatches fell `40 -> 31`. Correctness was strong but intentionally
+functional rather than bitwise: minimum row cosine `0.9999999105`, relative RMS
+`4.0486e-4`, maximum absolute error `2.7992e-8`, and 2 of 32,768 elements
+bit-identical.
+
+This was the optimistic route-overlap cell. Current attribution places routed
+experts at about `10.51` of `46.402 ms/token`; applying the measured local saving
+through all 43 layers predicts only about `0.60 ms/token`, or `1.013x` whole-token
+movement. Real route diversity adds grouping work and reduces expert reuse, so a
+production arm cannot recover the gap to the existing `1.37x` K160 B=2
+independent-queue fallback from this mechanism.
+
+Decision: delete the probe and do not build a DeepSeek static scheduler around
+current common-expert Q3_K/Q4_K mat-mat. This does not close every future
+DeepSeek batch organization. Reopen only when a materially different expert
+kernel clears 30% locally, another stage exposes an independently large charged
+ceiling, or shared executor infrastructure makes a low-single-digit increment
+worth carrying. Full result:
+`docs/bench/2026-08-11-dsv4-k160-routed-expert-b8-kill/README.md`.
+
+## 2026-08-11 — Qwen MoE B=8 Whole-Model KILL
+
+Status: the fixed-cohort Qwen MoE branch is closed before product integration.
+
+The initial mechanism was stronger than the old GDN-only replay. A complete
+three-GDN plus one-attention cell improved `1.3705x` at position 1,024 and
+`1.2918x` in a later cell at 32K. Across all 40 blocks plus a batched LM head,
+the aggressive arm moved `78.3039 -> 54.8739 ms` GPU (`1.4270x`, about `145.8`
+aggregate token/s). This was about 16% above the independently measured B=8
+queue-overlap control, so it legitimately advanced to continuation testing.
+
+The continuation gate rejected it. Packed-all diverged one lane at step 4;
+packed-routed diverged at step 15 even with a serial LM head. A stage oracle
+showed Q4 expert gate/up was bitwise equal, while the selected Q5 kernels differed
+only by alternate-kernel rounding (`<=9.095e-13`). Keeping B=8 Q4 gate/up and the
+replay control's singleton generic Q5 down made routed inner/output bitwise equal.
+
+That corrected arm stayed greedy-identical for 32 generated steps. At step 38,
+both replay and candidate diverged together from singleton, proving the remaining
+limit belongs to the existing GDN mat-mat schedule. Corrected timing was only
+`78.0269 -> 64.6661 ms` (`1.2066x`) and `1.0335x` beyond replay, or about `123.7`
+aggregate token/s versus `125.8` for independent queues.
+
+Decision: delete the spike and do not build a Qwen MoE static scheduler. Dense
+B=8 remains promoted; independent queues remain the simpler cross-family
+fallback. Reopen only for a materially new exact organization, or a realistic
+functional-equivalence packet that remains at least 10% ahead of queue overlap.
+Full result: `docs/bench/2026-08-11-qwen-moe-b8-cell-kill/README.md`.
 
 ## 2026-08-10 - Cooperative CLI Metal Teardown
 
@@ -11359,6 +11962,8 @@ Validation:
   (hermetic to this change)
 
 ## 2026-07-03 - v0.448 Close Decode-Glue Bundle (Skip Option)
+
+
 ## 2026-07-03 - v0.452 Close Decode-Glue Bundle (Skip Option)
 
 Status: queue curation, no code change. The do-less audit (v0.430-432 batch,
@@ -11371,6 +11976,7 @@ where decode-window measures med_cpu_enc ~0.64 ms of a GPU-bound ~9.9 ms
 token (med_wait ~= med_gpu, gpu/total 91-98% across ctx). Neither side
 reaches 1%. Closed in the roadmap digest; reopen only if decode stops being
 GPU-bound.
+
 ## 2026-07-03 - v0.451 Request-Trace Seam for Replay Economics
 
 Status: trace-only plumbing for the non-DFlash replay lane. `qwen -p ...` can now
@@ -11519,6 +12125,7 @@ is `5.16x` TTFT (`609.3 -> 118.2 ms`) and prefix 4096 is `18.51x`
 Decision: prefix caching is now a usable runtime feature boundary rather than a
 bench-only artifact. The remaining cache work is product wiring (request handling,
 cross-process/persistent identity policy, observability), not kernel optimization.
+
 ## 2026-07-03 - v0.444 N16 Skinny-GEMM Retune Falsifier (H5.6 M2a)
 
 Status: falsification checkpoint. The v0.443-sanctioned M2a bet (retune the
@@ -11850,6 +12457,7 @@ parallelism was a trigger, not the mechanism. Suspect set shifts to (a) a
 driver/OS multi-client issue or (b) a latent timing-sensitive race that
 contention exposes; and correctness gates are only trustworthy on a QUIET box
 (bench-vs-gate mutual exclusion is now part of the methodology).
+
 ## 2026-07-02 - v0.438 Replay Real-Window Economics Gate
 
 Status: extended `decode-block-slice-real-margin` with optional timing columns so
@@ -23690,609 +24298,3 @@ Interpretation:
   contributes little by 16K.
 - The combined branch is still a stronger overall decode checkpoint than either
   attention-only or pipelined submission.
-
-## 2026-08-11 — Qwen MoE B=8 Whole-Model KILL
-
-Status: the fixed-cohort Qwen MoE branch is closed before product integration.
-
-The initial mechanism was stronger than the old GDN-only replay. A complete
-three-GDN plus one-attention cell improved `1.3705x` at position 1,024 and
-`1.2918x` in a later cell at 32K. Across all 40 blocks plus a batched LM head,
-the aggressive arm moved `78.3039 -> 54.8739 ms` GPU (`1.4270x`, about `145.8`
-aggregate token/s). This was about 16% above the independently measured B=8
-queue-overlap control, so it legitimately advanced to continuation testing.
-
-The continuation gate rejected it. Packed-all diverged one lane at step 4;
-packed-routed diverged at step 15 even with a serial LM head. A stage oracle
-showed Q4 expert gate/up was bitwise equal, while the selected Q5 kernels differed
-only by alternate-kernel rounding (`<=9.095e-13`). Keeping B=8 Q4 gate/up and the
-replay control's singleton generic Q5 down made routed inner/output bitwise equal.
-
-That corrected arm stayed greedy-identical for 32 generated steps. At step 38,
-both replay and candidate diverged together from singleton, proving the remaining
-limit belongs to the existing GDN mat-mat schedule. Corrected timing was only
-`78.0269 -> 64.6661 ms` (`1.2066x`) and `1.0335x` beyond replay, or about `123.7`
-aggregate token/s versus `125.8` for independent queues.
-
-Decision: delete the spike and do not build a Qwen MoE static scheduler. Dense
-B=8 remains promoted; independent queues remain the simpler cross-family
-fallback. Reopen only for a materially new exact organization, or a realistic
-functional-equivalence packet that remains at least 10% ahead of queue overlap.
-Full result: `docs/bench/2026-08-11-qwen-moe-b8-cell-kill/README.md`.
-
-## 2026-08-11 — DeepSeek K160 Routed-Expert B=8 Floor KILL
-
-Status: close common-route static batching before a full-session or scheduler
-spike.
-
-The model-backed floor loaded one exact K160 residency and allocated only
-`3,211,264` additional Metal bytes; it constructed no DeepSeek session. Every
-one of eight distinct rows used experts `[0,1,2,3,4,5]` with distinct normalized
-weights. The control encoded eight production fast all-slot Q3_K/Q4_K bodies;
-the candidate read each expert once through gate/up/down N=8 mat-mat, exact
-clamped SwiGLU, row scatter, and one packed weighted sum.
-
-Across twelve counterbalanced pairs, GPU medians moved
-`1.9759999996 -> 1.8629791666 ms/layer` (`1.0606667x`, `0.1130208 ms`
-saved). Dispatches fell `40 -> 31`. Correctness was strong but intentionally
-functional rather than bitwise: minimum row cosine `0.9999999105`, relative RMS
-`4.0486e-4`, maximum absolute error `2.7992e-8`, and 2 of 32,768 elements
-bit-identical.
-
-This was the optimistic route-overlap cell. Current attribution places routed
-experts at about `10.51` of `46.402 ms/token`; applying the measured local saving
-through all 43 layers predicts only about `0.60 ms/token`, or `1.013x` whole-token
-movement. Real route diversity adds grouping work and reduces expert reuse, so a
-production arm cannot recover the gap to the existing `1.37x` K160 B=2
-independent-queue fallback from this mechanism.
-
-Decision: delete the probe and do not build a DeepSeek static scheduler around
-current common-expert Q3_K/Q4_K mat-mat. This does not close every future
-DeepSeek batch organization. Reopen only when a materially different expert
-kernel clears 30% locally, another stage exposes an independently large charged
-ceiling, or shared executor infrastructure makes a low-single-digit increment
-worth carrying. Full result:
-`docs/bench/2026-08-11-dsv4-k160-routed-expert-b8-kill/README.md`.
-
-## 2026-08-11 — Cross-Family Generated Queue Continuation GO
-
-Status: independent B=2 Metal queues now clear a 32-step generated greedy
-continuation gate on Qwen MoE and DeepSeek V4, authorizing a narrow resident
-concurrency product spike.
-
-The queue probe now optionally feeds each selected argmax into the next
-transition. Qwen uses its existing GPU argmax output; DeepSeek copies full
-logits, applies a finite tie-stable CPU argmax, and feeds the selected token from
-inside each queue worker. Serialized and independent arms compare every selected
-ID plus final full-logit SHA-256. Teacher-forced mode remains the default.
-
-On Qwen 35B-A3B, two 32-step streams move `98.28 -> 135.48` aggregate token/s
-(`1.3784x`) with a `1.988` GPU concurrency factor. Pair walls are
-`650.343/652.011 ms` serialized and `474.513/470.319 ms` independent. All IDs
-and final logits match; two sessions add `170,229,760` Metal bytes.
-
-On DeepSeek K160, the same causal contract moves `26.87 -> 37.66` aggregate
-token/s (`1.4016x`) with a `1.995` concurrency factor. Pair walls are
-`2,451.020/2,316.198 ms` serialized and `1,738.087/1,662.708 ms` independent.
-All IDs and final logits match. Two sessions add `8,714,649,600` bytes; normal
-exit returns wired memory to baseline, host compression rises, and swap remains
-unchanged.
-
-Decision: proceed to an explicit regular-file JSONL `--concurrency 2` slice.
-Prefill remains serial, decode pairs overlap on independent queues, outputs stay
-in input order, and an odd tail runs serially. Require up-front multi-session
-admission and fail closed with dense B=8, stdin, prompt lookup, and prefix-cache
-mutation. This is resident concurrency, not batching or a daemon. Full result:
-`docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.
-
-## 2026-08-11 — Qwen Resident Concurrency Product GO
-
-Status: the generated-feedback queue mechanism is now a fail-closed
-regular-file JSONL product path for dense and MoE Qwen.
-
-`qwen --requests-jsonl FILE --concurrency 2` serially prefills heterogeneous
-requests, overlaps two complete singleton decode graphs while both lanes remain
-active, returns a surviving lane to ordinary serial GPU-greedy decode, emits each
-pair in input order, and sends an odd final request through the existing serial
-path. The mode rejects stdin, sampling, dense B=8, prompt lookup, cache mutation,
-request sidecars, and an explicit GPU-greedy rollback.
-
-The runtime prices every allocation made by `MetalSession::fresh`, including
-per-layer GDN state, F16 or Q8 KV, attention partials, MoE scratch, logits, and
-integer buffers. Admission adds two such sessions, the largest Metal-priced
-candidate or fallback prefill scratch in the file, and a 2 GiB transient reserve.
-The resulting required bytes were `2,209,935,920` for 0.8B and `2,456,494,751`
-for A3B, rather than the probe's inherited 10+ GiB fixed allowance. Queue-scoped
-model residency is explicitly attached to both additional command queues and
-removed by guards on teardown.
-
-Release smokes compared normal serial JSONL and concurrency two over the same
-three requests, with 5/10/10 prompt tokens and 3/8/1 output limits. Dense 0.8B
-and A3B both matched every complete output object and generated-token SHA-256.
-The pair executed two overlapping transitions, then five serial-tail
-transitions; the odd request remained in order. This is lifecycle and exactness
-authority, not a new throughput packet. DeepSeek product integration remains a
-separate follow-up because its session memory is materially larger. Full result:
-`docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.
-
-## 2026-08-11 — DeepSeek Resident Concurrency Product GO
-
-Status: regular-file `--concurrency 2` is now cross-family. DeepSeek V4 uses
-worker-local mutable sessions over one shared immutable residency and two Metal
-queues; no session crosses a host thread boundary.
-
-The first complete-worker organization overlapped both prefill and generation.
-It preserved exact outputs but was killed immediately: K160 pair wall reached
-`2,742.826 ms`, with the two prefills expanding to `2,391/2,450 ms` from roughly
-`1,201/626 ms` serial. The promoted scheduler sends explicit prepare controls one
-worker at a time, verifies both sessions are ready and admitted, then releases
-both workers into concurrent generation. Errors, panic, cancellation, or channel
-closure cannot strand a scoped worker; pair stdout is atomic and input ordered.
-
-K160 greedy serial and concurrent paths match complete outputs and generated-ID
-SHA-256 over heterogeneous 3/8/1-token requests, including an odd tail. A warm
-pair spends `1,789.692 ms` in serial prefill and `309.129 ms` in concurrent
-generation, versus about `343.9 ms` summed serial generation. This tiny fixture
-is prefill-dominated, so whole-pair movement is only about 3-4%; the existing
-32-step `1.402x` packet remains decode authority.
-
-Request-local sampling also composes. Two requests with temperatures `0.7/0.8`,
-different filters, and seeds `123/456` match serial output exactly. Concurrent
-generation moves `230.8 -> 180.358 ms` (`1.280x`), while complete pair wall
-improves about `1.049x`.
-
-The corrected load path carries session count two through initial and refreshed
-admission. K160 requires `99,149,463,552` bytes including reserve; observed
-two-session state is `8,682,995,712` bytes against an `8,691,613,696` priced
-inventory. The odd tail reconciles one session and reports concurrency one.
-`QWEN_DSV4_RESIDENCY_SET=1` fails before model load because the set remains
-queue-scoped. Validation exits return memory to 92-93% free with swap unchanged
-at 2.44 MiB. Full result:
-`docs/bench/2026-08-10-cross-family-queue-overlap/README.md`.
-
-
-## 2026-08-11 — Qwen B2 File-Scoped Root Fanout GO
-
-Status: regular-file Qwen `--concurrency 2` now captures one chunk-aligned
-common-root checkpoint when at least two planned pairs share 1,024 or more
-tokens. Pair-local checkpoints remain available above that root; odd serial
-tails neither constrain nor consume it.
-
-A four-request realistic ring0 fixture shares 6,482 tokens and selects a 6,144-
-token root. Across two reversed-order comparisons and a final reviewed-code
-repeat, wall moves `2.59 -> 2.09/2.10/2.11 s` (`1.239x/1.233x/1.227x`).
-Pair-local prefix evaluation falls
-from 12,705 to 417 tokens while complete JSONL output remains byte-identical.
-The root costs one `~96.7 MB` retained CPU snapshot; three restores total
-`15.845 ms` in the first sample.
-
-Admission separates CPU checkpoint bytes from Metal working-set pressure while
-including both in the process budget. The simultaneous root plus deepest pair
-snapshot is priced before allocation; denial falls back to prior B2 behavior.
-`QWEN_CONCURRENCY_FILE_ROOT_FANOUT=0` is strict rollback. Final adversarial
-review: GO. Full packet:
-`docs/bench/2026-08-11-qwen-b2-file-root-fanout/README.md`.
-
-
-## 2026-08-12 — Ragged Qwen Fixed-Cohort Capability GO
-
-Status: dense B=8 and Qwen MoE B=16 can now decode requests at independent
-prompt frontiers under the explicit `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1` gate.
-Each lane carries its own position through attention/mixer encoding and rollback;
-complete candidate JSONL output remains byte-identical to serial execution.
-
-Final reviewed-code cells move dense 0.8B heterogeneous short prompts
-`2.82 -> 1.65 s` (`1.709x`), dense shared-root prompts `2.64 -> 2.29 s`
-(`1.153x`), and A3B heterogeneous short prompts `14.21 -> 10.95 s`
-(`1.298x`). A prior A3B long-private-suffix cell was flat (`1.006x`), so this
-checkpoint kept the capability default-off. The automatic decision is superseded
-by the charged dense-only promotion recorded below.
-
-Admission now prices shared-capacity sessions, prefill scratch, each independent
-executor buffer at Metal allocation size, transient reserve, and optional CPU
-checkpoint before mutable GPU allocation. Denied cohorts degrade to original-
-order serial requests. Capacity-first grouping is used only when it preserves
-cohort count, does not add transition slots, and strictly reduces capacity slots.
-Planner schema 5 distinguishes configured/effective prefix packing and planned/
-realized outcomes. Final adversarial review: GO. Full evidence:
-`docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
-
-
-## 2026-08-12 — Bounded Dense B8 Refill Mechanism GO
-
-Status: an explicit dense-only refill scheduler now replaces completed B8 lanes
-between committed decode steps. It operates over at most two waves (16 requests),
-keeps exactly eight live sessions behind `QWEN_DENSE_BATCH8_REFILL=1`;
-heterogeneous prompt lengths additionally require `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1`.
-
-A 32-request skew trace moves `2.76 s` serial, `2.29 s` B2, and `2.27 s`
-static ragged B8 to `1.83 s` with refill: `1.251x` over B2 and `1.240x`
-over same-width static execution. Complete JSONL is byte-identical across all
-four organizations. Two arenas consume 7 and 47 physical B8 steps.
-
-Refill is a post-plan rewrite: prefix/ragged decisions remain authoritative,
-admission failure restores the exact static work before ordinary cohort
-admission, and automatic mode never selects the experiment. Shared capacity
-includes a conservative all-productive-transition frontier bound and never
-exceeds an explicit context override. Synchronous MoE B16 refill remains killed:
-its optimistic charged endpoint is `10.06 s` against measured B2 at `9.06 s`.
-Evidence: `docs/bench/2026-08-12-qwen-refill-charged-screen/README.md`.
-
-
-## 2026-08-12 — Fixed-Cohort File Root GO
-
-Status: dense B8 now retains one immutable file-scoped Qwen checkpoint across
-all realized static cohorts. Root planning occurs after memory-denied cohorts
-become serial work; refill and serial requests neither constrain nor consume the
-root. B2 and fixed execution share one neutral planner/capture substrate without
-publishing to the RAM prefix index.
-
-A 32-request realistic trace forms four B8 cohorts around a 6,144-token root.
-Cohort-local roots take `16.01 s`; one file root takes `13.81 s` (`1.159x`).
-Complete JSONL is byte-identical. The candidate evaluates the root once in
-`794.229 ms`, captures a `96,716,848`-byte snapshot in `26.026 ms`, and avoids
-18,432 prompt-token evaluations. A two-cohort cell reaches only `1.093x`, so the
-value is correctly understood as cross-cohort amortization rather than a fixed
-per-request speedup.
-
-Dense and Qwen MoE default on behind
-`QWEN_FIXED_COHORT_FILE_ROOT_FANOUT=0` rollback. A separate A3B Q4 cell moves
-`14.58 -> 12.20 s` (`1.195x`) across four B16 cohorts with byte-identical
-output. Refill composition remains out of scope. Evidence:
-`docs/bench/2026-08-12-qwen-fixed-file-root/README.md`.
-
-
-## 2026-08-12 — Root-Aware Dense Refill HOLD
-
-Status: hold before implementation. A 16-request trace shares one 6,144-token
-file root but uses distinct post-root tasks, preventing B2 from receiving deeper
-identical-prompt reuse. Measured B2 takes `7.27 s`; static B8 takes `7.42 s` and
-81 physical steps.
-
-Perfect longest-first refill needs 67 steps. At the measured `18.189 ms` per B8
-step, crediting all 14 eliminated steps with zero replacement overhead yields an
-optimistic `7.165 s`, only `1.015x` over B2. This cannot clear the `1.10x` gate.
-This transition-only projection is not a formal ceiling because refill may also
-remove some setup work. It is nevertheless too weak to authorize more scheduler
-code at current leverage. Evidence:
-`docs/bench/2026-08-12-qwen-root-aware-refill-screen/README.md`.
-
-## 2026-08-12 — DeepSeek B2 Pair-Affinity Planner GO
-
-Status: enable the existing bounded pair planner by default for DeepSeek V4
-concurrency. A four-request K160 trace is interleaved `A0,B0,A1,B1`: each
-within-family pair shares 6,268 tokens, while adjacent input-order requests share
-only three. The planner changes physical pairs to `[0,2]` and `[1,3]` while
-retaining input-ordered publication.
-
-With pair-local fanout enabled and residency sets disabled, process wall moves
-`114.71 -> 71.57 s` (`1.603x`). Evaluated prompt tokens fall from 25,080 to
-12,792; each selected causal checkpoint is 6,144 tokens and about 60.1 MB.
-Summed decode wall remains effectively flat (`5.042 -> 5.014 s`), isolating the
-gain to prefix-affinity scheduling and snapshot reuse.
-
-Complete JSONL remains byte-identical with SHA-256
-`eb72076dd34ad4f2fa860bc68b72c6aab9c7fb7fec578c623215633ce9cf6acb`.
-Both arms report zero process swaps and no memory fallback. Keep the 16-request
-window, admission checks, and `QWEN_CONCURRENCY_PAIR_PLANNER=0` rollback.
-Evidence: `docs/bench/2026-08-12-deepseek-pair-affinity/README.md`.
-
-## 2026-08-12 — Short Dense B8 Serial-Tail Rescue GO
-
-Status: promote a measured subset of bounded refill inside explicit dense B8.
-Absent `QWEN_DENSE_BATCH8_REFILL`, the planner now rewrites only two-wave arenas
-that absorb at least one static serial fallback, keep every prompt at or below
-64 tokens, and clear the existing 3/4 utilization and 10% decode-step gates.
-`=1` forces the broader experimental planner; `=0` is strict static rollback.
-
-A 32-request Qwen3.5 0.8B Q8 fixture holds every prompt at 11 tokens and repeats
-generation limits ranging from 1 to 40. B2 takes `2.08/2.06 s`; refill takes
-`1.69/1.68 s`, moving median wall `2.070 -> 1.685 s` (`1.228x`). Static B8 takes
-`2.14 s`. Refill absorbs 16 requests that static planning sends to serial
-fallback. Complete JSONL is byte-identical, no arena fails memory admission, and
-all processes report zero swaps.
-
-The same fixture on Qwen3.6 27B Q4 moves B2 `23.79 -> 16.04 s` (`1.483x`) and
-static B8 `19.73 -> 16.04 s` (`1.230x`) with byte-identical output and flat RSS.
-This brackets the measured dense B8 model range instead of extrapolating from one
-asset.
-
-Two falsifiers narrow the default. A fully batched fixture at the exact 10%
-decode-step threshold moves only `0.90 -> 0.87 s` (`1.034x`), so automatic
-refill requires actual static serial fallback. With 1,029-token non-prefix
-prompts, forced serial-tail refill moves only `6.44 -> 5.99 s` (`1.075x`). At
-exactly 64 tokens, static-to-refill remains `2.23 -> 1.81 s` (`1.232x`) on 0.8B
-and `23.69 -> 20.17 s` (`1.174x`) on 27B. Freeze 64 as a conservative measured
-boundary, not a claim that token 65 is the crossover.
-
-At this checkpoint automatic execution remained unchanged. Qwen MoE stayed
-closed, ragged prompts did not implicitly enable refill, prefix-selected cohorts
-remained excluded, and
-memory denial restores the exact static plan. Dense planner schema 7 reports the
-tri-state policy and default prompt cap. Evidence:
-`docs/bench/2026-08-12-dense-refill-default/README.md`.
-## 2026-08-12 — DeepSeek File-Scoped Root Fanout GO
-
-Status: DeepSeek V4 B2 now captures one immutable causal root when at least two
-planned pairs select the same restorable boundary of 1,024 or more tokens. Pair
-selection, decode organization, and input-order publication remain unchanged;
-serial tails neither constrain nor consume the root.
-
-An eight-request K160 trace forms four affinity pairs around one 6,144-token
-root. Same-binary rollback-to-candidate wall moves `125.99 -> 67.17 s`
-(`1.876x`), while summed pair wall moves `124.584 -> 33.070 s` (`3.767x`). The
-candidate evaluates 7,112 model prompt tokens instead of 25,544, avoiding 18,432
-exact root-token evaluations.
-
-The root prefill takes `29,993.971 ms`, its 60,137,472-byte snapshot captures in
-`385.251 ms`, and eight restores total about `1.545 s`. Candidate pairs report
-zero pair-local snapshot bytes. Concurrent generation remains flat at about
-`3.106 s` versus `3.154 s`, isolating the gain to prefix reuse.
-
-Complete JSONL remains byte-identical with SHA-256
-`33c34db7d52c3ce49b7a6e12b45bc7784bb18eadc6c628b69bbadf015ce0afb7`.
-Both processes report zero swaps. The candidate paid `3.147 s` warming two
-shards while the later rollback found all four warm, so run order did not create
-the gain.
-
-Admission prices 8,780,218,368 Metal bytes for two live sessions and 66,307,104
-CPU bytes for the retained snapshot, root logits, and one serialized restore
-workspace. Denial preserves pair-local execution. Keep
-`QWEN_CONCURRENCY_FILE_ROOT_FANOUT=0` as strict rollback. V1 intentionally
-rejects differing pair maxima rather than adding a root-to-pair bridge hierarchy.
-Evidence: `docs/bench/2026-08-12-deepseek-file-root/README.md`.
-## 2026-08-12 — Automatic Dense Refill Composition GO
-
-Status: opt-in `--execution-mode auto` now carries the qualified dense B8
-short-serial-tail rescue through both selector lookahead and fixed execution.
-Absent `QWEN_DENSE_BATCH8_REFILL` or explicit `=1` remains bounded rescue;
-`=0` is rollback. At this checkpoint ragged auto, forced broad refill, and Qwen
-MoE remained closed.
-
-On the 32-request 11-token fixture, same-binary auto wall moves `2.16 -> 1.76 s`
-(`1.227x`) on Qwen3.5 0.8B Q8 and `19.76 -> 15.89 s` (`1.244x`) on Qwen3.6
-27B Q4. The candidate replaces two static B8 cohorts plus 16 serial requests with
-two refill arenas covering all 32 requests. Complete JSONL stays byte-identical
-and every process reports zero swaps.
-
-A fully batched threshold falsifier run with auto and explicit refill `=1`
-remains static at `0.90 s`: policy telemetry reports bounded rescue but no arena
-because no serial fallback exists. Selector admission now prices the plan's
-maximum execution capacity, and model-family-specific lookahead prevents the
-dense refill variable from affecting MoE automatic commands. Evidence:
-`docs/bench/2026-08-12-automatic-dense-refill/README.md`.
-
-## 2026-08-12 — Charged Automatic Dense Ragged Admission GO
-
-Status: `--execution-mode auto` may now select dense B8 for heterogeneous prompt
-frontiers inside a charged short-prompt envelope. Every prompt must be at most
-256 tokens and fit in one configured prefill chunk; requests must share a
-measured generation limit of at least 32 tokens; each proposed B8 cohort may
-charge at most two prompt tokens per productive decode transition. Ragged
-planning must create more full cohorts than the exact incumbent plan, leave no
-serial remainder requests, and preserve the existing 3/4 utilization and memory
-gates.
-
-The real incumbent is automatic B2, not serial execution. On the recovered
-10-137-token fixture, current-source 0.8B execution moves `1,748 -> 1,246 ms`
-(`1.403x`) at 64 output tokens and `943 -> 690 ms` (`1.367x`) at 32. Dense 27B
-moves `20,570 -> 10,333 ms` (`1.991x`) and `11,451 -> 6,417 ms` (`1.784x`) on
-the same cells. Complete outputs are byte-identical and every process reports
-zero swaps.
-
-The MoE result is deliberately not promoted. An initial A3B order suggested
-`14.88 -> 11.00 s`, but model load moved `5.60 -> 2.41 s`. Reverse-order
-execution isolates only `9,060 -> 8,343 ms` (`1.086x`) at 64 output tokens;
-32 and 16 output-token cells reach `1.078x` and `1.058x`. Keep Qwen MoE ragged
-B16 behind explicit `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1`.
-
-Unset enables only the charged automatic dense policy. `=0` is strict rollback
-to equal-frontier/refill/B2 planning; `=1` retains the broad explicit dense and
-MoE experiment. Selector schema 2 and dense planner schema 8 expose policy and
-closed admission decisions. The exact automatic 0.8B product cell moves
-`2.06 -> 1.53 s` (`1.346x`) with SHA-256
-`312f47f66e2242ee865648ff56fe9d2321213c3c60ebe3f0f60491d1aead8023`.
-Evidence: `docs/bench/2026-08-12-qwen-ragged-fixed-cohorts/README.md`.
-
-## 2026-08-12 — Qwen MoE Ragged B16 128-Token KILL
-
-Status: keep automatic Qwen MoE ragged admission closed at the current
-executor. The existing A3B Q4 fixture was extended to 128 requested output
-tokens and run counterbalanced B16/B2 then B2/B16 with one release binary
-embedding commit `4238acd`, dirty bit `1`, and exact source-state digest
-`git-source-sha256-v2:0c155730c47ffb4e99a0caa0cd37c69d3e04dfe62c247b2ed51010b90b1af7b4`.
-The dirty bit includes two pre-existing user-owned untracked documents; the
-packet claims same-binary rather than portable clean-build authority.
-
-B16 execution takes `15,260.044/15,304.856 ms`; B2 takes
-`16,677.467/16,640.817 ms`. Median speedup is `1.09008x`, with paired ratios
-`1.09288x/1.08729x`, below the frozen `1.10x` product gate. All four complete
-JSONL outputs are byte-identical and every process reports zero swaps.
-
-Decode alone is `30,027.420 / 27,302.575 = 1.09980x` across both repeats.
-The measured decode ratio lands 0.02% below the product gate before private
-prefill is charged. A 256-token packet has too little expected decision value
-to justify another product run at the current executor.
-Retain explicit `QWEN_FIXED_COHORT_RAGGED_PROMPTS=1`. Reopen only after B16
-decode materially improves relative to B2, replacement prefill overlaps active
-decode, or a changed executor has an independent whole-request ceiling above
-`1.10x`. Evidence:
-`docs/bench/2026-08-12-qwen-moe-ragged-128-screen/README.md`.
-
-## 2026-08-12 — Automatic Dense Ragged Refill GO
-
-Status: `--execution-mode auto` now composes charged ragged-frontier planning
-with bounded two-wave dense B8 refill for one measured mixed-limit slice. The
-candidate must cover the complete file with at least two 16-request arenas,
-keep prompts at or below 256 tokens and generation limits at or below 40, fit
-prefill in one chunk, and leave no static or serial remainder. Every arena must
-clear 90% simulated utilization, 15% idealized two-wave step savings, and a 32x
-prompt/transition cap; the complete file must clear a 9x charge.
-
-Final-source counterbalanced same-binary wall moves `2.14/2.15 -> 1.78/1.78 s`
-on Qwen3.5 0.8B Q8, a median `1.205x`, and
-`27.91/28.19 -> 19.12/19.71 s` on Qwen3.6 27B Q4, a median `1.445x`.
-Complete JSONL is byte-identical and every process reports zero swaps. Phrase the authority as bounded median qualification.
-
-The file-wide charge is intentional. A measured 256-token boundary improves
-`2.35 -> 1.99 s` (`1.181x`) while its shallow/deep arena charges are 31.54x and
-5.10x and its whole-file charge is 8.79x. The local 32x cap bounds subsidy while
-preserving that authority. A one-arena charged cell reaches only median `1.110x`, which
-freezes two arenas as the automatic minimum.
-
-Selector schema 3 and dense planner schema 9 expose the joint decision and full
-envelope. Runtime admission is all-or-nothing for automatic joint plans: one
-denial restores the captured planner baseline, with physical denial, transaction
-fallback, and planned/realized counts reported separately. Either
-`QWEN_FIXED_COHORT_RAGGED_PROMPTS=0` or `QWEN_DENSE_BATCH8_REFILL=0` is rollback.
-Qwen MoE and root-aware refill remain closed. Evidence:
-`docs/bench/2026-08-12-automatic-dense-ragged-refill/README.md`.
-
-## 2026-08-12 — DeepSeek V4 DSpark Metal Operating-Point Calibration
-
-Status: an external llama.cpp b10326 n-sweep on the exact 2,385-token
-official-chat prompt re-prices the held qwen DSpark budget. The Metal
-operating point is n=1, not the B200 n=3. No qwen code changed; this is
-calibration evidence only.
-
-- Condition: FRESH UD-IQ3_XXS target plus the 10.90 GB DSpark Q8_0 drafter,
-  `--spec-type draft-dspark`, confidence 0.3, 256 greedy tokens, single-turn,
-  prompt token identity verified at exactly 2,385 (BOS and role markers
-  correct). Two counterbalanced blocks `B n1 n2 n3 | n3 n2 n1 B` with a 120 s
-  cooldown before every timed run, per the A10B-class convention.
-- Generation medians: baseline 28.05 token/s (35.65 ms/token, repeats
-  28.1/28.0), n1 32.6 (1.162x), n2 30.95 (1.103x), n3 29.55 (1.053x). The
-  ordering held in both block directions and in an earlier un-cooled hot pilot
-  (26.5 versus 23.4), so it is not a thermal-order artifact. An un-cooled
-  pilot also demonstrated why the protocol matters: its closing baseline
-  sagged 27.9 to 24.4 before cooldowns were applied.
-- The B200 n=3 optimum inverts on M4 Max Metal: each added draft level costs
-  more verify time than its accepted tokens return. Baseline, n1, and n3
-  outputs are byte-identical after terminal-control normalization; n2
-  reproducibly emits a different greedy stream in both slots, first diverging
-  87% through at a near-tie token. Treat the n2 timing as diagnostic only and
-  count it against unguarded spec exactness on the external engine.
-- Acceptance anchor: the prior calibration's deterministic counts are retained
-  (107/142 accepted, 149 packets, 1.71812 useful tokens per packet). Greedy
-  stream stability across arms supports the transfer; b10297-to-b10326 build
-  drift is the residual caveat, and this build prints no per-run acceptance
-  counters at default verbosity.
-- Re-priced complete-packet budgets at 1.71812 tokens/packet: at most 58.34 ms
-  to beat this session's llama.cpp no-spec by 5%; at most 52.70/50.19 ms to
-  match/beat llama.cpp's own n=1 spec endpoint; at most 73.4-89.0 ms to beat
-  the qwen FRESH singleton by 5% (sweep-rate 44.84 versus floor-packet
-  54.39 ms/token respectively).
-- Verifier implication: a decode-lineage N=2 verifier floor (singleton
-  52.81 ms GPU plus marginal routed columns, drafter, capture, and rollback)
-  sits near 60-68 ms today. That clears the self-anchored budget but misses
-  the external anchors while the singleton decode gap versus llama.cpp
-  (54.4 versus 35.7 ms/token at this position) stands. Decode front-end
-  fusion is therefore upstream of qwen DSpark, and the target work unit
-  simplifies to exactly two verify columns.
-
-Decision: repoint the DSpark hold at an n=1/N=2 work unit against the 58.34 ms
-external budget; do not build for n=3. Raw arms, summary, and the sweep script
-are archived at `target/profiles/dspark-metal-nsweep-2026-08-12/`; rerun
-protocol is counterbalanced blocks with 120 s cooldowns.
-
-## 2026-08-12 — DeepSeek V4 Composed-Stack and REAP Quality Audit Rows
-
-Status: first full-defaults-versus-arithmetic-rollbacks audit of the composed
-numerical stack, plus maintained cross-asset baseline rows. This is stream and
-coherence evidence; value-task fixtures remain the named residual. No engine
-code changed.
-
-- Protocol: one binary at `adf67f7`, twelve runs, three official-chat depths
-  (2,385/6,272/15,675 input tokens), 128-token greedy continuations, seed 42,
-  reasoning none. The exact arm sets eleven numerical-lineage rollbacks
-  (Q8 Q-B and output to `exact`; output-grouped, compressor, shared, and QA-KV
-  matrices, IQ2 F16 staging, MXFP4 matrix, group8 dense, selected online, and
-  batched indexer RoPE to `0`); bit-exact promotions stay on so any divergence
-  attributes to the approximate arithmetic stack specifically. Quality runs are
-  thermally insensitive, so no cooldowns apply. Artifacts and the runner:
-  `target/profiles/dsv4-quality-audit-2026-08-12/`.
-- FRESH defaults versus exact diverge at every depth: generated-ID
-  fingerprints differ, with first text divergence at 22%/40%/90% of the
-  emitted output. Every observed divergence is a mid-sentence near-tie flip;
-  both continuations remain coherent, on-task, and format-clean, and
-  EOS-versus-limit differences follow content divergence (118 versus 128,
-  128 versus 128, 83 versus 82 tokens).
-- Read: the composed stack behaves like its per-promotion evidence, token
-  chaos without observed degradation, but this is stream-plus-coherence
-  evidence on open-ended prompts, not semantic-equivalence certification. The
-  2,385-token row's 22% divergence point is the earliest composed-stack flip
-  recorded so far.
-- Cross-asset rows on the same prompts: K216 defaults stay coherent and
-  on-task at all depths and reach EOS at 2,385 like FRESH. K160 stays coherent
-  but never reaches EOS inside 128 tokens on any of the three prompts,
-  consistent with its earlier longer-math-trace and missed-word-limit rows.
-  These are maintained baseline rows, not equivalence claims.
-- Residual gap for the governance item: no value-task fixture ran, because the
-  five-value ledger and four-key retrieval prompts were per-promotion
-  artifacts that are not maintained fixtures, and the designed v4.1 retention
-  battery remains unimplemented. This audit's runner and artifact layout are
-  the skeleton for those rows.
-
-Decision: keep the REAP quality-governance queue item open but reduced to
-fixture maintenance plus the v4.1 battery implementation. Composed-stack
-divergence is now a recorded fact with located flip points; any future
-approximate default that moves the earliest divergence materially before the
-22% row should trigger a full value battery prior to promotion.
-
-## 2026-08-13 — DeepSeek V4 Durable Prefix Cache GO and Declared Model Identity
-
-Status: DeepSeek V4 single-turn generation now accepts the full
-`--durable-prefix-cache` surface with product parity for the Ring0 game loop
-(`game/play.py` runs unmodified), and durable-identity cold starts no longer
-hash the model when hf download sidecars declare shard SHA-256s. Landed as
-`443d254` (shared store filesystem layer), `cc009da` (declared identity), and
-`5e6a929` (DS4 durable store + CLI + thinking-transcript normalization).
-
-- Store shape: `dsv4-v1/blobs/<compat hex64>/<len>-<digest>.dsv4cp`, keyed by
-  the causal compatibility digest and rolling u32 prefix keys. Entries are
-  observation-less, so lookup restores the longest strict prefix and the CLI
-  re-executes at least one endpoint token; capture is the `prompt_len-1`
-  boundary mid-prefill and publication defers past the response flush. Store,
-  restore-allocation, and admissibility failures all fail open to cold
-  prefill; a one-token prompt logs `skipped=short_prompt` instead of
-  asserting.
-- Live on the 89 GB REAP IQ3_XXS flash model, 32-token turn-1 prompt: cold
-  run publishes the 31-token boundary (13,775,772 B; capture 66.7 ms, publish
-  106.9 ms after flush). Turn 2 (48 tokens) hits `matched=31`
-  (`restore_total_ms=46.7`), promotes 16 tokens to the new 47-token boundary,
-  prefills one endpoint token, and publishes 14,587,868 B. A
-  `--reasoning low --messages-preserve-thinking` rerun of the same history
-  (57 tokens) reuses the chat-mode 31-token blob across encoding modes and
-  publishes its own 56-token boundary.
-- Identity: on a cold identity cache the content root composed from
-  `.cache/huggingface/download` sidecar etags in 18.8 ms with
-  `hashed_bytes=0` (`cache=declared_stored`), versus a full ordered-shard
-  read. Declared and hashed roots are domain-separated; any missing, stale
-  (mtime after stamp), or non-64-hex declaration falls back to hashing, and
-  `QWEN_CHECKPOINT_MODEL_IDENTITY=hashed` forces it. Cached roots are sticky
-  under the fstat key, so existing stores keep their identities. Empty-store
-  runs with no admissible capture now skip identity resolution entirely.
-- Thinking transcripts: `--messages-strip-thinking` normalizes a leading
-  inline think block out of assistant history, including the headless
-  `reasoning</think>text` shape raw thinking output produces;
-  `--messages-preserve-thinking` requires a `--reasoning` tier and promotes
-  inline blocks into the release encoder's structured reasoning field
-  (byte-exact 0731 preserve rendering, fixture-tested). Verified in the live
-  runs: stripped history rendered 48 tokens, promoted history 57.
-- Hardening: store mechanics (namespace/flock/leases/stamps/LRU eviction)
-  now live once in `checkpoint_fs`; the Qwen store suite passed unchanged
-  (26/26) across the extraction. The DS4 store carries the ported adversarial
-  suite (11 tests): LRU eviction under touch-freshness, oversized rejection
-  without namespace mutation, caller-budget failures preserving blobs,
-  corrupt-blob self-heal with fallback, foreign-entry rejection, same-prefix
-  different-state `NamespaceCollision`, and two-thread publisher convergence.
-- Operational note: with pages warm the 89 GB model reloads in ~76-81 ms
-  (`load_ms`), so the per-turn process model needs no resident server; cold
-  first-touch prefetch was 13.1 s.
-
-Decision: GO for game-loop use on both families sharing one cache root.
-Residuals, force-ranked: completed-turn checkpoints for preserve-mode DS4
-(each turn currently re-prefills the prior turn's reasoning), hoisting the
-CLI-inline DS4 durable orchestration into a qwen-llm runtime API, per-family
-namespace budgets stacking on a shared root (up to 2x the flag), and
-crash-orphaned `.tmp-` staging files being unbudgeted in both stores.

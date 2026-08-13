@@ -157,6 +157,95 @@ kernel void kernel_mat_vec_q8_0_f32_lcpp(
     }
 }
 
+// Group-axis variant of the `_lcpp` kernel above. Grid depth indexes
+// `n_groups` consecutive weight blocks of `n_out` rows, consecutive
+// `n_in`-element input slices, and consecutive `n_out`-element output
+// slices. The per-row traversal, accumulation order, and reductions are
+// byte-for-byte the singleton `_lcpp` body, so each group's output is
+// bitwise identical to a separate singleton dispatch over its slice.
+kernel void kernel_mat_vec_q8_0_f32_lcpp_grouped(
+        constant mat_vec_q8_0_args & args   [[buffer(0)]],
+        device const uchar         * weight [[buffer(1)]],
+        device const float         * x      [[buffer(2)]],
+        device       float         * y      [[buffer(3)]],
+        threadgroup  float         * shmem  [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr ushort NW = 32;
+    constexpr ushort NQ = NQ_Q80;
+    constexpr ushort NR0 = NR0_Q80_LCPP;
+    constexpr ushort NSG = NSG_Q80_LCPP;
+
+    const uint nb = args.n_in / QK8_0;
+    const uint first_row = tgpig.x * NR0;
+    if (first_row >= args.n_out) return;
+
+    const ushort ix = tiisg / (NW / NQ);
+    const ushort il = tiisg % (NW / NQ);
+    const uint ib0 = sgitg * NQ + ix;
+
+    const ulong row_stride_bytes = (ulong)nb * Q8_0_BYTES;
+    device const uchar * gweight = weight
+        + (ulong)tgpig.z * (ulong)args.n_out * row_stride_bytes;
+    device const float * gx = x + (ulong)tgpig.z * (ulong)args.n_in;
+    device       float * gy = y + (ulong)tgpig.z * (ulong)args.n_out;
+
+    device const uchar * row0 = gweight + (ulong)first_row * row_stride_bytes;
+    device const float * xb = gx + (ulong)ib0 * QK8_0 + (ulong)il * NQ;
+
+    float sumf[NR0] = {0.0f, 0.0f};
+    float xv[NQ];
+
+    for (uint ib = ib0; ib < nb; ib += NSG * NQ) {
+        for (ushort i = 0; i < NQ; ++i) {
+            xv[i] = xb[i];
+        }
+
+        for (ushort row = 0; row < NR0; ++row) {
+            if (first_row + row >= args.n_out) break;
+            device const uchar * blk = row0
+                + (ulong)row * row_stride_bytes
+                + (ulong)ib * Q8_0_BYTES;
+            device const half   * dh = (device const half *)blk;
+            device const int8_t * qs = (device const int8_t *)(blk + 2) + il * NQ;
+
+            float sumq = 0.0f;
+            for (ushort i = 0; i < NQ; ++i) {
+                sumq += (float)qs[i] * xv[i];
+            }
+            sumf[row] += sumq * (float)dh[0];
+        }
+
+        xb += (ulong)NSG * NQ * QK8_0;
+    }
+
+    for (ushort row = 0; row < NR0; ++row) {
+        threadgroup float * row_shmem = shmem + NW * row;
+        if (sgitg == 0) {
+            row_shmem[tiisg] = 0.0f;
+        }
+        sumf[row] = simd_sum(sumf[row]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (ushort row = 0; row < NR0; ++row) {
+        threadgroup float * row_shmem = shmem + NW * row;
+        if (tiisg == 0) {
+            row_shmem[sgitg] = sumf[row];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (ushort row = 0; row < NR0 && first_row + row < args.n_out; ++row) {
+        threadgroup float * row_shmem = shmem + NW * row;
+        const float total = simd_sum(row_shmem[tiisg]);
+        if (tiisg == 0 && sgitg == 0) {
+            gy[first_row + row] = total;
+        }
+    }
+}
+
 kernel void kernel_mat_vec_q8_0_f32_lcpp_batch(
         constant mat_vec_q8_0_args & args   [[buffer(0)]],
         device const uchar         * weight [[buffer(1)]],

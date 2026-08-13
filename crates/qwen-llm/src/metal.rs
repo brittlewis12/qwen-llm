@@ -19885,6 +19885,89 @@ pub fn encode_mat_vec_q8_0_f32(
     Ok(())
 }
 
+/// Group-axis Q8_0 GEMV with the exact singleton `_lcpp` accumulation body.
+/// Grid depth indexes `n_groups` consecutive weight blocks, input slices, and
+/// output slices, so one dispatch replaces `n_groups` sequential singleton
+/// dispatches with bitwise-identical per-group results.
+pub fn encode_mat_vec_q8_0_grouped_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    n_groups: usize,
+) -> Result<(), MetalError> {
+    if n_groups == 0 || !n_in.is_multiple_of(32) {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q8_0_grouped",
+            detail: format!("n_groups={n_groups} must be nonzero and n_in={n_in} divisible by 32"),
+        });
+    }
+    let expected_weight = n_groups
+        .checked_mul(n_in)
+        .and_then(|value| value.checked_mul(n_out));
+    let expected_input = n_groups.checked_mul(n_in);
+    let expected_output = n_groups.checked_mul(n_out);
+    if weight.dtype != GgmlType::Q8_0
+        || x.dtype != GgmlType::F32
+        || y.dtype != GgmlType::F32
+        || !y.is_writable()
+        || expected_weight.is_none_or(|expected| weight.n_elements() as usize != expected)
+        || expected_input.is_none_or(|expected| x.n_elements() as usize != expected)
+        || expected_output.is_none_or(|expected| y.n_elements() as usize != expected)
+        || u32::try_from(n_in).is_err()
+        || u32::try_from(n_out).is_err()
+        || u32::try_from(n_groups).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: "mat_vec_q8_0_grouped",
+            detail: format!(
+                "expected Q8_0 weight [{n_groups}x{n_in}x{n_out}] with F32 [{n_groups}x{n_in}] -> [{n_groups}x{n_out}], got {:?} w={} x={} y={}",
+                weight.dtype,
+                weight.n_elements(),
+                x.n_elements(),
+                y.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_mat_vec_q8_0_f32_lcpp_grouped")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    const NR0: usize = 2;
+    const NSG: usize = 4;
+    enc.set_threadgroup_memory(0, 32 * NR0 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0),
+            height: 1,
+            depth: n_groups,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Token-axis Q8_0 GEMV with the exact singleton `_lcpp` accumulation body.
 /// Each grid row owns one activation row; the weight traversal remains one
 /// dispatch without half-staging persistent cache-producing projections.

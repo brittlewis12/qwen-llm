@@ -6823,25 +6823,49 @@ impl DeepSeekV4PositionZeroAttentionScratch {
         )?;
         encode_ds4_rope_tail_adjacent_in_place(ctx, enc, &self.attention, position, rope, true)?;
 
-        for group in 0..c.group_count {
-            let input_view = self.attention.view_subrange(
-                (group * dims.group_width) as u64,
-                vec![dims.group_width as u64],
-            );
-            let output_view = self
-                .low_rank
-                .view_subrange((group * c.output_rank) as u64, vec![c.output_rank as u64]);
-            let weight_view = group_weight_view(output_a, dims.group_width, c.output_rank, group)?;
-            encode_projection(
+        let grouped_output_a = deepseek_v4_decode_output_grouped_enabled()
+            && output_a.dtype == GgmlType::Q8_0
+            && crate::metal::mat_vec_q8_0_lcpp_enabled();
+        if grouped_output_a {
+            static REPORTED: std::sync::Once = std::sync::Once::new();
+            REPORTED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: decode output A runs one grouped GEMV; rollback=QWEN_DSV4_DECODE_OUTPUT_GROUPED=0"
+                );
+            });
+            crate::metal::encode_mat_vec_q8_0_grouped_f32(
                 ctx,
                 enc,
-                &weight_view,
-                &input_view,
-                &output_view,
+                output_a,
+                &self.attention,
+                &self.low_rank,
                 dims.group_width,
                 c.output_rank,
-                "grouped output A",
-            )?;
+                c.group_count,
+            )
+            .map_err(DeepSeekV4MetalError::Metal)?;
+        } else {
+            for group in 0..c.group_count {
+                let input_view = self.attention.view_subrange(
+                    (group * dims.group_width) as u64,
+                    vec![dims.group_width as u64],
+                );
+                let output_view = self
+                    .low_rank
+                    .view_subrange((group * c.output_rank) as u64, vec![c.output_rank as u64]);
+                let weight_view =
+                    group_weight_view(output_a, dims.group_width, c.output_rank, group)?;
+                encode_projection(
+                    ctx,
+                    enc,
+                    &weight_view,
+                    &input_view,
+                    &output_view,
+                    dims.group_width,
+                    c.output_rank,
+                    "grouped output A",
+                )?;
+            }
         }
         encode_projection(
             ctx,
@@ -10612,6 +10636,11 @@ const DEEPSEEK_V4_ONLINE_HCA_THREADGROUP_BYTES: usize =
 crate::env_flag!(
     default_on deepseek_v4_online_direct_load_enabled,
     "QWEN_DSV4_ONLINE_DIRECT_LOAD"
+);
+
+crate::env_flag!(
+    default_on deepseek_v4_decode_output_grouped_enabled,
+    "QWEN_DSV4_DECODE_OUTPUT_GROUPED"
 );
 
 crate::env_flag!(
@@ -15371,6 +15400,116 @@ mod tests {
                 .cast::<f32>();
             std::slice::from_raw_parts(pointer, tensor.n_elements() as usize).to_vec()
         }
+    }
+
+    #[test]
+    fn decode_grouped_output_gemv_matches_singleton_loop_bitwise() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        if !crate::metal::mat_vec_q8_0_lcpp_enabled() {
+            return;
+        }
+        for (n_in, n_out, n_groups) in [(4_096usize, 1_024usize, 8usize), (64, 5, 3)] {
+            let blocks_per_row = n_in / 32;
+            let row_bytes = blocks_per_row * 34;
+            let group_bytes = n_out * row_bytes;
+            let mut bytes = vec![0u8; n_groups * group_bytes];
+            let mut state = 0x2545_F491_4F6C_DD1Du64;
+            for (index, block) in bytes.chunks_mut(34).enumerate() {
+                let scale = half::f16::from_f32(0.0035 + (index % 17) as f32 * 0.0004);
+                block[..2].copy_from_slice(&scale.to_le_bytes());
+                for quant in block[2..].iter_mut() {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    *quant = (state >> 33) as u8;
+                }
+            }
+            let weight = MetalTensor::from_bytes(
+                &ctx,
+                &bytes,
+                vec![n_in as u64, (n_groups * n_out) as u64],
+                GgmlType::Q8_0,
+            )
+            .expect("grouped Q8 weight");
+            let x_values = (0..n_groups * n_in)
+                .map(|i| ((i * 31 + 7) % 211) as f32 * 0.013 - 1.31)
+                .collect::<Vec<_>>();
+            let x = offset_f32(&ctx, &x_values, vec![(n_groups * n_in) as u64]);
+            let y_loop = offset_f32(
+                &ctx,
+                &vec![0.0; n_groups * n_out],
+                vec![(n_groups * n_out) as u64],
+            );
+            let y_grouped = offset_f32(
+                &ctx,
+                &vec![0.0; n_groups * n_out],
+                vec![(n_groups * n_out) as u64],
+            );
+
+            let command = ctx.queue.commandBuffer().expect("grouped GEMV command");
+            let encoder = KernelEncoder::begin(&command);
+            for group in 0..n_groups {
+                let weight_view =
+                    group_weight_view(&weight, n_in, n_out, group).expect("group weight view");
+                let x_view = x.view_subrange((group * n_in) as u64, vec![n_in as u64]);
+                let y_view = y_loop.view_subrange((group * n_out) as u64, vec![n_out as u64]);
+                crate::metal::encode_mat_vec_q8_0_f32(
+                    &ctx,
+                    &encoder,
+                    &weight_view,
+                    &x_view,
+                    &y_view,
+                    n_in,
+                    n_out,
+                )
+                .expect("singleton GEMV");
+            }
+            crate::metal::encode_mat_vec_q8_0_grouped_f32(
+                &ctx, &encoder, &weight, &x, &y_grouped, n_in, n_out, n_groups,
+            )
+            .expect("grouped GEMV");
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "grouped GEMV command failed: {:?}",
+                command.error()
+            );
+
+            let singleton = read_f32(&y_loop);
+            let grouped = read_f32(&y_grouped);
+            assert_eq!(singleton.len(), grouped.len());
+            assert!(
+                singleton
+                    .iter()
+                    .zip(&grouped)
+                    .all(|(&left, &right)| left.to_bits() == right.to_bits()),
+                "grouped output must match the singleton loop bit-for-bit at n_in={n_in} n_out={n_out} groups={n_groups}"
+            );
+            assert!(
+                singleton.iter().any(|&value| value != 0.0),
+                "differential must exercise nonzero outputs"
+            );
+        }
+
+        let bad = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
+        let x = offset_f32(&ctx, &vec![0.0; 192], vec![192]);
+        let y = offset_f32(&ctx, &vec![0.0; 15], vec![15]);
+        let command = ctx.queue.commandBuffer().expect("rejection command");
+        let encoder = KernelEncoder::begin(&command);
+        let error =
+            crate::metal::encode_mat_vec_q8_0_grouped_f32(&ctx, &encoder, &bad, &x, &y, 64, 5, 3)
+                .expect_err("F32 weight must fail closed");
+        assert!(
+            format!("{error}").contains("mat_vec_q8_0_grouped"),
+            "{error}"
+        );
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
     }
 
     fn read_u8(tensor: &MetalTensor) -> Vec<u8> {

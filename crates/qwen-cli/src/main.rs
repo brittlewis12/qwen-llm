@@ -13,7 +13,7 @@ mod shutdown;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use messages::{
-    DeepSeekV4EncodeOptions, DeepSeekV4Reasoning, QwenGenerationMode,
+    DeepSeekV4EncodeOptions, DeepSeekV4InlineThinking, DeepSeekV4Reasoning, QwenGenerationMode,
     load_deepseek_v4_0731_messages_prompt, load_messages_prompt_with_policy,
     messages_thinking_mode, parse_strict_messages_input, render_deepseek_v4_0731_messages_prompt,
     render_deepseek_v4_0731_single_turn_prompt, render_qwen_messages_prompt_with_generation,
@@ -26,15 +26,18 @@ use qwen_llm::checkpoint_identity::{
 use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedIntegrityMode};
 use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
 use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
+use qwen_llm::deepseek_v4_checkpoint_store::{DeepSeekV4CheckpointStore, DeepSeekV4StoreContext};
 use qwen_llm::deepseek_v4_metal::{
     DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES, DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS,
     DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS, DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS,
-    DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples,
-    DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4MultigroupSelectorGeometry,
+    DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
+    DeepSeekV4CompatibilityDigest, DeepSeekV4MemorySamples, DeepSeekV4MetalResidency,
+    DeepSeekV4ModelContentId, DeepSeekV4MultigroupSelectorGeometry,
     DeepSeekV4MultigroupSelectorTelemetry, DeepSeekV4Session, DeepSeekV4SessionCapacity,
-    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotFileOutcome, DeepSeekV4StageKind,
-    DeepSeekV4StageProfile, causal_snapshot_record_bytes, load_causal_snapshot_file,
-    publish_causal_snapshot_file,
+    DeepSeekV4SnapshotCaptureErrorKind, DeepSeekV4SnapshotCodecConstraints,
+    DeepSeekV4SnapshotFileOutcome, DeepSeekV4SnapshotRestoreErrorKind, DeepSeekV4StageKind,
+    DeepSeekV4StageProfile, causal_snapshot_capture_error_kind, causal_snapshot_record_bytes,
+    causal_snapshot_restore_error_kind, load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 use qwen_llm::dense_batch8::DENSE_BATCH8_WIDTH;
 use qwen_llm::gguf::GgufFile;
@@ -375,7 +378,12 @@ struct Args {
     messages_preserve_thinking: bool,
 
     /// Strip a leading assistant `<think>...</think>` block from history.
-    #[arg(long, hide_short_help = true, requires = "messages")]
+    #[arg(
+        long,
+        hide_short_help = true,
+        requires = "messages",
+        conflicts_with = "preserve_reasoning"
+    )]
     messages_strip_thinking: bool,
 
     /// Do not append the assistant generation prompt after messages.
@@ -2390,7 +2398,13 @@ fn run() -> Result<()> {
         return if args.requests_jsonl.is_some() {
             run_deepseek_v4_requests_jsonl(&model_path, gguf, &args, explicit_options)
         } else {
-            run_deepseek_v4_single_turn(&model_path, gguf, &args, explicit_options)
+            run_deepseek_v4_single_turn(
+                &model_path,
+                gguf,
+                &args,
+                explicit_options,
+                staged_integrity,
+            )
         };
     }
     ensure!(
@@ -2804,20 +2818,6 @@ fn deepseek_v4_shared_unsupported_options(
     if explicit.cache_prefix_auto_min_tokens || args.cache_prefix_auto_min_tokens != 1024 {
         unsupported.push("--cache-prefix-auto-min-tokens");
     }
-    if args.durable_prefix_cache.is_some() {
-        unsupported.push("--durable-prefix-cache");
-    }
-    if explicit.durable_prefix_cache_max_mib || args.durable_prefix_cache_max_mib != 32 * 1024 {
-        unsupported.push("--durable-prefix-cache-max-mib");
-    }
-    if explicit.durable_prefix_cache_max_entry_mib
-        || args.durable_prefix_cache_max_entry_mib != 16 * 1024
-    {
-        unsupported.push("--durable-prefix-cache-max-entry-mib");
-    }
-    if explicit.durable_prefix_cache_min_tokens || args.durable_prefix_cache_min_tokens != 1024 {
-        unsupported.push("--durable-prefix-cache-min-tokens");
-    }
     if args.request_stats.is_some() {
         unsupported.push("--request-stats");
     }
@@ -2826,12 +2826,6 @@ fn deepseek_v4_shared_unsupported_options(
     }
     if args.request_timing_warm_followup {
         unsupported.push("--request-timing-warm-followup");
-    }
-    if args.messages_preserve_thinking {
-        unsupported.push("--messages-preserve-thinking");
-    }
-    if args.messages_strip_thinking {
-        unsupported.push("--messages-strip-thinking");
     }
     if args.messages_no_generation_prompt {
         unsupported.push("--messages-no-generation-prompt");
@@ -2847,6 +2841,24 @@ fn validate_deepseek_v4_generation_mode(args: &Args, explicit: ExplicitCliOption
     if args.max_context_tokens.is_some() {
         unsupported.push("--max-context-tokens");
     }
+    if args.messages_preserve_thinking
+        && matches!(args.reasoning, None | Some(ReasoningLevelArg::None))
+    {
+        // Preserved history reasoning is a release thinking-mode contract;
+        // accepting the flag in chat mode would silently no-op.
+        unsupported.push("--messages-preserve-thinking (requires --reasoning low, high, or max)");
+    }
+    if args.durable_prefix_cache.is_none() {
+        if explicit.durable_prefix_cache_max_mib {
+            unsupported.push("--durable-prefix-cache-max-mib");
+        }
+        if explicit.durable_prefix_cache_max_entry_mib {
+            unsupported.push("--durable-prefix-cache-max-entry-mib");
+        }
+        if explicit.durable_prefix_cache_min_tokens {
+            unsupported.push("--durable-prefix-cache-min-tokens");
+        }
+    }
     ensure!(
         unsupported.is_empty(),
         "DeepSeek V4 currently supports bounded raw or ordinary-message single-turn generation only; unsupported options: {}",
@@ -2861,6 +2873,26 @@ fn validate_deepseek_v4_generation_mode(args: &Args, explicit: ExplicitCliOption
 
 fn validate_deepseek_v4_requests_mode(args: &Args, explicit: ExplicitCliOptions) -> Result<()> {
     let mut unsupported = deepseek_v4_shared_unsupported_options(args, explicit);
+    if args.durable_prefix_cache.is_some() {
+        unsupported.push("--durable-prefix-cache");
+    }
+    if explicit.durable_prefix_cache_max_mib || args.durable_prefix_cache_max_mib != 32 * 1024 {
+        unsupported.push("--durable-prefix-cache-max-mib");
+    }
+    if explicit.durable_prefix_cache_max_entry_mib
+        || args.durable_prefix_cache_max_entry_mib != 16 * 1024
+    {
+        unsupported.push("--durable-prefix-cache-max-entry-mib");
+    }
+    if explicit.durable_prefix_cache_min_tokens || args.durable_prefix_cache_min_tokens != 1024 {
+        unsupported.push("--durable-prefix-cache-min-tokens");
+    }
+    if args.messages_preserve_thinking {
+        unsupported.push("--messages-preserve-thinking");
+    }
+    if args.messages_strip_thinking {
+        unsupported.push("--messages-strip-thinking");
+    }
     if args.deepseek_v4_snapshot.is_some() {
         // Also excluded at the parser level; kept as a defensive invariant.
         unsupported.push("--deepseek-v4-snapshot");
@@ -3286,6 +3318,7 @@ fn run_deepseek_v4_single_turn(
     gguf: GgufFile,
     args: &Args,
     explicit: ExplicitCliOptions,
+    staged_integrity: Option<StagedIntegrityMode>,
 ) -> Result<()> {
     validate_deepseek_v4_generation_mode(args, explicit)?;
     ensure!(args.tokens > 0, "--tokens must be >= 1");
@@ -3303,9 +3336,25 @@ fn run_deepseek_v4_single_turn(
     let arrival_ms = unix_epoch_ms()?;
     let encode_options = deepseek_v4_encode_options(args)?;
     let (prompt, prompt_source) = if let Some(path) = args.messages.as_ref() {
+        let mut encode_options = encode_options;
+        let inline_thinking = if args.messages_strip_thinking {
+            DeepSeekV4InlineThinking::Strip
+        } else if args.messages_preserve_thinking {
+            // Tier presence is enforced by validate_deepseek_v4_generation_mode;
+            // the flag maps onto the release encoder's drop_thinking=False lane.
+            encode_options.preserve_reasoning = true;
+            DeepSeekV4InlineThinking::PromoteToReasoning
+        } else {
+            DeepSeekV4InlineThinking::Verbatim
+        };
         (
-            load_deepseek_v4_0731_messages_prompt(path, args.messages_max, encode_options)
-                .context("render DeepSeek V4 0731 messages")?,
+            load_deepseek_v4_0731_messages_prompt(
+                path,
+                args.messages_max,
+                encode_options,
+                inline_thinking,
+            )
+            .context("render DeepSeek V4 0731 messages")?,
             PromptSource::Messages,
         )
     } else {
@@ -3338,26 +3387,85 @@ fn run_deepseek_v4_single_turn(
             checked_deepseek_v4_token_id(token, vocab_size, &format!("prompt[{index}]"))
         })
         .collect::<Result<Vec<_>>>()?;
+    let durable_store = deepseek_v4_checkpoint_store(args, staged_integrity)?;
+    let durable_max_record_bytes = if durable_store.is_some() {
+        durable_prefix_cache_max_entry_bytes(args)?
+    } else {
+        0
+    };
+    let mut durable_admitted = durable_store.is_some()
+        && args.durable_prefix_cache_min_tokens > 0
+        && prompt_token_ids.len() >= args.durable_prefix_cache_min_tokens;
+    if let Some(publish_prefix) =
+        deepseek_v4_durable_capture_prefix_len(prompt_token_ids.len(), durable_admitted)?
+    {
+        let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf)
+            .context("bind durable DeepSeek V4 snapshot geometry")?;
+        let session_capacity = DeepSeekV4SessionCapacity::for_forward_limit(
+            required_forwards,
+            model.config.context_length,
+        )
+        .context("derive durable DeepSeek V4 snapshot session capacity")?;
+        let durable_record_admitted = causal_snapshot_record_bytes(
+            &model.config,
+            session_capacity,
+            u32::try_from(publish_prefix).context("DeepSeek V4 durable prefix exceeds u32")?,
+            durable_max_record_bytes,
+        );
+        if let Err(error) = durable_record_admitted.as_ref() {
+            durable_admitted = false;
+            eprintln!(
+                "warning: durable DeepSeek V4 prefix capture is not admissible; generation will continue without publication: {error}"
+            );
+        }
+    }
     let stop_tokens = gguf
         .stop_token_ids()
         .context("load producer-declared DeepSeek V4 stop tokens")?;
     for &token in &stop_tokens {
         checked_deepseek_v4_token_id(token, vocab_size, "stop")?;
     }
-    let (snapshot_model_content_id, snapshot_file_exists) = if let Some(path) =
-        args.deepseek_v4_snapshot.as_ref()
-    {
-        let parent = deepseek_v4_snapshot_parent(path)?;
-        let exists = match path.symlink_metadata() {
-            Ok(_) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+    // Probe store occupancy before resolving the strong model identity so an
+    // empty store with no planned capture skips identity work entirely.
+    let durable_probe_t0 = Instant::now();
+    let durable_has_blobs: Option<bool> = match durable_store.as_ref() {
+        None => None,
+        Some(store) => match store.has_managed_blobs() {
+            Ok(has_blobs) => Some(has_blobs),
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("inspect DeepSeek V4 snapshot path {}", path.display())
-                });
+                eprintln!(
+                    "warning: durable DeepSeek V4 prefix inventory failed after {:.1} ms; cold-prefilling: {error}",
+                    durable_probe_t0.elapsed().as_secs_f64() * 1e3,
+                );
+                None
             }
+        },
+    };
+    let durable_probe_ms = durable_probe_t0.elapsed().as_secs_f64() * 1e3;
+    let durable_identity_needed = durable_store.is_some()
+        && prompt_token_ids.len() >= 2
+        && (durable_has_blobs == Some(true) || durable_admitted);
+    let (snapshot_model_content_id, snapshot_file_exists) = if args.deepseek_v4_snapshot.is_some()
+        || durable_identity_needed
+    {
+        let explicit_snapshot_path = args.deepseek_v4_snapshot.as_ref();
+        let snapshot_parent = explicit_snapshot_path
+            .map(|path| deepseek_v4_snapshot_parent(path))
+            .transpose()?;
+        let exists = if let Some(path) = explicit_snapshot_path {
+            match path.symlink_metadata() {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("inspect DeepSeek V4 snapshot path {}", path.display())
+                    });
+                }
+            }
+        } else {
+            false
         };
-        if !exists {
+        if explicit_snapshot_path.is_some() && !exists {
             let publish_prefix = deepseek_v4_snapshot_publish_prefix(prompt_token_ids.len())?;
             let model = DeepSeekV4Model::from_gguf_flash_0731(&gguf)
                 .context("bind DeepSeek V4 snapshot geometry")?;
@@ -3374,19 +3482,25 @@ fn run_deepseek_v4_single_turn(
             )
             .context("preflight DeepSeek V4 causal snapshot record budget")?;
         }
-        let identity_cache = deepseek_v4_snapshot_identity_cache(parent)?;
+        let identity_cache = if let Some(store) = durable_store.as_ref() {
+            store.identity_cache()
+        } else {
+            deepseek_v4_snapshot_identity_cache(
+                snapshot_parent.expect("explicit snapshot path resolved a parent"),
+            )?
+        };
         let identity_t0 = Instant::now();
         let report = checkpoint_content_identity(&gguf, &identity_cache)
             .context("derive strong ordered-shard DeepSeek V4 model identity")?;
         eprintln!(
-            "deepseek_v4: snapshot model identity cache={} hashed_bytes={} elapsed_ms={:.1}",
+            "deepseek_v4: checkpoint model identity cache={} hashed_bytes={} elapsed_ms={:.1}",
             identity_cache_outcome_label(report.outcome),
             report.bytes_hashed,
             identity_t0.elapsed().as_secs_f64() * 1e3,
         );
         (
             Some(DeepSeekV4ModelContentId::new(report.content_id)),
-            exists,
+            explicit_snapshot_path.is_some() && exists,
         )
     } else {
         (None, false)
@@ -3453,6 +3567,71 @@ fn run_deepseek_v4_single_turn(
     } else {
         None
     };
+    let durable_compatibility = snapshot_model_content_id.map(|model_content_id| {
+        DeepSeekV4CompatibilityDigest::for_model(model_content_id, load_plan.config())
+    });
+    let mut durable_lookup = None;
+    let mut durable_restore_ms = durable_probe_ms;
+    if let Some(store) = durable_store.as_ref() {
+        if durable_has_blobs == Some(true) {
+            let restore_t0 = Instant::now();
+            if let (Some(model_content_id), Some(compatibility_digest)) =
+                (snapshot_model_content_id, durable_compatibility)
+            {
+                let context = DeepSeekV4StoreContext {
+                    compatibility_digest,
+                    codec_constraints: DeepSeekV4SnapshotCodecConstraints {
+                        config: load_plan.config(),
+                        session_capacity: load_plan.session_capacity(),
+                        expected_model_content_id: model_content_id,
+                        max_record_bytes: durable_max_record_bytes,
+                    },
+                    max_record_bytes: durable_max_record_bytes,
+                };
+                match store.lookup(context, &prompt_token_ids) {
+                    Ok(lookup) => {
+                        durable_restore_ms =
+                            durable_probe_ms + restore_t0.elapsed().as_secs_f64() * 1e3;
+                        eprintln!(
+                            concat!(
+                                "durable_prefix_cache: family=deepseek_v4 checkpoint_hit={} ",
+                                "matched={} restored={} exact={} candidates={} corrupt_removed={} ",
+                                "restore_total_ms={:.1}"
+                            ),
+                            lookup.snapshot.is_some(),
+                            lookup.matched_prefix_len,
+                            lookup.restored_prefix_len,
+                            lookup.exact,
+                            lookup.candidates_examined,
+                            lookup.corrupt_entries_removed,
+                            durable_restore_ms,
+                        );
+                        durable_lookup = Some(lookup);
+                    }
+                    Err(error) => {
+                        durable_restore_ms =
+                            durable_probe_ms + restore_t0.elapsed().as_secs_f64() * 1e3;
+                        eprintln!(
+                            "warning: durable DeepSeek V4 prefix lookup failed after {:.1} ms; cold-prefilling: {error}",
+                            durable_restore_ms,
+                        );
+                    }
+                }
+            } else {
+                // Occupied store, but the prompt cannot restore a strict
+                // prefix (fewer than two tokens), so no identity was resolved.
+                eprintln!(
+                    "durable_prefix_cache: family=deepseek_v4 checkpoint_hit=false skipped=short_prompt restore_total_ms={:.1}",
+                    durable_probe_ms,
+                );
+            }
+        } else if durable_has_blobs == Some(false) {
+            eprintln!(
+                "durable_prefix_cache: family=deepseek_v4 store_empty=true restore_total_ms={:.1}",
+                durable_probe_ms,
+            );
+        }
+    }
     let memory_plan = load_plan.memory_plan().clone();
     let initial_memory_signals = ctx.memory_signals();
     eprintln!("deepseek_v4: memory plan; {memory_plan}");
@@ -3511,6 +3690,8 @@ fn run_deepseek_v4_single_turn(
     );
 
     let prefill_t0 = Instant::now();
+    let mut durable_snapshot_to_publish = None;
+    let mut durable_capture_ms = 0.0;
     let prefill_mode = if let Some(snapshot_path) = args.deepseek_v4_snapshot.as_ref() {
         let model_content_id = snapshot_model_content_id
             .expect("snapshot path resolved a model-content identity before residency");
@@ -3582,6 +3763,131 @@ fn run_deepseek_v4_single_turn(
             );
             "causal_snapshot_publish"
         }
+    } else if durable_lookup
+        .as_ref()
+        .is_some_and(|lookup| lookup.snapshot.is_some())
+    {
+        let mut lookup = durable_lookup
+            .take()
+            .expect("durable DeepSeek V4 hit report disappeared");
+        let snapshot = lookup
+            .snapshot
+            .take()
+            .expect("durable DeepSeek V4 hit report lost its snapshot");
+        let restored_prefix = lookup.restored_prefix_len;
+        match session.restore_causal_snapshot(&snapshot) {
+            Ok(()) => {
+                let payload_bytes = snapshot.payload_bytes();
+                drop(snapshot);
+                if let Some(publish_prefix) = deepseek_v4_durable_capture_prefix_len(
+                    prompt_token_ids.len(),
+                    durable_admitted,
+                )? {
+                    if restored_prefix < publish_prefix {
+                        advance_deepseek_v4_prompt_prefix(
+                            &mut session,
+                            &ctx,
+                            &prompt_token_ids[restored_prefix..publish_prefix],
+                            prefill_chunk_tokens,
+                        )?;
+                    }
+                    let capture_t0 = Instant::now();
+                    match session.capture_causal_snapshot() {
+                        Ok(snapshot) => durable_snapshot_to_publish = Some(snapshot),
+                        Err(error)
+                            if causal_snapshot_capture_error_kind(&error)
+                                == DeepSeekV4SnapshotCaptureErrorKind::Allocation =>
+                        {
+                            eprintln!(
+                                "warning: durable DeepSeek V4 prefix capture allocation failed; continuing without publication: {error}"
+                            );
+                        }
+                        Err(error) => {
+                            return Err(error)
+                                .context("capture durable DeepSeek V4 causal snapshot");
+                        }
+                    }
+                    durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+                    let suffix_chunks = execute_deepseek_v4_prompt_suffix(
+                        &mut session,
+                        &ctx,
+                        &prompt_token_ids[publish_prefix..],
+                        prefill_chunk_tokens,
+                    )?;
+                    eprintln!(
+                        "deepseek_v4: durable restore restored_tokens={} promoted_tokens={} suffix_tokens={} suffix_chunks={} payload_bytes={}",
+                        restored_prefix,
+                        publish_prefix - restored_prefix,
+                        prompt_token_ids.len() - publish_prefix,
+                        suffix_chunks,
+                        payload_bytes,
+                    );
+                } else {
+                    let suffix_chunks = execute_deepseek_v4_prompt_suffix(
+                        &mut session,
+                        &ctx,
+                        &prompt_token_ids[restored_prefix..],
+                        prefill_chunk_tokens,
+                    )?;
+                    eprintln!(
+                        "deepseek_v4: durable restore restored_tokens={} promoted_tokens=0 suffix_tokens={} suffix_chunks={} payload_bytes={}",
+                        restored_prefix,
+                        prompt_token_ids.len() - restored_prefix,
+                        suffix_chunks,
+                        payload_bytes,
+                    );
+                }
+            }
+            Err(error)
+                if causal_snapshot_restore_error_kind(&error)
+                    == DeepSeekV4SnapshotRestoreErrorKind::Allocation =>
+            {
+                eprintln!(
+                    "warning: durable DeepSeek V4 prefix restore allocation failed; cold-prefilling: {error}"
+                );
+                drop(snapshot);
+                execute_deepseek_v4_prompt_suffix(
+                    &mut session,
+                    &ctx,
+                    &prompt_token_ids,
+                    prefill_chunk_tokens,
+                )?;
+            }
+            Err(error) => return Err(error).context("restore durable DeepSeek V4 causal snapshot"),
+        }
+        "durable_prefix_restore"
+    } else if let Some(publish_prefix) =
+        deepseek_v4_durable_capture_prefix_len(prompt_token_ids.len(), durable_admitted)?
+    {
+        advance_deepseek_v4_prompt_prefix(
+            &mut session,
+            &ctx,
+            &prompt_token_ids[..publish_prefix],
+            prefill_chunk_tokens,
+        )?;
+        let capture_t0 = Instant::now();
+        match session.capture_causal_snapshot() {
+            Ok(snapshot) => durable_snapshot_to_publish = Some(snapshot),
+            Err(error)
+                if causal_snapshot_capture_error_kind(&error)
+                    == DeepSeekV4SnapshotCaptureErrorKind::Allocation =>
+            {
+                eprintln!(
+                    "warning: durable DeepSeek V4 prefix capture allocation failed; continuing without publication: {error}"
+                );
+            }
+            Err(error) => {
+                return Err(error).context("capture durable DeepSeek V4 causal snapshot");
+            }
+        }
+        durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+        execute_deepseek_v4_prompt_suffix(
+            &mut session,
+            &ctx,
+            &prompt_token_ids[publish_prefix..],
+            prefill_chunk_tokens,
+        )?;
+        "durable_prefix_capture"
     } else {
         let packed_chunk_count =
             deepseek_v4_packed_chunk_count(prompt_token_ids.len(), prefill_chunk_tokens);
@@ -3734,6 +4040,47 @@ fn run_deepseek_v4_single_turn(
         },
     )?;
     drop(stdout);
+    if let (Some(store), Some(snapshot)) =
+        (durable_store.as_ref(), durable_snapshot_to_publish.as_ref())
+    {
+        let publish_t0 = Instant::now();
+        let model_content_id = snapshot_model_content_id
+            .expect("durable cache resolved a model-content identity before capture");
+        let compatibility_digest = durable_compatibility
+            .expect("durable cache resolved a compatibility digest before publication");
+        let context = DeepSeekV4StoreContext {
+            compatibility_digest,
+            codec_constraints: DeepSeekV4SnapshotCodecConstraints {
+                config: session.residency().config(),
+                session_capacity: session.capacity(),
+                expected_model_content_id: model_content_id,
+                max_record_bytes: durable_max_record_bytes,
+            },
+            max_record_bytes: durable_max_record_bytes,
+        };
+        match store.publish(context, snapshot) {
+            Ok(report) => eprintln!(
+                concat!(
+                    "durable_prefix_cache: family=deepseek_v4 publish={} capture=prompt ",
+                    "matched_tokens={} restored_tokens={} pending=false blob_bytes={} evicted={} ",
+                    "staged_integrity={} staged_integrity_us={} capture_ms={:.1} publish_ms={:.1}"
+                ),
+                publish_outcome_label(report.outcome),
+                snapshot.next_position(),
+                snapshot.next_position(),
+                report.blob_bytes,
+                report.evicted_entries,
+                report.staged_integrity.mode.as_str(),
+                report.staged_integrity.elapsed.as_micros(),
+                durable_capture_ms,
+                publish_t0.elapsed().as_secs_f64() * 1e3,
+            ),
+            Err(error) => eprintln!(
+                "warning: durable DeepSeek V4 prefix publication failed after response (restore_ms={:.1} capture_ms={:.1}): {error}",
+                durable_restore_ms, durable_capture_ms,
+            ),
+        }
+    }
     #[cfg(feature = "dsv4-diagnostics")]
     if temporal_capture.requested_tokens() > 0 {
         let mut report = temporal_capture.finish();
@@ -8129,6 +8476,33 @@ fn durable_checkpoint_store(
     }))
 }
 
+fn deepseek_v4_checkpoint_store(
+    args: &Args,
+    staged_integrity: Option<StagedIntegrityMode>,
+) -> Result<Option<DeepSeekV4CheckpointStore>> {
+    let Some(root) = args.durable_prefix_cache.as_ref() else {
+        return Ok(None);
+    };
+    let budget = mib_to_bytes(
+        args.durable_prefix_cache_max_mib,
+        "durable prefix cache byte budget",
+    )?;
+    Ok(Some(match staged_integrity {
+        Some(mode) => DeepSeekV4CheckpointStore::with_staged_integrity(root, budget, mode),
+        None => DeepSeekV4CheckpointStore::new(root, budget),
+    }))
+}
+
+fn deepseek_v4_durable_capture_prefix_len(
+    prompt_len: usize,
+    admitted: bool,
+) -> Result<Option<usize>> {
+    if !admitted || prompt_len < 2 {
+        return Ok(None);
+    }
+    deepseek_v4_snapshot_publish_prefix(prompt_len).map(Some)
+}
+
 fn configured_checkpoint_staged_integrity() -> Result<Option<StagedIntegrityMode>> {
     match std::env::var(CHECKPOINT_STAGED_INTEGRITY_ENV) {
         Ok(value) => parse_checkpoint_staged_integrity(Some(&value)),
@@ -9528,15 +9902,64 @@ mod tests {
             "--messages-strip-thinking",
         ])
         .unwrap();
+        validate_deepseek_v4_generation_mode(&messages_with_strip, ExplicitCliOptions::default())
+            .unwrap();
+
+        let preserve_with_tier = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--messages-preserve-thinking",
+            "--reasoning",
+            "low",
+        ])
+        .unwrap();
+        validate_deepseek_v4_generation_mode(&preserve_with_tier, ExplicitCliOptions::default())
+            .unwrap();
+
         assert!(
-            validate_deepseek_v4_generation_mode(
-                &messages_with_strip,
-                ExplicitCliOptions::default(),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("--messages-strip-thinking")
+            Args::try_parse_from([
+                "qwen",
+                "--model",
+                "model.gguf",
+                "--messages",
+                "messages.json",
+                "--messages-strip-thinking",
+                "--preserve-reasoning",
+            ])
+            .is_err(),
+            "strip-thinking must conflict with preserve-reasoning at the parser"
         );
+
+        let durable = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--messages",
+            "messages.json",
+            "--messages-strip-thinking",
+            "--durable-prefix-cache",
+            "cache",
+            "--durable-prefix-cache-min-tokens",
+            "1024",
+            "--durable-prefix-cache-max-mib",
+            "4096",
+            "--durable-prefix-cache-max-entry-mib",
+            "4096",
+        ])
+        .unwrap();
+        validate_deepseek_v4_generation_mode(
+            &durable,
+            ExplicitCliOptions {
+                durable_prefix_cache_min_tokens: true,
+                durable_prefix_cache_max_mib: true,
+                durable_prefix_cache_max_entry_mib: true,
+                ..ExplicitCliOptions::default()
+            },
+        )
+        .unwrap();
 
         let jsonl = Args::try_parse_from([
             "qwen",
@@ -10382,6 +10805,26 @@ mod tests {
                     .collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn deepseek_v4_durable_capture_boundary_promotes_growing_prompts() {
+        assert_eq!(
+            deepseek_v4_durable_capture_prefix_len(1024, true).unwrap(),
+            Some(1023)
+        );
+        assert_eq!(
+            deepseek_v4_durable_capture_prefix_len(2048, true).unwrap(),
+            Some(2047)
+        );
+        assert_eq!(
+            deepseek_v4_durable_capture_prefix_len(2048, false).unwrap(),
+            None
+        );
+        assert_eq!(
+            deepseek_v4_durable_capture_prefix_len(1, true).unwrap(),
+            None
+        );
     }
 
     #[test]

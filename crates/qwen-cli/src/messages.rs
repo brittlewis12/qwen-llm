@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct ChatMessage {
     pub(crate) role: String,
     pub(crate) content: String,
@@ -189,16 +189,142 @@ pub(crate) fn load_deepseek_v4_0731_messages_prompt(
     path: &Path,
     max_messages: Option<usize>,
     options: DeepSeekV4EncodeOptions,
+    inline_thinking: DeepSeekV4InlineThinking,
 ) -> Result<String> {
-    let (messages, meta) = load_messages_input(path, max_messages)?;
-    validate_deepseek_v4_0731_wrapper_metadata(&meta)?;
+    let (mut messages, meta) = load_messages_input(path, max_messages)?;
+    normalize_deepseek_v4_inline_thinking(&mut messages, inline_thinking)?;
+    validate_deepseek_v4_0731_wrapper_metadata(&meta, options)?;
     render_deepseek_v4_0731_messages_prompt(&messages, options)
 }
 
-fn validate_deepseek_v4_0731_wrapper_metadata(meta: &serde_json::Value) -> Result<()> {
+/// Policy for assistant-history `content` that embeds a leading inline
+/// `<think>...</think>` block (or the headless `reasoning</think>visible`
+/// shape produced by capturing raw DeepSeek V4 thinking-mode output, whose
+/// opening tag lives in the prompt template).
+///
+/// `Verbatim` preserves the byte-exact 0731 release contract: content passes
+/// through untouched. `Strip` and `PromoteToReasoning` are the transcript
+/// normalizations behind `--messages-strip-thinking` and
+/// `--messages-preserve-thinking`, which let family-portable saves (inline
+/// thinking in `content`) round-trip through the release encoder's structured
+/// `reasoning` field semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)] // The bench binary shares this module without the DS4 CLI lanes.
+pub(crate) enum DeepSeekV4InlineThinking {
+    Verbatim,
+    Strip,
+    PromoteToReasoning,
+}
+
+fn normalize_deepseek_v4_inline_thinking(
+    messages: &mut [ChatMessage],
+    mode: DeepSeekV4InlineThinking,
+) -> Result<()> {
+    if mode == DeepSeekV4InlineThinking::Verbatim {
+        return Ok(());
+    }
+    for (index, message) in messages.iter_mut().enumerate() {
+        if message.role != "assistant" {
+            continue;
+        }
+        let Some((reasoning, visible)) = split_leading_inline_thinking(&message.content)
+            .with_context(|| format!("DeepSeek V4 message {index}"))?
+        else {
+            continue;
+        };
+        match mode {
+            DeepSeekV4InlineThinking::Verbatim => unreachable!(),
+            DeepSeekV4InlineThinking::Strip => {
+                message.content = visible;
+            }
+            DeepSeekV4InlineThinking::PromoteToReasoning => {
+                if message.reasoning.is_some() || message.reasoning_content.is_some() {
+                    bail!(
+                        "DeepSeek V4 message {index} carries both inline <think> content and a structured reasoning field"
+                    );
+                }
+                message.reasoning = Some(reasoning);
+                message.content = visible;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Split one leading inline thinking block out of assistant content.
+///
+/// Recognizes `<think>R</think>V` and the headless `R</think>V` transcript
+/// shape. A `</think>` preceded by a later-positioned `<think>` opener is not
+/// a leading block and passes through verbatim; an opened but unterminated
+/// block fails closed rather than guessing at the boundary.
+fn split_leading_inline_thinking(content: &str) -> Result<Option<(String, String)>> {
+    let trimmed = content.trim_start();
+    if let Some(rest) = trimmed.strip_prefix(DEEPSEEK_V4_THINK_START) {
+        let Some((reasoning, visible)) = rest.split_once(DEEPSEEK_V4_THINK_END) else {
+            bail!("assistant content opens an inline <think> block without closing it");
+        };
+        return Ok(Some((
+            reasoning.trim().to_string(),
+            visible.trim().to_string(),
+        )));
+    }
+    if let Some((reasoning, visible)) = trimmed.split_once(DEEPSEEK_V4_THINK_END) {
+        if reasoning.contains(DEEPSEEK_V4_THINK_START) {
+            return Ok(None);
+        }
+        return Ok(Some((
+            reasoning.trim().to_string(),
+            visible.trim().to_string(),
+        )));
+    }
+    Ok(None)
+}
+
+fn validate_deepseek_v4_0731_wrapper_metadata(
+    meta: &serde_json::Value,
+    options: DeepSeekV4EncodeOptions,
+) -> Result<()> {
+    const GAME_METADATA_FIELDS: &[&str] = &[
+        "created_at",
+        "forked_from",
+        "max_tokens",
+        "model",
+        "preserve_thinking",
+        "prompt_version",
+        "reasoning",
+        "seed",
+        "temp",
+    ];
     match meta {
         serde_json::Value::Null => Ok(()),
         serde_json::Value::Object(fields) if fields.is_empty() => Ok(()),
+        serde_json::Value::Object(fields)
+            if fields
+                .keys()
+                .all(|key| GAME_METADATA_FIELDS.contains(&key.as_str())) =>
+        {
+            if let Some(model) = fields.get("model")
+                && !model.is_string()
+            {
+                bail!("DeepSeek V4 messages have malformed wrapper field: model");
+            }
+            if let Some(reasoning) = fields.get("reasoning")
+                && !reasoning.is_string()
+            {
+                bail!("DeepSeek V4 messages have malformed wrapper field: reasoning");
+            }
+            if let Some(preserve) = fields.get("preserve_thinking") {
+                let preserve = preserve.as_bool().ok_or_else(|| {
+                    anyhow!("DeepSeek V4 messages have malformed wrapper field: preserve_thinking")
+                })?;
+                if preserve && !options.preserve_reasoning {
+                    bail!(
+                        "DeepSeek V4 wrapper requests preserve_thinking=true; use --messages-preserve-thinking (or --preserve-reasoning) with --reasoning low, high, or max"
+                    );
+                }
+            }
+            Ok(())
+        }
         serde_json::Value::Object(fields) => bail!(
             "DeepSeek V4 messages have unsupported wrapper fields: {}",
             fields
@@ -1127,10 +1253,14 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let error =
-            load_deepseek_v4_0731_messages_prompt(&path, None, DeepSeekV4EncodeOptions::default())
-                .unwrap_err()
-                .to_string();
+        let error = load_deepseek_v4_0731_messages_prompt(
+            &path,
+            None,
+            DeepSeekV4EncodeOptions::default(),
+            DeepSeekV4InlineThinking::Verbatim,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("reasoning_effort"));
         assert!(error.contains("tools"));
 
@@ -1147,19 +1277,232 @@ mod tests {
         )
         .unwrap();
         let chat = DeepSeekV4EncodeOptions::default();
-        assert!(load_deepseek_v4_0731_messages_prompt(&path, Some(1), chat).is_ok());
-        let error = load_deepseek_v4_0731_messages_prompt(&path, Some(2), chat)
+        let verbatim = DeepSeekV4InlineThinking::Verbatim;
+        assert!(load_deepseek_v4_0731_messages_prompt(&path, Some(1), chat, verbatim).is_ok());
+        let error = load_deepseek_v4_0731_messages_prompt(&path, Some(2), chat, verbatim)
             .unwrap_err()
             .to_string();
         assert!(error.contains("must end with a user turn"));
-        assert!(load_deepseek_v4_0731_messages_prompt(&path, Some(3), chat).is_ok());
+        assert!(load_deepseek_v4_0731_messages_prompt(&path, Some(3), chat, verbatim).is_ok());
         // The trailing assistant message now carries a representable
         // reasoning field, so the full list fails on conversation shape
         // rather than on the field itself.
-        let error = load_deepseek_v4_0731_messages_prompt(&path, None, chat)
+        let error = load_deepseek_v4_0731_messages_prompt(&path, None, chat, verbatim)
             .unwrap_err()
             .to_string();
         assert!(error.contains("must end with a user turn"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn deepseek_v4_loader_accepts_game_wrapper_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "qwen-dsv4-game-wrapper-{}.json",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"{
+                "meta": {
+                    "model":"/tmp/deepseek-v4.gguf",
+                    "seed":42,
+                    "temp":0.7,
+                    "max_tokens":4096,
+                    "preserve_thinking":false,
+                    "created_at":"2026-08-13T00:00:00",
+                    "prompt_version":"the_current",
+                    "forked_from":"original"
+                },
+                "messages": [{"role":"user","content":"hello"}]
+            }"#,
+        )
+        .unwrap();
+        assert!(
+            load_deepseek_v4_0731_messages_prompt(
+                &path,
+                None,
+                DeepSeekV4EncodeOptions::default(),
+                DeepSeekV4InlineThinking::Strip,
+            )
+            .is_ok()
+        );
+
+        std::fs::write(
+            &path,
+            r#"{
+                "meta": {"model":"/tmp/deepseek-v4.gguf","preserve_thinking":true},
+                "messages": [{"role":"user","content":"hello"}]
+            }"#,
+        )
+        .unwrap();
+        let error = load_deepseek_v4_0731_messages_prompt(
+            &path,
+            None,
+            DeepSeekV4EncodeOptions::default(),
+            DeepSeekV4InlineThinking::Strip,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--messages-preserve-thinking"));
+        assert!(
+            load_deepseek_v4_0731_messages_prompt(
+                &path,
+                None,
+                DeepSeekV4EncodeOptions {
+                    reasoning: DeepSeekV4Reasoning::Low,
+                    preserve_reasoning: true,
+                },
+                DeepSeekV4InlineThinking::PromoteToReasoning,
+            )
+            .is_ok()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn deepseek_v4_inline_thinking_strip_and_promote_normalize_history() {
+        let mut messages = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "one <think>not assistant</think> text".into(),
+                reasoning: None,
+                reasoning_content: None,
+                extra: Default::default(),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "<think>tagged plan</think>tagged reply".into(),
+                reasoning: None,
+                reasoning_content: None,
+                extra: Default::default(),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "headless plan</think>headless reply".into(),
+                reasoning: None,
+                reasoning_content: None,
+                extra: Default::default(),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "prose then <think>mid</think> more prose".into(),
+                reasoning: None,
+                reasoning_content: None,
+                extra: Default::default(),
+            },
+        ];
+
+        let mut stripped = messages.clone();
+        normalize_deepseek_v4_inline_thinking(&mut stripped, DeepSeekV4InlineThinking::Strip)
+            .unwrap();
+        assert_eq!(stripped[0].content, messages[0].content);
+        assert_eq!(stripped[1].content, "tagged reply");
+        assert_eq!(stripped[1].reasoning, None);
+        assert_eq!(stripped[2].content, "headless reply");
+        // A `</think>` preceded by a later `<think>` opener is not a leading
+        // block; the message passes through verbatim.
+        assert_eq!(stripped[3].content, messages[3].content);
+
+        let mut promoted = messages.clone();
+        normalize_deepseek_v4_inline_thinking(
+            &mut promoted,
+            DeepSeekV4InlineThinking::PromoteToReasoning,
+        )
+        .unwrap();
+        assert_eq!(promoted[1].reasoning.as_deref(), Some("tagged plan"));
+        assert_eq!(promoted[1].content, "tagged reply");
+        assert_eq!(promoted[2].reasoning.as_deref(), Some("headless plan"));
+        assert_eq!(promoted[2].content, "headless reply");
+        assert_eq!(promoted[3].reasoning, None);
+
+        let mut verbatim = messages.clone();
+        normalize_deepseek_v4_inline_thinking(&mut verbatim, DeepSeekV4InlineThinking::Verbatim)
+            .unwrap();
+        assert_eq!(verbatim[1].content, messages[1].content);
+        assert_eq!(verbatim[2].content, messages[2].content);
+
+        messages[1].reasoning = Some("structured".into());
+        let error = normalize_deepseek_v4_inline_thinking(
+            &mut messages,
+            DeepSeekV4InlineThinking::PromoteToReasoning,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("both inline <think> content and a structured reasoning field"));
+
+        let mut unterminated = vec![ChatMessage {
+            role: "assistant".into(),
+            content: "<think>never closed".into(),
+            reasoning: None,
+            reasoning_content: None,
+            extra: Default::default(),
+        }];
+        let error = format!(
+            "{:#}",
+            normalize_deepseek_v4_inline_thinking(
+                &mut unterminated,
+                DeepSeekV4InlineThinking::Strip
+            )
+            .unwrap_err()
+        );
+        assert!(error.contains("DeepSeek V4 message 0"), "{error}");
+        assert!(error.contains("without closing it"), "{error}");
+    }
+
+    #[test]
+    fn deepseek_v4_promoted_inline_thinking_renders_release_preserve_contract() {
+        let messages = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "first".into(),
+                reasoning: None,
+                reasoning_content: None,
+                extra: Default::default(),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "<think>plan</think>reply".into(),
+                reasoning: None,
+                reasoning_content: None,
+                extra: Default::default(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "second".into(),
+                reasoning: None,
+                reasoning_content: None,
+                extra: Default::default(),
+            },
+        ];
+        let mut promoted = messages.clone();
+        normalize_deepseek_v4_inline_thinking(
+            &mut promoted,
+            DeepSeekV4InlineThinking::PromoteToReasoning,
+        )
+        .unwrap();
+        let options = DeepSeekV4EncodeOptions {
+            reasoning: DeepSeekV4Reasoning::Low,
+            preserve_reasoning: true,
+        };
+        let prompt = render_deepseek_v4_0731_messages_prompt(&promoted, options).unwrap();
+        assert_eq!(
+            prompt,
+            format!(
+                "{DEEPSEEK_V4_BOS}{DEEPSEEK_V4_USER}first{DEEPSEEK_V4_ASSISTANT}{DEEPSEEK_V4_THINK_START}plan{DEEPSEEK_V4_THINK_END}reply{DEEPSEEK_V4_EOS}{DEEPSEEK_V4_USER}second{DEEPSEEK_V4_ASSISTANT}{DEEPSEEK_V4_THINK_START}"
+            )
+        );
+
+        let mut stripped = messages.clone();
+        normalize_deepseek_v4_inline_thinking(&mut stripped, DeepSeekV4InlineThinking::Strip)
+            .unwrap();
+        let chat =
+            render_deepseek_v4_0731_messages_prompt(&stripped, DeepSeekV4EncodeOptions::default())
+                .unwrap();
+        assert_eq!(
+            chat,
+            format!(
+                "{DEEPSEEK_V4_BOS}{DEEPSEEK_V4_USER}first{DEEPSEEK_V4_ASSISTANT}{DEEPSEEK_V4_THINK_END}reply{DEEPSEEK_V4_EOS}{DEEPSEEK_V4_USER}second{DEEPSEEK_V4_ASSISTANT}{DEEPSEEK_V4_THINK_END}"
+            )
+        );
     }
 }

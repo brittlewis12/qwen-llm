@@ -46,6 +46,13 @@ impl DeepSeekV4CompatibilityDigest {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    pub fn for_model(
+        model_content_id: DeepSeekV4ModelContentId,
+        config: &DeepSeekV4Config,
+    ) -> Self {
+        snapshot_compatibility_digest(model_content_id, config)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +60,14 @@ pub enum DeepSeekV4SnapshotObservation {
     Unavailable,
     Available,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeepSeekV4SnapshotRestoreErrorKind {
+    Allocation,
+    Invariant,
+}
+
+pub type DeepSeekV4SnapshotCaptureErrorKind = DeepSeekV4SnapshotRestoreErrorKind;
 
 /// Exact causal state captured at a completed token boundary.
 ///
@@ -109,6 +124,20 @@ impl DeepSeekV4CausalSnapshot {
         ((self.prefix_tokens.len() + self.compressor_f32_bits.len()) * size_of::<u32>()
             + (self.raw_f16_bits.len() + self.published_f16_bits.len()) * size_of::<u16>())
             as u64
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic_test_fixture(
+        ctx: &MetalContext,
+        next_position: u32,
+        seed: u32,
+    ) -> (
+        DeepSeekV4Config,
+        DeepSeekV4SessionCapacity,
+        DeepSeekV4ModelContentId,
+        Self,
+    ) {
+        tests::synthetic_snapshot_fixture(ctx, next_position, seed)
     }
 
     #[cfg(test)]
@@ -262,6 +291,30 @@ impl DeepSeekV4Session {
             consumed_layer_count,
             counterfactual_domain_digest: *hasher.finalize().as_bytes(),
         })
+    }
+}
+
+pub fn causal_snapshot_restore_error_kind(
+    error: &DeepSeekV4MetalError,
+) -> DeepSeekV4SnapshotRestoreErrorKind {
+    match error {
+        DeepSeekV4MetalError::Invalid(message)
+            if message.starts_with("allocate snapshot raw restore image (") =>
+        {
+            DeepSeekV4SnapshotRestoreErrorKind::Allocation
+        }
+        _ => DeepSeekV4SnapshotRestoreErrorKind::Invariant,
+    }
+}
+
+pub fn causal_snapshot_capture_error_kind(
+    error: &DeepSeekV4MetalError,
+) -> DeepSeekV4SnapshotCaptureErrorKind {
+    match error {
+        DeepSeekV4MetalError::Invalid(message) if message.starts_with("allocate snapshot ") => {
+            DeepSeekV4SnapshotCaptureErrorKind::Allocation
+        }
+        _ => DeepSeekV4SnapshotCaptureErrorKind::Invariant,
     }
 }
 
@@ -1495,6 +1548,30 @@ mod tests {
             &state.frontiers,
         )
         .unwrap()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic_snapshot_fixture(
+        ctx: &MetalContext,
+        next_position: u32,
+        seed: u32,
+    ) -> (
+        DeepSeekV4Config,
+        DeepSeekV4SessionCapacity,
+        DeepSeekV4ModelContentId,
+        DeepSeekV4CausalSnapshot,
+    ) {
+        let config = crate::deepseek_v4::flash_0731_config_fixture();
+        let state = synthetic_state(
+            ctx,
+            &config,
+            next_position,
+            DeepSeekV4SnapshotObservation::Unavailable,
+            seed,
+        );
+        let model_content_id = model_id(0x5a);
+        let snapshot = capture_synthetic(&config, &state, model_content_id);
+        (config, state.capacity, model_content_id, snapshot)
     }
 
     #[test]

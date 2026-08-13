@@ -33,9 +33,11 @@ pub use diagnostics::{
 
 pub use snapshot::{
     DeepSeekV4CausalSnapshot, DeepSeekV4CompatibilityDigest, DeepSeekV4EncodedSnapshot,
-    DeepSeekV4ModelContentId, DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotCodecError,
-    DeepSeekV4SnapshotFileError, DeepSeekV4SnapshotFileOutcome, DeepSeekV4SnapshotFileReport,
-    DeepSeekV4SnapshotObservation, causal_snapshot_record_bytes, decode_causal_snapshot,
+    DeepSeekV4ModelContentId, DeepSeekV4SnapshotCaptureErrorKind,
+    DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotCodecError, DeepSeekV4SnapshotFileError,
+    DeepSeekV4SnapshotFileOutcome, DeepSeekV4SnapshotFileReport, DeepSeekV4SnapshotObservation,
+    DeepSeekV4SnapshotRestoreErrorKind, causal_snapshot_capture_error_kind,
+    causal_snapshot_record_bytes, causal_snapshot_restore_error_kind, decode_causal_snapshot,
     encode_causal_snapshot, load_causal_snapshot_file, publish_causal_snapshot_file,
 };
 

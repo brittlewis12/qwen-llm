@@ -26,13 +26,14 @@ use qwen_llm::checkpoint_identity::{
 use qwen_llm::checkpoint_store::{DurableCheckpointStore, PublishOutcome, StagedIntegrityMode};
 use qwen_llm::deepseek_v4::{AttentionLane, DeepSeekV4Model, RouterWeights};
 use qwen_llm::deepseek_v4_census::DeepSeekV4CensusV1;
-use qwen_llm::deepseek_v4_checkpoint_store::{DeepSeekV4CheckpointStore, DeepSeekV4StoreContext};
+use qwen_llm::deepseek_v4_checkpoint_store::{
+    DeepSeekV4CheckpointStore, DeepSeekV4DurableError, DeepSeekV4PreparedCheckpoint,
+};
 use qwen_llm::deepseek_v4_metal::{
     DEEPSEEK_V4_DYNAMIC_MEMORY_RESERVE_BYTES, DEEPSEEK_V4_MULTIGROUP_SELECTOR_MAX_CAPACITY_ROWS,
     DEEPSEEK_V4_MULTIGROUP_SELECTOR_MIN_VISIBLE_ROWS, DEEPSEEK_V4_PREFILL_DEFAULT_TOKENS,
-    DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY,
-    DeepSeekV4CompatibilityDigest, DeepSeekV4MemorySamples, DeepSeekV4MetalResidency,
-    DeepSeekV4ModelContentId, DeepSeekV4MultigroupSelectorGeometry,
+    DEEPSEEK_V4_PREFILL_MAX_TOKENS, DEEPSEEK_V4_PROMOTED_FORWARD_CAPACITY, DeepSeekV4MemorySamples,
+    DeepSeekV4MetalResidency, DeepSeekV4ModelContentId, DeepSeekV4MultigroupSelectorGeometry,
     DeepSeekV4MultigroupSelectorTelemetry, DeepSeekV4Session, DeepSeekV4SessionCapacity,
     DeepSeekV4SnapshotCaptureErrorKind, DeepSeekV4SnapshotCodecConstraints,
     DeepSeekV4SnapshotFileOutcome, DeepSeekV4SnapshotRestoreErrorKind, DeepSeekV4StageKind,
@@ -3335,32 +3336,39 @@ fn run_deepseek_v4_single_turn(
     let sampling = cli_sampling_config(args)?;
     let arrival_ms = unix_epoch_ms()?;
     let encode_options = deepseek_v4_encode_options(args)?;
-    let (prompt, prompt_source) = if let Some(path) = args.messages.as_ref() {
-        let mut encode_options = encode_options;
-        let inline_thinking = if args.messages_strip_thinking {
-            DeepSeekV4InlineThinking::Strip
-        } else if args.messages_preserve_thinking {
-            // Tier presence is enforced by validate_deepseek_v4_generation_mode;
-            // the flag maps onto the release encoder's drop_thinking=False lane.
-            encode_options.preserve_reasoning = true;
-            DeepSeekV4InlineThinking::PromoteToReasoning
-        } else {
-            DeepSeekV4InlineThinking::Verbatim
-        };
-        (
-            load_deepseek_v4_0731_messages_prompt(
-                path,
-                args.messages_max,
-                encode_options,
-                inline_thinking,
+    let (prompt, prompt_source, durable_completed_eligible) =
+        if let Some(path) = args.messages.as_ref() {
+            let mut encode_options = encode_options;
+            let inline_thinking = if args.messages_strip_thinking {
+                DeepSeekV4InlineThinking::Strip
+            } else if args.messages_preserve_thinking {
+                // Tier presence is enforced by validate_deepseek_v4_generation_mode;
+                // the flag maps onto the release encoder's drop_thinking=False lane.
+                encode_options.preserve_reasoning = true;
+                DeepSeekV4InlineThinking::PromoteToReasoning
+            } else {
+                DeepSeekV4InlineThinking::Verbatim
+            };
+            // Preserved reasoning renders assistant turns byte-faithfully, so the
+            // next turn's re-rendered prompt strictly extends this turn's
+            // completed transcript; only then is a completed-turn checkpoint
+            // reusable.
+            let completed_eligible = encode_options.preserve_reasoning;
+            (
+                load_deepseek_v4_0731_messages_prompt(
+                    path,
+                    args.messages_max,
+                    encode_options,
+                    inline_thinking,
+                )
+                .context("render DeepSeek V4 0731 messages")?,
+                PromptSource::Messages,
+                completed_eligible,
             )
-            .context("render DeepSeek V4 0731 messages")?,
-            PromptSource::Messages,
-        )
-    } else {
-        let (prompt, source, _) = prompt_text(args)?;
-        (prompt, source)
-    };
+        } else {
+            let (prompt, source, _) = prompt_text(args)?;
+            (prompt, source, false)
+        };
     let prompt_kind = match prompt_source {
         PromptSource::Inline | PromptSource::File => "raw",
         PromptSource::Messages => match encode_options.reasoning {
@@ -3567,71 +3575,6 @@ fn run_deepseek_v4_single_turn(
     } else {
         None
     };
-    let durable_compatibility = snapshot_model_content_id.map(|model_content_id| {
-        DeepSeekV4CompatibilityDigest::for_model(model_content_id, load_plan.config())
-    });
-    let mut durable_lookup = None;
-    let mut durable_restore_ms = durable_probe_ms;
-    if let Some(store) = durable_store.as_ref() {
-        if durable_has_blobs == Some(true) {
-            let restore_t0 = Instant::now();
-            if let (Some(model_content_id), Some(compatibility_digest)) =
-                (snapshot_model_content_id, durable_compatibility)
-            {
-                let context = DeepSeekV4StoreContext {
-                    compatibility_digest,
-                    codec_constraints: DeepSeekV4SnapshotCodecConstraints {
-                        config: load_plan.config(),
-                        session_capacity: load_plan.session_capacity(),
-                        expected_model_content_id: model_content_id,
-                        max_record_bytes: durable_max_record_bytes,
-                    },
-                    max_record_bytes: durable_max_record_bytes,
-                };
-                match store.lookup(context, &prompt_token_ids) {
-                    Ok(lookup) => {
-                        durable_restore_ms =
-                            durable_probe_ms + restore_t0.elapsed().as_secs_f64() * 1e3;
-                        eprintln!(
-                            concat!(
-                                "durable_prefix_cache: family=deepseek_v4 checkpoint_hit={} ",
-                                "matched={} restored={} exact={} candidates={} corrupt_removed={} ",
-                                "restore_total_ms={:.1}"
-                            ),
-                            lookup.snapshot.is_some(),
-                            lookup.matched_prefix_len,
-                            lookup.restored_prefix_len,
-                            lookup.exact,
-                            lookup.candidates_examined,
-                            lookup.corrupt_entries_removed,
-                            durable_restore_ms,
-                        );
-                        durable_lookup = Some(lookup);
-                    }
-                    Err(error) => {
-                        durable_restore_ms =
-                            durable_probe_ms + restore_t0.elapsed().as_secs_f64() * 1e3;
-                        eprintln!(
-                            "warning: durable DeepSeek V4 prefix lookup failed after {:.1} ms; cold-prefilling: {error}",
-                            durable_restore_ms,
-                        );
-                    }
-                }
-            } else {
-                // Occupied store, but the prompt cannot restore a strict
-                // prefix (fewer than two tokens), so no identity was resolved.
-                eprintln!(
-                    "durable_prefix_cache: family=deepseek_v4 checkpoint_hit=false skipped=short_prompt restore_total_ms={:.1}",
-                    durable_probe_ms,
-                );
-            }
-        } else if durable_has_blobs == Some(false) {
-            eprintln!(
-                "durable_prefix_cache: family=deepseek_v4 store_empty=true restore_total_ms={:.1}",
-                durable_probe_ms,
-            );
-        }
-    }
     let memory_plan = load_plan.memory_plan().clone();
     let initial_memory_signals = ctx.memory_signals();
     eprintln!("deepseek_v4: memory plan; {memory_plan}");
@@ -3690,8 +3633,10 @@ fn run_deepseek_v4_single_turn(
     );
 
     let prefill_t0 = Instant::now();
-    let mut durable_snapshot_to_publish = None;
+    let mut durable_prepared: Option<DeepSeekV4PreparedCheckpoint> = None;
+    let mut durable_capture_kind = "prompt";
     let mut durable_capture_ms = 0.0;
+    let mut durable_restore_ms = durable_probe_ms;
     let prefill_mode = if let Some(snapshot_path) = args.deepseek_v4_snapshot.as_ref() {
         let model_content_id = snapshot_model_content_id
             .expect("snapshot path resolved a model-content identity before residency");
@@ -3763,153 +3708,104 @@ fn run_deepseek_v4_single_turn(
             );
             "causal_snapshot_publish"
         }
-    } else if durable_lookup
-        .as_ref()
-        .is_some_and(|lookup| lookup.snapshot.is_some())
-    {
-        let mut lookup = durable_lookup
-            .take()
-            .expect("durable DeepSeek V4 hit report disappeared");
-        let snapshot = lookup
-            .snapshot
-            .take()
-            .expect("durable DeepSeek V4 hit report lost its snapshot");
-        let restored_prefix = lookup.restored_prefix_len;
-        match session.restore_causal_snapshot(&snapshot) {
-            Ok(()) => {
-                let payload_bytes = snapshot.payload_bytes();
-                drop(snapshot);
-                if let Some(publish_prefix) = deepseek_v4_durable_capture_prefix_len(
-                    prompt_token_ids.len(),
-                    durable_admitted,
-                )? {
-                    if restored_prefix < publish_prefix {
-                        advance_deepseek_v4_prompt_prefix(
-                            &mut session,
-                            &ctx,
-                            &prompt_token_ids[restored_prefix..publish_prefix],
-                            prefill_chunk_tokens,
-                        )?;
-                    }
-                    let capture_t0 = Instant::now();
-                    match session.capture_causal_snapshot() {
-                        Ok(snapshot) => durable_snapshot_to_publish = Some(snapshot),
-                        Err(error)
-                            if causal_snapshot_capture_error_kind(&error)
-                                == DeepSeekV4SnapshotCaptureErrorKind::Allocation =>
-                        {
-                            eprintln!(
-                                "warning: durable DeepSeek V4 prefix capture allocation failed; continuing without publication: {error}"
-                            );
-                        }
-                        Err(error) => {
-                            return Err(error)
-                                .context("capture durable DeepSeek V4 causal snapshot");
-                        }
-                    }
-                    durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
-                    let suffix_chunks = execute_deepseek_v4_prompt_suffix(
-                        &mut session,
-                        &ctx,
-                        &prompt_token_ids[publish_prefix..],
-                        prefill_chunk_tokens,
-                    )?;
+    } else {
+        let (restored_prefix, durable_payload_bytes) = attempt_deepseek_v4_durable_restore(
+            durable_store.as_ref(),
+            durable_has_blobs,
+            &mut session,
+            &prompt_token_ids,
+            durable_max_record_bytes,
+            durable_probe_ms,
+            &mut durable_restore_ms,
+        )?;
+        // Completed-turn runs skip the mid-prefill prompt boundary: the
+        // post-decode transcript strictly covers it.
+        let capture_boundary = deepseek_v4_durable_capture_prefix_len(
+            prompt_token_ids.len(),
+            durable_admitted && !durable_completed_eligible,
+        )?;
+        if let Some(publish_prefix) = capture_boundary {
+            if restored_prefix < publish_prefix {
+                advance_deepseek_v4_prompt_prefix(
+                    &mut session,
+                    &ctx,
+                    &prompt_token_ids[restored_prefix..publish_prefix],
+                    prefill_chunk_tokens,
+                )?;
+            }
+            let capture_t0 = Instant::now();
+            match session.prepare_durable_checkpoint() {
+                Ok(prepared) => durable_prepared = Some(prepared),
+                Err(error)
+                    if causal_snapshot_capture_error_kind(&error)
+                        == DeepSeekV4SnapshotCaptureErrorKind::Allocation =>
+                {
                     eprintln!(
-                        "deepseek_v4: durable restore restored_tokens={} promoted_tokens={} suffix_tokens={} suffix_chunks={} payload_bytes={}",
-                        restored_prefix,
-                        publish_prefix - restored_prefix,
-                        prompt_token_ids.len() - publish_prefix,
-                        suffix_chunks,
-                        payload_bytes,
-                    );
-                } else {
-                    let suffix_chunks = execute_deepseek_v4_prompt_suffix(
-                        &mut session,
-                        &ctx,
-                        &prompt_token_ids[restored_prefix..],
-                        prefill_chunk_tokens,
-                    )?;
-                    eprintln!(
-                        "deepseek_v4: durable restore restored_tokens={} promoted_tokens=0 suffix_tokens={} suffix_chunks={} payload_bytes={}",
-                        restored_prefix,
-                        prompt_token_ids.len() - restored_prefix,
-                        suffix_chunks,
-                        payload_bytes,
+                        "warning: durable DeepSeek V4 prefix capture allocation failed; continuing without publication: {error}"
                     );
                 }
+                Err(error) => {
+                    return Err(error).context("capture durable DeepSeek V4 causal snapshot");
+                }
             }
-            Err(error)
-                if causal_snapshot_restore_error_kind(&error)
-                    == DeepSeekV4SnapshotRestoreErrorKind::Allocation =>
-            {
+            durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+            let suffix_chunks = execute_deepseek_v4_prompt_suffix(
+                &mut session,
+                &ctx,
+                &prompt_token_ids[publish_prefix..],
+                prefill_chunk_tokens,
+            )?;
+            if restored_prefix > 0 {
                 eprintln!(
-                    "warning: durable DeepSeek V4 prefix restore allocation failed; cold-prefilling: {error}"
+                    "deepseek_v4: durable restore restored_tokens={} promoted_tokens={} suffix_tokens={} suffix_chunks={} payload_bytes={}",
+                    restored_prefix,
+                    publish_prefix - restored_prefix,
+                    prompt_token_ids.len() - publish_prefix,
+                    suffix_chunks,
+                    durable_payload_bytes,
                 );
-                drop(snapshot);
+                "durable_prefix_restore"
+            } else {
+                "durable_prefix_capture"
+            }
+        } else if restored_prefix > 0 {
+            let suffix_chunks = execute_deepseek_v4_prompt_suffix(
+                &mut session,
+                &ctx,
+                &prompt_token_ids[restored_prefix..],
+                prefill_chunk_tokens,
+            )?;
+            eprintln!(
+                "deepseek_v4: durable restore restored_tokens={} promoted_tokens=0 suffix_tokens={} suffix_chunks={} payload_bytes={}",
+                restored_prefix,
+                prompt_token_ids.len() - restored_prefix,
+                suffix_chunks,
+                durable_payload_bytes,
+            );
+            "durable_prefix_restore"
+        } else {
+            let packed_chunk_count =
+                deepseek_v4_packed_chunk_count(prompt_token_ids.len(), prefill_chunk_tokens);
+            if packed_chunk_count > 0 {
                 execute_deepseek_v4_prompt_suffix(
                     &mut session,
                     &ctx,
                     &prompt_token_ids,
                     prefill_chunk_tokens,
                 )?;
-            }
-            Err(error) => return Err(error).context("restore durable DeepSeek V4 causal snapshot"),
-        }
-        "durable_prefix_restore"
-    } else if let Some(publish_prefix) =
-        deepseek_v4_durable_capture_prefix_len(prompt_token_ids.len(), durable_admitted)?
-    {
-        advance_deepseek_v4_prompt_prefix(
-            &mut session,
-            &ctx,
-            &prompt_token_ids[..publish_prefix],
-            prefill_chunk_tokens,
-        )?;
-        let capture_t0 = Instant::now();
-        match session.capture_causal_snapshot() {
-            Ok(snapshot) => durable_snapshot_to_publish = Some(snapshot),
-            Err(error)
-                if causal_snapshot_capture_error_kind(&error)
-                    == DeepSeekV4SnapshotCaptureErrorKind::Allocation =>
-            {
-                eprintln!(
-                    "warning: durable DeepSeek V4 prefix capture allocation failed; continuing without publication: {error}"
-                );
-            }
-            Err(error) => {
-                return Err(error).context("capture durable DeepSeek V4 causal snapshot");
-            }
-        }
-        durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
-        execute_deepseek_v4_prompt_suffix(
-            &mut session,
-            &ctx,
-            &prompt_token_ids[publish_prefix..],
-            prefill_chunk_tokens,
-        )?;
-        "durable_prefix_capture"
-    } else {
-        let packed_chunk_count =
-            deepseek_v4_packed_chunk_count(prompt_token_ids.len(), prefill_chunk_tokens);
-        if packed_chunk_count > 0 {
-            execute_deepseek_v4_prompt_suffix(
-                &mut session,
-                &ctx,
-                &prompt_token_ids,
-                prefill_chunk_tokens,
-            )?;
-            if packed_chunk_count == 1 {
-                "layer_major"
+                if packed_chunk_count == 1 {
+                    "layer_major"
+                } else {
+                    "layer_major_chunks"
+                }
             } else {
-                "layer_major_chunks"
+                for (index, &token) in prompt_token_ids.iter().enumerate() {
+                    session
+                        .forward_token(&ctx, token)
+                        .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
+                }
+                "singleton"
             }
-        } else {
-            for (index, &token) in prompt_token_ids.iter().enumerate() {
-                session
-                    .forward_token(&ctx, token)
-                    .with_context(|| format!("forward DeepSeek V4 prompt token {index}"))?;
-            }
-            "singleton"
         }
     };
     let reconciliation = memory_plan
@@ -4040,34 +3936,67 @@ fn run_deepseek_v4_single_turn(
         },
     )?;
     drop(stdout);
-    if let (Some(store), Some(snapshot)) =
-        (durable_store.as_ref(), durable_snapshot_to_publish.as_ref())
+    if durable_completed_eligible
+        && durable_admitted
+        && durable_store.is_some()
+        && durable_prepared.is_none()
+        && args.deepseek_v4_snapshot.is_none()
     {
+        if matches!(generation.stop_reason, StopReason::Eos) {
+            // The session sits at the completed transcript boundary: every
+            // prompt and generated token except the unconsumed terminal EOS.
+            match causal_snapshot_record_bytes(
+                session.residency().config(),
+                session.capacity(),
+                session.next_position(),
+                durable_max_record_bytes,
+            ) {
+                Ok(_) => {
+                    let capture_t0 = Instant::now();
+                    match session.prepare_durable_checkpoint() {
+                        Ok(prepared) => {
+                            durable_prepared = Some(prepared);
+                            durable_capture_kind = "completed";
+                        }
+                        Err(error)
+                            if causal_snapshot_capture_error_kind(&error)
+                                == DeepSeekV4SnapshotCaptureErrorKind::Allocation =>
+                        {
+                            eprintln!(
+                                "warning: durable DeepSeek V4 completed capture allocation failed; continuing without publication: {error}"
+                            );
+                        }
+                        Err(error) => {
+                            return Err(error)
+                                .context("capture completed DeepSeek V4 causal snapshot");
+                        }
+                    }
+                    durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
+                }
+                Err(error) => eprintln!(
+                    "warning: durable DeepSeek V4 completed capture is not admissible; continuing without publication: {error}"
+                ),
+            }
+        } else {
+            // A truncated turn's boundary can never prefix a retry of the
+            // same prompt; publishing it would only pollute the budget.
+            eprintln!(
+                "durable_prefix_cache: family=deepseek_v4 publish=skipped capture=completed reason=token_limit"
+            );
+        }
+    }
+    if let (Some(store), Some(prepared)) = (durable_store.as_ref(), durable_prepared.as_ref()) {
         let publish_t0 = Instant::now();
-        let model_content_id = snapshot_model_content_id
-            .expect("durable cache resolved a model-content identity before capture");
-        let compatibility_digest = durable_compatibility
-            .expect("durable cache resolved a compatibility digest before publication");
-        let context = DeepSeekV4StoreContext {
-            compatibility_digest,
-            codec_constraints: DeepSeekV4SnapshotCodecConstraints {
-                config: session.residency().config(),
-                session_capacity: session.capacity(),
-                expected_model_content_id: model_content_id,
-                max_record_bytes: durable_max_record_bytes,
-            },
-            max_record_bytes: durable_max_record_bytes,
-        };
-        match store.publish(context, snapshot) {
+        match store.publish_prepared(prepared, durable_max_record_bytes) {
             Ok(report) => eprintln!(
                 concat!(
-                    "durable_prefix_cache: family=deepseek_v4 publish={} capture=prompt ",
-                    "matched_tokens={} restored_tokens={} pending=false blob_bytes={} evicted={} ",
+                    "durable_prefix_cache: family=deepseek_v4 publish={} capture={} ",
+                    "matched_tokens={} blob_bytes={} evicted={} ",
                     "staged_integrity={} staged_integrity_us={} capture_ms={:.1} publish_ms={:.1}"
                 ),
                 publish_outcome_label(report.outcome),
-                snapshot.next_position(),
-                snapshot.next_position(),
+                durable_capture_kind,
+                prepared.next_position(),
                 report.blob_bytes,
                 report.evicted_entries,
                 report.staged_integrity.mode.as_str(),
@@ -8501,6 +8430,84 @@ fn deepseek_v4_durable_capture_prefix_len(
         return Ok(None);
     }
     deepseek_v4_snapshot_publish_prefix(prompt_len).map(Some)
+}
+
+/// Probe the durable store and restore the longest strict prefix into the
+/// session, translating the runtime's fail-open policy into telemetry:
+/// misses, store faults, and pre-mutation restore allocation failures all
+/// return `(0, 0)` and cold-prefill; only invariant restore failures are
+/// fatal. Returns `(restored_prefix_len, payload_bytes)`.
+fn attempt_deepseek_v4_durable_restore(
+    durable_store: Option<&DeepSeekV4CheckpointStore>,
+    durable_has_blobs: Option<bool>,
+    session: &mut DeepSeekV4Session,
+    prompt_token_ids: &[u32],
+    durable_max_record_bytes: u64,
+    durable_probe_ms: f64,
+    durable_restore_ms: &mut f64,
+) -> Result<(usize, u64)> {
+    let store = match (durable_store, durable_has_blobs) {
+        (Some(store), Some(true)) => store,
+        (Some(_), Some(false)) => {
+            eprintln!(
+                "durable_prefix_cache: family=deepseek_v4 store_empty=true restore_total_ms={durable_probe_ms:.1}",
+            );
+            return Ok((0, 0));
+        }
+        _ => return Ok((0, 0)),
+    };
+    let restore_t0 = Instant::now();
+    match session.restore_durable_prefix(store, prompt_token_ids, durable_max_record_bytes) {
+        Ok(attempt) => {
+            *durable_restore_ms = durable_probe_ms + restore_t0.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                concat!(
+                    "durable_prefix_cache: family=deepseek_v4 checkpoint_hit={} ",
+                    "matched={} restored={} candidates={} corrupt_removed={} ",
+                    "restore_total_ms={:.1}"
+                ),
+                attempt.restored_prefix_len.is_some(),
+                attempt.matched_prefix_len,
+                attempt.restored_prefix_len.unwrap_or(0),
+                attempt.candidates_examined,
+                attempt.corrupt_entries_removed,
+                *durable_restore_ms,
+            );
+            Ok((
+                attempt.restored_prefix_len.unwrap_or(0),
+                attempt.payload_bytes,
+            ))
+        }
+        Err(DeepSeekV4DurableError::UnboundIdentity) => {
+            // Occupied store, but the prompt was too short to resolve an
+            // identity for this session; there is nothing to restore.
+            eprintln!(
+                "durable_prefix_cache: family=deepseek_v4 checkpoint_hit=false skipped=short_prompt restore_total_ms={durable_probe_ms:.1}",
+            );
+            Ok((0, 0))
+        }
+        Err(DeepSeekV4DurableError::Restore(error))
+            if causal_snapshot_restore_error_kind(&error)
+                == DeepSeekV4SnapshotRestoreErrorKind::Allocation =>
+        {
+            *durable_restore_ms = durable_probe_ms + restore_t0.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "warning: durable DeepSeek V4 prefix restore allocation failed; cold-prefilling: {error}"
+            );
+            Ok((0, 0))
+        }
+        Err(DeepSeekV4DurableError::Restore(error)) => {
+            Err(error).context("restore durable DeepSeek V4 causal snapshot")
+        }
+        Err(DeepSeekV4DurableError::Store(error)) => {
+            *durable_restore_ms = durable_probe_ms + restore_t0.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "warning: durable DeepSeek V4 prefix lookup failed after {:.1} ms; cold-prefilling: {error}",
+                *durable_restore_ms,
+            );
+            Ok((0, 0))
+        }
+    }
 }
 
 fn configured_checkpoint_staged_integrity() -> Result<Option<StagedIntegrityMode>> {

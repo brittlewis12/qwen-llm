@@ -1988,6 +1988,10 @@ impl DeepSeekV4Session {
         self.capacity
     }
 
+    pub(crate) fn bound_model_content_id(&self) -> Option<DeepSeekV4ModelContentId> {
+        self.snapshot_model_content_id
+    }
+
     #[doc(hidden)]
     pub fn multigroup_selector_telemetry(&self) -> DeepSeekV4MultigroupSelectorTelemetry {
         self.sparse_csa.multigroup_selector_telemetry()

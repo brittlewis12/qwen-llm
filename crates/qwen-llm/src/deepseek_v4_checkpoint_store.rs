@@ -20,8 +20,10 @@ use crate::checkpoint_fs::{
 };
 use crate::checkpoint_identity::CheckpointIdentityCache;
 use crate::checkpoint_store::{PublishOutcome, StagedIntegrityMode, StagedIntegrityReport};
+use crate::deepseek_v4::DeepSeekV4Config;
 use crate::deepseek_v4_metal::{
     DeepSeekV4CausalSnapshot, DeepSeekV4CompatibilityDigest, DeepSeekV4EncodedSnapshot,
+    DeepSeekV4MetalError, DeepSeekV4ModelContentId, DeepSeekV4Session, DeepSeekV4SessionCapacity,
     DeepSeekV4SnapshotCodecConstraints, DeepSeekV4SnapshotCodecError, decode_causal_snapshot,
     encode_causal_snapshot,
 };
@@ -198,6 +200,26 @@ impl DeepSeekV4CheckpointStore {
             corrupt_entries_removed: corrupt_removed,
             ..DeepSeekV4LookupReport::miss()
         })
+    }
+
+    /// Publish a prepared checkpoint captured earlier from a session that
+    /// may no longer exist.
+    pub fn publish_prepared(
+        &self,
+        prepared: &DeepSeekV4PreparedCheckpoint,
+        max_record_bytes: u64,
+    ) -> Result<DeepSeekV4PublishReport, DeepSeekV4CheckpointStoreError> {
+        let context = DeepSeekV4StoreContext {
+            compatibility_digest: prepared.snapshot.compatibility_digest(),
+            codec_constraints: DeepSeekV4SnapshotCodecConstraints {
+                config: &prepared.config,
+                session_capacity: prepared.capacity,
+                expected_model_content_id: prepared.model_content_id,
+                max_record_bytes,
+            },
+            max_record_bytes,
+        };
+        self.publish(context, &prepared.snapshot)
     }
 
     fn publish_staged(
@@ -536,6 +558,124 @@ impl From<CheckpointFsError> for DeepSeekV4CheckpointStoreError {
             CheckpointFsError::StagedMetadata(reason) => Self::StagedMetadata(reason),
             CheckpointFsError::TouchLostRace => Self::TouchLostRace,
         }
+    }
+}
+
+/// A captured causal boundary bundled with everything publication needs, so
+/// encoding and durability can run after the session (and its Metal state)
+/// are gone. The DeepSeek V4 analog of the Qwen runtime's prepared
+/// checkpoint: capture is cheap and happens at the boundary; the store I/O
+/// happens whenever the caller chooses.
+pub struct DeepSeekV4PreparedCheckpoint {
+    snapshot: DeepSeekV4CausalSnapshot,
+    config: DeepSeekV4Config,
+    capacity: DeepSeekV4SessionCapacity,
+    model_content_id: DeepSeekV4ModelContentId,
+}
+
+impl DeepSeekV4PreparedCheckpoint {
+    pub fn next_position(&self) -> u32 {
+        self.snapshot.next_position()
+    }
+
+    pub fn payload_bytes(&self) -> u64 {
+        self.snapshot.payload_bytes()
+    }
+}
+
+/// One durable probe-and-restore attempt against a session.
+#[derive(Clone, Copy, Debug)]
+pub struct DeepSeekV4DurableRestoreAttempt {
+    /// `Some(len)` when a checkpoint was restored into the session.
+    pub restored_prefix_len: Option<usize>,
+    pub matched_prefix_len: usize,
+    pub candidates_examined: usize,
+    pub corrupt_entries_removed: usize,
+    pub touched: bool,
+    pub payload_bytes: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DeepSeekV4DurableError {
+    #[error("DeepSeek V4 session has no bound model-content identity for durable reuse")]
+    UnboundIdentity,
+    #[error(transparent)]
+    Store(#[from] DeepSeekV4CheckpointStoreError),
+    #[error("restore durable DeepSeek V4 causal snapshot: {0}")]
+    Restore(DeepSeekV4MetalError),
+}
+
+impl DeepSeekV4Session {
+    /// Probe `store` for the longest strict-prefix checkpoint of
+    /// `request_tokens` and restore it into this ready session.
+    ///
+    /// A miss returns `Ok` with `restored_prefix_len: None`. Store and codec
+    /// failures surface as `Store` errors; a hit whose restore fails
+    /// pre-mutation surfaces as `Restore`, leaving the session ready for
+    /// cold prefill. Callers own the fail-open policy.
+    pub fn restore_durable_prefix(
+        &mut self,
+        store: &DeepSeekV4CheckpointStore,
+        request_tokens: &[u32],
+        max_record_bytes: u64,
+    ) -> Result<DeepSeekV4DurableRestoreAttempt, DeepSeekV4DurableError> {
+        let model_content_id = self
+            .bound_model_content_id()
+            .ok_or(DeepSeekV4DurableError::UnboundIdentity)?;
+        let config = self.residency().config();
+        let context = DeepSeekV4StoreContext {
+            compatibility_digest: DeepSeekV4CompatibilityDigest::for_model(
+                model_content_id,
+                config,
+            ),
+            codec_constraints: DeepSeekV4SnapshotCodecConstraints {
+                config,
+                session_capacity: self.capacity(),
+                expected_model_content_id: model_content_id,
+                max_record_bytes,
+            },
+            max_record_bytes,
+        };
+        let mut lookup = store.lookup(context, request_tokens)?;
+        let Some(snapshot) = lookup.snapshot.take() else {
+            return Ok(DeepSeekV4DurableRestoreAttempt {
+                restored_prefix_len: None,
+                matched_prefix_len: lookup.matched_prefix_len,
+                candidates_examined: lookup.candidates_examined,
+                corrupt_entries_removed: lookup.corrupt_entries_removed,
+                touched: lookup.touched,
+                payload_bytes: 0,
+            });
+        };
+        let payload_bytes = snapshot.payload_bytes();
+        self.restore_causal_snapshot(&snapshot)
+            .map_err(DeepSeekV4DurableError::Restore)?;
+        Ok(DeepSeekV4DurableRestoreAttempt {
+            restored_prefix_len: Some(lookup.restored_prefix_len),
+            matched_prefix_len: lookup.matched_prefix_len,
+            candidates_examined: lookup.candidates_examined,
+            corrupt_entries_removed: lookup.corrupt_entries_removed,
+            touched: lookup.touched,
+            payload_bytes,
+        })
+    }
+
+    /// Capture the session's current causal boundary for later publication.
+    pub fn prepare_durable_checkpoint(
+        &self,
+    ) -> Result<DeepSeekV4PreparedCheckpoint, DeepSeekV4MetalError> {
+        let model_content_id = self.bound_model_content_id().ok_or_else(|| {
+            DeepSeekV4MetalError::Invalid(
+                "DeepSeek V4 session has no bound model-content identity".into(),
+            )
+        })?;
+        let snapshot = self.capture_causal_snapshot()?;
+        Ok(DeepSeekV4PreparedCheckpoint {
+            config: self.residency().config().clone(),
+            capacity: self.capacity(),
+            model_content_id,
+            snapshot,
+        })
     }
 }
 
@@ -1147,6 +1287,40 @@ mod tests {
             .snapshot
             .unwrap();
         assert_eq!(survivor.causal_digest(), original.snapshot.causal_digest());
+    }
+
+    #[test]
+    fn prepared_checkpoints_publish_after_their_session_is_gone() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let temp = TestDir::new("prepared");
+        let store = DeepSeekV4CheckpointStore::new(&temp.0, 1 << 30);
+        let fixture = Fixture::new(&ctx, 4, 17);
+        let prepared = DeepSeekV4PreparedCheckpoint {
+            snapshot: fixture.snapshot.clone(),
+            config: fixture.config.clone(),
+            capacity: fixture.capacity,
+            model_content_id: fixture.model_content_id,
+        };
+        assert_eq!(prepared.next_position(), 4);
+
+        let published = store.publish_prepared(&prepared, 1 << 30).unwrap();
+        assert_eq!(published.outcome, PublishOutcome::Published);
+        assert_eq!(
+            store.publish_prepared(&prepared, 1 << 30).unwrap().outcome,
+            PublishOutcome::ExistingValid
+        );
+
+        // The prepared record is byte-identical to a direct publication.
+        let mut extension = fixture.snapshot.prefix_tokens().to_vec();
+        extension.push(99);
+        let survivor = store
+            .lookup(fixture.context(1 << 30), &extension)
+            .unwrap()
+            .snapshot
+            .unwrap();
+        assert_eq!(survivor.causal_digest(), fixture.snapshot.causal_digest());
     }
 
     #[test]

@@ -235,7 +235,9 @@ fn normalize_deepseek_v4_inline_thinking(
         match mode {
             DeepSeekV4InlineThinking::Verbatim => unreachable!(),
             DeepSeekV4InlineThinking::Strip => {
-                message.content = visible;
+                // Dropped history tolerates cosmetic trimming (Qwen strip
+                // parity); nothing downstream re-derives tokens from it.
+                message.content = visible.trim().to_string();
             }
             DeepSeekV4InlineThinking::PromoteToReasoning => {
                 if message.reasoning.is_some() || message.reasoning_content.is_some() {
@@ -243,6 +245,12 @@ fn normalize_deepseek_v4_inline_thinking(
                         "DeepSeek V4 message {index} carries both inline <think> content and a structured reasoning field"
                     );
                 }
+                // Byte-faithful promotion: the preserve renderer re-emits
+                // reasoning + `</think>` + visible verbatim, so the rendered
+                // history reproduces the exact generated transcript and
+                // completed-turn durable checkpoints stay strict prefixes of
+                // the next turn's prompt. Trimming here would silently break
+                // that token identity.
                 message.reasoning = Some(reasoning);
                 message.content = visible;
             }
@@ -263,19 +271,13 @@ fn split_leading_inline_thinking(content: &str) -> Result<Option<(String, String
         let Some((reasoning, visible)) = rest.split_once(DEEPSEEK_V4_THINK_END) else {
             bail!("assistant content opens an inline <think> block without closing it");
         };
-        return Ok(Some((
-            reasoning.trim().to_string(),
-            visible.trim().to_string(),
-        )));
+        return Ok(Some((reasoning.to_string(), visible.to_string())));
     }
     if let Some((reasoning, visible)) = trimmed.split_once(DEEPSEEK_V4_THINK_END) {
         if reasoning.contains(DEEPSEEK_V4_THINK_START) {
             return Ok(None);
         }
-        return Ok(Some((
-            reasoning.trim().to_string(),
-            visible.trim().to_string(),
-        )));
+        return Ok(Some((reasoning.to_string(), visible.to_string())));
     }
     Ok(None)
 }
@@ -1415,6 +1417,27 @@ mod tests {
         assert_eq!(promoted[2].content, "headless reply");
         assert_eq!(promoted[3].reasoning, None);
 
+        // Promotion preserves raw transcript bytes so re-rendered history
+        // reproduces the generated tokens; strip may trim cosmetically.
+        let mut raw_transcript = vec![ChatMessage {
+            role: "assistant".into(),
+            content: "plan things\n</think>\n\nfinal reply\n".into(),
+            reasoning: None,
+            reasoning_content: None,
+            extra: Default::default(),
+        }];
+        let mut raw_promoted = raw_transcript.clone();
+        normalize_deepseek_v4_inline_thinking(
+            &mut raw_promoted,
+            DeepSeekV4InlineThinking::PromoteToReasoning,
+        )
+        .unwrap();
+        assert_eq!(raw_promoted[0].reasoning.as_deref(), Some("plan things\n"));
+        assert_eq!(raw_promoted[0].content, "\n\nfinal reply\n");
+        normalize_deepseek_v4_inline_thinking(&mut raw_transcript, DeepSeekV4InlineThinking::Strip)
+            .unwrap();
+        assert_eq!(raw_transcript[0].content, "final reply");
+
         let mut verbatim = messages.clone();
         normalize_deepseek_v4_inline_thinking(&mut verbatim, DeepSeekV4InlineThinking::Verbatim)
             .unwrap();
@@ -1489,6 +1512,45 @@ mod tests {
             prompt,
             format!(
                 "{DEEPSEEK_V4_BOS}{DEEPSEEK_V4_USER}first{DEEPSEEK_V4_ASSISTANT}{DEEPSEEK_V4_THINK_START}plan{DEEPSEEK_V4_THINK_END}reply{DEEPSEEK_V4_EOS}{DEEPSEEK_V4_USER}second{DEEPSEEK_V4_ASSISTANT}{DEEPSEEK_V4_THINK_START}"
+            )
+        );
+
+        // A raw thinking transcript with interior whitespace round-trips
+        // byte-exactly through promotion + preserve rendering: the rendered
+        // history is `<think>` + raw generated output.
+        let mut raw = vec![
+            ChatMessage {
+                role: "user".into(),
+                content: "first".into(),
+                reasoning: None,
+                reasoning_content: None,
+                extra: Default::default(),
+            },
+            ChatMessage {
+                role: "assistant".into(),
+                content: "plan\n</think>\n\nreply".into(),
+                reasoning: None,
+                reasoning_content: None,
+                extra: Default::default(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: "second".into(),
+                reasoning: None,
+                reasoning_content: None,
+                extra: Default::default(),
+            },
+        ];
+        normalize_deepseek_v4_inline_thinking(
+            &mut raw,
+            DeepSeekV4InlineThinking::PromoteToReasoning,
+        )
+        .unwrap();
+        let raw_prompt = render_deepseek_v4_0731_messages_prompt(&raw, options).unwrap();
+        assert_eq!(
+            raw_prompt,
+            format!(
+                "{DEEPSEEK_V4_BOS}{DEEPSEEK_V4_USER}first{DEEPSEEK_V4_ASSISTANT}{DEEPSEEK_V4_THINK_START}plan\n{DEEPSEEK_V4_THINK_END}\n\nreply{DEEPSEEK_V4_EOS}{DEEPSEEK_V4_USER}second{DEEPSEEK_V4_ASSISTANT}{DEEPSEEK_V4_THINK_START}"
             )
         );
 

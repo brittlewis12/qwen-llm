@@ -1423,7 +1423,16 @@ projection arithmetic and a credible path to the complete wall bar.
    11.58/7.68/7.89/10.51/2.98 ms. Routed/shared waves move wall by only
    0.006 ms, and packed online-selected transfer saves `-0.242 ms` GPU. Do not
    resume local rearrangement or kernel sweeps without a structural
-   >=2 ms/token deletion.
+   >=2 ms/token deletion. The named deletion family now exists: the decode
+   dispatch census reconciles the 2,146-dispatch encoder exactly (55/45/42 per
+   CSA/HCA/SW layer), shows ~800-900 tiny elementwise/utility dispatches
+   including a 1-thread Sinkhorn kernel launched 86x/token, and prices eight
+   bitwise-safe fusions (grouped z=8 output GEMV with inverse-RoPE load
+   transform first) at 6-10 ms/token composed, 2,146 -> ~1,000-1,150
+   dispatches. Routed experts are already at their 2-dispatch floor; their
+   10.51 ms is compute and stays out of this family. Every fusion also lowers
+   the DSpark N=2 verifier denominator toward its 58.34 ms external budget.
+   Design: `docs/bench/2026-08-12-dsv4-decode-dispatch-census/README.md`.
 6. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,
    add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run

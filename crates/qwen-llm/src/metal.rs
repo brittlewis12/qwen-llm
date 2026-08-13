@@ -20110,6 +20110,107 @@ pub fn encode_shared_swiglu_q8_0_f32(
     Ok(())
 }
 
+pub fn encode_ds4_shared_swiglu_q8_0_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_weight: &MetalTensor,
+    up_weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    let expected_weights = n_in.checked_mul(n_out);
+    let expected_weight_bytes = n_in
+        .checked_div(32)
+        .and_then(|blocks| blocks.checked_mul(34))
+        .and_then(|row_bytes| row_bytes.checked_mul(n_out));
+    if n_in == 0
+        || n_out == 0
+        || !n_in.is_multiple_of(32)
+        || gate_weight.dtype != GgmlType::Q8_0
+        || up_weight.dtype != GgmlType::Q8_0
+        || gate_weight.shape != [n_in as u64, n_out as u64]
+        || up_weight.shape != [n_in as u64, n_out as u64]
+        || x.dtype != GgmlType::F32
+        || x.shape != [n_in as u64]
+        || y.dtype != GgmlType::F32
+        || y.shape != [n_out as u64]
+        || !y.is_writable()
+        || expected_weights.is_none_or(|expected| {
+            gate_weight.n_elements() as usize != expected
+                || up_weight.n_elements() as usize != expected
+        })
+        || x.n_elements() as usize != n_in
+        || y.n_elements() as usize != n_out
+        || !tensor_physical_range_valid(gate_weight, expected_weight_bytes.unwrap_or(usize::MAX), 2)
+        || !tensor_physical_range_valid(up_weight, expected_weight_bytes.unwrap_or(usize::MAX), 2)
+        || !tensor_physical_range_valid(x, n_in.saturating_mul(4), 4)
+        || !tensor_physical_range_valid(y, n_out.saturating_mul(4), 4)
+        || tensor_ranges_overlap(y, gate_weight)
+        || tensor_ranges_overlap(y, up_weight)
+        || tensor_ranges_overlap(y, x)
+        || !clamp.is_finite()
+        || clamp <= 0.0
+        || u32::try_from(n_in).is_err()
+        || u32::try_from(n_out).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: "ds4_shared_swiglu_q8_0",
+            detail: format!(
+                "expected Q8_0 gate/up [{n_in},{n_out}], F32 x={n_in}, writable F32 y={n_out}, and positive finite clamp; got {:?}/{:?} w={}/{} x={:?}/{} y={:?}/{} writable={} clamp={clamp}",
+                gate_weight.dtype,
+                up_weight.dtype,
+                gate_weight.n_elements(),
+                up_weight.n_elements(),
+                x.dtype,
+                x.n_elements(),
+                y.dtype,
+                y.n_elements(),
+                y.is_writable(),
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_ds4_shared_swiglu_q8_0_f32_lcpp")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        clamp: f32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            clamp,
+        },
+    );
+    enc.set_tensor(1, gate_weight);
+    enc.set_tensor(2, up_weight);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, y);
+    const NR0: usize = 2;
+    const NSG: usize = 4;
+    enc.set_threadgroup_memory(0, 32 * 2 * NR0 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// One-shot Q8_0 mat-vec for tests.
 pub fn mat_vec_q8_0_f32_readback_for_test(
     ctx: &MetalContext,
@@ -20221,6 +20322,133 @@ pub fn encode_mat_vec_q6_k_f32(
         },
     );
     Ok(())
+}
+
+pub fn encode_ds4_shared_swiglu_q6_k_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    gate_weight: &MetalTensor,
+    up_weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    clamp: f32,
+) -> Result<(), MetalError> {
+    let expected_weights = n_in.checked_mul(n_out);
+    let expected_weight_bytes = n_in
+        .checked_div(256)
+        .and_then(|blocks| blocks.checked_mul(210))
+        .and_then(|row_bytes| row_bytes.checked_mul(n_out));
+    let scratch_elements = n_out.checked_mul(3);
+    if n_in == 0
+        || n_out == 0
+        || !n_in.is_multiple_of(256)
+        || gate_weight.dtype != GgmlType::Q6_K
+        || up_weight.dtype != GgmlType::Q6_K
+        || gate_weight.shape != [n_in as u64, n_out as u64]
+        || up_weight.shape != [n_in as u64, n_out as u64]
+        || x.dtype != GgmlType::F32
+        || x.shape != [n_in as u64]
+        || y.dtype != GgmlType::F32
+        || scratch_elements.is_none_or(|elements| y.shape != [elements as u64])
+        || !y.is_writable()
+        || expected_weights.is_none_or(|expected| {
+            gate_weight.n_elements() as usize != expected
+                || up_weight.n_elements() as usize != expected
+        })
+        || x.n_elements() as usize != n_in
+        || scratch_elements.is_none_or(|elements| y.n_elements() as usize != elements)
+        || !tensor_physical_range_valid(gate_weight, expected_weight_bytes.unwrap_or(usize::MAX), 2)
+        || !tensor_physical_range_valid(up_weight, expected_weight_bytes.unwrap_or(usize::MAX), 2)
+        || !tensor_physical_range_valid(x, n_in.saturating_mul(4), 4)
+        || !tensor_physical_range_valid(
+            y,
+            scratch_elements.unwrap_or(usize::MAX).saturating_mul(4),
+            4,
+        )
+        || tensor_ranges_overlap(y, gate_weight)
+        || tensor_ranges_overlap(y, up_weight)
+        || tensor_ranges_overlap(y, x)
+        || !clamp.is_finite()
+        || clamp <= 0.0
+        || u32::try_from(n_in).is_err()
+        || u32::try_from(n_out).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: "ds4_shared_swiglu_q6_k",
+            detail: format!(
+                "expected Q6_K gate/up [{n_in},{n_out}], F32 x={n_in}, writable F32 y>={}; got {:?}/{:?} w={}/{} x={:?}/{} y={:?}/{} writable={} clamp={clamp}",
+                n_out.saturating_mul(3),
+                gate_weight.dtype,
+                up_weight.dtype,
+                gate_weight.n_elements(),
+                up_weight.n_elements(),
+                x.dtype,
+                x.n_elements(),
+                y.dtype,
+                y.n_elements(),
+                y.is_writable(),
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_ds4_shared_swiglu_q6_K_f32")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+        clamp: f32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+            clamp,
+        },
+    );
+    enc.set_tensor(1, gate_weight);
+    enc.set_tensor(2, up_weight);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, y);
+    const NR0: usize = 2;
+    const NSG: usize = 2;
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0 * NSG),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+fn tensor_physical_range_valid(
+    tensor: &MetalTensor,
+    expected_bytes: usize,
+    alignment: u64,
+) -> bool {
+    tensor.offset.is_multiple_of(alignment)
+        && u64::try_from(expected_bytes)
+            .ok()
+            .and_then(|bytes| tensor.offset.checked_add(bytes))
+            .is_some_and(|end| end <= tensor.buffer.length() as u64)
+}
+
+fn tensor_ranges_overlap(left: &MetalTensor, right: &MetalTensor) -> bool {
+    if Retained::as_ptr(&left.buffer) != Retained::as_ptr(&right.buffer) {
+        return false;
+    }
+    let left_end = left.offset.saturating_add(left.n_bytes());
+    let right_end = right.offset.saturating_add(right.n_bytes());
+    left.offset < right_end && right.offset < left_end
 }
 
 /// Token-axis Q6_K GEMV with the exact singleton accumulation body.

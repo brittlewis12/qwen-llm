@@ -1417,22 +1417,18 @@ projection arithmetic and a credible path to the complete wall bar.
    ms/token decode gap is what moves the verifier floor inside the external
    budget. Evidence: 2026-08-12 calibration entry;
    `target/profiles/dspark-metal-nsweep-2026-08-12/`.
-5. **Use the singleton stage front end only for a named work deletion.** K160
-   wall/GPU/outside-GPU medians are 47.783/46.402/1.370 ms versus llama.cpp's
-   39.2 ms. Attention core, prepare, output, routed, and shared are
-   11.58/7.68/7.89/10.51/2.98 ms. Routed/shared waves move wall by only
-   0.006 ms, and packed online-selected transfer saves `-0.242 ms` GPU. Do not
-   resume local rearrangement or kernel sweeps without a structural
-   >=2 ms/token deletion. The named deletion family now exists: the decode
-   dispatch census reconciles the 2,146-dispatch encoder exactly (55/45/42 per
-   CSA/HCA/SW layer), shows ~800-900 tiny elementwise/utility dispatches
-   including a 1-thread Sinkhorn kernel launched 86x/token, and prices eight
-   bitwise-safe fusions (grouped z=8 output GEMV with inverse-RoPE load
-   transform first) at 6-10 ms/token composed, 2,146 -> ~1,000-1,150
-   dispatches. Routed experts are already at their 2-dispatch floor; their
-   10.51 ms is compute and stays out of this family. Every fusion also lowers
-   the DSpark N=2 verifier denominator toward its 58.34 ms external budget.
-   Design: `docs/bench/2026-08-12-dsv4-decode-dispatch-census/README.md`.
+5. **Continue decode front-end fusion before verifier-width work.** The original
+   census reconciles 2,146 dispatches/token. Grouped output-A removed 301 and
+   measured 1.50 ms/token; exact Q6/Q8 shared-expert fusion removes another 86
+   and measures 0.240 ms/token wall on warm K160, leaving 1,759 ordinary
+   dispatches/token. Continue with the exact RoPE+KV publication leaf, then
+   broader prepare and compressor frontiers. Reopen mHC pre only with a changed
+   shared/deleted-work premise: the no-slab producer geometry is falsified. Use
+   separate rollbacks and held-position bitwise differentials; do not resume
+   isolated local retunes until structural deletion clears 2 ms/token. Every
+   fusion also lowers the DSpark N=2 verifier denominator toward its 58.34 ms
+   external budget. Design:
+   `docs/bench/2026-08-12-dsv4-decode-dispatch-census/README.md`.
 6. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,
    add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run

@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — DeepSeek V4 Shared-Expert Decode Fusion GO
+
+Status: singleton decode now fuses shared gate, shared up, and DeepSeek's
+clamped SwiGLU into one dispatch for matched Q6_K or Q8_0 gate/up tensors.
+`QWEN_DSV4_DECODE_SHARED_SWIGLU=0` restores the three-dispatch composition;
+shared down remains its existing second dispatch.
+
+- The Q8 kernel retains the existing `_lcpp` dual-projection traversal. The Q6
+  kernel repeats the singleton Q6 arithmetic sequentially for gate then up;
+  interleaving both accumulator lineages changed low projection bits under
+  `-ffast-math` and was rejected. Q6 publishes both exact projection results to
+  a three-row scratch before applying the unchanged clamp expression, preserving
+  the standalone-dispatch rounding boundary bit-for-bit.
+- FRESH uses Q8 for one layer and Q6_K for 42 layers, so the fused path removes
+  two dispatches per layer: 86 dispatches/token and about 1.375 MiB of logical
+  gate/up intermediate traffic. The source-derived ordinary decode census falls
+  from 1,845 to 1,759 dispatches/token.
+- A Q8/Q6 differential at ragged `512x67` verifies exact gate/up/clamped-SwiGLU
+  bits, including positive and negative clamp saturation. Full release DSv4
+  tests pass 94/94; strict library Clippy and workspace release check pass.
+- On warm K160, a counterbalanced fused/rollback/rollback/fused whole-token
+  bracket at positions 24-31 records wall medians `35.332/35.707/35.681/35.576`
+  ms and GPU medians `33.794/34.062/34.170/33.973` ms. Arm medians are 35.454
+  versus 35.694 ms wall and 33.884 versus 34.116 ms GPU: a 0.240 ms/token
+  (`0.67%`) wall saving and 0.233 ms/token GPU saving. Every arm emits generated
+  ID SHA-256 `2bbaa6fe...0e6f`.
+- The Q6 exact-rounding scratch adds 16 KiB of logical session memory; admission
+  and reconciliation now price it. Kernel APIs fail closed on zero or malformed
+  geometry, truncated physical ranges, misalignment, read-only output, and
+  output/input aliasing.
+
+Decision: retain the default exact fusion as F6 from the dispatch-census family.
+The measured win is small but order-robust and matches the ~0.4 ms prior. Do not
+retune it further; return leverage to a larger adjacent deletion, with the exact
+RoPE+KV publication leaf preferred over reopening the falsified mHC no-slab
+producer geometry.
+
 ## 2026-08-13 — Native Checkpoint Cleanup and Catalog Threshold
 
 Status: keep immutable checkpoint files authoritative and catalog-free at the

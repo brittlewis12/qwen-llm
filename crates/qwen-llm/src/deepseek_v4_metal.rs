@@ -7381,6 +7381,7 @@ impl DeepSeekV4MoeConfig {
         }
         checked_mul(self.hidden_size, self.top_k, "MoE routed output scratch")?;
         checked_mul(self.ffn_size, self.top_k, "MoE all-slot inner scratch")?;
+        checked_mul(self.ffn_size, 3, "MoE gate and fused Q6 scratch")?;
         Ok(())
     }
 }
@@ -7600,6 +7601,7 @@ impl DeepSeekV4MoeScratch {
     ) -> Result<Self, DeepSeekV4MetalError> {
         config.checked()?;
         let c = config;
+        let fused_q6_scratch = checked_mul(c.ffn_size, 3, "MoE gate and fused Q6 scratch")?;
         let ids = vec![0i32; c.top_k];
         Ok(Self {
             config,
@@ -7613,7 +7615,7 @@ impl DeepSeekV4MoeScratch {
             )?,
             weights: MetalTensor::zeros_f32(ctx, vec![c.top_k as u64])?,
             route_status: MetalTensor::zeros_i32(ctx, vec![1])?,
-            gate: MetalTensor::zeros_f32(ctx, vec![c.ffn_size as u64])?,
+            gate: MetalTensor::zeros_f32(ctx, vec![fused_q6_scratch as u64])?,
             up: MetalTensor::zeros_f32(ctx, vec![c.ffn_size as u64])?,
             inner: MetalTensor::zeros_f32(ctx, vec![c.ffn_size as u64])?,
             routed_inner: MetalTensor::zeros_f32(ctx, vec![c.ffn_size as u64, c.top_k as u64])?,
@@ -8020,12 +8022,13 @@ impl DeepSeekV4MoeScratch {
                 expert,
                 "routed down slice",
             )?;
+            let gate_scratch = self.gate.view_subrange(0, vec![c.ffn_size as u64]);
             encode_projection(
                 ctx,
                 enc,
                 &gate,
                 &self.normalized_input,
-                &self.gate,
+                &gate_scratch,
                 c.hidden_size,
                 c.ffn_size,
                 "routed gate",
@@ -8040,7 +8043,14 @@ impl DeepSeekV4MoeScratch {
                 c.ffn_size,
                 "routed up",
             )?;
-            encode_ds4_clamped_swiglu(ctx, enc, &self.gate, &self.up, &self.inner, expert_clamp)?;
+            encode_ds4_clamped_swiglu(
+                ctx,
+                enc,
+                &gate_scratch,
+                &self.up,
+                &self.inner,
+                expert_clamp,
+            )?;
             let output = self
                 .expert_outputs
                 .view_subrange((slot * c.hidden_size) as u64, vec![c.hidden_size as u64]);
@@ -8056,12 +8066,13 @@ impl DeepSeekV4MoeScratch {
             )?;
         }
 
+        let gate_scratch = self.gate.view_subrange(0, vec![c.ffn_size as u64]);
         encode_projection(
             ctx,
             enc,
             shared_gate,
             &self.normalized_input,
-            &self.gate,
+            &gate_scratch,
             c.hidden_size,
             c.ffn_size,
             "shared gate",
@@ -8076,7 +8087,7 @@ impl DeepSeekV4MoeScratch {
             c.ffn_size,
             "shared up",
         )?;
-        encode_ds4_clamped_swiglu(ctx, enc, &self.gate, &self.up, &self.inner, shared_clamp)?;
+        encode_ds4_clamped_swiglu(ctx, enc, &gate_scratch, &self.up, &self.inner, shared_clamp)?;
         encode_projection(
             ctx,
             enc,
@@ -8189,6 +8200,7 @@ impl DeepSeekV4MoeScratch {
         require_serial(enc, "deepseek_v4_moe_routed_experts_indexed")?;
         let c = self.config;
         record.validate(c)?;
+        let gate_scratch = self.gate.view_subrange(0, vec![c.ffn_size as u64]);
         for slot in 0..c.top_k {
             encode_ds4_indexed_expert_projection(
                 ctx,
@@ -8197,7 +8209,7 @@ impl DeepSeekV4MoeScratch {
                 &self.normalized_input,
                 &record.expert_ids,
                 &record.status,
-                &self.gate,
+                &gate_scratch,
                 c.hidden_size,
                 c.ffn_size,
                 c.expert_count,
@@ -8218,7 +8230,14 @@ impl DeepSeekV4MoeScratch {
                 slot,
                 "indexed routed up",
             )?;
-            encode_ds4_clamped_swiglu(ctx, enc, &self.gate, &self.up, &self.inner, expert_clamp)?;
+            encode_ds4_clamped_swiglu(
+                ctx,
+                enc,
+                &gate_scratch,
+                &self.up,
+                &self.inner,
+                expert_clamp,
+            )?;
             let output = self
                 .expert_outputs
                 .view_subrange((slot * c.hidden_size) as u64, vec![c.hidden_size as u64]);
@@ -8497,32 +8516,87 @@ impl DeepSeekV4MoeScratch {
     ) -> Result<(), DeepSeekV4MetalError> {
         require_serial(enc, "deepseek_v4_moe_shared_expert")?;
         let c = self.config;
-        encode_projection(
-            ctx,
-            enc,
-            shared_gate,
-            &self.normalized_input,
-            &self.gate,
-            c.hidden_size,
-            c.ffn_size,
-            "shared gate",
-        )?;
-        encode_projection(
-            ctx,
-            enc,
-            shared_up,
-            &self.normalized_input,
-            &self.up,
-            c.hidden_size,
-            c.ffn_size,
-            "shared up",
-        )?;
-        encode_ds4_clamped_swiglu(ctx, enc, &self.gate, &self.up, &self.inner, shared_clamp)?;
+        let fused_q6_scratch = checked_mul(c.ffn_size, 3, "MoE gate and fused Q6 scratch")?;
+        let fused = deepseek_v4_decode_shared_swiglu_enabled()
+            && shared_gate.dtype == shared_up.dtype
+            && matches!(shared_gate.dtype, GgmlType::Q6_K | GgmlType::Q8_0);
+        let shared_inner = if fused && shared_gate.dtype == GgmlType::Q6_K {
+            self.gate.view_subrange(0, vec![c.ffn_size as u64])
+        } else {
+            self.inner.clone()
+        };
+        if fused {
+            static REPORTED: std::sync::Once = std::sync::Once::new();
+            REPORTED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: decode shared gate/up/clamped-SwiGLU runs one fused dispatch; rollback=QWEN_DSV4_DECODE_SHARED_SWIGLU=0"
+                );
+            });
+            match shared_gate.dtype {
+                GgmlType::Q6_K => {
+                    let scratch = self.gate.view_subrange(0, vec![fused_q6_scratch as u64]);
+                    crate::metal::encode_ds4_shared_swiglu_q6_k_f32(
+                        ctx,
+                        enc,
+                        shared_gate,
+                        shared_up,
+                        &self.normalized_input,
+                        &scratch,
+                        c.hidden_size,
+                        c.ffn_size,
+                        shared_clamp,
+                    )
+                }
+                GgmlType::Q8_0 => crate::metal::encode_ds4_shared_swiglu_q8_0_f32(
+                    ctx,
+                    enc,
+                    shared_gate,
+                    shared_up,
+                    &self.normalized_input,
+                    &shared_inner,
+                    c.hidden_size,
+                    c.ffn_size,
+                    shared_clamp,
+                ),
+                _ => unreachable!("fused shared-expert dtype was qualified"),
+            }
+            .map_err(DeepSeekV4MetalError::Metal)?;
+        } else {
+            let gate_scratch = self.gate.view_subrange(0, vec![c.ffn_size as u64]);
+            encode_projection(
+                ctx,
+                enc,
+                shared_gate,
+                &self.normalized_input,
+                &gate_scratch,
+                c.hidden_size,
+                c.ffn_size,
+                "shared gate",
+            )?;
+            encode_projection(
+                ctx,
+                enc,
+                shared_up,
+                &self.normalized_input,
+                &self.up,
+                c.hidden_size,
+                c.ffn_size,
+                "shared up",
+            )?;
+            encode_ds4_clamped_swiglu(
+                ctx,
+                enc,
+                &gate_scratch,
+                &self.up,
+                &self.inner,
+                shared_clamp,
+            )?;
+        }
         encode_projection(
             ctx,
             enc,
             shared_down,
-            &self.inner,
+            &shared_inner,
             &self.shared_output,
             c.ffn_size,
             c.hidden_size,
@@ -8635,6 +8709,7 @@ impl DeepSeekV4MoeScratch {
     fn validate_scratch(&self) -> Result<(), DeepSeekV4MetalError> {
         let c = self.config;
         c.checked()?;
+        let fused_q6_scratch = checked_mul(c.ffn_size, 3, "MoE gate and fused Q6 scratch")?;
         validate_f32(
             &self.normalized_input,
             &[c.hidden_size as u64],
@@ -8650,8 +8725,13 @@ impl DeepSeekV4MoeScratch {
         validate_i32(&self.expert_ids, &[c.top_k as u64], true, "MoE ID scratch")?;
         validate_f32(&self.weights, &[c.top_k as u64], true, "MoE weight scratch")?;
         validate_i32(&self.route_status, &[1], true, "MoE route status")?;
+        validate_f32(
+            &self.gate,
+            &[fused_q6_scratch as u64],
+            true,
+            "MoE gate and fused Q6 scratch",
+        )?;
         for (tensor, name) in [
-            (&self.gate, "MoE gate scratch"),
             (&self.up, "MoE up scratch"),
             (&self.inner, "MoE inner scratch"),
         ] {
@@ -10647,6 +10727,11 @@ crate::env_flag!(
 crate::env_flag!(
     default_on deepseek_v4_decode_output_grouped_enabled,
     "QWEN_DSV4_DECODE_OUTPUT_GROUPED"
+);
+
+crate::env_flag!(
+    default_on deepseek_v4_decode_shared_swiglu_enabled,
+    "QWEN_DSV4_DECODE_SHARED_SWIGLU"
 );
 
 crate::env_flag!(
@@ -14890,7 +14975,13 @@ fn deepseek_v4_session_allocation_requests_for_kinds(
         )?,
         f32_bytes,
     )?;
-    for name in ["moe.gate", "moe.up", "moe.inner"] {
+    push_session_allocation(
+        &mut requests,
+        "moe.gate",
+        checked_mul(moe.ffn_size, 3, "MoE gate and fused Q6 scratch elements")?,
+        f32_bytes,
+    )?;
+    for name in ["moe.up", "moe.inner"] {
         push_session_allocation(&mut requests, name, moe.ffn_size, f32_bytes)?;
     }
     push_session_allocation(
@@ -15395,6 +15486,30 @@ mod tests {
         }
     }
 
+    fn encode_q6_k_test_block(d: f32, seed: usize) -> [u8; 210] {
+        let mut block = [0u8; 210];
+        for scale_index in 0..16 {
+            let scale = ((seed + scale_index * 3) % 15) as i8 - 7;
+            block[192 + scale_index] = scale as u8;
+        }
+        block[208..210].copy_from_slice(&half::f16::from_f32(d).to_bits().to_le_bytes());
+        for i in 0..256 {
+            let quant = ((seed * 11 + i * 7) % 64) as u8;
+            let half_index = i / 128;
+            let half_offset = i % 128;
+            let ql_index = 64 * half_index + half_offset % 64;
+            if half_offset < 64 {
+                block[ql_index] = (block[ql_index] & 0xF0) | (quant & 0x0F);
+            } else {
+                block[ql_index] = (block[ql_index] & 0x0F) | ((quant & 0x0F) << 4);
+            }
+            let qh_index = 128 + 32 * half_index + half_offset % 32;
+            let qh_shift = 2 * (half_offset / 32);
+            block[qh_index] |= (quant >> 4) << qh_shift;
+        }
+        block
+    }
+
     fn read_f32(tensor: &MetalTensor) -> Vec<f32> {
         unsafe {
             let pointer = tensor
@@ -15516,6 +15631,174 @@ mod tests {
         encoder.end();
         command.commit();
         command.waitUntilCompleted();
+    }
+
+    #[test]
+    fn decode_shared_swiglu_fusions_match_composed_paths_bitwise() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const N_IN: usize = 512;
+        const N_OUT: usize = 67;
+        const CLAMP: f32 = 0.375;
+
+        for dtype in [GgmlType::Q8_0, GgmlType::Q6_K] {
+            let mut gate_bytes = Vec::new();
+            let mut up_bytes = Vec::new();
+            match dtype {
+                GgmlType::Q8_0 => {
+                    for row in 0..N_OUT {
+                        for block in 0..N_IN / 32 {
+                            for (bytes, salt) in [(&mut gate_bytes, 11usize), (&mut up_bytes, 29)] {
+                                let scale = half::f16::from_f32(
+                                    0.004 + ((row * 7 + block * 3 + salt) % 13) as f32 * 0.0007,
+                                );
+                                bytes.extend_from_slice(&scale.to_bits().to_le_bytes());
+                                for index in 0..32 {
+                                    bytes.push(
+                                        ((row * 19 + block * 23 + index * 17 + salt) % 255) as u8,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                GgmlType::Q6_K => {
+                    for row in 0..N_OUT {
+                        for block in 0..N_IN / 256 {
+                            let gate = encode_q6_k_test_block(
+                                0.0025 + ((row + block) % 7) as f32 * 0.0004,
+                                row * 31 + block * 7 + 5,
+                            );
+                            let up = encode_q6_k_test_block(
+                                0.003 + ((row * 3 + block) % 5) as f32 * 0.0005,
+                                row * 37 + block * 11 + 17,
+                            );
+                            gate_bytes.extend_from_slice(&gate);
+                            up_bytes.extend_from_slice(&up);
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let gate_weight =
+                MetalTensor::from_bytes(&ctx, &gate_bytes, vec![N_IN as u64, N_OUT as u64], dtype)
+                    .expect("shared gate weight");
+            let up_weight =
+                MetalTensor::from_bytes(&ctx, &up_bytes, vec![N_IN as u64, N_OUT as u64], dtype)
+                    .expect("shared up weight");
+            let x_values = (0..N_IN)
+                .map(|index| ((index * 41 + 13) % 257) as f32 * 0.021 - 2.65)
+                .collect::<Vec<_>>();
+            let x = offset_f32(&ctx, &x_values, vec![N_IN as u64]);
+            let gate = offset_f32(&ctx, &vec![0.0; N_OUT], vec![N_OUT as u64]);
+            let up = offset_f32(&ctx, &vec![0.0; N_OUT], vec![N_OUT as u64]);
+            let composed = offset_f32(&ctx, &vec![0.0; N_OUT], vec![N_OUT as u64]);
+            let fused = offset_f32(&ctx, &vec![0.0; N_OUT], vec![N_OUT as u64]);
+
+            let command = ctx.queue.commandBuffer().expect("shared fusion command");
+            let encoder = KernelEncoder::begin(&command);
+            encode_projection(
+                &ctx,
+                &encoder,
+                &gate_weight,
+                &x,
+                &gate,
+                N_IN,
+                N_OUT,
+                "shared gate differential",
+            )
+            .unwrap();
+            encode_projection(
+                &ctx,
+                &encoder,
+                &up_weight,
+                &x,
+                &up,
+                N_IN,
+                N_OUT,
+                "shared up differential",
+            )
+            .unwrap();
+            encode_ds4_clamped_swiglu(&ctx, &encoder, &gate, &up, &composed, CLAMP).unwrap();
+            let fused_target = if dtype == GgmlType::Q6_K {
+                offset_f32(&ctx, &vec![0.0; N_OUT * 3], vec![(N_OUT * 3) as u64])
+            } else {
+                fused
+            };
+            match dtype {
+                GgmlType::Q8_0 => crate::metal::encode_ds4_shared_swiglu_q8_0_f32(
+                    &ctx,
+                    &encoder,
+                    &gate_weight,
+                    &up_weight,
+                    &x,
+                    &fused_target,
+                    N_IN,
+                    N_OUT,
+                    CLAMP,
+                ),
+                GgmlType::Q6_K => crate::metal::encode_ds4_shared_swiglu_q6_k_f32(
+                    &ctx,
+                    &encoder,
+                    &gate_weight,
+                    &up_weight,
+                    &x,
+                    &fused_target,
+                    N_IN,
+                    N_OUT,
+                    CLAMP,
+                ),
+                _ => unreachable!(),
+            }
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "{dtype:?} command failed");
+
+            let gate = read_f32(&gate);
+            let up = read_f32(&up);
+            assert!(gate.iter().any(|&value| value > CLAMP));
+            assert!(up.iter().any(|&value| value > CLAMP));
+            assert!(up.iter().any(|&value| value < -CLAMP));
+            let composed = read_f32(&composed);
+            let fused_all = read_f32(&fused_target);
+            if dtype == GgmlType::Q6_K {
+                if let Some((index, (left, right))) = gate
+                    .iter()
+                    .zip(&fused_all[N_OUT..N_OUT * 2])
+                    .enumerate()
+                    .find(|(_, (left, right))| left.to_bits() != right.to_bits())
+                {
+                    panic!(
+                        "Q6 gate projection mismatch at {index}: composed={left:?} ({:08x}) fused={right:?} ({:08x})",
+                        left.to_bits(),
+                        right.to_bits()
+                    );
+                }
+                if let Some((index, (left, right))) = up
+                    .iter()
+                    .zip(&fused_all[N_OUT * 2..N_OUT * 3])
+                    .enumerate()
+                    .find(|(_, (left, right))| left.to_bits() != right.to_bits())
+                {
+                    panic!(
+                        "Q6 up projection mismatch at {index}: composed={left:?} ({:08x}) fused={right:?} ({:08x})",
+                        left.to_bits(),
+                        right.to_bits()
+                    );
+                }
+            }
+            let fused = fused_all[..N_OUT].to_vec();
+            assert!(
+                composed
+                    .iter()
+                    .zip(&fused)
+                    .all(|(&left, &right)| left.to_bits() == right.to_bits()),
+                "{dtype:?} fused shared expert must match composed gate/up/clamped-SwiGLU bit-for-bit"
+            );
+        }
     }
 
     fn read_u8(tensor: &MetalTensor) -> Vec<u8> {
@@ -18737,7 +19020,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            4_353_915_844 + diagnostics_logical + packed_route_logical
+            4_353_932_228 + diagnostics_logical + packed_route_logical
         );
         let names = requests
             .iter()
@@ -18827,7 +19110,7 @@ mod tests {
                 .iter()
                 .map(|request| request.logical_bytes)
                 .sum::<u64>(),
-            20_104_116_332 + promoted_diagnostics_logical + packed_route_logical
+            20_104_132_716 + promoted_diagnostics_logical + packed_route_logical
         );
         assert_eq!(
             promoted
@@ -34795,6 +35078,7 @@ mod tests {
             "all-slot test status",
         )
         .unwrap();
+        let gate_scratch = scratch.gate.view_subrange(0, vec![F as u64]);
 
         for (gate_dtype, down_dtype) in [
             (GgmlType::IQ2_XS, GgmlType::IQ3_XXS),
@@ -34822,7 +35106,7 @@ mod tests {
                     &scratch.normalized_input,
                     &scratch.expert_ids,
                     &scratch.route_status,
-                    &scratch.gate,
+                    &gate_scratch,
                     H,
                     F,
                     E,
@@ -34849,7 +35133,7 @@ mod tests {
                 encode_ds4_clamped_swiglu(
                     &ctx,
                     &encoder,
-                    &scratch.gate,
+                    &gate_scratch,
                     &scratch.up,
                     &inner,
                     CLAMP,

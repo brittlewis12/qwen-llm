@@ -27,6 +27,12 @@ struct mat_vec_q8_0_args {
     uint n_out;
 };
 
+struct ds4_shared_swiglu_q8_0_args {
+    uint n_in;
+    uint n_out;
+    float clamp;
+};
+
 #define NR0_Q80 1
 #define NSG_Q80 2
 #define NQ_Q80 8       // quants per thread per super-block iter
@@ -412,6 +418,104 @@ kernel void kernel_shared_swiglu_q8_0_f32_lcpp(
         const float up_total = simd_sum(up_shmem[tiisg]);
         if (tiisg == 0 && sgitg == 0) {
             y[first_row + row] = gate_total / (1.0f + exp(-gate_total)) * up_total;
+        }
+    }
+}
+
+kernel void kernel_ds4_shared_swiglu_q8_0_f32_lcpp(
+        constant ds4_shared_swiglu_q8_0_args & args [[buffer(0)]],
+        device const uchar         * gate_weight [[buffer(1)]],
+        device const uchar         * up_weight   [[buffer(2)]],
+        device const float         * x           [[buffer(3)]],
+        device       float         * y           [[buffer(4)]],
+        threadgroup  float         * shmem       [[threadgroup(0)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]]) {
+    constexpr ushort NW = 32;
+    constexpr ushort NQ = NQ_Q80;
+    constexpr ushort NR0 = NR0_Q80_LCPP;
+    constexpr ushort NSG = NSG_Q80_LCPP;
+
+    const uint nb = args.n_in / QK8_0;
+    const uint first_row = tgpig * NR0;
+    if (first_row >= args.n_out) return;
+
+    const ushort ix = tiisg / (NW / NQ);
+    const ushort il = tiisg % (NW / NQ);
+    const uint ib0 = sgitg * NQ + ix;
+
+    const ulong row_stride_bytes = (ulong)nb * Q8_0_BYTES;
+    device const uchar * gate_row0 = gate_weight + (ulong)first_row * row_stride_bytes;
+    device const uchar * up_row0   = up_weight   + (ulong)first_row * row_stride_bytes;
+    device const float * xb = x + (ulong)ib0 * QK8_0 + (ulong)il * NQ;
+
+    float sumg[NR0] = {0.0f, 0.0f};
+    float sumu[NR0] = {0.0f, 0.0f};
+    float xv[NQ];
+
+    for (uint ib = ib0; ib < nb; ib += NSG * NQ) {
+        for (ushort i = 0; i < NQ; ++i) {
+            xv[i] = xb[i];
+        }
+
+        for (ushort row = 0; row < NR0; ++row) {
+            if (first_row + row >= args.n_out) break;
+            device const uchar * gate_blk = gate_row0
+                + (ulong)row * row_stride_bytes
+                + (ulong)ib * Q8_0_BYTES;
+            device const uchar * up_blk = up_row0
+                + (ulong)row * row_stride_bytes
+                + (ulong)ib * Q8_0_BYTES;
+            device const half   * gate_dh = (device const half *)gate_blk;
+            device const half   * up_dh   = (device const half *)up_blk;
+            device const int8_t * gate_qs = (device const int8_t *)(gate_blk + 2) + il * NQ;
+            device const int8_t * up_qs   = (device const int8_t *)(up_blk + 2) + il * NQ;
+
+            float sum_gate = 0.0f;
+            float sum_up = 0.0f;
+            for (ushort i = 0; i < NQ; ++i) {
+                sum_gate += (float)gate_qs[i] * xv[i];
+                sum_up += (float)up_qs[i] * xv[i];
+            }
+            sumg[row] += sum_gate * (float)gate_dh[0];
+            sumu[row] += sum_up * (float)up_dh[0];
+        }
+
+        xb += (ulong)NSG * NQ * QK8_0;
+    }
+
+    for (ushort row = 0; row < NR0; ++row) {
+        threadgroup float * gate_shmem = shmem + NW * row;
+        threadgroup float * up_shmem = shmem + NW * (NR0 + row);
+        if (sgitg == 0) {
+            gate_shmem[tiisg] = 0.0f;
+            up_shmem[tiisg] = 0.0f;
+        }
+        sumg[row] = simd_sum(sumg[row]);
+        sumu[row] = simd_sum(sumu[row]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (ushort row = 0; row < NR0; ++row) {
+        threadgroup float * gate_shmem = shmem + NW * row;
+        threadgroup float * up_shmem = shmem + NW * (NR0 + row);
+        if (tiisg == 0) {
+            gate_shmem[sgitg] = sumg[row];
+            up_shmem[sgitg] = sumu[row];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (ushort row = 0; row < NR0 && first_row + row < args.n_out; ++row) {
+        threadgroup float * gate_shmem = shmem + NW * row;
+        threadgroup float * up_shmem = shmem + NW * (NR0 + row);
+        const float gate_total = simd_sum(gate_shmem[tiisg]);
+        const float up_total = simd_sum(up_shmem[tiisg]);
+        if (tiisg == 0 && sgitg == 0) {
+            const float clamped_gate = min(gate_total, args.clamp);
+            const float clamped_up = clamp(up_total, -args.clamp, args.clamp);
+            y[first_row + row] = clamped_gate / (1.0f + exp(-clamped_gate)) * clamped_up;
         }
     }
 }

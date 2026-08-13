@@ -6,6 +6,53 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — DeepSeek V4 Compressor Frontier Fusion GO
+
+Status: singleton decode now fuses each matched Q8_0 compressor KV/score pair
+and its APE frontier write into one dispatch. Set
+`QWEN_DSV4_DECODE_COMPRESSOR_FUSED=0` to restore two GEMVs plus the write
+kernel. Packed compressor execution, pooling, normalization, RoPE, publication,
+and ratio-4 rolling are unchanged.
+
+- The fused depth-2 grid keeps each projection on the exact singleton `_lcpp`
+  body rather than interleaving accumulators. KV writes its final F32 value
+  directly to authoritative state. Score retains a volatile F32 scratch
+  store/load before APE addition, preserving the composed fast-math rounding
+  boundary bit-for-bit.
+- The 21 CSA layers own two frontiers and the 20 HCA layers own one, so 62
+  three-dispatch frontiers become 62 one-dispatch frontiers. This removes 124
+  dispatches/token and lowers the ordinary source census from 1,759 to 1,635.
+- Model-free differentials cover ragged `512x67` and production
+  `4096x256/512/1024` shapes. They require exact score-projection, KV-state, and
+  score-state bits. Integrated ratio-4 and ratio-128 cases cover phase offsets,
+  boundaries, pooling, rolling, normalized state, and complete F16 publication
+  bits. A trace assertion proves `3 -> 1` dispatches, and the API rejects
+  partially overlapping writable rows.
+- Full release DSv4 tests pass 97/97 with 13 ignored. Strict library Clippy,
+  workspace release check, formatting, and two adversarial reviews pass without
+  blocker or high-severity findings.
+- On warm K160, a final-source fused/rollback/rollback/fused whole-token bracket
+  at positions 11-18 records wall medians `34.380/35.404/35.204/35.145 ms` and
+  GPU medians `33.308/33.724/33.571/33.482 ms`. Arm medians save 0.542 ms/token
+  wall and 0.253 ms/token GPU. This is dirty-tree promotion evidence over the
+  exact final source, not a clean commit packet. Every arm emits SHA-256
+  `000a0551...b13a6e`.
+- A final-source 128-transition fused/rollback/rollback/fused product bracket
+  records generation `4647.9/4694.3/4705.1/4717.4 ms`. The drift-cancelled arm
+  means are 4682.65 versus 4699.70 ms, saving 17.05 ms/request or
+  `0.133 ms/transition` (`0.36%`). This likewise measures the exact final dirty
+  source. Every arm emits SHA-256
+  `122afc79...8811b8`.
+- A dissimilar FRESH guardrail preserves generated-ID SHA-256
+  `d40035ea...85a9c0`; its one-pair fused/rollback whole profiles are
+  32.425/33.065 ms wall and 31.391/31.676 ms GPU. Treat this as correctness and
+  directional transfer evidence, not a promotion-grade timing bracket.
+
+Decision: retain the default exact F4 fusion. The long product saving is smaller
+than the original 0.6-1.0 ms launch estimate but remains positive, structural,
+and cross-asset. Next rank the exact combine tail against a materially larger
+paired prepare organization; do not retune this kernel locally.
+
 ## 2026-08-13 — DeepSeek V4 KV RoPE/Publication Fusion KILL
 
 Status: KILL the narrow decode leaf that fused shared-KV RoPE with F16 ring

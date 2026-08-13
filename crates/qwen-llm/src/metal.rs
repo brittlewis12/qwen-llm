@@ -19968,6 +19968,126 @@ pub fn encode_mat_vec_q8_0_grouped_f32(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn encode_ds4_compressor_pair_q8_0_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    kv_weight: &MetalTensor,
+    score_weight: &MetalTensor,
+    x: &MetalTensor,
+    projected_score: &MetalTensor,
+    ape: &MetalTensor,
+    kv_state_row: &MetalTensor,
+    score_state_row: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    let expected_weights = n_in.checked_mul(n_out);
+    let expected_weight_bytes = n_in
+        .checked_div(32)
+        .and_then(|blocks| blocks.checked_mul(34))
+        .and_then(|row_bytes| row_bytes.checked_mul(n_out));
+    let valid_f32_input = |tensor: &MetalTensor, writable: bool| {
+        tensor.dtype == GgmlType::F32
+            && tensor.shape == [n_out as u64]
+            && (!writable || tensor.is_writable())
+            && tensor.n_elements() as usize == n_out
+            && tensor_physical_range_valid(tensor, n_out.saturating_mul(4), 4)
+    };
+    if n_in == 0
+        || n_out == 0
+        || !n_in.is_multiple_of(32)
+        || kv_weight.dtype != GgmlType::Q8_0
+        || score_weight.dtype != GgmlType::Q8_0
+        || kv_weight.shape != [n_in as u64, n_out as u64]
+        || score_weight.shape != [n_in as u64, n_out as u64]
+        || x.dtype != GgmlType::F32
+        || x.shape != [n_in as u64]
+        || x.n_elements() as usize != n_in
+        || expected_weights.is_none_or(|expected| {
+            kv_weight.n_elements() as usize != expected
+                || score_weight.n_elements() as usize != expected
+        })
+        || !tensor_physical_range_valid(kv_weight, expected_weight_bytes.unwrap_or(usize::MAX), 2)
+        || !tensor_physical_range_valid(
+            score_weight,
+            expected_weight_bytes.unwrap_or(usize::MAX),
+            2,
+        )
+        || !tensor_physical_range_valid(x, n_in.saturating_mul(4), 4)
+        || !valid_f32_input(projected_score, true)
+        || !valid_f32_input(ape, false)
+        || !valid_f32_input(kv_state_row, true)
+        || !valid_f32_input(score_state_row, true)
+        || [projected_score, kv_state_row, score_state_row]
+            .iter()
+            .any(|output| {
+                tensor_ranges_overlap(output, kv_weight)
+                    || tensor_ranges_overlap(output, score_weight)
+                    || tensor_ranges_overlap(output, x)
+                    || tensor_ranges_overlap(output, ape)
+            })
+        || tensor_ranges_overlap(projected_score, kv_state_row)
+        || tensor_ranges_overlap(projected_score, score_state_row)
+        || tensor_ranges_overlap(kv_state_row, score_state_row)
+        || u32::try_from(n_in).is_err()
+        || u32::try_from(n_out).is_err()
+    {
+        return Err(MetalError::BadShape {
+            kernel: "ds4_compressor_pair_q8_0",
+            detail: format!(
+                "expected Q8_0 KV/score [{n_in},{n_out}], F32 x={n_in}, and distinct writable F32 score/state rows of {n_out}; got {:?}/{:?} x={:?}/{} projected_score={:?} state={:?}/{:?}",
+                kv_weight.dtype,
+                score_weight.dtype,
+                x.dtype,
+                x.n_elements(),
+                projected_score.shape,
+                kv_state_row.shape,
+                score_state_row.shape,
+            ),
+        });
+    }
+
+    let pso = ctx.pipeline("kernel_ds4_compressor_pair_q8_0_f32_lcpp")?;
+    enc.set_pipeline(&pso);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            n_out: n_out as u32,
+        },
+    );
+    enc.set_tensor(1, kv_weight);
+    enc.set_tensor(2, score_weight);
+    enc.set_tensor(3, x);
+    enc.set_tensor(4, projected_score);
+    enc.set_tensor(5, ape);
+    enc.set_tensor(6, kv_state_row);
+    enc.set_tensor(7, score_state_row);
+    const NR0: usize = 2;
+    const NSG: usize = 4;
+    enc.set_threadgroup_memory(0, 32 * NR0 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(NR0),
+            height: 1,
+            depth: 2,
+        },
+        MTLSize {
+            width: NSG * 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Token-axis Q8_0 GEMV with the exact singleton `_lcpp` accumulation body.
 /// Each grid row owns one activation row; the weight traversal remains one
 /// dispatch without half-staging persistent cache-producing projections.

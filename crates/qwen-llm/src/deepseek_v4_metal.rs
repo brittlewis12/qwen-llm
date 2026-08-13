@@ -4041,6 +4041,59 @@ impl DeepSeekV4CompressorFrontier {
             "published compressor rows",
         )?;
 
+        let fused = deepseek_v4_decode_compressor_fused_enabled()
+            && kv_weight.dtype == GgmlType::Q8_0
+            && score_weight.dtype == GgmlType::Q8_0
+            && crate::metal::mat_vec_q8_0_lcpp_enabled();
+        if fused {
+            validate_ds4_rope(rope, self.head_dim, rope.rotary_dim)?;
+            validate_eps(rms_eps, "compressor RMSNorm epsilon")?;
+            let (following_position, state_row, published_row) = self.step(position)?;
+            let ape_row = ape.view_subrange(
+                ((position as usize % self.ratio) * self.width) as u64,
+                vec![self.width as u64],
+            );
+            let state_offset = checked_mul(
+                state_row,
+                self.width,
+                "fused compressor frontier row offset",
+            )?;
+            let kv_state_row = self
+                .kv_state
+                .view_subrange(state_offset as u64, vec![self.width as u64]);
+            let score_state_row = self
+                .score_state
+                .view_subrange(state_offset as u64, vec![self.width as u64]);
+            static REPORTED: std::sync::Once = std::sync::Once::new();
+            REPORTED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: decode Q8 compressor projections and frontier write run one fused dispatch; rollback=QWEN_DSV4_DECODE_COMPRESSOR_FUSED=0"
+                );
+            });
+            crate::metal::encode_ds4_compressor_pair_q8_0_f32(
+                ctx,
+                enc,
+                kv_weight,
+                score_weight,
+                input,
+                &self.projected_score,
+                &ape_row,
+                &kv_state_row,
+                &score_state_row,
+                hidden_size,
+                self.width,
+            )?;
+            return self.encode_after_frontier_write(
+                ctx,
+                enc,
+                norm_weight,
+                following_position,
+                published_row,
+                rope,
+                rms_eps,
+            );
+        }
+
         encode_projection(
             ctx,
             enc,
@@ -4145,6 +4198,34 @@ impl DeepSeekV4CompressorFrontier {
         validate_ds4_rope(rope, self.head_dim, rope.rotary_dim)?;
         validate_eps(rms_eps, "compressor RMSNorm epsilon")?;
 
+        let (following_position, state_row, published_row) = self.step(position)?;
+        let ape_row = ape.view_subrange(
+            ((position as usize % self.ratio) * self.width) as u64,
+            vec![self.width as u64],
+        );
+        encode_compressor_frontier_write(
+            ctx,
+            enc,
+            projected_kv,
+            projected_score,
+            &ape_row,
+            &self.kv_state,
+            &self.score_state,
+            self.width,
+            state_row,
+        )?;
+        self.encode_after_frontier_write(
+            ctx,
+            enc,
+            norm_weight,
+            following_position,
+            published_row,
+            rope,
+            rms_eps,
+        )
+    }
+
+    fn step(&self, position: u32) -> Result<(u32, usize, Option<usize>), DeepSeekV4MetalError> {
         let following_position = position
             .checked_add(1)
             .ok_or_else(|| DeepSeekV4MetalError::Invalid("compressor position overflow".into()))?;
@@ -4161,28 +4242,25 @@ impl DeepSeekV4CompressorFrontier {
         } else {
             None
         };
-
-        let ape_row = ape.view_subrange(
-            ((position as usize % self.ratio) * self.width) as u64,
-            vec![self.width as u64],
-        );
         let state_row = if self.ratio == 4 {
             self.ratio + position as usize % self.ratio
         } else {
             position as usize % self.ratio
         };
-        encode_compressor_frontier_write(
-            ctx,
-            enc,
-            projected_kv,
-            projected_score,
-            &ape_row,
-            &self.kv_state,
-            &self.score_state,
-            self.width,
-            state_row,
-        )?;
+        Ok((following_position, state_row, published_row))
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn encode_after_frontier_write(
+        &self,
+        ctx: &MetalContext,
+        enc: &KernelEncoder,
+        norm_weight: &MetalTensor,
+        following_position: u32,
+        published_row: Option<usize>,
+        rope: DeepSeekV4RopeParameters,
+        rms_eps: f32,
+    ) -> Result<(), DeepSeekV4MetalError> {
         let Some(published_row) = published_row else {
             return Ok(());
         };
@@ -10735,6 +10813,11 @@ crate::env_flag!(
 );
 
 crate::env_flag!(
+    default_on deepseek_v4_decode_compressor_fused_enabled,
+    "QWEN_DSV4_DECODE_COMPRESSOR_FUSED"
+);
+
+crate::env_flag!(
     default_on deepseek_v4_grouped_long_hca_enabled,
     "QWEN_DSV4_GROUPED_LONG_HCA"
 );
@@ -15531,6 +15614,9 @@ mod tests {
         if !crate::metal::mat_vec_q8_0_lcpp_enabled() {
             return;
         }
+        if !deepseek_v4_decode_compressor_fused_enabled() {
+            return;
+        }
         for (n_in, n_out, n_groups) in [(4_096usize, 1_024usize, 8usize), (64, 5, 3)] {
             let blocks_per_row = n_in / 32;
             let row_bytes = blocks_per_row * 34;
@@ -15799,6 +15885,440 @@ mod tests {
                 "{dtype:?} fused shared expert must match composed gate/up/clamped-SwiGLU bit-for-bit"
             );
         }
+    }
+
+    #[test]
+    fn decode_compressor_q8_pair_matches_composed_frontier_write_bitwise() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        if !crate::metal::mat_vec_q8_0_lcpp_enabled() {
+            return;
+        }
+
+        for (n_in, n_out) in [
+            (512usize, 67usize),
+            (4_096, 256),
+            (4_096, 512),
+            (4_096, 1_024),
+        ] {
+            let make_weight = |salt: usize| {
+                let mut bytes = Vec::with_capacity(n_out * (n_in / 32) * 34);
+                for row in 0..n_out {
+                    for block in 0..n_in / 32 {
+                        let scale = half::f16::from_f32(
+                            0.0015 + ((row * 13 + block * 7 + salt) % 29) as f32 * 0.00017,
+                        );
+                        bytes.extend_from_slice(&scale.to_bits().to_le_bytes());
+                        for index in 0..32 {
+                            bytes.push(
+                                ((row * 19 + block * 31 + index * 23 + salt * 11) % 255) as u8,
+                            );
+                        }
+                    }
+                }
+                MetalTensor::from_bytes(
+                    &ctx,
+                    &bytes,
+                    vec![n_in as u64, n_out as u64],
+                    GgmlType::Q8_0,
+                )
+                .expect("compressor Q8 weight")
+            };
+            let kv_weight = make_weight(3);
+            let score_weight = make_weight(17);
+            let x_values = (0..n_in)
+                .map(|index| ((index * 43 + index / 7 + 11) % 503) as f32 * 0.0091 - 2.27)
+                .collect::<Vec<_>>();
+            let ape_values = (0..n_out)
+                .map(|index| {
+                    let base = ((index * 37 + 5) % 211) as f32 * 0.00031 - 0.032;
+                    match index % 8 {
+                        0 => 0.0,
+                        1 => -0.0,
+                        2 => f32::from_bits(1),
+                        3 => -f32::from_bits(1),
+                        _ => base,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let x = offset_f32(&ctx, &x_values, vec![n_in as u64]);
+            let ape = offset_f32(&ctx, &ape_values, vec![n_out as u64]);
+            let composed_kv = offset_f32(&ctx, &vec![0.0; n_out], vec![n_out as u64]);
+            let composed_score = offset_f32(&ctx, &vec![0.0; n_out], vec![n_out as u64]);
+            let composed_kv_state = offset_f32(&ctx, &vec![f32::NAN; n_out], vec![n_out as u64]);
+            let composed_score_state =
+                offset_f32(&ctx, &vec![f32::NEG_INFINITY; n_out], vec![n_out as u64]);
+            let fused_score = offset_f32(&ctx, &vec![0.0; n_out], vec![n_out as u64]);
+            let fused_kv_state = offset_f32(&ctx, &vec![f32::NAN; n_out], vec![n_out as u64]);
+            let fused_score_state =
+                offset_f32(&ctx, &vec![f32::NEG_INFINITY; n_out], vec![n_out as u64]);
+
+            let command = ctx.queue.commandBuffer().expect("compressor pair command");
+            let encoder = KernelEncoder::begin(&command);
+            encode_projection(
+                &ctx,
+                &encoder,
+                &kv_weight,
+                &x,
+                &composed_kv,
+                n_in,
+                n_out,
+                "compressor KV differential",
+            )
+            .unwrap();
+            encode_projection(
+                &ctx,
+                &encoder,
+                &score_weight,
+                &x,
+                &composed_score,
+                n_in,
+                n_out,
+                "compressor score differential",
+            )
+            .unwrap();
+            encode_compressor_frontier_write(
+                &ctx,
+                &encoder,
+                &composed_kv,
+                &composed_score,
+                &ape,
+                &composed_kv_state,
+                &composed_score_state,
+                n_out,
+                0,
+            )
+            .unwrap();
+            crate::metal::encode_ds4_compressor_pair_q8_0_f32(
+                &ctx,
+                &encoder,
+                &kv_weight,
+                &score_weight,
+                &x,
+                &fused_score,
+                &ape,
+                &fused_kv_state,
+                &fused_score_state,
+                n_in,
+                n_out,
+            )
+            .unwrap();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "compressor pair command failed");
+
+            let assert_bits = |label: &str, composed: &MetalTensor, fused: &MetalTensor| {
+                let composed = read_f32(composed);
+                let fused = read_f32(fused);
+                if let Some((index, (&left, &right))) = composed
+                    .iter()
+                    .zip(&fused)
+                    .enumerate()
+                    .find(|(_, (left, right))| left.to_bits() != right.to_bits())
+                {
+                    panic!(
+                        "{label} mismatch at {index} for {n_in}x{n_out}: composed={left:?} ({:08x}) fused={right:?} ({:08x})",
+                        left.to_bits(),
+                        right.to_bits(),
+                    );
+                }
+            };
+            assert_bits("score projection", &composed_score, &fused_score);
+            assert_bits("KV state", &composed_kv_state, &fused_kv_state);
+            assert_bits("score state", &composed_score_state, &fused_score_state);
+            assert!(read_f32(&fused_kv_state).iter().any(|&value| value != 0.0));
+        }
+
+        let q8_bytes = vec![0u8; 2 * 34];
+        let weight = MetalTensor::from_bytes(&ctx, &q8_bytes, vec![32, 2], GgmlType::Q8_0)
+            .expect("valid Q8 rejection weight");
+        let x = offset_f32(&ctx, &[0.0; 32], vec![32]);
+        let projected_score = offset_f32(&ctx, &[0.0; 2], vec![2]);
+        let ape = offset_f32(&ctx, &[0.0; 2], vec![2]);
+        let state = offset_f32(&ctx, &[0.0; 4], vec![4]);
+        let kv_state = state.view_subrange(0, vec![2]);
+        let score_state = state.view_subrange(1, vec![2]);
+        let command = ctx
+            .queue
+            .commandBuffer()
+            .expect("compressor rejection command");
+        let encoder = KernelEncoder::begin(&command);
+        let error = crate::metal::encode_ds4_compressor_pair_q8_0_f32(
+            &ctx,
+            &encoder,
+            &weight,
+            &weight,
+            &x,
+            &projected_score,
+            &ape,
+            &kv_state,
+            &score_state,
+            32,
+            2,
+        )
+        .expect_err("partially overlapping state rows must fail closed");
+        assert!(format!("{error}").contains("ds4_compressor_pair_q8_0"));
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+    }
+
+    #[test]
+    fn decode_compressor_q8_pair_replaces_three_dispatches_with_one() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        if !crate::metal::mat_vec_q8_0_lcpp_enabled() {
+            return;
+        }
+
+        const N_IN: usize = 512;
+        const N_OUT: usize = 67;
+        let mut bytes = vec![0u8; N_OUT * (N_IN / 32) * 34];
+        for block in bytes.chunks_exact_mut(34) {
+            block[..2].copy_from_slice(&half::f16::from_f32(0.01).to_bits().to_le_bytes());
+            block[2..].fill(1);
+        }
+        let weight = MetalTensor::from_bytes(
+            &ctx,
+            &bytes,
+            vec![N_IN as u64, N_OUT as u64],
+            GgmlType::Q8_0,
+        )
+        .unwrap();
+        let x = offset_f32(&ctx, &[0.25; N_IN], vec![N_IN as u64]);
+        let ape = offset_f32(&ctx, &[0.125; N_OUT], vec![N_OUT as u64]);
+        let projected_kv = offset_f32(&ctx, &[0.0; N_OUT], vec![N_OUT as u64]);
+        let projected_score = offset_f32(&ctx, &[0.0; N_OUT], vec![N_OUT as u64]);
+        let kv_state = offset_f32(&ctx, &[0.0; N_OUT], vec![N_OUT as u64]);
+        let score_state = offset_f32(&ctx, &[0.0; N_OUT], vec![N_OUT as u64]);
+
+        let composed = {
+            let _trace = crate::metal::kernel_trace_begin();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            encode_projection(
+                &ctx,
+                &encoder,
+                &weight,
+                &x,
+                &projected_kv,
+                N_IN,
+                N_OUT,
+                "dispatch-count KV",
+            )
+            .unwrap();
+            encode_projection(
+                &ctx,
+                &encoder,
+                &weight,
+                &x,
+                &projected_score,
+                N_IN,
+                N_OUT,
+                "dispatch-count score",
+            )
+            .unwrap();
+            encode_compressor_frontier_write(
+                &ctx,
+                &encoder,
+                &projected_kv,
+                &projected_score,
+                &ape,
+                &kv_state,
+                &score_state,
+                N_OUT,
+                0,
+            )
+            .unwrap();
+            let trace = crate::metal::kernel_trace_snapshot();
+            encoder.end();
+            trace
+        };
+        let fused = {
+            let _trace = crate::metal::kernel_trace_begin();
+            let command = ctx.queue.commandBuffer().unwrap();
+            let encoder = KernelEncoder::begin(&command);
+            crate::metal::encode_ds4_compressor_pair_q8_0_f32(
+                &ctx,
+                &encoder,
+                &weight,
+                &weight,
+                &x,
+                &projected_score,
+                &ape,
+                &kv_state,
+                &score_state,
+                N_IN,
+                N_OUT,
+            )
+            .unwrap();
+            let trace = crate::metal::kernel_trace_snapshot();
+            encoder.end();
+            trace
+        };
+        assert_eq!(composed.dispatches, 3);
+        assert_eq!(fused.dispatches, 1);
+    }
+
+    #[test]
+    fn decode_compressor_q8_pair_matches_composed_frontier_steps_bitwise() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        if !crate::metal::mat_vec_q8_0_lcpp_enabled() {
+            return;
+        }
+
+        const N_IN: usize = 512;
+        let run = |ratio: usize, head_dim: usize, positions: &[u32]| {
+            let width = if ratio == 4 { 2 * head_dim } else { head_dim };
+            let make_weight = |salt: usize| {
+                let mut bytes = Vec::with_capacity(width * (N_IN / 32) * 34);
+                for row in 0..width {
+                    for block in 0..N_IN / 32 {
+                        let scale = half::f16::from_f32(
+                            0.0012 + ((row * 11 + block * 17 + salt) % 31) as f32 * 0.00013,
+                        );
+                        bytes.extend_from_slice(&scale.to_bits().to_le_bytes());
+                        for index in 0..32 {
+                            bytes.push(
+                                ((row * 29 + block * 19 + index * 7 + salt * 13) % 255) as u8,
+                            );
+                        }
+                    }
+                }
+                MetalTensor::from_bytes(
+                    &ctx,
+                    &bytes,
+                    vec![N_IN as u64, width as u64],
+                    GgmlType::Q8_0,
+                )
+                .expect("frontier-step Q8 weight")
+            };
+            let kv_weight = make_weight(5);
+            let score_weight = make_weight(23);
+            let ape_values = (0..ratio * width)
+                .map(|index| ((index * 31 + 9) % 257) as f32 * 0.00021 - 0.027)
+                .collect::<Vec<_>>();
+            let ape = offset_f32(&ctx, &ape_values, vec![width as u64, ratio as u64]);
+            let norm = offset_f32(&ctx, &vec![1.0; head_dim], vec![head_dim as u64]);
+            let rope = DeepSeekV4RopeParameters {
+                rotary_dim: head_dim.min(64),
+                theta: 10_000.0,
+                scaling_factor: 1.0,
+                original_context_length: 0,
+                beta_fast: 32.0,
+                beta_slow: 1.0,
+            };
+            let composed = DeepSeekV4CompressorFrontier::new(
+                &ctx,
+                ratio,
+                head_dim,
+                DeepSeekV4CompressorPublication::Attention,
+                DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+            )
+            .unwrap();
+            let fused = DeepSeekV4CompressorFrontier::new(
+                &ctx,
+                ratio,
+                head_dim,
+                DeepSeekV4CompressorPublication::Attention,
+                DEEPSEEK_V4_CSA_HISTORY_CAPACITY_ROWS,
+            )
+            .unwrap();
+
+            let command = ctx.queue.commandBuffer().expect("frontier-step command");
+            let encoder = KernelEncoder::begin(&command);
+            for &position in positions {
+                let x_values = (0..N_IN)
+                    .map(|index| {
+                        ((index * 41 + position as usize * 37 + 3) % 401) as f32 * 0.0083 - 1.67
+                    })
+                    .collect::<Vec<_>>();
+                let x = offset_f32(&ctx, &x_values, vec![N_IN as u64]);
+                encode_projection(
+                    &ctx,
+                    &encoder,
+                    &kv_weight,
+                    &x,
+                    &composed.projected_kv,
+                    N_IN,
+                    width,
+                    "composed frontier-step KV",
+                )
+                .unwrap();
+                encode_projection(
+                    &ctx,
+                    &encoder,
+                    &score_weight,
+                    &x,
+                    &composed.projected_score,
+                    N_IN,
+                    width,
+                    "composed frontier-step score",
+                )
+                .unwrap();
+                composed
+                    .encode_projected(
+                        &ctx,
+                        &encoder,
+                        &composed.projected_kv,
+                        &composed.projected_score,
+                        &ape,
+                        &norm,
+                        position,
+                        rope,
+                        1e-5,
+                    )
+                    .unwrap();
+
+                fused
+                    .encode(
+                        &ctx,
+                        &encoder,
+                        &x,
+                        &kv_weight,
+                        &score_weight,
+                        &ape,
+                        &norm,
+                        position,
+                        N_IN,
+                        rope,
+                        1e-5,
+                    )
+                    .unwrap();
+            }
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(command.error().is_none(), "frontier-step command failed");
+
+            let assert_f32_bits = |label: &str, left: &MetalTensor, right: &MetalTensor| {
+                let left = read_f32(left);
+                let right = read_f32(right);
+                assert!(
+                    left.iter()
+                        .zip(&right)
+                        .all(|(&left, &right)| left.to_bits() == right.to_bits()),
+                    "{label} differs for ratio {ratio} head_dim {head_dim}"
+                );
+            };
+            assert_f32_bits("KV state", &composed.kv_state, &fused.kv_state);
+            assert_f32_bits("score state", &composed.score_state, &fused.score_state);
+            assert_f32_bits("pooled row", &composed.pooled, &fused.pooled);
+            assert_f32_bits("normalized row", &composed.normalized, &fused.normalized);
+            assert_eq!(
+                read_f16_bits(&composed.published),
+                read_f16_bits(&fused.published),
+                "publication differs for ratio {ratio} head_dim {head_dim}"
+            );
+        };
+
+        run(4, 128, &[2, 3, 4, 6, 7, 8]);
+        run(128, 128, &[126, 127, 128]);
     }
 
     fn read_u8(tensor: &MetalTensor) -> Vec<u8> {

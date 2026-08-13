@@ -28,6 +28,7 @@
 
 pub mod cache_probe;
 pub mod checkpoint_codec;
+pub(crate) mod checkpoint_fs;
 pub mod checkpoint_identity;
 pub mod checkpoint_store;
 pub mod codec;

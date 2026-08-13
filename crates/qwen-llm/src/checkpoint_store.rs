@@ -16,31 +16,29 @@
 use crate::checkpoint_codec::{
     EncodedSnapshot, SnapshotCodecConstraints, SnapshotCodecError, decode_snapshot, encode_snapshot,
 };
+use crate::checkpoint_fs::{
+    BlobLease, CheckpointFsError, FileStamp, StoreNamespace, evict_to_fit, hex, metadata_nofollow,
+    parse_hex_32, path_exists_nofollow, require_real_directory_if_exists, scan_managed_blobs,
+    sync_directory, unique_temp_path, validate_post_link_stamp, validate_staged_stamp,
+};
 use crate::checkpoint_identity::CheckpointIdentityCache;
 use crate::metal_forward::{SessionSnapshot, SnapshotIdentity};
 use std::collections::{BTreeSet, HashMap};
-use std::fs::{File, FileTimes, OpenOptions};
+use std::fs::{FileTimes, OpenOptions};
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 const NAMESPACE_VERSION: &str = "v1";
 const PREFIX_KEY_DOMAIN: &[u8] = b"qwen-checkpoint-prefix-key-v1\0";
 const BLOB_EXTENSION: &str = "qcp";
-const TEMP_PREFIX: &str = ".tmp-";
-const LOCK_FILE: &str = "store.lock";
 const MAX_PUBLICATION_ATTEMPTS: usize = 8;
-
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct DurableCheckpointStore {
-    root: PathBuf,
+    namespace: StoreNamespace,
     max_managed_blob_bytes: u64,
-    namespace_ready: Arc<AtomicBool>,
     staged_integrity: StagedIntegrityMode,
     staged_integrity_explicit: bool,
 }
@@ -48,9 +46,8 @@ pub struct DurableCheckpointStore {
 impl DurableCheckpointStore {
     pub fn new(root: impl Into<PathBuf>, max_managed_blob_bytes: u64) -> Self {
         Self {
-            root: root.into(),
+            namespace: StoreNamespace::new(root, NAMESPACE_VERSION),
             max_managed_blob_bytes,
-            namespace_ready: Arc::new(AtomicBool::new(false)),
             staged_integrity: StagedIntegrityMode::Decode,
             staged_integrity_explicit: false,
         }
@@ -62,16 +59,15 @@ impl DurableCheckpointStore {
         staged_integrity: StagedIntegrityMode,
     ) -> Self {
         Self {
-            root: root.into(),
+            namespace: StoreNamespace::new(root, NAMESPACE_VERSION),
             max_managed_blob_bytes,
-            namespace_ready: Arc::new(AtomicBool::new(false)),
             staged_integrity,
             staged_integrity_explicit: true,
         }
     }
 
     pub fn root(&self) -> &Path {
-        &self.root
+        self.namespace.root()
     }
 
     pub fn max_managed_blob_bytes(&self) -> u64 {
@@ -87,14 +83,18 @@ impl DurableCheckpointStore {
     }
 
     pub fn identity_cache(&self) -> CheckpointIdentityCache {
-        CheckpointIdentityCache::new(self.namespace_root().join("identity"))
+        CheckpointIdentityCache::new(self.namespace.identity_root())
     }
 
     /// Cheap global emptiness probe for callers that can skip strong identity
     /// resolution when no checkpoint blob could possibly match.
     pub fn has_managed_blobs(&self) -> Result<bool, CheckpointStoreError> {
-        let _lock = self.lock_shared()?;
-        Ok(!scan_managed_blobs(&self.blobs_root())?.blobs.is_empty())
+        let _lock = self.namespace.lock_shared()?;
+        Ok(
+            !scan_managed_blobs(&self.blobs_root(), is_managed_blob_name)?
+                .blobs
+                .is_empty(),
+        )
     }
 
     pub fn publish(
@@ -222,12 +222,12 @@ impl DurableCheckpointStore {
                 continue;
             }
 
-            let lock = self.lock_exclusive()?;
+            let lock = self.namespace.lock_exclusive()?;
             if path_exists_nofollow(final_path)? {
                 drop(lock);
                 continue;
             }
-            let before = scan_managed_blobs(&self.blobs_root())?;
+            let before = scan_managed_blobs(&self.blobs_root(), is_managed_blob_name)?;
             let (evicted_entries, evicted_bytes, remaining_bytes) = evict_to_fit(
                 before,
                 staged.encoded.record_bytes,
@@ -359,7 +359,7 @@ impl DurableCheckpointStore {
         request_tokens: &[i32],
         context: StoreContext<'_>,
     ) -> Result<Vec<Candidate>, CheckpointStoreError> {
-        let lock = self.lock_shared()?;
+        let lock = self.namespace.lock_shared()?;
         let mut found = Vec::new();
         let mut lengths = BTreeSet::new();
         if !require_real_directory_if_exists(&self.blobs_root())?
@@ -414,29 +414,13 @@ impl DurableCheckpointStore {
         Ok(candidates)
     }
 
-    fn ensure_blob_dir(&self, blob_dir: &Path) -> Result<(), CheckpointStoreError> {
-        let _lock = self.lock_exclusive()?;
-        let blobs_root = self.blobs_root();
-        let blobs_created = create_directory(&blobs_root)?;
-        ensure_real_directory(&blobs_root)?;
-        if blobs_created {
-            sync_directory(&self.namespace_root())?;
-        }
-        let blob_dir_created = create_directory(blob_dir)?;
-        ensure_real_directory(blob_dir)?;
-        if blob_dir_created {
-            sync_directory(&blobs_root)?;
-        }
-        Ok(())
-    }
-
     fn admit_existing(
         &self,
         path: &Path,
         lease: &BlobLease,
         staged_integrity: StagedIntegrityReport,
     ) -> Result<Option<PublishReport>, CheckpointStoreError> {
-        let _lock = self.lock_exclusive()?;
+        let _lock = self.namespace.lock_exclusive()?;
         let Some(metadata) = metadata_nofollow(path)? else {
             return Ok(None);
         };
@@ -446,7 +430,7 @@ impl DurableCheckpointStore {
         if metadata.dev() != lease.dev || metadata.ino() != lease.ino {
             return Ok(None);
         }
-        let before = scan_managed_blobs(&self.blobs_root())?;
+        let before = scan_managed_blobs(&self.blobs_root(), is_managed_blob_name)?;
         let (evicted_entries, evicted_bytes, managed_bytes_after) =
             evict_to_fit(before, 0, self.max_managed_blob_bytes, Some(path))?;
         let touched = lease
@@ -465,8 +449,7 @@ impl DurableCheckpointStore {
     }
 
     fn open_candidate(&self, path: &Path) -> Result<Option<BlobLease>, CheckpointStoreError> {
-        let _lock = self.lock_shared()?;
-        open_blob_nofollow(path)
+        Ok(self.namespace.open_candidate(path)?)
     }
 
     fn remove_if_same_inode(
@@ -474,24 +457,7 @@ impl DurableCheckpointStore {
         path: &Path,
         lease: &BlobLease,
     ) -> Result<bool, CheckpointStoreError> {
-        let _lock = self.lock_exclusive()?;
-        let Some(metadata) = metadata_nofollow(path)? else {
-            return Ok(false);
-        };
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-            return Ok(false);
-        }
-        if metadata.dev() != lease.dev || metadata.ino() != lease.ino {
-            return Ok(false);
-        }
-        std::fs::remove_file(path)?;
-        sync_directory(path.parent().expect("blob parent")).map_err(|source| {
-            CheckpointStoreError::PostMutationIo {
-                operation: "sync repaired blob directory",
-                source,
-            }
-        })?;
-        Ok(true)
+        Ok(self.namespace.remove_if_same_inode(path, lease)?)
     }
 
     fn touch_if_same_inode(
@@ -499,75 +465,50 @@ impl DurableCheckpointStore {
         path: &Path,
         lease: &BlobLease,
     ) -> Result<(), CheckpointStoreError> {
-        let _lock = self.lock_exclusive()?;
-        let metadata = metadata_nofollow(path)?.ok_or(CheckpointStoreError::TouchLostRace)?;
-        if metadata.dev() != lease.dev || metadata.ino() != lease.ino {
-            return Err(CheckpointStoreError::TouchLostRace);
-        }
-        lease
-            .file
-            .set_times(FileTimes::new().set_modified(SystemTime::now()))?;
-        Ok(())
+        Ok(self.namespace.touch_if_same_inode(path, lease)?)
     }
 
-    fn lock_shared(&self) -> Result<StoreLock, CheckpointStoreError> {
-        self.lock(libc::LOCK_SH)
+    fn ensure_blob_dir(&self, blob_dir: &Path) -> Result<(), CheckpointStoreError> {
+        Ok(self.namespace.ensure_blob_dir(blob_dir)?)
     }
 
-    fn lock_exclusive(&self) -> Result<StoreLock, CheckpointStoreError> {
-        self.lock(libc::LOCK_EX)
-    }
-
-    fn lock(&self, operation: libc::c_int) -> Result<StoreLock, CheckpointStoreError> {
-        let initialize = !self.namespace_ready.load(Ordering::Acquire);
-        if initialize {
-            self.ensure_namespace()?;
-        }
-        let namespace = self.namespace_root();
-        ensure_real_directory(&namespace)?;
-        let path = namespace.join(LOCK_FILE);
-        let mut options = OpenOptions::new();
-        options
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        let file = options.open(path)?;
-        if !file.metadata()?.file_type().is_file() {
-            return Err(CheckpointStoreError::ForeignEntryAtKey(
-                self.namespace_root().join(LOCK_FILE),
-            ));
-        }
-        if initialize {
-            sync_directory(&namespace)?;
-            self.namespace_ready.store(true, Ordering::Release);
-        }
-        flock_retry(&file, operation)?;
-        Ok(StoreLock { file })
-    }
-
-    fn ensure_namespace(&self) -> Result<(), CheckpointStoreError> {
-        create_directory_tree_synced(&self.root)?;
-        let namespace = self.namespace_root();
-        let namespace_created = create_directory(&namespace)?;
-        ensure_real_directory(&namespace)?;
-        if namespace_created {
-            sync_directory(&self.root)?;
-        }
-        Ok(())
-    }
-
-    fn namespace_root(&self) -> PathBuf {
-        self.root.join(NAMESPACE_VERSION)
+    #[cfg(test)]
+    fn lock_exclusive(&self) -> Result<crate::checkpoint_fs::StoreLock, CheckpointStoreError> {
+        Ok(self.namespace.lock_exclusive()?)
     }
 
     fn blobs_root(&self) -> PathBuf {
-        self.namespace_root().join("blobs")
+        self.namespace.blobs_root()
     }
 
     fn blob_dir(&self, compatibility_id: &[u8; 32]) -> PathBuf {
-        self.blobs_root().join(hex(compatibility_id))
+        self.namespace.blob_dir(compatibility_id)
+    }
+}
+
+fn is_managed_blob_name(name: &std::ffi::OsStr) -> bool {
+    parse_blob_name(name).is_some()
+}
+
+impl From<CheckpointFsError> for CheckpointStoreError {
+    fn from(error: CheckpointFsError) -> Self {
+        match error {
+            CheckpointFsError::Io(source) => Self::Io(source),
+            CheckpointFsError::ForeignEntryAtKey(path) => Self::ForeignEntryAtKey(path),
+            CheckpointFsError::ManagedBytesOverflow => Self::ManagedBytesOverflow,
+            CheckpointFsError::OversizedBlob {
+                blob_bytes,
+                max_managed_blob_bytes,
+            } => Self::OversizedBlob {
+                blob_bytes,
+                max_managed_blob_bytes,
+            },
+            CheckpointFsError::PostMutationIo { operation, source } => {
+                Self::PostMutationIo { operation, source }
+            }
+            CheckpointFsError::StagedMetadata(reason) => Self::StagedMetadata(reason),
+            CheckpointFsError::TouchLostRace => Self::TouchLostRace,
+        }
     }
 }
 
@@ -773,7 +714,7 @@ struct Candidate {
 }
 
 struct StagedBlob {
-    file: File,
+    file: std::fs::File,
     path: PathBuf,
     encoded: EncodedSnapshot,
     opening: FileStamp,
@@ -781,61 +722,10 @@ struct StagedBlob {
     integrity: StagedIntegrityReport,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FileStamp {
-    regular: bool,
-    len: u64,
-    mode: u32,
-    dev: u64,
-    ino: u64,
-    nlink: u64,
-}
-
-impl FileStamp {
-    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
-        Self {
-            regular: metadata.file_type().is_file(),
-            len: metadata.len(),
-            mode: metadata.mode() & 0o7777,
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-            nlink: metadata.nlink(),
-        }
-    }
-}
-
-struct BlobLease {
-    file: File,
-    dev: u64,
-    ino: u64,
-    size: u64,
-}
-
-struct StoreLock {
-    file: File,
-}
-
-impl Drop for StoreLock {
-    fn drop(&mut self) {
-        let _ = flock_retry(&self.file, libc::LOCK_UN);
-    }
-}
-
 struct ParsedBlobName {
     matched_len: usize,
     mode: SnapshotMode,
     digest: [u8; 32],
-}
-
-struct ManagedBlob {
-    path: PathBuf,
-    size: u64,
-    modified: SystemTime,
-}
-
-struct ManagedScan {
-    blobs: Vec<ManagedBlob>,
-    total_bytes: u64,
 }
 
 fn snapshot_prefix_key(compatibility_id: &[u8; 32], snapshot: &SessionSnapshot) -> [u8; 32] {
@@ -938,106 +828,6 @@ fn parse_blob_name(name: &std::ffi::OsStr) -> Option<ParsedBlobName> {
     })
 }
 
-fn unique_temp_path(blob_dir: &Path, digest: &[u8; 32]) -> PathBuf {
-    let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nonce = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    blob_dir.join(format!(
-        "{TEMP_PREFIX}{}-{nonce}-{sequence}-{}",
-        std::process::id(),
-        &hex(digest)[..16]
-    ))
-}
-
-fn open_blob_nofollow(path: &Path) -> Result<Option<BlobLease>, CheckpointStoreError> {
-    if let Some(metadata) = metadata_nofollow(path)?
-        && (metadata.file_type().is_symlink() || !metadata.file_type().is_file())
-    {
-        return Err(CheckpointStoreError::ForeignEntryAtKey(path.to_path_buf()));
-    }
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
-            return Err(CheckpointStoreError::ForeignEntryAtKey(path.to_path_buf()));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() {
-        return Err(CheckpointStoreError::ForeignEntryAtKey(path.to_path_buf()));
-    }
-    Ok(Some(BlobLease {
-        file,
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-        size: metadata.len(),
-    }))
-}
-
-fn metadata_nofollow(path: &Path) -> io::Result<Option<std::fs::Metadata>> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-fn path_exists_nofollow(path: &Path) -> io::Result<bool> {
-    Ok(metadata_nofollow(path)?.is_some())
-}
-
-fn ensure_real_directory(path: &Path) -> Result<(), CheckpointStoreError> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(CheckpointStoreError::ForeignEntryAtKey(path.to_path_buf()));
-    }
-    Ok(())
-}
-
-fn require_real_directory_if_exists(path: &Path) -> Result<bool, CheckpointStoreError> {
-    let Some(metadata) = metadata_nofollow(path)? else {
-        return Ok(false);
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(CheckpointStoreError::ForeignEntryAtKey(path.to_path_buf()));
-    }
-    Ok(true)
-}
-
-fn create_directory(path: &Path) -> io::Result<bool> {
-    match std::fs::create_dir(path) {
-        Ok(()) => Ok(true),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-fn create_directory_tree_synced(path: &Path) -> Result<(), CheckpointStoreError> {
-    if require_real_directory_if_exists(path)? {
-        return Ok(());
-    }
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    if parent != path {
-        create_directory_tree_synced(parent)?;
-    }
-    let created = create_directory(path)?;
-    ensure_real_directory(path)?;
-    if created {
-        sync_directory(parent)?;
-    }
-    Ok(())
-}
-
 fn codec_error_proves_invalid_blob(error: &SnapshotCodecError) -> bool {
     match error {
         SnapshotCodecError::InvalidHeader(_)
@@ -1059,222 +849,18 @@ fn codec_error_proves_invalid_blob(error: &SnapshotCodecError) -> bool {
     }
 }
 
-fn scan_managed_blobs(root: &Path) -> Result<ManagedScan, CheckpointStoreError> {
-    let mut blobs = Vec::new();
-    let mut total_bytes = 0u64;
-    if !require_real_directory_if_exists(root)? {
-        return Ok(ManagedScan { blobs, total_bytes });
-    }
-    let compat_dirs = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(ManagedScan { blobs, total_bytes });
-        }
-        Err(error) => return Err(error.into()),
-    };
-    for compat_dir in compat_dirs {
-        let compat_dir = compat_dir?;
-        let name = compat_dir.file_name();
-        if !is_lower_hex_64(&name) {
-            continue;
-        }
-        let metadata = std::fs::symlink_metadata(compat_dir.path())?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(CheckpointStoreError::ForeignEntryAtKey(compat_dir.path()));
-        }
-        for entry in std::fs::read_dir(compat_dir.path())? {
-            let entry = entry?;
-            if parse_blob_name(&entry.file_name()).is_none() {
-                continue;
-            }
-            let metadata = std::fs::symlink_metadata(entry.path())?;
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-                continue;
-            }
-            total_bytes = total_bytes
-                .checked_add(metadata.len())
-                .ok_or(CheckpointStoreError::ManagedBytesOverflow)?;
-            blobs.push(ManagedBlob {
-                path: entry.path(),
-                size: metadata.len(),
-                modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-            });
-        }
-    }
-    Ok(ManagedScan { blobs, total_bytes })
-}
-
-fn evict_to_fit(
-    mut scan: ManagedScan,
-    incoming_bytes: u64,
-    max_bytes: u64,
-    protected: Option<&Path>,
-) -> Result<(usize, u64, u64), CheckpointStoreError> {
-    scan.blobs.sort_by(|a, b| {
-        a.modified
-            .cmp(&b.modified)
-            .then_with(|| a.path.cmp(&b.path))
-    });
-    let mut evicted_entries = 0usize;
-    let mut evicted_bytes = 0u64;
-    let mut affected_directories = BTreeSet::new();
-    for blob in scan.blobs {
-        if scan
-            .total_bytes
-            .checked_add(incoming_bytes)
-            .ok_or(CheckpointStoreError::ManagedBytesOverflow)?
-            <= max_bytes
-        {
-            break;
-        }
-        if protected.is_some_and(|path| path == blob.path) {
-            continue;
-        }
-        if let Err(source) = std::fs::remove_file(&blob.path) {
-            if evicted_entries > 0 {
-                return Err(CheckpointStoreError::PostMutationIo {
-                    operation: "continue eviction after prior unlink",
-                    source,
-                });
-            }
-            return Err(source.into());
-        }
-        affected_directories.insert(
-            blob.path
-                .parent()
-                .expect("managed blob has parent")
-                .to_path_buf(),
-        );
-        scan.total_bytes -= blob.size;
-        evicted_entries += 1;
-        evicted_bytes = evicted_bytes
-            .checked_add(blob.size)
-            .ok_or(CheckpointStoreError::ManagedBytesOverflow)?;
-    }
-    if scan
-        .total_bytes
-        .checked_add(incoming_bytes)
-        .ok_or(CheckpointStoreError::ManagedBytesOverflow)?
-        > max_bytes
-    {
-        return Err(CheckpointStoreError::OversizedBlob {
-            blob_bytes: incoming_bytes,
-            max_managed_blob_bytes: max_bytes,
-        });
-    }
-    for directory in affected_directories {
-        sync_directory(&directory).map_err(|source| CheckpointStoreError::PostMutationIo {
-            operation: "sync evicted blob directory",
-            source,
-        })?;
-    }
-    Ok((evicted_entries, evicted_bytes, scan.total_bytes))
-}
-
-fn flock_retry(file: &File, operation: libc::c_int) -> io::Result<()> {
-    use std::os::fd::AsRawFd;
-    loop {
-        let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
-        if result == 0 {
-            return Ok(());
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
-}
-
-fn validate_staged_stamp(
-    actual: &FileStamp,
-    expected_len: u64,
-    expected_nlink: u64,
-    expected_identity: Option<&FileStamp>,
-) -> Result<(), CheckpointStoreError> {
-    if !actual.regular {
-        return Err(CheckpointStoreError::StagedMetadata("not a regular file"));
-    }
-    if actual.len != expected_len {
-        return Err(CheckpointStoreError::StagedMetadata("length mismatch"));
-    }
-    if actual.mode != 0o600 {
-        return Err(CheckpointStoreError::StagedMetadata("mode mismatch"));
-    }
-    if actual.nlink != expected_nlink {
-        return Err(CheckpointStoreError::StagedMetadata("link-count mismatch"));
-    }
-    if expected_identity
-        .is_some_and(|expected| actual.dev != expected.dev || actual.ino != expected.ino)
-    {
-        return Err(CheckpointStoreError::StagedMetadata("inode mismatch"));
-    }
-    Ok(())
-}
-
-fn validate_post_link_stamp(
-    actual: &FileStamp,
-    expected_len: u64,
-    expected_identity: &FileStamp,
-) -> Result<(), CheckpointStoreError> {
-    validate_staged_stamp(actual, expected_len, 2, Some(expected_identity))
-}
-
-fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-fn is_lower_hex_64(value: &std::ffi::OsStr) -> bool {
-    value.to_str().is_some_and(|value| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    })
-}
-
-fn parse_hex_32(value: &str) -> Option<[u8; 32]> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
-        let high = hex_nibble(pair[0])?;
-        let low = hex_nibble(pair[1])?;
-        out[index] = high << 4 | low;
-    }
-    if hex(&out) != value {
-        return None;
-    }
-    Some(out)
-}
-
-fn hex_nibble(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        _ => None,
-    }
-}
-
-fn hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint_fs::TEMP_PREFIX;
     use crate::metal_forward::{
         SNAPSHOT_LAYOUT_VERSION, SnapshotKvStorageKind, SnapshotValidationError,
     };
     use sha2::{Digest, Sha256};
+    use std::fs::File;
     use std::io::{Read, Seek, SeekFrom};
     use std::os::fd::AsRawFd;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Barrier};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1831,7 +1417,7 @@ mod tests {
         assert!(report.managed_bytes_after <= first_report.blob_bytes);
         assert!(!second_path.exists());
         assert_eq!(
-            scan_managed_blobs(&constrained.blobs_root())
+            scan_managed_blobs(&constrained.blobs_root(), is_managed_blob_name)
                 .unwrap()
                 .total_bytes,
             report.managed_bytes_after
@@ -1917,7 +1503,7 @@ mod tests {
         let restored = decode.lookup(context(&identity()), &[1, 2]).unwrap();
         assert!(restored.snapshot.is_some());
         assert_eq!(
-            scan_managed_blobs(&decode.blobs_root())
+            scan_managed_blobs(&decode.blobs_root(), is_managed_blob_name)
                 .unwrap()
                 .blobs
                 .len(),
@@ -2226,7 +1812,10 @@ mod tests {
             )))
         ));
         assert_eq!(
-            scan_managed_blobs(&store.blobs_root()).unwrap().blobs.len(),
+            scan_managed_blobs(&store.blobs_root(), is_managed_blob_name)
+                .unwrap()
+                .blobs
+                .len(),
             0
         );
     }

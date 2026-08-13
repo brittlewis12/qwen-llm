@@ -6,6 +6,51 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — Native Checkpoint Cleanup and Catalog Threshold
+
+Status: keep immutable checkpoint files authoritative and catalog-free at the
+current scale. Do not put multi-MiB/GiB payloads in SQLite, RocksDB, LMDB, or an
+external KV store. Metadata eviction cannot atomically delete an external blob;
+it would require a durable deletion queue and filesystem reconciliation while
+discarding the current open-descriptor lease and scan-to-recover simplicity.
+
+- New staging names carry an `l1` format marker and acquire an exclusive inode
+  `flock` before their path becomes visible outside the namespace shared lock.
+  A participating process crash releases the lock in the kernel. Publication
+  scavenges only canonical, same-UID, `0600`, one/two-link files whose inode lock
+  can be acquired and whose pathname still names that inode. Live writers remain
+  untouched; legacy unlocked names are reported but never inferred dead from PID
+  or age.
+- Cleanup examines at most 256 temp-like entries and removes at most 64 from the
+  active compatibility directory per publication, without materializing or
+  sorting the directory. Cleanup is best-effort rather than an eventual-progress
+  guarantee when persistent temp-like entries exceed those bounds. All removals
+  share one final directory sync; an error after mutation first attempts that
+  sync and returns a post-mutation failure. Allocated-byte telemetry uses
+  filesystem block counts and counts a removed name only when its inode had one
+  link immediately before unlink, so sparse files and post-link aliases do not
+  overstate reclaimed space.
+- The identity preflight's `has_managed_blobs` operation now stops inventorying
+  blob entries after the first recognized regular file. It still traverses every
+  canonical compatibility directory to preserve fail-closed substitution checks.
+- Publish telemetry now reports examined, removed, reclaimed-byte, live, legacy,
+  foreign, and truncated staging-cleanup counts for Qwen and DeepSeek V4.
+- A spawned-process test verifies a live locked staging inode survives another
+  process's publication and becomes reclaimable after forced process death.
+  Alias, truncation, legacy, foreign-entry, and substituted-directory cases are
+  covered in the shared Qwen-backed filesystem path, with a DeepSeek V4 publish
+  wiring check. Release checkpoint tests, strict library Clippy, formatting, and
+  adversarial review pass.
+
+Decision: introduce a rebuildable metadata-only SQLite catalog only after entry
+scale or measured metadata wall demands it. Provisional measurement triggers are
+approximately 512 blobs per family, 256 in one compatibility directory, warm
+inventory p95 above 10 ms, or cold p95 above 50 ms. Blob files, codec validation,
+and descriptor leases remain authoritative even then. Root-wide cross-family
+budgeting, a physical free-space floor, and value-per-byte eviction remain
+separate policy work; pure LRU is
+adequate until telemetry demonstrates churn or materially better simulated reuse.
+
 ## 2026-08-13 — DeepSeek V4 Completed-Turn Durable Checkpoints GO
 
 Status: preserve-mode DeepSeek V4 turns now checkpoint the completed

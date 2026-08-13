@@ -13,6 +13,7 @@
 //! The shared error carries only the variants both stores expose verbatim;
 //! each store converts with `From` so its public error surface is unchanged.
 
+use std::ffi::OsStr;
 use std::fs::{File, FileTimes, OpenOptions};
 use std::io;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -23,6 +24,9 @@ use std::time::SystemTime;
 
 pub(crate) const TEMP_PREFIX: &str = ".tmp-";
 const LOCK_FILE: &str = "store.lock";
+const LOCKED_TEMP_VERSION: &str = "l1";
+const MAX_STAGING_EXAMINED_PER_PUBLISH: usize = 256;
+pub(crate) const MAX_STAGING_SCAVENGE_PER_PUBLISH: usize = 64;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -138,8 +142,12 @@ impl StoreNamespace {
         Ok(())
     }
 
-    /// Create (and durably record) the blobs root and one compat directory.
-    pub(crate) fn ensure_blob_dir(&self, blob_dir: &Path) -> Result<(), CheckpointFsError> {
+    /// Create (and durably record) the blobs root and one compat directory,
+    /// then reclaim any abandoned staging inodes in this family namespace.
+    pub(crate) fn ensure_blob_dir(
+        &self,
+        blob_dir: &Path,
+    ) -> Result<StagingCleanupReport, CheckpointFsError> {
         let _lock = self.lock_exclusive()?;
         let blobs_root = self.blobs_root();
         let blobs_created = create_directory(&blobs_root)?;
@@ -152,7 +160,55 @@ impl StoreNamespace {
         if blob_dir_created {
             sync_directory(&blobs_root)?;
         }
-        Ok(())
+        scavenge_staging_files_locked(blob_dir)
+    }
+
+    /// Create and lock one staging file without exposing an unlocked managed
+    /// temp name to a concurrent scavenger.
+    pub(crate) fn create_staging_file(
+        &self,
+        path: &Path,
+        readable: bool,
+    ) -> Result<File, CheckpointFsError> {
+        let _lock = self.lock_shared()?;
+        ensure_real_directory(path.parent().expect("staging file parent"))?;
+        let mut options = OpenOptions::new();
+        options
+            .read(readable)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options.open(path)?;
+        if let Err(error) = flock_retry(&file, libc::LOCK_EX | libc::LOCK_NB) {
+            let descriptor =
+                file.metadata()
+                    .map_err(|source| CheckpointFsError::PostMutationIo {
+                        operation: "inspect staging file after lock failure",
+                        source,
+                    })?;
+            if let Some(current) =
+                metadata_nofollow(path).map_err(|source| CheckpointFsError::PostMutationIo {
+                    operation: "inspect staging path after lock failure",
+                    source,
+                })?
+                && descriptor.dev() == current.dev()
+                && descriptor.ino() == current.ino()
+            {
+                std::fs::remove_file(path).map_err(|source| CheckpointFsError::PostMutationIo {
+                    operation: "remove staging file after lock failure",
+                    source,
+                })?;
+                sync_directory(path.parent().expect("staging file parent")).map_err(|source| {
+                    CheckpointFsError::PostMutationIo {
+                        operation: "sync staging directory after lock failure",
+                        source,
+                    }
+                })?;
+            }
+            return Err(error.into());
+        }
+        Ok(file)
     }
 
     /// Open a managed blob for reading under a shared lock.
@@ -261,6 +317,17 @@ pub(crate) struct ManagedBlob {
 pub(crate) struct ManagedScan {
     pub(crate) blobs: Vec<ManagedBlob>,
     pub(crate) total_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StagingCleanupReport {
+    pub(crate) examined_entries: usize,
+    pub(crate) removed_entries: usize,
+    pub(crate) reclaimed_bytes: u64,
+    pub(crate) live_entries: usize,
+    pub(crate) legacy_entries: usize,
+    pub(crate) foreign_entries: usize,
+    pub(crate) truncated: bool,
 }
 
 pub(crate) fn flock_retry(file: &File, operation: libc::c_int) -> io::Result<()> {
@@ -375,7 +442,7 @@ pub(crate) fn unique_temp_path(blob_dir: &Path, digest: &[u8; 32]) -> PathBuf {
         .unwrap_or_default()
         .as_nanos();
     blob_dir.join(format!(
-        "{TEMP_PREFIX}{}-{nonce}-{sequence}-{}",
+        "{TEMP_PREFIX}{LOCKED_TEMP_VERSION}-{}-{nonce}-{sequence}-{}",
         std::process::id(),
         &hex(digest)[..16]
     ))
@@ -463,6 +530,252 @@ pub(crate) fn scan_managed_blobs(
         }
     }
     Ok(ManagedScan { blobs, total_bytes })
+}
+
+/// Return after finding the first recognized regular blob. This is an
+/// existence hint only; publication and eviction still require a full scan.
+/// After a hit, remaining compatibility directories are still validated so a
+/// substituted managed directory cannot be hidden by traversal order.
+pub(crate) fn has_managed_blob(
+    root: &Path,
+    is_managed_name: impl Fn(&OsStr) -> bool,
+) -> Result<bool, CheckpointFsError> {
+    if !require_real_directory_if_exists(root)? {
+        return Ok(false);
+    }
+    let compat_dirs = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let mut found = false;
+    for compat_dir in compat_dirs {
+        let compat_dir = compat_dir?;
+        if !is_lower_hex_64(&compat_dir.file_name()) {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(compat_dir.path())?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(CheckpointFsError::ForeignEntryAtKey(compat_dir.path()));
+        }
+        if found {
+            continue;
+        }
+        for entry in std::fs::read_dir(compat_dir.path())? {
+            let entry = entry?;
+            if !is_managed_name(&entry.file_name()) {
+                continue;
+            }
+            let metadata = std::fs::symlink_metadata(entry.path())?;
+            if !metadata.file_type().is_symlink() && metadata.file_type().is_file() {
+                found = true;
+                break;
+            }
+        }
+    }
+    Ok(found)
+}
+
+fn scavenge_staging_files_locked(
+    blob_dir: &Path,
+) -> Result<StagingCleanupReport, CheckpointFsError> {
+    let mut report = StagingCleanupReport::default();
+    if !require_real_directory_if_exists(blob_dir)? {
+        return Ok(report);
+    }
+    let effective_uid = unsafe { libc::geteuid() };
+    for entry in std::fs::read_dir(blob_dir)? {
+        if report.removed_entries == MAX_STAGING_SCAVENGE_PER_PUBLISH {
+            report.truncated = true;
+            break;
+        }
+        let entry = entry.map_err(|source| staging_cleanup_io_error(blob_dir, &report, source))?;
+        if !entry.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+            continue;
+        }
+        if report.examined_entries == MAX_STAGING_EXAMINED_PER_PUBLISH {
+            report.truncated = true;
+            break;
+        }
+        report.examined_entries += 1;
+        let Some(staging_kind) = parse_staging_name(&entry.file_name()) else {
+            report.foreign_entries += 1;
+            continue;
+        };
+        if staging_kind == StagingKind::LegacyUnlocked {
+            // An unlocked legacy file can belong to an older live binary; age
+            // and PID cannot prove abandonment, so automatic cleanup leaves it.
+            report.legacy_entries += 1;
+            continue;
+        }
+        let path = entry.path();
+        let path_metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(staging_cleanup_io_error(blob_dir, &report, error)),
+        };
+        if path_metadata.file_type().is_symlink()
+            || !path_metadata.file_type().is_file()
+            || path_metadata.uid() != effective_uid
+            || path_metadata.mode() & 0o7777 != 0o600
+            || !(1..=2).contains(&path_metadata.nlink())
+        {
+            report.foreign_entries += 1;
+            continue;
+        }
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                report.foreign_entries += 1;
+                continue;
+            }
+            Err(error) => return Err(staging_cleanup_io_error(blob_dir, &report, error)),
+        };
+        if !try_flock_exclusive(&file)
+            .map_err(|source| staging_cleanup_io_error(blob_dir, &report, source))?
+        {
+            report.live_entries += 1;
+            continue;
+        }
+        let descriptor_metadata = file
+            .metadata()
+            .map_err(|source| staging_cleanup_io_error(blob_dir, &report, source))?;
+        let Some(current_metadata) = metadata_nofollow(&path)
+            .map_err(|source| staging_cleanup_io_error(blob_dir, &report, source))?
+        else {
+            continue;
+        };
+        if !descriptor_metadata.file_type().is_file()
+            || descriptor_metadata.uid() != effective_uid
+            || descriptor_metadata.mode() & 0o7777 != 0o600
+            || !(1..=2).contains(&descriptor_metadata.nlink())
+            || current_metadata.file_type().is_symlink()
+            || !current_metadata.file_type().is_file()
+            || descriptor_metadata.dev() != current_metadata.dev()
+            || descriptor_metadata.ino() != current_metadata.ino()
+        {
+            report.foreign_entries += 1;
+            continue;
+        }
+        let reclaimed_bytes = if descriptor_metadata.nlink() == 1 {
+            let allocated_bytes = descriptor_metadata
+                .blocks()
+                .checked_mul(512)
+                .ok_or(CheckpointFsError::ManagedBytesOverflow)?;
+            match report.reclaimed_bytes.checked_add(allocated_bytes) {
+                Some(bytes) => bytes,
+                None => {
+                    sync_staging_cleanup_mutation(blob_dir, &report)?;
+                    return Err(CheckpointFsError::ManagedBytesOverflow);
+                }
+            }
+        } else {
+            report.reclaimed_bytes
+        };
+        if let Err(source) = std::fs::remove_file(&path) {
+            return Err(staging_cleanup_io_error(blob_dir, &report, source));
+        }
+        report.removed_entries += 1;
+        report.reclaimed_bytes = reclaimed_bytes;
+    }
+    sync_staging_cleanup_mutation(blob_dir, &report)?;
+    Ok(report)
+}
+
+fn sync_staging_cleanup_mutation(
+    blob_dir: &Path,
+    report: &StagingCleanupReport,
+) -> Result<(), CheckpointFsError> {
+    if report.removed_entries == 0 {
+        return Ok(());
+    }
+    sync_directory(blob_dir).map_err(|source| CheckpointFsError::PostMutationIo {
+        operation: "sync scavenged staging directory",
+        source,
+    })
+}
+
+fn staging_cleanup_io_error(
+    blob_dir: &Path,
+    report: &StagingCleanupReport,
+    source: io::Error,
+) -> CheckpointFsError {
+    if report.removed_entries > 0 {
+        if let Err(sync_error) = sync_directory(blob_dir) {
+            return CheckpointFsError::PostMutationIo {
+                operation: "sync staging directory after cleanup failure",
+                source: sync_error,
+            };
+        }
+        CheckpointFsError::PostMutationIo {
+            operation: "continue staging cleanup after prior unlink",
+            source,
+        }
+    } else {
+        source.into()
+    }
+}
+
+fn try_flock_exclusive(file: &File) -> io::Result<bool> {
+    use std::os::fd::AsRawFd;
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        if error.kind() == io::ErrorKind::WouldBlock || error.raw_os_error() == Some(libc::EAGAIN) {
+            return Ok(false);
+        }
+        return Err(error);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StagingKind {
+    LegacyUnlocked,
+    LockedV1,
+}
+
+fn parse_staging_name(name: &OsStr) -> Option<StagingKind> {
+    let name = name.to_str()?;
+    let rest = name.strip_prefix(TEMP_PREFIX)?;
+    let (kind, rest) = match rest.strip_prefix(&format!("{LOCKED_TEMP_VERSION}-")) {
+        Some(rest) => (StagingKind::LockedV1, rest),
+        None => (StagingKind::LegacyUnlocked, rest),
+    };
+    let mut parts = rest.split('-');
+    let (Some(pid), Some(nonce), Some(sequence), Some(digest)) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    (parts.next().is_none()
+        && canonical_decimal(pid, |value| {
+            value.parse::<u32>().ok().filter(|&value| value > 0)
+        })
+        && canonical_decimal(nonce, |value| value.parse::<u128>().ok())
+        && canonical_decimal(sequence, |value| value.parse::<u64>().ok())
+        && digest.len() == 16
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then_some(kind)
+}
+
+fn canonical_decimal<T>(value: &str, parse: impl FnOnce(&str) -> Option<T>) -> bool {
+    !value.is_empty()
+        && (value.len() == 1 || !value.starts_with('0'))
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && parse(value).is_some()
 }
 
 /// Evict least-recently-touched blobs until `incoming_bytes` fits the budget.

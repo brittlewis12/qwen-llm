@@ -17,16 +17,17 @@ use crate::checkpoint_codec::{
     EncodedSnapshot, SnapshotCodecConstraints, SnapshotCodecError, decode_snapshot, encode_snapshot,
 };
 use crate::checkpoint_fs::{
-    BlobLease, CheckpointFsError, FileStamp, StoreNamespace, evict_to_fit, hex, metadata_nofollow,
-    parse_hex_32, path_exists_nofollow, require_real_directory_if_exists, scan_managed_blobs,
-    sync_directory, unique_temp_path, validate_post_link_stamp, validate_staged_stamp,
+    BlobLease, CheckpointFsError, FileStamp, StagingCleanupReport, StoreNamespace, evict_to_fit,
+    has_managed_blob, hex, metadata_nofollow, parse_hex_32, path_exists_nofollow,
+    require_real_directory_if_exists, scan_managed_blobs, sync_directory, unique_temp_path,
+    validate_post_link_stamp, validate_staged_stamp,
 };
 use crate::checkpoint_identity::CheckpointIdentityCache;
 use crate::metal_forward::{SessionSnapshot, SnapshotIdentity};
 use std::collections::{BTreeSet, HashMap};
-use std::fs::{FileTimes, OpenOptions};
+use std::fs::FileTimes;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -90,11 +91,7 @@ impl DurableCheckpointStore {
     /// resolution when no checkpoint blob could possibly match.
     pub fn has_managed_blobs(&self) -> Result<bool, CheckpointStoreError> {
         let _lock = self.namespace.lock_shared()?;
-        Ok(
-            !scan_managed_blobs(&self.blobs_root(), is_managed_blob_name)?
-                .blobs
-                .is_empty(),
-        )
+        Ok(has_managed_blob(&self.blobs_root(), is_managed_blob_name)?)
     }
 
     pub fn publish(
@@ -106,7 +103,7 @@ impl DurableCheckpointStore {
         let matched_len = snapshot.matched_prefix_len();
         let digest = snapshot_prefix_key(context.compatibility_id, snapshot);
         let blob_dir = self.blob_dir(context.compatibility_id);
-        self.ensure_blob_dir(&blob_dir)?;
+        let staging_cleanup = self.ensure_blob_dir(&blob_dir)?;
         let final_path = blob_dir.join(blob_name(matched_len, mode, &digest));
         let temp_path = unique_temp_path(&blob_dir, &digest);
         let staged = match self.encode_staged(&temp_path, context, snapshot) {
@@ -124,7 +121,15 @@ impl DurableCheckpointStore {
             });
         }
 
-        let result = self.publish_staged(context, snapshot, mode, digest, &final_path, &staged);
+        let result = self.publish_staged(
+            context,
+            snapshot,
+            mode,
+            digest,
+            &final_path,
+            &staged,
+            staging_cleanup,
+        );
         let _ = std::fs::remove_file(&staged.path);
         result
     }
@@ -196,6 +201,7 @@ impl DurableCheckpointStore {
         digest: [u8; 32],
         final_path: &Path,
         staged: &StagedBlob,
+        staging_cleanup: StagingCleanupReport,
     ) -> Result<PublishReport, CheckpointStoreError> {
         let mut repaired = false;
         for _ in 0..MAX_PUBLICATION_ATTEMPTS {
@@ -212,7 +218,7 @@ impl DurableCheckpointStore {
                 };
                 if valid {
                     if let Some(report) =
-                        self.admit_existing(final_path, &lease, staged.integrity)?
+                        self.admit_existing(final_path, &lease, staged.integrity, staging_cleanup)?
                     {
                         return Ok(report);
                     }
@@ -300,6 +306,13 @@ impl DurableCheckpointStore {
                 evicted_bytes,
                 touched: false,
                 staged_integrity: staged.integrity,
+                staging_entries_removed: staging_cleanup.removed_entries,
+                staging_allocated_bytes_reclaimed: staging_cleanup.reclaimed_bytes,
+                staging_entries_examined: staging_cleanup.examined_entries,
+                staging_live_entries: staging_cleanup.live_entries,
+                staging_legacy_entries: staging_cleanup.legacy_entries,
+                staging_foreign_entries: staging_cleanup.foreign_entries,
+                staging_cleanup_truncated: staging_cleanup.truncated,
             });
         }
         Err(CheckpointStoreError::ConcurrentChurn)
@@ -311,14 +324,10 @@ impl DurableCheckpointStore {
         context: StoreContext<'_>,
         snapshot: &SessionSnapshot,
     ) -> Result<StagedBlob, CheckpointStoreError> {
-        let mut options = OpenOptions::new();
-        options
-            .read(self.staged_integrity == StagedIntegrityMode::Decode)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW);
-        let mut file = options.open(temp_path)?;
+        let mut file = self.namespace.create_staging_file(
+            temp_path,
+            self.staged_integrity == StagedIntegrityMode::Decode,
+        )?;
         let opening = FileStamp::from_metadata(&file.metadata()?);
         validate_staged_stamp(&opening, 0, 1, None)?;
         let encoded = {
@@ -419,6 +428,7 @@ impl DurableCheckpointStore {
         path: &Path,
         lease: &BlobLease,
         staged_integrity: StagedIntegrityReport,
+        staging_cleanup: StagingCleanupReport,
     ) -> Result<Option<PublishReport>, CheckpointStoreError> {
         let _lock = self.namespace.lock_exclusive()?;
         let Some(metadata) = metadata_nofollow(path)? else {
@@ -445,6 +455,13 @@ impl DurableCheckpointStore {
             evicted_bytes,
             touched,
             staged_integrity,
+            staging_entries_removed: staging_cleanup.removed_entries,
+            staging_allocated_bytes_reclaimed: staging_cleanup.reclaimed_bytes,
+            staging_entries_examined: staging_cleanup.examined_entries,
+            staging_live_entries: staging_cleanup.live_entries,
+            staging_legacy_entries: staging_cleanup.legacy_entries,
+            staging_foreign_entries: staging_cleanup.foreign_entries,
+            staging_cleanup_truncated: staging_cleanup.truncated,
         }))
     }
 
@@ -468,7 +485,10 @@ impl DurableCheckpointStore {
         Ok(self.namespace.touch_if_same_inode(path, lease)?)
     }
 
-    fn ensure_blob_dir(&self, blob_dir: &Path) -> Result<(), CheckpointStoreError> {
+    fn ensure_blob_dir(
+        &self,
+        blob_dir: &Path,
+    ) -> Result<StagingCleanupReport, CheckpointStoreError> {
         Ok(self.namespace.ensure_blob_dir(blob_dir)?)
     }
 
@@ -578,6 +598,13 @@ pub struct PublishReport {
     pub evicted_bytes: u64,
     pub touched: bool,
     pub staged_integrity: StagedIntegrityReport,
+    pub staging_entries_removed: usize,
+    pub staging_allocated_bytes_reclaimed: u64,
+    pub staging_entries_examined: usize,
+    pub staging_live_entries: usize,
+    pub staging_legacy_entries: usize,
+    pub staging_foreign_entries: usize,
+    pub staging_cleanup_truncated: bool,
 }
 
 #[derive(Debug)]
@@ -852,12 +879,12 @@ fn codec_error_proves_invalid_blob(error: &SnapshotCodecError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint_fs::TEMP_PREFIX;
+    use crate::checkpoint_fs::{MAX_STAGING_SCAVENGE_PER_PUBLISH, TEMP_PREFIX};
     use crate::metal_forward::{
         SNAPSHOT_LAYOUT_VERSION, SnapshotKvStorageKind, SnapshotValidationError,
     };
     use sha2::{Digest, Sha256};
-    use std::fs::File;
+    use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom};
     use std::os::fd::AsRawFd;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -884,6 +911,33 @@ mod tests {
     impl Drop for TestDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    struct ChildGuard(Option<std::process::Child>);
+
+    impl ChildGuard {
+        fn spawn(command: &mut std::process::Command) -> Self {
+            Self(Some(
+                command.spawn().expect("spawn checkpoint staging helper"),
+            ))
+        }
+
+        fn child_mut(&mut self) -> &mut std::process::Child {
+            self.0.as_mut().expect("checkpoint staging helper exists")
+        }
+
+        fn kill_and_wait(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                child.wait().expect("wait for checkpoint staging helper");
+            }
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            self.kill_and_wait();
         }
     }
 
@@ -1107,6 +1161,272 @@ mod tests {
         )
         .unwrap();
         assert_snapshot_equal(&snapshot, &restored);
+    }
+
+    #[test]
+    fn publication_reclaims_only_abandoned_canonical_staging_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TestDir::new("staging-scavenge");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let first_snapshot = snapshot(&[1, 2], None, true);
+        let blob_dir = store.blob_dir(&COMPATIBILITY_ID);
+        store.ensure_blob_dir(&blob_dir).unwrap();
+
+        let abandoned = unique_temp_path(&blob_dir, &[0x11; 32]);
+        std::fs::write(&abandoned, b"abandoned").unwrap();
+        std::fs::set_permissions(&abandoned, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let live = unique_temp_path(&blob_dir, &[0x22; 32]);
+        let live_file = store.namespace.create_staging_file(&live, true).unwrap();
+        (&live_file).write_all(b"live-staging-data").unwrap();
+
+        let foreign = blob_dir.join(format!("{TEMP_PREFIX}foreign-lookalike"));
+        std::fs::write(&foreign, b"foreign").unwrap();
+        let wrong_mode = unique_temp_path(&blob_dir, &[0x33; 32]);
+        std::fs::write(&wrong_mode, b"wrong-mode").unwrap();
+        std::fs::set_permissions(&wrong_mode, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let report = store
+            .publish(context(&first_snapshot.identity), &first_snapshot)
+            .unwrap();
+        assert_eq!(report.staging_entries_removed, 1);
+        assert!(report.staging_allocated_bytes_reclaimed >= 9);
+        assert_eq!(report.staging_live_entries, 1);
+        assert_eq!(report.staging_foreign_entries, 2);
+        assert!(!abandoned.exists());
+        assert!(live.exists());
+        assert!(foreign.exists());
+        assert!(wrong_mode.exists());
+
+        drop(live_file);
+        let next = snapshot(&[1, 3], None, true);
+        let report = store.publish(context(&next.identity), &next).unwrap();
+        assert_eq!(report.staging_entries_removed, 1);
+        assert!(report.staging_allocated_bytes_reclaimed >= 17);
+        assert_eq!(report.staging_live_entries, 0);
+        assert_eq!(report.staging_foreign_entries, 2);
+        assert!(!live.exists());
+        assert!(foreign.exists());
+        assert!(wrong_mode.exists());
+    }
+
+    #[test]
+    fn managed_blob_probe_ignores_staging_and_foreign_entries() {
+        let temp = TestDir::new("managed-probe");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let blob_dir = store.blob_dir(&COMPATIBILITY_ID);
+        store.ensure_blob_dir(&blob_dir).unwrap();
+        std::fs::write(unique_temp_path(&blob_dir, &[0x44; 32]), b"temp").unwrap();
+        std::fs::write(blob_dir.join("foreign.qcp"), b"foreign").unwrap();
+        assert!(!store.has_managed_blobs().unwrap());
+
+        let first_snapshot = snapshot(&[1, 2], None, true);
+        store
+            .publish(context(&first_snapshot.identity), &first_snapshot)
+            .unwrap();
+        assert!(store.has_managed_blobs().unwrap());
+    }
+
+    #[test]
+    fn managed_blob_probe_still_rejects_substituted_compatibility_directory() {
+        let temp = TestDir::new("managed-probe-foreign-compat");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let snapshot = snapshot(&[1, 2], None, true);
+        store
+            .publish(context(&snapshot.identity), &snapshot)
+            .unwrap();
+        let outside = temp.0.join("outside-probe-compat");
+        std::fs::create_dir(&outside).unwrap();
+        let substituted = store.blob_dir(&OTHER_COMPATIBILITY_ID);
+        std::os::unix::fs::symlink(&outside, &substituted).unwrap();
+
+        assert!(matches!(
+            store.has_managed_blobs(),
+            Err(CheckpointStoreError::ForeignEntryAtKey(path)) if path == substituted
+        ));
+        assert!(blob_path(&store, &snapshot).exists());
+    }
+
+    #[test]
+    fn legacy_unlocked_staging_file_is_never_reclaimed_automatically() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TestDir::new("legacy-staging-grace");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let first_snapshot = snapshot(&[1, 2], None, true);
+        let blob_dir = store.blob_dir(&COMPATIBILITY_ID);
+        store.ensure_blob_dir(&blob_dir).unwrap();
+        let legacy = blob_dir.join(format!(
+            "{TEMP_PREFIX}{}-1-0-{}",
+            std::process::id(),
+            "55".repeat(8)
+        ));
+        std::fs::write(&legacy, b"legacy").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let report = store
+            .publish(context(&first_snapshot.identity), &first_snapshot)
+            .unwrap();
+        assert_eq!(report.staging_entries_removed, 0);
+        assert_eq!(report.staging_live_entries, 0);
+        assert_eq!(report.staging_legacy_entries, 1);
+        assert!(legacy.exists());
+
+        let next = snapshot(&[1, 3], None, true);
+        let report = store.publish(context(&next.identity), &next).unwrap();
+        assert_eq!(report.staging_entries_removed, 0);
+        assert_eq!(report.staging_allocated_bytes_reclaimed, 0);
+        assert_eq!(report.staging_legacy_entries, 1);
+        assert!(legacy.exists());
+    }
+
+    #[test]
+    fn scavenging_post_link_staging_name_does_not_overstate_reclaimed_bytes() {
+        let temp = TestDir::new("linked-staging-scavenge");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let first = snapshot(&[1, 2], None, true);
+        store.publish(context(&first.identity), &first).unwrap();
+        let final_path = blob_path(&store, &first);
+        let blob_dir = final_path.parent().unwrap();
+        let stale_link = unique_temp_path(blob_dir, &[0x66; 32]);
+        std::fs::hard_link(&final_path, &stale_link).unwrap();
+        assert_eq!(final_path.metadata().unwrap().nlink(), 2);
+
+        let next = snapshot(&[1, 3], None, true);
+        let report = store.publish(context(&next.identity), &next).unwrap();
+        assert_eq!(report.staging_entries_removed, 1);
+        assert_eq!(report.staging_allocated_bytes_reclaimed, 0);
+        assert!(!stale_link.exists());
+        assert_eq!(final_path.metadata().unwrap().nlink(), 1);
+    }
+
+    #[test]
+    fn scavenging_two_staging_aliases_counts_physical_reclaim_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TestDir::new("aliased-staging-scavenge");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let blob_dir = store.blob_dir(&COMPATIBILITY_ID);
+        store.ensure_blob_dir(&blob_dir).unwrap();
+        let first_link = unique_temp_path(&blob_dir, &[0x77; 32]);
+        let second_link = unique_temp_path(&blob_dir, &[0x88; 32]);
+        std::fs::write(&first_link, b"aliased-staging").unwrap();
+        std::fs::set_permissions(&first_link, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::hard_link(&first_link, &second_link).unwrap();
+        assert_eq!(first_link.metadata().unwrap().nlink(), 2);
+
+        let snapshot = snapshot(&[1, 2], None, true);
+        let report = store
+            .publish(context(&snapshot.identity), &snapshot)
+            .unwrap();
+        assert_eq!(report.staging_entries_removed, 2);
+        assert!(report.staging_allocated_bytes_reclaimed >= 15);
+        assert!(!first_link.exists());
+        assert!(!second_link.exists());
+    }
+
+    #[test]
+    fn staging_cleanup_is_bounded_and_reports_truncation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TestDir::new("bounded-staging-scavenge");
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let blob_dir = store.blob_dir(&COMPATIBILITY_ID);
+        store.ensure_blob_dir(&blob_dir).unwrap();
+        let staging_count = MAX_STAGING_SCAVENGE_PER_PUBLISH + 1;
+        for index in 0..staging_count {
+            let mut digest = [0u8; 32];
+            digest[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            let path = unique_temp_path(&blob_dir, &digest);
+            std::fs::write(&path, b"x").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let snapshot = snapshot(&[1, 2], None, true);
+        let report = store
+            .publish(context(&snapshot.identity), &snapshot)
+            .unwrap();
+        assert_eq!(
+            report.staging_entries_examined,
+            MAX_STAGING_SCAVENGE_PER_PUBLISH
+        );
+        assert_eq!(
+            report.staging_entries_removed,
+            MAX_STAGING_SCAVENGE_PER_PUBLISH
+        );
+        assert!(
+            report.staging_allocated_bytes_reclaimed >= MAX_STAGING_SCAVENGE_PER_PUBLISH as u64
+        );
+        assert!(report.staging_cleanup_truncated);
+    }
+
+    #[test]
+    #[ignore = "spawned by cross-process staging-lock test"]
+    fn staging_lock_child_helper() {
+        let Some(root) = std::env::var_os("QWEN_CHECKPOINT_STAGING_CHILD_ROOT") else {
+            return;
+        };
+        let ready = PathBuf::from(
+            std::env::var_os("QWEN_CHECKPOINT_STAGING_CHILD_READY")
+                .expect("staging helper ready path"),
+        );
+        let store = DurableCheckpointStore::new(PathBuf::from(root), 1 << 20);
+        let blob_dir = store.blob_dir(&COMPATIBILITY_ID);
+        store.ensure_blob_dir(&blob_dir).unwrap();
+        let path = unique_temp_path(&blob_dir, &[0x99; 32]);
+        let file = store.namespace.create_staging_file(&path, true).unwrap();
+        (&file).write_all(&[0x5a; 23]).unwrap();
+        std::fs::write(&ready, path.to_string_lossy().as_bytes()).unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
+
+    #[test]
+    fn cross_process_staging_lock_survives_cleanup_and_releases_on_death() {
+        let temp = TestDir::new("cross-process-staging-lock");
+        let ready = temp.0.join("child-ready");
+        let executable = std::env::current_exe().unwrap();
+        let mut command = std::process::Command::new(executable);
+        command
+            .arg("--exact")
+            .arg("checkpoint_store::tests::staging_lock_child_helper")
+            .arg("--ignored")
+            .env("QWEN_CHECKPOINT_STAGING_CHILD_ROOT", &temp.0)
+            .env("QWEN_CHECKPOINT_STAGING_CHILD_READY", &ready)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = ChildGuard::spawn(&mut command);
+        for _ in 0..500 {
+            if ready.exists() {
+                break;
+            }
+            assert!(
+                child.child_mut().try_wait().unwrap().is_none(),
+                "checkpoint staging helper exited before ready"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            ready.exists(),
+            "checkpoint staging helper did not become ready"
+        );
+        let staging_path = PathBuf::from(std::fs::read_to_string(&ready).unwrap());
+
+        let store = DurableCheckpointStore::new(&temp.0, 1 << 20);
+        let first = snapshot(&[1, 2], None, true);
+        let report = store.publish(context(&first.identity), &first).unwrap();
+        assert_eq!(report.staging_entries_removed, 0);
+        assert_eq!(report.staging_live_entries, 1);
+        assert!(staging_path.exists());
+
+        child.kill_and_wait();
+        let next = snapshot(&[1, 3], None, true);
+        let report = store.publish(context(&next.identity), &next).unwrap();
+        assert_eq!(report.staging_entries_removed, 1);
+        assert!(report.staging_allocated_bytes_reclaimed >= 23);
+        assert!(!staging_path.exists());
     }
 
     #[test]

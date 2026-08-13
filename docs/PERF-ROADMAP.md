@@ -2480,12 +2480,19 @@ Dense GPU-greedy deconfounding remains a separate diagnostic-only question that
 v0.652 neither answers nor closes; it is intentionally deprioritized below the
 active queue on leverage.
 
-Checkpoint durability and the may-exist probe remain lifecycle work below the
-material inference queue. v0.660 consumes the sole sampled-product timing packet
-and completes its no-new-performance policy review; no sampled-product work
-remains. Serial direct restore is closed. `MTLIO` is a conditional fresh-load
-population primitive whose timed floor remains serialized; without a live A10B
-baseline it does not preempt the active queue.
+Checkpoint cleanup and the reduced-cost may-exist probe are lifecycle
+infrastructure, not a new inference claim. New-format staging inodes are
+kernel-leased and receive bounded cleanup after process death; legacy unlocked
+names are never guessed dead. Keep the catalog-free store until measured metadata
+wall justifies one; provisional instrumentation triggers are roughly 512 family
+entries, 256 in one compatibility directory, warm inventory p95 above 10 ms, or
+cold p95 above 50 ms. If a trigger fires, add rebuildable SQLite metadata only;
+immutable blob files and descriptor leases remain authoritative. Root-wide
+family budgeting, physical free-space admission, and value-per-byte eviction
+require independent telemetry before implementation. v0.660 consumes the sole
+sampled-product timing packet and completes its no-new-performance policy review.
+Serial direct restore
+is closed. `MTLIO` remains conditional on a live A10B baseline.
 
 Below the line: v0.609 closes standalone GGUF safety-walk consolidation and
 temp-metallib I/O under the 10 ms gate. v0.610 closes manifest-only JSON numeric

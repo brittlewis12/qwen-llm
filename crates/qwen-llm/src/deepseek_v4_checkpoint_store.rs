@@ -14,9 +14,10 @@
 //! returns an error; callers must remain correct after any cache entry disappears.
 
 use crate::checkpoint_fs::{
-    BlobLease, CheckpointFsError, FileStamp, StoreNamespace, evict_to_fit, hex, metadata_nofollow,
-    parse_hex_32, path_exists_nofollow, require_real_directory_if_exists, scan_managed_blobs,
-    sync_directory, unique_temp_path, validate_post_link_stamp, validate_staged_stamp,
+    BlobLease, CheckpointFsError, FileStamp, StagingCleanupReport, StoreNamespace, evict_to_fit,
+    has_managed_blob, hex, metadata_nofollow, parse_hex_32, path_exists_nofollow,
+    require_real_directory_if_exists, scan_managed_blobs, sync_directory, unique_temp_path,
+    validate_post_link_stamp, validate_staged_stamp,
 };
 use crate::checkpoint_identity::CheckpointIdentityCache;
 use crate::checkpoint_store::{PublishOutcome, StagedIntegrityMode, StagedIntegrityReport};
@@ -28,9 +29,9 @@ use crate::deepseek_v4_metal::{
     encode_causal_snapshot,
 };
 use std::collections::{BTreeSet, HashMap};
-use std::fs::{FileTimes, OpenOptions};
+use std::fs::FileTimes;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 
@@ -94,11 +95,7 @@ impl DeepSeekV4CheckpointStore {
     /// resolution when no checkpoint blob could possibly match.
     pub fn has_managed_blobs(&self) -> Result<bool, DeepSeekV4CheckpointStoreError> {
         let _lock = self.namespace.lock_shared()?;
-        Ok(
-            !scan_managed_blobs(&self.blobs_root(), is_managed_blob_name)?
-                .blobs
-                .is_empty(),
-        )
+        Ok(has_managed_blob(&self.blobs_root(), is_managed_blob_name)?)
     }
 
     pub fn publish(
@@ -113,7 +110,7 @@ impl DeepSeekV4CheckpointStore {
         }
         let digest = snapshot_prefix_key(context.compatibility_digest.as_bytes(), snapshot);
         let blob_dir = self.blob_dir(context.compatibility_digest.as_bytes());
-        self.ensure_blob_dir(&blob_dir)?;
+        let staging_cleanup = self.ensure_blob_dir(&blob_dir)?;
         let final_path = blob_dir.join(blob_name(matched_len, &digest));
         let temp_path = unique_temp_path(&blob_dir, &digest);
         let staged = match self.encode_staged(&temp_path, context, snapshot) {
@@ -131,7 +128,14 @@ impl DeepSeekV4CheckpointStore {
             });
         }
 
-        let result = self.publish_staged(context, snapshot, digest, &final_path, &staged);
+        let result = self.publish_staged(
+            context,
+            snapshot,
+            digest,
+            &final_path,
+            &staged,
+            staging_cleanup,
+        );
         let _ = std::fs::remove_file(&staged.path);
         result
     }
@@ -229,6 +233,7 @@ impl DeepSeekV4CheckpointStore {
         digest: [u8; 32],
         final_path: &Path,
         staged: &StagedBlob,
+        staging_cleanup: StagingCleanupReport,
     ) -> Result<DeepSeekV4PublishReport, DeepSeekV4CheckpointStoreError> {
         let mut repaired = false;
         for _ in 0..MAX_PUBLICATION_ATTEMPTS {
@@ -252,7 +257,7 @@ impl DeepSeekV4CheckpointStore {
                     };
                 if valid {
                     if let Some(report) =
-                        self.admit_existing(final_path, &lease, staged.integrity)?
+                        self.admit_existing(final_path, &lease, staged.integrity, staging_cleanup)?
                     {
                         return Ok(report);
                     }
@@ -346,6 +351,13 @@ impl DeepSeekV4CheckpointStore {
                 evicted_bytes,
                 touched: false,
                 staged_integrity: staged.integrity,
+                staging_entries_removed: staging_cleanup.removed_entries,
+                staging_allocated_bytes_reclaimed: staging_cleanup.reclaimed_bytes,
+                staging_entries_examined: staging_cleanup.examined_entries,
+                staging_live_entries: staging_cleanup.live_entries,
+                staging_legacy_entries: staging_cleanup.legacy_entries,
+                staging_foreign_entries: staging_cleanup.foreign_entries,
+                staging_cleanup_truncated: staging_cleanup.truncated,
             });
         }
         Err(DeepSeekV4CheckpointStoreError::ConcurrentChurn)
@@ -357,14 +369,10 @@ impl DeepSeekV4CheckpointStore {
         context: DeepSeekV4StoreContext<'_>,
         snapshot: &DeepSeekV4CausalSnapshot,
     ) -> Result<StagedBlob, DeepSeekV4CheckpointStoreError> {
-        let mut options = OpenOptions::new();
-        options
-            .read(self.staged_integrity == StagedIntegrityMode::Decode)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW);
-        let mut file = options.open(temp_path)?;
+        let mut file = self.namespace.create_staging_file(
+            temp_path,
+            self.staged_integrity == StagedIntegrityMode::Decode,
+        )?;
         let opening = FileStamp::from_metadata(&file.metadata()?);
         validate_staged_stamp(&opening, 0, 1, None)?;
         let encoded = {
@@ -460,7 +468,10 @@ impl DeepSeekV4CheckpointStore {
         Ok(candidates)
     }
 
-    fn ensure_blob_dir(&self, blob_dir: &Path) -> Result<(), DeepSeekV4CheckpointStoreError> {
+    fn ensure_blob_dir(
+        &self,
+        blob_dir: &Path,
+    ) -> Result<StagingCleanupReport, DeepSeekV4CheckpointStoreError> {
         Ok(self.namespace.ensure_blob_dir(blob_dir)?)
     }
 
@@ -469,6 +480,7 @@ impl DeepSeekV4CheckpointStore {
         path: &Path,
         lease: &BlobLease,
         staged_integrity: StagedIntegrityReport,
+        staging_cleanup: StagingCleanupReport,
     ) -> Result<Option<DeepSeekV4PublishReport>, DeepSeekV4CheckpointStoreError> {
         let _lock = self.namespace.lock_exclusive()?;
         let Some(metadata) = metadata_nofollow(path)? else {
@@ -495,6 +507,13 @@ impl DeepSeekV4CheckpointStore {
             evicted_bytes,
             touched,
             staged_integrity,
+            staging_entries_removed: staging_cleanup.removed_entries,
+            staging_allocated_bytes_reclaimed: staging_cleanup.reclaimed_bytes,
+            staging_entries_examined: staging_cleanup.examined_entries,
+            staging_live_entries: staging_cleanup.live_entries,
+            staging_legacy_entries: staging_cleanup.legacy_entries,
+            staging_foreign_entries: staging_cleanup.foreign_entries,
+            staging_cleanup_truncated: staging_cleanup.truncated,
         }))
     }
 
@@ -716,6 +735,13 @@ pub struct DeepSeekV4PublishReport {
     pub evicted_bytes: u64,
     pub touched: bool,
     pub staged_integrity: StagedIntegrityReport,
+    pub staging_entries_removed: usize,
+    pub staging_allocated_bytes_reclaimed: u64,
+    pub staging_entries_examined: usize,
+    pub staging_live_entries: usize,
+    pub staging_legacy_entries: usize,
+    pub staging_foreign_entries: usize,
+    pub staging_cleanup_truncated: bool,
 }
 
 #[derive(Debug)]
@@ -915,7 +941,9 @@ fn codec_error_proves_invalid_blob(error: &DeepSeekV4SnapshotCodecError) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checkpoint_fs::unique_temp_path;
     use crate::metal::MetalContext;
+    use std::io::Write;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -969,6 +997,32 @@ mod tests {
         ] {
             assert!(parse_blob_name(std::ffi::OsStr::new(invalid)).is_none());
         }
+    }
+
+    #[test]
+    fn shared_staging_cleanup_is_wired_into_deepseek_publication() {
+        let Ok(ctx) = MetalContext::new() else {
+            return;
+        };
+        let temp = TestDir::new("staging-cleanup");
+        let store = DeepSeekV4CheckpointStore::new(&temp.0, 1 << 30);
+        let fixture = Fixture::new(&ctx, 4, 17);
+        let blob_dir = store.blob_dir(fixture.snapshot.compatibility_digest().as_bytes());
+        store.ensure_blob_dir(&blob_dir).unwrap();
+        let abandoned = unique_temp_path(&blob_dir, &[0x42; 32]);
+        let mut file = store
+            .namespace
+            .create_staging_file(&abandoned, true)
+            .unwrap();
+        file.write_all(b"abandoned-deepseek-staging").unwrap();
+        drop(file);
+
+        let report = store
+            .publish(fixture.context(1 << 30), &fixture.snapshot)
+            .unwrap();
+        assert_eq!(report.staging_entries_removed, 1);
+        assert!(report.staging_allocated_bytes_reclaimed >= 26);
+        assert!(!abandoned.exists());
     }
 
     #[test]

@@ -4,13 +4,23 @@
 //! reuse that content root only while fstat metadata for the exact retained
 //! file descriptions matches the metadata that keyed the cached entry.
 //!
+//! When every shard carries a fresh Hugging Face download sidecar
+//! (`.cache/huggingface/download/<name>.metadata`, whose LFS etag line is the
+//! shard's SHA-256), the content root may instead be composed from those
+//! declared digests under separate domains, skipping the full read. Declared
+//! and hashed roots are distinct identities; whichever resolves first for a
+//! given source description is cached and reused. `QWEN_CHECKPOINT_MODEL_IDENTITY=hashed`
+//! forces the exhaustive read.
+//!
 //! Trust envelope: source files remain immutable for a `LoadedModel` lifetime;
 //! metadata reuse targets local filesystems with stable inode and nanosecond
 //! timestamp semantics; and the cache root is private and trusted. BLAKE3
-//! detects accidental cache corruption, not malicious replacement. Concurrent
-//! source truncation retains the loader's existing possible-SIGBUS contract.
-//! `ctime` is intentionally part of the key, so renames and hardlink changes
-//! may conservatively force a rehash.
+//! detects accidental cache corruption, not malicious replacement. Declared
+//! digests additionally trust the downloader's verification and the source
+//! mtime ordering against the sidecar timestamp. Concurrent source truncation
+//! retains the loader's existing possible-SIGBUS contract. `ctime` is
+//! intentionally part of the key, so renames and hardlink changes may
+//! conservatively force a rehash.
 
 use crate::gguf::GgufFile;
 use crate::metal_forward::SnapshotAbi;
@@ -23,7 +33,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const METADATA_DOMAIN: &[u8] = b"qwen-checkpoint-source-metadata-v1\0";
 const SHARD_DOMAIN: &[u8] = b"qwen-checkpoint-shard-content-v1\0";
 const CONTENT_DOMAIN: &[u8] = b"qwen-checkpoint-ordered-content-v1\0";
+const DECLARED_SHARD_DOMAIN: &[u8] = b"qwen-checkpoint-declared-shard-sha256-v1\0";
+const DECLARED_CONTENT_DOMAIN: &[u8] = b"qwen-checkpoint-declared-ordered-content-v1\0";
 const COMPATIBILITY_DOMAIN: &[u8] = b"qwen-checkpoint-compatibility-v1\0";
+const IDENTITY_MODE_ENV: &str = "QWEN_CHECKPOINT_MODEL_IDENTITY";
+const SIDECAR_MAX_BYTES: u64 = 4096;
+/// Downloaders stamp the sidecar after the shard's final write; allow modest
+/// filesystem timestamp skew before treating the shard as newer than its
+/// declaration.
+const SIDECAR_MTIME_SLACK_SECONDS: f64 = 5.0;
 const PARALLEL_HASH_MIN_BYTES: usize = 1024 * 1024;
 const CACHE_MAGIC: &[u8; 8] = b"QWENMID\0";
 const CACHE_VERSION: u32 = 1;
@@ -97,6 +115,10 @@ pub enum IdentityCacheOutcome {
     ComputedAndStored,
     ComputedAndRepaired,
     ComputedUncached,
+    /// Composed from fresh downloader-declared shard digests; nothing read.
+    DeclaredAndStored,
+    /// Declared digests resolved but the cache entry could not be written.
+    DeclaredUncached,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -130,14 +152,45 @@ pub enum CheckpointIdentityError {
     },
     #[error("checkpoint identity byte count overflow")]
     ByteCountOverflow,
+    #[error(
+        "{IDENTITY_MODE_ENV}={0:?} is not a recognized checkpoint identity mode; use auto or hashed"
+    )]
+    IdentityModeEnv(String),
     #[error("checkpoint identity I/O: {0}")]
     Io(#[from] io::Error),
 }
 
 struct SourceView<'a> {
     file: &'a File,
+    path: &'a Path,
     bytes: &'a [u8],
     baseline: SourceStamp,
+}
+
+/// How a cold content root may be derived. Cached roots are reused verbatim
+/// regardless of mode; the mode only governs the first resolution for a given
+/// source description.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IdentityMode {
+    /// Compose from fresh downloader-declared SHA-256 sidecars when every
+    /// shard has one; otherwise hash the ordered shard contents.
+    Auto,
+    /// Always hash the ordered shard contents.
+    Hashed,
+}
+
+fn configured_identity_mode() -> Result<IdentityMode, CheckpointIdentityError> {
+    match std::env::var(IDENTITY_MODE_ENV) {
+        Err(std::env::VarError::NotPresent) => Ok(IdentityMode::Auto),
+        Err(std::env::VarError::NotUnicode(_)) => Err(CheckpointIdentityError::IdentityModeEnv(
+            "<non-unicode>".to_string(),
+        )),
+        Ok(value) => match value.as_str() {
+            "auto" => Ok(IdentityMode::Auto),
+            "hashed" => Ok(IdentityMode::Hashed),
+            other => Err(CheckpointIdentityError::IdentityModeEnv(other.to_string())),
+        },
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -155,6 +208,13 @@ pub fn checkpoint_content_identity(
     resolve_content_sources(&sources, cache, || {})
 }
 
+/// Report whether every shard carries a fresh declared-digest sidecar, without
+/// resolving or caching an identity.
+pub fn declared_identity_available(gguf: &GgufFile) -> bool {
+    let sources = source_views(gguf);
+    declared_shard_digests(&sources).is_some()
+}
+
 pub(crate) fn checkpoint_compatibility(
     gguf: &GgufFile,
     abi: SnapshotAbi,
@@ -169,6 +229,7 @@ fn source_views(gguf: &GgufFile) -> Vec<SourceView<'_>> {
         .iter()
         .map(|shard| SourceView {
             file: shard.file.as_ref(),
+            path: shard.path.as_path(),
             bytes: shard.mmap.as_ref(),
             baseline: shard.source_stamp,
         })
@@ -228,6 +289,21 @@ where
     C: FnOnce(),
     H: FnOnce(),
 {
+    let mode = configured_identity_mode()?;
+    resolve_content_sources_with_mode(sources, cache, mode, after_cache_read, after_hash)
+}
+
+fn resolve_content_sources_with_mode<C, H>(
+    sources: &[SourceView<'_>],
+    cache: &CheckpointIdentityCache,
+    mode: IdentityMode,
+    after_cache_read: C,
+    after_hash: H,
+) -> Result<CheckpointContentReport, CheckpointIdentityError>
+where
+    C: FnOnce(),
+    H: FnOnce(),
+{
     validate_sources(sources, false)?;
     let metadata_key = metadata_key(sources);
     let cache_path = cache_path(cache.root(), &metadata_key);
@@ -242,25 +318,140 @@ where
         });
     }
 
-    let (content_id, bytes_hashed) = hash_ordered_content(sources)?;
+    let declared = match mode {
+        IdentityMode::Auto => declared_ordered_content(sources),
+        IdentityMode::Hashed => None,
+    };
+    let (content_id, bytes_hashed, declared_used) = match declared {
+        Some(content_id) => (content_id, 0, true),
+        None => {
+            let (content_id, bytes_hashed) = hash_ordered_content(sources)?;
+            (content_id, bytes_hashed, false)
+        }
+    };
     after_hash();
     validate_sources(sources, true)?;
     let stored = write_cache_entry(cache.root(), &cache_path, metadata_key, content_id).is_ok();
     validate_sources(sources, true)?;
-    let outcome = if stored {
-        match cache_read {
+    let outcome = match (stored, declared_used) {
+        (true, true) => IdentityCacheOutcome::DeclaredAndStored,
+        (false, true) => IdentityCacheOutcome::DeclaredUncached,
+        (true, false) => match cache_read {
             CacheRead::Corrupt => IdentityCacheOutcome::ComputedAndRepaired,
             CacheRead::Miss => IdentityCacheOutcome::ComputedAndStored,
             CacheRead::Hit(_) => unreachable!(),
-        }
-    } else {
-        IdentityCacheOutcome::ComputedUncached
+        },
+        (false, false) => IdentityCacheOutcome::ComputedUncached,
     };
     Ok(CheckpointContentReport {
         content_id,
         outcome,
         bytes_hashed,
     })
+}
+
+/// Compose the declared content root when every shard has a fresh sidecar.
+///
+/// Any missing, malformed, oversized, or stale sidecar disqualifies the whole
+/// declared derivation; the caller falls back to exhaustive hashing.
+fn declared_ordered_content(sources: &[SourceView<'_>]) -> Option<[u8; 32]> {
+    let digests = declared_shard_digests(sources)?;
+    let mut content = blake3::Hasher::new();
+    content.update(DECLARED_CONTENT_DOMAIN);
+    hash_u64(&mut content, sources.len() as u64);
+    for (index, (source, digest)) in sources.iter().zip(&digests).enumerate() {
+        let mut shard = blake3::Hasher::new();
+        shard.update(DECLARED_SHARD_DOMAIN);
+        hash_u64(&mut shard, index as u64);
+        hash_u64(&mut shard, source.baseline.size());
+        shard.update(digest);
+        let shard_id = shard.finalize();
+        hash_u64(&mut content, index as u64);
+        hash_u64(&mut content, source.baseline.size());
+        content.update(shard_id.as_bytes());
+    }
+    Some(*content.finalize().as_bytes())
+}
+
+fn declared_shard_digests(sources: &[SourceView<'_>]) -> Option<Vec<[u8; 32]>> {
+    sources
+        .iter()
+        .map(|source| declared_shard_digest(source))
+        .collect()
+}
+
+fn declared_shard_digest(source: &SourceView<'_>) -> Option<[u8; 32]> {
+    let name = source.path.file_name()?;
+    let mut sidecar_name = name.to_os_string();
+    sidecar_name.push(".metadata");
+    let sidecar_path = source
+        .path
+        .parent()?
+        .join(".cache")
+        .join("huggingface")
+        .join("download")
+        .join(sidecar_name);
+    let mut options = OpenOptions::new();
+    options.read(true).custom_flags(libc::O_NOFOLLOW);
+    let mut file = options.open(&sidecar_path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > SIDECAR_MAX_BYTES {
+        return None;
+    }
+    let mut raw = String::new();
+    file.read_to_string(&mut raw).ok()?;
+    parse_declared_sidecar(&raw, source.baseline)
+}
+
+/// Parse the three-line hf download sidecar: commit hash, etag, timestamp.
+///
+/// Only LFS-style 64-hex etags declare a content SHA-256; anything else is
+/// not a usable declaration. The shard must not have been modified after the
+/// sidecar was stamped.
+fn parse_declared_sidecar(raw: &str, baseline: SourceStamp) -> Option<[u8; 32]> {
+    let mut lines = raw.lines();
+    let commit = lines.next()?.trim();
+    let etag = lines.next()?.trim();
+    let timestamp = lines.next()?.trim();
+    if lines.any(|line| !line.trim().is_empty()) {
+        return None;
+    }
+    if commit.len() != 40 || !commit.bytes().all(is_lower_hex_byte) {
+        return None;
+    }
+    let digest = parse_hex_32(etag)?;
+    let stamped: f64 = timestamp.parse().ok()?;
+    if !stamped.is_finite() || stamped < 0.0 {
+        return None;
+    }
+    let source_mtime = baseline.mtime_sec as f64 + baseline.mtime_nsec as f64 * 1e-9;
+    if source_mtime > stamped + SIDECAR_MTIME_SLACK_SECONDS {
+        return None;
+    }
+    Some(digest)
+}
+
+fn is_lower_hex_byte(byte: u8) -> bool {
+    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+}
+
+fn parse_hex_32(value: &str) -> Option<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(is_lower_hex_byte) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        out[index] = hex_nibble(pair[0])? << 4 | hex_nibble(pair[1])?;
+    }
+    Some(out)
+}
+
+fn hex_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
 }
 
 fn validate_sources(
@@ -510,6 +701,7 @@ mod tests {
 
     struct TestSource {
         file: File,
+        path: PathBuf,
         mmap: memmap2::Mmap,
         baseline: SourceStamp,
     }
@@ -531,6 +723,7 @@ mod tests {
             let mmap = unsafe { memmap2::Mmap::map(&file).expect("map source") };
             Self {
                 file,
+                path: path.to_path_buf(),
                 mmap,
                 baseline,
             }
@@ -539,11 +732,37 @@ mod tests {
         fn view(&self) -> SourceView<'_> {
             SourceView {
                 file: &self.file,
+                path: &self.path,
                 bytes: &self.mmap,
                 baseline: self.baseline,
             }
         }
+
+        fn write_sidecar(&self, commit: &str, etag: &str, timestamp: f64) {
+            let sidecar_dir = self
+                .path
+                .parent()
+                .unwrap()
+                .join(".cache")
+                .join("huggingface")
+                .join("download");
+            std::fs::create_dir_all(&sidecar_dir).unwrap();
+            let mut name = self.path.file_name().unwrap().to_os_string();
+            name.push(".metadata");
+            std::fs::write(
+                sidecar_dir.join(name),
+                format!("{commit}\n{etag}\n{timestamp}\n"),
+            )
+            .unwrap();
+        }
+
+        fn fresh_sidecar_timestamp(&self) -> f64 {
+            self.baseline.mtime_sec as f64 + self.baseline.mtime_nsec as f64 * 1e-9 + 1.0
+        }
     }
+
+    const TEST_COMMIT: &str = "9f8c8a7abcd5f02d598f5b6c194bab804e87b837";
+    const TEST_SHA256: &str = "15fc87ee87c445a1732b321673df56f9d5675aec4db46dcc9436d29b6e41f3c8";
 
     fn abi() -> SnapshotAbi {
         SnapshotAbi {
@@ -747,6 +966,156 @@ mod tests {
         let retargeted = resolve_sources(&[second.view()], abi(), &cache, || {}).unwrap();
         assert_ne!(retained.content_id, retargeted.content_id);
         assert_eq!(retained.bytes_hashed, 5);
+    }
+
+    #[test]
+    fn declared_sidecars_compose_identity_without_reading_content() {
+        let temp = TestDir::new("declared");
+        let source = TestSource::create(&temp.0, "model.gguf", b"declared model bytes");
+        source.write_sidecar(TEST_COMMIT, TEST_SHA256, source.fresh_sidecar_timestamp());
+        let sources = [source.view()];
+        let declared_cache = CheckpointIdentityCache::new(temp.0.join("declared-cache"));
+
+        let declared = resolve_content_sources(&sources, &declared_cache, || {}).unwrap();
+        assert_eq!(declared.outcome, IdentityCacheOutcome::DeclaredAndStored);
+        assert_eq!(declared.bytes_hashed, 0);
+
+        let hashed_cache = CheckpointIdentityCache::new(temp.0.join("hashed-cache"));
+        let hashed = resolve_content_sources_with_mode(
+            &sources,
+            &hashed_cache,
+            IdentityMode::Hashed,
+            || {},
+            || {},
+        )
+        .unwrap();
+        assert_eq!(hashed.outcome, IdentityCacheOutcome::ComputedAndStored);
+        assert_eq!(hashed.bytes_hashed, source.mmap.len() as u64);
+        assert_ne!(
+            declared.content_id, hashed.content_id,
+            "declared and hashed roots are domain-separated identities"
+        );
+
+        // The cached root is sticky: later resolutions reuse it even after
+        // the sidecar disappears or the preferred mode changes.
+        std::fs::remove_dir_all(temp.0.join(".cache")).unwrap();
+        let sticky = resolve_content_sources(&sources, &declared_cache, || {}).unwrap();
+        assert_eq!(sticky.outcome, IdentityCacheOutcome::Hit);
+        assert_eq!(sticky.content_id, declared.content_id);
+        let sticky_hashed_mode = resolve_content_sources_with_mode(
+            &sources,
+            &declared_cache,
+            IdentityMode::Hashed,
+            || {},
+            || {},
+        )
+        .unwrap();
+        assert_eq!(sticky_hashed_mode.outcome, IdentityCacheOutcome::Hit);
+        assert_eq!(sticky_hashed_mode.content_id, declared.content_id);
+    }
+
+    #[test]
+    fn declared_identity_requires_fresh_wellformed_sidecars_on_every_shard() {
+        let temp = TestDir::new("declared-reject");
+        let source = TestSource::create(&temp.0, "model.gguf", b"model");
+
+        // Shard modified after the sidecar was stamped: stale declaration.
+        source.write_sidecar(
+            TEST_COMMIT,
+            TEST_SHA256,
+            source.baseline.mtime_sec as f64 - 10.0,
+        );
+        let stale = resolve_content_sources(
+            &[source.view()],
+            &CheckpointIdentityCache::new(temp.0.join("stale")),
+            || {},
+        )
+        .unwrap();
+        assert_eq!(stale.outcome, IdentityCacheOutcome::ComputedAndStored);
+        assert!(stale.bytes_hashed > 0);
+
+        // Non-LFS etag shapes (md5-style 32 hex) do not declare content.
+        source.write_sidecar(
+            TEST_COMMIT,
+            "d41d8cd98f00b204e9800998ecf8427e",
+            source.fresh_sidecar_timestamp(),
+        );
+        let malformed = resolve_content_sources(
+            &[source.view()],
+            &CheckpointIdentityCache::new(temp.0.join("malformed")),
+            || {},
+        )
+        .unwrap();
+        assert_eq!(malformed.outcome, IdentityCacheOutcome::ComputedAndStored);
+
+        // Every shard must declare; one bare shard rejects the whole set.
+        source.write_sidecar(TEST_COMMIT, TEST_SHA256, source.fresh_sidecar_timestamp());
+        let bare = TestSource::create(&temp.0, "model-shard2.gguf", b"more");
+        let partial = resolve_content_sources(
+            &[source.view(), bare.view()],
+            &CheckpointIdentityCache::new(temp.0.join("partial")),
+            || {},
+        )
+        .unwrap();
+        assert_eq!(partial.outcome, IdentityCacheOutcome::ComputedAndStored);
+        assert_eq!(
+            partial.bytes_hashed,
+            (source.mmap.len() + bare.mmap.len()) as u64
+        );
+    }
+
+    #[test]
+    fn declared_root_binds_shard_order_and_declared_digests() {
+        let temp = TestDir::new("declared-order");
+        let first = TestSource::create(&temp.0, "a.gguf", b"aa");
+        let second = TestSource::create(&temp.0, "b.gguf", b"bb");
+        first.write_sidecar(TEST_COMMIT, TEST_SHA256, first.fresh_sidecar_timestamp());
+        second.write_sidecar(
+            TEST_COMMIT,
+            "25fc87ee87c445a1732b321673df56f9d5675aec4db46dcc9436d29b6e41f3c8",
+            second.fresh_sidecar_timestamp(),
+        );
+        let forward = declared_ordered_content(&[first.view(), second.view()]).unwrap();
+        let reverse = declared_ordered_content(&[second.view(), first.view()]).unwrap();
+        assert_ne!(forward, reverse);
+
+        second.write_sidecar(TEST_COMMIT, TEST_SHA256, second.fresh_sidecar_timestamp());
+        let redeclared = declared_ordered_content(&[first.view(), second.view()]).unwrap();
+        assert_ne!(forward, redeclared);
+    }
+
+    #[test]
+    fn declared_sidecar_parser_is_strict() {
+        let stamp = SourceStamp {
+            dev: 1,
+            ino: 2,
+            size: 3,
+            mtime_sec: 1_000,
+            mtime_nsec: 0,
+            ctime_sec: 1_000,
+            ctime_nsec: 0,
+        };
+        let valid = format!("{TEST_COMMIT}\n{TEST_SHA256}\n2000.5\n");
+        assert!(parse_declared_sidecar(&valid, stamp).is_some());
+        for rejected in [
+            format!("{TEST_COMMIT}\n{TEST_SHA256}\n2000.5\ntrailing\n"),
+            format!("{TEST_COMMIT}\n{}\n2000.5\n", TEST_SHA256.to_uppercase()),
+            format!("{}\n{TEST_SHA256}\n2000.5\n", &TEST_COMMIT[..39]),
+            format!("{TEST_COMMIT}\n{TEST_SHA256}\nNaN\n"),
+            format!("{TEST_COMMIT}\n{TEST_SHA256}\n-4.0\n"),
+            format!("{TEST_COMMIT}\n{TEST_SHA256}\n"),
+        ] {
+            assert_eq!(
+                parse_declared_sidecar(&rejected, stamp),
+                None,
+                "{rejected:?}"
+            );
+        }
+        let too_old = SourceStamp {
+            mtime_sec: 2_010,
+            ..stamp
+        };
+        assert_eq!(parse_declared_sidecar(&valid, too_old), None);
     }
 
     #[test]

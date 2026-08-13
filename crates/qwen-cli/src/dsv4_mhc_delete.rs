@@ -1037,6 +1037,8 @@ fn identity_cache_outcome(outcome: IdentityCacheOutcome) -> &'static str {
         IdentityCacheOutcome::ComputedAndStored => "computed_and_stored",
         IdentityCacheOutcome::ComputedAndRepaired => "computed_and_repaired",
         IdentityCacheOutcome::ComputedUncached => "computed_uncached",
+        IdentityCacheOutcome::DeclaredAndStored => "declared_and_stored",
+        IdentityCacheOutcome::DeclaredUncached => "declared_uncached",
     }
 }
 

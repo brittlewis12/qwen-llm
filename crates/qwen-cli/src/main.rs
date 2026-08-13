@@ -8260,6 +8260,8 @@ fn identity_cache_outcome_label(outcome: IdentityCacheOutcome) -> &'static str {
         IdentityCacheOutcome::ComputedAndStored => "computed_stored",
         IdentityCacheOutcome::ComputedAndRepaired => "computed_repaired",
         IdentityCacheOutcome::ComputedUncached => "computed_uncached",
+        IdentityCacheOutcome::DeclaredAndStored => "declared_stored",
+        IdentityCacheOutcome::DeclaredUncached => "declared_uncached",
     }
 }
 

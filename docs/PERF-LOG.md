@@ -24238,3 +24238,61 @@ fixture maintenance plus the v4.1 battery implementation. Composed-stack
 divergence is now a recorded fact with located flip points; any future
 approximate default that moves the earliest divergence materially before the
 22% row should trigger a full value battery prior to promotion.
+
+## 2026-08-13 — DeepSeek V4 Durable Prefix Cache GO and Declared Model Identity
+
+Status: DeepSeek V4 single-turn generation now accepts the full
+`--durable-prefix-cache` surface with product parity for the Ring0 game loop
+(`game/play.py` runs unmodified), and durable-identity cold starts no longer
+hash the model when hf download sidecars declare shard SHA-256s. Landed as
+`443d254` (shared store filesystem layer), `cc009da` (declared identity), and
+`5e6a929` (DS4 durable store + CLI + thinking-transcript normalization).
+
+- Store shape: `dsv4-v1/blobs/<compat hex64>/<len>-<digest>.dsv4cp`, keyed by
+  the causal compatibility digest and rolling u32 prefix keys. Entries are
+  observation-less, so lookup restores the longest strict prefix and the CLI
+  re-executes at least one endpoint token; capture is the `prompt_len-1`
+  boundary mid-prefill and publication defers past the response flush. Store,
+  restore-allocation, and admissibility failures all fail open to cold
+  prefill; a one-token prompt logs `skipped=short_prompt` instead of
+  asserting.
+- Live on the 89 GB REAP IQ3_XXS flash model, 32-token turn-1 prompt: cold
+  run publishes the 31-token boundary (13,775,772 B; capture 66.7 ms, publish
+  106.9 ms after flush). Turn 2 (48 tokens) hits `matched=31`
+  (`restore_total_ms=46.7`), promotes 16 tokens to the new 47-token boundary,
+  prefills one endpoint token, and publishes 14,587,868 B. A
+  `--reasoning low --messages-preserve-thinking` rerun of the same history
+  (57 tokens) reuses the chat-mode 31-token blob across encoding modes and
+  publishes its own 56-token boundary.
+- Identity: on a cold identity cache the content root composed from
+  `.cache/huggingface/download` sidecar etags in 18.8 ms with
+  `hashed_bytes=0` (`cache=declared_stored`), versus a full ordered-shard
+  read. Declared and hashed roots are domain-separated; any missing, stale
+  (mtime after stamp), or non-64-hex declaration falls back to hashing, and
+  `QWEN_CHECKPOINT_MODEL_IDENTITY=hashed` forces it. Cached roots are sticky
+  under the fstat key, so existing stores keep their identities. Empty-store
+  runs with no admissible capture now skip identity resolution entirely.
+- Thinking transcripts: `--messages-strip-thinking` normalizes a leading
+  inline think block out of assistant history, including the headless
+  `reasoning</think>text` shape raw thinking output produces;
+  `--messages-preserve-thinking` requires a `--reasoning` tier and promotes
+  inline blocks into the release encoder's structured reasoning field
+  (byte-exact 0731 preserve rendering, fixture-tested). Verified in the live
+  runs: stripped history rendered 48 tokens, promoted history 57.
+- Hardening: store mechanics (namespace/flock/leases/stamps/LRU eviction)
+  now live once in `checkpoint_fs`; the Qwen store suite passed unchanged
+  (26/26) across the extraction. The DS4 store carries the ported adversarial
+  suite (11 tests): LRU eviction under touch-freshness, oversized rejection
+  without namespace mutation, caller-budget failures preserving blobs,
+  corrupt-blob self-heal with fallback, foreign-entry rejection, same-prefix
+  different-state `NamespaceCollision`, and two-thread publisher convergence.
+- Operational note: with pages warm the 89 GB model reloads in ~76-81 ms
+  (`load_ms`), so the per-turn process model needs no resident server; cold
+  first-touch prefetch was 13.1 s.
+
+Decision: GO for game-loop use on both families sharing one cache root.
+Residuals, force-ranked: completed-turn checkpoints for preserve-mode DS4
+(each turn currently re-prefills the prior turn's reasoning), hoisting the
+CLI-inline DS4 durable orchestration into a qwen-llm runtime API, per-family
+namespace budgets stacking on a shared root (up to 2x the flag), and
+crash-orphaned `.tmp-` staging files being unbudgeted in both stores.

@@ -60,6 +60,7 @@ const DEEPSEEK_V4_USER: &str = "<｜User｜>";
 const DEEPSEEK_V4_ASSISTANT: &str = "<｜Assistant｜>";
 const DEEPSEEK_V4_THINK_START: &str = "<think>";
 const DEEPSEEK_V4_THINK_END: &str = "</think>";
+const QWEN38_REASONING_EFFORT_XHIGH: &str = "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.";
 /// Byte-exact "high" effort instruction from the 0731 release contract
 /// (vLLM `REASONING_EFFORT_PROMPTS["high"]` at `77434861`; identical bytes
 /// appeared as the max-tier text in the earlier two-tier encoders, e.g. the
@@ -374,7 +375,10 @@ pub(crate) fn messages_auto_preserve_thinking(meta: &serde_json::Value) -> bool 
     }
     meta.get("model")
         .and_then(|value| value.as_str())
-        .map(|model| model.to_ascii_lowercase().contains("qwen3.6"))
+        .map(|model| {
+            let model = model.to_ascii_lowercase();
+            model.contains("qwen3.6") || model.contains("qwen3.8")
+        })
         .unwrap_or(false)
 }
 
@@ -536,6 +540,80 @@ pub(crate) fn render_qwen_messages_prompt_with_generation(
         }
     }
     output
+}
+
+pub(crate) fn render_qwen38_messages_prompt_with_generation(
+    messages: &[ChatMessage],
+    append_generation_prompt: bool,
+    generation_mode: QwenGenerationMode,
+) -> String {
+    let reasoning_instruction = match generation_mode {
+        QwenGenerationMode::Auto | QwenGenerationMode::Thinking => {
+            Some(QWEN38_REASONING_EFFORT_XHIGH)
+        }
+        QwenGenerationMode::NoThinking => None,
+    };
+    let mut output = String::new();
+    let mut first_non_system = 0;
+    if let Some(system) = messages.first().filter(|message| message.role == "system") {
+        let content = system.content.trim();
+        if reasoning_instruction.is_some() || !content.is_empty() {
+            output.push_str("<|im_start|>system\n");
+            if let Some(instruction) = reasoning_instruction {
+                output.push_str(instruction);
+                if !content.is_empty() {
+                    output.push_str("\n\n");
+                }
+            }
+            output.push_str(content);
+            output.push_str("<|im_end|>\n");
+        }
+        first_non_system = 1;
+    } else if let Some(instruction) = reasoning_instruction {
+        output.push_str("<|im_start|>system\n");
+        output.push_str(instruction);
+        output.push_str("<|im_end|>\n");
+    }
+
+    for message in &messages[first_non_system..] {
+        output.push_str("<|im_start|>");
+        output.push_str(&message.role);
+        output.push('\n');
+        if message.role == "assistant" {
+            output.push_str("<think>\n\n</think>\n\n");
+        }
+        output.push_str(message.content.trim());
+        output.push_str("<|im_end|>\n");
+    }
+    if append_generation_prompt {
+        output.push_str("<|im_start|>assistant\n");
+        match generation_mode {
+            QwenGenerationMode::Auto | QwenGenerationMode::Thinking => output.push_str("<think>\n"),
+            QwenGenerationMode::NoThinking => output.push_str("<think>\n\n</think>\n\n"),
+        }
+    }
+    output
+}
+
+pub(crate) fn render_qwen38_single_turn_prompt(
+    user: &str,
+    system: Option<&str>,
+    generation_mode: QwenGenerationMode,
+) -> String {
+    let mut messages = Vec::with_capacity(usize::from(system.is_some()) + 1);
+    if let Some(system) = system {
+        messages.push(ChatMessage {
+            role: "system".into(),
+            content: system.into(),
+            ..Default::default()
+        });
+    }
+    messages.push(ChatMessage {
+        role: "user".into(),
+        content: user.into(),
+        ..Default::default()
+    });
+    render_qwen38_messages_prompt_with_generation(&messages, true, generation_mode)
 }
 
 pub(crate) fn render_qwen_single_turn_prompt(
@@ -769,12 +847,15 @@ mod tests {
     }
 
     #[test]
-    fn auto_preserves_thinking_only_for_qwen36() {
+    fn auto_preserves_thinking_for_qwen36_and_qwen38() {
         assert!(messages_auto_preserve_thinking(
             &json!({ "model": "/models/Qwen3.6-27B-Q4_K_M.gguf" })
         ));
         assert!(messages_auto_preserve_thinking(
             &json!({ "preserve_thinking": true, "model": "anything" })
+        ));
+        assert!(messages_auto_preserve_thinking(
+            &json!({ "model": "/models/Qwen3.8-27B-Q4_K_M.gguf" })
         ));
         assert!(!messages_auto_preserve_thinking(
             &json!({ "model": "/models/Qwen3.5-27B-Q4_K_M.gguf" })
@@ -849,6 +930,52 @@ mod tests {
                 "<|im_start|>system\nBe exact.<|im_end|>\n",
                 "<|im_start|>user\nHello<|im_end|>\n",
                 "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            )
+        );
+    }
+
+    #[test]
+    fn qwen38_generation_modes_match_upstream_ordinary_chat_subset() {
+        assert_eq!(
+            render_qwen38_single_turn_prompt(" Hello ", None, QwenGenerationMode::Auto),
+            concat!(
+                "<|im_start|>system\n",
+                "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.",
+                "<|im_end|>\n",
+                "<|im_start|>user\nHello<|im_end|>\n",
+                "<|im_start|>assistant\n<think>\n",
+            )
+        );
+        assert_eq!(
+            render_qwen38_single_turn_prompt(
+                "Hello",
+                Some("Be exact."),
+                QwenGenerationMode::NoThinking,
+            ),
+            concat!(
+                "<|im_start|>system\nBe exact.<|im_end|>\n",
+                "<|im_start|>user\nHello<|im_end|>\n",
+                "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            )
+        );
+
+        let history = vec![
+            message("user", "one"),
+            message("assistant", "done"),
+            message("user", "two"),
+        ];
+        let rendered =
+            render_qwen38_messages_prompt_with_generation(&history, true, QwenGenerationMode::Auto);
+        assert_eq!(
+            rendered,
+            concat!(
+                "<|im_start|>system\n",
+                "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.",
+                "<|im_end|>\n",
+                "<|im_start|>user\none<|im_end|>\n",
+                "<|im_start|>assistant\n<think>\n\n</think>\n\ndone<|im_end|>\n",
+                "<|im_start|>user\ntwo<|im_end|>\n",
+                "<|im_start|>assistant\n<think>\n",
             )
         );
     }

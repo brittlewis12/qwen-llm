@@ -17,7 +17,8 @@ use messages::{
     load_deepseek_v4_0731_messages_prompt, load_messages_prompt_with_policy,
     messages_thinking_mode, parse_strict_messages_input, render_deepseek_v4_0731_messages_prompt,
     render_deepseek_v4_0731_single_turn_prompt, render_qwen_messages_prompt_with_generation,
-    render_qwen_single_turn_prompt,
+    render_qwen_single_turn_prompt, render_qwen38_messages_prompt_with_generation,
+    render_qwen38_single_turn_prompt,
 };
 use objc2_metal::MTLDevice;
 use qwen_llm::checkpoint_identity::{
@@ -2671,10 +2672,11 @@ fn prepare_modern_run_prompt(
     );
     if run.no_thinking && matches!(family, ModelFamily::Qwen35 | ModelFamily::Qwen35Moe) {
         ensure!(
-            validated_qwen36_no_thinking_model(family, gguf),
-            "--no-thinking is currently validated only for Qwen3.6 35B A3B with the qwen35 tokenizer; omit --no-thinking to use this model's default generation behavior"
+            validated_qwen_no_thinking_model(family, gguf),
+            "--no-thinking is currently validated only for Qwen3.6 35B A3B and Qwen3.8 27B identities with the qwen35 tokenizer; omit --no-thinking to use this model's default generation behavior"
         );
     }
+    let qwen38 = validated_qwen38_prompt_model(family, gguf);
 
     let no_thinking = run.no_thinking;
     let input = run.acquire_input()?;
@@ -2682,6 +2684,17 @@ fn prepare_modern_run_prompt(
         cli::AcquiredRunInput::RawPrompt(prompt) => (prompt, PromptSource::Inline),
         cli::AcquiredRunInput::User { system, user } => {
             let prompt = match family {
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe if qwen38 => {
+                    render_qwen38_single_turn_prompt(
+                        &user,
+                        system.as_deref(),
+                        if no_thinking {
+                            QwenGenerationMode::NoThinking
+                        } else {
+                            QwenGenerationMode::Auto
+                        },
+                    )
+                }
                 ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => render_qwen_single_turn_prompt(
                     &user,
                     system.as_deref(),
@@ -2703,6 +2716,17 @@ fn prepare_modern_run_prompt(
         cli::AcquiredRunInput::Messages { document, source } => {
             let messages = parse_strict_messages_input(&document, &source)?;
             let prompt = match family {
+                ModelFamily::Qwen35 | ModelFamily::Qwen35Moe if qwen38 => {
+                    render_qwen38_messages_prompt_with_generation(
+                        &messages,
+                        true,
+                        if no_thinking {
+                            QwenGenerationMode::NoThinking
+                        } else {
+                            QwenGenerationMode::Auto
+                        },
+                    )
+                }
                 ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
                     render_qwen_messages_prompt_with_generation(
                         &messages,
@@ -2731,13 +2755,58 @@ fn prepare_modern_run_prompt(
     })
 }
 
-fn validated_qwen36_no_thinking_model(family: ModelFamily, gguf: &GgufFile) -> bool {
+fn validated_qwen_no_thinking_model(family: ModelFamily, gguf: &GgufFile) -> bool {
     validated_qwen36_no_thinking_identity(
         family,
         gguf.get_str("general.base_model.0.name"),
         gguf.get_str("tokenizer.ggml.model"),
         gguf.get_str("tokenizer.ggml.pre"),
+    ) || validated_qwen38_prompt_model(family, gguf)
+}
+
+fn validated_qwen38_prompt_model(family: ModelFamily, gguf: &GgufFile) -> bool {
+    validated_qwen38_prompt_identity(
+        family,
+        gguf.get_str("general.name"),
+        gguf.get_str("general.base_model.0.name"),
+        gguf.get_str("tokenizer.ggml.model"),
+        gguf.get_str("tokenizer.ggml.pre"),
+        gguf.get_u64("qwen35.context_length"),
+        gguf.get_u64("qwen35.block_count"),
+        gguf.get_u64("qwen35.nextn_predict_layers"),
+        gguf.get_u64("qwen35.embedding_length"),
+        gguf.get_u64("qwen35.feed_forward_length"),
     )
+}
+
+fn validated_qwen38_prompt_identity(
+    family: ModelFamily,
+    general_name: Option<&str>,
+    base_model_name: Option<&str>,
+    tokenizer_model: Option<&str>,
+    tokenizer_pre: Option<&str>,
+    context_length: Option<u64>,
+    block_count: Option<u64>,
+    nextn_predict_layers: Option<u64>,
+    embedding_length: Option<u64>,
+    feed_forward_length: Option<u64>,
+) -> bool {
+    let named_qwen38_27b = [general_name, base_model_name]
+        .into_iter()
+        .flatten()
+        .any(|name| {
+            let name = name.to_ascii_lowercase();
+            name.contains("qwen3.8") && name.contains("27b")
+        });
+    family == ModelFamily::Qwen35
+        && named_qwen38_27b
+        && tokenizer_model == Some("gpt2")
+        && tokenizer_pre == Some("qwen35")
+        && context_length == Some(262_144)
+        && block_count == Some(65)
+        && nextn_predict_layers == Some(1)
+        && embedding_length == Some(5_120)
+        && feed_forward_length == Some(17_408)
 }
 
 fn validated_qwen36_no_thinking_identity(
@@ -9124,6 +9193,7 @@ fn print_model_info(model_path: &Path) -> Result<()> {
         "qwen35.embedding_length",
         "qwen35.feed_forward_length",
         "qwen35.context_length",
+        "qwen35.nextn_predict_layers",
         "qwen35.ssm.conv_kernel",
         "qwen35.ssm.inner_size",
         "qwen35.ssm.state_size",
@@ -9527,6 +9597,105 @@ mod tests {
             Some("gpt2"),
             Some("qwen35"),
         ));
+        assert!(validated_qwen38_prompt_identity(
+            ModelFamily::Qwen35,
+            Some("Qwen3.8 27B!"),
+            Some("Qwen3.8-27B"),
+            Some("gpt2"),
+            Some("qwen35"),
+            Some(262_144),
+            Some(65),
+            Some(1),
+            Some(5_120),
+            Some(17_408),
+        ));
+        assert!(!validated_qwen38_prompt_identity(
+            ModelFamily::Qwen35,
+            Some("Qwen3.8 27B!"),
+            Some("Qwen3.8-27B"),
+            Some("gpt2"),
+            Some("qwen35"),
+            Some(262_144),
+            Some(64),
+            Some(1),
+            Some(5_120),
+            Some(17_408),
+        ));
+        for identity in [
+            (
+                ModelFamily::Qwen35Moe,
+                Some("Qwen3.8 27B!"),
+                Some("qwen35"),
+                Some(262_144),
+                Some(65),
+                Some(1),
+                Some(5_120),
+                Some(17_408),
+            ),
+            (
+                ModelFamily::Qwen35,
+                Some("Qwen3.7 27B"),
+                Some("qwen35"),
+                Some(262_144),
+                Some(65),
+                Some(1),
+                Some(5_120),
+                Some(17_408),
+            ),
+            (
+                ModelFamily::Qwen35,
+                Some("Qwen3.8 27B!"),
+                Some("other"),
+                Some(262_144),
+                Some(65),
+                Some(1),
+                Some(5_120),
+                Some(17_408),
+            ),
+            (
+                ModelFamily::Qwen35,
+                Some("Qwen3.8 27B!"),
+                Some("qwen35"),
+                Some(131_072),
+                Some(65),
+                Some(1),
+                Some(5_120),
+                Some(17_408),
+            ),
+            (
+                ModelFamily::Qwen35,
+                Some("Qwen3.8 27B!"),
+                Some("qwen35"),
+                Some(262_144),
+                Some(65),
+                Some(0),
+                Some(5_120),
+                Some(17_408),
+            ),
+            (
+                ModelFamily::Qwen35,
+                Some("Qwen3.8 27B!"),
+                Some("qwen35"),
+                Some(262_144),
+                Some(65),
+                Some(1),
+                Some(4_096),
+                Some(17_408),
+            ),
+        ] {
+            assert!(!validated_qwen38_prompt_identity(
+                identity.0,
+                identity.1,
+                None,
+                Some("gpt2"),
+                identity.2,
+                identity.3,
+                identity.4,
+                identity.5,
+                identity.6,
+                identity.7,
+            ));
+        }
         for identity in [
             (
                 ModelFamily::Qwen35,

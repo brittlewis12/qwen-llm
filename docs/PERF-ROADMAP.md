@@ -1389,13 +1389,18 @@ projection arithmetic and a credible path to the complete wall bar.
    work, such as destination pre-wiring or uncached source reads; require loaded
    parity and complete first-byte improvement. Do not sweep workers, suppress
    the cache warmer again, or auto-admit A10B from the current result.
-2. **Require a physical routed gate/up deletion before implementation.** After
-   the MXFP4 repair, FRESH and K160 still spend about `1,833` and `1,877 ms` in
-   routed gate/up, but neither profile exposes a broken layer or shared quant
-   work unit. Advance only a cohort-wide design that first demonstrates roughly
-   150-200 ms of fewer weight decodes, routed assignments, or intermediate
-   publication. Do not reopen paired gate/up staging, tile geometry, or command
-   rearrangement from the subtotal alone.
+2. **Keep current-asset routed gate/up closed.** After the MXFP4 repair, FRESH
+   and K160 still spend about `1,833` and `1,877 ms` in routed gate/up, but neither
+   profile exposes a broken layer or shared quant work unit. K160's six selected
+   gate/up experts consume 41.25 MiB/layer of independent Q3_K bytes; matching
+   formats share no masks, codes, scales, decode, or dots. The exact shared-input
+   Q3 body is already slower than separate low-pressure packed arithmetic
+   (`0.676` versus `0.236 ms/layer` for the routed stage), while exact paired IQ2
+   and all-IQ3 analogues regress under accumulator pressure. Do not implement
+   sequential fast-Q3 fusion, depth pairing, interleaved banks, paired staging,
+   or tile retunes. Reopen only for fewer routed assignments or a changed
+   model/asset representation that first demonstrates roughly 150-200 ms of
+   deleted weight decode, dot work, or cohort-wide publication.
 3. **Keep command ownership closed without a larger GPU-work deletion.** The
    removed merged-route arm already deletes CPU routing, publication, and 86 of
    129 commands. Its maximally favorable planning ceiling is 132.965 ms; adding
@@ -1443,11 +1448,12 @@ projection arithmetic and a credible path to the complete wall bar.
    publications. Two 256-repeat A/B/B/A screens saved only `0.001733` and
    `0.000113 ms/site`, projecting to `0.074533` and `0.004847 ms/token` against
    the `0.4 ms/token` gate. No code remains. Do not transfer final-only ownership
-   to narrower dtype cohorts or reopen mHC launch grouping. Return implementation
-   priority to item 2: a routed gate/up producer must delete or reuse material
-   dequant/dot work. Do not resume isolated local retunes until a structural
-   deletion has a credible 2 ms/token ceiling. Every retained fusion also lowers
-   the DSpark N=2 verifier denominator toward its 58.34 ms external budget. Design:
+   to narrower dtype cohorts or reopen mHC launch grouping. The current-asset
+   gate/up audit in item 2 finds no shared dequant/dot work and closes that branch
+   before code. Return implementation priority to item 1's residency mechanism;
+   do not resume isolated local retunes until a structural deletion has a credible
+   2 ms/token ceiling. Every retained fusion also lowers the DSpark N=2 verifier
+   denominator toward its 58.34 ms external budget. Design:
    `docs/bench/2026-08-12-dsv4-decode-dispatch-census/README.md`.
 6. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,

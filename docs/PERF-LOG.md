@@ -6,6 +6,43 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — DeepSeek V4 Current-Asset Gate/Up Fusion KILL
+
+Status: KILL current-asset routed gate/up fusion before code. No exact no-repack
+organization exposes material shared dequantization or dot work.
+
+- K160's gate and up are independent Q3_K `[4096,2048,160]` banks. One selected
+  expert matrix is 3,604,480 bytes; six routes across both projections consume
+  41.25 MiB of distinct compressed weights per layer and execute 4.329 billion
+  weight terms/token. Matching block formats do not share masks, codes, scales,
+  or F16 block factors.
+- The strongest reusable organizations are the existing fused all-slot Q3 body,
+  sequential exact Q6 shared-expert body, paired-depth projection wrapper, and
+  Q8/IQ2/IQ3 shared-input kernels. All share activation loads or publication;
+  none skips a gate/up weight block, decode, or dot product.
+- The exact fused all-slot Q3 gate/up/SwiGLU body already shares each activation
+  and publishes only routed inner, but the complete routed stage measures
+  `0.676 ms/layer` versus `0.236 ms/layer` for separate low-pressure packed-Q3
+  gate/up plus in-place SwiGLU. Exact paired IQ2 likewise regressed its target
+  `4076.981/3994.295 -> 4207.414 ms`; the independent exact all-IQ3 fusion
+  regressed hot GPU/wall by `0.5713%/0.7625%` and sparse by about `1.87%`.
+- A new sequential packed-Q3 producer could remove launches, repeated activation
+  service, and about 192 KiB/layer of logical projection/SwiGLU traffic. It would
+  retain all 41.25 MiB/layer of selected weight traffic and both accumulator
+  lineages. That is the same launch/materialization premise just rejected by the
+  routed-down screen, not the required physical gate/up deletion.
+- The active `2 ms/token` structural bar is `0.046512 ms/layer` across 43 layers,
+  at least 19% of K160's entire measured `10.51 ms/token` routed stage before
+  isolating gate/up. The packed-prefill bar similarly requires 150-200 ms of
+  actual decode, assignment, or publication deletion. No current-asset exact
+  relation supplies either ceiling.
+
+Decision: do not prototype sequential fast-Q3 fusion, depth pairing, bank
+interleaving, or another shared-activation tile. Reopen only for fewer routed
+assignments or a changed model/asset representation that makes weight decode or
+dot work genuinely common. Promote the A10B residency-wiring mechanism audit as
+the next implementation-facing branch.
+
 ## 2026-08-13 — DeepSeek V4 Routed-Down Producer Reduction KILL
 
 Status: KILL Q4_K routed-down ownership of weighted reduction and shared add. No

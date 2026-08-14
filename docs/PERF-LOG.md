@@ -6,6 +6,35 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — DeepSeek V4 Routed-Down Producer Reduction KILL
+
+Status: KILL Q4_K routed-down ownership of weighted reduction and shared add. No
+implementation is retained.
+
+- The model-free screen used K160's production `F=2048 -> H=4096`, top-k 6 Q4_K
+  down geometry with six resident experts. The candidate ran the unchanged Q4_K
+  dot body serially by slot, accumulated route weights in the existing order,
+  and added the shared row. It changed down/weighted-sum/add from three dispatches
+  to one and avoided publishing the `6H` expert rows and routed `H` row.
+- The complete fused final row was bit-identical to composition at production
+  geometry. This validates the arithmetic organization without changing either
+  F32 rounding boundary.
+- Two independent release A/B/B/A screens used 256 repeats per arm. The first
+  measured composed `0.059407/0.059586` and fused `0.057736/0.057791 ms/site`;
+  arm means save `0.001733 ms/site`, or `0.074533 ms/token` across 43 layers. The
+  repeat measured composed `0.053219/0.053390` and fused
+  `0.053213/0.053171 ms/site`; arm means save `0.000113 ms/site`, or
+  `0.004847 ms/token`.
+- The predeclared `0.4 ms/token` gate requires `0.009302 ms/site`. Even the more
+  favorable screen misses by 5.4x. Removing two launches and about 112 KiB of
+  logical F32 publication per layer is nearly canceled by serial slot ownership;
+  unchanged dequant/dot work remains decisive.
+
+Decision: remove the exact prototype without model acquisition or production
+schedule surgery. Do not transfer this final-only Q4_K organization to narrower
+dtype cohorts. Reopen routed-down only when a producer deletes or reuses material
+dequant/dot work; return decode priority to a physical routed gate/up deletion.
+
 ## 2026-08-13 — DeepSeek V4 mHC Launch-Fusion Screens KILL
 
 Status: KILL the remaining launch-only mHC organizations. No implementation is

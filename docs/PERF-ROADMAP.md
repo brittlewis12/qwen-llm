@@ -1417,18 +1417,18 @@ projection arithmetic and a credible path to the complete wall bar.
    ms/token decode gap is what moves the verifier floor inside the external
    budget. Evidence: 2026-08-12 calibration entry;
    `target/profiles/dspark-metal-nsweep-2026-08-12/`.
-5. **Continue decode front-end fusion before verifier-width work.** The original
-   census reconciles 2,146 dispatches/token. Grouped output-A removed 301 and
-   measured 1.50 ms/token; exact Q6/Q8 shared-expert fusion removed another 86
-   and measured 0.240 ms/token wall. Exact Q8 compressor-frontier fusion removed
-   another 124 and measured 0.133 ms/transition in its 128-transition product
-   bracket. Paired Q-A/raw-KV projection, Q-LoRA/KV RMSNorm, and query/KV RoPE
-   now remove another 129 nonzero-position dispatches, leaving 1,506 ordinary
-   dispatches/token. Production-geometry intermediates and F16 publication are
-   bit-exact. Two noisy short K160 brackets have pooled arm medians favoring the
-   packet by 0.086 ms/token wall and 0.100 ms/token GPU. Two 128-transition
-   product brackets are independently positive; the conservative lower result
-   saves 0.198 ms/transition (0.52%).
+5. **Hold decode front-end fusion until physical work can be deleted.** The
+   original census reconciles 2,146 dispatches/token. Grouped output-A removed
+   301 and measured 1.50 ms/token; exact Q6/Q8 shared-expert fusion removed
+   another 86 and measured 0.240 ms/token wall. Exact Q8 compressor-frontier
+   fusion removed another 124 and measured 0.133 ms/transition in its
+   128-transition product bracket. Paired Q-A/raw-KV projection, Q-LoRA/KV
+   RMSNorm, and query/KV RoPE now remove another 129 nonzero-position dispatches,
+   leaving 1,506 ordinary dispatches/token. Production-geometry intermediates and
+   F16 publication are bit-exact. Two noisy short K160 brackets have pooled arm
+   medians favoring the packet by 0.086 ms/token wall and 0.100 ms/token GPU. Two
+   128-transition product brackets are independently positive; the conservative
+   lower result saves 0.198 ms/transition (0.52%).
    The narrow KV RoPE+F16 publication leaf remains KILL: it deletes 43
    dispatches but regresses the 128-token product bracket by about 0.051 ms/token
    and broadens transient F32 KV bits under fast-math. Launch-only mHC cleanup is
@@ -1436,15 +1436,18 @@ projection arithmetic and a credible path to the complete wall bar.
    `0.09-0.24 ms/token` ceiling. A changed-premise controls+collapse+consumer-norm
    kernel preserved every authoritative bit and could remove 172 dispatches, but
    its production-width isolated bracket averaged 0.035193 versus 0.032028
-   ms/site, a projected `0.272 ms/token` regression; no code remains. Reopen mHC
-   only with a producer-owned deletion of projection/dequant work, not another
-   launch grouping. The next bounded screen is dtype-qualified routed-down
-   ownership of weighted reduction/shared add, which can delete the six-row
-   expert-output publication; kill it if serial slot ownership regresses the down
-   kernel or cannot clear 0.4 ms/token. Use separate rollbacks and held-position
-   bitwise differentials; do not resume isolated local retunes until structural
-   deletion clears 2 ms/token. Every fusion also lowers the DSpark N=2 verifier
-   denominator toward its 58.34 ms external budget. Design:
+   ms/site, a projected `0.272 ms/token` regression; no code remains. The changed-
+   premise routed-down screen is now closed too. At production K160 Q4_K
+   `2048 -> 4096`, an exact final-only producer changed down/weighted-sum/add from
+   three dispatches to one and removed the `6H` expert plus routed `H` F32
+   publications. Two 256-repeat A/B/B/A screens saved only `0.001733` and
+   `0.000113 ms/site`, projecting to `0.074533` and `0.004847 ms/token` against
+   the `0.4 ms/token` gate. No code remains. Do not transfer final-only ownership
+   to narrower dtype cohorts or reopen mHC launch grouping. Return implementation
+   priority to item 2: a routed gate/up producer must delete or reuse material
+   dequant/dot work. Do not resume isolated local retunes until a structural
+   deletion has a credible 2 ms/token ceiling. Every retained fusion also lowers
+   the DSpark N=2 verifier denominator toward its 58.34 ms external budget. Design:
    `docs/bench/2026-08-12-dsv4-decode-dispatch-census/README.md`.
 6. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,

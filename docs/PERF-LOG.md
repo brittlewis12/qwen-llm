@@ -6,6 +6,37 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — Whole-Model Residency Optimization Lane CLOSED
+
+Status: whole-model explicit residency is not an actionable optimization lane.
+Do not run or extend it under current process supervision.
+
+- A hard-killed FRESH process had committed 11 allocations totaling
+  `104,202,698,752` bytes. After its supervisor escalated SIGTERM to SIGKILL in
+  200 ms, about 98.7 GiB remained wired with no live inference process and the
+  machine required a reboot. The failure was machine-wide, not a recoverable
+  request-local leak.
+- `removeResidencySet`/`endResidency`, cooperative cancellation, process-wide
+  Metal exclusion, and the half-physical wired-memory poison gate are containment
+  layers. SIGKILL bypasses Rust destruction, API return does not prove XNU has
+  unwired pages, and the poison gate prevents a second allocation rather than
+  recovering the first.
+- The historical A10B force-only composition also couples
+  `QWEN_GGUF_PARALLEL_COPY=pread` to an 879-allocation whole-model residency set.
+  Its 59.45-second `requestResidency` interval is not an invitation to test
+  pre-wiring, `mlock`, uncached source reads, or another placement order. Leave
+  that force selector unset or disabled.
+- DeepSeek work remains on `QWEN_DSV4_RESIDENCY_SET=0`. Existing opt-in code and
+  performance evidence are historical/diagnostic only; they do not authorize a
+  workload, default, or transfer. No residency API or model/GPU workload was run
+  while making this correction.
+
+Decision: require an explicit future user reopen plus a supervisor with a long or
+disabled SIGKILL deadline, deterministic unload, and observed host-memory
+recovery before any whole-model residency work. Until then, optimize ordinary
+pageable loading, execution, and reuse without wiring or pinning model-scale
+allocations. Return the active queue to non-residency work.
+
 ## 2026-08-13 — DeepSeek V4 Current-Asset Gate/Up Fusion KILL
 
 Status: KILL current-asset routed gate/up fusion before code. No exact no-repack

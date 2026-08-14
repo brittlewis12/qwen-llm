@@ -51,13 +51,17 @@ Scope rules:
   They remain important, but do not rank against fresh serial BS=1 work today.
 - Prefix caching is relevant only when a prefix is reused or reconstructed. It is
   not a fresh-prompt optimization.
-- Process-cold model loading and first residency are a first-class product lane.
-  Keep their boundary separate from model-ready TTFT, but let broad exact cold
-  wins outrank narrower loaded-model work under the current deployment mix.
-- Whole-model `MTLResidencySet` placement is opt-in. A hard-killed 104.2 GB
-  FRESH process stranded essentially the complete set as reboot-only wired
-  memory. Promotion requires explicit unload plus a supervisor teardown window;
-  `QWEN_DSV4_RESIDENCY_SET=1` is unsafe under sub-second SIGKILL escalation.
+- Process-cold model loading and ordinary first-use placement are a first-class
+  product lane. Keep their boundary separate from model-ready TTFT, but let broad
+  exact cold wins outrank narrower loaded-model work under the current deployment
+  mix. This does not include explicit whole-model wiring.
+- Whole-model `MTLResidencySet` optimization is closed, not merely waiting for a
+  faster implementation. A hard-killed 104.2 GB FRESH process stranded
+  essentially the complete set as reboot-only wired memory and destabilized the
+  machine. Existing opt-ins are historical/diagnostic only. Do not run, extend,
+  or transfer them under current supervision; reopening requires an explicit user
+  decision, deterministic unload, a sufficient supervisor teardown window, and
+  observed host-memory recovery.
 - Metal initialization is process-exclusive across qwen binaries. Direct
   contention fails with owner metadata, queue-managed work may set
   `QWEN_METAL_LEASE_WAIT=1`, and a host that remains at least half wired after a
@@ -1365,12 +1369,12 @@ The exact A10B process-cold path has a bounded force-only rescue. The incumbent
 needs 165.95 seconds to load and 111.76 seconds for a 13-token first prefill.
 Authenticated W4 destination pread populates 77.02 GB in 9.82 seconds and cuts
 that one-token process wall `280.58 -> 30.38 s`, with the same generated token.
-Sustained inference still collapses without explicit placement. Adding one
-879-allocation residency set charges 59.45 seconds during load, then restores
-222 ms prefill and 44.77 decode token/s while reproducing the known exact
-v0.538 128-token stream. Keep `QWEN_GGUF_PARALLEL_COPY=pread` force-only and
-ordinary loading unchanged. The remaining A10B problem is residency wiring,
-not another population selector or cache-warmer pass.
+Sustained inference still collapses without explicit placement. The historical
+879-allocation residency result charged 59.45 seconds during load, then restored
+222 ms prefill and 44.77 decode token/s while reproducing the known exact v0.538
+128-token stream. Keep `QWEN_GGUF_PARALLEL_COPY=pread` unused: on A10B that force
+selector implicitly creates the whole-model set. Ordinary loading remains the
+safe path; residency wiring is closed rather than an open loader problem.
 
 Force-ranked queue:
 
@@ -1383,12 +1387,11 @@ and exact shared-panel precedents are negative or about 1% whole-wall. Reopen
 only with 30-50 ms of independently isolated GPU-work deletion beyond unchanged
 projection arithmetic and a credible path to the complete wall bar.
 
-1. **Bound A10B residency wiring before any loader expansion.** The force-only
-   composition restores loaded speed, but `requestResidency` owns 59.45 seconds
-   of an 83.36-second load. Reopen only with one mechanism that changes that
-   work, such as destination pre-wiring or uncached source reads; require loaded
-   parity and complete first-byte improvement. Do not sweep workers, suppress
-   the cache warmer again, or auto-admit A10B from the current result.
+1. **Record REAP quality governance before another speed promotion.** Keep
+   K160's correct math result and failed 180-word constraint as the first row,
+   add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run
+   one full-defaults versus arithmetic-rollbacks logit/top-1 audit. Memory and
+   speed do not authorize an asset-quality claim.
 2. **Keep current-asset routed gate/up closed.** After the MXFP4 repair, FRESH
    and K160 still spend about `1,833` and `1,877 ms` in routed gate/up, but neither
    profile exposes a broken layer or shared quant work unit. K160's six selected
@@ -1450,16 +1453,16 @@ projection arithmetic and a credible path to the complete wall bar.
    the `0.4 ms/token` gate. No code remains. Do not transfer final-only ownership
    to narrower dtype cohorts or reopen mHC launch grouping. The current-asset
    gate/up audit in item 2 finds no shared dequant/dot work and closes that branch
-   before code. Return implementation priority to item 1's residency mechanism;
+   before code. Return program priority to item 1's non-residency quality audit;
    do not resume isolated local retunes until a structural deletion has a credible
    2 ms/token ceiling. Every retained fusion also lowers the DSpark N=2 verifier
    denominator toward its 58.34 ms external budget. Design:
    `docs/bench/2026-08-12-dsv4-decode-dispatch-census/README.md`.
-6. **Record REAP quality governance before product equivalence claims.** Keep
-   K160's correct math result and failed 180-word constraint as the first row,
-   add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run
-   one full-defaults versus arithmetic-rollbacks logit/top-1 audit. Memory and
-   speed do not authorize an asset-quality claim.
+6. **Keep whole-model residency work closed.** Do not call `requestResidency`,
+   pre-wire or `mlock` model destinations, experiment with uncached source reads
+   around a residency set, or use the A10B force selector under current OpenCode
+   supervision. The lease, poison gate, and cooperative teardown contain repeat
+   damage but cannot make SIGKILL safe or prove host unwiring.
 7. **Keep direct low-precision scoring closed.** Unguarded FP4 changed every
    deep mask and regressed wall; F16 query staging now fails on real nonzero
    history. Reopen low precision only as an F32-authoritative conservative

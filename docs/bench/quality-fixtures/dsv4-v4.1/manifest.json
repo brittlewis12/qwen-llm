@@ -1,0 +1,182 @@
+[
+  {
+    "n": 149,
+    "label": "PRIME",
+    "burden": 6,
+    "bin": "140-199",
+    "pair_id": "140-199-149"
+  },
+  {
+    "n": 161,
+    "label": "COMPOSITE",
+    "burden": 4,
+    "bin": "140-199",
+    "smallest_factor": 7,
+    "pair_id": "140-199-161"
+  },
+  {
+    "n": 151,
+    "label": "PRIME",
+    "burden": 6,
+    "bin": "140-199",
+    "pair_id": "140-199-151"
+  },
+  {
+    "n": 143,
+    "label": "COMPOSITE",
+    "burden": 5,
+    "bin": "140-199",
+    "smallest_factor": 11,
+    "pair_id": "140-199-143"
+  },
+  {
+    "n": 157,
+    "label": "PRIME",
+    "burden": 6,
+    "bin": "140-199",
+    "pair_id": "140-199-157"
+  },
+  {
+    "n": 187,
+    "label": "COMPOSITE",
+    "burden": 5,
+    "bin": "140-199",
+    "smallest_factor": 11,
+    "pair_id": "140-199-187"
+  },
+  {
+    "n": 163,
+    "label": "PRIME",
+    "burden": 6,
+    "bin": "140-199",
+    "pair_id": "140-199-163"
+  },
+  {
+    "n": 169,
+    "label": "COMPOSITE",
+    "burden": 6,
+    "bin": "140-199",
+    "smallest_factor": 13,
+    "pair_id": "140-199-169"
+  },
+  {
+    "n": 211,
+    "label": "PRIME",
+    "burden": 6,
+    "bin": "200-299",
+    "pair_id": "200-299-211"
+  },
+  {
+    "n": 203,
+    "label": "COMPOSITE",
+    "burden": 4,
+    "bin": "200-299",
+    "smallest_factor": 7,
+    "pair_id": "200-299-203"
+  },
+  {
+    "n": 223,
+    "label": "PRIME",
+    "burden": 6,
+    "bin": "200-299",
+    "pair_id": "200-299-223"
+  },
+  {
+    "n": 217,
+    "label": "COMPOSITE",
+    "burden": 4,
+    "bin": "200-299",
+    "smallest_factor": 7,
+    "pair_id": "200-299-217"
+  },
+  {
+    "n": 227,
+    "label": "PRIME",
+    "burden": 6,
+    "bin": "200-299",
+    "pair_id": "200-299-227"
+  },
+  {
+    "n": 259,
+    "label": "COMPOSITE",
+    "burden": 4,
+    "bin": "200-299",
+    "smallest_factor": 7,
+    "pair_id": "200-299-259"
+  },
+  {
+    "n": 229,
+    "label": "PRIME",
+    "burden": 6,
+    "bin": "200-299",
+    "pair_id": "200-299-229"
+  },
+  {
+    "n": 287,
+    "label": "COMPOSITE",
+    "burden": 4,
+    "bin": "200-299",
+    "smallest_factor": 7,
+    "pair_id": "200-299-287"
+  },
+  {
+    "n": 307,
+    "label": "PRIME",
+    "burden": 7,
+    "bin": "300-499",
+    "pair_id": "300-499-307"
+  },
+  {
+    "n": 301,
+    "label": "COMPOSITE",
+    "burden": 4,
+    "bin": "300-499",
+    "smallest_factor": 7,
+    "pair_id": "300-499-301"
+  },
+  {
+    "n": 311,
+    "label": "PRIME",
+    "burden": 7,
+    "bin": "300-499",
+    "pair_id": "300-499-311"
+  },
+  {
+    "n": 329,
+    "label": "COMPOSITE",
+    "burden": 4,
+    "bin": "300-499",
+    "smallest_factor": 7,
+    "pair_id": "300-499-329"
+  },
+  {
+    "n": 313,
+    "label": "PRIME",
+    "burden": 7,
+    "bin": "300-499",
+    "pair_id": "300-499-313"
+  },
+  {
+    "n": 343,
+    "label": "COMPOSITE",
+    "burden": 4,
+    "bin": "300-499",
+    "smallest_factor": 7,
+    "pair_id": "300-499-343"
+  },
+  {
+    "n": 317,
+    "label": "PRIME",
+    "burden": 7,
+    "bin": "300-499",
+    "pair_id": "300-499-317"
+  },
+  {
+    "n": 371,
+    "label": "COMPOSITE",
+    "burden": 4,
+    "bin": "300-499",
+    "smallest_factor": 7,
+    "pair_id": "300-499-371"
+  }
+]

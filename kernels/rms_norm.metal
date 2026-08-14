@@ -31,6 +31,12 @@ struct rms_norm_rows_args {
     float eps;
 };
 
+struct ds4_prepare_norm_pair_args {
+    uint q_dim;
+    uint kv_dim;
+    float eps;
+};
+
 kernel void kernel_rms_norm_mul_f32(
         constant rms_norm_args & args     [[buffer(0)]],
         device const float     * x        [[buffer(1)]],
@@ -99,6 +105,44 @@ kernel void kernel_rms_norm_mul_rows_f32(
     const float scale = rsqrt(mean + args.eps);
     for (uint i = tpitg; i < args.n_dim; i += ntg) {
         y[base + i] = (x[base + i] * scale) * weight[i];
+    }
+}
+
+kernel void kernel_ds4_prepare_norm_pair_f32(
+        constant ds4_prepare_norm_pair_args & args [[buffer(0)]],
+        device const float * q_x [[buffer(1)]],
+        device const float * q_weight [[buffer(2)]],
+        device float * q_y [[buffer(3)]],
+        device const float * kv_x [[buffer(4)]],
+        device const float * kv_weight [[buffer(5)]],
+        device float * kv_y [[buffer(6)]],
+        threadgroup float * shmem [[threadgroup(0)]],
+        uint tgpig [[threadgroup_position_in_grid]],
+        uint tpitg [[thread_position_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]],
+        ushort tiisg [[thread_index_in_simdgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    const uint n_dim = tgpig == 0u ? args.q_dim : args.kv_dim;
+    device const float * x = tgpig == 0u ? q_x : kv_x;
+    device const float * weight = tgpig == 0u ? q_weight : kv_weight;
+    device float * y = tgpig == 0u ? q_y : kv_y;
+
+    float sumsq = 0.0f;
+    for (uint i = tpitg; i < n_dim; i += ntg) {
+        const float v = x[i];
+        sumsq += v * v;
+    }
+    sumsq = simd_sum(sumsq);
+    if (tiisg == 0) {
+        shmem[sgitg] = sumsq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    sumsq = (tiisg < (ntg + 31) / 32) ? shmem[tiisg] : 0.0f;
+    sumsq = simd_sum(sumsq);
+    const float mean = sumsq / float(n_dim);
+    const float scale = rsqrt(mean + args.eps);
+    for (uint i = tpitg; i < n_dim; i += ntg) {
+        y[i] = (x[i] * scale) * weight[i];
     }
 }
 

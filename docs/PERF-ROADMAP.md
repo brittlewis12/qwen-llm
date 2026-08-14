@@ -1420,21 +1420,27 @@ projection arithmetic and a credible path to the complete wall bar.
 5. **Continue decode front-end fusion before verifier-width work.** The original
    census reconciles 2,146 dispatches/token. Grouped output-A removed 301 and
    measured 1.50 ms/token; exact Q6/Q8 shared-expert fusion removed another 86
-   and measured 0.240 ms/token wall. Exact Q8 compressor-frontier fusion now
-   replaces 62 pairs of GEMVs plus APE writes with 62 depth-2 dispatches,
-   removing another 124 and leaving 1,635 ordinary dispatches/token. Its final
-   K160 bracket saves 0.542 ms/token wall and 0.253 ms/token GPU over eight
-   samples; a 128-transition product bracket saves 0.133 ms/transition after
-   drift cancellation. The narrow KV RoPE+F16 publication leaf remains KILL: it
-   deletes 43 dispatches but regresses the 128-token product bracket by about
-   0.051 ms/token and broadens transient F32 KV bits under fast-math. Next rank
-   the exact combine tail against a materially larger paired prepare deletion.
-   Reopen mHC pre only with a changed shared/deleted-work premise: the no-slab
-   producer geometry is falsified. Use
-   separate rollbacks and held-position bitwise differentials; do not resume
-   isolated local retunes until structural deletion clears 2 ms/token. Every
-   fusion also lowers the DSpark N=2 verifier denominator toward its 58.34 ms
-   external budget. Design:
+   and measured 0.240 ms/token wall. Exact Q8 compressor-frontier fusion removed
+   another 124 and measured 0.133 ms/transition in its 128-transition product
+   bracket. Paired Q-A/raw-KV projection, Q-LoRA/KV RMSNorm, and query/KV RoPE
+   now remove another 129 nonzero-position dispatches, leaving 1,506 ordinary
+   dispatches/token. Production-geometry intermediates and F16 publication are
+   bit-exact. Two noisy short K160 brackets have pooled arm medians favoring the
+   packet by 0.086 ms/token wall and 0.100 ms/token GPU. Two 128-transition
+   product brackets are independently positive; the conservative lower result
+   saves 0.198 ms/transition (0.52%).
+   The narrow KV RoPE+F16 publication leaf remains KILL: it deletes 43
+   dispatches but regresses the 128-token product bracket by about 0.051 ms/token
+   and broadens transient F32 KV bits under fast-math. The next bounded packet is
+   exact combine-through-mHC-post: three dispatches to one in each of 43 layers,
+   at most 86 more deletions. Require exact routed/final/residual bits and a
+   positive product bracket; kill it quickly if volatile publication cannot
+   preserve boundaries or the measured ceiling is immaterial. Reopen mHC pre
+   only with a changed shared/deleted-work premise: the no-slab producer geometry
+   is falsified. Use separate rollbacks and held-position bitwise differentials;
+   do not resume isolated local retunes until structural deletion clears 2
+   ms/token. Every fusion also lowers the DSpark N=2 verifier denominator toward
+   its 58.34 ms external budget. Design:
    `docs/bench/2026-08-12-dsv4-decode-dispatch-census/README.md`.
 6. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,

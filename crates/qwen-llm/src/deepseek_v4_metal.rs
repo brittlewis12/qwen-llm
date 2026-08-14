@@ -6256,8 +6256,11 @@ pub struct DeepSeekV4PositionZeroAttentionScratch {
     low_rank: MetalTensor,
     output: MetalTensor,
     head_norm_ones: MetalTensor,
+    paired_prepare_capabilities: DeepSeekV4PairedPrepareCapabilities,
     #[cfg(test)]
     hca_test_policy: DeepSeekV4HcaTestPolicy,
+    #[cfg(test)]
+    prepare_test_policy: DeepSeekV4PrepareTestPolicy,
 }
 
 #[cfg(test)]
@@ -6269,6 +6272,52 @@ enum DeepSeekV4HcaTestPolicy {
     LegacyTiled,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeepSeekV4PrepareTestPolicy {
+    Production,
+    Paired,
+    Composed,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DeepSeekV4PairedPrepareCapabilities {
+    q6_projection: bool,
+    q8_projection: bool,
+    norm_and_rope: bool,
+}
+
+impl DeepSeekV4PairedPrepareCapabilities {
+    fn probe(ctx: &MetalContext) -> Self {
+        let supports = |kernel: &str, threads: usize| {
+            ctx.pipeline(kernel)
+                .is_ok_and(|pipeline| pipeline.maxTotalThreadsPerThreadgroup() >= threads)
+        };
+        let norm_threads = ctx
+            .pipeline("kernel_rms_norm_mul_f32")
+            .ok()
+            .map(|pipeline| pipeline.maxTotalThreadsPerThreadgroup().min(1024))
+            .filter(|&threads| threads > 0);
+        Self {
+            q6_projection: supports("kernel_ds4_prepare_projection_pair_q6_q8_f32", 128),
+            q8_projection: supports("kernel_ds4_prepare_projection_pair_q8_q8_f32", 128),
+            norm_and_rope: norm_threads.is_some_and(|threads| {
+                supports("kernel_ds4_prepare_norm_pair_f32", threads)
+                    && supports("kernel_deepseek_v4_rope_pair_in_place", 256)
+            }),
+        }
+    }
+
+    fn supports(self, q_dtype: GgmlType) -> bool {
+        self.norm_and_rope
+            && match q_dtype {
+                GgmlType::Q6_K => self.q6_projection,
+                GgmlType::Q8_0 => self.q8_projection,
+                _ => false,
+            }
+    }
+}
+
 impl DeepSeekV4PositionZeroAttentionScratch {
     pub fn new(
         ctx: &MetalContext,
@@ -6276,6 +6325,16 @@ impl DeepSeekV4PositionZeroAttentionScratch {
     ) -> Result<Self, DeepSeekV4MetalError> {
         let dims = config.checked()?;
         let ones = vec![1.0f32; config.head_dim];
+        #[cfg(test)]
+        let probe_paired_prepare = true;
+        #[cfg(not(test))]
+        let probe_paired_prepare = deepseek_v4_decode_prepare_paired_enabled()
+            && crate::metal::mat_vec_q8_0_lcpp_enabled();
+        let paired_prepare_capabilities = if probe_paired_prepare {
+            DeepSeekV4PairedPrepareCapabilities::probe(ctx)
+        } else {
+            DeepSeekV4PairedPrepareCapabilities::default()
+        };
         Ok(Self {
             config,
             normalized_input: MetalTensor::zeros_f32(ctx, vec![config.hidden_size as u64])?,
@@ -6317,8 +6376,11 @@ impl DeepSeekV4PositionZeroAttentionScratch {
                 vec![config.head_dim as u64],
                 GgmlType::F32,
             )?,
+            paired_prepare_capabilities,
             #[cfg(test)]
             hca_test_policy: DeepSeekV4HcaTestPolicy::Production,
+            #[cfg(test)]
+            prepare_test_policy: DeepSeekV4PrepareTestPolicy::Production,
         })
     }
 
@@ -6369,6 +6431,32 @@ impl DeepSeekV4PositionZeroAttentionScratch {
     #[cfg(all(test, feature = "dsv4-diagnostics"))]
     fn set_hca_test_policy(&mut self, policy: DeepSeekV4HcaTestPolicy) {
         self.hca_test_policy = policy;
+    }
+
+    #[cfg(test)]
+    fn set_prepare_test_policy(&mut self, policy: DeepSeekV4PrepareTestPolicy) {
+        self.prepare_test_policy = policy;
+    }
+
+    fn use_paired_prepare(&self, q_a: &MetalTensor, kv_weight: &MetalTensor) -> bool {
+        #[cfg(test)]
+        if self.prepare_test_policy == DeepSeekV4PrepareTestPolicy::Composed {
+            return false;
+        }
+        #[cfg(not(test))]
+        if !deepseek_v4_decode_prepare_paired_enabled() {
+            return false;
+        }
+        #[cfg(test)]
+        if self.prepare_test_policy == DeepSeekV4PrepareTestPolicy::Production
+            && !deepseek_v4_decode_prepare_paired_enabled()
+        {
+            return false;
+        }
+        kv_weight.dtype == GgmlType::Q8_0
+            && matches!(q_a.dtype, GgmlType::Q6_K | GgmlType::Q8_0)
+            && crate::metal::mat_vec_q8_0_lcpp_enabled()
+            && self.paired_prepare_capabilities.supports(q_a.dtype)
     }
 
     fn use_online_hca(&self) -> bool {
@@ -6593,17 +6681,50 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             &self.normalized_input,
             rms_eps,
         )?;
-        encode_projection(
-            ctx,
-            enc,
-            q_a,
-            &self.normalized_input,
-            &self.q_lora_raw,
-            c.hidden_size,
-            c.q_lora_rank,
-            "Q A",
-        )?;
-        encode_rms_norm_mul_f32(ctx, enc, &self.q_lora_raw, q_a_norm, &self.q_lora, rms_eps)?;
+        let paired = self.use_paired_prepare(q_a, kv_weight);
+        if paired {
+            static REPORTED: std::sync::Once = std::sync::Once::new();
+            REPORTED.call_once(|| {
+                eprintln!(
+                    "deepseek_v4: decode Q/KV projections, norms, and RoPE run as paired dispatches; rollback=QWEN_DSV4_DECODE_PREPARE_PAIRED=0"
+                );
+            });
+            encode_ds4_prepare_projection_pair(
+                ctx,
+                enc,
+                q_a,
+                kv_weight,
+                &self.normalized_input,
+                &self.q_lora_raw,
+                &self.kv_raw,
+                c.hidden_size,
+                c.q_lora_rank,
+                c.head_dim,
+            )?;
+            encode_ds4_prepare_norm_pair(
+                ctx,
+                enc,
+                &self.q_lora_raw,
+                q_a_norm,
+                &self.q_lora,
+                &self.kv_raw,
+                kv_norm,
+                &self.kv,
+                rms_eps,
+            )?;
+        } else {
+            encode_projection(
+                ctx,
+                enc,
+                q_a,
+                &self.normalized_input,
+                &self.q_lora_raw,
+                c.hidden_size,
+                c.q_lora_rank,
+                "Q A",
+            )?;
+            encode_rms_norm_mul_f32(ctx, enc, &self.q_lora_raw, q_a_norm, &self.q_lora, rms_eps)?;
+        }
         encode_projection(
             ctx,
             enc,
@@ -6624,20 +6745,23 @@ impl DeepSeekV4PositionZeroAttentionScratch {
             c.head_dim,
             rms_eps,
         )?;
-        encode_projection(
-            ctx,
-            enc,
-            kv_weight,
-            &self.normalized_input,
-            &self.kv_raw,
-            c.hidden_size,
-            c.head_dim,
-            "KV",
-        )?;
-        encode_rms_norm_mul_f32(ctx, enc, &self.kv_raw, kv_norm, &self.kv, rms_eps)?;
-
-        encode_ds4_rope_tail_adjacent_in_place(ctx, enc, &self.queries, position, rope, false)?;
-        encode_ds4_rope_tail_adjacent_in_place(ctx, enc, &self.kv, position, rope, false)?;
+        if paired {
+            encode_ds4_rope_pair_in_place(ctx, enc, &self.queries, &self.kv, position, rope)?;
+        } else {
+            encode_projection(
+                ctx,
+                enc,
+                kv_weight,
+                &self.normalized_input,
+                &self.kv_raw,
+                c.hidden_size,
+                c.head_dim,
+                "KV",
+            )?;
+            encode_rms_norm_mul_f32(ctx, enc, &self.kv_raw, kv_norm, &self.kv, rms_eps)?;
+            encode_ds4_rope_tail_adjacent_in_place(ctx, enc, &self.queries, position, rope, false)?;
+            encode_ds4_rope_tail_adjacent_in_place(ctx, enc, &self.kv, position, rope, false)?;
+        }
         let cache_slot = position as usize % DEEPSEEK_V4_LOCAL_WINDOW;
         encode_scatter_offset_f32_to_f16(
             ctx,
@@ -9849,6 +9973,190 @@ fn encode_projection(
         })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn encode_ds4_prepare_projection_pair(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_weight: &MetalTensor,
+    kv_weight: &MetalTensor,
+    input: &MetalTensor,
+    q_output: &MetalTensor,
+    kv_output: &MetalTensor,
+    n_in: usize,
+    q_out: usize,
+    kv_out: usize,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, "paired prepare projection")?;
+    validate_matvec_weight(q_weight, n_in, q_out, "paired Q A weight")?;
+    validate_matvec_weight(kv_weight, n_in, kv_out, "paired KV weight")?;
+    validate_f32(input, &[n_in as u64], false, "paired projection input")?;
+    validate_f32(q_output, &[q_out as u64], true, "paired Q A output")?;
+    validate_f32(kv_output, &[kv_out as u64], true, "paired KV output")?;
+    if n_in == 0
+        || q_out == 0
+        || kv_out == 0
+        || kv_weight.dtype != GgmlType::Q8_0
+        || !matches!(q_weight.dtype, GgmlType::Q6_K | GgmlType::Q8_0)
+        || metal_tensor_ranges_overlap(q_output, kv_output)
+        || [q_output, kv_output].iter().any(|output| {
+            metal_tensor_ranges_overlap(output, q_weight)
+                || metal_tensor_ranges_overlap(output, kv_weight)
+                || metal_tensor_ranges_overlap(output, input)
+        })
+        || u32::try_from(n_in).is_err()
+        || u32::try_from(q_out).is_err()
+        || u32::try_from(kv_out).is_err()
+    {
+        return invalid(format!(
+            "paired prepare projection requires Q6_K/Q8_0 Q A and Q8_0 KV weights over nonzero, distinct F32 outputs; got {:?}/{:?} {n_in} -> {q_out}/{kv_out}",
+            q_weight.dtype, kv_weight.dtype,
+        ));
+    }
+    let (kernel, q_rows_per_group) = match q_weight.dtype {
+        GgmlType::Q6_K => ("kernel_ds4_prepare_projection_pair_q6_q8_f32", 4usize),
+        GgmlType::Q8_0 => ("kernel_ds4_prepare_projection_pair_q8_q8_f32", 2usize),
+        _ => unreachable!("paired Q A dtype was qualified"),
+    };
+    let pso = ctx.pipeline(kernel)?;
+    if pso.maxTotalThreadsPerThreadgroup() < 128 {
+        return invalid(format!(
+            "paired prepare projection pipeline supports {} threads, requires 128",
+            pso.maxTotalThreadsPerThreadgroup()
+        ));
+    }
+    enc.note_read(q_weight);
+    enc.note_read(kv_weight);
+    enc.note_read(input);
+    enc.note_write(q_output);
+    enc.note_write(kv_output);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        q_out: u32,
+        kv_out: u32,
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in: n_in as u32,
+            q_out: q_out as u32,
+            kv_out: kv_out as u32,
+        },
+    );
+    enc.set_tensor(1, q_weight);
+    enc.set_tensor(2, kv_weight);
+    enc.set_tensor(3, input);
+    enc.set_tensor(4, q_output);
+    enc.set_tensor(5, kv_output);
+    enc.set_threadgroup_memory(0, 32 * 2 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: q_out.div_ceil(q_rows_per_group).max(kv_out.div_ceil(2)),
+            height: 1,
+            depth: 2,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_ds4_prepare_norm_pair(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_input: &MetalTensor,
+    q_weight: &MetalTensor,
+    q_output: &MetalTensor,
+    kv_input: &MetalTensor,
+    kv_weight: &MetalTensor,
+    kv_output: &MetalTensor,
+    eps: f32,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, "paired prepare RMSNorm")?;
+    let q_dim = usize::try_from(q_input.n_elements())
+        .map_err(|_| DeepSeekV4MetalError::Invalid("paired Q norm width exceeds usize".into()))?;
+    let kv_dim = usize::try_from(kv_input.n_elements())
+        .map_err(|_| DeepSeekV4MetalError::Invalid("paired KV norm width exceeds usize".into()))?;
+    validate_eps(eps, "paired prepare RMSNorm epsilon")?;
+    validate_f32(q_input, &[q_dim as u64], false, "paired Q norm input")?;
+    validate_f32(q_weight, &[q_dim as u64], false, "paired Q norm weight")?;
+    validate_f32(q_output, &[q_dim as u64], true, "paired Q norm output")?;
+    validate_f32(kv_input, &[kv_dim as u64], false, "paired KV norm input")?;
+    validate_f32(kv_weight, &[kv_dim as u64], false, "paired KV norm weight")?;
+    validate_f32(kv_output, &[kv_dim as u64], true, "paired KV norm output")?;
+    if q_dim == 0
+        || kv_dim == 0
+        || metal_tensor_ranges_overlap(q_output, kv_output)
+        || [q_output, kv_output].iter().any(|output| {
+            [q_input, q_weight, kv_input, kv_weight]
+                .iter()
+                .any(|input| metal_tensor_ranges_overlap(output, input))
+        })
+        || u32::try_from(q_dim).is_err()
+        || u32::try_from(kv_dim).is_err()
+    {
+        return invalid("paired prepare RMSNorm requires nonzero, distinct F32 input/output rows");
+    }
+    let reference = ctx.pipeline("kernel_rms_norm_mul_f32")?;
+    let pso = ctx.pipeline("kernel_ds4_prepare_norm_pair_f32")?;
+    let tg_threads = reference.maxTotalThreadsPerThreadgroup().min(1024);
+    if tg_threads == 0 || pso.maxTotalThreadsPerThreadgroup() < tg_threads {
+        return invalid(format!(
+            "paired prepare RMSNorm pipeline supports {} threads, exact reference requires {tg_threads}",
+            pso.maxTotalThreadsPerThreadgroup()
+        ));
+    }
+    enc.note_read(q_input);
+    enc.note_read(q_weight);
+    enc.note_read(kv_input);
+    enc.note_read(kv_weight);
+    enc.note_write(q_output);
+    enc.note_write(kv_output);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        q_dim: u32,
+        kv_dim: u32,
+        eps: f32,
+    }
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            q_dim: q_dim as u32,
+            kv_dim: kv_dim as u32,
+            eps,
+        },
+    );
+    enc.set_tensor(1, q_input);
+    enc.set_tensor(2, q_weight);
+    enc.set_tensor(3, q_output);
+    enc.set_tensor(4, kv_input);
+    enc.set_tensor(5, kv_weight);
+    enc.set_tensor(6, kv_output);
+    let simdgroups = tg_threads.div_ceil(32);
+    enc.set_threadgroup_memory(0, (simdgroups * std::mem::size_of::<f32>()).max(32));
+    enc.dispatch(
+        MTLSize {
+            width: 2,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 fn encode_attention_cache_roundtrip(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -10023,6 +10331,113 @@ fn encode_ds4_rope_tail_adjacent_in_place(
     );
     enc.set_tensor(1, tensor);
     let pair_count = checked_mul(head_count, rope.rotary_dim / 2, "DS4 RoPE pair count")?;
+    enc.dispatch(
+        MTLSize {
+            width: pair_count.div_ceil(256),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+fn encode_ds4_rope_pair_in_place(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    kv: &MetalTensor,
+    position: u32,
+    rope: DeepSeekV4RopeParameters,
+) -> Result<(), DeepSeekV4MetalError> {
+    require_serial(enc, "paired prepare RoPE")?;
+    validate_ds4_rope(
+        rope,
+        q.shape.first().copied().unwrap_or(0) as usize,
+        rope.rotary_dim,
+    )?;
+    validate_f32(q, &q.shape, true, "paired Q RoPE tensor")?;
+    validate_f32(kv, &kv.shape, true, "paired KV RoPE tensor")?;
+    let head_dim = usize::try_from(*q.shape.first().ok_or_else(|| {
+        DeepSeekV4MetalError::Invalid("paired Q RoPE tensor has no head dimension".into())
+    })?)
+    .map_err(|_| {
+        DeepSeekV4MetalError::Invalid("paired RoPE head dimension exceeds usize".into())
+    })?;
+    if head_dim == 0
+        || kv.shape.first().copied() != Some(head_dim as u64)
+        || !q.n_elements().is_multiple_of(head_dim as u64)
+        || !kv.n_elements().is_multiple_of(head_dim as u64)
+        || metal_tensor_ranges_overlap(q, kv)
+    {
+        return invalid(
+            "paired RoPE requires distinct complete Q/KV head sets with one head width",
+        );
+    }
+    if position == 0 {
+        return Ok(());
+    }
+    let q_head_count = usize::try_from(q.n_elements() / head_dim as u64)
+        .map_err(|_| DeepSeekV4MetalError::Invalid("paired Q head count exceeds usize".into()))?;
+    let kv_head_count = usize::try_from(kv.n_elements() / head_dim as u64)
+        .map_err(|_| DeepSeekV4MetalError::Invalid("paired KV head count exceeds usize".into()))?;
+    u32::try_from(q.n_elements())
+        .map_err(|_| DeepSeekV4MetalError::Invalid("paired Q elements exceed u32".into()))?;
+    u32::try_from(kv.n_elements())
+        .map_err(|_| DeepSeekV4MetalError::Invalid("paired KV elements exceed u32".into()))?;
+    let pairs_per_head = rope.rotary_dim / 2;
+    let q_pair_count = checked_mul(q_head_count, pairs_per_head, "paired Q RoPE pair count")?;
+    let kv_pair_count = checked_mul(kv_head_count, pairs_per_head, "paired KV RoPE pair count")?;
+    let pair_count = q_pair_count
+        .checked_add(kv_pair_count)
+        .ok_or_else(|| DeepSeekV4MetalError::Invalid("paired RoPE pair count overflow".into()))?;
+    let (correction_low, correction_high) = ds4_rope_correction_bounds(rope);
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        q_pair_count: u32,
+        pair_count: u32,
+        head_dim: u32,
+        rotary_dim: u32,
+        position: u32,
+        inverse: u32,
+        yarn: u32,
+        theta: f32,
+        frequency_scale: f32,
+        correction_low: f32,
+        correction_high: f32,
+    }
+    let pso = ctx.pipeline("kernel_deepseek_v4_rope_pair_in_place")?;
+    enc.note_write(q);
+    enc.note_write(kv);
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            q_pair_count: u32::try_from(q_pair_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("paired Q RoPE pairs exceed u32".into())
+            })?,
+            pair_count: u32::try_from(pair_count).map_err(|_| {
+                DeepSeekV4MetalError::Invalid("paired RoPE pairs exceed u32".into())
+            })?,
+            head_dim: u32::try_from(head_dim)
+                .map_err(|_| DeepSeekV4MetalError::Invalid("paired head dim exceeds u32".into()))?,
+            rotary_dim: rope.rotary_dim as u32,
+            position,
+            inverse: 0,
+            yarn: u32::from(rope.scaling_factor > 1.0),
+            theta: rope.theta,
+            frequency_scale: 1.0 / rope.scaling_factor,
+            correction_low,
+            correction_high,
+        },
+    );
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, kv);
     enc.dispatch(
         MTLSize {
             width: pair_count.div_ceil(256),
@@ -10815,6 +11230,11 @@ crate::env_flag!(
 crate::env_flag!(
     default_on deepseek_v4_decode_compressor_fused_enabled,
     "QWEN_DSV4_DECODE_COMPRESSOR_FUSED"
+);
+
+crate::env_flag!(
+    default_on deepseek_v4_decode_prepare_paired_enabled,
+    "QWEN_DSV4_DECODE_PREPARE_PAIRED"
 );
 
 crate::env_flag!(
@@ -14097,6 +14517,19 @@ fn validate_f32(
     Ok(())
 }
 
+fn metal_tensor_ranges_overlap(left: &MetalTensor, right: &MetalTensor) -> bool {
+    if Retained::as_ptr(&left.buffer) != Retained::as_ptr(&right.buffer) {
+        return false;
+    }
+    let Some(left_end) = left.offset.checked_add(left.n_bytes()) else {
+        return true;
+    };
+    let Some(right_end) = right.offset.checked_add(right.n_bytes()) else {
+        return true;
+    };
+    left.offset < right_end && right.offset < left_end
+}
+
 fn validate_f16(
     tensor: &MetalTensor,
     shape: &[u64],
@@ -15606,6 +16039,623 @@ mod tests {
         }
     }
 
+    fn offset_weight(
+        ctx: &MetalContext,
+        bytes: &[u8],
+        shape: Vec<u64>,
+        dtype: GgmlType,
+    ) -> MetalTensor {
+        let prefix = 16usize;
+        let mut backing = vec![0xA5u8; prefix];
+        backing.extend_from_slice(bytes);
+        backing.extend_from_slice(&[0x5Au8; 32]);
+        MetalTensor {
+            buffer: ctx.buffer_from(&backing).expect("offset weight buffer"),
+            offset: prefix as u64,
+            shape,
+            dtype,
+            provenance: MetalTensorProvenance::OwnedWritable,
+        }
+    }
+
+    fn q8_test_weight_bytes(n_in: usize, n_out: usize, salt: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(n_out * (n_in / 32) * 34);
+        for row in 0..n_out {
+            for block in 0..n_in / 32 {
+                let scale = half::f16::from_f32(
+                    0.0013 + ((row * 13 + block * 7 + salt) % 31) as f32 * 0.00019,
+                );
+                bytes.extend_from_slice(&scale.to_bits().to_le_bytes());
+                for index in 0..32 {
+                    bytes.push(((row * 29 + block * 17 + index * 23 + salt * 11) % 255) as u8);
+                }
+            }
+        }
+        bytes
+    }
+
+    fn prepare_test_weight(
+        ctx: &MetalContext,
+        n_in: usize,
+        n_out: usize,
+        dtype: GgmlType,
+        salt: usize,
+    ) -> MetalTensor {
+        let bytes = match dtype {
+            GgmlType::Q8_0 => q8_test_weight_bytes(n_in, n_out, salt),
+            GgmlType::Q6_K => {
+                let mut bytes = Vec::with_capacity(n_out * (n_in / 256) * 210);
+                for row in 0..n_out {
+                    for block in 0..n_in / 256 {
+                        bytes.extend_from_slice(&encode_q6_k_test_block(
+                            0.0017 + ((row * 5 + block * 3 + salt) % 17) as f32 * 0.00023,
+                            row * 37 + block * 19 + salt,
+                        ));
+                    }
+                }
+                bytes
+            }
+            _ => panic!("unsupported prepare test weight dtype {dtype:?}"),
+        };
+        offset_weight(ctx, &bytes, vec![n_in as u64, n_out as u64], dtype)
+    }
+
+    fn assert_f32_tensor_bits_eq(label: &str, left: &MetalTensor, right: &MetalTensor) {
+        let left = read_f32(left);
+        let right = read_f32(right);
+        assert_eq!(left.len(), right.len(), "{label} length");
+        if let Some((index, (&left, &right))) = left
+            .iter()
+            .zip(&right)
+            .enumerate()
+            .find(|(_, (left, right))| left.to_bits() != right.to_bits())
+        {
+            panic!(
+                "{label} mismatch at {index}: left={left:?} ({:08x}) right={right:?} ({:08x})",
+                left.to_bits(),
+                right.to_bits(),
+            );
+        }
+    }
+
+    #[test]
+    fn decode_prepare_projection_pairs_match_composed_bitwise() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        if !crate::metal::mat_vec_q8_0_lcpp_enabled() {
+            return;
+        }
+
+        for q_dtype in [GgmlType::Q8_0, GgmlType::Q6_K] {
+            for (n_in, q_out, kv_out) in [(512usize, 67usize, 129usize), (4_096, 1_024, 512)] {
+                let q_weight = prepare_test_weight(&ctx, n_in, q_out, q_dtype, 5);
+                let kv_weight = prepare_test_weight(&ctx, n_in, kv_out, GgmlType::Q8_0, 23);
+                let input_values = (0..n_in)
+                    .map(|index| ((index * 43 + index / 7 + 11) % 503) as f32 * 0.0091 - 2.27)
+                    .collect::<Vec<_>>();
+                let input = offset_f32(&ctx, &input_values, vec![n_in as u64]);
+                let composed_q = offset_f32(&ctx, &vec![0.0; q_out], vec![q_out as u64]);
+                let composed_kv = offset_f32(&ctx, &vec![0.0; kv_out], vec![kv_out as u64]);
+                let paired_q = offset_f32(&ctx, &vec![f32::NAN; q_out], vec![q_out as u64]);
+                let paired_kv =
+                    offset_f32(&ctx, &vec![f32::NEG_INFINITY; kv_out], vec![kv_out as u64]);
+
+                let _trace = crate::metal::kernel_trace_begin();
+                let command = ctx
+                    .queue
+                    .commandBuffer()
+                    .expect("prepare projection command");
+                let encoder = KernelEncoder::begin(&command);
+                encode_projection(
+                    &ctx,
+                    &encoder,
+                    &q_weight,
+                    &input,
+                    &composed_q,
+                    n_in,
+                    q_out,
+                    "composed Q A differential",
+                )
+                .unwrap();
+                encode_projection(
+                    &ctx,
+                    &encoder,
+                    &kv_weight,
+                    &input,
+                    &composed_kv,
+                    n_in,
+                    kv_out,
+                    "composed KV differential",
+                )
+                .unwrap();
+                let composed_trace = crate::metal::kernel_trace_take_delta();
+                encode_ds4_prepare_projection_pair(
+                    &ctx, &encoder, &q_weight, &kv_weight, &input, &paired_q, &paired_kv, n_in,
+                    q_out, kv_out,
+                )
+                .unwrap();
+                let paired_trace = crate::metal::kernel_trace_take_delta();
+                encoder.end();
+                command.commit();
+                command.waitUntilCompleted();
+                assert!(
+                    command.error().is_none(),
+                    "paired prepare projection command failed: {:?}",
+                    command.error()
+                );
+
+                assert_eq!(composed_trace.dispatches, 2);
+                assert_eq!(paired_trace.dispatches, 1);
+                assert_f32_tensor_bits_eq(
+                    &format!("{q_dtype:?} Q A {n_in}x{q_out}"),
+                    &composed_q,
+                    &paired_q,
+                );
+                assert_f32_tensor_bits_eq(
+                    &format!("Q8 KV {n_in}x{kv_out}"),
+                    &composed_kv,
+                    &paired_kv,
+                );
+                assert!(read_f32(&paired_q).iter().any(|&value| value != 0.0));
+                assert!(read_f32(&paired_kv).iter().any(|&value| value != 0.0));
+            }
+        }
+
+        const N_IN: usize = 512;
+        const N_OUT: usize = 8;
+        let q_weight = prepare_test_weight(&ctx, N_IN, N_OUT, GgmlType::Q8_0, 7);
+        let kv_weight = prepare_test_weight(&ctx, N_IN, N_OUT, GgmlType::Q8_0, 13);
+        let input = offset_f32(&ctx, &[0.25; N_IN], vec![N_IN as u64]);
+        let outputs = offset_f32(&ctx, &[0.0; N_OUT * 2], vec![(N_OUT * 2) as u64]);
+        let q_output = outputs.view_subrange(0, vec![N_OUT as u64]);
+        let overlapping_kv = outputs.view_subrange(4, vec![N_OUT as u64]);
+        let adjacent_kv = outputs.view_subrange(N_OUT as u64, vec![N_OUT as u64]);
+        let _trace = crate::metal::kernel_trace_begin();
+        let command = ctx.queue.commandBuffer().expect("prepare overlap command");
+        let encoder = KernelEncoder::begin(&command);
+        let error = encode_ds4_prepare_projection_pair(
+            &ctx,
+            &encoder,
+            &q_weight,
+            &kv_weight,
+            &input,
+            &q_output,
+            &overlapping_kv,
+            N_IN,
+            N_OUT,
+            N_OUT,
+        )
+        .expect_err("partially overlapping projection outputs must fail closed");
+        assert!(format!("{error}").contains("distinct F32 outputs"));
+        assert_eq!(crate::metal::kernel_trace_take_delta().dispatches, 0);
+        encode_ds4_prepare_projection_pair(
+            &ctx,
+            &encoder,
+            &q_weight,
+            &kv_weight,
+            &input,
+            &q_output,
+            &adjacent_kv,
+            N_IN,
+            N_OUT,
+            N_OUT,
+        )
+        .expect("adjacent projection outputs do not overlap");
+        assert_eq!(crate::metal::kernel_trace_take_delta().dispatches, 1);
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(command.error().is_none());
+    }
+
+    #[test]
+    fn decode_prepare_pair_routing_falls_back_for_ineligible_weights() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        let config = DeepSeekV4PositionZeroAttentionConfig {
+            hidden_size: 512,
+            q_lora_rank: 256,
+            head_count: 2,
+            head_dim: 128,
+            rotary_dim: 64,
+            group_count: 1,
+            output_rank: 1,
+        };
+        let mut scratch = DeepSeekV4PositionZeroAttentionScratch::new(&ctx, config).unwrap();
+        scratch.set_prepare_test_policy(DeepSeekV4PrepareTestPolicy::Paired);
+        let q8_q = prepare_test_weight(&ctx, 512, 256, GgmlType::Q8_0, 3);
+        let q6_q = prepare_test_weight(&ctx, 512, 256, GgmlType::Q6_K, 5);
+        let q8_kv = prepare_test_weight(&ctx, 512, 128, GgmlType::Q8_0, 7);
+        let f32_q = offset_f32(&ctx, &[0.0; 512 * 256], vec![512, 256]);
+        let f32_kv = offset_f32(&ctx, &[0.0; 512 * 128], vec![512, 128]);
+
+        let eligible_capabilities = scratch.paired_prepare_capabilities;
+        assert_eq!(
+            scratch.use_paired_prepare(&q8_q, &q8_kv),
+            eligible_capabilities.supports(GgmlType::Q8_0)
+                && crate::metal::mat_vec_q8_0_lcpp_enabled()
+        );
+        assert_eq!(
+            scratch.use_paired_prepare(&q6_q, &q8_kv),
+            eligible_capabilities.supports(GgmlType::Q6_K)
+                && crate::metal::mat_vec_q8_0_lcpp_enabled()
+        );
+        assert!(!scratch.use_paired_prepare(&f32_q, &q8_kv));
+        assert!(!scratch.use_paired_prepare(&q8_q, &f32_kv));
+
+        scratch.paired_prepare_capabilities = DeepSeekV4PairedPrepareCapabilities::default();
+        assert!(!scratch.use_paired_prepare(&q8_q, &q8_kv));
+        assert!(!scratch.use_paired_prepare(&q6_q, &q8_kv));
+    }
+
+    #[test]
+    fn decode_prepare_norm_pair_matches_composed_bitwise() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const EPS: f32 = 1.0e-6;
+
+        for (q_dim, kv_dim) in [(67usize, 129usize), (1_024, 512)] {
+            let values = |n: usize, salt: usize| {
+                (0..n)
+                    .map(|index| match index % 17 {
+                        0 => 0.0,
+                        1 => -0.0,
+                        2 => f32::from_bits(1),
+                        3 => -f32::from_bits(1),
+                        _ => ((index * 31 + salt) % 257) as f32 * 0.017 - 2.11,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let weights = |n: usize, salt: usize| {
+                (0..n)
+                    .map(|index| 0.37 + ((index * 19 + salt) % 113) as f32 * 0.011)
+                    .collect::<Vec<_>>()
+            };
+            let q_input = offset_f32(&ctx, &values(q_dim, 3), vec![q_dim as u64]);
+            let q_weight = offset_f32(&ctx, &weights(q_dim, 5), vec![q_dim as u64]);
+            let kv_input = offset_f32(&ctx, &values(kv_dim, 17), vec![kv_dim as u64]);
+            let kv_weight = offset_f32(&ctx, &weights(kv_dim, 29), vec![kv_dim as u64]);
+            let composed_q = offset_f32(&ctx, &vec![0.0; q_dim], vec![q_dim as u64]);
+            let composed_kv = offset_f32(&ctx, &vec![0.0; kv_dim], vec![kv_dim as u64]);
+            let paired_q = offset_f32(&ctx, &vec![f32::NAN; q_dim], vec![q_dim as u64]);
+            let paired_kv = offset_f32(&ctx, &vec![f32::NAN; kv_dim], vec![kv_dim as u64]);
+
+            let _trace = crate::metal::kernel_trace_begin();
+            let command = ctx.queue.commandBuffer().expect("prepare norm command");
+            let encoder = KernelEncoder::begin(&command);
+            encode_rms_norm_mul_f32(&ctx, &encoder, &q_input, &q_weight, &composed_q, EPS).unwrap();
+            encode_rms_norm_mul_f32(&ctx, &encoder, &kv_input, &kv_weight, &composed_kv, EPS)
+                .unwrap();
+            let composed_trace = crate::metal::kernel_trace_take_delta();
+            encode_ds4_prepare_norm_pair(
+                &ctx, &encoder, &q_input, &q_weight, &paired_q, &kv_input, &kv_weight, &paired_kv,
+                EPS,
+            )
+            .unwrap();
+            let paired_trace = crate::metal::kernel_trace_take_delta();
+            encoder.end();
+            command.commit();
+            command.waitUntilCompleted();
+            assert!(
+                command.error().is_none(),
+                "paired prepare norm command failed: {:?}",
+                command.error()
+            );
+
+            assert_eq!(composed_trace.dispatches, 2);
+            assert_eq!(paired_trace.dispatches, 1);
+            assert_f32_tensor_bits_eq("paired Q RMSNorm", &composed_q, &paired_q);
+            assert_f32_tensor_bits_eq("paired KV RMSNorm", &composed_kv, &paired_kv);
+        }
+
+        let q_input = offset_f32(&ctx, &[0.25; 8], vec![8]);
+        let q_weight = offset_f32(&ctx, &[1.0; 8], vec![8]);
+        let kv_input = offset_f32(&ctx, &[0.5; 8], vec![8]);
+        let kv_weight = offset_f32(&ctx, &[0.75; 8], vec![8]);
+        let outputs = offset_f32(&ctx, &[0.0; 16], vec![16]);
+        let q_output = outputs.view_subrange(0, vec![8]);
+        let kv_output = outputs.view_subrange(4, vec![8]);
+        let command = ctx
+            .queue
+            .commandBuffer()
+            .expect("prepare norm overlap command");
+        let encoder = KernelEncoder::begin(&command);
+        let error = encode_ds4_prepare_norm_pair(
+            &ctx, &encoder, &q_input, &q_weight, &q_output, &kv_input, &kv_weight, &kv_output, EPS,
+        )
+        .expect_err("partially overlapping norm outputs must fail closed");
+        assert!(format!("{error}").contains("distinct F32 input/output rows"));
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+    }
+
+    #[test]
+    fn decode_prepare_rope_pair_matches_composed_bitwise() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        const HEAD_DIM: usize = 128;
+        const Q_HEADS: usize = 3;
+        let q_values = (0..HEAD_DIM * Q_HEADS)
+            .map(|index| ((index * 37 + 11) % 401) as f32 * 0.0061 - 1.23)
+            .collect::<Vec<_>>();
+        let kv_values = (0..HEAD_DIM)
+            .map(|index| ((index * 29 + 7) % 197) as f32 * 0.0093 - 0.91)
+            .collect::<Vec<_>>();
+        let ropes = [
+            DeepSeekV4RopeParameters {
+                rotary_dim: 64,
+                theta: 10_000.0,
+                scaling_factor: 1.0,
+                original_context_length: 0,
+                beta_fast: 0.0,
+                beta_slow: 0.0,
+            },
+            DeepSeekV4RopeParameters {
+                rotary_dim: 64,
+                theta: 160_000.0,
+                scaling_factor: 16.0,
+                original_context_length: 65_536,
+                beta_fast: 32.0,
+                beta_slow: 1.0,
+            },
+        ];
+        let positions = [
+            0u32, 1, 127, 128, 129, 2_051, 2_052, 3_071, 65_535, 65_536, 1_048_575,
+        ];
+        let mut cases = Vec::new();
+        let _trace = crate::metal::kernel_trace_begin();
+        let command = ctx.queue.commandBuffer().expect("prepare RoPE command");
+        let encoder = KernelEncoder::begin(&command);
+        for (rope_index, rope) in ropes.into_iter().enumerate() {
+            for position in positions {
+                let composed_q = offset_f32(&ctx, &q_values, vec![HEAD_DIM as u64, Q_HEADS as u64]);
+                let composed_kv = offset_f32(&ctx, &kv_values, vec![HEAD_DIM as u64]);
+                let paired_q = offset_f32(&ctx, &q_values, vec![HEAD_DIM as u64, Q_HEADS as u64]);
+                let paired_kv = offset_f32(&ctx, &kv_values, vec![HEAD_DIM as u64]);
+                encode_ds4_rope_tail_adjacent_in_place(
+                    &ctx,
+                    &encoder,
+                    &composed_q,
+                    position,
+                    rope,
+                    false,
+                )
+                .unwrap();
+                encode_ds4_rope_tail_adjacent_in_place(
+                    &ctx,
+                    &encoder,
+                    &composed_kv,
+                    position,
+                    rope,
+                    false,
+                )
+                .unwrap();
+                let composed_trace = crate::metal::kernel_trace_take_delta();
+                encode_ds4_rope_pair_in_place(
+                    &ctx, &encoder, &paired_q, &paired_kv, position, rope,
+                )
+                .unwrap();
+                let paired_trace = crate::metal::kernel_trace_take_delta();
+                assert_eq!(composed_trace.dispatches, u64::from(position != 0) * 2);
+                assert_eq!(paired_trace.dispatches, u64::from(position != 0));
+                cases.push((
+                    rope_index,
+                    position,
+                    composed_q,
+                    composed_kv,
+                    paired_q,
+                    paired_kv,
+                ));
+            }
+        }
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+        assert!(
+            command.error().is_none(),
+            "paired prepare RoPE command failed: {:?}",
+            command.error()
+        );
+
+        for (rope_index, position, composed_q, composed_kv, paired_q, paired_kv) in cases {
+            assert_f32_tensor_bits_eq(
+                &format!("paired Q RoPE rope={rope_index} position={position}"),
+                &composed_q,
+                &paired_q,
+            );
+            assert_f32_tensor_bits_eq(
+                &format!("paired KV RoPE rope={rope_index} position={position}"),
+                &composed_kv,
+                &paired_kv,
+            );
+            if position != 0 {
+                assert!(
+                    read_f32(&paired_q)
+                        .iter()
+                        .zip(&q_values)
+                        .any(|(&actual, &initial)| actual.to_bits() != initial.to_bits()),
+                    "nonzero RoPE case must rotate values"
+                );
+            }
+        }
+
+        let overlapping = offset_f32(&ctx, &[0.0; HEAD_DIM * 2], vec![(HEAD_DIM * 2) as u64]);
+        let q = overlapping.view_subrange(0, vec![HEAD_DIM as u64]);
+        let kv = overlapping.view_subrange(64, vec![HEAD_DIM as u64]);
+        let command = ctx
+            .queue
+            .commandBuffer()
+            .expect("prepare RoPE overlap command");
+        let encoder = KernelEncoder::begin(&command);
+        let error = encode_ds4_rope_pair_in_place(&ctx, &encoder, &q, &kv, 1, ropes[0])
+            .expect_err("partially overlapping RoPE tensors must fail closed");
+        assert!(format!("{error}").contains("distinct complete Q/KV head sets"));
+        encoder.end();
+        command.commit();
+        command.waitUntilCompleted();
+    }
+
+    #[test]
+    fn decode_prepare_paired_matches_composed_path_bitwise() {
+        let Some(ctx) = metal_context() else {
+            return;
+        };
+        if !crate::metal::mat_vec_q8_0_lcpp_enabled() {
+            return;
+        }
+        let config = deepseek_v4_session_attention_config();
+        let c = config;
+        let query_width = c.head_count * c.head_dim;
+        let input_values = (0..c.hidden_size)
+            .map(|index| ((index * 41 + 13) % 401) as f32 * 0.0087 - 1.73)
+            .collect::<Vec<_>>();
+        let attention_norm_values = (0..c.hidden_size)
+            .map(|index| 0.43 + ((index * 17 + 3) % 127) as f32 * 0.0091)
+            .collect::<Vec<_>>();
+        let q_a_norm_values = (0..c.q_lora_rank)
+            .map(|index| 0.51 + ((index * 23 + 7) % 113) as f32 * 0.0083)
+            .collect::<Vec<_>>();
+        let kv_norm_values = (0..c.head_dim)
+            .map(|index| 0.61 + ((index * 29 + 11) % 97) as f32 * 0.0077)
+            .collect::<Vec<_>>();
+        let input = offset_f32(&ctx, &input_values, vec![c.hidden_size as u64]);
+        let attention_norm = offset_f32(&ctx, &attention_norm_values, vec![c.hidden_size as u64]);
+        let q_a_norm = offset_f32(&ctx, &q_a_norm_values, vec![c.q_lora_rank as u64]);
+        let kv_norm = offset_f32(&ctx, &kv_norm_values, vec![c.head_dim as u64]);
+        let q_b = prepare_test_weight(&ctx, c.q_lora_rank, query_width, GgmlType::Q8_0, 31);
+        let kv_weight = prepare_test_weight(&ctx, c.hidden_size, c.head_dim, GgmlType::Q8_0, 47);
+        let local_rope = DeepSeekV4RopeParameters {
+            rotary_dim: c.rotary_dim,
+            theta: 10_000.0,
+            scaling_factor: 1.0,
+            original_context_length: 0,
+            beta_fast: 0.0,
+            beta_slow: 0.0,
+        };
+        let yarn_rope = DeepSeekV4RopeParameters {
+            rotary_dim: c.rotary_dim,
+            theta: 160_000.0,
+            scaling_factor: 16.0,
+            original_context_length: 65_536,
+            beta_fast: 32.0,
+            beta_slow: 1.0,
+        };
+
+        for q_dtype in [GgmlType::Q8_0, GgmlType::Q6_K] {
+            let q_a = prepare_test_weight(&ctx, c.hidden_size, c.q_lora_rank, q_dtype, 19);
+            for (position, rope) in [(0u32, local_rope), (65_535, yarn_rope)] {
+                let mut composed =
+                    DeepSeekV4PositionZeroAttentionScratch::new(&ctx, config).unwrap();
+                composed.set_prepare_test_policy(DeepSeekV4PrepareTestPolicy::Composed);
+                let mut paired = DeepSeekV4PositionZeroAttentionScratch::new(&ctx, config).unwrap();
+                paired.set_prepare_test_policy(DeepSeekV4PrepareTestPolicy::Paired);
+                let composed_cache = MetalTensor::zeros_f16(
+                    &ctx,
+                    vec![c.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+                )
+                .unwrap();
+                let paired_cache = MetalTensor::zeros_f16(
+                    &ctx,
+                    vec![c.head_dim as u64, DEEPSEEK_V4_LOCAL_WINDOW as u64],
+                )
+                .unwrap();
+                const CACHE_SENTINEL_BYTE: u8 = 0x5A;
+                const CACHE_SENTINEL_BITS: u16 = 0x5A5A;
+                fill_tensor_bytes(&composed_cache, CACHE_SENTINEL_BYTE);
+                fill_tensor_bytes(&paired_cache, CACHE_SENTINEL_BYTE);
+
+                let run = |scratch: &DeepSeekV4PositionZeroAttentionScratch,
+                           raw_cache: &MetalTensor,
+                           label: &str| {
+                    let _trace = crate::metal::kernel_trace_begin();
+                    let command = ctx.queue.commandBuffer().expect("full prepare command");
+                    let encoder = KernelEncoder::begin(&command);
+                    scratch
+                        .encode_prepare_local_f16(
+                            &ctx,
+                            &encoder,
+                            &input,
+                            &attention_norm,
+                            &q_a,
+                            &q_a_norm,
+                            &q_b,
+                            &kv_weight,
+                            &kv_norm,
+                            raw_cache,
+                            position,
+                            rope,
+                            1.0e-6,
+                        )
+                        .unwrap();
+                    let trace = crate::metal::kernel_trace_snapshot();
+                    encoder.end();
+                    command.commit();
+                    command.waitUntilCompleted();
+                    assert!(
+                        command.error().is_none(),
+                        "{label} prepare command failed: {:?}",
+                        command.error()
+                    );
+                    trace
+                };
+                let composed_trace = run(&composed, &composed_cache, "composed");
+                let paired_trace = run(&paired, &paired_cache, "paired");
+                let (expected_composed, expected_paired) =
+                    if position == 0 { (8, 6) } else { (10, 7) };
+                assert_eq!(composed_trace.dispatches, expected_composed);
+                assert_eq!(paired_trace.dispatches, expected_paired);
+
+                let label = format!("{q_dtype:?} position={position}");
+                for (name, left, right) in [
+                    (
+                        "normalized input",
+                        &composed.normalized_input,
+                        &paired.normalized_input,
+                    ),
+                    ("Q LoRA raw", &composed.q_lora_raw, &paired.q_lora_raw),
+                    ("Q LoRA", &composed.q_lora, &paired.q_lora),
+                    ("queries raw", &composed.queries_raw, &paired.queries_raw),
+                    ("queries", &composed.queries, &paired.queries),
+                    ("KV raw", &composed.kv_raw, &paired.kv_raw),
+                    ("KV", &composed.kv, &paired.kv),
+                ] {
+                    assert_f32_tensor_bits_eq(&format!("{label} {name}"), left, right);
+                }
+                let composed_cache_bits = read_f16_bits(&composed_cache);
+                let paired_cache_bits = read_f16_bits(&paired_cache);
+                assert_eq!(
+                    composed_cache_bits, paired_cache_bits,
+                    "{label} F16 publication differs"
+                );
+                let slot = position as usize % DEEPSEEK_V4_LOCAL_WINDOW;
+                let row_start = slot * c.head_dim;
+                let row_end = row_start + c.head_dim;
+                let expected_row = read_f32(&paired.kv)
+                    .into_iter()
+                    .map(|value| half::f16::from_f32(value).to_bits())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    &paired_cache_bits[row_start..row_end],
+                    expected_row,
+                    "{label} F16 publication must round the authoritative KV row"
+                );
+                assert!(expected_row.iter().any(|&bits| bits != CACHE_SENTINEL_BITS));
+                assert!(
+                    paired_cache_bits[..row_start]
+                        .iter()
+                        .chain(&paired_cache_bits[row_end..])
+                        .all(|&bits| bits == CACHE_SENTINEL_BITS),
+                    "{label} F16 publication modified an untouched cache slot"
+                );
+            }
+        }
+    }
+
     #[test]
     fn decode_grouped_output_gemv_matches_singleton_loop_bitwise() {
         let Ok(ctx) = MetalContext::new() else {
@@ -16371,6 +17421,19 @@ mod tests {
                 .cast::<u8>()
                 .add(tensor.offset as usize);
             std::ptr::write_bytes(destination, 0, bytes);
+        }
+    }
+
+    fn fill_tensor_bytes(tensor: &MetalTensor, byte: u8) {
+        let bytes = usize::try_from(tensor.n_bytes()).expect("test tensor byte count fits usize");
+        unsafe {
+            let destination = tensor
+                .buffer
+                .contents()
+                .as_ptr()
+                .cast::<u8>()
+                .add(tensor.offset as usize);
+            std::ptr::write_bytes(destination, byte, bytes);
         }
     }
 

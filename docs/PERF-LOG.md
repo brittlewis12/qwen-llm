@@ -6,6 +6,65 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — DeepSeek V4 Paired Attention Prepare GO
+
+Status: eligible singleton decode layers now pair Q-A/raw-KV projection,
+Q-LoRA/KV RMSNorm, and query/KV RoPE into three depth/row-cooperative
+dispatches. Set `QWEN_DSV4_DECODE_PREPARE_PAIRED=0` to restore the exact six
+standalone operations. Q-B, per-head query normalization, authoritative F32
+scratch, and F16 ring publication remain separate and unchanged.
+
+- The projection pair supports the observed Q8_0/Q8_0 and Q6_K/Q8_0 cohorts and
+  preserves each singleton arithmetic body. Device capability and dtype checks
+  fail back to composition before encoding rather than rejecting an otherwise
+  valid model. The paired helpers are serial-only, participate in buffer-hazard
+  tracking, reject overlap, and use checked shader counts.
+- Every nonzero decode layer changes ten prepare dispatches to seven. Across 43
+  layers this removes 129 dispatches/token and lowers the ordinary source census
+  from 1,635 to 1,506. Position zero changes eight to six and removes 86 once per
+  request.
+- Exact model-free differentials cover Q8/Q8 and Q6/Q8 projections at ragged
+  `512x67/129` and production `4096x1024/512` geometry, asymmetric RMSNorm rows,
+  and unscaled/YaRN RoPE at positions 0/1/127/128/129/2051/2052/3071/65535/
+  65536/1048575. A full production-geometry prepare differential requires exact
+  F32 intermediates and complete F16 cache bits, independently checks F16
+  rounding, and proves untouched sentinel slots remain unchanged. Trace checks
+  prove `10 -> 7` and `8 -> 6` dispatches.
+- Full release DSv4 tests pass 102/102 with 13 ignored. Strict library Clippy,
+  workspace release check, formatting, and four adversarial reviews pass
+  without code-level blocker or high-severity findings.
+- Two warm K160 paired/rollback/rollback/paired whole-token brackets at positions
+  6-13 record wall medians `35.626/35.908/35.749/35.622` and
+  `35.673/35.671/34.685/35.528 ms`; GPU medians are
+  `34.690/35.025/34.854/34.756` and `34.757/34.791/33.381/34.608 ms`. One
+  anomalously fast rollback arm reverses the second bracket's arm means, so the
+  short packet is supporting rather than decisive. Pooled arm-median medians
+  favor pairing by `0.086 ms/token` wall and `0.100 ms/token` GPU. Every arm
+  emits generated-ID SHA-256 `ad915bd1...220e967`.
+- Valid 128-transition K160 product brackets use the exact prompt
+  `Write the integers from 1 to 300, one per line, and do not omit any number.`
+  after the ordinary `Hello` prompt reached EOS at 25 transitions and was
+  discarded. The
+  exact-final paired/rollback/rollback/paired generation is
+  `4720.9/4791.0/4696.1/4671.1 ms`; arm means are 4696.00 versus 4743.55 ms,
+  saving 47.55 ms/request or `0.371 ms/transition` (`1.00%`). An independent
+  earlier final-kernel bracket records `4808.1/4843.0/4839.7/4823.9 ms` and the
+  conservative lower saving, 25.35 ms/request or `0.198 ms/transition` (`0.52%`).
+  All arms report 129 generated tokens, token-limit stop, and SHA-256
+  `5ff63edd...0f3772`.
+- A dissimilar FRESH one-pair guardrail preserves SHA-256
+  `7eed93a0...2849795`; the exact-final pair moves wall `32.319 -> 31.787 ms` and
+  GPU `31.283 -> 30.856 ms`. Treat that pair as transfer/correctness evidence
+  rather than a promotion-grade timing bracket. All live measurements are
+  dirty-tree evidence with `QWEN_DSV4_RESIDENCY_SET=0`; the decisive product and
+  FRESH packets use the exact source retained here.
+
+Decision: retain the default exact paired prepare packet. It compounds prior
+front-end deletions without broadening authoritative state and clears the long
+product gate on the exact final source. Next test the lower-ceiling
+combine-through-mHC-post packet only as a single exact organization; do not
+retune these three paired kernels locally.
+
 ## 2026-08-13 — DeepSeek V4 Compressor Frontier Fusion GO
 
 Status: singleton decode now fuses each matched Q8_0 compressor KV/score pair

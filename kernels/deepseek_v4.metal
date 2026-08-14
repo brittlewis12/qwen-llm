@@ -883,6 +883,20 @@ struct ds4_rope_tail_args {
     float correction_high;
 };
 
+struct ds4_rope_pair_args {
+    uint q_pair_count;
+    uint pair_count;
+    uint head_dim;
+    uint rotary_dim;
+    uint position;
+    uint inverse;
+    uint yarn;
+    float theta;
+    float frequency_scale;
+    float correction_low;
+    float correction_high;
+};
+
 struct ds4_rope_tail_batch_args {
     uint head_count;
     uint head_dim;
@@ -1215,6 +1229,44 @@ kernel void kernel_deepseek_v4_rope_tail_adjacent_in_place(
     const uint tail = head * args.head_dim + args.head_dim - args.rotary_dim;
     const uint first_index = tail + relative;
     const uint second_index = first_index + 1u;
+
+    const float extrapolated = float(args.position)
+        * pow(args.theta, -float(relative) / float(args.rotary_dim));
+    float angle = extrapolated;
+    if (args.yarn != 0u) {
+        const float interpolated = args.frequency_scale * extrapolated;
+        const float ramp = 1.0f - clamp(
+            (float(pair) - args.correction_low)
+                / max(0.001f, args.correction_high - args.correction_low),
+            0.0f,
+            1.0f);
+        angle = interpolated * (1.0f - ramp) + extrapolated * ramp;
+    }
+    const float cosine = cos(angle);
+    float sine = sin(angle);
+    if (args.inverse != 0u) sine = -sine;
+    const float first = values[first_index];
+    const float second = values[second_index];
+    values[first_index] = first * cosine - second * sine;
+    values[second_index] = first * sine + second * cosine;
+}
+
+kernel void kernel_deepseek_v4_rope_pair_in_place(
+        constant ds4_rope_pair_args & args [[buffer(0)]],
+        device float * q [[buffer(1)]],
+        device float * kv [[buffer(2)]],
+        uint index [[thread_position_in_grid]]) {
+    const uint pairs_per_head = args.rotary_dim / 2u;
+    if (index >= args.pair_count) return;
+    const bool is_q = index < args.q_pair_count;
+    const uint local_index = is_q ? index : index - args.q_pair_count;
+    const uint head = local_index / pairs_per_head;
+    const uint pair = local_index % pairs_per_head;
+    const uint relative = pair * 2u;
+    const uint tail = head * args.head_dim + args.head_dim - args.rotary_dim;
+    const uint first_index = tail + relative;
+    const uint second_index = first_index + 1u;
+    device float * values = is_q ? q : kv;
 
     const float extrapolated = float(args.position)
         * pow(args.theta, -float(relative) / float(args.rotary_dim));

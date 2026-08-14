@@ -6,6 +6,36 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — DeepSeek V4 mHC Launch-Fusion Screens KILL
+
+Status: KILL the remaining launch-only mHC organizations. No implementation is
+retained.
+
+- Narrow weighted-combine/shared-add/mHC-post fusion was killed before code. It
+  could remove 86 dispatches/token, but preserving authoritative routed and
+  final F32 rows retains both publication boundaries, nearly all traffic, and
+  all arithmetic. Calibration from the last three promoted packets prices only
+  about `0.09-0.24 ms/token`, below the acquisition/noise bar.
+- A changed-premise prototype kept the proven normalized `4H` residual slab and
+  `4H -> 24` projection, then fused only controls, stream collapse, and the
+  immediate consumer RMSNorm. This avoided the previously falsified no-slab
+  producer geometry and changed five site dispatches to three, a theoretical
+  172-dispatch/token deletion.
+- Exact differentials at ragged `H=67` and production `H=4096` required identical
+  residual norm, 24 mixes, pre/post gates, source-major combination, collapsed
+  input, and consumer-normalized F32 bits. The fused kernel passed every buffer.
+- The predeclared production-width release screen repeated each site 1,024 times.
+  Fused arms measured `0.040234/0.030151 ms/site`; composed arms measured
+  `0.032128/0.031927`. Arm means are 0.035193 versus 0.032028 ms, extrapolating
+  to a `0.272 ms/token` regression across 86 sites. Even the favorable fused arm
+  implies only about `0.161 ms/token` saving, far below the `0.4 ms/token` screen.
+
+Decision: remove the exact prototype without model acquisition. Do not reopen
+mHC launch fusion, controls/collapse grouping, or narrow combine/post. The next
+decode candidate must let an existing expensive producer own its reduction or
+epilogue and delete materialized work, with routed-down/weighted reduction the
+leading but still high-risk screen.
+
 ## 2026-08-13 — DeepSeek V4 Paired Attention Prepare GO
 
 Status: eligible singleton decode layers now pair Q-A/raw-KV projection,

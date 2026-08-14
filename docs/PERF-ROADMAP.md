@@ -1431,16 +1431,20 @@ projection arithmetic and a credible path to the complete wall bar.
    saves 0.198 ms/transition (0.52%).
    The narrow KV RoPE+F16 publication leaf remains KILL: it deletes 43
    dispatches but regresses the 128-token product bracket by about 0.051 ms/token
-   and broadens transient F32 KV bits under fast-math. The next bounded packet is
-   exact combine-through-mHC-post: three dispatches to one in each of 43 layers,
-   at most 86 more deletions. Require exact routed/final/residual bits and a
-   positive product bracket; kill it quickly if volatile publication cannot
-   preserve boundaries or the measured ceiling is immaterial. Reopen mHC pre
-   only with a changed shared/deleted-work premise: the no-slab producer geometry
-   is falsified. Use separate rollbacks and held-position bitwise differentials;
-   do not resume isolated local retunes until structural deletion clears 2
-   ms/token. Every fusion also lowers the DSpark N=2 verifier denominator toward
-   its 58.34 ms external budget. Design:
+   and broadens transient F32 KV bits under fast-math. Launch-only mHC cleanup is
+   now closed. Narrow combine-through-post was killed on a calibrated
+   `0.09-0.24 ms/token` ceiling. A changed-premise controls+collapse+consumer-norm
+   kernel preserved every authoritative bit and could remove 172 dispatches, but
+   its production-width isolated bracket averaged 0.035193 versus 0.032028
+   ms/site, a projected `0.272 ms/token` regression; no code remains. Reopen mHC
+   only with a producer-owned deletion of projection/dequant work, not another
+   launch grouping. The next bounded screen is dtype-qualified routed-down
+   ownership of weighted reduction/shared add, which can delete the six-row
+   expert-output publication; kill it if serial slot ownership regresses the down
+   kernel or cannot clear 0.4 ms/token. Use separate rollbacks and held-position
+   bitwise differentials; do not resume isolated local retunes until structural
+   deletion clears 2 ms/token. Every fusion also lowers the DSpark N=2 verifier
+   denominator toward its 58.34 ms external budget. Design:
    `docs/bench/2026-08-12-dsv4-decode-dispatch-census/README.md`.
 6. **Record REAP quality governance before product equivalence claims.** Keep
    K160's correct math result and failed 180-word constraint as the first row,

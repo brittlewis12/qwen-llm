@@ -1387,11 +1387,15 @@ and exact shared-panel precedents are negative or about 1% whole-wall. Reopen
 only with 30-50 ms of independently isolated GPU-work deletion beyond unchanged
 projection arithmetic and a credible path to the complete wall bar.
 
-1. **Record REAP quality governance before another speed promotion.** Keep
-   K160's correct math result and failed 180-word constraint as the first row,
-   add maintained K160-versus-FRESH and K216-versus-FRESH battery rows, and run
-   one full-defaults versus arithmetic-rollbacks logit/top-1 audit. Memory and
-   speed do not authorize an asset-quality claim.
+1. **Demand a genuinely new fresh-decode work unit.** REAP quality governance is
+   now recorded: the composed defaults-versus-rollbacks audit, prior K160
+   constraint failure, and maintained v4.1 FRESH/K216/K160 rows are complete.
+   Neutral retention is `24/24` for all three; misleading retention is `16/24`,
+   `12/24`, and `12/24`, with only `14/24` FRESH/K216 and `10/24` FRESH/K160
+   item-level agreement. This is a guardrail, not asset equivalence. Do not fund
+   another launch/publication retune. The next implementation proposal must first
+   show deletion of target evaluations, route assignments, weight traversal, or
+   another material physical work unit with a credible `>=2 ms/token` ceiling.
 2. **Keep current-asset routed gate/up closed.** After the MXFP4 repair, FRESH
    and K160 still spend about `1,833` and `1,877 ms` in routed gate/up, but neither
    profile exposes a broken layer or shared quant work unit. K160's six selected
@@ -1453,7 +1457,7 @@ projection arithmetic and a credible path to the complete wall bar.
    the `0.4 ms/token` gate. No code remains. Do not transfer final-only ownership
    to narrower dtype cohorts or reopen mHC launch grouping. The current-asset
    gate/up audit in item 2 finds no shared dequant/dot work and closes that branch
-   before code. Return program priority to item 1's non-residency quality audit;
+   before code. Return program priority to item 1's structural work-unit search;
    do not resume isolated local retunes until a structural deletion has a credible
    2 ms/token ceiling. Every retained fusion also lowers the DSpark N=2 verifier
    denominator toward its 58.34 ms external budget. Design:

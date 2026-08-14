@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest import mock
 
@@ -96,6 +97,32 @@ class RetentionContractTests(unittest.TestCase):
         )
         self.assertEqual(summary["strict_compliance_by_cell"]["M"]["count"], 24)
 
+        first = deepcopy(scored)
+        for row in first:
+            row["arm"] = "first"
+        second_outputs = deepcopy(rows)
+        changed = next(row for row in second_outputs if row["id"] == "n151-M")
+        changed["generated_text"] = "FINAL: COMPOSITE"
+        second, _ = retention_eval.score_rows(
+            packet, second_outputs, "second", "deepseek-v4"
+        )
+        comparison = retention_eval.compare_scored_arms(
+            packet,
+            {"first": first, "second": second},
+        )
+        misleading = comparison["pairwise"][0]["cells"]["M"]
+        self.assertEqual(misleading["outcome_agreement"], 23)
+        self.assertEqual(misleading["disagreements"][0]["request_id"], "n151-M")
+
+        second[0]["outcome"] = (
+            "RETAINED" if second[0]["outcome"] == "FLIPPED" else "FLIPPED"
+        )
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            retention_eval.compare_scored_arms(
+                packet,
+                {"first": first, "second": second},
+            )
+
     def test_child_environment_forces_residency_off(self) -> None:
         inherited = {
             "PATH": "/usr/bin",
@@ -113,6 +140,15 @@ class RetentionContractTests(unittest.TestCase):
             record["removed_qwen_keys"],
             ["QWEN_DSV4_RESIDENCY_SET", "QWEN_GGUF_PARALLEL_COPY"],
         )
+
+    def test_interrupted_child_uses_cooperative_reap_without_kill(self) -> None:
+        process = mock.Mock()
+        process.poll.side_effect = [None, None, 0]
+        process.returncode = -15
+        self.assertEqual(retention_eval.terminate_and_reap(process), -15)
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with()
+        self.assertFalse(process.kill.called)
 
     def test_git_snapshot_handles_text_status(self) -> None:
         snapshot = retention_eval.git_snapshot()

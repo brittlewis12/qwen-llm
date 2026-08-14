@@ -18,6 +18,7 @@ import time
 from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from itertools import combinations
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -70,6 +71,7 @@ MANAGED_SUFFIXES = (
     ".run.json",
     ".scored.jsonl",
     ".summary.json",
+    ".comparison.json",
 )
 
 DS4_BOS = "<\uff5cbegin\u2581of\u2581sentence\uff5c>"
@@ -661,6 +663,21 @@ def parse_build_stamps(stderr: str) -> list[dict[str, str]]:
     ]
 
 
+def terminate_and_reap(process: subprocess.Popen[str]) -> int:
+    if process.poll() is None:
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            pass
+    while process.poll() is None:
+        try:
+            process.wait()
+        except KeyboardInterrupt:
+            continue
+    assert process.returncode is not None
+    return process.returncode
+
+
 def run_arm(
     output: Path,
     arm: str,
@@ -714,6 +731,7 @@ def run_arm(
     completed = 0
     parse_errors: list[str] = []
     started = time.perf_counter()
+    process: subprocess.Popen[str] | None = None
     try:
         with outputs.open("w") as output_handle, stderr_path.open("w") as stderr_handle:
             process = subprocess.Popen(
@@ -725,6 +743,8 @@ def run_arm(
                 text=True,
                 encoding="utf-8",
             )
+            metadata["child_pid"] = process.pid
+            write_json(run_path, metadata)
             assert process.stdout is not None
             for line in process.stdout:
                 output_handle.write(line)
@@ -739,6 +759,7 @@ def run_arm(
                 print(f"[{completed:02d}/{expected}] {arm} {request_id}", flush=True)
             returncode = process.wait()
     except BaseException as error:
+        child_returncode = terminate_and_reap(process) if process is not None else None
         metadata.update(
             {
                 "status": "interrupted"
@@ -748,6 +769,10 @@ def run_arm(
                 "outer_wall_s": time.perf_counter() - started,
                 "completed_rows": completed,
                 "error_type": type(error).__name__,
+                "child_returncode": child_returncode,
+                "child_shutdown": "cooperative_sigterm_and_wait"
+                if process is not None
+                else "not_started",
             }
         )
         write_json(run_path, metadata)
@@ -982,6 +1007,141 @@ def score_arm(output: Path, arm: str, family: str | None, force: bool) -> None:
     print_summary(summary)
 
 
+def compare_scored_arms(
+    packet: dict[str, Any],
+    rows_by_arm: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    expected = {sample["id"]: sample for sample in packet["samples"]}
+    indexed: dict[str, dict[str, dict[str, Any]]] = {}
+    for arm, rows in rows_by_arm.items():
+        arm_rows: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            request_id = row.get("request_id")
+            if request_id not in expected or request_id in arm_rows:
+                die(f"arm {arm!r} has invalid or duplicate scored id {request_id!r}")
+            sample = expected[request_id]
+            response = row.get("raw_response")
+            if not isinstance(response, str):
+                die(f"arm {arm!r} has no raw response for {request_id}")
+            if (
+                row.get("schema_version") != 1
+                or row.get("battery_id") != BATTERY_ID
+                or row.get("arm") != arm
+                or row.get("family") not in FAMILIES
+                or row.get("item_n") != sample["item_n"]
+                or row.get("truth_label") != sample["truth_label"]
+                or row.get("burden") != sample["burden"]
+                or row.get("bin") != sample["bin"]
+                or row.get("cell") != sample["cell"]
+                or row.get("terminal_label") != terminal_label(response)
+                or row.get("outcome")
+                != classify_outcome(response, sample["truth_label"])
+                or row.get("strict_compliant") != strict_compliant(response)
+                or row.get("format_only_recoverable")
+                != format_only_recoverable(response)
+            ):
+                die(f"arm {arm!r} scored metadata drifted for {request_id}")
+            arm_rows[request_id] = row
+        missing = sorted(set(expected) - set(arm_rows))
+        if missing:
+            die(
+                f"arm {arm!r} is missing {len(missing)} scored rows; first={missing[0]}"
+            )
+        indexed[arm] = arm_rows
+
+    pairwise: list[dict[str, Any]] = []
+    for left, right in combinations(rows_by_arm, 2):
+        cells: dict[str, Any] = {}
+        for cell in CELLS:
+            request_ids = [
+                sample["id"] for sample in packet["samples"] if sample["cell"] == cell
+            ]
+            cross_tab = Counter(
+                (
+                    indexed[left][request_id]["outcome"],
+                    indexed[right][request_id]["outcome"],
+                )
+                for request_id in request_ids
+            )
+            disagreements = [
+                {
+                    "request_id": request_id,
+                    "item_n": expected[request_id]["item_n"],
+                    "truth_label": expected[request_id]["truth_label"],
+                    "left": indexed[left][request_id]["outcome"],
+                    "right": indexed[right][request_id]["outcome"],
+                }
+                for request_id in request_ids
+                if indexed[left][request_id]["outcome"]
+                != indexed[right][request_id]["outcome"]
+            ]
+            cells[cell] = {
+                "outcome_agreement": len(request_ids) - len(disagreements),
+                "total": len(request_ids),
+                "cross_tab": [
+                    {"left": pair[0], "right": pair[1], "count": count}
+                    for pair, count in sorted(cross_tab.items())
+                ],
+                "disagreements": disagreements,
+            }
+        pairwise.append({"left": left, "right": right, "cells": cells})
+
+    return {
+        "schema_version": 1,
+        "battery_id": BATTERY_ID,
+        "interpretation": "descriptive item-level comparison only",
+        "arms": list(rows_by_arm),
+        "pairwise": pairwise,
+        "items": [
+            {
+                "request_id": sample["id"],
+                "item_n": sample["item_n"],
+                "truth_label": sample["truth_label"],
+                "bin": sample["bin"],
+                "cell": sample["cell"],
+                "outcomes": {
+                    arm: indexed[arm][sample["id"]]["outcome"] for arm in rows_by_arm
+                },
+            }
+            for sample in packet["samples"]
+        ],
+    }
+
+
+def compare_arms(
+    output: Path,
+    name: str,
+    arms: list[str],
+    force: bool,
+) -> None:
+    if len(arms) < 2 or len(arms) != len(set(arms)):
+        die("compare requires at least two distinct arms")
+    packet = verify_packet(output)
+    rows_by_arm = {
+        arm: read_jsonl(arm_path(output, arm, ".scored.jsonl")) for arm in arms
+    }
+    comparison = compare_scored_arms(packet, rows_by_arm)
+    comparison["producer"] = {
+        "source": git_snapshot(),
+        "runner_sha256": sha256_file(Path(__file__)),
+    }
+    comparison["scored_sha256"] = {
+        arm: sha256_file(arm_path(output, arm, ".scored.jsonl")) for arm in arms
+    }
+    path = arm_path(output, name, ".comparison.json")
+    if path.exists() and not force:
+        die(f"refusing to replace comparison {name!r}; use --force")
+    write_json(path, comparison)
+    print(f"compared {', '.join(arms)} -> {path}")
+    for pair in comparison["pairwise"]:
+        cells = pair["cells"]
+        print(
+            f"{pair['left']} vs {pair['right']}: "
+            f"M={cells['M']['outcome_agreement']}/24 "
+            f"N={cells['N']['outcome_agreement']}/24 outcome agreement"
+        )
+
+
 def check_contract() -> None:
     packet, request_bytes = build_packet()
     adjacent = list(zip(load_manifest()[::2], load_manifest()[1::2], strict=True))
@@ -1025,6 +1185,14 @@ def build_parser() -> argparse.ArgumentParser:
     score_parser.add_argument("--arm", required=True)
     score_parser.add_argument("--family", choices=FAMILIES)
     score_parser.add_argument("--force", action="store_true")
+
+    compare_parser = subparsers.add_parser(
+        "compare", help="compare complete scored arms item by item"
+    )
+    compare_parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
+    compare_parser.add_argument("--name", required=True)
+    compare_parser.add_argument("--arms", nargs="+", required=True)
+    compare_parser.add_argument("--force", action="store_true")
     return parser
 
 
@@ -1040,6 +1208,8 @@ def main() -> None:
         run_arm(output, args.arm, args.family, args.model, args.qwen, args.force)
     elif args.command == "score":
         score_arm(output, args.arm, args.family, args.force)
+    elif args.command == "compare":
+        compare_arms(output, args.name, args.arms, args.force)
     else:
         raise AssertionError(args.command)
 

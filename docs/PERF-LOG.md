@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-13 — DeepSeek V4 Maintained Retention Quality Rows
+
+Status: REAP quality governance now has a maintained v4.1 fixture, hardened
+runner, and item-level FRESH/K216/K160 rows. This closes the missing battery
+implementation; it does not establish asset equivalence.
+
+- Contract: 24 deterministic primality items, misleading false-modulo and
+  neutral cells, greedy seed 42, 32-token cap. The exact historical item set,
+  messages, rebuttals, and Qwen prompts are frozen. Every false claim is checked,
+  outputs use a terminal-label parser, and scoring remains descriptive.
+- Safety: every run removed ambient `QWEN_*`, then fixed
+  `QWEN_DSV4_RESIDENCY_SET=0` and `QWEN_DSV4_PREFETCH=off`. All stderr logs
+  report zero prefetch bytes; all three processes exited normally with 94/88/88%
+  post-run memory availability and no survivor. No Metal residency-set API or
+  pre-wire work ran; the percentages are operator observations, not run fields.
+- Results: all 144 rows are strict and parseable; neutral is 24/24 retained for
+  every asset. Misleading retention/flip is FRESH `16/8`, K216 `12/12`, and K160
+  `12/12`. By truth direction, FRESH prime/composite retention is `9/12` and
+  `7/12`, K216 `2/12` and `10/12`, and K160 `0/12` and `12/12`.
+- Item-level agreement matters: FRESH/K216, FRESH/K160, and K216/K160 agree on
+  only `14/24`, `10/24`, and `20/24` misleading outcomes; all agree on neutral.
+  FRESH exactly reproduces the historical aggregate and same eight flipped items.
+- Limit: v4.1 is not burden-matched (1/12 adjacent rows match), its `pair_id` is
+  not a pair, and wording differs by truth direction. The K160 direction-locked
+  split is therefore a guardrail observation, not an arithmetic or global-quality
+  explanation. A corrected construct would be v4.2, not silent fixture drift.
+
+Decision: mark the quality-governance implementation complete while retaining
+the existing no-equivalence policy for REAP assets. Rerun this exact row for a
+new asset or materially changed approximate default; build v4.2 only when a live
+asset decision needs the corrected discriminator. Evidence:
+`docs/bench/2026-08-13-dsv4-retention-v4.1/`; initial runner commit `2a61165`.
+
 ## 2026-08-13 — Whole-Model Residency Optimization Lane CLOSED
 
 Status: whole-model explicit residency is not an actionable optimization lane.

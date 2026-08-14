@@ -66,6 +66,10 @@ uv run --script scripts/bench/retention_eval.py run \
   --arm dense-q4-anchor \
   --family qwen36 \
   --model /path/to/Qwen3.6-27B-Q4_K_M.gguf
+
+uv run --script scripts/bench/retention_eval.py compare \
+  --name defaults-cross-asset \
+  --arms fresh-defaults k216-defaults k160-defaults
 ```
 
 Prepared requests and run artifacts live under
@@ -75,7 +79,9 @@ edge hashes for every shard), source state, fixed child environment, exact
 request and output hashes, raw stderr, raw JSONL completions, scored rows, and a
 descriptive summary. The model locator detects ordinary local replacement or
 mutation but is explicitly not a complete content digest. `score` can rescore
-an existing standard `qwen` JSONL output without rerunning inference.
+an existing standard `qwen` JSONL output without rerunning inference. `compare`
+produces deterministic pairwise outcome cross-tabs and item-level disagreement
+lists across two or more scored arms.
 
 ## Historical Pilot
 

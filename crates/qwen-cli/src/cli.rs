@@ -1,6 +1,6 @@
 use super::Args;
 use anyhow::{Context, Result, ensure};
-use clap::{ArgGroup, Args as ClapArgs, Subcommand};
+use clap::{ArgGroup, Args as ClapArgs, Subcommand, ValueEnum};
 use std::io::Read;
 use std::path::PathBuf;
 
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 pub(crate) enum Command {
     /// Run one model-templated or explicitly raw request.
     #[command(
-        after_help = "Examples:\n  qwen run -m MODEL --user 'Explain this'\n  qwen run -m MODEL --system 'Be concise' --user 'Explain this'\n  qwen run -m MODEL --user -\n  qwen run -m MODEL --messages -\n  qwen run -m MODEL --raw-prompt '<exact model input>'\n  qwen run -m Qwen3.6-35B-A3B.gguf --user 'Explain this' --no-thinking"
+        after_help = "Examples:\n  qwen run -m MODEL --user 'Explain this'\n  qwen run -m MODEL --system 'Be concise' --user 'Explain this'\n  qwen run -m Qwen3.8-27B.gguf --reasoning-effort low --user 'Explain this'\n  qwen run -m MODEL --user -\n  qwen run -m MODEL --messages -\n  qwen run -m MODEL --raw-prompt '<exact model input>'\n  qwen run -m Qwen3.6-35B-A3B.gguf --user 'Explain this' --no-thinking"
     )]
     Run(RunArgs),
 }
@@ -24,7 +24,15 @@ pub(crate) struct RunInvocation {
     pub(crate) model: PathBuf,
     pub(crate) input: RunInput,
     pub(crate) no_thinking: bool,
+    pub(crate) reasoning_effort: Option<RunReasoningEffort>,
     generation: GenerationOverrides,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum RunReasoningEffort {
+    Low,
+    Medium,
+    Xhigh,
 }
 
 #[derive(Debug)]
@@ -102,6 +110,14 @@ pub(crate) struct RunArgs {
     /// not an output filter.
     #[arg(long, conflicts_with = "raw_prompt")]
     no_thinking: bool,
+
+    /// Qwen3.8 reasoning depth. Omitted defaults to xhigh.
+    #[arg(
+        long,
+        value_name = "EFFORT",
+        conflicts_with_all = ["raw_prompt", "no_thinking"]
+    )]
+    reasoning_effort: Option<RunReasoningEffort>,
 
     #[command(flatten)]
     generation: GenerationOverrides,
@@ -250,6 +266,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
                 model: run.model,
                 input,
                 no_thinking: run.no_thinking,
+                reasoning_effort: run.reasoning_effort,
                 generation: run.generation,
             })
         }
@@ -308,6 +325,57 @@ mod tests {
                 user: TextSource::Inline(ref user),
             } if system == "Be exact" && user == "Hello"
         ));
+        assert_eq!(run.reasoning_effort, None);
+    }
+
+    #[test]
+    fn run_accepts_only_upstream_qwen38_reasoning_efforts() {
+        for (value, expected) in [
+            ("low", RunReasoningEffort::Low),
+            ("medium", RunReasoningEffort::Medium),
+            ("xhigh", RunReasoningEffort::Xhigh),
+        ] {
+            let (_, invocation) = parse(&[
+                "qwen",
+                "run",
+                "-m",
+                "model.gguf",
+                "--user",
+                "Hello",
+                "--reasoning-effort",
+                value,
+            ]);
+            let Invocation::Run(run) = invocation else {
+                panic!("expected run invocation");
+            };
+            assert_eq!(run.reasoning_effort, Some(expected));
+        }
+
+        for value in ["high", "max", "none", "unknown"] {
+            assert!(
+                Args::try_parse_from([
+                    "qwen",
+                    "run",
+                    "-m",
+                    "model.gguf",
+                    "--user",
+                    "Hello",
+                    "--reasoning-effort",
+                    value,
+                ])
+                .is_err(),
+                "unexpectedly accepted {value}"
+            );
+        }
+
+        let mut command = Args::command();
+        let run = command.find_subcommand_mut("run").expect("run subcommand");
+        let mut help = Vec::new();
+        run.write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+        assert!(help.contains("--reasoning-effort <EFFORT>"));
+        assert!(help.contains("possible values: low, medium, xhigh"));
+        assert!(help.contains("Omitted defaults to xhigh"));
     }
 
     #[test]
@@ -380,6 +448,27 @@ mod tests {
                 "--raw-prompt",
                 "raw",
                 "--no-thinking",
+            ],
+            vec![
+                "qwen",
+                "run",
+                "-m",
+                "model.gguf",
+                "--raw-prompt",
+                "raw",
+                "--reasoning-effort",
+                "low",
+            ],
+            vec![
+                "qwen",
+                "run",
+                "-m",
+                "model.gguf",
+                "--user",
+                "Hello",
+                "--no-thinking",
+                "--reasoning-effort",
+                "medium",
             ],
             vec![
                 "qwen",

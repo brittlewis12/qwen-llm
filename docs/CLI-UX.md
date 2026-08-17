@@ -75,6 +75,7 @@ qwen run -m MODEL --user -
 qwen run -m MODEL --messages -
 qwen run -m MODEL --raw-prompt '<exact model input>'
 qwen run -m MODEL --user "Explain this" --no-thinking
+qwen run -m Qwen3.8-27B.gguf --user "Explain this" --reasoning-effort medium
 ```
 
 Contract:
@@ -86,14 +87,23 @@ Contract:
 - `--messages -` accepts either a bare message array or a wrapped
   `{ "messages": [...] }` document.
 - `--no-thinking` is a prompt-rendering guarantee, not an output filter, and is
-  rejected with raw input. On the exact validated Qwen3.6 model/tokenizer
-  surface it selects the tested preclosed thinking suffix and fails closed
-  elsewhere. DeepSeek ordinary chat is already non-thinking, so the flag is an
-  idempotent guarantee there.
+  rejected with raw input. On the exact validated Qwen3.6 and Qwen3.8
+  model/tokenizer surfaces it selects the tested preclosed thinking suffix and
+  fails closed elsewhere. Qwen3.8 otherwise uses its upstream xhigh transition.
+  DeepSeek ordinary chat is already non-thinking, so the flag is an idempotent
+  guarantee there.
+- `--reasoning-effort low|medium|xhigh` is restricted to the validated Qwen3.8
+  27B identity and structured `--user`/`--messages` input. Omission remains
+  upstream xhigh; low injects the upstream brief-thinking instruction; medium
+  opens thinking without an effort instruction. `high`, unknown values, raw
+  input, `--no-thinking`, and other model identities fail closed.
 - Modern messages accept only the strict ordinary-chat subset: optional leading
   system, alternating user/assistant turns, and a final user turn. Unknown
   fields, wrapper metadata, unsupported roles, and structured assistant
   thinking are rejected rather than ignored.
+- The Qwen3.8 surface is text-only. Image content arrays, developer/tool roles,
+  structured calls/results, response formats, and projector execution remain
+  outside this contract.
 - Existing flat flags retain their current parsing and runtime semantics.
 
 The short root help should lead with commands and copy-ready examples. The long

@@ -1,6 +1,6 @@
 # qwen-llm
 
-A from-scratch Apple Silicon inference engine for **Qwen 3.5 / 3.6 hybrid Gated
+A from-scratch Apple Silicon inference engine for **Qwen 3.5 / 3.6 / 3.8 hybrid Gated
 DeltaNet** models and **DeepSeek V4 Flash-0731**. Single goal: maximum tok/sec
 for prompt processing and token generation, single-stream and batched.
 
@@ -55,6 +55,7 @@ Use `run` for an ordinary model-templated request:
 ```sh
 qwen run -m MODEL --user "Explain this"
 qwen run -m MODEL --system "Be concise" --user "Explain this"
+qwen run -m Qwen3.8-27B.gguf --reasoning-effort low --user "Explain this"
 qwen run -m MODEL --user -
 ```
 
@@ -74,14 +75,21 @@ Raw model input remains explicit. On supported detected model families,
 qwen run -m MODEL --raw-prompt '<exact model input>'
 ```
 
-On the validated Qwen3.6 35B A3B surface, `--no-thinking` uses the model-family
-non-thinking template transition. DeepSeek ordinary chat is already
-non-thinking, so the option is idempotent there. It does not suppress CLI
-diagnostics, and diagnostic suppression is not currently available. Existing
-flat invocations and resident `--requests-jsonl FILE|-` remain supported;
-`qwen -h` shows the common path and `qwen --help` shows expanded documented
-legacy/research options with copy-ready flat examples. Legacy flags cannot be
-combined with `qwen run`.
+On the validated Qwen3.8 27B surface, `--reasoning-effort low|medium|xhigh`
+selects the exact upstream ordinary-chat transition; omission remains xhigh.
+The option rejects `high`, raw prompts, `--no-thinking`, and non-Qwen3.8
+identities rather than inventing semantics. On validated Qwen3.6 35B A3B and
+Qwen3.8 27B surfaces, `--no-thinking` uses the model-family non-thinking
+transition. DeepSeek ordinary chat is already non-thinking, so that option is
+idempotent there. These controls do not suppress CLI diagnostics. Existing flat
+invocations and resident `--requests-jsonl FILE|-` remain supported; `qwen -h`
+shows the common path and `qwen --help` shows expanded documented
+legacy/research options. Legacy flags cannot be combined with `qwen run`.
+
+Qwen3.8 support is text-only. Modern messages do not accept image content,
+developer or tool roles, structured tool calls/results, response-format
+objects, or structured reasoning history. Vision/projector execution and those
+protocol surfaces are not implemented.
 
 ## Reference quarry
 

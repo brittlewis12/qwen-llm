@@ -13,12 +13,12 @@ mod shutdown;
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use messages::{
-    DeepSeekV4EncodeOptions, DeepSeekV4InlineThinking, DeepSeekV4Reasoning, QwenGenerationMode,
-    load_deepseek_v4_0731_messages_prompt, load_messages_prompt_with_policy,
-    messages_thinking_mode, parse_strict_messages_input, render_deepseek_v4_0731_messages_prompt,
-    render_deepseek_v4_0731_single_turn_prompt, render_qwen_messages_prompt_with_generation,
-    render_qwen_single_turn_prompt, render_qwen38_messages_prompt_with_generation,
-    render_qwen38_single_turn_prompt,
+    DeepSeekV4EncodeOptions, DeepSeekV4InlineThinking, DeepSeekV4Reasoning, Qwen38GenerationMode,
+    Qwen38ReasoningEffort, QwenGenerationMode, load_deepseek_v4_0731_messages_prompt,
+    load_messages_prompt_with_policy, messages_thinking_mode, parse_strict_messages_input,
+    render_deepseek_v4_0731_messages_prompt, render_deepseek_v4_0731_single_turn_prompt,
+    render_qwen_messages_prompt_with_generation, render_qwen_single_turn_prompt,
+    render_qwen38_messages_prompt_with_generation, render_qwen38_single_turn_prompt,
 };
 use objc2_metal::MTLDevice;
 use qwen_llm::checkpoint_identity::{
@@ -2679,6 +2679,8 @@ fn prepare_modern_run_prompt(
     let qwen38 = validated_qwen38_prompt_model(family, gguf);
 
     let no_thinking = run.no_thinking;
+    let qwen38_generation_mode =
+        resolve_qwen38_generation_mode(qwen38, no_thinking, run.reasoning_effort)?;
     let input = run.acquire_input()?;
     let (text, source) = match input {
         cli::AcquiredRunInput::RawPrompt(prompt) => (prompt, PromptSource::Inline),
@@ -2688,11 +2690,7 @@ fn prepare_modern_run_prompt(
                     render_qwen38_single_turn_prompt(
                         &user,
                         system.as_deref(),
-                        if no_thinking {
-                            QwenGenerationMode::NoThinking
-                        } else {
-                            QwenGenerationMode::Auto
-                        },
+                        qwen38_generation_mode.expect("validated Qwen3.8 mode"),
                     )
                 }
                 ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => render_qwen_single_turn_prompt(
@@ -2720,11 +2718,7 @@ fn prepare_modern_run_prompt(
                     render_qwen38_messages_prompt_with_generation(
                         &messages,
                         true,
-                        if no_thinking {
-                            QwenGenerationMode::NoThinking
-                        } else {
-                            QwenGenerationMode::Auto
-                        },
+                        qwen38_generation_mode.expect("validated Qwen3.8 mode"),
                     )
                 }
                 ModelFamily::Qwen35 | ModelFamily::Qwen35Moe => {
@@ -2753,6 +2747,33 @@ fn prepare_modern_run_prompt(
         source,
         completed_checkpoint_eligible: false,
     })
+}
+
+fn resolve_qwen38_generation_mode(
+    qwen38: bool,
+    no_thinking: bool,
+    reasoning_effort: Option<cli::RunReasoningEffort>,
+) -> Result<Option<Qwen38GenerationMode>> {
+    ensure!(
+        !(no_thinking && reasoning_effort.is_some()),
+        "--reasoning-effort cannot be combined with --no-thinking"
+    );
+    ensure!(
+        reasoning_effort.is_none() || qwen38,
+        "--reasoning-effort is currently validated only for Qwen3.8 27B identities with the qwen35 tokenizer"
+    );
+    if !qwen38 {
+        return Ok(None);
+    }
+    if no_thinking {
+        return Ok(Some(Qwen38GenerationMode::NoThinking));
+    }
+    let effort = match reasoning_effort.unwrap_or(cli::RunReasoningEffort::Xhigh) {
+        cli::RunReasoningEffort::Low => Qwen38ReasoningEffort::Low,
+        cli::RunReasoningEffort::Medium => Qwen38ReasoningEffort::Medium,
+        cli::RunReasoningEffort::Xhigh => Qwen38ReasoningEffort::Xhigh,
+    };
+    Ok(Some(Qwen38GenerationMode::Thinking(effort)))
 }
 
 fn validated_qwen_no_thinking_model(family: ModelFamily, gguf: &GgufFile) -> bool {
@@ -9720,6 +9741,44 @@ mod tests {
                 identity.0, identity.1, identity.2, identity.3,
             ));
         }
+    }
+
+    #[test]
+    fn qwen38_reasoning_effort_resolver_is_typed_and_fail_closed() {
+        assert_eq!(
+            resolve_qwen38_generation_mode(true, false, None).unwrap(),
+            Some(Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh))
+        );
+        for (input, expected) in [
+            (cli::RunReasoningEffort::Low, Qwen38ReasoningEffort::Low),
+            (
+                cli::RunReasoningEffort::Medium,
+                Qwen38ReasoningEffort::Medium,
+            ),
+            (cli::RunReasoningEffort::Xhigh, Qwen38ReasoningEffort::Xhigh),
+        ] {
+            assert_eq!(
+                resolve_qwen38_generation_mode(true, false, Some(input)).unwrap(),
+                Some(Qwen38GenerationMode::Thinking(expected))
+            );
+        }
+        assert_eq!(
+            resolve_qwen38_generation_mode(true, true, None).unwrap(),
+            Some(Qwen38GenerationMode::NoThinking)
+        );
+        assert!(
+            resolve_qwen38_generation_mode(false, false, Some(cli::RunReasoningEffort::Low))
+                .unwrap_err()
+                .to_string()
+                .contains("validated only for Qwen3.8 27B")
+        );
+        assert_eq!(
+            resolve_qwen38_generation_mode(false, false, None).unwrap(),
+            None
+        );
+        assert!(
+            resolve_qwen38_generation_mode(true, true, Some(cli::RunReasoningEffort::Low)).is_err()
+        );
     }
 
     #[test]

@@ -36,9 +36,12 @@ the same injected answer and asks only for an independent double-check.
 
 `scripts/bench/retention_eval.py` prepares deterministic raw-prompt JSONL for
 the current DeepSeek V4 ordinary-chat encoding and the historical Qwen 3.6
-empty-thinking encoding. It then reuses the existing `qwen --requests-jsonl`
-path, so one loaded process executes all samples serially. This avoids 48 model
-reloads without adding a server or a general evaluation framework.
+empty-thinking encoding. The `qwen38` run family intentionally aliases those
+exact frozen Qwen bytes while retaining an honest Qwen3.8 family label and
+recording `request_profile: qwen36` in run metadata. It then reuses the existing
+`qwen --requests-jsonl` path, so one loaded process executes all samples
+serially. This avoids 48 model reloads without adding a server or a general
+evaluation framework.
 
 The runner removes every ambient `QWEN_*` variable, then fixes
 `QWEN_DSV4_RESIDENCY_SET=0` and `QWEN_DSV4_PREFETCH=off`. It never requests a
@@ -66,6 +69,11 @@ uv run --script scripts/bench/retention_eval.py run \
   --arm dense-q4-anchor \
   --family qwen36 \
   --model /path/to/Qwen3.6-27B-Q4_K_M.gguf
+
+uv run --script scripts/bench/retention_eval.py run \
+  --arm qwen38-q4km \
+  --family qwen38 \
+  --model /path/to/Qwen3.8-27B-Q4_K_M.gguf
 
 uv run --script scripts/bench/retention_eval.py compare \
   --name defaults-cross-asset \

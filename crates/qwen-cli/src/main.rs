@@ -105,6 +105,37 @@ enum DeepSeekV4PrefetchMode {
     Auto,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+enum QwenModelPrefetchArg {
+    #[default]
+    Auto,
+    Off,
+}
+
+impl QwenModelPrefetchArg {
+    fn policy(self) -> PrefetchPolicy {
+        match self {
+            Self::Auto => LoadedModelConfig::default().prefetch_policy,
+            Self::Off => PrefetchPolicy::Off,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
+}
+
+fn prefetch_policy_label(policy: PrefetchPolicy) -> &'static str {
+    match policy {
+        PrefetchPolicy::Off => "off",
+        PrefetchPolicy::Always => "always",
+        PrefetchPolicy::ColdOnly { .. } => "cold_only",
+    }
+}
+
 impl DeepSeekV4PrefetchMode {
     fn as_str(self) -> &'static str {
         match self {
@@ -403,6 +434,10 @@ struct Args {
     /// Read JSONL request objects from a file or '-' while keeping one model loaded.
     #[arg(long, hide_short_help = true, conflicts_with_all = ["prompt", "prompt_file", "messages"])]
     requests_jsonl: Option<PathBuf>,
+
+    /// Select ordinary Qwen model cache warming; `off` avoids prefetch reads.
+    #[arg(long, hide_short_help = true, requires = "requests_jsonl", value_enum)]
+    model_prefetch: Option<QwenModelPrefetchArg>,
 
     /// Decode equal-prompt-length JSONL cohorts with per-request token limits.
     ///
@@ -2216,14 +2251,33 @@ struct RequestOutput {
     generated_text: String,
     stop_reason: StopReason,
     terminal_token_target_transition_consumed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_partition: Option<GeneratedThinkingPartition>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct GeneratedThinkingPartition {
+    delimiter: &'static str,
+    delimiter_start_token_index: usize,
+    delimiter_end_token_index_exclusive: usize,
+    delimiter_token_aligned: bool,
+    reasoning_tokens: Option<usize>,
+    delimiter_tokens: Option<usize>,
+    visible_tokens: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
 struct RequestStatsRow {
     schema_version: u32,
+    request_stats_contract: &'static str,
     id: String,
     line: usize,
     model: String,
+    build_commit: &'static str,
+    build_dirty: bool,
+    build_source_state: &'static str,
+    model_prefetch_policy: &'static str,
+    model_prefetch_bytes_returned: u64,
     greedy_gpu_selection_reason: &'static str,
     arrival_ms: u64,
     finish_ms: u64,
@@ -2235,6 +2289,8 @@ struct RequestStatsRow {
     decode_policy: &'static str,
     stop_reason: StopReason,
     terminal_token_target_transition_consumed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_partition: Option<GeneratedThinkingPartition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sampling: Option<SamplingTelemetry>,
     cache_prefix_tokens: Option<usize>,
@@ -2322,6 +2378,7 @@ fn run() -> Result<()> {
     invocation.apply_option_overrides(&mut args);
     let modern_run = invocation.is_run();
     validate_deepseek_v4_reasoning_scope(&args)?;
+    validate_qwen_model_prefetch_scope(&args)?;
     validate_request_timing_mode(&args)?;
     validate_sampling_attribution_mode(&args)?;
     validate_sampled_structural_mode(&args)?;
@@ -2427,6 +2484,14 @@ fn run() -> Result<()> {
     }
 
     unreachable!("request mode was validated above")
+}
+
+fn validate_qwen_model_prefetch_scope(args: &Args) -> Result<()> {
+    ensure!(
+        args.model_prefetch.is_none() || args.requests_jsonl.is_some(),
+        "--model-prefetch requires --requests-jsonl"
+    );
+    Ok(())
 }
 
 fn validate_request_timing_mode(args: &Args) -> Result<()> {
@@ -2914,6 +2979,9 @@ fn deepseek_v4_shared_unsupported_options(
     }
     if args.request_timings.is_some() {
         unsupported.push("--request-timings");
+    }
+    if args.model_prefetch.is_some() {
+        unsupported.push("--model-prefetch");
     }
     if args.request_timing_warm_followup {
         unsupported.push("--request-timing-warm-followup");
@@ -4889,6 +4957,7 @@ fn run_deepseek_v4_requests_jsonl(
             generated_text: String::from_utf8_lossy(&generated_bytes).into_owned(),
             stop_reason: generation.stop_reason,
             terminal_token_target_transition_consumed: false,
+            thinking_partition: None,
         };
         {
             let mut stdout = stdout_handle.lock();
@@ -6836,20 +6905,34 @@ fn run_requests_jsonl(
 
     let load_t0 = Instant::now();
     let runtime = Runtime::metal().context("init Metal runtime")?;
+    let requested_prefetch = args.model_prefetch.unwrap_or_default();
+    let prefetch_policy = requested_prefetch.policy();
     let prefix_cache_max_bytes = if args.batch_size.is_some() || args.concurrency.is_some() {
         0
     } else {
         prefix_cache_max_bytes(args)?
     };
+    let defaults = LoadedModelConfig::default();
     let loaded = runtime
         .load_open_model_with_config(
             gguf,
             LoadedModelConfig {
                 prefix_cache_max_bytes,
-                ..LoadedModelConfig::default()
+                prefetch_policy,
+                ..defaults
             },
         )
         .with_context(|| format!("load model {}", model_path.display()))?;
+    ensure!(
+        loaded.prefetch_outcome().policy == prefetch_policy,
+        "Qwen model prefetch policy changed during load"
+    );
+    eprintln!(
+        "model_prefetch: requested={} effective={} bytes_returned={}",
+        requested_prefetch.as_str(),
+        prefetch_policy_label(loaded.prefetch_outcome().policy),
+        loaded.prefetch_outcome().bytes_returned_total(),
+    );
     if args.prompt_lookup {
         ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(anyhow::Error::msg)?;
     }
@@ -7578,6 +7661,7 @@ fn run_jsonl_request(
     let stop_reason = generation.stop_reason;
     let generated = generation.tokens;
     let generated_token_sha256 = generated_token_sha256(&generated);
+    let thinking_partition = generated_thinking_partition(tokenizer, &generated);
     drop(sequence);
     let decode_ms = generation.wall_ms;
     let decode_tps = if decode_ms > 0.0 {
@@ -7604,9 +7688,15 @@ fn run_jsonl_request(
             false,
             false,
         ),
+        request_stats_contract: "qwen_jsonl_v2",
         id: id.to_string(),
         line: prepared.line,
         model: loaded.path().display().to_string(),
+        build_commit: env!("QWEN_BUILD_COMMIT"),
+        build_dirty: parse_build_dirty(env!("QWEN_BUILD_DIRTY")),
+        build_source_state: env!("QWEN_BUILD_SOURCE_STATE"),
+        model_prefetch_policy: prefetch_policy_label(loaded.prefetch_outcome().policy),
+        model_prefetch_bytes_returned: loaded.prefetch_outcome().bytes_returned_total(),
         greedy_gpu_selection_reason: greedy_gpu_decision.reason,
         arrival_ms,
         finish_ms,
@@ -7622,6 +7712,7 @@ fn run_jsonl_request(
         ),
         stop_reason,
         terminal_token_target_transition_consumed: false,
+        thinking_partition: thinking_partition.clone(),
         sampling: SamplingTelemetry::sampled(sampling_config, sampler.draws()),
         cache_prefix_tokens,
         cache_prefix_source: cache_prefix_source.as_str().to_string(),
@@ -7676,6 +7767,7 @@ fn run_jsonl_request(
         generated_text,
         stop_reason,
         terminal_token_target_transition_consumed: false,
+        thinking_partition,
     };
     Ok((output, stats))
 }
@@ -7688,6 +7780,71 @@ fn request_prompt(request: &JsonlRequest, line: usize) -> Result<String> {
             .with_context(|| format!("read prompt_file {} on line {line}", path.display())),
         (None, None) => bail!("request line {line} has neither prompt nor prompt_file"),
     }
+}
+
+fn generated_thinking_partition(
+    tokenizer: &Tokenizer,
+    generated: &[i32],
+) -> Option<GeneratedThinkingPartition> {
+    let pieces = generated
+        .iter()
+        .map(|&token| tokenizer.decode_piece(token))
+        .collect::<Vec<_>>();
+    thinking_partition_from_pieces(&pieces)
+}
+
+fn thinking_partition_from_pieces(pieces: &[String]) -> Option<GeneratedThinkingPartition> {
+    const DELIMITER: &str = "</think>";
+    let mut decoded = String::new();
+    let mut boundaries = Vec::with_capacity(pieces.len() + 1);
+    boundaries.push(0usize);
+    for piece in pieces {
+        decoded.push_str(piece);
+        boundaries.push(decoded.len());
+    }
+
+    let delimiter_start = decoded.find(DELIMITER)?;
+    let delimiter_end = delimiter_start + DELIMITER.len();
+    let start_exact = boundaries
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, &offset)| (offset == delimiter_start).then_some(index));
+    let end_exact = boundaries
+        .iter()
+        .enumerate()
+        .find_map(|(index, &offset)| (offset == delimiter_end).then_some(index));
+    let delimiter_start_token_index = start_exact.unwrap_or_else(|| {
+        boundaries
+            .iter()
+            .rposition(|&offset| offset < delimiter_start)
+            .unwrap_or(0)
+    });
+    let delimiter_end_token_index_exclusive = end_exact.unwrap_or_else(|| {
+        boundaries
+            .iter()
+            .position(|&offset| offset > delimiter_end)
+            .unwrap_or(pieces.len())
+    });
+    let delimiter_token_aligned = start_exact.is_some() && end_exact.is_some();
+    let (reasoning_tokens, delimiter_tokens, visible_tokens) = match (start_exact, end_exact) {
+        (Some(start), Some(end)) if start <= end => (
+            Some(start),
+            Some(end - start),
+            Some(pieces.len().saturating_sub(end)),
+        ),
+        _ => (None, None, None),
+    };
+
+    Some(GeneratedThinkingPartition {
+        delimiter: DELIMITER,
+        delimiter_start_token_index,
+        delimiter_end_token_index_exclusive,
+        delimiter_token_aligned,
+        reasoning_tokens,
+        delimiter_tokens,
+        visible_tokens,
+    })
 }
 
 fn prefill_span(
@@ -9320,6 +9477,66 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn qwen_model_prefetch_cli_is_explicit_and_jsonl_scoped() {
+        assert!(matches!(
+            QwenModelPrefetchArg::Auto.policy(),
+            PrefetchPolicy::ColdOnly { .. }
+        ));
+        assert_eq!(QwenModelPrefetchArg::Off.policy(), PrefetchPolicy::Off);
+
+        let args = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--requests-jsonl",
+            "requests.jsonl",
+            "--model-prefetch",
+            "off",
+        ])
+        .unwrap();
+        assert_eq!(args.model_prefetch, Some(QwenModelPrefetchArg::Off));
+        let wrong_scope = Args::try_parse_from([
+            "qwen",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "hello",
+            "--model-prefetch",
+            "off",
+        ])
+        .unwrap();
+        assert!(
+            validate_qwen_model_prefetch_scope(&wrong_scope)
+                .unwrap_err()
+                .to_string()
+                .contains("requires --requests-jsonl")
+        );
+    }
+
+    #[test]
+    fn generated_thinking_partition_counts_only_aligned_segments() {
+        let aligned = thinking_partition_from_pieces(&[
+            "reason".to_string(),
+            "ing".to_string(),
+            "</think>".to_string(),
+            "\n\nanswer".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(aligned.reasoning_tokens, Some(2));
+        assert_eq!(aligned.delimiter_tokens, Some(1));
+        assert_eq!(aligned.visible_tokens, Some(1));
+        assert!(aligned.delimiter_token_aligned);
+
+        let split =
+            thinking_partition_from_pieces(&["reason</thi".to_string(), "nk>answer".to_string()])
+                .unwrap();
+        assert!(!split.delimiter_token_aligned);
+        assert_eq!(split.reasoning_tokens, None);
+        assert_eq!(split.visible_tokens, None);
+        assert!(thinking_partition_from_pieces(&["answer".to_string()]).is_none());
+    }
 
     #[test]
     fn exact_lcp_fanout_policy_is_bounded_by_default_and_strict() {

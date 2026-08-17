@@ -2789,6 +2789,7 @@ fn finalize_refill_lane(lane: Lane) -> Result<(usize, RequestOutput)> {
             generated_text: lane.generated_text,
             stop_reason,
             terminal_token_target_transition_consumed: false,
+            thinking_partition: None,
         },
     ))
 }
@@ -3439,6 +3440,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
             generated_text: lane.generated_text,
             stop_reason,
             terminal_token_target_transition_consumed: false,
+            thinking_partition: None,
         });
     }
     let moe_plan = executor.moe_plan_telemetry();
@@ -3562,6 +3564,7 @@ mod tests {
             generated_text: id.to_string(),
             stop_reason: StopReason::TokenLimit,
             terminal_token_target_transition_consumed: false,
+            thinking_partition: None,
         }
     }
 

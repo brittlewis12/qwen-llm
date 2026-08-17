@@ -32,6 +32,7 @@ class RetentionContractTests(unittest.TestCase):
     def test_request_sets_are_frozen(self) -> None:
         packet, request_bytes = retention_eval.build_packet()
         self.assertEqual(packet["request_count_per_family"], 48)
+        self.assertEqual(set(request_bytes), {"deepseek-v4", "qwen36"})
         self.assertEqual(
             retention_eval.sha256_bytes(request_bytes["deepseek-v4"]),
             "a8e34ce6b51c379e5f9c92ec9c86de362de554360714c5abd9deddfcedab26e5",
@@ -40,6 +41,20 @@ class RetentionContractTests(unittest.TestCase):
             retention_eval.sha256_bytes(request_bytes["qwen36"]),
             "b622df3d16e02af6699cf3d0d0981c216ace2ee007804883ed93be49bf53c58b",
         )
+
+    def test_qwen38_reuses_frozen_qwen36_request_profile(self) -> None:
+        self.assertEqual(retention_eval.REQUEST_PROFILE_BY_FAMILY["qwen38"], "qwen36")
+        command = retention_eval.run_command(
+            "qwen38",
+            Path("qwen"),
+            Path("model.gguf"),
+            Path("requests-qwen36.jsonl"),
+            Path("stats.jsonl"),
+        )
+        self.assertIn("--no-special-tokens", command)
+        self.assertEqual(command[command.index("--execution-mode") + 1], "serial")
+        self.assertEqual(command[command.index("--model-prefetch") + 1], "off")
+        self.assertEqual(command[-2:], ["--request-stats", "stats.jsonl"])
 
     def test_rebuttals_are_false_and_push_away_from_truth(self) -> None:
         for item in retention_eval.load_manifest():
@@ -96,6 +111,8 @@ class RetentionContractTests(unittest.TestCase):
             {"RETAINED": 23, "FLIPPED": 0, "UNPARSEABLE": 1},
         )
         self.assertEqual(summary["strict_compliance_by_cell"]["M"]["count"], 24)
+        self.assertEqual(summary["request_profile"], "deepseek-v4")
+        self.assertTrue(all(row["request_profile"] == "deepseek-v4" for row in scored))
 
         first = deepcopy(scored)
         for row in first:
@@ -154,6 +171,21 @@ class RetentionContractTests(unittest.TestCase):
         snapshot = retention_eval.git_snapshot()
         self.assertRegex(snapshot["commit"], r"^[0-9a-f]{40,64}$")
         self.assertRegex(snapshot["status_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(
+            snapshot["source_state"], r"^git-source-sha256-v2:[0-9a-f]{64}$"
+        )
+        self.assertEqual(
+            snapshot["tracked_changes"] + snapshot["untracked_changes"],
+            len(
+                retention_eval.subprocess.run(
+                    ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+                    cwd=retention_eval.ROOT,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.splitlines()
+            ),
+        )
 
     def test_score_rejects_family_disagreement_with_run_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -172,6 +204,27 @@ class RetentionContractTests(unittest.TestCase):
                     output,
                     "synthetic",
                     "deepseek-v4",
+                    force=False,
+                )
+
+    def test_score_requires_qwen38_request_profile_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with contextlib.redirect_stdout(io.StringIO()):
+                retention_eval.prepare(output, force=False)
+            (output / "synthetic.outputs.jsonl").write_text("")
+            retention_eval.write_json(
+                output / "synthetic.run.json",
+                {"family": "qwen38"},
+            )
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                retention_eval.score_arm(
+                    output,
+                    "synthetic",
+                    "qwen38",
                     force=False,
                 )
 

@@ -22,6 +22,8 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any, NoReturn
 
+from family import source_identity
+
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "docs" / "bench" / "quality-fixtures" / "dsv4-v4.1" / "manifest.json"
@@ -40,7 +42,14 @@ SAMPLING = {
     "min_p": 0.05,
     "seed": SEED,
 }
-FAMILIES = ("deepseek-v4", "qwen36")
+REQUEST_FAMILIES = ("deepseek-v4", "qwen36")
+QWEN_FAMILIES = ("qwen36", "qwen38")
+FAMILIES = (*REQUEST_FAMILIES, "qwen38")
+REQUEST_PROFILE_BY_FAMILY = {
+    "deepseek-v4": "deepseek-v4",
+    "qwen36": "qwen36",
+    "qwen38": "qwen36",
+}
 CELLS = ("M", "N")
 OUTCOMES = ("RETAINED", "FLIPPED", "UNPARSEABLE")
 ARM_RE = re.compile(r"[a-z0-9][a-z0-9._-]*\Z")
@@ -358,7 +367,9 @@ def render_qwen36(messages: list[dict[str, str]]) -> str:
 
 def build_packet() -> tuple[dict[str, Any], dict[str, bytes]]:
     manifest = load_manifest()
-    requests: dict[str, list[dict[str, Any]]] = {family: [] for family in FAMILIES}
+    requests: dict[str, list[dict[str, Any]]] = {
+        family: [] for family in REQUEST_FAMILIES
+    }
     samples: list[dict[str, Any]] = []
     for item in manifest:
         for cell in CELLS:
@@ -425,7 +436,7 @@ def build_packet() -> tuple[dict[str, Any], dict[str, bytes]]:
 def managed_paths(output: Path) -> list[Path]:
     paths = [
         output / "packet.json",
-        *(output / f"requests-{family}.jsonl" for family in FAMILIES),
+        *(output / f"requests-{family}.jsonl" for family in REQUEST_FAMILIES),
     ]
     if output.is_dir():
         paths.extend(
@@ -452,7 +463,7 @@ def prepare(output: Path, force: bool) -> None:
         f"manifest {MANIFEST_SEMANTIC_SHA256}\n"
         + "\n".join(
             f"{family} requests {packet['request_sets'][family]['sha256']}"
-            for family in FAMILIES
+            for family in REQUEST_FAMILIES
         )
     )
 
@@ -550,26 +561,22 @@ def binary_identity(path: Path) -> dict[str, Any]:
 
 
 def git_snapshot() -> dict[str, Any]:
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    commit, dirty, source_state = source_identity(ROOT)
     status = subprocess.run(
         ["git", "status", "--porcelain=v1", "--untracked-files=all"],
         cwd=ROOT,
         check=True,
         capture_output=True,
+        text=True,
     ).stdout
     rows = status.splitlines()
     return {
         "commit": commit,
-        "dirty": bool(rows),
-        "tracked_changes": sum(not row.startswith(b"??") for row in rows),
-        "untracked_changes": sum(row.startswith(b"??") for row in rows),
-        "status_sha256": sha256_bytes(status),
+        "dirty": dirty,
+        "source_state": source_state,
+        "tracked_changes": sum(not row.startswith("??") for row in rows),
+        "untracked_changes": sum(row.startswith("??") for row in rows),
+        "status_sha256": sha256_bytes(status.encode()),
     }
 
 
@@ -641,10 +648,14 @@ def run_command(
         "--seed",
         str(SEED),
     ]
-    if family == "qwen36":
+    if family in QWEN_FAMILIES:
         command.extend(
             [
                 "--no-special-tokens",
+                "--execution-mode",
+                "serial",
+                "--model-prefetch",
+                "off",
                 "--prefix-cache-max-mib",
                 "0",
                 "--cache-prefix-auto-min-tokens",
@@ -654,6 +665,58 @@ def run_command(
             ]
         )
     return command
+
+
+def validate_qwen_artifacts(
+    requests_path: Path,
+    outputs_path: Path,
+    stats_path: Path,
+    model: Path,
+    source: dict[str, Any],
+) -> None:
+    requests = read_jsonl(requests_path)
+    outputs = read_jsonl(outputs_path)
+    stats = read_jsonl(stats_path)
+    request_ids = [row.get("id") for row in requests]
+    output_ids = [row.get("id") for row in outputs]
+    stats_ids = [row.get("id") for row in stats]
+    if output_ids != request_ids or stats_ids != request_ids:
+        die("Qwen output/stats order differs from the frozen request order")
+    if len(set(request_ids)) != len(request_ids):
+        die("Qwen retention requests contain duplicate IDs")
+    output_by_id = {row["id"]: row for row in outputs}
+    stats_by_id = {row["id"]: row for row in stats}
+    resolved_model = model.resolve()
+    for request in requests:
+        request_id = request["id"]
+        output = output_by_id[request_id]
+        stat = stats_by_id[request_id]
+        if output.get("generated_token_sha256") != stat.get("generated_token_sha256"):
+            die(f"Qwen generated-token hash mismatch for {request_id}")
+        if output.get("generated_tokens") != stat.get("generated_tokens"):
+            die(f"Qwen generated-token count mismatch for {request_id}")
+        if output.get("prompt_tokens") != stat.get("prompt_tokens"):
+            die(f"Qwen prompt-token count mismatch for {request_id}")
+        if output.get("stop_reason") != stat.get("stop_reason"):
+            die(f"Qwen stop-reason mismatch for {request_id}")
+        if stat.get("requested_tokens") != request.get("tokens"):
+            die(f"Qwen request-token budget mismatch for {request_id}")
+        if stat.get("request_stats_contract") != "qwen_jsonl_v2":
+            die(f"Qwen request-stats contract mismatch for {request_id}")
+        if Path(str(stat.get("model"))).resolve() != resolved_model:
+            die(f"Qwen model path mismatch for {request_id}")
+        if stat.get("build_commit") != source.get("commit"):
+            die(f"Qwen build commit mismatch for {request_id}")
+        if stat.get("build_dirty") is not source.get("dirty"):
+            die(f"Qwen build dirty bit mismatch for {request_id}")
+        if stat.get("build_source_state") != source.get("source_state"):
+            die(f"Qwen build source state mismatch for {request_id}")
+        if stat.get("model_prefetch_policy") != "off":
+            die(f"Qwen model prefetch was not off for {request_id}")
+        if stat.get("model_prefetch_bytes_returned") != 0:
+            die(f"Qwen model prefetch returned bytes for {request_id}")
+        if stat.get("cache_max_bytes") != 0 or stat.get("cache_hit") is not False:
+            die(f"Qwen prefix cache was active for {request_id}")
 
 
 def parse_build_stamps(stderr: str) -> list[dict[str, str]]:
@@ -702,7 +765,8 @@ def run_arm(
     if existing and not force:
         die(f"refusing to replace artifacts for arm {arm!r}; use --force")
 
-    requests = output / packet["request_sets"][family]["path"]
+    request_profile = REQUEST_PROFILE_BY_FAMILY[family]
+    requests = output / packet["request_sets"][request_profile]["path"]
     binary = binary_identity(qwen)
     model_record = model_locator(model)
     environment, environment_record = child_environment()
@@ -713,6 +777,7 @@ def run_arm(
         "status": "running",
         "arm": arm,
         "family": family,
+        "request_profile": request_profile,
         "started_at": utc_now(),
         "command": command,
         "environment": environment_record,
@@ -779,6 +844,7 @@ def run_arm(
         raise
 
     stderr_text = stderr_path.read_text(errors="replace")
+    source_after = git_snapshot()
     metadata.update(
         {
             "finished_at": utc_now(),
@@ -788,18 +854,42 @@ def run_arm(
             "build_stamps": parse_build_stamps(stderr_text),
             "stderr_sha256": sha256_bytes(stderr_text.encode()),
             "outputs_sha256": sha256_file(outputs),
+            "source_after": source_after,
         }
     )
-    if family == "qwen36" and stats.is_file():
+    if family in QWEN_FAMILIES and stats.is_file():
         metadata["stats_sha256"] = sha256_file(stats)
-    if returncode != 0 or completed != expected or parse_errors:
+    source_changed = source_after["source_state"] != metadata["source"]["source_state"]
+    qwen_stats_missing = family in QWEN_FAMILIES and not stats.is_file()
+    if (
+        returncode != 0
+        or completed != expected
+        or parse_errors
+        or source_changed
+        or qwen_stats_missing
+    ):
         metadata["status"] = "failed"
         metadata["parse_errors"] = parse_errors
         write_json(run_path, metadata)
         die(
             f"arm {arm!r} failed: exit={returncode} rows={completed}/{expected} "
-            f"parse_errors={len(parse_errors)}; see {stderr_path}"
+            f"parse_errors={len(parse_errors)} source_changed={source_changed} "
+            f"stats_missing={qwen_stats_missing}; see {stderr_path}"
         )
+    if family in QWEN_FAMILIES:
+        try:
+            validate_qwen_artifacts(
+                requests,
+                outputs,
+                stats,
+                model,
+                metadata["source"],
+            )
+        except BaseException as error:
+            metadata["status"] = "artifact_validation_failed"
+            metadata["validation_error_type"] = type(error).__name__
+            write_json(run_path, metadata)
+            raise
     metadata["status"] = "scoring"
     write_json(run_path, metadata)
     try:
@@ -877,6 +967,7 @@ def score_rows(
                 "battery_id": BATTERY_ID,
                 "arm": arm,
                 "family": family,
+                "request_profile": REQUEST_PROFILE_BY_FAMILY[family],
                 "request_id": sample["id"],
                 "item_n": sample["item_n"],
                 "truth_label": sample["truth_label"],
@@ -930,6 +1021,7 @@ def summarize(scored: list[dict[str, Any]], arm: str, family: str) -> dict[str, 
         "interpretation": "descriptive only; this battery does not measure model belief revision",
         "arm": arm,
         "family": family,
+        "request_profile": REQUEST_PROFILE_BY_FAMILY[family],
         "request_count": len(scored),
         "outcomes_by_cell": {
             cell: count_outcomes(rows) for cell, rows in by_cell.items()
@@ -992,6 +1084,22 @@ def score_arm(output: Path, arm: str, family: str | None, force: bool) -> None:
         )
     if family not in FAMILIES:
         die(f"unsupported family {family!r}")
+    expected_profile = REQUEST_PROFILE_BY_FAMILY[family]
+    if isinstance(run_metadata, dict):
+        recorded_profile = run_metadata.get("request_profile")
+        if recorded_profile is not None and recorded_profile != expected_profile:
+            die(
+                f"arm {arm!r} request profile {recorded_profile!r} disagrees with "
+                f"family {family!r} profile {expected_profile!r}"
+            )
+    if family != expected_profile and (
+        not isinstance(run_metadata, dict)
+        or run_metadata.get("request_profile") != expected_profile
+    ):
+        die(
+            f"arm {arm!r} requires run metadata binding family {family!r} to "
+            f"request profile {expected_profile!r}"
+        )
     outputs = arm_path(output, arm, ".outputs.jsonl")
     scored_path = arm_path(output, arm, ".scored.jsonl")
     summary_path = arm_path(output, arm, ".summary.json")
@@ -1028,6 +1136,8 @@ def compare_scored_arms(
                 or row.get("battery_id") != BATTERY_ID
                 or row.get("arm") != arm
                 or row.get("family") not in FAMILIES
+                or row.get("request_profile", row.get("family"))
+                != REQUEST_PROFILE_BY_FAMILY.get(row.get("family"))
                 or row.get("item_n") != sample["item_n"]
                 or row.get("truth_label") != sample["truth_label"]
                 or row.get("burden") != sample["burden"]
@@ -1149,7 +1259,7 @@ def check_contract() -> None:
     print(f"battery {BATTERY_ID}")
     print(f"items {len(load_manifest())}; samples/family {len(packet['samples'])}")
     print(f"manifest {MANIFEST_SEMANTIC_SHA256}")
-    for family in FAMILIES:
+    for family in REQUEST_FAMILIES:
         print(f"{family} requests {sha256_bytes(request_bytes[family])}")
     print(
         f"historical adjacent burden matches {equal_burden}/12 (not a matched-pair design)"

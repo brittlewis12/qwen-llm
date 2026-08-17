@@ -1755,6 +1755,7 @@ fn run_pair(
             .stop_reason
             .expect("validated concurrent lane termination"),
         terminal_token_target_transition_consumed: false,
+        thinking_partition: None,
     });
     Ok((
         outputs,
@@ -2429,6 +2430,7 @@ fn generate_deepseek_lane(
         generated_text: String::from_utf8_lossy(&generated_bytes).into_owned(),
         stop_reason: generation.stop_reason,
         terminal_token_target_transition_consumed: false,
+        thinking_partition: None,
     };
     Ok(DeepSeekCompletedLane {
         output,

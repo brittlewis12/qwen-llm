@@ -2,8 +2,8 @@
 
 Date: 2026-08-17
 
-Status: **PREREGISTERED AMENDMENT A1** after a decisive parsed-streaming
-**KILL**. No direct-word-fill timing result has been admitted.
+Status: **KILL** for both parsed streaming and A1 native direct-word fill.
+Legacy decode remains unchanged.
 
 ## Question
 
@@ -109,7 +109,7 @@ Supporting 6,144 gates:
 The first implementation followed the literal candidate above: 4 KiB wire
 chunks were hashed and converted word-by-word with `from_le_bytes`. Its
 representation deletion was real, but its large-record wall result failed every
-preregistered performance gate:
+preregistered wall gate:
 
 | Position | Legacy median | Parsed median | Reduction | Wins | RSS deletion |
 |---:|---:|---:|---:|---:|---:|
@@ -139,6 +139,30 @@ unsafe boundary is limited to `T: bytemuck::Pod`, checked byte/count arithmetic,
 and writes within reserved capacity. All original correctness and performance
 gates remain unchanged. A1 restarts fixture generation and every pair from zero;
 the parsed-streaming campaign contributes no A1 timing sample.
+
+## A1 Direct Word Result: KILL
+
+A1 passed every byte, digest, short-read, interruption, corruption, and error
+equivalence gate. It also reproduced the full memory deletion. It did not pass
+the frozen large-record wall gates:
+
+| Position | Legacy median | Direct median | Reduction | Wins | RSS deletion |
+|---:|---:|---:|---:|---:|---:|
+| 6,144 | 215.387 ms | 214.486 ms | +0.42% | 4/6 | 60,194,816 B |
+| 97,040 | 2,596.299 ms | 2,593.283 ms | +0.12% | 4/6 | 685,694,976 B |
+
+At 97,040, AB median saving was `-7.295 ms`; BA was `+9.153 ms`. The candidate
+missed the required 5/6 wins, positive result in both order strata, and 5%
+reduction. Peak-footprint deletion was 686,088,696 bytes and median
+whole-process paired saving was 5 ms, confirming that the memory representation
+disappeared without establishing useful wall leverage.
+
+`direct-word-results.json` retains all A1 arms and gates. No v1 fixture or arm
+was reused. Per the preregistered decision rule, the memory-only result does not
+authorize default promotion: the decoder prototype and environment flag are
+removed. A future memory-pressure-specific reopen would require an explicit
+product objective and a new gate; it must not inherit a speed claim from this
+packet.
 
 ## Decision Rule
 

@@ -1,0 +1,1920 @@
+{
+  "arms": [
+    {
+      "arm": "control",
+      "event_sequence": 6,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 214851.0,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 1,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 130465792,
+        "peak_footprint_bytes": 124781168,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 7,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 213543.042,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 1,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 70287360,
+        "peak_footprint_bytes": 64668224,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 9,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 214303.209,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 2,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 70287360,
+        "peak_footprint_bytes": 64619000,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 10,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 214208.5,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 2,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 130662400,
+        "peak_footprint_bytes": 124764760,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 12,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 214490.584,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 3,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 70451200,
+        "peak_footprint_bytes": 64848424,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 13,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 215922.916,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 3,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 130662400,
+        "peak_footprint_bytes": 124748352,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 15,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 216719.416,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 4,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 130465792,
+        "peak_footprint_bytes": 124781168,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 16,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 215077.0,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 4,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 70483968,
+        "peak_footprint_bytes": 64832016,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 18,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 214675.291,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 5,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 130596864,
+        "peak_footprint_bytes": 124748352,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 19,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 214921.458,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 5,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 70287360,
+        "peak_footprint_bytes": 64619000,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 21,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 214481.08299999998,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 6,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 70287360,
+        "peak_footprint_bytes": 64668224,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 22,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+        "decode_us": 216627.584,
+        "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+        "payload_bytes": 60137472,
+        "position": 6144,
+        "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+        "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+        "record_bytes": 60153888,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 6,
+      "position": 6144,
+      "time": {
+        "max_rss_bytes": 130465792,
+        "peak_footprint_bytes": 124764760,
+        "real_s": 0.22
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 24,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2594651.3749999995,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 1,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 1381810176,
+        "peak_footprint_bytes": 1376912872,
+        "real_s": 2.6
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 25,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2608659.2909999997,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 1,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 696025088,
+        "peak_footprint_bytes": 690734064,
+        "real_s": 2.61
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 27,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2588728.417,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 2,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 696205312,
+        "peak_footprint_bytes": 690930696,
+        "real_s": 2.59
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 28,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2600349.625,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 2,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 1381810176,
+        "peak_footprint_bytes": 1376896464,
+        "real_s": 2.61
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 30,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2588794.084,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 3,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 696205312,
+        "peak_footprint_bytes": 690897880,
+        "real_s": 2.59
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 31,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2597947.25,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 3,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 1381810176,
+        "peak_footprint_bytes": 1376896464,
+        "real_s": 2.6
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 33,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2605639.333,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 4,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 1381810176,
+        "peak_footprint_bytes": 1376962096,
+        "real_s": 2.61
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 34,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2600449.083,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 4,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 696025088,
+        "peak_footprint_bytes": 690766880,
+        "real_s": 2.61
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 36,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2590477.334,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 5,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 1381810176,
+        "peak_footprint_bytes": 1376912872,
+        "real_s": 2.59
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 37,
+      "order": "ab",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2597772.2920000004,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 5,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 696025088,
+        "peak_footprint_bytes": 690734064,
+        "real_s": 2.6
+      }
+    },
+    {
+      "arm": "direct",
+      "event_sequence": 39,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2585133.875,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": true,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 6,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 696205312,
+        "peak_footprint_bytes": 690897880,
+        "real_s": 2.59
+      }
+    },
+    {
+      "arm": "control",
+      "event_sequence": 40,
+      "order": "ba",
+      "packet": {
+        "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+        "decode_us": 2592117.375,
+        "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+        "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+        "payload_bytes": 685862976,
+        "position": 97040,
+        "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+        "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+        "record_bytes": 685879392,
+        "schema": "qwen-dsv4-typed-decode-floor/v1",
+        "source_identity": {
+          "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "build_commit_short": "abb18e0b5",
+          "build_dirty": true,
+          "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "overrides": [
+            "allow_dirty"
+          ],
+          "problems": [
+            "dirty"
+          ],
+          "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+          "runtime_dirty": true,
+          "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+          "schema_version": 2,
+          "stamp_error": null,
+          "stamp_source": "git",
+          "status": "dirty"
+        },
+        "streaming_typed": false,
+        "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+      },
+      "pair": 6,
+      "position": 97040,
+      "time": {
+        "max_rss_bytes": 1381777408,
+        "peak_footprint_bytes": 1376880104,
+        "real_s": 2.6
+      }
+    }
+  ],
+  "disposition": "KILL",
+  "execution_chronology": [
+    {
+      "arm": null,
+      "artifact": "build-info-before.json",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:04Z",
+      "event": "build-info-before",
+      "event_sequence": 1,
+      "exit_status": 0,
+      "order": null,
+      "pair": null,
+      "position": null,
+      "started_utc": "2026-08-17T19:52:04Z"
+    },
+    {
+      "arm": null,
+      "artifact": "fixture-p006144.json",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:05Z",
+      "event": "generate",
+      "event_sequence": 2,
+      "exit_status": 0,
+      "order": null,
+      "pair": null,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:04Z"
+    },
+    {
+      "arm": null,
+      "artifact": "fixture-p097040.json",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:13Z",
+      "event": "generate",
+      "event_sequence": 3,
+      "exit_status": 0,
+      "order": null,
+      "pair": null,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:05Z"
+    },
+    {
+      "arm": null,
+      "artifact": "build-info-after-fixtures.json",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:14Z",
+      "event": "build-info-after-fixtures",
+      "event_sequence": 4,
+      "exit_status": 0,
+      "order": null,
+      "pair": null,
+      "position": null,
+      "started_utc": "2026-08-17T19:52:13Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p6144-pair1.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:14Z",
+      "event": "authenticate",
+      "event_sequence": 5,
+      "exit_status": 0,
+      "order": null,
+      "pair": 1,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:14Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p6144-pair1-ab-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:14Z",
+      "event": "arm",
+      "event_sequence": 6,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 1,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:14Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p6144-pair1-ab-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:14Z",
+      "event": "arm",
+      "event_sequence": 7,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 1,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:14Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p6144-pair2.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:14Z",
+      "event": "authenticate",
+      "event_sequence": 8,
+      "exit_status": 0,
+      "order": null,
+      "pair": 2,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:14Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p6144-pair2-ba-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:15Z",
+      "event": "arm",
+      "event_sequence": 9,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 2,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:14Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p6144-pair2-ba-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:15Z",
+      "event": "arm",
+      "event_sequence": 10,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 2,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:15Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p6144-pair3.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:15Z",
+      "event": "authenticate",
+      "event_sequence": 11,
+      "exit_status": 0,
+      "order": null,
+      "pair": 3,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:15Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p6144-pair3-ba-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:15Z",
+      "event": "arm",
+      "event_sequence": 12,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 3,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:15Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p6144-pair3-ba-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:15Z",
+      "event": "arm",
+      "event_sequence": 13,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 3,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:15Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p6144-pair4.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:15Z",
+      "event": "authenticate",
+      "event_sequence": 14,
+      "exit_status": 0,
+      "order": null,
+      "pair": 4,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:15Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p6144-pair4-ab-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:16Z",
+      "event": "arm",
+      "event_sequence": 15,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 4,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:15Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p6144-pair4-ab-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:16Z",
+      "event": "arm",
+      "event_sequence": 16,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 4,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:16Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p6144-pair5.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:16Z",
+      "event": "authenticate",
+      "event_sequence": 17,
+      "exit_status": 0,
+      "order": null,
+      "pair": 5,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:16Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p6144-pair5-ab-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:16Z",
+      "event": "arm",
+      "event_sequence": 18,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 5,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:16Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p6144-pair5-ab-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:17Z",
+      "event": "arm",
+      "event_sequence": 19,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 5,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:16Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p6144-pair6.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:17Z",
+      "event": "authenticate",
+      "event_sequence": 20,
+      "exit_status": 0,
+      "order": null,
+      "pair": 6,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:17Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p6144-pair6-ba-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:17Z",
+      "event": "arm",
+      "event_sequence": 21,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 6,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:17Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p6144-pair6-ba-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:17Z",
+      "event": "arm",
+      "event_sequence": 22,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 6,
+      "position": 6144,
+      "started_utc": "2026-08-17T19:52:17Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p97040-pair1.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:18Z",
+      "event": "authenticate",
+      "event_sequence": 23,
+      "exit_status": 0,
+      "order": null,
+      "pair": 1,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:17Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p97040-pair1-ab-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:21Z",
+      "event": "arm",
+      "event_sequence": 24,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 1,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:18Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p97040-pair1-ab-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:24Z",
+      "event": "arm",
+      "event_sequence": 25,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 1,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:21Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p97040-pair2.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:25Z",
+      "event": "authenticate",
+      "event_sequence": 26,
+      "exit_status": 0,
+      "order": null,
+      "pair": 2,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:24Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p97040-pair2-ba-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:27Z",
+      "event": "arm",
+      "event_sequence": 27,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 2,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:25Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p97040-pair2-ba-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:30Z",
+      "event": "arm",
+      "event_sequence": 28,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 2,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:27Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p97040-pair3.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:31Z",
+      "event": "authenticate",
+      "event_sequence": 29,
+      "exit_status": 0,
+      "order": null,
+      "pair": 3,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:30Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p97040-pair3-ba-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:34Z",
+      "event": "arm",
+      "event_sequence": 30,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 3,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:31Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p97040-pair3-ba-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:37Z",
+      "event": "arm",
+      "event_sequence": 31,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 3,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:34Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p97040-pair4.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:38Z",
+      "event": "authenticate",
+      "event_sequence": 32,
+      "exit_status": 0,
+      "order": null,
+      "pair": 4,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:37Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p97040-pair4-ab-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:40Z",
+      "event": "arm",
+      "event_sequence": 33,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 4,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:38Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p97040-pair4-ab-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:43Z",
+      "event": "arm",
+      "event_sequence": 34,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 4,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:40Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p97040-pair5.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:44Z",
+      "event": "authenticate",
+      "event_sequence": 35,
+      "exit_status": 0,
+      "order": null,
+      "pair": 5,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:43Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p97040-pair5-ab-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:47Z",
+      "event": "arm",
+      "event_sequence": 36,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 5,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:44Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p97040-pair5-ab-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:49Z",
+      "event": "arm",
+      "event_sequence": 37,
+      "exit_status": 0,
+      "order": "ab",
+      "pair": 5,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:47Z"
+    },
+    {
+      "arm": null,
+      "artifact": "auth-p97040-pair6.sha256",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:51Z",
+      "event": "authenticate",
+      "event_sequence": 38,
+      "exit_status": 0,
+      "order": null,
+      "pair": 6,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:50Z"
+    },
+    {
+      "arm": "direct",
+      "artifact": "p97040-pair6-ba-direct.json",
+      "direct": true,
+      "ended_utc": "2026-08-17T19:52:53Z",
+      "event": "arm",
+      "event_sequence": 39,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 6,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:51Z"
+    },
+    {
+      "arm": "control",
+      "artifact": "p97040-pair6-ba-control.json",
+      "direct": false,
+      "ended_utc": "2026-08-17T19:52:56Z",
+      "event": "arm",
+      "event_sequence": 40,
+      "exit_status": 0,
+      "order": "ba",
+      "pair": 6,
+      "position": 97040,
+      "started_utc": "2026-08-17T19:52:53Z"
+    },
+    {
+      "arm": null,
+      "artifact": "build-info-after-campaign.json",
+      "direct": null,
+      "ended_utc": "2026-08-17T19:52:56Z",
+      "event": "build-info-after-campaign",
+      "event_sequence": 41,
+      "exit_status": 0,
+      "order": null,
+      "pair": null,
+      "position": null,
+      "started_utc": "2026-08-17T19:52:56Z"
+    }
+  ],
+  "fixtures": {
+    "6144": {
+      "causal_digest": "15912d0841c5a72e94bcf85dfc730dda73a2cf29ddfb6567a0eeb0e49723011f",
+      "compressor_bytes": 12206080,
+      "file_sha256": "4876714d8b22d93424ec50bc94265f095385e2dbb1e9ed16268815c6e271a50a",
+      "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p006144.ds4c",
+      "payload_bytes": 60137472,
+      "position": 6144,
+      "prefix_bytes": 24576,
+      "prefix_digest": "df77a5605bde70e7b66e1a9ba8bb83f52de2a0273dbb5acb140627e4946dd6d6",
+      "published_bytes": 42270720,
+      "raw_bytes": 5636096,
+      "record_blake3": "6f9e763b69822f820137eb5d4a3a5788b9d9036e8a393b8e0cb343adcd7c6bb9",
+      "record_bytes": 60153888,
+      "schema": "qwen-dsv4-typed-decode-fixture/v1",
+      "source_identity": {
+        "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+        "build_commit_short": "abb18e0b5",
+        "build_dirty": true,
+        "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+        "overrides": [
+          "allow_dirty"
+        ],
+        "problems": [
+          "dirty"
+        ],
+        "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+        "runtime_dirty": true,
+        "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+        "schema_version": 2,
+        "stamp_error": null,
+        "stamp_source": "git",
+        "status": "dirty"
+      },
+      "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+    },
+    "97040": {
+      "causal_digest": "c1c2140fbcf52698c1c645f6af571d1d190e925d956fae00fb6ec3db02f67174",
+      "compressor_bytes": 12206080,
+      "file_sha256": "b8139c0296777f54baa4a60b1867aa25b5328b989bf38dc3e367c91b5a89581a",
+      "fixture": "/tmp/qwen-dsv4-typed-snapshot-decode-20260817/campaign-v2/snapshot-p097040.ds4c",
+      "payload_bytes": 685862976,
+      "position": 97040,
+      "prefix_bytes": 388160,
+      "prefix_digest": "01836d1be0c50d7c225a1265965b1d796e7c65d677084414b93c73bd4b7683ed",
+      "published_bytes": 667632640,
+      "raw_bytes": 5636096,
+      "record_blake3": "de9c9029efea3cc2cb09416f4e39d8dd16671096d396ec8a2132763d3f221929",
+      "record_bytes": 685879392,
+      "schema": "qwen-dsv4-typed-decode-fixture/v1",
+      "source_identity": {
+        "build_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+        "build_commit_short": "abb18e0b5",
+        "build_dirty": true,
+        "build_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+        "overrides": [
+          "allow_dirty"
+        ],
+        "problems": [
+          "dirty"
+        ],
+        "runtime_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+        "runtime_dirty": true,
+        "runtime_source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+        "schema_version": 2,
+        "stamp_error": null,
+        "stamp_source": "git",
+        "status": "dirty"
+      },
+      "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+    }
+  },
+  "gates": {
+    "correctness_and_protocol": true,
+    "fixtures": {
+      "6144": {
+        "ab_median_positive": true,
+        "ba_median_positive": true,
+        "marginal_median_regression_at_most_2pct": true,
+        "rss_at_least_0_80_payload": true
+      },
+      "97040": {
+        "ab_median_positive": false,
+        "ba_median_positive": true,
+        "candidate_wins_at_least_5_of_6": false,
+        "marginal_median_reduction_at_least_5pct": false,
+        "peak_footprint_direction_positive": true,
+        "rss_at_least_0_80_payload": true
+      }
+    }
+  },
+  "pairs": [
+    {
+      "decode_saving_us": 1307.9580000000133,
+      "max_rss_deleted_bytes": 60178432,
+      "order": "ab",
+      "pair": 1,
+      "peak_footprint_deleted_bytes": 60112944,
+      "position": 6144,
+      "whole_process_wall_saving_s": 0.0
+    },
+    {
+      "decode_saving_us": -94.70900000000256,
+      "max_rss_deleted_bytes": 60375040,
+      "order": "ba",
+      "pair": 2,
+      "peak_footprint_deleted_bytes": 60145760,
+      "position": 6144,
+      "whole_process_wall_saving_s": 0.0
+    },
+    {
+      "decode_saving_us": 1432.3319999999949,
+      "max_rss_deleted_bytes": 60211200,
+      "order": "ba",
+      "pair": 3,
+      "peak_footprint_deleted_bytes": 59899928,
+      "position": 6144,
+      "whole_process_wall_saving_s": 0.0
+    },
+    {
+      "decode_saving_us": 1642.4159999999974,
+      "max_rss_deleted_bytes": 59981824,
+      "order": "ab",
+      "pair": 4,
+      "peak_footprint_deleted_bytes": 59949152,
+      "position": 6144,
+      "whole_process_wall_saving_s": 0.0
+    },
+    {
+      "decode_saving_us": -246.16700000001583,
+      "max_rss_deleted_bytes": 60309504,
+      "order": "ab",
+      "pair": 5,
+      "peak_footprint_deleted_bytes": 60129352,
+      "position": 6144,
+      "whole_process_wall_saving_s": 0.0
+    },
+    {
+      "decode_saving_us": 2146.5010000000184,
+      "max_rss_deleted_bytes": 60178432,
+      "order": "ba",
+      "pair": 6,
+      "peak_footprint_deleted_bytes": 60096536,
+      "position": 6144,
+      "whole_process_wall_saving_s": 0.0
+    },
+    {
+      "decode_saving_us": -14007.916000000201,
+      "max_rss_deleted_bytes": 685785088,
+      "order": "ab",
+      "pair": 1,
+      "peak_footprint_deleted_bytes": 686178808,
+      "position": 97040,
+      "whole_process_wall_saving_s": -0.009999999999999787
+    },
+    {
+      "decode_saving_us": 11621.2080000001,
+      "max_rss_deleted_bytes": 685604864,
+      "order": "ba",
+      "pair": 2,
+      "peak_footprint_deleted_bytes": 685965768,
+      "position": 97040,
+      "whole_process_wall_saving_s": 0.020000000000000018
+    },
+    {
+      "decode_saving_us": 9153.166000000201,
+      "max_rss_deleted_bytes": 685604864,
+      "order": "ba",
+      "pair": 3,
+      "peak_footprint_deleted_bytes": 685998584,
+      "position": 97040,
+      "whole_process_wall_saving_s": 0.010000000000000231
+    },
+    {
+      "decode_saving_us": 5190.25,
+      "max_rss_deleted_bytes": 685785088,
+      "order": "ab",
+      "pair": 4,
+      "peak_footprint_deleted_bytes": 686195216,
+      "position": 97040,
+      "whole_process_wall_saving_s": 0.0
+    },
+    {
+      "decode_saving_us": -7294.958000000566,
+      "max_rss_deleted_bytes": 685785088,
+      "order": "ab",
+      "pair": 5,
+      "peak_footprint_deleted_bytes": 686178808,
+      "position": 97040,
+      "whole_process_wall_saving_s": -0.010000000000000231
+    },
+    {
+      "decode_saving_us": 6983.5,
+      "max_rss_deleted_bytes": 685572096,
+      "order": "ba",
+      "pair": 6,
+      "peak_footprint_deleted_bytes": 685982224,
+      "position": 97040,
+      "whole_process_wall_saving_s": 0.010000000000000231
+    }
+  ],
+  "protocol": {
+    "benchmarked_commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+    "layouts": {
+      "6144": {
+        "compressor_bytes": 12206080,
+        "payload_bytes": 60137472,
+        "prefix_bytes": 24576,
+        "published_bytes": 42270720,
+        "raw_bytes": 5636096,
+        "record_bytes": 60153888
+      },
+      "97040": {
+        "compressor_bytes": 12206080,
+        "payload_bytes": 685862976,
+        "prefix_bytes": 388160,
+        "published_bytes": 667632640,
+        "raw_bytes": 5636096,
+        "record_bytes": 685879392
+      }
+    },
+    "pair_orders": [
+      "ab",
+      "ba",
+      "ba",
+      "ab",
+      "ab",
+      "ba"
+    ],
+    "positions": [
+      6144,
+      97040
+    ]
+  },
+  "schema": "qwen-dsv4-typed-snapshot-decode/v1",
+  "source_identity": {
+    "commit": "abb18e0b5aa01adf547cecadf62683dec9081139",
+    "source_state": "git-source-sha256-v2:2870399887107cb2369bc37d850ecce5ff68225a1ca09de367deb8ac671c9d1c",
+    "test_binary_sha256": "cdacc785b63565f515ce5352655d58939d5076707b1070a59f01cfb1f3e6ef70"
+  },
+  "summaries": {
+    "6144": {
+      "ab_median_decode_saving_us": 1307.9580000000133,
+      "ba_median_decode_saving_us": 1432.3319999999949,
+      "candidate_wins": 4,
+      "control_decode_us": [
+        214851.0,
+        214208.5,
+        215922.916,
+        216719.416,
+        214675.291,
+        216627.584
+      ],
+      "control_median_decode_us": 215386.95799999998,
+      "direct_decode_us": [
+        213543.042,
+        214303.209,
+        214490.584,
+        215077.0,
+        214921.458,
+        214481.08299999998
+      ],
+      "direct_median_decode_us": 214485.8335,
+      "marginal_median_reduction_fraction": 0.004183746817205014,
+      "median_max_rss_deleted_bytes": 60194816.0,
+      "median_paired_decode_saving_us": 1370.145000000004,
+      "median_peak_footprint_deleted_bytes": 60104740.0,
+      "median_whole_process_wall_saving_s": 0.0,
+      "position": 6144
+    },
+    "97040": {
+      "ab_median_decode_saving_us": -7294.958000000566,
+      "ba_median_decode_saving_us": 9153.166000000201,
+      "candidate_wins": 4,
+      "control_decode_us": [
+        2594651.3749999995,
+        2600349.625,
+        2597947.25,
+        2605639.333,
+        2590477.334,
+        2592117.375
+      ],
+      "control_median_decode_us": 2596299.3125,
+      "direct_decode_us": [
+        2608659.2909999997,
+        2588728.417,
+        2588794.084,
+        2600449.083,
+        2597772.2920000004,
+        2585133.875
+      ],
+      "direct_median_decode_us": 2593283.188,
+      "marginal_median_reduction_fraction": 0.0011617013822246003,
+      "median_max_rss_deleted_bytes": 685694976.0,
+      "median_paired_decode_saving_us": 6086.875,
+      "median_peak_footprint_deleted_bytes": 686088696.0,
+      "median_whole_process_wall_saving_s": 0.0050000000000001155,
+      "position": 97040
+    }
+  }
+}

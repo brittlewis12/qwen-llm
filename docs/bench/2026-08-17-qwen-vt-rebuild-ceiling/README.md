@@ -142,16 +142,37 @@ transpose of exactly `P..P+C` populates that bank's suffix from its canonical
 source. This common preparation is outside both timed arms and prevents D2 from
 preserving a sentinel or stale output.
 
-Each geometry runs in one fresh process with this exact release invocation,
+The collector requires a tracked-clean worktree, records build-time `HEAD` and
+`HEAD^{tree}`, builds the release libtest artifact once, copies it to an
+immutable campaign-owned path, resolves that path, and hashes it. Every child
+must retain the same `HEAD`, tree, clean status, and binary hash. Each geometry
+then runs that exact copied binary in one fresh process with this invocation,
 plus the cell-specific mode/prefix/chunk environment:
 
 ```text
-cargo test -p qwen-llm --release --lib \
-  'metal::tests::attn_matrix_vt_rebuild_screen' -- \
+TEST_BINARY 'metal::tests::attn_matrix_vt_rebuild_screen' \
   --ignored --exact --nocapture --test-threads=1
 ```
 
-Substring filtering or invoking all ignored tests is forbidden.
+Cargo-mediated execution, substring filtering, or invoking all ignored tests is
+forbidden. Every child records its PID, exact argv, resolved executable, binary
+SHA-256 immediately before and after execution, and `HEAD` immediately before
+and after execution. Any drift invalidates the packet.
+
+Before measured children, the same binary runs these three full test names
+individually with `--exact --nocapture --test-threads=1`:
+
+```text
+metal::tests::attn_matrix_vt_dispatch_groups_cover_exact_thread_range
+metal::tests::attn_matrix_vt_compact_dispatch_matches_legacy_nonzero_span
+metal::tests::attn_matrix_vt_prefix_rebuild_preserves_scattered_suffix
+```
+
+Each must report exactly its named test and one pass. A separate exact,
+untimed `metal::tests::attn_matrix_vt_environment_probe` runs before and after
+the measured chronology, must likewise report one named pass, and records the
+Metal device registry ID, device name, and `maxBufferLength` without allocating
+benchmark banks.
 
 The P8192 D0 cell runs only if no measured P2048 D0 arm wall time exceeds
 1,000 ms and `4 * median(measured D0 wall) <= 2,000 ms`; warmups are excluded.
@@ -171,6 +192,28 @@ after the chronology it records binary SHA-256, implementation commit, device,
 `maxBufferLength`, OS, physical memory, power source, memory pressure, thermal
 state, and protected-PID status.
 
+Preflight build, correctness, or provenance failure creates no campaign
+chronology and may be repaired and rerun. Immediately before launching the first
+measured child, the collector creates the immutable campaign packet. For every
+child it atomically records command, identity, timestamp, and PID before waiting;
+after completion it atomically records status/stdout/stderr before attempting
+JSON parsing. A malformed record remains evidence and ends the campaign; no
+attempt may be discarded or retried. Existing campaign evidence is never
+overwritten.
+
+Stdout and stderr are retained as exact base64-encoded bytes with SHA-256,
+alongside PID, return code or terminating signal, and spawn/completion
+timestamps. Packet writes use write-flush-fsync-rename plus parent-directory
+fsync. A post-chronology identity, environment, protected-PID, or Metal-probe
+failure invalidates the existing packet and is not covered by the repairable
+preflight exception.
+
+If a command-buffer failure identifies D0, the dispatch result is
+**INCONCLUSIVE** rather than a D1 failure. A D1 failure is a D1 **KILL**; a D2
+or `PREP_D2` overlap-preparation failure is a D2 **KILL**. Unattributed process
+or infrastructure failure invalidates the packet. The harness must include the
+active `D0`, `D1`, `D2`, or `PREP_D2` label in any command-failure record.
+
 All bandwidth values are algorithmic logical bytes,
 `4 * L * n_kv * head_dim * rows`, divided by GPU time. They are not claims about
 physical DRAM traffic.
@@ -187,7 +230,9 @@ D1 proceeds to a separately preregistered restored-prefix product A/B only if:
 - GPU speedup is `median(D0_gpu) / median(D1_gpu)` and must be at least 8x both
   overall and separately within the AB and BA strata;
 - D1 median GPU time is nondecreasing from 8K through 32K; and
-- median D1 exact-byte rate is 50--800 decimal GB/s at 16K and 32K.
+- the median of the six per-arm D1 exact-byte rates is 50--800 decimal GB/s at
+  16K and 32K. Each rate uses that arm's GPU delta; the six-value median is the
+  arithmetic mean of the middle two sorted values.
 
 The local D2 source change remains separate. Retain it only if D2 wins at least
 five of six P32768/C1024 pairs under the same strict GPU rule, each order

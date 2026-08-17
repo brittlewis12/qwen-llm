@@ -2,7 +2,8 @@
 
 Date: 2026-08-17
 
-Status: **PREREGISTERED**. No candidate timing result has been admitted.
+Status: **PREREGISTERED AMENDMENT A1** after a decisive parsed-streaming
+**KILL**. No direct-word-fill timing result has been admitted.
 
 ## Question
 
@@ -102,6 +103,42 @@ Supporting 6,144 gates:
 - no more than 2% marginal median wall regression;
 - positive paired wall saving in both order strata; and
 - median maximum-RSS deletion is at least 48,109,978 bytes (`0.80B`).
+
+## Parsed Streaming Result: KILL
+
+The first implementation followed the literal candidate above: 4 KiB wire
+chunks were hashed and converted word-by-word with `from_le_bytes`. Its
+representation deletion was real, but its large-record wall result failed every
+preregistered performance gate:
+
+| Position | Legacy median | Parsed median | Reduction | Wins | RSS deletion |
+|---:|---:|---:|---:|---:|---:|
+| 6,144 | 216.375 ms | 216.138 ms | +0.11% | 4/6 | 60,194,816 B |
+| 97,040 | 2,604.258 ms | 2,861.602 ms | **-9.88%** | 0/6 | 685,588,480 B |
+
+At 97,040, AB and BA median savings were `-256.952 ms` and `-251.710 ms`.
+Peak-footprint deletion was 686,080,528 bytes. This is a clean **KILL** for
+per-word parsed streaming; `parsed-streaming-results.json` retains every arm and
+gate. No arm was retried or excluded.
+
+## Amendment A1: Native Direct Word Fill
+
+The codec already rejects non-little-endian hosts. A `u16`/`u32` typed arena on
+the admitted host therefore has the exact wire byte order, and both word types
+accept every bit pattern. Before any A1 timing, the candidate changes to:
+
+1. fallibly reserve the final `Vec<T>` with length zero;
+2. read into one fixed aligned wire buffer;
+3. hash those exact bytes;
+4. copy bytes into checked spare typed capacity; and
+5. set typed length only after the complete section arrives.
+
+This preserves truncation failure atomicity and the one-payload allocation
+model, but removes hundreds of millions of `from_le_bytes` conversions. The
+unsafe boundary is limited to `T: bytemuck::Pod`, checked byte/count arithmetic,
+and writes within reserved capacity. All original correctness and performance
+gates remain unchanged. A1 restarts fixture generation and every pair from zero;
+the parsed-streaming campaign contributes no A1 timing sample.
 
 ## Decision Rule
 

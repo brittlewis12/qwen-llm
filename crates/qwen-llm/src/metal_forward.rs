@@ -3555,13 +3555,38 @@ impl<'a> MetalWeightLoader<'a> {
         if desc.dtype == GgmlType::F32 {
             return self.load_direct(desc);
         }
-        let f32 = crate::codec::dequant_to_f32(desc, self.gguf.slice(desc))?;
-        let tensor = MetalTensor::from_bytes(
-            self.ctx,
-            bytemuck::cast_slice(&f32),
-            desc.shape.clone(),
-            GgmlType::F32,
-        )?;
+        let tensor = MetalTensor::zeros_f32(self.ctx, desc.shape.clone())?;
+        let elements = usize::try_from(tensor.n_elements()).map_err(|_| {
+            MfError::LoadPolicy(format!(
+                "converted F32 tensor {:?} element count exceeds usize",
+                desc.name
+            ))
+        })?;
+        let bytes = elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| {
+                MfError::LoadPolicy(format!(
+                    "converted F32 tensor {:?} byte count overflows usize",
+                    desc.name
+                ))
+            })?;
+        if tensor.offset != 0 || bytes > tensor.buffer.length() {
+            return Err(MfError::LoadPolicy(format!(
+                "converted F32 tensor {:?} destination range is invalid",
+                desc.name
+            )));
+        }
+        let start = tensor.buffer.contents().as_ptr() as *mut u8;
+        if !(start as usize).is_multiple_of(std::mem::align_of::<f32>()) {
+            return Err(MfError::LoadPolicy(format!(
+                "converted F32 tensor {:?} destination is not f32-aligned",
+                desc.name
+            )));
+        }
+        let output = unsafe {
+            std::slice::from_raw_parts_mut(start.cast::<std::mem::MaybeUninit<f32>>(), elements)
+        };
+        crate::codec::dequant_to_f32_into(desc, self.gguf.slice(desc), output)?;
         self.record_source(desc, SourceMaterialization::ConvertedF32, tensor.n_bytes())?;
         Ok(tensor)
     }

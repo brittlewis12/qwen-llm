@@ -90,6 +90,26 @@ pub enum TokError {
     DecodePieceFailed { token: i32, detail: String },
     #[error("detokenize failed: {0}")]
     DetokenizeFailed(String),
+    #[error("failed to reserve {bytes} bytes for {operation}")]
+    AllocationFailed {
+        operation: &'static str,
+        bytes: usize,
+    },
+}
+
+fn try_output_capacity<T>(elements: usize, operation: &'static str) -> Result<Vec<T>, TokError> {
+    let bytes =
+        elements
+            .checked_mul(std::mem::size_of::<T>())
+            .ok_or(TokError::AllocationFailed {
+                operation,
+                bytes: usize::MAX,
+            })?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(elements)
+        .map_err(|_| TokError::AllocationFailed { operation, bytes })?;
+    Ok(output)
 }
 
 /// One-time `llama_backend_init` + log silencing. llama.cpp / ggml
@@ -265,7 +285,7 @@ impl LlamaCppTokenizer {
             usize::try_from(needed).map_err(|_| TokError::TokenizeOverflow)?
         };
         let n_i32 = i32::try_from(n).map_err(|_| TokError::TokenizeOverflow)?;
-        let mut buf: Vec<i32> = vec![0; n];
+        let mut buf = try_output_capacity::<i32>(n, "llama.cpp tokenization output")?;
         let written = unsafe {
             llama_cpp_sys_2::llama_tokenize(
                 self.vocab.as_ptr(),
@@ -283,7 +303,15 @@ impl LlamaCppTokenizer {
         if written < 0 {
             return Err(TokError::InputTooLong(-written));
         }
-        buf.truncate(written as usize);
+        let written = usize::try_from(written).map_err(|_| TokError::TokenizeOverflow)?;
+        if written > n {
+            return Err(TokError::TokenizeOverflow);
+        }
+        // SAFETY: llama_tokenize returned the initialized prefix length, which
+        // is bounded by the capacity passed to the same call.
+        unsafe {
+            buf.set_len(written);
+        }
         Ok(buf)
     }
 
@@ -291,16 +319,17 @@ impl LlamaCppTokenizer {
         let token = self.checked_token(token)?;
         let mut cap = 32usize;
         loop {
-            let mut buf = vec![0u8; cap];
+            let cap_i32 = i32::try_from(cap).map_err(|_| TokError::DecodePieceFailed {
+                token,
+                detail: format!("buffer length {cap} exceeds i32::MAX"),
+            })?;
+            let mut buf = try_output_capacity::<u8>(cap, "llama.cpp token-piece output")?;
             let n = unsafe {
                 llama_cpp_sys_2::llama_token_to_piece(
                     self.vocab.as_ptr(),
                     token,
                     buf.as_mut_ptr() as *mut i8,
-                    i32::try_from(buf.len()).map_err(|_| TokError::DecodePieceFailed {
-                        token,
-                        detail: format!("buffer length {} exceeds i32::MAX", buf.len()),
-                    })?,
+                    cap_i32,
                     /* lstrip = */ 0,
                     /* special = */ true,
                 )
@@ -313,7 +342,17 @@ impl LlamaCppTokenizer {
                     token,
                     detail: "returned byte count did not fit usize".into(),
                 })?;
-                buf.truncate(n);
+                if n > cap {
+                    return Err(TokError::DecodePieceFailed {
+                        token,
+                        detail: format!("returned byte count {n} exceeds capacity {cap}"),
+                    });
+                }
+                // SAFETY: llama_token_to_piece returned the initialized prefix
+                // length, bounded by the capacity passed to the same call.
+                unsafe {
+                    buf.set_len(n);
+                }
                 return Ok(String::from_utf8_lossy(&buf).into_owned());
             }
             if n == i32::MIN {
@@ -333,19 +372,17 @@ impl LlamaCppTokenizer {
         let n_tokens = checked_i32_count(tokens.len())?;
         let mut cap = tokens.len().saturating_mul(8).max(32);
         loop {
-            let mut buf = vec![0u8; cap];
+            let cap_i32 = i32::try_from(cap).map_err(|_| {
+                TokError::DetokenizeFailed(format!("buffer length {cap} exceeds i32::MAX"))
+            })?;
+            let mut buf = try_output_capacity::<u8>(cap, "llama.cpp detokenization output")?;
             let n = unsafe {
                 llama_cpp_sys_2::llama_detokenize(
                     self.vocab.as_ptr(),
                     tokens.as_ptr(),
                     n_tokens,
                     buf.as_mut_ptr() as *mut i8,
-                    i32::try_from(buf.len()).map_err(|_| {
-                        TokError::DetokenizeFailed(format!(
-                            "buffer length {} exceeds i32::MAX",
-                            buf.len()
-                        ))
-                    })?,
+                    cap_i32,
                     /* remove_special = */ false,
                     /* unparse_special = */ true,
                 )
@@ -354,7 +391,16 @@ impl LlamaCppTokenizer {
                 let n = usize::try_from(n).map_err(|_| {
                     TokError::DetokenizeFailed("returned byte count did not fit usize".into())
                 })?;
-                buf.truncate(n);
+                if n > cap {
+                    return Err(TokError::DetokenizeFailed(format!(
+                        "returned byte count {n} exceeds capacity {cap}"
+                    )));
+                }
+                // SAFETY: llama_detokenize returned the initialized prefix
+                // length, bounded by the capacity passed to the same call.
+                unsafe {
+                    buf.set_len(n);
+                }
                 return Ok(String::from_utf8_lossy(&buf).into_owned());
             }
             if n == i32::MIN {

@@ -26,20 +26,73 @@ pub enum CodecError {
     SizeMismatch { got: usize, expected: usize },
     #[error("tensor size overflows host usize for {name:?}")]
     SizeOverflow { name: String },
+    #[error(
+        "tensor {name:?} row width {row_elements} is not divisible by {block_elements} elements for {dtype:?}"
+    )]
+    InvalidBlockGeometry {
+        name: String,
+        dtype: GgmlType,
+        row_elements: u64,
+        block_elements: u64,
+    },
+    #[error("failed to allocate {bytes} output bytes for tensor {name:?}")]
+    AllocationFailed { name: String, bytes: usize },
+    #[error("output length {got} does not match expected {expected} elements")]
+    OutputLengthMismatch { got: usize, expected: usize },
 }
 
-/// Dequantize the raw `bytes` of a `desc` tensor into a fresh `Vec<f32>`.
-///
-/// This calls `ggml_get_type_traits(dtype).to_float(bytes, dst, n)`, which
-/// covers F32 / F16 / BF16 / Q*_0 / Q*_1 / Q*_K / IQ* / MXFP4 — everything
-/// llama.cpp ships.
-pub fn dequant_to_f32(desc: &TensorDesc, bytes: &[u8]) -> Result<Vec<f32>, CodecError> {
+#[derive(Clone, Copy)]
+struct DequantPlan {
+    elements: usize,
+    source_bytes: usize,
+}
+
+fn try_uninit_f32(desc: &TensorDesc, n: usize) -> Result<Vec<f32>, CodecError> {
+    let bytes =
+        n.checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CodecError::SizeOverflow {
+                name: desc.name.clone(),
+            })?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(n)
+        .map_err(|_| CodecError::AllocationFailed {
+            name: desc.name.clone(),
+            bytes,
+        })?;
+    Ok(output)
+}
+
+fn validate_dequant(desc: &TensorDesc, bytes: &[u8]) -> Result<DequantPlan, CodecError> {
     let n_u64 = desc
         .checked_n_elements()
         .ok_or_else(|| CodecError::SizeOverflow {
             name: desc.name.clone(),
         })?;
     let n = usize::try_from(n_u64).map_err(|_| CodecError::SizeOverflow {
+        name: desc.name.clone(),
+    })?;
+
+    let (block_elements, block_bytes) = desc
+        .dtype
+        .storage_layout()
+        .ok_or(CodecError::NoTraits(desc.dtype as i32))?;
+    let row_elements = desc.shape.first().copied().unwrap_or(n_u64);
+    if block_elements == 0 || !row_elements.is_multiple_of(block_elements) {
+        return Err(CodecError::InvalidBlockGeometry {
+            name: desc.name.clone(),
+            dtype: desc.dtype,
+            row_elements,
+            block_elements,
+        });
+    }
+    let layout_bytes_u64 = n_u64
+        .checked_div(block_elements)
+        .and_then(|blocks| blocks.checked_mul(block_bytes))
+        .ok_or_else(|| CodecError::SizeOverflow {
+            name: desc.name.clone(),
+        })?;
+    let layout_bytes = usize::try_from(layout_bytes_u64).map_err(|_| CodecError::SizeOverflow {
         name: desc.name.clone(),
     })?;
 
@@ -50,36 +103,61 @@ pub fn dequant_to_f32(desc: &TensorDesc, bytes: &[u8]) -> Result<Vec<f32>, Codec
     let expected = usize::try_from(desc.n_bytes).map_err(|_| CodecError::SizeOverflow {
         name: desc.name.clone(),
     })?;
+    if expected != layout_bytes {
+        return Err(CodecError::SizeMismatch {
+            got: expected,
+            expected: layout_bytes,
+        });
+    }
     if bytes.len() != expected {
         return Err(CodecError::SizeMismatch {
             got: bytes.len(),
             expected,
         });
     }
+    Ok(DequantPlan {
+        elements: n,
+        source_bytes: expected,
+    })
+}
+
+fn dequant_validated_into(
+    desc: &TensorDesc,
+    bytes: &[u8],
+    plan: DequantPlan,
+    output: &mut [std::mem::MaybeUninit<f32>],
+) -> Result<(), CodecError> {
+    if output.len() != plan.elements {
+        return Err(CodecError::OutputLengthMismatch {
+            got: output.len(),
+            expected: plan.elements,
+        });
+    }
 
     // Fast path: F32 — no codec call needed.
     if desc.dtype == GgmlType::F32 {
-        // SAFETY: alignment of f32 is 4; mmap pages are page-aligned, but
-        // `bytes` may not be — copy out via byte-wise read.
-        let mut out = Vec::<f32>::with_capacity(n);
-        let copy_bytes =
-            n.checked_mul(std::mem::size_of::<f32>())
-                .ok_or_else(|| CodecError::SizeOverflow {
-                    name: desc.name.clone(),
-                })?;
-        if expected != copy_bytes {
+        let copy_bytes = plan
+            .elements
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| CodecError::SizeOverflow {
+                name: desc.name.clone(),
+            })?;
+        if plan.source_bytes != copy_bytes {
             return Err(CodecError::SizeMismatch {
-                got: expected,
+                got: plan.source_bytes,
                 expected: copy_bytes,
             });
         }
-        // SAFETY: we just allocated `n` slots; size guard above proves
-        // `bytes.len() == n * size_of::<f32>()` for F32 dtype.
+        // SAFETY: validation proves equal complete source and destination byte
+        // spans. Byte-wise copy does not require the source to be f32-aligned.
         unsafe {
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr() as *mut u8, copy_bytes);
-            out.set_len(n);
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                output.as_mut_ptr().cast::<u8>(),
+                copy_bytes,
+            );
         }
-        return Ok(out);
+        return Ok(());
     }
 
     // SAFETY: `ggml_get_type_traits` is read-only and idempotent. The
@@ -94,16 +172,153 @@ pub fn dequant_to_f32(desc: &TensorDesc, bytes: &[u8]) -> Result<Vec<f32>, Codec
     // optional function pointer.
     let to_float = unsafe { (*traits).to_float }.ok_or(CodecError::NoToFloat(raw_dtype))?;
 
-    let mut out = vec![0.0f32; n];
+    let n_i64 = i64::try_from(plan.elements).map_err(|_| CodecError::SizeOverflow {
+        name: desc.name.clone(),
+    })?;
     // SAFETY: `to_float(src, dst, n_elements)` reads `desc.n_bytes` from
-    // `bytes` and writes `n` f32s to `out`. The universal length guard
-    // above ensures `bytes.len() == desc.n_bytes` for this (shape, dtype).
+    // `bytes` and writes every output f32. The checked storage
+    // geometry and universal length guard prove that both spans are complete.
     unsafe {
         to_float(
             bytes.as_ptr() as *const std::ffi::c_void,
-            out.as_mut_ptr(),
-            n as i64,
+            output.as_mut_ptr().cast::<f32>(),
+            n_i64,
         );
     }
+    Ok(())
+}
+
+/// Fill an exactly-sized uninitialized F32 destination from a tensor payload.
+///
+/// On success every destination element is initialized. All validation and
+/// fallible work happens before the producer writes, so an error exposes no
+/// partially initialized output.
+pub(crate) fn dequant_to_f32_into(
+    desc: &TensorDesc,
+    bytes: &[u8],
+    output: &mut [std::mem::MaybeUninit<f32>],
+) -> Result<(), CodecError> {
+    let plan = validate_dequant(desc, bytes)?;
+    dequant_validated_into(desc, bytes, plan, output)
+}
+
+/// Dequantize the raw `bytes` of a `desc` tensor into a fresh `Vec<f32>`.
+///
+/// This calls `ggml_get_type_traits(dtype).to_float(bytes, dst, n)`, which
+/// covers F32 / F16 / BF16 / Q*_0 / Q*_1 / Q*_K / IQ* / MXFP4 — everything
+/// llama.cpp ships.
+pub fn dequant_to_f32(desc: &TensorDesc, bytes: &[u8]) -> Result<Vec<f32>, CodecError> {
+    let plan = validate_dequant(desc, bytes)?;
+    let mut out = try_uninit_f32(desc, plan.elements)?;
+    let output = unsafe {
+        std::slice::from_raw_parts_mut(
+            out.as_mut_ptr().cast::<std::mem::MaybeUninit<f32>>(),
+            plan.elements,
+        )
+    };
+    dequant_validated_into(desc, bytes, plan, output)?;
+    // SAFETY: the producer returned successfully after initializing every slot.
+    unsafe {
+        out.set_len(plan.elements);
+    }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn desc(name: &str, shape: Vec<u64>, dtype: GgmlType, n_bytes: usize) -> TensorDesc {
+        TensorDesc {
+            name: name.to_string(),
+            shape,
+            dtype,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: n_bytes as u64,
+        }
+    }
+
+    #[test]
+    fn f32_copy_commits_exact_output() {
+        let values = [1.25f32, -0.0, f32::INFINITY, f32::from_bits(0x7fc0_1234)];
+        let tensor = desc("f32", vec![values.len() as u64], GgmlType::F32, 16);
+        let decoded = dequant_to_f32(&tensor, bytemuck::cast_slice(&values)).unwrap();
+        assert_eq!(decoded.len(), values.len());
+        assert!(
+            decoded
+                .iter()
+                .zip(values)
+                .all(|(actual, expected)| actual.to_bits() == expected.to_bits())
+        );
+    }
+
+    #[test]
+    fn q8_0_dequant_fills_every_reserved_element() {
+        let scale = half::f16::from_f32(0.25).to_bits().to_le_bytes();
+        let mut block = [0u8; 34];
+        block[..2].copy_from_slice(&scale);
+        for (index, byte) in block[2..].iter_mut().enumerate() {
+            *byte = (index as i8 - 16) as u8;
+        }
+        let tensor = desc("q8", vec![32], GgmlType::Q8_0, block.len());
+        let decoded = dequant_to_f32(&tensor, &block).unwrap();
+        assert_eq!(decoded.len(), 32);
+        for (index, value) in decoded.iter().enumerate() {
+            assert_eq!(value.to_bits(), ((index as f32 - 16.0) * 0.25).to_bits());
+        }
+    }
+
+    #[test]
+    fn q8_0_dequant_into_initializes_exact_destination() {
+        let scale = half::f16::from_f32(0.5).to_bits().to_le_bytes();
+        let mut block = [0u8; 34];
+        block[..2].copy_from_slice(&scale);
+        for (index, byte) in block[2..].iter_mut().enumerate() {
+            *byte = (index as i8 - 8) as u8;
+        }
+        let tensor = desc("q8-into", vec![32], GgmlType::Q8_0, block.len());
+        let mut output = [std::mem::MaybeUninit::<f32>::uninit(); 32];
+        dequant_to_f32_into(&tensor, &block, &mut output).unwrap();
+        let output = unsafe { &*(&output as *const _ as *const [f32; 32]) };
+        for (index, value) in output.iter().enumerate() {
+            assert_eq!(value.to_bits(), ((index as f32 - 8.0) * 0.5).to_bits());
+        }
+
+        let mut short = [std::mem::MaybeUninit::<f32>::uninit(); 31];
+        assert!(matches!(
+            dequant_to_f32_into(&tensor, &block, &mut short),
+            Err(CodecError::OutputLengthMismatch {
+                got: 31,
+                expected: 32
+            })
+        ));
+    }
+
+    #[test]
+    fn quantized_rows_must_be_block_aligned() {
+        let tensor = desc("bad-row", vec![16, 2], GgmlType::Q8_0, 34);
+        let error = dequant_to_f32(&tensor, &[0u8; 34]).unwrap_err();
+        assert!(matches!(
+            error,
+            CodecError::InvalidBlockGeometry {
+                row_elements: 16,
+                block_elements: 32,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn descriptor_bytes_must_match_storage_layout() {
+        let tensor = desc("bad-size", vec![32], GgmlType::Q8_0, 35);
+        let error = dequant_to_f32(&tensor, &[0u8; 35]).unwrap_err();
+        assert!(matches!(
+            error,
+            CodecError::SizeMismatch {
+                got: 35,
+                expected: 34
+            }
+        ));
+    }
 }

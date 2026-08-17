@@ -6,6 +6,39 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-17 — Direct Converted-F32 Destination GO
+
+Status: converted-F32 Qwen weights now dequantize directly into their final
+Shared Metal allocation. Host zero deletion alone is performance-neutral; a
+broad anonymous no-copy Metal output allocator is killed.
+
+- A deterministic 256 MiB Q4_K-to-F32 floor compares six fresh-process AB/BA
+  pairs. Removing only `vec![0.0; n]` moves median `24.529 -> 24.618 ms`, has
+  median paired saving `-0.044 ms`, and wins 2/6. Fresh `calloc`/VM demand-zero
+  already avoids an observable standalone physical memset in this cell.
+- Dequantizing into final Shared Metal storage instead of a host vector followed
+  by `from_bytes` moves median `37.855 -> 25.714 ms` (`1.472x`), saves
+  `12.261 ms` paired, wins 6/6, and has positive AB/BA medians
+  `12.273/12.250 ms`. The deleted Metal population copy costs 11.413 ms median.
+- Maximum RSS falls `587,284,480 -> 318,832,640` bytes, deleting one complete
+  256 MiB staging representation. Every arm has the same output checksum. A
+  forced-converted 0.8B smoke realizes the production path for a
+  `208,588,800 -> 1,017,118,720` byte embedding and completes one token.
+- Wrapping anonymous demand-zero pages with `newBufferWithBytesNoCopy` saves only
+  0.238 ms median at 512 MiB and 1.367 ms at 2 GiB, with 4/6 wins in both cells.
+  Do not generalize it into session scratch or reopen giant-resource/overlay work.
+- Retained hygiene makes host dequant and tokenizer FFI allocations fallible,
+  validates block-row geometry before llama.cpp calls, and materializes only the
+  initialized prefix of the CPU KV oracle. These carry no standalone speed claim.
+- Metal/model commands were serialized. No residency set, `requestResidency`,
+  pre-wire, `mlock`, cache-bypass read, uncached read, or residency-coupled A10B
+  path ran; no process was killed.
+
+Decision: keep direct final-destination dequantization and its safety checks.
+Close host zero deletion as acceleration and broad anonymous no-copy output
+allocation under this premise. Evidence:
+`docs/bench/2026-08-17-dead-init-direct-destination/`.
+
 ## 2026-08-13 — DeepSeek V4 Maintained Retention Quality Rows
 
 Status: REAP quality governance now has a maintained v4.1 fixture, hardened

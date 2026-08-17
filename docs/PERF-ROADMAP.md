@@ -1791,6 +1791,16 @@ prefill or long-attention work units.
 Gain bands below are whole-phase estimates, not isolated-kernel ratios. Unknown
 bands remain unknown until a costed oracle establishes them.
 
+Banked exact process-cold cleanup: converted-F32 Qwen tensors now dequantize
+directly into their final Shared Metal allocation. A 256 MiB floor moves
+`37.855 -> 25.714 ms`, saves 12.261 ms paired with 6/6 wins, and deletes one
+complete 256 MiB host representation. Scale the byte/RSS benefit to actual
+fallback tensors, but do not project decode or native-quant gains: hot native
+weights bypass this path. Host zero deletion alone is flat, and anonymous
+no-copy output backing saves only 0.238 ms at 512 MiB / 1.367 ms at 2 GiB with
+4/6 wins. Keep direct destination population; close a broad scratch allocator
+without a changed physical premise.
+
 Completed v0.546 removes the token-0 transition from TTFT and the unused terminal
 transition from total request wall. For base TTFT `B` and removed transition `D`,
 speedup is `(B + D) / B`.

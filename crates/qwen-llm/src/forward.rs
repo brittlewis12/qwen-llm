@@ -335,11 +335,11 @@ impl<'a> Forward<'a> {
         let head_dim = arch.attn_head_dim as usize;
         let n_kv_heads = arch.n_kv_heads as usize;
         let stride = n_kv_heads * head_dim;
-        let bytes_per_layer = capacity_tokens * stride;
+        let elements_per_layer = capacity_tokens * stride;
         KvCache {
             layers: vec![LayerKv {
-                k: vec![0.0; bytes_per_layer],
-                v: vec![0.0; bytes_per_layer],
+                k: Vec::with_capacity(elements_per_layer),
+                v: Vec::with_capacity(elements_per_layer),
                 n_pos: 0,
             }],
             head_dim,
@@ -1147,7 +1147,8 @@ pub struct KvCache {
 
 struct LayerKv {
     /// `[capacity_tokens, n_kv_heads, head_dim]` row-major. Pre-allocated
-    /// to `capacity_tokens * stride` zeros.
+    /// to `capacity_tokens * stride`, with length equal to the initialized
+    /// prefix.
     k: Vec<f32>,
     v: Vec<f32>,
     /// Number of valid positions written so far. Equal to the largest
@@ -1171,11 +1172,11 @@ impl KvCache {
         let head_dim = arch.attn_head_dim as usize;
         let n_kv_heads = arch.n_kv_heads as usize;
         let stride = n_kv_heads * head_dim;
-        let bytes_per_layer = capacity_tokens * stride;
+        let elements_per_layer = capacity_tokens * stride;
         let layers = (0..arch.n_layer)
             .map(|_| LayerKv {
-                k: vec![0.0; bytes_per_layer],
-                v: vec![0.0; bytes_per_layer],
+                k: Vec::with_capacity(elements_per_layer),
+                v: Vec::with_capacity(elements_per_layer),
                 n_pos: 0,
             })
             .collect();
@@ -1236,8 +1237,10 @@ impl KvCache {
         );
         assert_eq!(v.len(), self.stride, "kv cache: v.len() != stride");
         let base = pos * self.stride;
-        lk.k[base..base + self.stride].copy_from_slice(k);
-        lk.v[base..base + self.stride].copy_from_slice(v);
+        debug_assert_eq!(lk.k.len(), base);
+        debug_assert_eq!(lk.v.len(), base);
+        lk.k.extend_from_slice(k);
+        lk.v.extend_from_slice(v);
         lk.n_pos = pos + 1;
     }
 }

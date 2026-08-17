@@ -17159,7 +17159,45 @@ fn validate_attn_matrix_common(
     Ok(())
 }
 
-pub fn encode_attn_matrix_transpose_v_f16(
+crate::env_flag!(
+    default_off attn_matrix_vt_compact_dispatch_enabled,
+    "QWEN_ATTN_MATRIX_VT_COMPACT_DISPATCH"
+);
+
+const ATTN_MATRIX_VT_THREADS: usize = 256;
+
+fn attn_matrix_vt_threadgroups(total: usize, compact: bool) -> Result<usize, MetalError> {
+    if total == 0 || total > u32::MAX as usize {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_transpose_v",
+            detail: format!("total threads {total} do not fit nonzero shader uint range"),
+        });
+    }
+    let groups = if compact {
+        total.div_ceil(ATTN_MATRIX_VT_THREADS)
+    } else {
+        total
+    };
+    let padded_threads =
+        groups
+            .checked_mul(ATTN_MATRIX_VT_THREADS)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "attn_matrix_transpose_v",
+                detail: format!("threadgroups {groups} * {ATTN_MATRIX_VT_THREADS} overflows usize"),
+            })?;
+    if padded_threads - 1 > u32::MAX as usize {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_transpose_v",
+            detail: format!(
+                "maximum global thread id {} does not fit shader uint",
+                padded_threads - 1
+            ),
+        });
+    }
+    Ok(groups)
+}
+
+fn encode_attn_matrix_transpose_v_f16_mode(
     ctx: &MetalContext,
     enc: &KernelEncoder,
     v_cache: &MetalTensor,
@@ -17171,6 +17209,7 @@ pub fn encode_attn_matrix_transpose_v_f16(
     vt_stride: usize,
     n_kv_heads: usize,
     head_dim: usize,
+    compact_dispatch: bool,
 ) -> Result<(), MetalError> {
     if v_cache.dtype != GgmlType::F16 || v_t.dtype != GgmlType::F16 {
         return Err(MetalError::BadShape {
@@ -17181,7 +17220,13 @@ pub fn encode_attn_matrix_transpose_v_f16(
             ),
         });
     }
-    if n_rows == 0 || base_pos + n_rows > n_pos {
+    let span_end = base_pos
+        .checked_add(n_rows)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "attn_matrix_transpose_v",
+            detail: format!("base_pos={base_pos} + n_rows={n_rows} overflows"),
+        })?;
+    if n_rows == 0 || span_end > n_pos {
         return Err(MetalError::BadShape {
             kernel: "attn_matrix_transpose_v",
             detail: format!(
@@ -17195,14 +17240,47 @@ pub fn encode_attn_matrix_transpose_v_f16(
             detail: format!("vt_stride={vt_stride} < n_pos={n_pos}"),
         });
     }
-    let want_vt = n_kv_heads * head_dim * vt_stride;
+    let kv_dim = n_kv_heads
+        .checked_mul(head_dim)
+        .filter(|&value| value > 0)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "attn_matrix_transpose_v",
+            detail: format!("invalid n_kv_heads={n_kv_heads} * head_dim={head_dim}"),
+        })?;
+    if kv_stride < kv_dim {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_transpose_v",
+            detail: format!("kv_stride={kv_stride} < kv_dim={kv_dim}"),
+        });
+    }
+    let last_component = kv_dim - 1;
+    let last_pos = span_end - 1;
+    let want_vt = last_component
+        .checked_mul(vt_stride)
+        .and_then(|value| value.checked_add(last_pos))
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "attn_matrix_transpose_v",
+            detail: format!(
+                "V_T max index overflows for kv_dim={kv_dim} vt_stride={vt_stride} span_end={span_end}"
+            ),
+        })?;
     if v_t.n_elements() < want_vt as u64 {
         return Err(MetalError::BadShape {
             kernel: "attn_matrix_transpose_v",
             detail: format!("v_t has {} elements, need >= {want_vt}", v_t.n_elements()),
         });
     }
-    let want_cache = (base_pos + n_rows) * kv_stride;
+    let want_cache = last_pos
+        .checked_mul(kv_stride)
+        .and_then(|value| value.checked_add(last_component))
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "attn_matrix_transpose_v",
+            detail: format!(
+                "V cache max index overflows for kv_stride={kv_stride} kv_dim={kv_dim} span_end={span_end}"
+            ),
+        })?;
     if v_cache.n_elements() < want_cache as u64 {
         return Err(MetalError::BadShape {
             kernel: "attn_matrix_transpose_v",
@@ -17212,20 +17290,58 @@ pub fn encode_attn_matrix_transpose_v_f16(
             ),
         });
     }
+    let n_rows_u32 = u32::try_from(n_rows).map_err(|_| MetalError::BadShape {
+        kernel: "attn_matrix_transpose_v",
+        detail: format!("n_rows={n_rows} does not fit shader uint"),
+    })?;
+    let n_pos_u32 = u32::try_from(n_pos).map_err(|_| MetalError::BadShape {
+        kernel: "attn_matrix_transpose_v",
+        detail: format!("n_pos={n_pos} does not fit shader uint"),
+    })?;
+    let base_pos_u32 = u32::try_from(base_pos).map_err(|_| MetalError::BadShape {
+        kernel: "attn_matrix_transpose_v",
+        detail: format!("base_pos={base_pos} does not fit shader uint"),
+    })?;
+    let kv_stride_u32 = u32::try_from(kv_stride).map_err(|_| MetalError::BadShape {
+        kernel: "attn_matrix_transpose_v",
+        detail: format!("kv_stride={kv_stride} does not fit shader uint"),
+    })?;
+    let vt_stride_u32 = u32::try_from(vt_stride).map_err(|_| MetalError::BadShape {
+        kernel: "attn_matrix_transpose_v",
+        detail: format!("vt_stride={vt_stride} does not fit shader uint"),
+    })?;
+    let n_kv_heads_u32 = u32::try_from(n_kv_heads).map_err(|_| MetalError::BadShape {
+        kernel: "attn_matrix_transpose_v",
+        detail: format!("n_kv_heads={n_kv_heads} does not fit shader uint"),
+    })?;
+    let head_dim_u32 = u32::try_from(head_dim).map_err(|_| MetalError::BadShape {
+        kernel: "attn_matrix_transpose_v",
+        detail: format!("head_dim={head_dim} does not fit shader uint"),
+    })?;
+    let total = kv_dim
+        .checked_mul(n_rows)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "attn_matrix_transpose_v",
+            detail: format!(
+                "n_kv_heads={n_kv_heads} * head_dim={head_dim} * n_rows={n_rows} overflows"
+            ),
+        })?;
+    let threadgroups = attn_matrix_vt_threadgroups(total, compact_dispatch)?;
+
     let pso = ctx.pipeline("kernel_attn_matrix_transpose_v_f16")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
         0,
         &AttnMatrixArgs {
-            n_rows: n_rows as u32,
-            n_pos: n_pos as u32,
-            base_pos: base_pos as u32,
-            kv_stride: kv_stride as u32,
-            vt_stride: vt_stride as u32,
+            n_rows: n_rows_u32,
+            n_pos: n_pos_u32,
+            base_pos: base_pos_u32,
+            kv_stride: kv_stride_u32,
+            vt_stride: vt_stride_u32,
             n_q_heads: 0,
-            n_kv_heads: n_kv_heads as u32,
+            n_kv_heads: n_kv_heads_u32,
             group: 0,
-            head_dim: head_dim as u32,
+            head_dim: head_dim_u32,
             scale: 0.0,
             causal_skip: 0,
         },
@@ -17234,17 +17350,46 @@ pub fn encode_attn_matrix_transpose_v_f16(
     enc.set_tensor(2, v_t);
     enc.dispatch(
         MTLSize {
-            width: n_kv_heads * head_dim * n_rows,
+            width: threadgroups,
             height: 1,
             depth: 1,
         },
         MTLSize {
-            width: 256,
+            width: ATTN_MATRIX_VT_THREADS,
             height: 1,
             depth: 1,
         },
     );
     Ok(())
+}
+
+pub fn encode_attn_matrix_transpose_v_f16(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    v_cache: &MetalTensor,
+    v_t: &MetalTensor,
+    base_pos: usize,
+    n_rows: usize,
+    n_pos: usize,
+    kv_stride: usize,
+    vt_stride: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+) -> Result<(), MetalError> {
+    encode_attn_matrix_transpose_v_f16_mode(
+        ctx,
+        enc,
+        v_cache,
+        v_t,
+        base_pos,
+        n_rows,
+        n_pos,
+        kv_stride,
+        vt_stride,
+        n_kv_heads,
+        head_dim,
+        attn_matrix_vt_compact_dispatch_enabled(),
+    )
 }
 
 pub fn encode_attn_matrix_kq_f32(
@@ -31566,6 +31711,627 @@ mod tests {
             }
         }
         out
+    }
+
+    fn read_back_u16(tensor: &MetalTensor) -> Vec<u16> {
+        assert_eq!(tensor.dtype, GgmlType::F16);
+        assert_eq!(tensor.buffer.storageMode(), MTLStorageMode::Shared);
+        assert_eq!(tensor.offset as usize % std::mem::align_of::<u16>(), 0);
+        let n = tensor.n_elements() as usize;
+        let n_bytes = n.checked_mul(std::mem::size_of::<u16>()).unwrap();
+        let end = (tensor.offset as usize).checked_add(n_bytes).unwrap();
+        assert!(end <= tensor.buffer.length());
+        let mut out = Vec::<u16>::with_capacity(n);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                (tensor.buffer.contents().as_ptr() as *const u8).add(tensor.offset as usize)
+                    as *const u16,
+                out.as_mut_ptr(),
+                n,
+            );
+            out.set_len(n);
+        }
+        out
+    }
+
+    #[test]
+    fn attn_matrix_vt_dispatch_groups_cover_exact_thread_range() {
+        for total in [1usize, 255, 256, 257] {
+            assert_eq!(attn_matrix_vt_threadgroups(total, false).unwrap(), total);
+            assert_eq!(
+                attn_matrix_vt_threadgroups(total, true).unwrap(),
+                total.div_ceil(ATTN_MATRIX_VT_THREADS)
+            );
+        }
+        assert!(attn_matrix_vt_threadgroups(0, false).is_err());
+        let legacy_max = (u32::MAX as usize + 1) / ATTN_MATRIX_VT_THREADS;
+        assert_eq!(
+            attn_matrix_vt_threadgroups(legacy_max, false).unwrap(),
+            legacy_max
+        );
+        assert!(attn_matrix_vt_threadgroups(legacy_max + 1, false).is_err());
+        assert!(attn_matrix_vt_threadgroups(u32::MAX as usize, true).is_ok());
+        assert!(attn_matrix_vt_threadgroups(u32::MAX as usize + 1, true).is_err());
+    }
+
+    #[test]
+    fn attn_matrix_vt_compact_dispatch_matches_legacy_nonzero_span() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const SENTINEL: u16 = 0x3555;
+
+        // Exact thread totals 255, 256, and 257. The first two also exercise
+        // multiple KV heads and dimensions; all use nonzero base and padding.
+        for &(n_kv, head_dim, n_rows) in &[(3usize, 5usize, 17usize), (2, 8, 16), (1, 1, 257)] {
+            let base_pos = 2usize;
+            let n_pos = base_pos + n_rows + 1;
+            let vt_stride = n_pos + 3;
+            let kv_dim = n_kv * head_dim;
+            let total = kv_dim * n_rows;
+            assert!([255, 256, 257].contains(&total));
+            let cache: Vec<u16> = (0..n_pos * kv_dim)
+                .map(|i| half::f16::from_f32(((i % 31) as f32 - 15.0) * 0.03125).to_bits())
+                .collect();
+            let cache_t = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&cache),
+                vec![cache.len() as u64],
+                GgmlType::F16,
+            )
+            .unwrap();
+            let make_vt = || {
+                MetalTensor::from_bytes(
+                    &ctx,
+                    bytemuck::cast_slice(&vec![SENTINEL; kv_dim * vt_stride]),
+                    vec![(kv_dim * vt_stride) as u64],
+                    GgmlType::F16,
+                )
+                .unwrap()
+            };
+            let legacy = make_vt();
+            let compact = make_vt();
+
+            for (dst, compact_dispatch) in [(&legacy, false), (&compact, true)] {
+                one_shot(&ctx, |enc| {
+                    encode_attn_matrix_transpose_v_f16_mode(
+                        &ctx,
+                        enc,
+                        &cache_t,
+                        dst,
+                        base_pos,
+                        n_rows,
+                        n_pos,
+                        kv_dim,
+                        vt_stride,
+                        n_kv,
+                        head_dim,
+                        compact_dispatch,
+                    )
+                })
+                .unwrap();
+            }
+
+            let mut expected = vec![SENTINEL; kv_dim * vt_stride];
+            for pos in base_pos..base_pos + n_rows {
+                for flat_d in 0..kv_dim {
+                    expected[flat_d * vt_stride + pos] = cache[pos * kv_dim + flat_d];
+                }
+            }
+            assert_eq!(read_back_u16(&legacy), expected);
+            assert_eq!(read_back_u16(&compact), expected);
+
+            let cmd = ctx
+                .queue
+                .commandBuffer()
+                .expect("validation command buffer");
+            let enc = KernelEncoder::begin(&cmd);
+            assert!(
+                encode_attn_matrix_transpose_v_f16_mode(
+                    &ctx,
+                    &enc,
+                    &cache_t,
+                    &compact,
+                    base_pos,
+                    n_rows,
+                    n_pos,
+                    kv_dim - 1,
+                    vt_stride,
+                    n_kv,
+                    head_dim,
+                    true,
+                )
+                .is_err()
+            );
+            let mut short_cache = cache_t.clone();
+            short_cache.shape = vec![((base_pos + n_rows) * kv_dim - 1) as u64];
+            assert!(
+                encode_attn_matrix_transpose_v_f16_mode(
+                    &ctx,
+                    &enc,
+                    &short_cache,
+                    &compact,
+                    base_pos,
+                    n_rows,
+                    n_pos,
+                    kv_dim,
+                    vt_stride,
+                    n_kv,
+                    head_dim,
+                    true,
+                )
+                .is_err()
+            );
+            let mut short_vt = compact.clone();
+            let exact_vt_end = (kv_dim - 1) * vt_stride + base_pos + n_rows;
+            short_vt.shape = vec![(exact_vt_end - 1) as u64];
+            assert!(
+                encode_attn_matrix_transpose_v_f16_mode(
+                    &ctx, &enc, &cache_t, &short_vt, base_pos, n_rows, n_pos, kv_dim, vt_stride,
+                    n_kv, head_dim, true,
+                )
+                .is_err()
+            );
+            assert!(
+                encode_attn_matrix_transpose_v_f16_mode(
+                    &ctx,
+                    &enc,
+                    &cache_t,
+                    &compact,
+                    usize::MAX,
+                    1,
+                    n_pos,
+                    kv_dim,
+                    vt_stride,
+                    n_kv,
+                    head_dim,
+                    true,
+                )
+                .is_err()
+            );
+            enc.end();
+        }
+    }
+
+    #[test]
+    fn attn_matrix_vt_prefix_rebuild_preserves_scattered_suffix() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const PREFIX: usize = 5;
+        const CHUNK: usize = 3;
+        const N_KV: usize = 2;
+        const HEAD_DIM: usize = 8;
+        const VT_PADDING: usize = 3;
+        const SENTINELS: [u16; 3] = [0x3555, 0x3aaa, 0x3999];
+
+        let n_pos = PREFIX + CHUNK;
+        let vt_stride = n_pos + VT_PADDING;
+        let kv_dim = N_KV * HEAD_DIM;
+        let cache_elems = n_pos * kv_dim;
+        let vt_elems = kv_dim * vt_stride;
+        let initial_cache: Vec<u16> = (0..cache_elems)
+            .map(|i| half::f16::from_f32(((i % 29) as f32 - 14.0) * 0.03125).to_bits())
+            .collect();
+        let current_f32: Vec<f32> = (0..CHUNK * kv_dim)
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.0625)
+            .collect();
+        let current_f16: Vec<u16> = current_f32
+            .iter()
+            .map(|&value| half::f16::from_f32(value).to_bits())
+            .collect();
+        let current = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&current_f32),
+            vec![current_f32.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        let mut expected_cache = initial_cache.clone();
+        expected_cache[PREFIX * kv_dim..].copy_from_slice(&current_f16);
+
+        let make_cache = || {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&initial_cache),
+                vec![cache_elems as u64],
+                GgmlType::F16,
+            )
+            .unwrap()
+        };
+        let mut arms = Vec::new();
+        for &sentinel in &SENTINELS {
+            let cache_k = make_cache();
+            let cache_v = make_cache();
+            let vt = MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&vec![sentinel; vt_elems]),
+                vec![vt_elems as u64],
+                GgmlType::F16,
+            )
+            .unwrap();
+            one_shot(&ctx, |enc| {
+                encode_scatter_offset_f32_to_f16_kv_vt(
+                    &ctx,
+                    enc,
+                    &current,
+                    &current,
+                    &cache_k,
+                    &cache_v,
+                    &vt,
+                    PREFIX * kv_dim,
+                    CHUNK * kv_dim,
+                    PREFIX,
+                    kv_dim,
+                    HEAD_DIM,
+                    vt_stride,
+                )
+            })
+            .unwrap();
+            assert_eq!(read_back_u16(&cache_k), expected_cache);
+            assert_eq!(read_back_u16(&cache_v), expected_cache);
+            let scattered_vt = read_back_u16(&vt);
+            for row in 0..CHUNK {
+                for flat_d in 0..kv_dim {
+                    assert_eq!(
+                        scattered_vt[flat_d * vt_stride + PREFIX + row],
+                        current_f16[row * kv_dim + flat_d]
+                    );
+                }
+            }
+            arms.push((cache_v, vt, sentinel));
+        }
+
+        for (index, (cache_v, vt, _)) in arms.iter().enumerate() {
+            let (rows, compact) = match index {
+                0 => (n_pos, false),
+                1 => (n_pos, true),
+                _ => (PREFIX, true),
+            };
+            one_shot(&ctx, |enc| {
+                encode_attn_matrix_transpose_v_f16_mode(
+                    &ctx, enc, cache_v, vt, 0, rows, n_pos, kv_dim, vt_stride, N_KV, HEAD_DIM,
+                    compact,
+                )
+            })
+            .unwrap();
+        }
+
+        for (_, vt, sentinel) in &arms {
+            let mut expected_vt = vec![*sentinel; vt_elems];
+            for pos in 0..n_pos {
+                for flat_d in 0..kv_dim {
+                    expected_vt[flat_d * vt_stride + pos] = expected_cache[pos * kv_dim + flat_d];
+                }
+            }
+            assert_eq!(read_back_u16(vt), expected_vt);
+        }
+    }
+
+    /// Model-free screen preregistered in
+    /// `docs/bench/2026-08-17-qwen-vt-rebuild-ceiling/README.md`.
+    #[test]
+    #[ignore]
+    fn attn_matrix_vt_environment_probe() {
+        let ctx = MetalContext::new().expect("Metal context for V_T environment probe");
+        println!(
+            "VT_ENV_JSON {}",
+            serde_json::json!({
+                "schema_version": 1,
+                "test": "metal::tests::attn_matrix_vt_environment_probe",
+                "device_registry_id": ctx.device.registryID(),
+                "device": ctx.device.name().to_string(),
+                "max_buffer_length": ctx.device.maxBufferLength(),
+                "recommended_max_working_set_size": ctx.recommended_max_working_set_size(),
+            })
+        );
+    }
+
+    /// Model-free screen preregistered in
+    /// `docs/bench/2026-08-17-qwen-vt-rebuild-ceiling/README.md`.
+    #[test]
+    #[ignore]
+    fn attn_matrix_vt_rebuild_screen() {
+        const N_LAYERS: usize = 16;
+        const N_KV: usize = 4;
+        const HEAD_DIM: usize = 256;
+
+        struct Bank {
+            src: Vec<MetalTensor>,
+            dst: Vec<MetalTensor>,
+        }
+
+        fn parse_usize(name: &str) -> usize {
+            let raw = std::env::var(name).unwrap_or_else(|_| panic!("missing {name}"));
+            raw.parse::<usize>()
+                .unwrap_or_else(|_| panic!("invalid {name}={raw:?}"))
+        }
+
+        fn fill_tensor(tensor: &MetalTensor, byte: u8) {
+            assert_eq!(tensor.dtype, GgmlType::F16);
+            assert_eq!(tensor.buffer.storageMode(), MTLStorageMode::Shared);
+            assert_eq!(tensor.offset, 0);
+            let n_bytes = tensor.n_bytes() as usize;
+            assert!(n_bytes <= tensor.buffer.length());
+            unsafe {
+                std::ptr::write_bytes(tensor.buffer.contents().as_ptr() as *mut u8, byte, n_bytes);
+            }
+        }
+
+        fn allocate_bank(
+            ctx: &MetalContext,
+            name: &str,
+            elems_per_layer: usize,
+            bytes_per_layer: usize,
+            src_byte: u8,
+            dst_byte: u8,
+        ) -> Bank {
+            let mut src = Vec::with_capacity(N_LAYERS);
+            let mut dst = Vec::with_capacity(N_LAYERS);
+            for layer in 0..N_LAYERS {
+                let src_layer = MetalTensor::zeros_f16(ctx, vec![elems_per_layer as u64])
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "allocate bank={name} layer={layer} role=src bytes={bytes_per_layer}: {error}"
+                        )
+                    });
+                let dst_layer = MetalTensor::zeros_f16(ctx, vec![elems_per_layer as u64])
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "allocate bank={name} layer={layer} role=dst bytes={bytes_per_layer}: {error}"
+                        )
+                    });
+                fill_tensor(&src_layer, src_byte);
+                fill_tensor(&dst_layer, dst_byte);
+                src.push(src_layer);
+                dst.push(dst_layer);
+            }
+            Bank { src, dst }
+        }
+
+        fn run_span(
+            ctx: &MetalContext,
+            bank: &Bank,
+            label: &str,
+            base_pos: usize,
+            rows: usize,
+            n_pos: usize,
+            kv_dim: usize,
+            compact: bool,
+        ) -> (f64, f64) {
+            let cmd = ctx
+                .queue
+                .commandBuffer()
+                .expect("V_T rebuild command buffer");
+            let enc = KernelEncoder::begin(&cmd);
+            for layer in 0..N_LAYERS {
+                encode_attn_matrix_transpose_v_f16_mode(
+                    ctx,
+                    &enc,
+                    &bank.src[layer],
+                    &bank.dst[layer],
+                    base_pos,
+                    rows,
+                    n_pos,
+                    kv_dim,
+                    n_pos,
+                    N_KV,
+                    HEAD_DIM,
+                    compact,
+                )
+                .unwrap();
+            }
+            enc.end();
+            let wall_start = std::time::Instant::now();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            let wall_ms = wall_start.elapsed().as_secs_f64() * 1e3;
+            let status = cmd.status();
+            let error = cmd.error();
+            assert!(
+                status == objc2_metal::MTLCommandBufferStatus::Completed && error.is_none(),
+                "V_T command failed arm={label} status={status:?} error={error:?}"
+            );
+            let gpu_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+            assert!(wall_ms.is_finite() && wall_ms > 0.0);
+            assert!(gpu_ms.is_finite() && gpu_ms > 0.0);
+            (wall_ms, gpu_ms)
+        }
+
+        fn prep_overlap(
+            ctx: &MetalContext,
+            bank: &Bank,
+            prefix: usize,
+            chunk: usize,
+            n_pos: usize,
+            kv_dim: usize,
+        ) {
+            let _ = run_span(ctx, bank, "PREP_D2", prefix, chunk, n_pos, kv_dim, true);
+        }
+
+        let mode = std::env::var("QWEN_VT_REBUILD_MODE")
+            .unwrap_or_else(|_| panic!("missing QWEN_VT_REBUILD_MODE"));
+        let prefix = parse_usize("QWEN_VT_REBUILD_PREFIX");
+        let chunk = parse_usize("QWEN_VT_REBUILD_CHUNK");
+        match mode.as_str() {
+            "dispatch" => {
+                assert!([512, 2048, 8192].contains(&prefix));
+                assert_eq!(chunk, 128);
+            }
+            "compact" => {
+                assert!([8192, 16384, 32768].contains(&prefix));
+                assert_eq!(chunk, 128);
+            }
+            "overlap" => {
+                assert_eq!(prefix, 32768);
+                assert_eq!(chunk, 1024);
+            }
+            _ => panic!("invalid QWEN_VT_REBUILD_MODE={mode:?}"),
+        }
+
+        let n_pos = prefix.checked_add(chunk).unwrap();
+        let kv_dim = N_KV * HEAD_DIM;
+        let elems_per_layer = n_pos.checked_mul(kv_dim).unwrap();
+        let bytes_per_layer = elems_per_layer.checked_mul(2).unwrap();
+        let total_requested_bytes = bytes_per_layer
+            .checked_mul(N_LAYERS)
+            .and_then(|value| value.checked_mul(4))
+            .unwrap();
+        let ctx = MetalContext::new().expect("Metal context for V_T rebuild screen");
+        let max_buffer_length = ctx.device.maxBufferLength();
+        assert!(
+            bytes_per_layer <= max_buffer_length,
+            "V_T layer bytes {bytes_per_layer} exceed maxBufferLength {max_buffer_length}"
+        );
+        let allocated_before = ctx.current_allocated_size();
+        let bank_x = allocate_bank(&ctx, "X", elems_per_layer, bytes_per_layer, 0x3c, 0xa5);
+        let bank_y = allocate_bank(&ctx, "Y", elems_per_layer, bytes_per_layer, 0x38, 0x5a);
+        let allocated_after = ctx.current_allocated_size();
+
+        println!(
+            "VT_REBUILD_JSON {}",
+            serde_json::json!({
+                "kind": "meta",
+                "schema_version": 2,
+                "mode": mode,
+                "prefix": prefix,
+                "chunk": chunk,
+                "n_pos": n_pos,
+                "vt_stride": n_pos,
+                "layers": N_LAYERS,
+                "n_kv": N_KV,
+                "head_dim": HEAD_DIM,
+                "kv_dim": kv_dim,
+                "device_registry_id": ctx.device.registryID(),
+                "device": ctx.device.name().to_string(),
+                "max_buffer_length": max_buffer_length,
+                "recommended_max_working_set_size": ctx.recommended_max_working_set_size(),
+                "bytes_per_layer_buffer": bytes_per_layer,
+                "total_requested_bytes": total_requested_bytes,
+                "allocated_before": allocated_before,
+                "allocated_after": allocated_after,
+            })
+        );
+
+        let arm_spec = |role: &str| -> (&str, bool, usize) {
+            match (mode.as_str(), role) {
+                ("dispatch", "A") => ("D0", false, n_pos),
+                ("dispatch", "B") => ("D1", true, n_pos),
+                ("overlap", "A") => ("D1", true, n_pos),
+                ("overlap", "B") => ("D2", true, prefix),
+                ("compact", "S") => ("D1", true, n_pos),
+                _ => panic!("invalid mode/role {mode}/{role}"),
+            }
+        };
+        let bank = |name: &str| -> &Bank {
+            match name {
+                "X" => &bank_x,
+                "Y" => &bank_y,
+                _ => panic!("invalid bank {name}"),
+            }
+        };
+        let run_role = |role: &str, bank_name: &str| -> (f64, f64) {
+            let (arm, compact, rows) = arm_spec(role);
+            if mode == "overlap" {
+                prep_overlap(&ctx, bank(bank_name), prefix, chunk, n_pos, kv_dim);
+            }
+            run_span(&ctx, bank(bank_name), arm, 0, rows, n_pos, kv_dim, compact)
+        };
+
+        let warmups: Vec<(&str, &str)> = match mode.as_str() {
+            "dispatch" => vec![("A", "X"), ("B", "Y"), ("A", "Y"), ("B", "X")],
+            "compact" => vec![("S", "X"), ("S", "Y")],
+            "overlap" => vec![("A", "X"), ("B", "Y"), ("A", "Y"), ("B", "X")],
+            _ => unreachable!(),
+        };
+        for (role, bank_name) in warmups {
+            let _ = run_role(role, bank_name);
+        }
+
+        let paired_schedule = [
+            [("A", "X"), ("B", "Y")],
+            [("B", "X"), ("A", "Y")],
+            [("B", "Y"), ("A", "X")],
+            [("A", "Y"), ("B", "X")],
+            [("A", "X"), ("B", "Y")],
+            [("B", "X"), ("A", "Y")],
+        ];
+        let single_banks = ["X", "Y", "Y", "X", "X", "Y"];
+
+        if mode == "compact" {
+            for (sample_idx, bank_name) in single_banks.iter().enumerate() {
+                let (wall_ms, gpu_ms) = run_role("S", bank_name);
+                let (arm, compact, rows) = arm_spec("S");
+                let logical_bytes = (N_LAYERS as u64)
+                    .checked_mul(kv_dim as u64)
+                    .and_then(|value| value.checked_mul(rows as u64))
+                    .and_then(|value| value.checked_mul(4))
+                    .unwrap();
+                let total = kv_dim.checked_mul(rows).unwrap();
+                let threadgroups = attn_matrix_vt_threadgroups(total, compact).unwrap();
+                println!(
+                    "VT_REBUILD_JSON {}",
+                    serde_json::json!({
+                        "kind": "arm",
+                        "schema_version": 2,
+                        "mode": mode,
+                        "prefix": prefix,
+                        "chunk": chunk,
+                        "sample": sample_idx + 1,
+                        "role": "S",
+                        "arm": arm,
+                        "bank": bank_name,
+                        "base_pos": 0,
+                        "rows": rows,
+                        "threadgroups_per_layer": threadgroups,
+                        "thread_slots_per_layer": threadgroups * ATTN_MATRIX_VT_THREADS,
+                        "logical_bytes": logical_bytes,
+                        "wall_ms": wall_ms,
+                        "gpu_ms": gpu_ms,
+                        "gb_s": logical_bytes as f64 / (gpu_ms * 1e6),
+                    })
+                );
+            }
+        } else {
+            for (pair_idx, pair) in paired_schedule.iter().enumerate() {
+                let order = format!("{}{}", pair[0].0, pair[1].0);
+                for (sequence_idx, &(role, bank_name)) in pair.iter().enumerate() {
+                    let (wall_ms, gpu_ms) = run_role(role, bank_name);
+                    let (arm, compact, rows) = arm_spec(role);
+                    let logical_bytes = (N_LAYERS as u64)
+                        .checked_mul(kv_dim as u64)
+                        .and_then(|value| value.checked_mul(rows as u64))
+                        .and_then(|value| value.checked_mul(4))
+                        .unwrap();
+                    let total = kv_dim.checked_mul(rows).unwrap();
+                    let threadgroups = attn_matrix_vt_threadgroups(total, compact).unwrap();
+                    println!(
+                        "VT_REBUILD_JSON {}",
+                        serde_json::json!({
+                            "kind": "arm",
+                            "schema_version": 2,
+                            "mode": mode,
+                            "prefix": prefix,
+                            "chunk": chunk,
+                            "pair": pair_idx + 1,
+                            "order": order,
+                            "sequence": sequence_idx + 1,
+                            "role": role,
+                            "arm": arm,
+                            "bank": bank_name,
+                            "base_pos": 0,
+                            "rows": rows,
+                            "threadgroups_per_layer": threadgroups,
+                            "thread_slots_per_layer": threadgroups * ATTN_MATRIX_VT_THREADS,
+                            "logical_bytes": logical_bytes,
+                            "wall_ms": wall_ms,
+                            "gpu_ms": gpu_ms,
+                            "gb_s": logical_bytes as f64 / (gpu_ms * 1e6),
+                        })
+                    );
+                }
+            }
+        }
     }
 
     /// Micro-oracle for the non-flash matrix-attention sidecar

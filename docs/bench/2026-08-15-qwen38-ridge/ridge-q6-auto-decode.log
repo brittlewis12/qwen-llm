@@ -1,0 +1,31 @@
+status	dirty
+build_commit	1ac9446cec5702254331f2f9986a63bdc39abb60
+runtime_commit	1ac9446cec5702254331f2f9986a63bdc39abb60
+build_source_state	git-source-sha256-v2:ca3e7b2efa0a9355e9c74297fd49db873e9dac122d607cd66be4eaeabc299e25
+runtime_source_state	git-source-sha256-v2:ca3e7b2efa0a9355e9c74297fd49db873e9dac122d607cd66be4eaeabc299e25
+dirty	build=true runtime=true
+stamp_source	git
+problems	dirty
+[bench] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[bench] power: source=AC Power battery=80% AC attached warning=none powermode_ac=2 powermode_battery=2 thermal_warning=false performance_warning=false
+[metal-load] native quantized token embedding policy: auto-promoted (Q6_K [5120, 248320])
+[metal-load-ledger] source=851/12249470976 direct_copy=851/12249470976 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+[bench] model=/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf prompt="Give a concise explanation of why the sky appears blue during the day." (14 tokens), gen=32 tokens, kv_capacity=62
+[bench] rep  1: prefill    275.4 ms (50.8 t/s)  decode   1168.0 ms (27.4 t/s)
+[bench] rep  1 request   1444.0 ms
+
+[bench] === results (1 run) ===
+[bench] decode mode: gpu-argmax
+[bench] prefill mode: packed layer-major
+[bench] prefill chunk: 14
+[bench] request wall: 1444.0 ms avg
+[bench] prefill: 14 tokens in 275.4 ms avg = 19.67 ms/token = 50.8 +/- 0.0 t/s
+[bench] prefill gpu: 217.8 ms avg = 15.56 ms/token = 79.1% of prefill wall
+[bench] decode:  32 tokens in 1168.0 ms avg = 36.50 ms/token (avg) = 27.4 t/s
+[bench] steady:  36.39 ms/token (excl. first decode) = 27.48 +/- 0.00 t/s
+[bench] total:   1443.4 ms wall (mean)
+[bench] prefill per-token: packed mode (no sequential replay series)
+[bench] decode per-token (first 5): [39.752625, 36.30775, 36.405416, 36.356832999999995, 36.504709000000005]
+[bench] decode per-token (last  5): [36.529916, 36.450417, 36.47075, 36.233458000000006, 36.361667]
+[bench] generated token trace: [271,760,12515,7701,6105,1521,37728,11,864,369,4022,3000,11,1100,9872,303,279,16078,13,10382,261,89661,318,11855,321,76990,8,43000,777,1056,4860,89661,318]
+[bench] generated: "\n\nThe sky appears blue because sunlight, which is white light, scatters in the atmosphere. Shorter wavelengths (blue and violet) scatter more than longer wavelengths"

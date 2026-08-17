@@ -1,0 +1,39 @@
+status	dirty
+build_commit	1ac9446cec5702254331f2f9986a63bdc39abb60
+runtime_commit	1ac9446cec5702254331f2f9986a63bdc39abb60
+build_source_state	git-source-sha256-v2:ca3e7b2efa0a9355e9c74297fd49db873e9dac122d607cd66be4eaeabc299e25
+runtime_source_state	git-source-sha256-v2:ca3e7b2efa0a9355e9c74297fd49db873e9dac122d607cd66be4eaeabc299e25
+dirty	build=true runtime=true
+stamp_source	git
+problems	dirty
++zsh:1> target/release/qwen run --model /Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf --reasoning-effort low --max-tokens 256 --user 'Return exactly EFFORT_OK after checking that 17 + 25 = 42.'
+[metal-load] native quantized token embedding policy: auto-promoted (Q6_K [5120, 248320])
+[2m2026-08-15T23:26:20.396148Z[0m [32m INFO[0m [2mqwen_llm::runtime[0m[2m:[0m prefetch: skipped (already warm) [3mshard[0m[2m=[0m/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf [3mresident_pct[0m[2m=[0m100.0
+[metal-load-ledger] source=851/12249470976 direct_copy=851/12249470976 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+The user wants me to check if 17 + 25 = 42, and if so, return exactly "EFFORT_OK".
+
+17 + 25 = 42. Yes, that's correct.
+
+So I should return exactly "EFFORT_OK".
+</think>
+
+EFFORT_OK
+stats: prompt_tokens=60 generated_tokens=66 transitions=65 stop_reason=eos load_ms=1412.6 prefill_ms=376.8 ttft_ms=400.3 decode_tps=27.27 transition_tps=27.44 cache_entries=0 cache_mib=0.0/16384.0
++zsh:1> target/release/qwen run --model /Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf --reasoning-effort medium --max-tokens 256 --user 'Return exactly EFFORT_OK after checking that 17 + 25 = 42.'
+[metal-load] native quantized token embedding policy: auto-promoted (Q6_K [5120, 248320])
+[2m2026-08-15T23:26:24.808686Z[0m [32m INFO[0m [2mqwen_llm::runtime[0m[2m:[0m prefetch: skipped (already warm) [3mshard[0m[2m=[0m/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf [3mresident_pct[0m[2m=[0m100.0
+[metal-load-ledger] source=851/12249470976 direct_copy=851/12249470976 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+Let me check: 17 + 25 = 42. Yes, that's correct. 17 + 25 = 42. The user wants me to return exactly "EFFORT_OK" after confirming this.
+</think>
+
+EFFORT_OK
+stats: prompt_tokens=30 generated_tokens=57 transitions=56 stop_reason=eos load_ms=1435.7 prefill_ms=278.0 ttft_ms=300.9 decode_tps=27.35 transition_tps=27.45 cache_entries=0 cache_mib=0.0/16384.0
++zsh:1> target/release/qwen run --model /Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf --reasoning-effort xhigh --max-tokens 256 --user 'Return exactly EFFORT_OK after checking that 17 + 25 = 42.'
+[metal-load] native quantized token embedding policy: auto-promoted (Q6_K [5120, 248320])
+[2m2026-08-15T23:26:28.793108Z[0m [32m INFO[0m [2mqwen_llm::runtime[0m[2m:[0m prefetch: skipped (already warm) [3mshard[0m[2m=[0m/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf [3mresident_pct[0m[2m=[0m100.0
+[metal-load-ledger] source=851/12249470976 direct_copy=851/12249470976 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+We need answer user: "Return exactly EFFORT_OK after checking that 17 + 25 = 42." Need final exactly EFFORT_OK. Need maybe no extra. Ensure check: 17+25=42 true. Final only EFFORT_OK.
+</think>
+
+EFFORT_OK
+stats: prompt_tokens=72 generated_tokens=65 transitions=64 stop_reason=eos load_ms=1436.6 prefill_ms=516.3 ttft_ms=538.8 decode_tps=27.26 transition_tps=27.43 cache_entries=0 cache_mib=0.0/16384.0

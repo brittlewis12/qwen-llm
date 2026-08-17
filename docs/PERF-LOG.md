@@ -78,6 +78,87 @@ row-specific bound below 20-25% fully charged work, and GDN factors only for an
 adaptive representation with an explicit state-error/continuation contract.
 Evidence: `docs/bench/2026-08-17-structural-thinness-falsifiers/`.
 
+## 2026-08-16 — Ridge IQ2 N64 And Direct-Level Repack KILL
+
+Status: two exact/high-ceiling Ridge low-bit hypotheses were implemented as
+isolated falsifiers and removed. No experimental kernel or selector remains.
+
+- A serialized Ridge `pp1024`, chunk-1024 baseline reports 4,367.5 ms median
+  wall, 4,113.7 ms median GPU, and 234.46 token/s. Gate, up, and down are each
+  about 13.7-14.3 ms/layer; the complete FFN is approximately 67% of GPU time.
+- The full-tile IQ2_S N64 kernel was bit-identical to two N32 tiles and reused
+  each decoded 64x32 panel across twice the prompt width. Real Ridge tensors at
+  N=1024 moved only `13.724 -> 13.714 ms` for `[5120,17408]` (`1.001x`) and
+  `13.828 -> 13.799 ms` for `[17408,5120]` (`1.002x`). Halving panel decode did
+  not move the MMA-bound primitive, so the path was removed at the 1.08x gate.
+- The singleton decode census puts gate/up at 12.842 ms, down at 7.395 ms, and
+  all low-bit FFN projections at 20.237 ms of a 36.77 ms phase. An exact-source
+  direct-level repack expanded IQ2_S by 1.294-1.298x to remove the 8 KiB
+  codebook/index reconstruction. It raised charged physical throughput from
+  284.0 to 391.8 GB/s and 253.2 to 348.0 GB/s, but wall improved only
+  `0.10053 -> 0.09454 ms` (`1.063x`) and `0.11277 -> 0.10617 ms` (`1.062x`).
+  Outputs also differed by 1-2 ULP (max absolute `1.49e-8` / `2.98e-8`). It was
+  removed below the preregistered 1.12x primitive and bitwise gates.
+- The N64 result establishes that Ridge packed prefill is matrix-compute bound,
+  not duplicated IQ2 codebook work. The direct-level result bounds decode
+  repacks that spend 29% more bytes. Reopen only for actual weight/MMA deletion
+  or a materially denser exact representation with a measured whole-phase
+  ceiling; do not retune N64, rows-per-simdgroup, or dual gate/up fusion.
+- All GPU work was serialized on ordinary pageable Qwen storage. No residency
+  set, pre-wire, `mlock`, cache-bypass read, or residency-coupled A10B path ran;
+  the user-owned llama server was untouched.
+
+Decision: keep native N32 IQ2_S prefill and native singleton IQ2_S decode. The
+next Ridge branch must delete model work rather than reshuffle the same MMAs or
+buy instruction relief with enough extra bytes to erase the gain.
+
+## 2026-08-15 — Ridge Pareto Point, Q6 Embedding GO, Low-Bit N2 Repair
+
+Status: the 11.73 GiB Qwen3.8 Ridge mix is a credible interactive Pareto point.
+Native Q6_K embeddings and operator-bit-exact, shape-gated IQ2_S/IQ3_S N2
+kernels are default-on in the current WIP. Ridge MTP remains off at 0.968x
+total, and clean committed timing is still required for release promotion.
+
+- Asset `95580dbd...a09f5e` has 12,249,470,976 base source bytes plus a
+  338,720,768-byte MTP inventory. Its supplied same-box packet reports
+  1.058x/1.050x decode and 0.956x/0.979x prefill versus Qwen3.6 Q4_K_M at
+  6.5K/32K. Raw throughput output is not retained here, so those four ratios
+  are directional operator evidence rather than a promotion packet.
+- Qwen policy had lagged the already-tested shared Q6_K row kernel. Auto-retaining
+  the 1,042,944,000-byte embedding instead of materializing 5,085,593,600 F32
+  bytes removes exactly 4,042,649,600 bytes (3.76 GiB). Selected real rows are
+  bit-exact against CPU dequantization, and native/forced-F32 ordinary runs
+  emit the identical 33-token trace.
+- Ridge exposed a physical-shape cliff: 160 IQ2_S and 32 IQ3_S FFN projections
+  used 32-column matrix tiles for N2. Exact parallel-simdgroup NC2 dispatches,
+  defaulted only at N2 and `[5120,17408]` / `[17408,5120]`, move the 64-token
+  verifier `5240.6 -> 2255.4 ms` (2.324x) and total MTP `0.468x -> 0.968x`.
+  Candidate/rollback preserve all 64 target IDs and pass a numerical terminal
+  resume audit. This repairs an engine cliff but does not establish bitwise
+  terminal-state identity or promote speculation.
+- The maintained retention battery is 24/24 retained and strict in both cells;
+  its output SHA is byte-identical to the Qwen3.8 Q4_K_M guardrail. The Ridge
+  card separately reports 7.82 versus 7.15 BF16 Wiki-style PPL; neither result
+  establishes general capability equivalence.
+- `qwen run --reasoning-effort low|medium|xhigh` now reproduces the exact
+  upstream Qwen3.8 ordinary-chat transitions. Omission is xhigh; invalid tiers,
+  raw prompts, no-thinking combinations, and non-Qwen3.8 identities fail
+  closed. A three-tier smoke reaches EOS and `EFFORT_OK`; it is a transition
+  check, not an effort-quality ranking.
+- A rolling physical-N1 D1 formulation was audited and closed as acceleration:
+  it can defer accepted target work and delete rejected speculative rows, but
+  asymptotically emits only one new token per target call while adding a full
+  MTP draft. N2 is not recomputing a previously known conditional.
+- Operator observation: all loads were ordinary pageable Qwen loads. No
+  residency set, pre-wire, `mlock`, cache-bypass read, or residency-coupled A10B
+  path ran; GPU work was serialized and the user-owned llama server untouched.
+
+Decision: use Ridge as the leading interactive candidate while retaining
+Qwen3.8 Q4_K_M as the higher-bit capability/prefill anchor and Qwen3.6 Q4_K_M as
+the regression anchor. Clean-confirm the WIP defaults before release promotion.
+The next discriminator is a small paired executable coding/reasoning packet,
+not broader kernel retuning. Evidence: `docs/bench/2026-08-15-qwen38-ridge/`.
+
 ## 2026-08-15 — Qwen3.8 Packed D1 Reframe And Exact Redundancy KILL
 
 Status: the old 0.788x D1 result was a topology failure, not an MTP-head

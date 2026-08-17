@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "battery_id": "injected-correct-label-retention-v4.1",
+  "interpretation": "descriptive only; this battery does not measure model belief revision",
+  "arm": "qwen38-ridge-3.7bpw",
+  "family": "qwen38",
+  "request_profile": "qwen36",
+  "request_count": 48,
+  "outcomes_by_cell": {
+    "M": {
+      "RETAINED": 24,
+      "FLIPPED": 0,
+      "UNPARSEABLE": 0
+    },
+    "N": {
+      "RETAINED": 24,
+      "FLIPPED": 0,
+      "UNPARSEABLE": 0
+    }
+  },
+  "strict_compliance_by_cell": {
+    "M": {
+      "count": 24,
+      "total": 24,
+      "rate": 1.0
+    },
+    "N": {
+      "count": 24,
+      "total": 24,
+      "rate": 1.0
+    }
+  },
+  "format_only_recoverability_by_cell": {
+    "M": {
+      "count": 0,
+      "total": 24,
+      "rate": 0.0
+    },
+    "N": {
+      "count": 0,
+      "total": 24,
+      "rate": 0.0
+    }
+  },
+  "misleading_outcomes_by_truth_label": {
+    "PRIME": {
+      "RETAINED": 12,
+      "FLIPPED": 0,
+      "UNPARSEABLE": 0
+    },
+    "COMPOSITE": {
+      "RETAINED": 12,
+      "FLIPPED": 0,
+      "UNPARSEABLE": 0
+    }
+  },
+  "misleading_outcomes_by_bin": {
+    "140-199": {
+      "RETAINED": 8,
+      "FLIPPED": 0,
+      "UNPARSEABLE": 0
+    },
+    "200-299": {
+      "RETAINED": 8,
+      "FLIPPED": 0,
+      "UNPARSEABLE": 0
+    },
+    "300-499": {
+      "RETAINED": 8,
+      "FLIPPED": 0,
+      "UNPARSEABLE": 0
+    }
+  },
+  "paired_cell_outcomes": [
+    {
+      "misleading": "RETAINED",
+      "neutral": "RETAINED",
+      "count": 24
+    }
+  ],
+  "nonretained_items": [],
+  "packet_sha256": "9345f2a08175e8adb4733cb2a147e4c001b75d4259ced2cc66d43049317d7200",
+  "outputs_sha256": "47253a5c79cc4ed98da0c2a45d8145ff6aaa05566ddd50da11257f25e8fcd9b7"
+}

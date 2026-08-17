@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "battery_id": "injected-correct-label-retention-v4.1",
+  "status": "complete",
+  "arm": "qwen38-ridge-3.7bpw",
+  "family": "qwen38",
+  "request_profile": "qwen36",
+  "started_at": "2026-08-15T22:59:20.267836+00:00",
+  "command": [
+    "/Users/tito/code/qwen-llm/target/release/qwen",
+    "--model",
+    "/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf",
+    "--requests-jsonl",
+    "/Users/tito/code/qwen-llm/target/qualitative/dsv4-retention-v4.1/requests-qwen36.jsonl",
+    "--tokens",
+    "32",
+    "--temp",
+    "0.0",
+    "--top-k",
+    "200",
+    "--top-p",
+    "1.0",
+    "--min-p",
+    "0.05",
+    "--seed",
+    "42",
+    "--no-special-tokens",
+    "--prefix-cache-max-mib",
+    "0",
+    "--cache-prefix-auto-min-tokens",
+    "0",
+    "--request-stats",
+    "/Users/tito/code/qwen-llm/target/qualitative/dsv4-retention-v4.1/qwen38-ridge-3.7bpw.stats.jsonl"
+  ],
+  "environment": {
+    "policy": "allowlisted base environment plus fixed overlays",
+    "inherited_value_sha256": {
+      "COMMAND_MODE": "f9571298e47042c0e2d1cf71c7205787c65625ebfbf4f6be7e885b272f082c50",
+      "HOME": "0055e5afd8d84634a9a6b630063683f1f3d4a79816f95bb7f4778f9a892e2747",
+      "LANG": "65ce8c93514741c928d27fcdbe7b0a754dfcaebcb2292111cd60305dc983f51f",
+      "LOGNAME": "504db5aeeabd937a18a36b62d6e948d236b889b33c84e9e0561d7fda1c145bce",
+      "PATH": "aeae89424623b5902b177213061e0d9b6b52f72111fe44dc8e94a4430ab455c3",
+      "SHELL": "475f846a312099b30f3cd540b3eb682015c93f0316fa581b63de258107a9b623",
+      "TERM": "7f44899d0925ec2c615f664a5dd62df27c65ce39c2e82739f129084c054af778",
+      "TMPDIR": "7b46c577be8a4ee645b935ec9b13d7b33ed5c20389f04e5fa2dae6bc4ca94a91",
+      "USER": "504db5aeeabd937a18a36b62d6e948d236b889b33c84e9e0561d7fda1c145bce"
+    },
+    "removed_qwen_keys": [],
+    "overlay": {
+      "QWEN_DSV4_PREFETCH": "off",
+      "QWEN_DSV4_RESIDENCY_SET": "0",
+      "RUST_LOG": "warn"
+    }
+  },
+  "source": {
+    "commit": "1ac9446cec5702254331f2f9986a63bdc39abb60",
+    "dirty": true,
+    "tracked_changes": 17,
+    "untracked_changes": 18,
+    "status_sha256": "a5b77debcc5090e7367431d41b7faa8c6b5e748b88028ccd7eb63f933c73f7ad"
+  },
+  "binary": {
+    "path": "/Users/tito/code/qwen-llm/target/release/qwen",
+    "bytes": 9616680,
+    "mtime_ns": 1786834755464107686,
+    "sha256": "81fc47e5465a6ddd86db5bf4e921a59b7c7753b6a31dc413862b3bfc80891b00"
+  },
+  "model_locator": {
+    "locator_kind": "path-stat-edge64k-v1",
+    "integrity_scope": "local file locator, not a complete content digest; inode and ctime detect ordinary in-place or replacement mutations",
+    "entry_point": "/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf",
+    "total_bytes": 12599187008,
+    "files": [
+      {
+        "path": "/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf",
+        "bytes": 12599187008,
+        "device": 16777232,
+        "inode": 161888850,
+        "mtime_ns": 1786821997134907910,
+        "ctime_ns": 1786821997153722543,
+        "edge_sha256": "25e31afe5ef231eb9bf0ca45a86ae5cb52c67207e4b9bf6e23c05f60143c4863"
+      }
+    ],
+    "locator_sha256": "4f3ae831f0bd37ab899eec1e2bc02307472561c03d108ed2a8d4907264f373e6"
+  },
+  "packet_sha256": "9345f2a08175e8adb4733cb2a147e4c001b75d4259ced2cc66d43049317d7200",
+  "requests_sha256": "b622df3d16e02af6699cf3d0d0981c216ace2ee007804883ed93be49bf53c58b",
+  "whole_model_residency": "disabled",
+  "model_prefetch": "off",
+  "child_pid": 75580,
+  "finished_at": "2026-08-15T23:00:02.526688+00:00",
+  "outer_wall_s": 42.24050158302998,
+  "completed_rows": 48,
+  "child_returncode": 0,
+  "build_stamps": [],
+  "stderr_sha256": "a14409e3e54b7b1bceec92236238cff4368435191ed9977dc03fc90fc378dae2",
+  "outputs_sha256": "47253a5c79cc4ed98da0c2a45d8145ff6aaa05566ddd50da11257f25e8fcd9b7",
+  "stats_sha256": "ed268acb80673ea6a68c47a27eae97d1046e3a77f28b225b8469098d008f7875"
+}

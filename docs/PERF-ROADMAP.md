@@ -87,7 +87,13 @@ Exactness labels:
 Primary sentinels:
 
 - Lightweight dense: 0.8B or 4B, plus one low-bit stress format.
-- Dense quality anchor: `Qwen3.6-27B-Q4_K_M.gguf`.
+- Dense regression anchor: `Qwen3.6-27B-Q4_K_M.gguf`.
+- Dense current capability candidates: pinned `Qwen3.8-27B-Q4_K_M.gguf` from
+  `unsloth/Qwen3.8-27B-GGUF` as the higher-bit anchor, plus pinned
+  `Qwen3.8-27B-Ridge-3.7bpw.gguf` from
+  `empero-ai/Qwen3.8-27B-Ridge-GGUF` as the smaller interactive Pareto
+  candidate. Both surfaces are text-only; compare measured capability rather
+  than assuming version or bitrate equivalence.
 - MoE responsiveness anchor: `Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`.
 - MoE heavy anchor: `Qwen3.5-122B-A10B-UD-Q4_K_XL.gguf`.
 - True-long anchor: A3B Q4 at 32K and 131K.
@@ -146,6 +152,105 @@ Decision rules:
 - Track raw acquisition under `target/profiles`; commit packet directories only
   for decision-changing results. A focused regression and ordinary endpoint
   check are preferable to replaying unrelated historical gates.
+
+## Qwen3.8 27B Launch Lane — 2026-08-14
+
+The pinned Qwen3.8 Q4_K_M asset is a near-drop-in dense text backbone with one
+attached MTP head. Ordinary no-thinking and default-xhigh generation work, and
+the maintained retention guardrail is 48/48 retained and strict. That battery is
+ceilinged against historical Qwen3.6 and does not establish broader capability.
+Synthetic throughput is order-sensitive and supports parity-ish operation, not
+a Qwen3.8 speed claim.
+
+The first exact cross-pollination is promoted. Native Q4_K token lookup already
+supports the model, and MTP consumes that same dispatcher. Removing MTP presence
+from the otherwise exact backbone fingerprint avoids a 5.09 GB F32 materialized
+embedding and removes 4.07 GiB of private memory. This is ordinary pageable
+loading, not whole-model residency.
+
+Ridge adds a second operator-bit-exact WIP default and changes the local
+optimization map. Its Q6_K embedding now reuses the shared row kernel, removing
+a 4,042,649,600-byte F32 expansion. Its IQ2_S/IQ3_S N2 FFNs also exposed a
+32-column physical-tile cliff; shape-gated NC2 projection kernels are bit-exact
+against singleton rows and cut the dirty-tree measured verifier 2.324x. A clean
+committed confirmation remains mandatory for release promotion. Even after the
+correction Ridge D1/N2 is 0.968x, while the final source-stamped Q4 row is only
+1.023x. This moves broad MTP work below capability and effort policy.
+
+The first optimization-only screen now bounds the obvious low-bit retunes.
+At Ridge `pp1024`, FFN owns about 67% of GPU time, but the three projections are
+already at the matrix-compute shelf. A bit-identical IQ2_S N64 tile is only
+1.001-1.002x on both real FFN orientations. Singleton decode has a larger
+20.237 ms / 36.77 ms low-bit projection share, but a 1.294-1.298x-byte direct
+level repack reaches only 1.062-1.063x and loses bit identity by 1-2 ULP. Both
+prototypes were removed. Tile-width reuse and byte-expanding decode repacks are
+therefore closed unless a materially new representation clears their explicit
+ceilings.
+
+The first representation-level census also closes the obvious sparse/factor
+branches before kernel work. Across two Ridge decode traces, roughly one quarter
+of FFN-inner scalars are below `1e-2`, but at most 0.046% of complete physical
+256-wide blocks are; a 0.1% activation-energy budget removes zero blocks at the
+median. Mature GDN states are low stable-rank but not uniformly low numerical
+rank: at position 512, rank 24 leaves 1.42% median / 20.28% p95 relative
+Frobenius residual, while a 1% residual requires median rank 31 / p95 rank 100.
+Observed alpha reaches `2.31e-20`, making inverse rollback numerically
+ill-conditioned even without exact alpha-zero resets. Do not build sparse-down,
+universal rank-24 state, or exact inverse-log rollback from scalar CDFs or
+real-arithmetic identities alone.
+
+Force-ranked queue:
+
+1. **Demand high-ceiling changed work before another Ridge kernel.** Packed IQ2
+   is matrix-compute-bound, native decode is instruction-limited, and the first
+   29%-larger direct representation gains only 6%. Reopen low-bit storage only
+   for an exact representation near 98 bytes/block or smaller that measures at
+   least 1.12x on both FFN orientations and projects at least 5% whole-phase.
+   Prefer actual weight-term, target-call, prompt-token, or MMA deletion. Do not
+   retry N64, rows-per-simdgroup widening, dual gate/up accumulators, a larger
+   direct-level sidecar, block-sparse down on the measured layout, or fixed-rank
+   GDN state.
+2. **Use capability only as a bounded regression guardrail.** The retained
+   direct/no-thinking packet and effort stress rows are sufficient to catch an
+   obvious optimization regression. Do not expand task characterization while
+   no high-ceiling engine candidate is waiting on it; run the frozen packet only
+   after a candidate clears primitive and phase gates.
+3. **Validate long-context semantics before a 262K product claim.** Reuse the proven
+   ledger/four-key/multilingual retrieval pattern at a shared short control, 16K,
+   and 64K for Qwen3.8 Q4_K_M and Ridge. Metadata capacity and synthetic pp
+   throughput are not retrieval evidence. This remains a product-correctness
+   lane below changed-work optimization. Treat Q8 KV as a separate memory/quality
+   decision.
+4. **Compose existing exact prefix reuse instead of inventing a universal
+   cache.** For cohorts with a real repeated prefix, use the already-proven
+   snapshot/fanout machinery to prefill once and restore private suffix lanes.
+   Keep fresh BS=1 requests on the direct path; do not pay indexing, eviction,
+   or disk-state coupling where reuse is absent.
+5. **Keep packed D1/N2 bounded to a decision packet.** Q4_K_M remains a small
+   interactive positive (`1.023x` in the final source-stamped row); Ridge remains
+   negative (`0.968x`) after exact low-bit N2 repair. If revisited, interleave
+   named request archetypes, allocate long-context partial scratch lazily, and
+   promote only a stable regime selector. The shared-KV attention primitive is
+   about 2x only at 20K-32K and stays 16K-gated/opt-in. Keep recursive D3/D7 and
+   rolling N1 closed.
+6. **Keep measured closed lanes closed.** The bounded payload scanner found zero
+   whole-tensor duplicates across 17.10 GB and zero exact stored-row duplicates
+   across 3.30 million rows in selected front projections. Generic GDN recurrence
+   removal has only about a 2.5% whole-prefill oracle. Do not build payload
+   interning, generic/fixed-rank factorization, inverse-log rollback, WY
+   recurrence, or another local recurrence scheduler without new evidence.
+7. **Make the product boundary explicit.** Qwen3.8 support is ordinary text chat.
+   Vision/projector execution, developer roles, structured tool calls/results,
+   response formats, and reasoning-history objects remain separate capability
+   gates and must not block the text launch.
+8. **Keep whole-model residency closed.** Native embeddings, capability work,
+   long-context validation, and any future draft mechanism use ordinary loading.
+   None authorizes `MTLResidencySet`, pre-wiring, `mlock`, uncached reads, or the
+   residency-coupled A10B selector.
+
+Evidence: `docs/bench/2026-08-14-qwen38-27b-launch/`,
+`docs/bench/2026-08-15-qwen38-ridge/`, and
+`docs/bench/2026-08-17-structural-thinness-falsifiers/`.
 
 ## DeepSeek V4 Optimization Lane — 2026-08-04
 

@@ -1,0 +1,66 @@
+{
+  "architecture": "qwen35",
+  "base_weight_requests": 851,
+  "build_identity": {
+    "build_commit": "1ac9446cec5702254331f2f9986a63bdc39abb60",
+    "build_commit_short": "1ac9446ce",
+    "build_dirty": true,
+    "build_source_state": "git-source-sha256-v2:ca3e7b2efa0a9355e9c74297fd49db873e9dac122d607cd66be4eaeabc299e25",
+    "overrides": [],
+    "problems": [
+      "dirty"
+    ],
+    "runtime_commit": "1ac9446cec5702254331f2f9986a63bdc39abb60",
+    "runtime_dirty": true,
+    "runtime_source_state": "git-source-sha256-v2:ca3e7b2efa0a9355e9c74297fd49db873e9dac122d607cd66be4eaeabc299e25",
+    "schema_version": 2,
+    "stamp_error": null,
+    "stamp_source": "git",
+    "status": "dirty"
+  },
+  "converted_count": 0,
+  "converted_resident_bytes": 0,
+  "converted_source_bytes": 0,
+  "copied_base_weight_private_bytes_under_policy": 12249470976,
+  "descriptor_layout_digest": "0x677f1932e720323d",
+  "device_max_buffer_length": 77309411328,
+  "direct_alias_bytes": 0,
+  "direct_alias_count": 0,
+  "direct_logical_bytes": 12249470976,
+  "direct_logical_count": 851,
+  "direct_logical_view_bytes": 12249470976,
+  "direct_unique_view_bytes": 12249470976,
+  "direct_unique_view_count": 851,
+  "embedding_policy": "production-auto",
+  "estimated_base_weight_private_bytes_removed_under_policy": 12249470976,
+  "fallback_unique_bytes": 0,
+  "fallback_unique_count": 0,
+  "fallbacks": [],
+  "model": "/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf",
+  "mtp_descriptor_bytes": 338720768,
+  "mtp_descriptor_count": 15,
+  "mtp_present": true,
+  "native_quant_embedding": true,
+  "page_size": 16384,
+  "planned_base_weight_private_bytes_under_policy": 0,
+  "planned_max_buffer_length": 77309411328,
+  "required_alignment": 32,
+  "router_f16": false,
+  "schema_version": 1,
+  "shard_mapped_lengths": [
+    12599187008
+  ],
+  "sum_window_lengths": 12249481216,
+  "tensor_descriptors": 866,
+  "unbound_descriptor_bytes": 0,
+  "unbound_descriptor_count": 0,
+  "usable_window_length": 77309411328,
+  "windows": [
+    {
+      "index": 0,
+      "length": 12249481216,
+      "mmap_offset": 10993664,
+      "shard_idx": 0
+    }
+  ]
+}

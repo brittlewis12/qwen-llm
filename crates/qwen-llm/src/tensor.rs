@@ -132,6 +132,15 @@ impl GgmlType {
             Self::Unknown => "UNKNOWN",
         }
     }
+
+    /// GGML storage block geometry as `(elements_per_block, bytes_per_block)`.
+    ///
+    /// This describes the serialized tensor payload, not a dequantized view.
+    /// Callers deriving row boundaries must additionally require the contiguous
+    /// `shape[0]` dimension to be block-aligned.
+    pub fn storage_layout(self) -> Option<(u64, u64)> {
+        ggml_type_layout(self)
+    }
 }
 
 pub(crate) fn ggml_type_layout_raw(raw: u32) -> Option<(u64, u64)> {
@@ -244,6 +253,7 @@ mod tests {
         assert_eq!(ggml_type_layout(GgmlType::MXFP4), ggml_type_layout_raw(39));
         assert_eq!(ggml_type_layout(GgmlType::F32), ggml_type_layout_raw(0));
         assert_eq!(ggml_type_layout(GgmlType::Unknown), None);
+        assert_eq!(GgmlType::Q4_K.storage_layout(), Some((256, 144)));
     }
 
     #[test]

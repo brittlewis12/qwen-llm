@@ -187,7 +187,7 @@ D1 proceeds to a separately preregistered restored-prefix product A/B only if:
 - GPU speedup is `median(D0_gpu) / median(D1_gpu)` and must be at least 8x both
   overall and separately within the AB and BA strata;
 - D1 median GPU time is nondecreasing from 8K through 32K; and
-- D1 exact-byte rate is 50--800 decimal GB/s at 16K and 32K.
+- median D1 exact-byte rate is 50--800 decimal GB/s at 16K and 32K.
 
 The local D2 source change remains separate. Retain it only if D2 wins at least
 five of six P32768/C1024 pairs under the same strict GPU rule, each order

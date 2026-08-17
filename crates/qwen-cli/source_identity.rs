@@ -38,7 +38,7 @@ fn index_has_hidden_worktree_entries(repo: &Path) -> Option<bool> {
 
 pub fn git_dirty(repo: &Path) -> Option<bool> {
     let root = git_root(repo)?;
-    let status = git_bytes(&root, &["status", "--porcelain", "--untracked-files=all"])?;
+    let status = git_bytes(&root, &["status", "--porcelain", "-uno"])?;
     Some(!status.is_empty() || index_has_hidden_worktree_entries(&root)?)
 }
 

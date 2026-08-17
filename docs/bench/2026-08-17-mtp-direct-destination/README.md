@@ -2,7 +2,8 @@
 
 Date: 2026-08-17
 
-Status: **PREREGISTERED**. No timing result has been admitted yet.
+Status: **PREREGISTERED WITH CONTROL-ONLY AMENDMENT A1**. No candidate timing
+result has been admitted yet.
 
 ## Question
 
@@ -52,12 +53,38 @@ has no acceptance authority.
 1. Load each of the three banks sequentially through the staged and direct
    implementations, hashing every final byte. Require equal shape, dtype,
    length, and BLAKE3 digest for every bank.
-2. Run the production MTP benchmark with greedy token IDs and terminal resume
-   audit enabled. Require `identical=true`, equal target token digest,
-   `resume_audit_pass=true`, and identical MTP bank policy/dtypes/bytes.
+2. Run the production normal lazy-D1 MTP benchmark with greedy token IDs.
+   Require `identical=true`, equal target token digest, and identical MTP bank
+   policy/dtypes/bytes. This path consumes the loaded MTP banks but does not
+   invoke the independently failing packed-N2 terminal-state assay described in
+   Amendment A1.
 3. Keep all GPU/model work serialized through the normal process lease.
 
-Any byte, token, state, or ledger mismatch kills and removes the candidate.
+Any byte, token, or ledger mismatch kills and removes the candidate.
+
+## Amendment A1: Packed-N2 Baseline Is Invalid For This Gate
+
+After the protocol-only commit and exact bank oracle, the first staged control
+arm ran; no candidate arm had run. It emitted the exact target token stream and
+wrote a complete result, but the existing A3B packed-N2 terminal resume audit
+failed after 16 continuation steps:
+
+- KV cosine `0.9994732413`, below the assay's `0.99999` threshold;
+- continuation max-abs `1.6023061`, above `0.05`;
+- GDN state max-abs `0.35898465`, above `0.01`;
+- continuation argmax still equal.
+
+The staged control therefore cannot satisfy the original absolute gate. This is
+an assay/baseline failure independent of destination construction; the direct
+candidate had not been executed, and the full-byte bank oracle already proves
+the two constructors equal. The invalid control sample is excluded from timing
+and preserved under the external run root.
+
+A1 restarts all six pairs from zero and removes `--mtp-physical-n 2`, selecting
+the normal lazy-D1 product path. The exact byte oracle remains the primary
+correctness gate. The production run adds target-stream and bank-ledger checks;
+it makes no terminal-resume claim. The load timing and memory decision rules are
+unchanged.
 
 ## Timing Protocol
 
@@ -67,7 +94,7 @@ Build one release binary, then run six fresh-process pairs in alternating order:
 ```sh
 target/release/qwen-bench mtp \
   --model "$MODEL" \
-  --spec-tokens 1 --mtp-physical-n 2 \
+  --spec-tokens 1 \
   --tokens 16 --no-warmup \
   --include-token-ids --output "$OUT"
 ```

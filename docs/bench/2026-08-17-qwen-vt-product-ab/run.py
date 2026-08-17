@@ -506,6 +506,8 @@ def validate_records(
             "threadgroup_sum",
             expected_elements if role == "A" else 16 * 4 * prefix,
         )
+    if preflight:
+        return
     measured = [record for record in records if record.get("kind") == "arm"]
     expected_schedule = [
         (pair, order, role, bank)

@@ -64,10 +64,10 @@ use qwen_llm::{
         RetainedStorageDisposition, attn_v4_choose_group_tile, attn_v4_choose_nwg,
         attn_v4_choose_tile_c, encode_add_inplace_f32, encode_attn_decode_v4_f32,
         encode_attn_decode_v4_main_only_f32, encode_attn_decode_v4_reduce_only_f32,
-        encode_attn_prefill_v4_g8_t2_q2_c64_f32, encode_attn_prefill_v4_g8_t2_q4_c64_f32,
-        encode_attn_prefill_v4_g16_t4_q2_c64_f32, encode_attn_prefill_v4_g16_t4_q4_c64_f32,
-        encode_fill_f32, encode_gdn_decay_chain_f32, encode_get_rows_f32,
-        encode_mat_vec_f32_sigmoid, encode_mat_vec_q8_0_batch_f32,
+        encode_attn_prefill_v4_g6_q2_c32_f32, encode_attn_prefill_v4_g8_t2_q2_c64_f32,
+        encode_attn_prefill_v4_g8_t2_q4_c64_f32, encode_attn_prefill_v4_g16_t4_q2_c64_f32,
+        encode_attn_prefill_v4_g16_t4_q4_c64_f32, encode_fill_f32, encode_gdn_decay_chain_f32,
+        encode_get_rows_f32, encode_mat_vec_f32_sigmoid, encode_mat_vec_q8_0_batch_f32,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots,
         encode_moe_down_weighted_sum_q5_K_f32_packed_slots_k512_r2,
         encode_moe_fused_routed_q4q5_token_f32, encode_moe_swiglu_q4_K_f32,
@@ -1459,17 +1459,19 @@ struct MtpArgs {
     /// empty `<think>...</think>` block instead of an open thinking block.
     #[arg(long)]
     disable_thinking: bool,
-    /// Experimental speculative depth. `1` is the original H4 lazy-verify
-    /// path. `2..=15` use a bench-only MTP-N prototype that chains MTP
-    /// drafts recursively and verifies them with the packed base path.
+    /// Experimental speculative depth. `1` defaults to the original H4
+    /// lazy-verify path; combine it with `--mtp-physical-n 2` for ordinary
+    /// packed D1/N2 verification. `2..=15` recursively chain MTP drafts and
+    /// verify them with the packed base path.
     #[arg(long, default_value = "1")]
     spec_tokens: usize,
     /// Bench-only probe for pricing native-MTP draft overhead.
     #[arg(long, value_enum, default_value_t = MtpProbeMode::Normal)]
     mtp_probe: MtpProbeMode,
-    /// Physical packed-verify N for packed MTP probes. When larger than
-    /// `1 + --spec-tokens`, padded positions are rolled back after the logical
-    /// accept window.
+    /// Select packed verification and its physical N. For D1, pass `2` to
+    /// compare standard packed speculation with the legacy lazy path. When N
+    /// exceeds `1 + --spec-tokens`, padded positions are rolled back after the
+    /// logical accept window.
     #[arg(long)]
     mtp_physical_n: Option<usize>,
     /// Chain all recursive MTP draft slots into one command buffer.
@@ -1512,7 +1514,7 @@ struct MtpArgs {
     /// Write a compact JSON summary for MTPLX/profile-parity sweeps.
     #[arg(long)]
     output: Option<PathBuf>,
-    /// Include exact prompt and serial target token IDs in `--output`.
+    /// Include exact prompt and product-target token IDs in `--output`.
     #[arg(long, requires = "output")]
     include_token_ids: bool,
     /// Number of tokens to generate after the prompt.
@@ -1523,7 +1525,7 @@ struct MtpArgs {
     /// resolved from the GGUF's declared `tokenizer.ggml.eos_token_id`
     /// (and `eot_token_id` if present) at runtime. There is no
     /// hardcoded fallback — a GGUF that declares no stops is an error.
-    #[arg(long, value_parser = parse_stop_tokens)]
+    #[arg(long, value_delimiter = ',')]
     stop_tokens: Option<Vec<i32>>,
     /// Skip the warmup pass.
     #[arg(long)]
@@ -1551,7 +1553,7 @@ struct PldArgs {
     #[arg(long, default_value = "128")]
     tokens: usize,
     /// Stop tokens for generation, comma-separated.
-    #[arg(long, value_parser = parse_stop_tokens)]
+    #[arg(long, value_delimiter = ',')]
     stop_tokens: Option<Vec<i32>>,
     /// Skip the warmup pass.
     #[arg(long)]
@@ -1632,24 +1634,6 @@ impl From<MtpHistoryArg> for MtpHistoryMode {
     }
 }
 
-/// Parse a comma-separated list of i32 token ids for `--stop-tokens`.
-/// Rejects empty input and non-numeric components; clap surfaces the
-/// error inline with the flag name.
-fn parse_stop_tokens(s: &str) -> Result<Vec<i32>, String> {
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        return Err("must contain at least one token id".into());
-    }
-    trimmed
-        .split(',')
-        .map(|part| {
-            part.trim()
-                .parse::<i32>()
-                .map_err(|e| format!("invalid token id {part:?}: {e}"))
-        })
-        .collect()
-}
-
 /// Resolve the effective stop-token set: CLI override if provided,
 /// otherwise the GGUF's declared set. Errors when the GGUF declares
 /// nothing AND no override is given. No heuristic fallback — silent
@@ -1663,6 +1647,29 @@ fn resolve_stop_tokens(
     }
     g.stop_token_ids()
         .map_err(|e| anyhow!("resolving stop tokens from GGUF: {e}"))
+}
+
+#[cfg(test)]
+mod stop_token_cli_tests {
+    use super::*;
+
+    #[test]
+    fn mtp_stop_tokens_accept_single_and_comma_delimited_values() {
+        let single =
+            MtpArgs::try_parse_from(["mtp", "--model", "model.gguf", "--stop-tokens", "0"])
+                .expect("single stop token");
+        assert_eq!(single.stop_tokens, Some(vec![0]));
+
+        let multiple = MtpArgs::try_parse_from([
+            "mtp",
+            "--model",
+            "model.gguf",
+            "--stop-tokens",
+            "248046,248044",
+        ])
+        .expect("comma-delimited stop tokens");
+        assert_eq!(multiple.stop_tokens, Some(vec![248046, 248044]));
+    }
 }
 
 /// JSON schema version for `BenchRow`. Bump when fields are renamed,
@@ -2480,7 +2487,7 @@ struct DflashLazyArgs {
     /// Stop tokens for generation, comma-separated. When omitted, the
     /// stop set is resolved from the GGUF's declared
     /// `tokenizer.ggml.eos_token_id` (and `eot_token_id` if present).
-    #[arg(long, value_parser = parse_stop_tokens)]
+    #[arg(long, value_delimiter = ',')]
     stop_tokens: Option<Vec<i32>>,
     /// Effective-N: only consider the first M draft positions per outer
     /// step (1 ≤ M ≤ block_size - 1). Reveals where α decays in the
@@ -2539,7 +2546,7 @@ struct DflashArgs {
     /// Stop tokens for generation, comma-separated. When omitted, the
     /// stop set is resolved from the GGUF's declared
     /// `tokenizer.ggml.eos_token_id` (and `eot_token_id` if present).
-    #[arg(long, value_parser = parse_stop_tokens)]
+    #[arg(long, value_delimiter = ',')]
     stop_tokens: Option<Vec<i32>>,
     /// Skip the warmup pass.
     #[arg(long)]
@@ -9496,10 +9503,11 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
     const HD: usize = 256;
     let n_q: usize = m.arch.n_q_heads as usize;
     let n_kv: usize = m.arch.n_kv_heads as usize;
-    let group_tile = match (n_q, n_kv) {
-        (16, 2) => 2,
-        (32, 2) => 4,
-        _ => 0,
+    let (group_tile, tile_c) = match (n_q, n_kv) {
+        (16, 2) => (2, 64),
+        (24, 4) => (6, 32),
+        (32, 2) => (4, 64),
+        _ => (0, 0),
     };
     if group_tile == 0 {
         anyhow::bail!(
@@ -9514,7 +9522,6 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
             m.arch.attn_head_dim
         );
     }
-    const TILE_C: usize = 64;
     let kv_dim = n_kv * HD;
     let n_pos = base_pos + rows;
 
@@ -9588,7 +9595,7 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
                     HD,
                     base_pos + row + 1,
                     nwg,
-                    TILE_C,
+                    tile_c,
                 )
                 .expect("decode-shaped oracle attention");
             }
@@ -9607,6 +9614,19 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
         let cmd = ctx.queue.commandBuffer().context("packed cmd")?;
         let enc = KernelEncoder::begin(&cmd);
         match (n_q, n_kv, qt) {
+            (24, 4, 2) => encode_attn_prefill_v4_g6_q2_c32_f32(
+                &ctx,
+                &enc,
+                &q_t,
+                &k_cache,
+                &v_cache,
+                &o_partial_packed,
+                &ml_partial_packed,
+                &out_packed,
+                rows,
+                base_pos,
+                nwg,
+            )?,
             (16, 2, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32(
                 &ctx,
                 &enc,
@@ -9744,16 +9764,16 @@ fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
         })
         .ok_or_else(|| anyhow!("model has no full-attention block"))?;
     const HD: usize = 256;
-    const TILE_C: usize = 64;
     let n_q = mm.arch.n_q_heads as usize;
     let n_kv = mm.arch.n_kv_heads as usize;
     let h = mm.arch.hidden_size as usize;
     let q_dim = n_q * HD;
     let kv_dim = n_kv * HD;
     let group = n_q / n_kv;
-    let group_tile = match (n_q, n_kv) {
-        (16, 2) => 2,
-        (32, 2) => 4,
+    let (group_tile, tile_c) = match (n_q, n_kv) {
+        (16, 2) => (2, 64),
+        (24, 4) => (6, 32),
+        (32, 2) => (4, 64),
         _ => anyhow::bail!(
             "attn-layer-micro unsupported shape n_q={} n_kv={}",
             n_q,
@@ -9989,7 +10009,7 @@ fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
                     HD,
                     base_pos + row + 1,
                     nwg,
-                    TILE_C,
+                    tile_c,
                 )
                 .expect("baseline decode attention");
             }
@@ -10006,6 +10026,19 @@ fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
         let enc = KernelEncoder::begin(&cmd);
         run_front(&enc, &packed, &packed_k_cache, &packed_v_cache)?;
         match (n_q, n_kv, qt) {
+            (24, 4, 2) => encode_attn_prefill_v4_g6_q2_c32_f32(
+                &ctx,
+                &enc,
+                &packed.q_normed,
+                &packed_k_cache,
+                &packed_v_cache,
+                &packed.o_partial,
+                &packed.ml_partial,
+                &packed.attn_o,
+                rows,
+                base_pos,
+                nwg,
+            )?,
             (16, 2, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32(
                 &ctx,
                 &enc,
@@ -11182,9 +11215,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             mtp_probe
         );
     }
-    if mtp_physical_n.is_some() && spec_tokens == 1 {
-        anyhow::bail!("--mtp-physical-n requires --spec-tokens 2 or higher");
-    }
+    let use_packed_verify = spec_tokens >= 2 || mtp_physical_n.is_some();
     if mtp_rank_topk.is_some() {
         if spec_tokens == 1 {
             anyhow::bail!("--mtp-rank-topk requires --spec-tokens 2 or higher");
@@ -11201,12 +11232,22 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         anyhow::bail!("choose at most one draft lm_head override");
     }
     let planned_verify_n = mtp_physical_n.unwrap_or(spec_tokens + 1);
-    if spec_tokens >= 2 && !(spec_tokens + 1..=16).contains(&planned_verify_n) {
+    if !(spec_tokens + 1..=16).contains(&planned_verify_n) {
         anyhow::bail!(
             "--mtp-physical-n must be in {}..=16 for --spec-tokens {spec_tokens}",
             spec_tokens + 1
         );
     }
+    let effective_logical_verify_n = use_packed_verify.then_some(spec_tokens + 1);
+    let effective_physical_verify_n = use_packed_verify.then_some(planned_verify_n);
+    let packed_base_prefill = env_flag_default_on("QWEN_MTP_PACKED_BASE_PREFILL");
+    let q5_k_n2_seq = env_flag_default_on("QWEN_MATMAT_Q5_K_N2_SEQ");
+    let iq2_s_n2_nc2 = env_flag_default_on("QWEN_MATMAT_IQ2_S_N2_NC2");
+    let iq3_s_n2_nc2 = env_flag_default_on("QWEN_MATMAT_IQ3_S_N2_NC2");
+    let skip_final_checkpoint = env_flag_default_on("QWEN_MTP_SKIP_FINAL_CKPT");
+    let shared_kv_q2_requested = env_flag_enabled("QWEN_MTP_ATTN_Q2_SHARED_KV");
+    let build_identity = recorded_build_identity();
+    let qwen_env = capture_qwen_env();
 
     let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
     let stops = resolve_stop_tokens(&g, stop_tokens)?;
@@ -11268,7 +11309,9 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         },
         spec_tokens,
         mtp_probe,
-        planned_verify_n,
+        effective_physical_verify_n
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
         mtp_single_cb_draft,
         mtp_draft_token_embd_head,
         mtp_draft_lm_head_q4_1,
@@ -11280,6 +11323,25 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         prompt_ids.len(),
         tokens,
         stops,
+    );
+    eprintln!(
+        "[mtp-bench] execution_features: packed_base_prefill={} q5_k_n2_seq={} \
+         iq2_s_n2_nc2={} iq3_s_n2_nc2={} skip_final_checkpoint={} \
+         shared_kv_q2_requested={} shared_kv_q2_min_position=16384",
+        packed_base_prefill,
+        q5_k_n2_seq,
+        iq2_s_n2_nc2,
+        iq3_s_n2_nc2,
+        skip_final_checkpoint,
+        shared_kv_q2_requested,
+    );
+    eprintln!(
+        "[mtp-bench] build_identity: status={} commit={} build_source_state={:?} runtime_source_state={:?} overrides={:?}",
+        build_identity.status,
+        build_identity.build_commit,
+        build_identity.build_source_state,
+        build_identity.runtime_source_state,
+        build_identity.overrides,
     );
     if let Some((dtypes, bytes)) = mtp_moe_bank_ledger {
         eprintln!(
@@ -11337,9 +11399,10 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let mut ref_tokens = prompt_ids.clone();
     let t_ref_total = Instant::now();
     let t_ref_prefill = Instant::now();
-    // v0.75.1: packed multi-token prefill (no hidden capture needed for
-    // the no-spec ref). Block size 16 matches DFlash convention; chunk
-    // boundaries don't affect ref correctness.
+    // Product reference: ordinary qwen uses packed multi-token prefill, so MTP
+    // must preserve this target stream rather than a retired serial-prefill
+    // reduction order. The terminal audit still compares continuation state
+    // against serial target transitions under numerical tolerances.
     let mut ref_layer_scratch =
         MetalDFlashLayerMajorScratch::fresh_prefill(&ctx, &mm, 16).context("ref layer scratch")?;
     let last_logits = prefill_tokens_with_multi_hidden(
@@ -11530,7 +11593,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             spec.set_base_hidden_variant(mtp_base_hidden.into());
             spec.set_recursive_hidden_variant(mtp_recursive_hidden.into());
             spec.set_history_mode(mtp_history.into());
-            let output = if spec_tokens == 1 {
+            let output = if !use_packed_verify {
                 spec.decode(&prompt_ids, tokens, &stops, &mut spec_session)
                     .context("spec decode")?
             } else {
@@ -11554,14 +11617,14 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
                 )
                 .context("spec decode packed-n")?
             };
-            if spec_tokens >= 2 {
+            if use_packed_verify {
                 let generated = &ref_generated_vec[..ref_generated_vec.len().saturating_sub(1)];
                 if output.tokens[prompt_ids.len()..] != ref_generated_vec {
                     // Stream divergent: a state audit against the serial
                     // token reconstruction would not be comparable. Skip
                     // it, defer the failure past the results emission.
                     deferred_gate_failure.get_or_insert_with(|| {
-                        "native MTP emitted tokens differ from serial target".to_string()
+                        "native MTP emitted tokens differ from packed product target".to_string()
                     });
                 } else {
                     let pending_terminal_token = *ref_generated_vec
@@ -11734,7 +11797,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let expected_target_transitions = ref_emitted.saturating_sub(1);
     let target_state_audit = if mtp_probe == MtpProbeMode::Oracle {
         planned_state_audit
-    } else if mtp_probe == MtpProbeMode::Normal && spec_tokens >= 2 {
+    } else if mtp_probe == MtpProbeMode::Normal && use_packed_verify {
         normal_state_audit
     } else {
         None
@@ -11757,7 +11820,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         );
         if !identical {
             deferred_gate_failure.get_or_insert_with(|| {
-                "oracle emitted tokens differ from serial target".to_string()
+                "oracle emitted tokens differ from packed product target".to_string()
             });
         } else if !audit.resume_audit_pass {
             deferred_gate_failure
@@ -11945,7 +12008,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             })
         });
         let semantics = serde_json::json!({
-            "verify_mode": if spec_tokens == 1 { "lazy_mtp1" } else { "packed_n" },
+            "verify_mode": if use_packed_verify { "packed_n" } else { "lazy_mtp1" },
             "sampler": "greedy_argmax",
             "correction_accounting": "deferred_next_step_carry",
             "equivalence": if target_state_audit.is_some() {
@@ -12007,8 +12070,17 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "generated_requested": tokens,
             "stop_tokens": stops,
             "spec_tokens": spec_tokens,
-            "logical_verify_n": spec_tokens + 1,
-            "physical_verify_n": planned_verify_n,
+            "logical_verify_n": effective_logical_verify_n,
+            "physical_verify_n": effective_physical_verify_n,
+            "execution_features": {
+                "packed_base_prefill": packed_base_prefill,
+                "q5_k_n2_seq": q5_k_n2_seq,
+                "iq2_s_n2_nc2": iq2_s_n2_nc2,
+                "iq3_s_n2_nc2": iq3_s_n2_nc2,
+                "skip_final_checkpoint": skip_final_checkpoint,
+                "shared_kv_q2_requested": shared_kv_q2_requested,
+                "shared_kv_q2_min_position": 16_384,
+            },
             "terminal_token_target_transition_consumed": if target_state_audit.is_some() {
                 Some(false)
             } else {
@@ -12026,6 +12098,8 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
             "mtp_moe_banks": mtp_moe_banks,
             "rank_topk": mtp_rank_topk.as_ref().map(|p| p.display().to_string()),
             "no_warmup": no_warmup,
+            "build_identity": build_identity,
+            "qwen_env": qwen_env,
             "semantics": semantics,
             "token_fixture": token_fixture,
             "reference": reference,

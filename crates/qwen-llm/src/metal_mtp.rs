@@ -41,7 +41,7 @@ use crate::metal::{
 };
 use crate::metal_dflash::{
     MetalDFlashLayerMajorScratch, MetalDFlashVerifyScratch, encode_packed_verify_layer_major_inner,
-    encode_restore_after_partial_accept_inner,
+    encode_restore_after_partial_accept_inner, prefill_tokens_with_multi_hidden,
 };
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, MetalAttnBlock, MetalForward, MetalMoeFfn, MetalSession, RMS_EPS,
@@ -848,6 +848,8 @@ fn copy_f32_tensor(src: &MetalTensor, dst: &MetalTensor) -> Result<(), MtpError>
     }
     Ok(())
 }
+
+crate::env_flag!(default_on mtp_packed_base_prefill_enabled, "QWEN_MTP_PACKED_BASE_PREFILL");
 
 /// Top-level speculative-decode driver. Owns nothing the base path needs;
 /// borrows base for the actual base-forward calls.
@@ -2264,9 +2266,10 @@ impl<'a> SpeculativeDecoder<'a> {
         })
     }
 
-    /// Experimental MTP-N path. Drafts `spec_tokens` proposals by recursively
-    /// feeding the MTP head, then verifies `[carry, drafts...]` in one packed
-    /// base-model forward using the DFlash packed-verify machinery.
+    /// Experimental packed MTP path. Drafts `spec_tokens` proposals, then
+    /// verifies `[carry, drafts...]` in one packed base-model forward using the
+    /// DFlash packed-verify machinery. Depth one is ordinary speculative
+    /// verification; deeper paths recursively feed the MTP head.
     ///
     /// This is bench-only for now: recursive draft slots beyond the first use
     /// the previous MTP hidden (`mtp_session.x`) as a surrogate for the exact
@@ -2310,10 +2313,10 @@ impl<'a> SpeculativeDecoder<'a> {
         mut rank_rows: Option<&mut Vec<MtpRankRow>>,
         single_cb_draft: bool,
     ) -> Result<DecodeOutput, MtpError> {
-        if !(2..=15).contains(&spec_tokens) {
+        if !(1..=15).contains(&spec_tokens) {
             return Err(MtpError::Metal(MetalError::BadShape {
                 kernel: "mtp_decode_packed_n",
-                detail: format!("spec_tokens={spec_tokens} must be in [2, 15]"),
+                detail: format!("spec_tokens={spec_tokens} must be in [1, 15]"),
             }));
         }
 
@@ -2372,22 +2375,79 @@ impl<'a> SpeculativeDecoder<'a> {
         let n_prompt = prompt_ids.len();
         let mut next_bootstrap_tok: i32 = 0;
 
-        // Prompt prefill: identical streaming contract as H4, but only argmax
-        // readback from the base path.
+        // Prompt prefill. This uses the same packed base execution as the
+        // ordinary product target, captures every final residual row, then
+        // builds the canonical shifted MTP KV history.
+        // This removes the old requirement to run the complete target model one
+        // token at a time merely to obtain those hidden rows.
         let t_prefill = std::time::Instant::now();
-        for (i, &tid) in prompt_ids.iter().enumerate() {
-            next_bootstrap_tok = self.base.single_token_argmax_with_hidden(
-                tid,
-                i as u32,
+        let last_layer = [(self.base.model.blocks.len() - 1) as u32];
+        if mtp_packed_base_prefill_enabled() {
+            let pre_norm_capture =
+                MetalTensor::zeros_f32(self.base.ctx, vec![(n_prompt * h) as u64])?;
+            let mut prefill_scratch =
+                MetalDFlashLayerMajorScratch::fresh_prefill(self.base.ctx, self.base.model, 16)?;
+            let logits = prefill_tokens_with_multi_hidden(
+                self.base,
+                prompt_ids,
+                0,
                 base_session,
-                &hidden_cur,
-                self.wants_base_post_norm(),
+                &mut prefill_scratch,
+                &last_layer,
+                Some(&pre_norm_capture),
             )?;
+            next_bootstrap_tok = argmax_i32(&logits);
             stats.base_forward_calls += 1;
 
-            if i + 1 < n_prompt && !self.uses_cycle_mtp_history() {
-                self.draft_kv_only(prompt_ids[i + 1], &hidden_cur, i as u32)?;
-                stats.mtp_calls += 1;
+            let post_norm_capture = if self.wants_base_post_norm() {
+                let normalized =
+                    MetalTensor::zeros_f32(self.base.ctx, vec![(n_prompt * h) as u64])?;
+                let cmd = self.base.ctx.queue.commandBuffer().expect("cmd buf");
+                let enc = KernelEncoder::begin(&cmd);
+                encode_rms_norm_batched_f32(
+                    self.base.ctx,
+                    &enc,
+                    &pre_norm_capture,
+                    &self.base.model.output_norm,
+                    &normalized,
+                    n_prompt,
+                    h,
+                    RMS_EPS,
+                )?;
+                enc.end();
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                Some(normalized)
+            } else {
+                None
+            };
+            let hidden_capture = post_norm_capture.as_ref().unwrap_or(&pre_norm_capture);
+
+            if !self.uses_cycle_mtp_history() {
+                for i in 0..n_prompt.saturating_sub(1) {
+                    let hidden_row = hidden_capture.view_subrange((i * h) as u64, vec![h as u64]);
+                    self.draft_kv_only(prompt_ids[i + 1], &hidden_row, i as u32)?;
+                    stats.mtp_calls += 1;
+                }
+            }
+            let final_hidden =
+                hidden_capture.view_subrange(((n_prompt - 1) * h) as u64, vec![h as u64]);
+            copy_f32_tensor(&final_hidden, &hidden_cur)?;
+        } else {
+            for (i, &tid) in prompt_ids.iter().enumerate() {
+                next_bootstrap_tok = self.base.single_token_argmax_with_hidden(
+                    tid,
+                    i as u32,
+                    base_session,
+                    &hidden_cur,
+                    self.wants_base_post_norm(),
+                )?;
+                stats.base_forward_calls += 1;
+
+                if i + 1 < n_prompt && !self.uses_cycle_mtp_history() {
+                    self.draft_kv_only(prompt_ids[i + 1], &hidden_cur, i as u32)?;
+                    stats.mtp_calls += 1;
+                }
             }
         }
         stats.prefill_ms = t_prefill.elapsed().as_secs_f64() * 1e3;
@@ -2401,7 +2461,6 @@ impl<'a> SpeculativeDecoder<'a> {
                 "after prefill: mtp_kv should have n-1 entries"
             );
         }
-        let last_layer = [(self.base.model.blocks.len() - 1) as u32];
         let mut emit_tok = next_bootstrap_tok;
         let mut processed_pos = (n_prompt - 1) as u32;
         let mut emitted_count: usize = 0;

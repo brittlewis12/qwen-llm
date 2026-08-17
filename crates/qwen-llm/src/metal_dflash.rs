@@ -196,6 +196,10 @@ fn poison_capture_tensor(tensor: &MetalTensor) -> Result<(), MetalError> {
 
 crate::env_flag!(default_on dense_packed_gdn_step_enabled, "QWEN_DENSE_GDN_STEP_PACKED");
 crate::env_flag!(
+    default_off mtp_attn_q2_shared_kv_enabled,
+    "QWEN_MTP_ATTN_Q2_SHARED_KV"
+);
+crate::env_flag!(
     default_on prefill_attn_gdn_scratch_overlay_enabled,
     "QWEN_PREFILL_ATTN_GDN_SCRATCH_OVERLAY"
 );
@@ -441,6 +445,8 @@ crate::env_flag!(default_on mtp_moe_verify_batched_mixer_enabled, "QWEN_MTP_MOE_
 crate::env_flag!(default_on mtp_moe_verify_concurrent_ffn_enabled, "QWEN_MTP_MOE_VERIFY_CONCURRENT_FFN");
 
 crate::env_flag!(default_off mtp_verify_trace_counts_enabled, "QWEN_MTP_VERIFY_TRACE_COUNTS");
+
+crate::env_flag!(default_on packed_verify_skip_final_ckpt_enabled, "QWEN_MTP_SKIP_FINAL_CKPT");
 
 crate::env_flag!(default_on mtp_moe_verify_row_views_enabled, "QWEN_MTP_MOE_VERIFY_ROW_VIEWS");
 
@@ -3411,20 +3417,25 @@ fn build_prefill_scratch_plan_from_arch(
     let moe_group_ids_elems =
         checked_u64_mul(expert_count, n, "prefill plan moe group ids overflow")?;
     let attn_group = n_q.checked_div(n_kv.max(1)).unwrap_or(1).max(1);
+    let attn_packed_rows = if include_spec_packs && attn_group == 6 && block_size == 2 {
+        n
+    } else {
+        ATTN_PREFILL_V4_PACKED_ROWS as u64
+    };
     let attn_partial_group = checked_u64_mul(
         attn_group,
         head_dim,
         "prefill plan partial attention group overflow",
     )?;
     let attn_prefill_v4_o_partial_elems = checked_u64_mul4(
-        ATTN_PREFILL_V4_PACKED_ROWS as u64,
+        attn_packed_rows,
         n_kv.max(1),
         ATTN_V4_MAX_NWG as u64,
         attn_partial_group,
         "prefill plan attention partial overflow",
     )?;
     let attn_prefill_v4_ml_partial_elems = checked_u64_mul4(
-        ATTN_PREFILL_V4_PACKED_ROWS as u64,
+        attn_packed_rows,
         n_kv.max(1),
         ATTN_V4_MAX_NWG as u64,
         checked_u64_double(attn_group, "prefill plan attention ml group overflow")?,
@@ -3731,7 +3742,12 @@ fn resolve_prefill_scratch_plan_modes(
     ) || matches!(
         std::env::var("QWEN_PREFILL_ATTN_PACKED_G16").as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
-    ) || (head_dim == 256 && matches!(attn_group, 8 | 16));
+    ) || (head_dim == 256 && matches!(attn_group, 8 | 16))
+        || (include_spec_packs
+            && block_size == 2
+            && head_dim == 256
+            && attn_group == 6
+            && mtp_attn_q2_shared_kv_enabled());
     let enable_attn_fused_qkv_g8 = matches!(
         std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
@@ -4132,8 +4148,13 @@ impl MetalDFlashLayerMajorScratch {
             .checked_div((arch.n_kv_heads as u64).max(1))
             .unwrap_or(1)
             .max(1);
+        let attn_packed_rows = if include_spec_packs && attn_group == 6 && block_size == 2 {
+            n
+        } else {
+            ATTN_PREFILL_V4_PACKED_ROWS as u64
+        };
         let attn_prefill_v4_o_partial_elems = checked_u64_mul4(
-            ATTN_PREFILL_V4_PACKED_ROWS as u64,
+            attn_packed_rows,
             (arch.n_kv_heads as u64).max(1),
             ATTN_V4_MAX_NWG as u64,
             checked_u64_mul(
@@ -4144,7 +4165,7 @@ impl MetalDFlashLayerMajorScratch {
             "layer-major attn prefill partial size overflow",
         )?;
         let attn_prefill_v4_ml_partial_elems = checked_u64_mul4(
-            ATTN_PREFILL_V4_PACKED_ROWS as u64,
+            attn_packed_rows,
             (arch.n_kv_heads as u64).max(1),
             ATTN_V4_MAX_NWG as u64,
             checked_u64_mul(
@@ -4970,9 +4991,9 @@ impl<'a> DFlashDecoder<'a> {
     //
     // ## Indexing semantics — pinned brutally clearly per codex review.
     //
-    // After `packed_verify(tokens[0..N], start_position)`, for each
-    // n ∈ [0, N), the checkpoint slot `gdn_ckpt_slot(k, n)` holds
-    // "state-after-token-n for GDN layer k". Same for `conv_ckpt_slot`.
+    // After `packed_verify(tokens[0..N], start_position)`, checkpoint slots
+    // n ∈ [0, N-1) hold "state-after-token-n for GDN layer k". The final
+    // state already lives in the session and is never a rollback source.
     //
     // `restore_after_partial_accept(n_keep, start_position)` rolls the
     // session back to "as if exactly `n_keep` tokens were processed
@@ -4997,8 +5018,8 @@ impl<'a> DFlashDecoder<'a> {
     //
     // n_keep can never be 0 (the carry is always processed). n_keep=1
     // means full reject (carry only, no drafts accepted). n_keep=N
-    // means full accept (carry + all D drafts) — the rollback is a
-    // no-op but the call must be safe.
+    // means full accept (carry + all D drafts) — restore returns without a
+    // copy because the session already holds that state.
     //
     // Codex review: pin the API to `n_keep` so callers can't confuse
     // "accepted drafts" with "tokens to retain." The conversion lives
@@ -5386,14 +5407,16 @@ fn encode_packed_verify_inner_impl(
         // was mutated by exactly one block above (GDN layer k); after
         // all blocks complete, those buffers contain the post-token-n
         // state we want to checkpoint.
-        let blit = BlitEncoder::begin(&cmd_buf);
-        for k in 0..n_gdn_actual {
-            let ssm_dst = scratch.gdn_ckpt_slot(k, n_idx as u32);
-            blit.copy_tensor(&target_session.gdn_state[k as usize], &ssm_dst);
-            let conv_dst = scratch.conv_ckpt_slot(k, n_idx as u32);
-            blit.copy_tensor(&target_session.gdn_conv[k as usize], &conv_dst);
+        if !packed_verify_skip_final_ckpt_enabled() || n_idx + 1 < n {
+            let blit = BlitEncoder::begin(&cmd_buf);
+            for k in 0..n_gdn_actual {
+                let ssm_dst = scratch.gdn_ckpt_slot(k, n_idx as u32);
+                blit.copy_tensor(&target_session.gdn_state[k as usize], &ssm_dst);
+                let conv_dst = scratch.conv_ckpt_slot(k, n_idx as u32);
+                blit.copy_tensor(&target_session.gdn_conv[k as usize], &conv_dst);
+            }
+            blit.end();
         }
-        blit.end();
     }
 
     cmd_buf.commit();
@@ -5986,7 +6009,9 @@ pub fn encode_packed_verify_layer_major_inner(
                     )?;
                     enc.end();
                 }
-                if let Some(gi) = gdn_ckpt_idx {
+                if let Some(gi) = gdn_ckpt_idx
+                    && (!packed_verify_skip_final_ckpt_enabled() || n_idx + 1 < n)
+                {
                     let blit = BlitEncoder::begin(&cmd_buf);
                     let ssm_dst = verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32);
                     blit.copy_tensor(&target_session.gdn_state[gi], &ssm_dst);
@@ -6232,8 +6257,9 @@ pub fn encode_packed_verify_layer_major_inner(
                             )?;
                             enc.end();
                         }
-                        // Blit pass: snapshot post-token-n state into ckpt slots.
-                        {
+                        // The final row already resides in the live session and
+                        // cannot be a partial-restore source.
+                        if !packed_verify_skip_final_ckpt_enabled() || n_idx + 1 < n {
                             let blit = BlitEncoder::begin(&cmd_buf);
                             let ssm_dst = verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32);
                             blit.copy_tensor(&target_session.gdn_state[gi], &ssm_dst);
@@ -6292,8 +6318,9 @@ pub fn encode_packed_verify_layer_major_inner(
                             )?;
                             enc.end();
                         }
-                        // Blit pass: snapshot post-token-n state into ckpt slots.
-                        {
+                        // The final row already resides in the live session and
+                        // cannot be a partial-restore source.
+                        if !packed_verify_skip_final_ckpt_enabled() || n_idx + 1 < n {
                             let blit = BlitEncoder::begin(&cmd_buf);
                             let ssm_dst = verify_scratch.gdn_ckpt_slot(gi as u32, n_idx as u32);
                             blit.copy_tensor(&target_session.gdn_state[gi], &ssm_dst);
@@ -6420,104 +6447,178 @@ pub fn encode_packed_verify_layer_major_inner(
                     }
                     emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "front");
 
-                    // Per-token loop (KV append + softmax are inherently
-                    // sequential per token; attn-v4 sees a different
-                    // n_pos for each token and writes to a different
-                    // KV cache slot).
-                    for n_idx in 0..n {
-                        let position_n = start_position + n_idx as u32;
-                        let q_normed_n = layer_scratch
-                            .attn_q_normed_pack
-                            .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                        let k_normed_n = layer_scratch
-                            .attn_k_normed_pack
-                            .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
-                        let v_now_n = layer_scratch
-                            .attn_v_now_pack
-                            .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
-                        let attn_o_n = layer_scratch
-                            .attn_o_pack
-                            .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
-                        {
-                            let enc = KernelEncoder::begin(&cmd_buf);
-                            // RoPE on this row of Q and K.
-                            encode_rope_neox_f32(
-                                base.ctx,
-                                &enc,
-                                &q_normed_n,
-                                n_q,
-                                head_dim,
-                                n_rot,
-                                position_n,
-                                arch.rope_theta,
-                            )?;
-                            encode_rope_neox_f32(
-                                base.ctx,
-                                &enc,
-                                &k_normed_n,
-                                n_kv,
-                                head_dim,
-                                n_rot,
-                                position_n,
-                                arch.rope_theta,
-                            )?;
-                            // KV scatter into F16 cache slot.
-                            encode_scatter_offset_f32_to_f16_kv(
-                                base.ctx,
-                                &enc,
-                                &k_normed_n,
-                                &v_now_n,
-                                &target_session.kv_k[ai],
-                                &target_session.kv_v[ai],
-                                (position_n as usize) * kv_dim,
-                                kv_dim,
-                            )?;
-                            target_session.kv_n_pos[ai] = position_n as usize + 1;
+                    let packed_q2_nwg = if mtp_attn_q2_shared_kv_enabled()
+                        && n == 2
+                        && start_position as usize + n >= 16_384
+                        && head_dim == 256
+                        && n_q == 24
+                        && n_kv == 4
+                        && target_session.kv_k[ai].dtype == GgmlType::F16
+                        && target_session.kv_v[ai].dtype == GgmlType::F16
+                    {
+                        let n_pos0 = start_position as usize + 1;
+                        let n_pos1 = start_position as usize + 2;
+                        let nwg0 = crate::metal::attn_v4_choose_nwg(n_pos0, 6);
+                        let nwg1 = crate::metal::attn_v4_choose_nwg(n_pos1, 6);
+                        let tile0 = crate::metal::attn_v4_choose_tile_c(n_pos0, 6);
+                        let tile1 = crate::metal::attn_v4_choose_tile_c(n_pos1, 6);
+                        (nwg0 == nwg1
+                            && n_pos0.div_ceil(nwg0) == n_pos1.div_ceil(nwg1)
+                            && tile0 == 32
+                            && tile1 == 32)
+                            .then_some(nwg1)
+                    } else {
+                        None
+                    };
 
-                            // Fused attn-v4 (or naive fallback for non-matching shapes).
-                            const V4_HEAD_DIM: usize = 256;
-                            let group = n_q / n_kv;
-                            let use_v4 = head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
-                            if use_v4 {
-                                let nwg = crate::metal::attn_v4_choose_nwg(
-                                    target_session.kv_n_pos[ai],
-                                    group,
-                                );
-                                let tile_c = crate::metal::attn_v4_choose_tile_c(
-                                    target_session.kv_n_pos[ai],
-                                    group,
-                                );
-                                crate::metal::encode_attn_decode_v4_f32(
+                    if let Some(nwg) = packed_q2_nwg {
+                        let enc = KernelEncoder::begin(&cmd_buf);
+                        encode_rope_neox_f32_packed_consecutive(
+                            base.ctx,
+                            &enc,
+                            &attn_q_normed_pack,
+                            n,
+                            n_q,
+                            head_dim,
+                            n_rot,
+                            start_position,
+                            arch.rope_theta,
+                        )?;
+                        encode_rope_neox_f32_packed_consecutive(
+                            base.ctx,
+                            &enc,
+                            &attn_k_normed_pack,
+                            n,
+                            n_kv,
+                            head_dim,
+                            n_rot,
+                            start_position,
+                            arch.rope_theta,
+                        )?;
+                        encode_scatter_offset_f32_to_f16_kv(
+                            base.ctx,
+                            &enc,
+                            &attn_k_normed_pack,
+                            &attn_v_now_pack,
+                            &target_session.kv_k[ai],
+                            &target_session.kv_v[ai],
+                            start_position as usize * kv_dim,
+                            n * kv_dim,
+                        )?;
+                        target_session.kv_n_pos[ai] = start_position as usize + n;
+                        crate::metal::encode_attn_prefill_v4_g6_q2_c32_f32(
+                            base.ctx,
+                            &enc,
+                            &attn_q_normed_pack,
+                            &target_session.kv_k[ai],
+                            &target_session.kv_v[ai],
+                            &layer_scratch.attn_prefill_v4_o_partial_pack,
+                            &layer_scratch.attn_prefill_v4_ml_partial_pack,
+                            &attn_o_pack,
+                            n,
+                            start_position as usize,
+                            nwg,
+                        )?;
+                        enc.end();
+                    } else {
+                        // The generic path appends and attends one causal row at
+                        // a time because each row sees a different KV extent.
+                        for n_idx in 0..n {
+                            let position_n = start_position + n_idx as u32;
+                            let q_normed_n = layer_scratch
+                                .attn_q_normed_pack
+                                .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                            let k_normed_n = layer_scratch
+                                .attn_k_normed_pack
+                                .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                            let v_now_n = layer_scratch
+                                .attn_v_now_pack
+                                .view_subrange((n_idx * kv_dim) as u64, vec![kv_dim as u64]);
+                            let attn_o_n = layer_scratch
+                                .attn_o_pack
+                                .view_subrange((n_idx * q_dim) as u64, vec![q_dim as u64]);
+                            {
+                                let enc = KernelEncoder::begin(&cmd_buf);
+                                // RoPE on this row of Q and K.
+                                encode_rope_neox_f32(
                                     base.ctx,
                                     &enc,
                                     &q_normed_n,
-                                    &target_session.kv_k[ai],
-                                    &target_session.kv_v[ai],
-                                    &target_session.attn_v4_o_partial,
-                                    &target_session.attn_v4_ml_partial,
-                                    &attn_o_n,
                                     n_q,
-                                    n_kv,
                                     head_dim,
-                                    target_session.kv_n_pos[ai],
-                                    nwg,
-                                    tile_c,
+                                    n_rot,
+                                    position_n,
+                                    arch.rope_theta,
                                 )?;
-                            } else {
-                                crate::metal::encode_attn_decode_f16kv_f32(
+                                encode_rope_neox_f32(
                                     base.ctx,
                                     &enc,
-                                    &q_normed_n,
-                                    &target_session.kv_k[ai],
-                                    &target_session.kv_v[ai],
-                                    &attn_o_n,
-                                    n_q,
+                                    &k_normed_n,
                                     n_kv,
                                     head_dim,
-                                    target_session.kv_n_pos[ai],
+                                    n_rot,
+                                    position_n,
+                                    arch.rope_theta,
                                 )?;
+                                // KV scatter into F16 cache slot.
+                                encode_scatter_offset_f32_to_f16_kv(
+                                    base.ctx,
+                                    &enc,
+                                    &k_normed_n,
+                                    &v_now_n,
+                                    &target_session.kv_k[ai],
+                                    &target_session.kv_v[ai],
+                                    (position_n as usize) * kv_dim,
+                                    kv_dim,
+                                )?;
+                                target_session.kv_n_pos[ai] = position_n as usize + 1;
+
+                                // Fused attn-v4 (or naive fallback for non-matching shapes).
+                                const V4_HEAD_DIM: usize = 256;
+                                let group = n_q / n_kv;
+                                let use_v4 =
+                                    head_dim == V4_HEAD_DIM && matches!(group, 4 | 6 | 8 | 16);
+                                if use_v4 {
+                                    let nwg = crate::metal::attn_v4_choose_nwg(
+                                        target_session.kv_n_pos[ai],
+                                        group,
+                                    );
+                                    let tile_c = crate::metal::attn_v4_choose_tile_c(
+                                        target_session.kv_n_pos[ai],
+                                        group,
+                                    );
+                                    crate::metal::encode_attn_decode_v4_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &q_normed_n,
+                                        &target_session.kv_k[ai],
+                                        &target_session.kv_v[ai],
+                                        &target_session.attn_v4_o_partial,
+                                        &target_session.attn_v4_ml_partial,
+                                        &attn_o_n,
+                                        n_q,
+                                        n_kv,
+                                        head_dim,
+                                        target_session.kv_n_pos[ai],
+                                        nwg,
+                                        tile_c,
+                                    )?;
+                                } else {
+                                    crate::metal::encode_attn_decode_f16kv_f32(
+                                        base.ctx,
+                                        &enc,
+                                        &q_normed_n,
+                                        &target_session.kv_k[ai],
+                                        &target_session.kv_v[ai],
+                                        &attn_o_n,
+                                        n_q,
+                                        n_kv,
+                                        head_dim,
+                                        target_session.kv_n_pos[ai],
+                                    )?;
+                                }
+                                enc.end();
                             }
-                            enc.end();
                         }
                     }
                     emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "body");
@@ -12159,11 +12260,12 @@ pub fn encode_restore_after_partial_accept_inner(
     //
     // Destination: target_session.gdn_state[k] / target_session.gdn_conv[k].
     //
-    // n_keep == N (full accept) edge case: source is gdn_ckpt_slot(k, N-1),
-    // which holds state-after-token-(N-1) — exactly what's currently in
-    // session.gdn_state[k]. The blit is a no-op in semantics but still
-    // copies bytes. Optimization opportunity (skip the blit when n_keep == N)
-    // is deferred — at v1 we want the simplest, most-defensive code path.
+    // Full accept needs no copy: the live session already holds the final state,
+    // and packed verification intentionally does not publish the unreachable
+    // final checkpoint slot.
+    if packed_verify_skip_final_ckpt_enabled() && n_keep == n {
+        return Ok(());
+    }
     let cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
     let blit = BlitEncoder::begin(&cmd_buf);
     let ckpt_n = n_keep - 1; // checkpoint index to restore from

@@ -4446,6 +4446,176 @@ pub fn encode_mat_vec_iq2_s_f32(
     )
 }
 
+fn encode_mat_vec_lowbit_nc2_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+    expected: GgmlType,
+    error_kernel: &'static str,
+    metal_kernel: &'static str,
+) -> Result<(), MetalError> {
+    if !n_in.is_multiple_of(256) {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: format!("n_in={n_in} not divisible by 256"),
+        });
+    }
+    if weight.dtype != expected {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: format!("weight.dtype = {:?}, expected {expected:?}", weight.dtype),
+        });
+    }
+    if x.dtype != GgmlType::F32 || y.dtype != GgmlType::F32 || !y.is_writable() {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: format!(
+                "x/y expected F32 with writable y, got {:?}/{:?} y_provenance={:?}",
+                x.dtype,
+                y.dtype,
+                y.provenance(),
+            ),
+        });
+    }
+    let weight_shape = [
+        u64::try_from(n_in).map_err(|_| MetalError::BadShape {
+            kernel: error_kernel,
+            detail: "n_in exceeds u64".into(),
+        })?,
+        u64::try_from(n_out).map_err(|_| MetalError::BadShape {
+            kernel: error_kernel,
+            detail: "n_out exceeds u64".into(),
+        })?,
+    ];
+    if weight.shape != weight_shape {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: format!(
+                "weight shape {:?} != expected {:?}",
+                weight.shape, weight_shape
+            ),
+        });
+    }
+    let expected_x = n_in.checked_mul(2).ok_or_else(|| MetalError::BadShape {
+        kernel: error_kernel,
+        detail: "2*n_in overflow".into(),
+    })?;
+    let expected_y = n_out.checked_mul(2).ok_or_else(|| MetalError::BadShape {
+        kernel: error_kernel,
+        detail: "2*n_out overflow".into(),
+    })?;
+    let (x_elements, x_bytes) = checked_shape_bytes(&x.shape, std::mem::size_of::<f32>())?;
+    let (y_elements, y_bytes) = checked_shape_bytes(&y.shape, std::mem::size_of::<f32>())?;
+    if x_elements != expected_x || y_elements != expected_y {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: format!(
+                "shape mismatch x={} y={} expected x={} y={}",
+                x_elements, y_elements, expected_x, expected_y,
+            ),
+        });
+    }
+    let (_, weight_bytes) = checked_ggml_shape_bytes(&weight.shape, expected)?;
+    let range_fits = |tensor: &MetalTensor, bytes: usize, alignment: u64| {
+        tensor.offset.is_multiple_of(alignment)
+            && u64::try_from(bytes)
+                .ok()
+                .and_then(|bytes| tensor.offset.checked_add(bytes))
+                .is_some_and(|end| end <= tensor.buffer.length() as u64)
+    };
+    if !range_fits(weight, weight_bytes, 2)
+        || !range_fits(x, x_bytes, std::mem::size_of::<f32>() as u64)
+        || !range_fits(y, y_bytes, std::mem::size_of::<f32>() as u64)
+    {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: "weight/x/y has an unaligned or out-of-buffer byte range".into(),
+        });
+    }
+    if tensor_ranges_overlap(weight, y) || tensor_ranges_overlap(x, y) {
+        return Err(MetalError::BadShape {
+            kernel: error_kernel,
+            detail: "output must not overlap weight or input storage".into(),
+        });
+    }
+    u32::try_from(expected_x).map_err(|_| MetalError::BadShape {
+        kernel: error_kernel,
+        detail: "2*n_in exceeds u32 indexing".into(),
+    })?;
+    u32::try_from(expected_y).map_err(|_| MetalError::BadShape {
+        kernel: error_kernel,
+        detail: "2*n_out exceeds u32 indexing".into(),
+    })?;
+    let n_in = u32::try_from(n_in).map_err(|_| MetalError::BadShape {
+        kernel: error_kernel,
+        detail: "n_in exceeds u32".into(),
+    })?;
+    let n_out_u32 = u32::try_from(n_out).map_err(|_| MetalError::BadShape {
+        kernel: error_kernel,
+        detail: "n_out exceeds u32".into(),
+    })?;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_in: u32,
+        n_out: u32,
+    }
+
+    let pso = ctx.pipeline(metal_kernel)?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n_in,
+            n_out: n_out_u32,
+        },
+    );
+    enc.set_tensor(1, weight);
+    enc.set_tensor(2, x);
+    enc.set_tensor(3, y);
+    enc.dispatch(
+        MTLSize {
+            width: n_out.div_ceil(8),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+pub fn encode_mat_vec_iq2_s_nc2_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    encode_mat_vec_lowbit_nc2_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        GgmlType::IQ2_S,
+        "mat_vec_iq2_s_nc2",
+        "kernel_mat_vec_iq2_s_nc2_f32_fast",
+    )
+}
+
 crate::env_flag!(default_on matvec_iq3_xxs_fast_enabled, "QWEN_MATVEC_IQ3_XXS_FAST");
 
 pub fn encode_mat_vec_iq3_xxs_f32(
@@ -4527,6 +4697,29 @@ pub fn encode_mat_vec_iq3_s_f32(
         n_out,
         GgmlType::IQ3_S,
         "kernel_mat_vec_iq3_s_f32",
+    )
+}
+
+pub fn encode_mat_vec_iq3_s_nc2_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    weight: &MetalTensor,
+    x: &MetalTensor,
+    y: &MetalTensor,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), MetalError> {
+    encode_mat_vec_lowbit_nc2_f32(
+        ctx,
+        enc,
+        weight,
+        x,
+        y,
+        n_in,
+        n_out,
+        GgmlType::IQ3_S,
+        "mat_vec_iq3_s_nc2",
+        "kernel_mat_vec_iq3_s_nc2_f32_fast",
     )
 }
 
@@ -15917,6 +16110,269 @@ pub fn encode_attn_decode_v4_reduce_only_f32(
     Ok(())
 }
 
+/// Packed two-query attention for dense Qwen's 24Q/4KV group-6 shape.
+/// Both causal rows share each K/V load while retaining independent online
+/// softmax state and outputs.
+pub fn encode_attn_prefill_v4_g6_q2_c32_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q_rows: &MetalTensor,
+    k_cache: &MetalTensor,
+    v_cache: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    out: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    nwg: usize,
+) -> Result<(), MetalError> {
+    const N_Q_HEADS: usize = 24;
+    const N_KV_HEADS: usize = 4;
+    const HEAD_DIM: usize = 256;
+    const GROUP: usize = 6;
+    const QT: usize = 2;
+    const TILE_C: usize = 32;
+
+    if enc.concurrent {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g6_q2_c32",
+            detail: "dependent main/reduce dispatches require a serial encoder".into(),
+        });
+    }
+    if n_rows == 0 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g6_q2_c32",
+            detail: "n_rows must be > 0".into(),
+        });
+    }
+    if q_rows.dtype != GgmlType::F32
+        || o_partial.dtype != GgmlType::F32
+        || ml_partial.dtype != GgmlType::F32
+        || out.dtype != GgmlType::F32
+        || !o_partial.is_writable()
+        || !ml_partial.is_writable()
+        || !out.is_writable()
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g6_q2_c32",
+            detail: format!(
+                "expected F32 q and writable F32 partials/out, got {:?}/{:?}/{:?}/{:?} writable={}/{}/{}",
+                q_rows.dtype,
+                o_partial.dtype,
+                ml_partial.dtype,
+                out.dtype,
+                o_partial.is_writable(),
+                ml_partial.is_writable(),
+                out.is_writable(),
+            ),
+        });
+    }
+    if k_cache.dtype != GgmlType::F16 || v_cache.dtype != GgmlType::F16 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g6_q2_c32",
+            detail: format!(
+                "expected F16 KV cache, got {:?}/{:?}",
+                k_cache.dtype, v_cache.dtype
+            ),
+        });
+    }
+    let range_fits = |tensor: &MetalTensor, element_bytes: u64| {
+        tensor.offset.is_multiple_of(element_bytes)
+            && tensor
+                .n_elements()
+                .checked_mul(element_bytes)
+                .and_then(|bytes| tensor.offset.checked_add(bytes))
+                .is_some_and(|end| end <= tensor.buffer.length() as u64)
+    };
+    for (name, tensor, element_bytes) in [
+        ("q", q_rows, 4),
+        ("k_cache", k_cache, 2),
+        ("v_cache", v_cache, 2),
+        ("o_partial", o_partial, 4),
+        ("ml_partial", ml_partial, 4),
+        ("out", out, 4),
+    ] {
+        if !range_fits(tensor, element_bytes) {
+            return Err(MetalError::BadShape {
+                kernel: "attn_prefill_v4_g6_q2_c32",
+                detail: format!("{name} has an unaligned or out-of-buffer byte range"),
+            });
+        }
+    }
+    if nwg == 0 || nwg > 64 {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g6_q2_c32",
+            detail: format!("nwg={nwg} out of range [1, 64]"),
+        });
+    }
+    let checked_product = |factors: &[usize], label: &str| -> Result<u64, MetalError> {
+        let elements = factors
+            .iter()
+            .try_fold(1usize, |product, factor| product.checked_mul(*factor));
+        elements
+            .and_then(|elements| u64::try_from(elements).ok())
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: "attn_prefill_v4_g6_q2_c32",
+                detail: format!("{label} element count overflow"),
+            })
+    };
+    let want_q = checked_product(&[n_rows, N_Q_HEADS, HEAD_DIM], "q/out")?;
+    if q_rows.n_elements() != want_q || out.n_elements() != want_q {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g6_q2_c32",
+            detail: format!(
+                "q/out expected {want_q} elements, got {}/{}",
+                q_rows.n_elements(),
+                out.n_elements()
+            ),
+        });
+    }
+    let n_pos = base_pos
+        .checked_add(n_rows)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: "attn_prefill_v4_g6_q2_c32",
+            detail: "base_pos + n_rows overflow".into(),
+        })?;
+    let kv_stride = N_KV_HEADS * HEAD_DIM;
+    let want_kv = checked_product(&[n_pos, kv_stride], "KV")?;
+    if k_cache.n_elements() < want_kv || v_cache.n_elements() < want_kv {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g6_q2_c32",
+            detail: format!(
+                "KV cache too small: need {want_kv}, got {}/{}",
+                k_cache.n_elements(),
+                v_cache.n_elements()
+            ),
+        });
+    }
+    let want_o_partial = checked_product(
+        &[n_rows, N_KV_HEADS, nwg, GROUP, HEAD_DIM],
+        "output partial",
+    )?;
+    let want_ml_partial = checked_product(&[n_rows, N_KV_HEADS, nwg, GROUP, 2], "softmax partial")?;
+    if o_partial.n_elements() < want_o_partial || ml_partial.n_elements() < want_ml_partial {
+        return Err(MetalError::BadShape {
+            kernel: "attn_prefill_v4_g6_q2_c32",
+            detail: format!(
+                "partials too small: o have {} need >= {want_o_partial}, ml have {} need >= {want_ml_partial}",
+                o_partial.n_elements(),
+                ml_partial.n_elements()
+            ),
+        });
+    }
+
+    let rows_per_partition = n_pos.div_ceil(nwg);
+    let n_rows_u32 = u32::try_from(n_rows).map_err(|_| MetalError::BadShape {
+        kernel: "attn_prefill_v4_g6_q2_c32",
+        detail: format!("n_rows={n_rows} does not fit u32"),
+    })?;
+    let n_pos_u32 = u32::try_from(n_pos).map_err(|_| MetalError::BadShape {
+        kernel: "attn_prefill_v4_g6_q2_c32",
+        detail: format!("n_pos={n_pos} does not fit u32"),
+    })?;
+    let rows_per_partition_u32 =
+        u32::try_from(rows_per_partition).map_err(|_| MetalError::BadShape {
+            kernel: "attn_prefill_v4_g6_q2_c32",
+            detail: format!("rows_per_partition={rows_per_partition} does not fit u32"),
+        })?;
+    let base_pos_u32 = u32::try_from(base_pos).map_err(|_| MetalError::BadShape {
+        kernel: "attn_prefill_v4_g6_q2_c32",
+        detail: format!("base_pos={base_pos} does not fit u32"),
+    })?;
+    let scale = (1.0f32 / (HEAD_DIM as f32).sqrt()) * std::f32::consts::LOG2_E;
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct MainArgs {
+        n_rows: u32,
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_pos: u32,
+        kv_stride: u32,
+        n_partitions: u32,
+        rows_per_partition: u32,
+        base_pos: u32,
+        scale: f32,
+    }
+    let main = ctx.pipeline("kernel_attn_prefill_v4_g6_q2_c32_f32")?;
+    enc.set_pipeline(&main);
+    enc.set_bytes(
+        0,
+        &MainArgs {
+            n_rows: n_rows_u32,
+            n_q_heads: N_Q_HEADS as u32,
+            n_kv_heads: N_KV_HEADS as u32,
+            head_dim: HEAD_DIM as u32,
+            n_pos: n_pos_u32,
+            kv_stride: kv_stride as u32,
+            n_partitions: nwg as u32,
+            rows_per_partition: rows_per_partition_u32,
+            base_pos: base_pos_u32,
+            scale,
+        },
+    );
+    enc.set_tensor(1, q_rows);
+    enc.set_tensor(2, k_cache);
+    enc.set_tensor(3, v_cache);
+    enc.set_tensor(4, o_partial);
+    enc.set_tensor(5, ml_partial);
+    enc.set_threadgroup_memory(0, QT * GROUP * HEAD_DIM * 2);
+    enc.set_threadgroup_memory(1, QT * GROUP * TILE_C * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: N_KV_HEADS,
+            height: n_rows.div_ceil(QT),
+            depth: nwg,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct ReduceArgs {
+        n_rows: u32,
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_partitions: u32,
+    }
+    let reduce = ctx.pipeline("kernel_attn_prefill_v4_reduce_rows_g6_f32")?;
+    enc.set_pipeline(&reduce);
+    enc.set_bytes(
+        0,
+        &ReduceArgs {
+            n_rows: n_rows_u32,
+            n_q_heads: N_Q_HEADS as u32,
+            n_kv_heads: N_KV_HEADS as u32,
+            head_dim: HEAD_DIM as u32,
+            n_partitions: nwg as u32,
+        },
+    );
+    enc.set_tensor(1, o_partial);
+    enc.set_tensor(2, ml_partial);
+    enc.set_tensor(3, out);
+    enc.set_threadgroup_memory(0, 64 * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, 64 * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(2, 64 * std::mem::size_of::<f32>());
+    enc.dispatch(
+        MTLSize {
+            width: N_Q_HEADS,
+            height: n_rows,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 pub fn encode_attn_prefill_v4_g8_t2_q2_c64_main_only_f32(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -26519,6 +26975,273 @@ mod tests {
                 .fold(0f32, f32::max);
             eprintln!("[dense-iq2_s mat_mat n_query={n_query}] max|Delta|={max_abs:.2e}");
             assert!(max_abs < 1e-2, "IQ2_S mat_mat max_abs={max_abs}");
+        }
+    }
+
+    #[test]
+    fn mat_vec_lowbit_nc2_synthetic_matches_singletons_and_rejects_bad_views() {
+        type Encoder = fn(
+            &MetalContext,
+            &KernelEncoder,
+            &MetalTensor,
+            &MetalTensor,
+            &MetalTensor,
+            usize,
+            usize,
+        ) -> Result<(), MetalError>;
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(error) => panic!("metal context: {error}"),
+        };
+        const N_IN: usize = 256;
+        const N_OUT: usize = 9;
+        let cases: [(GgmlType, usize, Encoder, Encoder); 2] = [
+            (
+                GgmlType::IQ2_S,
+                82,
+                encode_mat_vec_iq2_s_nc2_f32,
+                encode_mat_vec_iq2_s_f32,
+            ),
+            (
+                GgmlType::IQ3_S,
+                110,
+                encode_mat_vec_iq3_s_nc2_f32,
+                encode_mat_vec_iq3_s_f32,
+            ),
+        ];
+        for (dtype, block_bytes, encode_nc2, encode_single) in cases {
+            let mut weight_bytes = vec![0u8; N_OUT * block_bytes];
+            for row in 0..N_OUT {
+                let block = &mut weight_bytes[row * block_bytes..(row + 1) * block_bytes];
+                for (index, byte) in block.iter_mut().enumerate().skip(2) {
+                    *byte = ((row * 37 + index * 19 + 11) & 0xff) as u8;
+                }
+                block[..2].copy_from_slice(
+                    &half::f16::from_f32(0.03125 + row as f32 * 0.001)
+                        .to_bits()
+                        .to_le_bytes(),
+                );
+            }
+            let weight = offset_tensor(
+                &ctx,
+                32,
+                &weight_bytes,
+                18,
+                vec![N_IN as u64, N_OUT as u64],
+                dtype,
+            );
+            let inputs = (0..2 * N_IN)
+                .map(|index| ((index * 13 + index / N_IN * 7) % 97) as f32 * 1e-3 - 0.04)
+                .collect::<Vec<_>>();
+            let input = offset_tensor(
+                &ctx,
+                16,
+                bytemuck::cast_slice(&inputs),
+                12,
+                vec![2, N_IN as u64],
+                GgmlType::F32,
+            );
+            let output_bytes = vec![0u8; 2 * N_OUT * size_of::<f32>()];
+            let nc2 = offset_tensor(
+                &ctx,
+                32,
+                &output_bytes,
+                20,
+                vec![(2 * N_OUT) as u64],
+                GgmlType::F32,
+            );
+            let sequential = offset_tensor(
+                &ctx,
+                32,
+                &output_bytes,
+                20,
+                vec![(2 * N_OUT) as u64],
+                GgmlType::F32,
+            );
+
+            one_shot(&ctx, |enc| {
+                encode_nc2(&ctx, enc, &weight, &input, &nc2, N_IN, N_OUT)?;
+                for row in 0..2 {
+                    let input_row = input.view_subrange((row * N_IN) as u64, vec![N_IN as u64]);
+                    let output_row =
+                        sequential.view_subrange((row * N_OUT) as u64, vec![N_OUT as u64]);
+                    encode_single(&ctx, enc, &weight, &input_row, &output_row, N_IN, N_OUT)?;
+                }
+                Ok(())
+            })
+            .unwrap_or_else(|error| panic!("{dtype:?} synthetic NC2: {error}"));
+            let candidate = tensor_f32_at_offset(&nc2);
+            let reference = tensor_f32_at_offset(&sequential);
+            assert!(
+                candidate
+                    .iter()
+                    .zip(&reference)
+                    .all(|(left, right)| left.to_bits() == right.to_bits()),
+                "{dtype:?} synthetic NC2 differs from singleton rows"
+            );
+            assert_offset_guards(&nc2, 32, 20);
+            assert_offset_guards(&sequential, 32, 20);
+
+            let command = ctx.queue.commandBuffer().expect("validation command");
+            let encoder = KernelEncoder::begin(&command);
+            let mut misaligned_weight = weight.clone();
+            misaligned_weight.offset += 1;
+            assert!(
+                encode_nc2(
+                    &ctx,
+                    &encoder,
+                    &misaligned_weight,
+                    &input,
+                    &nc2,
+                    N_IN,
+                    N_OUT,
+                )
+                .is_err()
+            );
+            let mut read_only_output = nc2.clone();
+            read_only_output.provenance = MetalTensorProvenance::RetainedGgufReadOnly;
+            assert!(
+                encode_nc2(
+                    &ctx,
+                    &encoder,
+                    &weight,
+                    &input,
+                    &read_only_output,
+                    N_IN,
+                    N_OUT,
+                )
+                .is_err()
+            );
+            let mut short_output = nc2.clone();
+            short_output.offset = short_output.buffer.length() as u64 - 4;
+            assert!(
+                encode_nc2(&ctx, &encoder, &weight, &input, &short_output, N_IN, N_OUT,).is_err()
+            );
+            encoder.end();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local Ridge IQ2_S/IQ3_S fixtures"]
+    fn mat_vec_lowbit_nc2_matches_two_singleton_rows_bit_exact() {
+        type Encoder = fn(
+            &MetalContext,
+            &KernelEncoder,
+            &MetalTensor,
+            &MetalTensor,
+            &MetalTensor,
+            usize,
+            usize,
+        ) -> Result<(), MetalError>;
+        let ctx = MetalContext::new().expect("metal context");
+        let path = "/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf";
+        let g = crate::gguf::GgufFile::open(path).expect("open Ridge fixture");
+        let cases: [(GgmlType, usize, usize, Encoder, Encoder); 4] = [
+            (
+                GgmlType::IQ2_S,
+                5120,
+                17408,
+                encode_mat_vec_iq2_s_nc2_f32,
+                encode_mat_vec_iq2_s_f32,
+            ),
+            (
+                GgmlType::IQ2_S,
+                17408,
+                5120,
+                encode_mat_vec_iq2_s_nc2_f32,
+                encode_mat_vec_iq2_s_f32,
+            ),
+            (
+                GgmlType::IQ3_S,
+                5120,
+                17408,
+                encode_mat_vec_iq3_s_nc2_f32,
+                encode_mat_vec_iq3_s_f32,
+            ),
+            (
+                GgmlType::IQ3_S,
+                17408,
+                5120,
+                encode_mat_vec_iq3_s_nc2_f32,
+                encode_mat_vec_iq3_s_f32,
+            ),
+        ];
+        for (dtype, expected_n_in, expected_n_out, encode_nc2, encode_single) in cases {
+            let w = g
+                .tensors
+                .iter()
+                .find(|tensor| {
+                    tensor.dtype == dtype
+                        && tensor.shape.len() == 2
+                        && tensor.shape == [expected_n_in as u64, expected_n_out as u64]
+                })
+                .unwrap_or_else(|| {
+                    panic!("Ridge {dtype:?} matrix [{expected_n_in}, {expected_n_out}]")
+                });
+            let n_in = w.shape[0] as usize;
+            let n_out = w.shape[1] as usize;
+            let weight =
+                MetalTensor::from_bytes(&ctx, g.slice(w), vec![n_in as u64, n_out as u64], dtype)
+                    .unwrap_or_else(|error| panic!("{dtype:?} weight: {error}"));
+            let inputs = (0..2 * n_in)
+                .map(|i| (((i * 17 + i / n_in * 11) % 101) as f32 - 50.0) * 1e-3)
+                .collect::<Vec<_>>();
+            let input = offset_tensor(
+                &ctx,
+                32,
+                bytemuck::cast_slice(&inputs),
+                16,
+                vec![2, n_in as u64],
+                GgmlType::F32,
+            );
+            let output_bytes = vec![0u8; 2 * n_out * size_of::<f32>()];
+            let nc2 = offset_tensor(
+                &ctx,
+                64,
+                &output_bytes,
+                32,
+                vec![(2 * n_out) as u64],
+                GgmlType::F32,
+            );
+            let sequential = offset_tensor(
+                &ctx,
+                64,
+                &output_bytes,
+                32,
+                vec![(2 * n_out) as u64],
+                GgmlType::F32,
+            );
+
+            one_shot(&ctx, |enc| {
+                encode_nc2(&ctx, enc, &weight, &input, &nc2, n_in, n_out)?;
+                for row in 0..2 {
+                    let input_row = input.view_subrange((row * n_in) as u64, vec![n_in as u64]);
+                    let output_row =
+                        sequential.view_subrange((row * n_out) as u64, vec![n_out as u64]);
+                    encode_single(&ctx, enc, &weight, &input_row, &output_row, n_in, n_out)?;
+                }
+                Ok(())
+            })
+            .unwrap_or_else(|error| panic!("{dtype:?} NC2 and singleton rows: {error}"));
+
+            let nc2_values = tensor_f32_at_offset(&nc2);
+            let sequential_values = tensor_f32_at_offset(&sequential);
+            let max_abs = nc2_values
+                .iter()
+                .zip(&sequential_values)
+                .map(|(candidate, reference)| (candidate - reference).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                nc2_values
+                    .iter()
+                    .zip(&sequential_values)
+                    .all(|(candidate, reference)| candidate.to_bits() == reference.to_bits()),
+                "{dtype:?} NC2 differs from singleton rows; max_abs={max_abs:.3e}"
+            );
+            eprintln!("[lowbit-nc2] dtype={dtype:?} max_abs={max_abs:.3e}");
+            assert_offset_guards(&nc2, 64, 32);
+            assert_offset_guards(&sequential, 64, 32);
         }
     }
 

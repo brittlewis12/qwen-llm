@@ -13481,6 +13481,9 @@ pub fn encode_mat_vec_dispatch(
 }
 
 crate::env_flag!(default_on matmat_smalln_table_enabled, "QWEN_MATMAT_SMALLN_TABLE");
+crate::env_flag!(default_on matmat_q5_k_n2_seq_enabled, "QWEN_MATMAT_Q5_K_N2_SEQ");
+crate::env_flag!(default_on matmat_iq2_s_n2_nc2_enabled, "QWEN_MATMAT_IQ2_S_N2_NC2");
+crate::env_flag!(default_on matmat_iq3_s_n2_nc2_enabled, "QWEN_MATMAT_IQ3_S_N2_NC2");
 
 /// Mat-mat dispatch routing for the H5.3b layer-major path. Picks the
 /// right `kernel_mul_mm_*` lift based on weight dtype. Output is
@@ -13491,6 +13494,7 @@ crate::env_flag!(default_on matmat_smalln_table_enabled, "QWEN_MATMAT_SMALLN_TAB
 /// Production 27B Q4_K_M reaches several weight dtypes via mat-mat:
 ///   * F32/F16/BF16 (full-precision and mixed GGUF variants)
 ///   * Q2_K/Q3_K (low-bit K-quant compatibility)
+///   * IQ2_S/IQ3_S (Ridge low-bit FFNs)
 ///   * Q4_0/Q4_1 (legacy quant compatibility)
 ///   * Q4_K (ffn_gate, ffn_up, attn projections)
 ///   * Q5_K (GDN out_proj — added by v0.73a.0)
@@ -13507,6 +13511,41 @@ pub fn encode_mat_mat_dispatch(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MfError> {
+    // The generic Q5_K matrix kernel owns a physical 32-column tile. At N=2
+    // it computes that tile to retain two columns and is substantially slower
+    // than two mature Q5_K mat-vec dispatches. Keep the packed row contract,
+    // but compose exact row views until a true dequant-once NC2 body exists.
+    // Rollback: QWEN_MATMAT_Q5_K_N2_SEQ=0.
+    if matmat_q5_k_n2_seq_enabled() && weight.dtype == GgmlType::Q5_K && n_query == 2 {
+        for row in 0..n_query {
+            let x_row = x.view_subrange((row * n_in) as u64, vec![n_in as u64]);
+            let y_row = y.view_subrange((row * n_out) as u64, vec![n_out as u64]);
+            encode_mat_vec_q5_k_f32(ctx, enc, weight, &x_row, &y_row, n_in, n_out)?;
+        }
+        return Ok(());
+    }
+
+    let dense_27b_ffn_shape = matches!((n_in, n_out), (5120, 17408) | (17408, 5120));
+    if matmat_iq2_s_n2_nc2_enabled()
+        && weight.dtype == GgmlType::IQ2_S
+        && n_query == 2
+        && dense_27b_ffn_shape
+    {
+        return Ok(crate::metal::encode_mat_vec_iq2_s_nc2_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?);
+    }
+
+    if matmat_iq3_s_n2_nc2_enabled()
+        && weight.dtype == GgmlType::IQ3_S
+        && n_query == 2
+        && dense_27b_ffn_shape
+    {
+        return Ok(crate::metal::encode_mat_vec_iq3_s_nc2_f32(
+            ctx, enc, weight, x, y, n_in, n_out,
+        )?);
+    }
+
     // v0.501: small-N best-kernel table from the v0.500 selection sweep
     // (PERF-LOG v0.500; the pre-v0.501 selection fell through to the
     // GENERIC 32-wide tile at every N < 16 and lost 2-5x). Only fires

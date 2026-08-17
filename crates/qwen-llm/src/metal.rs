@@ -18719,6 +18719,22 @@ pub fn encode_get_rows_f32(
         }
     };
     let (block_elements, block_bytes) = block_layout;
+    let source_alignment = match embed.dtype {
+        GgmlType::F32 => std::mem::align_of::<f32>(),
+        GgmlType::F16 | GgmlType::BF16 | GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::Q8_0 => {
+            std::mem::align_of::<u16>()
+        }
+        _ => unreachable!(),
+    } as u64;
+    if !embed.offset.is_multiple_of(source_alignment) {
+        return Err(MetalError::BadShape {
+            kernel: "get_rows",
+            detail: format!(
+                "source {:?} offset {} is not {source_alignment}-byte aligned",
+                embed.dtype, embed.offset
+            ),
+        });
+    }
     if !n_cols.is_multiple_of(block_elements) {
         return Err(MetalError::BadShape {
             kernel: "get_rows",
@@ -22254,6 +22270,20 @@ mod tests {
         short_embed.offset = short_embed.buffer.length() as u64 - 1;
         assert!(
             encode_get_rows_f32(&ctx, &enc, &short_embed, &ids, &y, row_ids.len(), N_COLS).is_err()
+        );
+        let mut misaligned_embed = embed.clone();
+        misaligned_embed.offset += 1;
+        assert!(
+            encode_get_rows_f32(
+                &ctx,
+                &enc,
+                &misaligned_embed,
+                &ids,
+                &y,
+                row_ids.len(),
+                N_COLS,
+            )
+            .is_err()
         );
         let mut short_ids = ids.clone();
         short_ids.offset = short_ids.buffer.length() as u64 - 1;
@@ -29716,6 +29746,16 @@ mod tests {
         quantized_get_rows_fixture(
             "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
             GgmlType::Q8_0,
+            true,
+        );
+    }
+
+    #[test]
+    #[ignore = "requires local Ridge 27B Q6_K embedding fixture"]
+    fn get_rows_q6_k_matches_selected_cpu_rows() {
+        quantized_get_rows_fixture(
+            "/Users/tito/models/qwen38-27b-ridge/Qwen3.8-27B-Ridge-3.7bpw.gguf",
+            GgmlType::Q6_K,
             true,
         );
     }

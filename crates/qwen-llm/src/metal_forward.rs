@@ -303,19 +303,17 @@ fn native_quant_embedding_supported(dtype: GgmlType, shape: &[u64]) -> bool {
     shape.len() == 2
         && shape[0] > 0
         && shape[1] > 0
-        && ((dtype == GgmlType::Q4_K && shape[0].is_multiple_of(256))
+        && ((matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K) && shape[0].is_multiple_of(256))
             || (dtype == GgmlType::Q8_0 && shape[0].is_multiple_of(32)))
 }
 
 fn native_quant_embedding_default_promoted(
     arch: &crate::model::Arch,
     tied_embeddings: bool,
-    mtp_present: bool,
     dtype: GgmlType,
     shape: &[u64],
 ) -> bool {
-    if tied_embeddings || mtp_present || shape != [arch.hidden_size as u64, arch.vocab_size as u64]
-    {
+    if tied_embeddings || shape != [arch.hidden_size as u64, arch.vocab_size as u64] {
         return false;
     }
     let common = arch.vocab_size == 248_320
@@ -325,10 +323,9 @@ fn native_quant_embedding_default_promoted(
         && arch.partial_rotary_factor == 0.25
         && arch.gdn_n_k_heads == 16
         && arch.gdn_head_dim == 128
-        && arch.gdn_conv_kernel == 4
-        && arch.mtp_n_hidden_layers == 0;
+        && arch.gdn_conv_kernel == 4;
     common
-        && ((dtype == GgmlType::Q4_K
+        && ((matches!(dtype, GgmlType::Q4_K | GgmlType::Q6_K)
             && arch.kind == ArchKind::Dense
             && arch.n_layer == 64
             && arch.hidden_size == 5120
@@ -1945,7 +1942,6 @@ pub fn production_native_quant_embedding_storage_enabled(model: &Model<'_>) -> b
         && native_quant_embedding_default_promoted(
             &model.arch,
             model.tied_embeddings,
-            model.mtp.is_some(),
             model.token_embd.dtype,
             &model.token_embd.shape,
         )
@@ -3868,7 +3864,6 @@ fn matches_no_copy_27b_sentinel(gguf: &GgufFile, model: &Model<'_>) -> bool {
         && native_quant_embedding_default_promoted(
             &model.arch,
             model.tied_embeddings,
-            model.mtp.is_some(),
             model.token_embd.dtype,
             &model.token_embd.shape,
         )
@@ -3964,7 +3959,6 @@ fn parallel_copy_profile_matches(
                 && native_quant_embedding_default_promoted(
                     &model.arch,
                     model.tied_embeddings,
-                    model.mtp.is_some(),
                     model.token_embd.dtype,
                     &model.token_embd.shape,
                 )
@@ -5058,7 +5052,7 @@ impl MetalModel {
     /// For weights that aren't matmul'd by a quant-supporting kernel
     /// (e.g. norms, ssm_a, dt_bias — they need F32 for the elementwise
     /// kernels), we dequant via the codec at load time. The big tensors
-    /// (mat_vec inputs and lm_head) keep their native dtype. Q4_K/Q8_0
+    /// (mat_vec inputs and lm_head) keep their native dtype. Q4_K/Q6_K/Q8_0
     /// embeddings can opt into native residency once their row kernels apply.
     pub fn load(ctx: &MetalContext, gguf: &GgufFile, model: &Model<'_>) -> Result<Self, MfError> {
         Self::load_with_options(ctx, gguf, model, MetalModelLoadOptions::default())
@@ -5151,7 +5145,6 @@ impl MetalModel {
                 native_quant_embedding_default_promoted(
                     &model.arch,
                     model.tied_embeddings,
-                    model.mtp.is_some(),
                     model.token_embd.dtype,
                     &model.token_embd.shape,
                 ),
@@ -5300,7 +5293,6 @@ impl MetalModel {
             native_quant_embedding_default_promoted(
                 &model.arch,
                 model.tied_embeddings,
-                model.mtp.is_some(),
                 model.token_embd.dtype,
                 &model.token_embd.shape,
             ),
@@ -16951,12 +16943,16 @@ mod tests {
             GgmlType::Q8_0,
             &[3072, 248_320]
         ));
-        assert!(!native_quant_embedding_supported(
+        assert!(native_quant_embedding_supported(
             GgmlType::Q6_K,
             &[5120, 248_320]
         ));
         assert!(!native_quant_embedding_supported(
             GgmlType::Q4_K,
+            &[5119, 248_320]
+        ));
+        assert!(!native_quant_embedding_supported(
+            GgmlType::Q6_K,
             &[5119, 248_320]
         ));
         assert!(!native_quant_embedding_supported(
@@ -17029,11 +17025,17 @@ mod tests {
 
     #[test]
     fn native_quant_embedding_defaults_only_on_promoted_fingerprints() {
-        let mut dense = crate::model::QWEN3_27B;
-        dense.mtp_n_hidden_layers = 0;
+        let dense = crate::model::QWEN3_27B;
         assert!(native_quant_embedding_default_promoted(
             &dense,
             false,
+            GgmlType::Q4_K,
+            &[5120, 248_320],
+        ));
+        let mut dense_without_mtp = dense;
+        dense_without_mtp.mtp_n_hidden_layers = 0;
+        assert!(native_quant_embedding_default_promoted(
+            &dense_without_mtp,
             false,
             GgmlType::Q4_K,
             &[5120, 248_320],
@@ -17041,34 +17043,23 @@ mod tests {
         assert!(!native_quant_embedding_default_promoted(
             &dense,
             true,
-            false,
             GgmlType::Q4_K,
             &[5120, 248_320],
         ));
         assert!(!native_quant_embedding_default_promoted(
             &dense,
-            false,
-            true,
-            GgmlType::Q4_K,
-            &[5120, 248_320],
-        ));
-        assert!(!native_quant_embedding_default_promoted(
-            &dense,
-            false,
             false,
             GgmlType::Q8_0,
             &[5120, 248_320],
         ));
-        dense.mtp_n_hidden_layers = 1;
-        assert!(!native_quant_embedding_default_promoted(
+        assert!(native_quant_embedding_default_promoted(
             &dense,
             false,
-            false,
-            GgmlType::Q4_K,
+            GgmlType::Q6_K,
             &[5120, 248_320],
         ));
 
-        let a3b = crate::model::Arch {
+        let mut a3b = crate::model::Arch {
             kind: ArchKind::Moe,
             n_layer: 40,
             hidden_size: 2048,
@@ -17093,6 +17084,12 @@ mod tests {
         assert!(native_quant_embedding_default_promoted(
             &a3b,
             false,
+            GgmlType::Q8_0,
+            &[2048, 248_320],
+        ));
+        a3b.mtp_n_hidden_layers = 1;
+        assert!(native_quant_embedding_default_promoted(
+            &a3b,
             false,
             GgmlType::Q8_0,
             &[2048, 248_320],
@@ -17100,27 +17097,17 @@ mod tests {
         assert!(!native_quant_embedding_default_promoted(
             &a3b,
             true,
-            false,
             GgmlType::Q8_0,
             &[2048, 248_320],
         ));
         assert!(!native_quant_embedding_default_promoted(
             &a3b,
-            false,
-            true,
-            GgmlType::Q8_0,
-            &[2048, 248_320],
-        ));
-        assert!(!native_quant_embedding_default_promoted(
-            &a3b,
-            false,
             false,
             GgmlType::Q4_K,
             &[2048, 248_320],
         ));
         assert!(!native_quant_embedding_default_promoted(
             &a3b,
-            false,
             false,
             GgmlType::Q8_0,
             &[3072, 248_320],
@@ -17155,7 +17142,6 @@ mod tests {
             native_quant_embedding_default_promoted(
                 &m.arch,
                 m.tied_embeddings,
-                m.mtp.is_some(),
                 source.dtype,
                 &source.shape,
             ),
@@ -18699,7 +18685,7 @@ mod tests {
         // Match the policy in MetalModel::load:
         //   * load_f32 (ALWAYS dequant to F32): norms, ssm_a, ssm_dt, conv1d,
         //     ssm_norm, q_norm, k_norm, output_norm; token_embd is F32 by
-        //     default and Q4_K/Q8_0-native under QWEN_NATIVE_QUANT_EMBED.
+        //     default and Q4_K/Q6_K/Q8_0-native under QWEN_NATIVE_QUANT_EMBED.
         //   * load_weight (preserves F32/Q4_K/Q6_K, falls back to F32 for
         //     others): all the mat_vec weights — lm_head, ffn_*, attn_q/k/v/o,
         //     attn_qkv, attn_gate, in_proj_qkv, in_proj_z, beta_proj,
@@ -18720,7 +18706,7 @@ mod tests {
         // Top-level tensors.
         bump(
             &mut stats,
-            "token_embd (F32 default; Q4_K/Q8_0 native opt-in)",
+            "token_embd (F32 default; Q4_K/Q6_K/Q8_0 native opt-in)",
             m.token_embd.n_bytes,
             f32_size(&m.token_embd.shape),
         );

@@ -25,7 +25,7 @@
 //! and wait per call (v1). Future ICB-cached version will overlap with
 //! base forward on the same MetalSession command queue.
 
-use crate::codec::dequant_to_f32;
+use crate::codec::{dequant_to_f32, dequant_to_f32_into};
 use crate::gguf::GgufFile;
 use crate::loader::MtpHead;
 use crate::metal::{
@@ -119,6 +119,82 @@ impl MtpMoeBankPolicy {
     fn native_down(self) -> bool {
         matches!(self, Self::Down | Self::All)
     }
+}
+
+crate::env_flag!(
+    default_on mtp_direct_f32_destination_enabled,
+    "QWEN_MTP_DIRECT_F32_DEST"
+);
+
+fn load_mtp_f32_tensor(
+    ctx: &MetalContext,
+    gguf: &GgufFile,
+    desc: &TensorDesc,
+    direct_destination: bool,
+) -> Result<MetalTensor, MtpError> {
+    const KERNEL: &str = "mtp_load_f32";
+
+    if desc.dtype == GgmlType::F32 {
+        return Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?);
+    }
+    if !direct_destination {
+        let f32 = dequant_to_f32(desc, gguf.slice(desc))?;
+        return Ok(MetalTensor::from_bytes(
+            ctx,
+            bytemuck::cast_slice(&f32),
+            desc.shape.clone(),
+            GgmlType::F32,
+        )?);
+    }
+
+    let tensor = MetalTensor::zeros_f32(ctx, desc.shape.clone())?;
+    let elements = usize::try_from(tensor.n_elements()).map_err(|_| {
+        MtpError::Metal(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "converted tensor {:?} element count exceeds usize",
+                desc.name
+            ),
+        })
+    })?;
+    let bytes = elements
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| {
+            MtpError::Metal(MetalError::BadShape {
+                kernel: KERNEL,
+                detail: format!(
+                    "converted tensor {:?} byte count overflows usize",
+                    desc.name
+                ),
+            })
+        })?;
+    if tensor.offset != 0 || bytes > tensor.buffer.length() {
+        return Err(MtpError::Metal(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "converted tensor {:?} destination range is invalid",
+                desc.name
+            ),
+        }));
+    }
+    let start = tensor.buffer.contents().as_ptr() as *mut u8;
+    if !(start as usize).is_multiple_of(std::mem::align_of::<f32>()) {
+        return Err(MtpError::Metal(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!(
+                "converted tensor {:?} destination is not f32-aligned",
+                desc.name
+            ),
+        }));
+    }
+    // SAFETY: `tensor` owns a fresh writable Shared buffer. The checked shape,
+    // range, zero offset, and alignment establish this exact F32 destination,
+    // and no GPU command or other alias can observe it before publication.
+    let output = unsafe {
+        std::slice::from_raw_parts_mut(start.cast::<std::mem::MaybeUninit<f32>>(), elements)
+    };
+    dequant_to_f32_into(desc, gguf.slice(desc), output)?;
+    Ok(tensor)
 }
 
 /// All MTP head weights, resident as `MetalTensor`s. Loaded once at session
@@ -465,19 +541,9 @@ impl MetalMtpHead {
         mtp: &MtpHead<'_>,
         moe_bank_policy: MtpMoeBankPolicy,
     ) -> Result<Self, MtpError> {
-        let load_f32 = |desc: &TensorDesc| -> Result<MetalTensor, MtpError> {
-            if desc.dtype == GgmlType::F32 {
-                Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
-            } else {
-                let f32 = dequant_to_f32(desc, gguf.slice(desc))?;
-                Ok(MetalTensor::from_bytes(
-                    ctx,
-                    bytemuck::cast_slice(&f32),
-                    desc.shape.clone(),
-                    GgmlType::F32,
-                )?)
-            }
-        };
+        let direct_f32_destination = mtp_direct_f32_destination_enabled();
+        let load_f32 =
+            |desc: &TensorDesc| load_mtp_f32_tensor(ctx, gguf, desc, direct_f32_destination);
         let load_weight = |desc: &TensorDesc| -> Result<MetalTensor, MtpError> {
             if weight_dtype_kept_native(desc.dtype) {
                 Ok(MetalTensor::from_gguf_tensor(ctx, desc, gguf.slice(desc))?)
@@ -3380,6 +3446,132 @@ mod tests {
             MtpMoeBankPolicy::All
         );
         assert!(MtpMoeBankPolicy::parse(Some("true")).is_err());
+    }
+
+    fn metal_tensor_digest(tensor: &MetalTensor) -> blake3::Hash {
+        let offset = usize::try_from(tensor.offset).expect("tensor offset fits usize");
+        let n_bytes = usize::try_from(tensor.n_bytes()).expect("tensor bytes fit usize");
+        let end = offset
+            .checked_add(n_bytes)
+            .expect("tensor range fits usize");
+        assert!(end <= tensor.buffer.length());
+        // SAFETY: the checked logical tensor range lies within CPU-visible
+        // Shared storage and is borrowed read-only for the duration of hashing.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                (tensor.buffer.contents().as_ptr() as *const u8).add(offset),
+                n_bytes,
+            )
+        };
+        blake3::hash(bytes)
+    }
+
+    #[test]
+    #[ignore = "requires local A3B Q4_K_M MTP fixture and 2 GiB peak Metal/host memory"]
+    fn mtp_direct_f32_banks_match_staged_bytes() {
+        let path =
+            "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf";
+        assert!(
+            std::path::Path::new(path).is_file(),
+            "required MTP direct-F32 fixture is missing: {path}"
+        );
+        let ctx = MetalContext::new().expect("metal context");
+        let g = GgufFile::open(path).expect("open fixture");
+        let m = Model::from_gguf(&g).expect("load model");
+        let source = m
+            .mtp
+            .as_ref()
+            .expect("MTP head")
+            .attn
+            .ffn_moe
+            .as_ref()
+            .expect("MoE MTP block");
+        let mut banks = Vec::new();
+
+        for desc in [source.gate_exps, source.up_exps, source.down_exps] {
+            let staged = load_mtp_f32_tensor(&ctx, &g, desc, false).expect("staged F32 load");
+            assert_eq!(staged.shape, desc.shape);
+            assert_eq!(staged.dtype, GgmlType::F32);
+            assert_eq!(staged.n_bytes(), 1_073_741_824);
+            let staged_digest = metal_tensor_digest(&staged);
+            drop(staged);
+
+            let direct = load_mtp_f32_tensor(&ctx, &g, desc, true).expect("direct F32 load");
+            assert_eq!(direct.shape, desc.shape);
+            assert_eq!(direct.dtype, GgmlType::F32);
+            assert_eq!(direct.n_bytes(), 1_073_741_824);
+            let direct_digest = metal_tensor_digest(&direct);
+            assert_eq!(direct_digest, staged_digest, "bank {} differs", desc.name);
+            banks.push(serde_json::json!({
+                "name": desc.name,
+                "source_dtype": format!("{:?}", desc.dtype),
+                "shape": &desc.shape,
+                "bytes": direct.n_bytes(),
+                "staged_blake3": staged_digest.to_hex().to_string(),
+                "direct_blake3": direct_digest.to_hex().to_string(),
+            }));
+            eprintln!(
+                "[mtp-direct-f32] bank={} source={:?} bytes={} blake3={}",
+                desc.name,
+                desc.dtype,
+                direct.n_bytes(),
+                direct_digest.to_hex(),
+            );
+        }
+        let output = std::path::PathBuf::from(
+            std::env::var_os("QWEN_MTP_DIRECT_F32_ORACLE_OUT")
+                .expect("QWEN_MTP_DIRECT_F32_ORACLE_OUT is required"),
+        );
+        assert!(
+            !output.exists(),
+            "refusing to overwrite byte-oracle packet: {}",
+            output.display()
+        );
+        let identity_path = std::path::PathBuf::from(
+            std::env::var_os("QWEN_MTP_DIRECT_F32_ORACLE_BUILD_IDENTITY")
+                .expect("QWEN_MTP_DIRECT_F32_ORACLE_BUILD_IDENTITY is required"),
+        );
+        let source_identity: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&identity_path).expect("read byte-oracle build identity"),
+        )
+        .expect("parse byte-oracle build identity");
+        let test_binary = std::env::current_exe().expect("resolve byte-oracle test binary");
+        use sha2::Digest as _;
+        use std::io::Read as _;
+        let mut test_binary_file = std::fs::File::open(&test_binary).expect("open test binary");
+        let mut test_binary_hasher = sha2::Sha256::new();
+        let mut hash_buffer = [0u8; 1024 * 1024];
+        loop {
+            let read = test_binary_file
+                .read(&mut hash_buffer)
+                .expect("hash test binary");
+            if read == 0 {
+                break;
+            }
+            test_binary_hasher.update(&hash_buffer[..read]);
+        }
+        let test_binary_sha256 = format!("{:x}", test_binary_hasher.finalize());
+        let recorded_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("byte-oracle timestamp precedes epoch")
+            .as_millis();
+        let packet = serde_json::json!({
+            "schema": "qwen-mtp-direct-f32-byte-oracle/v2",
+            "fixture": path,
+            "test_passed": true,
+            "staged_equals_direct": true,
+            "source_identity": source_identity,
+            "recorded_unix_ms": recorded_unix_ms,
+            "test_binary_sha256": test_binary_sha256,
+            "banks": banks,
+        });
+        std::fs::write(
+            &output,
+            serde_json::to_vec_pretty(&packet).expect("serialize byte-oracle packet"),
+        )
+        .expect("write byte-oracle packet");
+        eprintln!("[mtp-direct-f32] oracle={}", output.display());
+        eprintln!("[mtp-direct-f32] packet={packet}");
     }
 
     #[test]

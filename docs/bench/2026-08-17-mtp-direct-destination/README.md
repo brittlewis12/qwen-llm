@@ -2,8 +2,8 @@
 
 Date: 2026-08-17
 
-Status: **PREREGISTERED WITH CONTROL-ONLY AMENDMENT A1**. No candidate timing
-result has been admitted yet.
+Status: **GO** after control-only Amendment A1. The default-on direct destination
+passes every amended correctness, timing, order, and memory gate.
 
 ## Question
 
@@ -123,6 +123,76 @@ Retain only if all correctness gates pass and:
 Otherwise remove the implementation and bank the negative result. A noisy
 whole-process wall result does not veto a passing isolated load boundary, but
 it cannot be promoted as an end-to-end speed claim.
+
+## Result
+
+All six fresh-process pairs completed under one exact build/runtime source-state
+digest. The direct path won every pair:
+
+| Endpoint | Staged | Direct | Candidate result |
+|---|---:|---:|---:|
+| Median MTP load | 572.928 ms | 314.979 ms | 255.068 ms paired saving |
+| MTP load ratio | 1.000x | 0.550x | **1.819x speedup** |
+| Whole-process wall | 3.680 s | 3.450 s | 0.220 s paired saving |
+
+The marginal medians imply a **45.02%** load reduction; the primary median
+paired saving is 44.52% of the control median. Candidate wins are `6/6`; AB
+median saving is `247.008 ms` and BA median saving is `260.014 ms`.
+Whole-process wall tracks the isolated deletion, but remains supporting evidence
+rather than a general inference-speed claim.
+
+Memory is consistent with the deleted representation:
+
+| Endpoint | Staged median | Direct median | Median paired deletion |
+|---|---:|---:|---:|
+| Maximum RSS | 49,251,794,944 B | 48,253,190,144 B | **998,326,272 B** |
+| Peak footprint | 26,607,226,028 B | 25,973,090,912 B | **634,471,012 B** |
+
+The RSS deletion is 952.08 MiB, consistent with removing one sequential 1 GiB
+host bank temporary. The implementation also deletes 3 GiB of aggregate bank
+population copies across gate, up, and down.
+
+## Exactness
+
+The ignored fixture oracle hashes every byte after loading each 1 GiB bank by
+both constructors. Shape, F32 dtype, byte count, and digest all match:
+
+| Bank | Source | BLAKE3 |
+|---|---|---|
+| gate | Q4_K | `860565f930abb0e362f96e1662f3d7905915b268fb972da161ec8363b89580bd` |
+| up | Q4_K | `2f35551e2ea074a75bf7bed23ecb5bdc8739b2063c7d28df3380fb03b6a4e2dd` |
+| down | Q5_K | `8983881b26d9eb1e6cd0ab34e8126ead7971b57c251ab8e217a4de67d1a43559` |
+
+All 12 production arms report `identical=true`, the same F32/F32/F32
+3,221,225,472-byte bank ledger, and target token digest
+`3af19c4e6c6bc7ca867fd41488b65ef22933de2c31e6c5541c43654591a856a6`.
+Every arm's build and runtime source digest is
+`git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734`.
+The oracle embeds that same build identity, a timestamp inside its manifest
+event, and test-binary SHA-256
+`e447b4f9919e8e362b0ca59a2edc1352215139d9a29bdc694df756e0904bf283`.
+
+Authority is narrow: timing covers this A3B fixture's default-F32 MTP load;
+production semantics cover one 16-token lazy-D1 prompt; full-byte evidence
+covers the three converted expert banks. This does not claim a native-bank
+speedup, an inference-throughput change, or coverage of every possible MTP
+source dtype/model geometry.
+
+The final chronology brackets build identity before and after the oracle and
+campaign. Its staged packed-N2 control reproduces Amendment A1's exact failure
+as event 2, before the oracle and every direct arm; it does not enter timing
+vectors. `results.json` retains the full chronology, oracle, excluded control,
+and admitted packets. `analyze.py` rejects source drift, fixture absence,
+schedule drift, non-treatment environment drift, protocol drift, or an
+unauthenticated token fixture rather than emitting a disposition.
+
+## Retained Change
+
+- Non-F32 MTP tensors dequantize into final writable Shared Metal storage.
+- `QWEN_MTP_DIRECT_F32_DEST=0` retains the staged rollback path.
+- `qwen-bench mtp` records isolated MTP load time, direct-path state, and target
+  token digest.
+- F32 source tensors and native MTP bank policies keep their prior storage path.
 
 ## Safety Boundary
 

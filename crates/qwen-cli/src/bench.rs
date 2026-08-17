@@ -105,7 +105,7 @@ use qwen_llm::{
     },
     runtime::{LoadedModel, Runtime, SequenceConfig},
     tensor::GgmlType,
-    tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer},
+    tokenizer::{LlamaCppTokenizer, NativeTokenizer, Tokenizer, token_ids_sha256_i32le},
 };
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -2854,9 +2854,9 @@ fn run() -> Result<()> {
 }
 
 fn run_build_info(args: BuildInfoArgs) -> Result<()> {
-    let identity = qwen_build_identity_packet();
+    let identity = recorded_build_identity();
     match args.output {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(identity)?),
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&identity)?),
         OutputFormat::Text => {
             println!("status\t{}", identity.status);
             println!("build_commit\t{}", identity.build_commit);
@@ -11245,6 +11245,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let iq2_s_n2_nc2 = env_flag_default_on("QWEN_MATMAT_IQ2_S_N2_NC2");
     let iq3_s_n2_nc2 = env_flag_default_on("QWEN_MATMAT_IQ3_S_N2_NC2");
     let skip_final_checkpoint = env_flag_default_on("QWEN_MTP_SKIP_FINAL_CKPT");
+    let direct_mtp_f32_destination = env_flag_default_on("QWEN_MTP_DIRECT_F32_DEST");
     let shared_kv_q2_requested = env_flag_enabled("QWEN_MTP_ATTN_Q2_SHARED_KV");
     let build_identity = recorded_build_identity();
     let qwen_env = capture_qwen_env();
@@ -11260,7 +11261,9 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     })?;
 
     let mm = MetalModel::load(&ctx, &g, &m).context("metal-load weights")?;
+    let mtp_load_start = Instant::now();
     let mtp_head = MetalMtpHead::load(&ctx, &g, mtp_view).context("metal-load MTP head")?;
+    let mtp_load_ms = mtp_load_start.elapsed().as_secs_f64() * 1e3;
     let mtp_moe_bank_ledger = mtp_head.attn.ffn_moe.as_ref().map(|moe| {
         (
             [moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype],
@@ -11288,6 +11291,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let prompt_ids = tok
         .encode(&rendered_prompt, false)
         .context("tokenize prompt")?;
+    let prompt_token_sha256 = token_ids_sha256_i32le(&prompt_ids);
     eprintln!(
         concat!(
             "[mtp-bench] model={} prompt={:?} rendered_mode={} thinking={} ",
@@ -11327,14 +11331,17 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     eprintln!(
         "[mtp-bench] execution_features: packed_base_prefill={} q5_k_n2_seq={} \
          iq2_s_n2_nc2={} iq3_s_n2_nc2={} skip_final_checkpoint={} \
+         direct_mtp_f32_destination={} \
          shared_kv_q2_requested={} shared_kv_q2_min_position=16384",
         packed_base_prefill,
         q5_k_n2_seq,
         iq2_s_n2_nc2,
         iq3_s_n2_nc2,
         skip_final_checkpoint,
+        direct_mtp_f32_destination,
         shared_kv_q2_requested,
     );
+    eprintln!("[mtp-bench] MTP head load: {mtp_load_ms:.3} ms");
     eprintln!(
         "[mtp-bench] build_identity: status={} commit={} build_source_state={:?} runtime_source_state={:?} overrides={:?}",
         build_identity.status,
@@ -11794,6 +11801,7 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
     let ref_generated = &ref_tokens[prompt_ids.len()..];
     let spec_generated = &result.tokens[prompt_ids.len()..];
     let identical = ref_generated == spec_generated;
+    let target_generated_token_sha256 = token_ids_sha256_i32le(ref_generated);
     let expected_target_transitions = ref_emitted.saturating_sub(1);
     let target_state_audit = if mtp_probe == MtpProbeMode::Oracle {
         planned_state_audit
@@ -12066,18 +12074,26 @@ fn run_mtp(args: MtpArgs) -> Result<()> {
         };
         let row = serde_json::json!({
             "model": model.display().to_string(),
+            "prompt": prompt,
+            "qwen_chat": qwen_chat,
+            "system": system,
+            "disable_thinking": disable_thinking,
             "prompt_tokens": prompt_ids.len(),
+            "prompt_token_sha256": prompt_token_sha256,
             "generated_requested": tokens,
             "stop_tokens": stops,
             "spec_tokens": spec_tokens,
             "logical_verify_n": effective_logical_verify_n,
             "physical_verify_n": effective_physical_verify_n,
+            "mtp_load_ms": mtp_load_ms,
+            "target_generated_token_sha256": target_generated_token_sha256,
             "execution_features": {
                 "packed_base_prefill": packed_base_prefill,
                 "q5_k_n2_seq": q5_k_n2_seq,
                 "iq2_s_n2_nc2": iq2_s_n2_nc2,
                 "iq3_s_n2_nc2": iq3_s_n2_nc2,
                 "skip_final_checkpoint": skip_final_checkpoint,
+                "direct_mtp_f32_destination": direct_mtp_f32_destination,
                 "shared_kv_q2_requested": shared_kv_q2_requested,
                 "shared_kv_q2_min_position": 16_384,
             },

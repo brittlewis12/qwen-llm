@@ -1627,6 +1627,14 @@ fn attn_matrix_query_tiles(n_rows: usize, max_rows: usize) -> impl Iterator<Item
         .map(move |row_base| (row_base, (n_rows - row_base).min(max_rows)))
 }
 
+pub(crate) fn attn_matrix_vt_prefix_rebuild_rows(
+    use_matrix: bool,
+    valid_until: usize,
+    chunk_start: usize,
+) -> Option<usize> {
+    (use_matrix && valid_until < chunk_start).then_some(chunk_start)
+}
+
 fn prefill_attn_matrix_g16_mode() -> PrefillEnvMode {
     static MODE: OnceLock<PrefillEnvMode> = OnceLock::new();
     *MODE.get_or_init(|| env_mode("QWEN_PREFILL_ATTN_MATRIX_G16"))
@@ -8729,8 +8737,12 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             let use_matrix =
                                 use_matrix_g4 || use_matrix_g8 || use_matrix_g6 || use_matrix_g16;
                             let n_pos = chunk_start as usize + chunk_p;
-                            let rebuild_matrix_vt_prefix =
-                                use_matrix && attn_matrix_vt_valid_until[ai] < chunk_start as usize;
+                            let matrix_vt_prefix_rebuild_rows = attn_matrix_vt_prefix_rebuild_rows(
+                                use_matrix,
+                                attn_matrix_vt_valid_until[ai],
+                                chunk_start as usize,
+                            );
+                            let rebuild_matrix_vt_prefix = matrix_vt_prefix_rebuild_rows.is_some();
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 encode_rope_neox_f32_packed_consecutive(
@@ -8885,13 +8897,21 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     };
                                     let vt_update_bytes =
                                         n_kv * head_dim * vt_rows * std::mem::size_of::<u16>();
+                                    let vt_rebuild_rows =
+                                        matrix_vt_prefix_rebuild_rows.unwrap_or(0);
+                                    let vt_rebuild_bytes = n_kv
+                                        * head_dim
+                                        * vt_rebuild_rows
+                                        * std::mem::size_of::<u16>();
                                     eprintln!(
                                         concat!(
                                             "[prefill-attn-matrix-g{}-shape] layer={} ",
                                             "chunk_start={} chunk_p={} query_rows={} ",
                                             "query_tiles={} n_pos={} score_tile_scratch_mib={:.2} ",
                                             "vt_stride={} vt_layer_mib={:.2} vt_update_base={} ",
-                                            "vt_update_rows={} vt_update_mib={:.2}"
+                                            "vt_update_rows={} vt_update_mib={:.2} ",
+                                            "vt_rebuild_rows={} vt_rebuild_bytes={} ",
+                                            "vt_rebuild_mib={:.2}"
                                         ),
                                         group,
                                         il,
@@ -8906,6 +8926,9 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         vt_base,
                                         vt_rows,
                                         vt_update_bytes as f64 / (1024.0 * 1024.0),
+                                        vt_rebuild_rows,
+                                        vt_rebuild_bytes,
+                                        vt_rebuild_bytes as f64 / (1024.0 * 1024.0),
                                     );
                                 }
                                 let matrix_query_tiled =
@@ -8918,7 +8941,6 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     && !matrix_query_tiled;
                                 traced_matrix_subphases = trace_matrix_subphases;
                                 if trace_matrix_subphases {
-                                    let rebuild_vt_prefix = rebuild_matrix_vt_prefix;
                                     let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                     let per_attn_vt = n_kv * head_dim * vt_stride;
                                     let matrix_online =
@@ -8928,7 +8950,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         vec![per_attn_vt as u64],
                                     );
 
-                                    if rebuild_vt_prefix {
+                                    if let Some(prefix_rows) = matrix_vt_prefix_rebuild_rows {
                                         let enc = KernelEncoder::begin(&cmd_buf);
                                         label_prefill_encoder(
                                             &enc,
@@ -8949,7 +8971,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             &target_session.kv_v[ai],
                                             &v_t,
                                             0,
-                                            n_pos,
+                                            prefix_rows,
                                             n_pos,
                                             n_kv * head_dim,
                                             vt_stride,
@@ -9215,21 +9237,20 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         },
                                     );
                                     if use_matrix {
-                                        let rebuild_vt_prefix = rebuild_matrix_vt_prefix;
                                         let vt_stride = layer_scratch.attn_matrix_max_pos as usize;
                                         let per_attn_vt = n_kv * head_dim * vt_stride;
                                         let v_t = layer_scratch.attn_matrix_vt_pack.view_subrange(
                                             (ai * per_attn_vt) as u64,
                                             vec![per_attn_vt as u64],
                                         );
-                                        if rebuild_vt_prefix {
+                                        if let Some(prefix_rows) = matrix_vt_prefix_rebuild_rows {
                                             crate::metal::encode_attn_matrix_transpose_v_f16(
                                                 base.ctx,
                                                 &enc,
                                                 &target_session.kv_v[ai],
                                                 &v_t,
                                                 0,
-                                                n_pos,
+                                                prefix_rows,
                                                 n_pos,
                                                 n_kv * head_dim,
                                                 vt_stride,
@@ -13311,6 +13332,16 @@ mod tests {
             attn_matrix_query_tiles(1024, 4096).collect::<Vec<_>>(),
             vec![(0, 1024)]
         );
+    }
+
+    #[test]
+    fn matrix_vt_prefix_rebuild_span_is_exact() {
+        assert_eq!(attn_matrix_vt_prefix_rebuild_rows(false, 0, 47), None);
+        assert_eq!(attn_matrix_vt_prefix_rebuild_rows(true, 0, 0), None);
+        assert_eq!(attn_matrix_vt_prefix_rebuild_rows(true, 0, 47), Some(47));
+        assert_eq!(attn_matrix_vt_prefix_rebuild_rows(true, 46, 47), Some(47));
+        assert_eq!(attn_matrix_vt_prefix_rebuild_rows(true, 47, 47), None);
+        assert_eq!(attn_matrix_vt_prefix_rebuild_rows(true, 64, 47), None);
     }
 
     #[test]

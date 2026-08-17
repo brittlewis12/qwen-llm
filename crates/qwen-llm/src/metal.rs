@@ -31982,6 +31982,34 @@ mod tests {
             arms.push((cache_v, vt, sentinel));
         }
 
+        let divergent_suffix: Vec<f32> = current_f32.iter().map(|&value| value + 1.0).collect();
+        let divergent_suffix_f16: Vec<u16> = divergent_suffix
+            .iter()
+            .map(|&value| half::f16::from_f32(value).to_bits())
+            .collect();
+        let divergent_suffix_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&divergent_suffix),
+            vec![divergent_suffix.len() as u64],
+            GgmlType::F32,
+        )
+        .unwrap();
+        one_shot(&ctx, |enc| {
+            encode_scatter_offset_f32_to_f16(
+                &ctx,
+                enc,
+                &divergent_suffix_t,
+                &arms[2].0,
+                PREFIX * kv_dim,
+                divergent_suffix.len(),
+            )
+        })
+        .unwrap();
+        assert_eq!(
+            &read_back_u16(&arms[2].0)[PREFIX * kv_dim..],
+            divergent_suffix_f16.as_slice()
+        );
+
         for (index, (cache_v, vt, _)) in arms.iter().enumerate() {
             let (rows, compact) = match index {
                 0 => (n_pos, false),
@@ -31997,15 +32025,219 @@ mod tests {
             .unwrap();
         }
 
-        for (_, vt, sentinel) in &arms {
+        for (index, (_, vt, sentinel)) in arms.iter().enumerate() {
             let mut expected_vt = vec![*sentinel; vt_elems];
             for pos in 0..n_pos {
                 for flat_d in 0..kv_dim {
-                    expected_vt[flat_d * vt_stride + pos] = expected_cache[pos * kv_dim + flat_d];
+                    expected_vt[flat_d * vt_stride + pos] = if index == 2 && pos >= PREFIX {
+                        current_f16[(pos - PREFIX) * kv_dim + flat_d]
+                    } else {
+                        expected_cache[pos * kv_dim + flat_d]
+                    };
                 }
             }
             assert_eq!(read_back_u16(vt), expected_vt);
         }
+    }
+
+    #[test]
+    fn attn_matrix_prefix_only_vt_rebuild_matches_full_attention() {
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const PREFIX: usize = 47;
+        const CHUNK: usize = 17;
+        const N_Q: usize = 24;
+        const N_KV: usize = 4;
+        const HEAD_DIM: usize = 256;
+        const SENTINEL: u16 = 0x3555;
+
+        let n_pos = PREFIX + CHUNK;
+        let group = N_Q / N_KV;
+        let kv_dim = N_KV * HEAD_DIM;
+        let vt_stride = n_pos + 3;
+        let round_f16 = |value: f32| half::f16::from_f32(value).to_f32();
+        let q: Vec<f32> = (0..CHUNK * N_Q * HEAD_DIM)
+            .map(|i| round_f16(((i % 31) as f32 - 15.0) * 0.01))
+            .collect();
+        let k: Vec<f32> = (0..n_pos * kv_dim)
+            .map(|i| round_f16(((i % 23) as f32 - 11.0) * 0.015))
+            .collect();
+        let v: Vec<f32> = (0..n_pos * kv_dim)
+            .map(|i| round_f16(((i % 17) as f32 - 8.0) * 0.02))
+            .collect();
+        let k_f16: Vec<u16> = k
+            .iter()
+            .map(|&value| half::f16::from_f32(value).to_bits())
+            .collect();
+        let v_f16: Vec<u16> = v
+            .iter()
+            .map(|&value| half::f16::from_f32(value).to_bits())
+            .collect();
+        let mut restored_k = vec![SENTINEL; n_pos * kv_dim];
+        let mut restored_v = vec![SENTINEL; n_pos * kv_dim];
+        restored_k[..PREFIX * kv_dim].copy_from_slice(&k_f16[..PREFIX * kv_dim]);
+        restored_v[..PREFIX * kv_dim].copy_from_slice(&v_f16[..PREFIX * kv_dim]);
+
+        let tensor_f32 = |data: &[f32]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(data),
+                vec![data.len() as u64],
+                GgmlType::F32,
+            )
+            .unwrap()
+        };
+        let tensor_f16 = |data: &[u16]| {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(data),
+                vec![data.len() as u64],
+                GgmlType::F16,
+            )
+            .unwrap()
+        };
+        let q_t = tensor_f32(&q);
+        let current_k = tensor_f32(&k[PREFIX * kv_dim..]);
+        let current_v = tensor_f32(&v[PREFIX * kv_dim..]);
+        let full_k = tensor_f16(&k_f16);
+        let full_v = tensor_f16(&v_f16);
+        let rebuilt_k = tensor_f16(&restored_k);
+        let rebuilt_v = tensor_f16(&restored_v);
+        let make_vt = || tensor_f16(&vec![SENTINEL; kv_dim * vt_stride]);
+        let full_vt = make_vt();
+        let rebuilt_vt = make_vt();
+
+        let make_scores =
+            || MetalTensor::zeros_f16(&ctx, vec![(CHUNK * N_Q * n_pos) as u64]).unwrap();
+        let make_ml = || {
+            MetalTensor::zeros_f32(&ctx, vec![attn_matrix_ml_elems(CHUNK, N_Q, n_pos) as u64])
+                .unwrap()
+        };
+        let full_scores = make_scores();
+        let full_ml = make_ml();
+        let full_out = MetalTensor::zeros_f32(&ctx, vec![(CHUNK * N_Q * HEAD_DIM) as u64]).unwrap();
+        one_shot(&ctx, |enc| {
+            encode_attn_matrix_transpose_v_f16(
+                &ctx, enc, &full_v, &full_vt, 0, n_pos, n_pos, kv_dim, vt_stride, N_KV, HEAD_DIM,
+            )?;
+            encode_attn_matrix_kq_online_f32(
+                &ctx,
+                enc,
+                &q_t,
+                &full_k,
+                &full_scores,
+                &full_ml,
+                CHUNK,
+                PREFIX,
+                n_pos,
+                kv_dim,
+                N_Q,
+                N_KV,
+                group,
+                HEAD_DIM,
+                true,
+            )?;
+            encode_attn_matrix_kqv_norm_f32(
+                &ctx,
+                enc,
+                &full_scores,
+                &full_ml,
+                &full_vt,
+                &full_out,
+                CHUNK,
+                PREFIX,
+                n_pos,
+                vt_stride,
+                N_Q,
+                N_KV,
+                group,
+                HEAD_DIM,
+                true,
+            )
+        })
+        .unwrap();
+
+        let rebuilt_scores = make_scores();
+        let rebuilt_ml = make_ml();
+        let rebuilt_out =
+            MetalTensor::zeros_f32(&ctx, vec![(CHUNK * N_Q * HEAD_DIM) as u64]).unwrap();
+        let rebuilt_prefix_rows =
+            crate::metal_dflash::attn_matrix_vt_prefix_rebuild_rows(true, 0, PREFIX)
+                .expect("restored prefix requires a V_T rebuild");
+        one_shot(&ctx, |enc| {
+            encode_scatter_offset_f32_to_f16_kv_vt(
+                &ctx,
+                enc,
+                &current_k,
+                &current_v,
+                &rebuilt_k,
+                &rebuilt_v,
+                &rebuilt_vt,
+                PREFIX * kv_dim,
+                CHUNK * kv_dim,
+                PREFIX,
+                kv_dim,
+                HEAD_DIM,
+                vt_stride,
+            )?;
+            encode_attn_matrix_transpose_v_f16(
+                &ctx,
+                enc,
+                &rebuilt_v,
+                &rebuilt_vt,
+                0,
+                rebuilt_prefix_rows,
+                n_pos,
+                kv_dim,
+                vt_stride,
+                N_KV,
+                HEAD_DIM,
+            )?;
+            encode_attn_matrix_kq_online_f32(
+                &ctx,
+                enc,
+                &q_t,
+                &rebuilt_k,
+                &rebuilt_scores,
+                &rebuilt_ml,
+                CHUNK,
+                PREFIX,
+                n_pos,
+                kv_dim,
+                N_Q,
+                N_KV,
+                group,
+                HEAD_DIM,
+                true,
+            )?;
+            encode_attn_matrix_kqv_norm_f32(
+                &ctx,
+                enc,
+                &rebuilt_scores,
+                &rebuilt_ml,
+                &rebuilt_vt,
+                &rebuilt_out,
+                CHUNK,
+                PREFIX,
+                n_pos,
+                vt_stride,
+                N_Q,
+                N_KV,
+                group,
+                HEAD_DIM,
+                true,
+            )
+        })
+        .unwrap();
+
+        assert_eq!(read_back_u16(&rebuilt_k), k_f16);
+        assert_eq!(read_back_u16(&rebuilt_v), v_f16);
+        assert_eq!(read_back_u16(&rebuilt_vt), read_back_u16(&full_vt));
+        assert_eq!(
+            read_back_f32(&rebuilt_out.buffer, CHUNK * N_Q * HEAD_DIM),
+            read_back_f32(&full_out.buffer, CHUNK * N_Q * HEAD_DIM)
+        );
     }
 
     /// Model-free screen preregistered in

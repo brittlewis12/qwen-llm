@@ -2,9 +2,62 @@
 
 Date: 2026-08-17
 
-Status: **PREREGISTERED, AMENDED BEFORE TIMING**. No candidate timing has run.
+Status: **MODEL-FREE PASS**. D1 is `ADVANCE_PRODUCT_AB`; D2 is
+`RETAIN_PREFIX_ONLY`.
 
 Baseline commit: `dda7a5e7e8f0cb63c4b8e29981d991ecf65dd9fe`.
+
+Measured implementation commit: `f4d2c73479a59f7b7e4e427a9d2411102d83601c`.
+Measured implementation tree: `4c82f5eb66c6bd57777aa63c6d1ef1188f81db8c`.
+Release test binary SHA-256:
+`0b8a34d519aa613a0c0828dfa02f580d0cc0dd5696f7e01d431d6213e7a81d06`.
+
+## Result
+
+The frozen model-free campaign completed without a retry or safety skip on an
+Apple M4 Max (registry ID `4294968442`). All three exact correctness fixtures
+and both environment probes passed. `results.json` is the strict analyzer output
+for the immutable `raw/chronology.json` packet.
+
+Compact dispatch D1 removed the erroneous 256x threadgroup multiplication and
+won every pair:
+
+| Prefix / chunk | D0 GPU median | D1 GPU median | Speedup | Paired GPU saving | Wins |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 512 / 128 | 123.5925 ms | 0.6272 ms | 197.05x | 122.9636 ms | 6/6 |
+| 2,048 / 128 | 420.1235 ms | 2.1015 ms | 199.92x | 418.0282 ms | 6/6 |
+| 8,192 / 128 | 1,605.8949 ms | 7.4023 ms | 216.95x | 1,598.4991 ms | 6/6 |
+
+At the largest paired cell, the independently frozen order strata remained
+positive: AB was 217.42x and BA was 216.61x. The P2,048 D0 safety predicate
+allowed the P8,192 comparison: maximum wall time was 420.3389 ms and median was
+420.3151 ms.
+
+D1 then scaled monotonically with credible exact-byte rates:
+
+| Prefix / chunk | D1 GPU median | Exact-byte rate |
+| --- | ---: | ---: |
+| 8,192 / 128 | 7.4023 ms | not gated |
+| 16,384 / 128 | 14.1163 ms | 76.66 GB/s |
+| 32,768 / 128 | 27.6092 ms | 78.09 GB/s |
+
+The independent overlap arm also passed. At P32,768/C1,024, compact full-span
+D1 took 28.4150 ms and compact prefix-only D2 took 27.5594 ms. D2 won 6/6,
+saved 0.8535 ms at the paired median, and stayed positive in both order strata
+(0.8505 ms AB and 0.8689 ms BA). This authorizes the exact local source change
+that preserves the suffix already written by fused scatter.
+
+This campaign loaded no model or GGUF and executed no model forward pass. D1
+therefore remains default-off pending the separately preregistered
+restored-prefix product A/B; these results make no TTFT claim. D2 is an
+independent exact retention decision, not evidence for persistent V_T cache
+ownership.
+
+Authoritative evidence:
+
+- `raw/chronology.json`: immutable child chronology, exact output bytes, build
+  and runtime identity, environment probes, and protected-PID checks.
+- `results.json`: strict analyzer output and gate dispositions.
 
 ## Question
 
@@ -43,10 +96,11 @@ The redundant current-chunk overlap is therefore proportional to `C`, not
 `P+C`.
 
 The current implementation is at
-`crates/qwen-llm/src/metal_dflash.rs:7568`,
-`crates/qwen-llm/src/metal_dflash.rs:8732`, and
-`crates/qwen-llm/src/metal_dflash.rs:9225`. The fused current-chunk V_T scatter
-is at `crates/qwen-llm/src/metal_dflash.rs:8758`.
+`crates/qwen-llm/src/metal_dflash.rs:7576`,
+`crates/qwen-llm/src/metal_dflash.rs:8740`, and the rebuild call sites near
+`crates/qwen-llm/src/metal_dflash.rs:8966` and
+`crates/qwen-llm/src/metal_dflash.rs:9245`. The fused current-chunk V_T scatter
+is near `crates/qwen-llm/src/metal_dflash.rs:8777`.
 
 ## Amendment A1: Compact The 256x V_T Dispatch Grid
 

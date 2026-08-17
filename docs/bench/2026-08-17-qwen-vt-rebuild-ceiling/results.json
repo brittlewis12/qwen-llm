@@ -1,0 +1,626 @@
+{
+  "binary_sha256": "0b8a34d519aa613a0c0828dfa02f580d0cc0dd5696f7e01d431d6213e7a81d06",
+  "cells": [
+    {
+      "a_gpu_median_ms": 123.59249999281019,
+      "a_wall_median_ms": 123.7772295,
+      "arm_a": "D0",
+      "arm_b": "D1",
+      "b_gpu_median_ms": 0.6272082682698965,
+      "b_wall_median_ms": 0.827083,
+      "chunk": 128,
+      "gpu_saving_median_ms": 122.96358332969248,
+      "gpu_speedup": 197.05177091132765,
+      "gpu_wins": 6,
+      "mode": "dispatch",
+      "pairs": [
+        {
+          "gpu_saving_ms": 122.95220838859677,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 1,
+          "wall_saving_ms": 122.942583,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 122.95762496069074,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 2,
+          "wall_saving_ms": 122.93504300000001,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 122.96870828140527,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 3,
+          "wall_saving_ms": 122.93558300000001,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 122.96416657045484,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 4,
+          "wall_saving_ms": 123.003125,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 122.96300008893013,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 5,
+          "wall_saving_ms": 122.99366699999999,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 122.97345837578177,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 6,
+          "wall_saving_ms": 122.943541,
+          "wall_win": true
+        }
+      ],
+      "prefix": 512,
+      "strata": {
+        "AB": {
+          "gpu_saving_median_ms": 122.96300008893013,
+          "gpu_speedup": 196.6063066231321,
+          "wall_saving_median_ms": 122.99366699999999
+        },
+        "BA": {
+          "gpu_saving_median_ms": 122.96870828140527,
+          "gpu_speedup": 197.63196672331918,
+          "wall_saving_median_ms": 122.93558300000001
+        }
+      },
+      "wall_saving_median_ms": 122.943062,
+      "wall_speedup": 149.6551488786494,
+      "wall_wins": 6
+    },
+    {
+      "a_gpu_median_ms": 420.12345837429166,
+      "a_wall_median_ms": 420.315104,
+      "arm_a": "D0",
+      "arm_b": "D1",
+      "b_gpu_median_ms": 2.101479156408459,
+      "b_wall_median_ms": 2.29275,
+      "chunk": 128,
+      "gpu_saving_median_ms": 418.02818747237325,
+      "gpu_speedup": 199.91797543797927,
+      "gpu_wins": 6,
+      "mode": "dispatch",
+      "pairs": [
+        {
+          "gpu_saving_ms": 418.002666789107,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 1,
+          "wall_saving_ms": 418.016167,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 418.03512489423156,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 2,
+          "wall_saving_ms": 418.06704199999996,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 418.0414582369849,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 3,
+          "wall_saving_ms": 418.02854099999996,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 418.02125005051494,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 4,
+          "wall_saving_ms": 417.91137499999996,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 418.0607501184568,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 5,
+          "wall_saving_ms": 418.076499,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 417.99674998037517,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 6,
+          "wall_saving_ms": 417.940292,
+          "wall_win": true
+        }
+      ],
+      "prefix": 2048,
+      "strata": {
+        "AB": {
+          "gpu_saving_median_ms": 418.02125005051494,
+          "gpu_speedup": 201.6834779042536,
+          "wall_saving_median_ms": 418.016167
+        },
+        "BA": {
+          "gpu_saving_median_ms": 418.03512489423156,
+          "gpu_speedup": 199.57970577375173,
+          "wall_saving_median_ms": 418.02854099999996
+        }
+      },
+      "wall_saving_median_ms": 418.02235399999995,
+      "wall_speedup": 183.32356515101955,
+      "wall_wins": 6
+    },
+    {
+      "a_gpu_median_ms": 1605.8948750142008,
+      "a_wall_median_ms": 1606.154458,
+      "arm_a": "D0",
+      "arm_b": "D1",
+      "b_gpu_median_ms": 7.402291637845337,
+      "b_wall_median_ms": 9.1991665,
+      "chunk": 128,
+      "gpu_saving_median_ms": 1598.4991458244622,
+      "gpu_speedup": 216.9456370516152,
+      "gpu_wins": 6,
+      "mode": "dispatch",
+      "pairs": [
+        {
+          "gpu_saving_ms": 1598.5002083471045,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 1,
+          "wall_saving_ms": 1594.7402070000003,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 1598.5363749787211,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 2,
+          "wall_saving_ms": 1598.50275,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 1598.4836667776108,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 3,
+          "wall_saving_ms": 1600.141375,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 1598.4980833018199,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 4,
+          "wall_saving_ms": 1597.261749,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 1598.6003750003874,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 5,
+          "wall_saving_ms": 1596.1870829999998,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 1598.473958321847,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 6,
+          "wall_saving_ms": 1598.4758339999998,
+          "wall_win": true
+        }
+      ],
+      "prefix": 8192,
+      "strata": {
+        "AB": {
+          "gpu_saving_median_ms": 1598.5002083471045,
+          "gpu_speedup": 217.4164000153576,
+          "wall_saving_median_ms": 1596.1870829999998
+        },
+        "BA": {
+          "gpu_saving_median_ms": 1598.4836667776108,
+          "gpu_speedup": 216.61439187881817,
+          "wall_saving_median_ms": 1598.50275
+        }
+      },
+      "wall_saving_median_ms": 1597.8687915,
+      "wall_speedup": 174.5978244876859,
+      "wall_wins": 6
+    },
+    {
+      "chunk": 128,
+      "gb_s_median": 76.65826559544931,
+      "gpu_median_ms": 14.116291713435203,
+      "mode": "compact",
+      "prefix": 16384,
+      "samples": [
+        {
+          "arm": "D1",
+          "bank": "X",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 76.62999158166492,
+          "gpu_ms": 14.121500076726079,
+          "kind": "arm",
+          "logical_bytes": 1082130432,
+          "mode": "compact",
+          "prefix": 16384,
+          "role": "S",
+          "rows": 16512,
+          "sample": 1,
+          "schema_version": 2,
+          "thread_slots_per_layer": 16908288,
+          "threadgroups_per_layer": 66048,
+          "wall_ms": 14.307875
+        },
+        {
+          "arm": "D1",
+          "bank": "Y",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 76.67274909765173,
+          "gpu_ms": 14.113625045865774,
+          "kind": "arm",
+          "logical_bytes": 1082130432,
+          "mode": "compact",
+          "prefix": 16384,
+          "role": "S",
+          "rows": 16512,
+          "sample": 2,
+          "schema_version": 2,
+          "thread_slots_per_layer": 16908288,
+          "threadgroups_per_layer": 66048,
+          "wall_ms": 14.298
+        },
+        {
+          "arm": "D1",
+          "bank": "Y",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 76.66460110045611,
+          "gpu_ms": 14.115125057287514,
+          "kind": "arm",
+          "logical_bytes": 1082130432,
+          "mode": "compact",
+          "prefix": 16384,
+          "role": "S",
+          "rows": 16512,
+          "sample": 3,
+          "schema_version": 2,
+          "thread_slots_per_layer": 16908288,
+          "threadgroups_per_layer": 66048,
+          "wall_ms": 14.283833
+        },
+        {
+          "arm": "D1",
+          "bank": "X",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 76.65193009044249,
+          "gpu_ms": 14.117458369582891,
+          "kind": "arm",
+          "logical_bytes": 1082130432,
+          "mode": "compact",
+          "prefix": 16384,
+          "role": "S",
+          "rows": 16512,
+          "sample": 4,
+          "schema_version": 2,
+          "thread_slots_per_layer": 16908288,
+          "threadgroups_per_layer": 66048,
+          "wall_ms": 14.283292
+        },
+        {
+          "arm": "D1",
+          "bank": "X",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 76.61575009281002,
+          "gpu_ms": 14.124125009402633,
+          "kind": "arm",
+          "logical_bytes": 1082130432,
+          "mode": "compact",
+          "prefix": 16384,
+          "role": "S",
+          "rows": 16512,
+          "sample": 5,
+          "schema_version": 2,
+          "thread_slots_per_layer": 16908288,
+          "threadgroups_per_layer": 66048,
+          "wall_ms": 14.310666999999999
+        },
+        {
+          "arm": "D1",
+          "bank": "Y",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 76.68520114058667,
+          "gpu_ms": 14.11133329384029,
+          "kind": "arm",
+          "logical_bytes": 1082130432,
+          "mode": "compact",
+          "prefix": 16384,
+          "role": "S",
+          "rows": 16512,
+          "sample": 6,
+          "schema_version": 2,
+          "thread_slots_per_layer": 16908288,
+          "threadgroups_per_layer": 66048,
+          "wall_ms": 14.2845
+        }
+      ],
+      "wall_median_ms": 14.29125
+    },
+    {
+      "chunk": 128,
+      "gb_s_median": 78.0852600388601,
+      "gpu_median_ms": 27.60922914603725,
+      "mode": "compact",
+      "prefix": 32768,
+      "samples": [
+        {
+          "arm": "D1",
+          "bank": "X",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 78.01556075443334,
+          "gpu_ms": 27.633875026367605,
+          "kind": "arm",
+          "logical_bytes": 2155872256,
+          "mode": "compact",
+          "prefix": 32768,
+          "role": "S",
+          "rows": 32896,
+          "sample": 1,
+          "schema_version": 2,
+          "thread_slots_per_layer": 33685504,
+          "threadgroups_per_layer": 131584,
+          "wall_ms": 27.855999999999998
+        },
+        {
+          "arm": "D1",
+          "bank": "Y",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 78.15213601392254,
+          "gpu_ms": 27.58558327332139,
+          "kind": "arm",
+          "logical_bytes": 2155872256,
+          "mode": "compact",
+          "prefix": 32768,
+          "role": "S",
+          "rows": 32896,
+          "sample": 2,
+          "schema_version": 2,
+          "thread_slots_per_layer": 33685504,
+          "threadgroups_per_layer": 131584,
+          "wall_ms": 27.778458
+        },
+        {
+          "arm": "D1",
+          "bank": "Y",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 78.19749126953168,
+          "gpu_ms": 27.56958338432014,
+          "kind": "arm",
+          "logical_bytes": 2155872256,
+          "mode": "compact",
+          "prefix": 32768,
+          "role": "S",
+          "rows": 32896,
+          "sample": 3,
+          "schema_version": 2,
+          "thread_slots_per_layer": 33685504,
+          "threadgroups_per_layer": 131584,
+          "wall_ms": 27.748790999999997
+        },
+        {
+          "arm": "D1",
+          "bank": "X",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 77.996626527635,
+          "gpu_ms": 27.64058334287256,
+          "kind": "arm",
+          "logical_bytes": 2155872256,
+          "mode": "compact",
+          "prefix": 32768,
+          "role": "S",
+          "rows": 32896,
+          "sample": 4,
+          "schema_version": 2,
+          "thread_slots_per_layer": 33685504,
+          "threadgroups_per_layer": 131584,
+          "wall_ms": 27.815375
+        },
+        {
+          "arm": "D1",
+          "bank": "X",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 78.01838406379765,
+          "gpu_ms": 27.63287501875311,
+          "kind": "arm",
+          "logical_bytes": 2155872256,
+          "mode": "compact",
+          "prefix": 32768,
+          "role": "S",
+          "rows": 32896,
+          "sample": 5,
+          "schema_version": 2,
+          "thread_slots_per_layer": 33685504,
+          "threadgroups_per_layer": 131584,
+          "wall_ms": 27.814917
+        },
+        {
+          "arm": "D1",
+          "bank": "Y",
+          "base_pos": 0,
+          "chunk": 128,
+          "gb_s": 78.19489138697072,
+          "gpu_ms": 27.570500038564205,
+          "kind": "arm",
+          "logical_bytes": 2155872256,
+          "mode": "compact",
+          "prefix": 32768,
+          "role": "S",
+          "rows": 32896,
+          "sample": 6,
+          "schema_version": 2,
+          "thread_slots_per_layer": 33685504,
+          "threadgroups_per_layer": 131584,
+          "wall_ms": 27.745459
+        }
+      ],
+      "wall_median_ms": 27.7966875
+    },
+    {
+      "a_gpu_median_ms": 28.41502078808844,
+      "a_wall_median_ms": 28.599125,
+      "arm_a": "D1",
+      "arm_b": "D2",
+      "b_gpu_median_ms": 27.559437497984618,
+      "b_wall_median_ms": 27.733916999999998,
+      "chunk": 1024,
+      "gpu_saving_median_ms": 0.853499979712069,
+      "gpu_speedup": 1.0310450200649557,
+      "gpu_wins": 6,
+      "mode": "overlap",
+      "pairs": [
+        {
+          "gpu_saving_ms": 0.8565416792407632,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 1,
+          "wall_saving_ms": 0.834417000000002,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 0.8688749512657523,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 2,
+          "wall_saving_ms": 0.8774580000000007,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 0.8427082793787122,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 3,
+          "wall_saving_ms": 0.8634579999999978,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 0.8371251169592142,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 4,
+          "wall_saving_ms": 0.8283330000000007,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 0.8504582801833749,
+          "gpu_win": true,
+          "order": "AB",
+          "pair": 5,
+          "wall_saving_ms": 0.8421249999999993,
+          "wall_win": true
+        },
+        {
+          "gpu_saving_ms": 0.8791249711066484,
+          "gpu_win": true,
+          "order": "BA",
+          "pair": 6,
+          "wall_saving_ms": 0.8926249999999989,
+          "wall_win": true
+        }
+      ],
+      "prefix": 32768,
+      "strata": {
+        "AB": {
+          "gpu_saving_median_ms": 0.8504582801833749,
+          "gpu_speedup": 1.0303661023548012,
+          "wall_saving_median_ms": 0.834417000000002
+        },
+        "BA": {
+          "gpu_saving_median_ms": 0.8688749512657523,
+          "gpu_speedup": 1.031461204633798,
+          "wall_saving_median_ms": 0.8774580000000007
+        }
+      },
+      "wall_saving_median_ms": 0.8527914999999986,
+      "wall_speedup": 1.0311967472896095,
+      "wall_wins": 6
+    }
+  ],
+  "d1_scaling": {
+    "gb_s_medians_16k_32k": [
+      76.65826559544931,
+      78.0852600388601
+    ],
+    "gpu_medians_ms": [
+      7.402291637845337,
+      14.116291713435203,
+      27.60922914603725
+    ],
+    "prefixes": [
+      8192,
+      16384,
+      32768
+    ]
+  },
+  "device": "Apple M4 Max",
+  "device_registry_id": 4294968442,
+  "disposition": {
+    "D1": "ADVANCE_PRODUCT_AB",
+    "D2": "RETAIN_PREFIX_ONLY"
+  },
+  "gates": {
+    "D1": {
+      "ab_gpu_saving_positive": true,
+      "ab_gpu_speedup_at_least_8x": true,
+      "all_six_gpu_wins": true,
+      "ba_gpu_saving_positive": true,
+      "ba_gpu_speedup_at_least_8x": true,
+      "d1_16k_rate_credible": true,
+      "d1_32k_rate_credible": true,
+      "d1_gpu_time_nondecreasing_8k_32k": true,
+      "overall_gpu_speedup_at_least_8x": true
+    },
+    "D2": {
+      "ab_gpu_saving_positive": true,
+      "at_least_five_gpu_wins": true,
+      "ba_gpu_saving_positive": true,
+      "median_gpu_saving_at_least_0_25_ms": true
+    }
+  },
+  "implementation_commit": "f4d2c73479a59f7b7e4e427a9d2411102d83601c",
+  "implementation_tree": "4c82f5eb66c6bd57777aa63c6d1ef1188f81db8c",
+  "safety": {
+    "p2048_d0_wall_max_ms": 420.338875,
+    "p2048_d0_wall_median_ms": 420.315104,
+    "p2048_d0_wall_ms": [
+      420.311667,
+      420.338875,
+      420.318541,
+      420.294875,
+      420.338166,
+      420.2555
+    ],
+    "run_dispatch_p8192": true
+  },
+  "schema_version": 2
+}

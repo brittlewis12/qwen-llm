@@ -112,6 +112,37 @@ Decision: keep native N32 IQ2_S prefill and native singleton IQ2_S decode. The
 next Ridge branch must delete model work rather than reshuffle the same MMAs or
 buy instruction relief with enough extra bytes to erase the gain.
 
+## 2026-08-16 — Cinder Audit: NO-GO For Changed Rust Iteration
+
+Status: audited `CapSoftware/cinder` at `b5e72a4b8858`; did not install or run it.
+The screenshot speedups are real only for an exact no-change cache hit and do
+not address this repository's changed release-test compile.
+
+- The repository was created 2026-08-14 and currently has one contributor, 22
+  commits, 31 stars, no release assets, no checked-in CI workflows, and no issue
+  history. It labels itself experimental and not production-ready.
+- `cinder check` records one Cargo-built unit, then returns success without
+  invoking Cargo only while its selected source/input/output state appears
+  unchanged. Any changed Rust source delegates to ordinary Cargo. Published
+  10.7x-34.8x rows compare Cargo's 0.25-0.64 s no-change graph walk with Cinder's
+  0.009-0.040 s validation; they are not edit/check measurements.
+- Local Cargo evidence is already below that problem size: the first check after
+  kernel/prototype cleanup took 5.62 s, while the immediate exact no-change check
+  took 0.09 s. Cinder could only shave the latter; it cannot remove the roughly
+  80-second optimized `qwen-llm` recompilation after a real source edit.
+- Source review found correctness blockers before authoritative use: Cargo
+  fingerprint directories are checked for existence rather than bound contents,
+  and external path dependencies, transitive build-script inputs, wrapper
+  binaries, and recursively referenced Cargo configuration are not completely
+  invalidated. The internal recorder surface also accepts caller-selected paths.
+- The source is MIT licensed, has a small locked dependency set, and contains no
+  runtime telemetry/HTTP client. Those positives do not compensate for stale
+  success risk in a tool intended to stand in for Cargo.
+
+Decision: do not install, alias, or use Cinder as a correctness authority. Revisit
+only after its invalidation gaps, CI/release provenance, and changed-code
+benchmarks exist; ordinary Cargo remains the development contract.
+
 ## 2026-08-15 — Ridge Pareto Point, Q6 Embedding GO, Low-Bit N2 Repair
 
 Status: the 11.73 GiB Qwen3.8 Ridge mix is a credible interactive Pareto point.

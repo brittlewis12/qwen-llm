@@ -1209,7 +1209,7 @@ fn flush_prefill_phase(
     chunk_start: u32,
     layer_idx: usize,
     phase: &str,
-) {
+) -> Result<(), DFlashError> {
     emit_prefill_count_phase(
         prefill_trace_counts_enabled(),
         chunk_idx,
@@ -1219,10 +1219,11 @@ fn flush_prefill_phase(
         phase,
     );
     if !enabled {
-        return;
+        return Ok(());
     }
     cmd_buf.commit();
     cmd_buf.waitUntilCompleted();
+    require_prefill_command_completed(cmd_buf)?;
     let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
     *prefill_gpu_total_ms += gpu_ms;
     eprintln!(
@@ -1230,6 +1231,21 @@ fn flush_prefill_phase(
         chunk_idx, chunk_start, layer_idx, phase, gpu_ms
     );
     *cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    Ok(())
+}
+
+fn require_prefill_command_completed(
+    cmd_buf: &ProtocolObject<dyn MTLCommandBuffer>,
+) -> Result<(), DFlashError> {
+    let status = cmd_buf.status();
+    let error = cmd_buf.error();
+    if status != MTLCommandBufferStatus::Completed || error.is_some() {
+        return Err(DFlashError::MetalForward(MfError::CommandBuffer {
+            status: format!("{status:?}"),
+            error: format!("{error:?}"),
+        }));
+    }
+    Ok(())
 }
 
 fn emit_prefill_count_phase(
@@ -1284,7 +1300,7 @@ fn flush_prefill_layer_phase(
     layer_idx: usize,
     kind: &str,
     phase: &str,
-) {
+) -> Result<(), DFlashError> {
     emit_prefill_count_phase(
         prefill_trace_counts_enabled(),
         chunk_idx,
@@ -1294,10 +1310,11 @@ fn flush_prefill_layer_phase(
         phase,
     );
     if !enabled {
-        return;
+        return Ok(());
     }
     cmd_buf.commit();
     cmd_buf.waitUntilCompleted();
+    require_prefill_command_completed(cmd_buf)?;
     let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
     *prefill_gpu_total_ms += gpu_ms;
     eprintln!(
@@ -1305,19 +1322,21 @@ fn flush_prefill_layer_phase(
         chunk_idx, chunk_start, layer_idx, kind, phase, gpu_ms
     );
     *cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
+    Ok(())
 }
 
 fn flush_prefill_layer_phase_accum(
     ctx: &MetalContext,
     cmd_buf: &mut Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     prefill_gpu_total_ms: &mut f64,
-) -> f64 {
+) -> Result<f64, DFlashError> {
     cmd_buf.commit();
     cmd_buf.waitUntilCompleted();
+    require_prefill_command_completed(cmd_buf)?;
     let gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
     *prefill_gpu_total_ms += gpu_ms;
     *cmd_buf = ctx.queue.commandBuffer().expect("command buffer");
-    gpu_ms
+    Ok(gpu_ms)
 }
 
 fn diagnose_gdn_projection_matmat_vs_matvec(
@@ -1346,7 +1365,7 @@ fn diagnose_gdn_projection_matmat_vs_matvec(
         }
         enc.end();
     }
-    let gpu_ms = flush_prefill_layer_phase_accum(ctx, cmd_buf, prefill_gpu_total_ms);
+    let gpu_ms = flush_prefill_layer_phase_accum(ctx, cmd_buf, prefill_gpu_total_ms)?;
 
     let mm = read_f32_tensor(matmat_out);
     let mv = read_f32_tensor(&matvec_out);
@@ -4033,10 +4052,7 @@ pub struct MetalDFlashLayerMajorScratch {
 }
 
 impl MetalDFlashLayerMajorScratch {
-    fn aliases_mutable_buffer(&self, candidate: &MetalTensor) -> bool {
-        let same = |tensor: &MetalTensor| {
-            Retained::as_ptr(&candidate.buffer) == Retained::as_ptr(&tensor.buffer)
-        };
+    fn mutable_tensors(&self) -> impl Iterator<Item = &MetalTensor> {
         [
             &self.x_pack,
             &self.h_pack,
@@ -4089,7 +4105,28 @@ impl MetalDFlashLayerMajorScratch {
             &self.gdn_normed_pack,
         ]
         .into_iter()
-        .any(same)
+    }
+
+    fn aliases_mutable_buffer(&self, candidate: &MetalTensor) -> bool {
+        let candidate_id = Retained::as_ptr(&candidate.buffer) as *const () as usize;
+        self.mutable_tensors()
+            .any(|tensor| Retained::as_ptr(&tensor.buffer) as *const () as usize == candidate_id)
+    }
+
+    pub fn mutable_buffer_ids(&self) -> Vec<usize> {
+        let mut ids = self
+            .mutable_tensors()
+            .map(|tensor| Retained::as_ptr(&tensor.buffer) as *const () as usize)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    pub fn aliases_scratch(&self, other: &Self) -> bool {
+        let own = self.mutable_buffer_ids();
+        let other = other.mutable_buffer_ids();
+        own.iter().any(|id| other.binary_search(id).is_ok())
     }
 
     fn fresh_inner(
@@ -7718,7 +7755,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                 il,
                 block_kind,
                 "pre_norm",
-            );
+            )?;
 
             // 2b: mixer (GDN or Attn). NO ckpt blits (prefill is
             // final-commit; no rollback machinery).
@@ -7807,7 +7844,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 il,
                                 "gdn",
                                 "gdn_qkv",
-                            );
+                            )?;
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 if prefill_gdn_matvec_projection_enabled("z", il) {
@@ -7845,7 +7882,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 il,
                                 "gdn",
                                 "gdn_z",
-                            );
+                            )?;
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 if prefill_gdn_matvec_projection_enabled("beta", il) {
@@ -7904,7 +7941,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 il,
                                 "gdn",
                                 "gdn_beta_alpha",
-                            );
+                            )?;
                         } else {
                             let enc = KernelEncoder::begin(&cmd_buf);
                             if prefill_gdn_matvec_projection_enabled("qkv", il) {
@@ -8088,7 +8125,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             "gdn",
                             "gdn_alpha_beta",
-                        );
+                        )?;
 
                         if matches!(gdn_split, PrefillGdnSplitMode::SkipAll) {
                             apply_mixer_residual = false;
@@ -8123,7 +8160,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         il,
                                         "gdn",
                                         "gdn_prep_conv",
-                                    );
+                                    )?;
 
                                     let enc = KernelEncoder::begin(&cmd_buf);
                                     if prefill_gdn_pair_l2_enabled() {
@@ -8169,7 +8206,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         il,
                                         "gdn",
                                         "gdn_prep_l2",
-                                    );
+                                    )?;
                                 } else {
                                     let enc = KernelEncoder::begin(&cmd_buf);
                                     encode_gdn_prep_packed_f32(
@@ -8229,7 +8266,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         il,
                                         "gdn",
                                         "gdn_prep",
-                                    );
+                                    )?;
                                 }
                             }
 
@@ -8261,7 +8298,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     il,
                                     "gdn",
                                     "gdn_step",
-                                );
+                                )?;
                             }
 
                             if gdn_split.run_gated() {
@@ -8288,7 +8325,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     il,
                                     "gdn",
                                     "gdn_gated",
-                                );
+                                )?;
                             } else if gdn_split.needs_zero_normed() {
                                 zero_f32_tensor(&gdn_normed_pack_p);
                             }
@@ -8332,7 +8369,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 il,
                                 "gdn",
                                 "gdn_tail",
-                            );
+                            )?;
                         }
 
                         if apply_mixer_residual {
@@ -8390,7 +8427,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     il,
                                     "gdn",
                                     "gdn_back",
-                                );
+                                )?;
                             }
                         }
                     } else {
@@ -8430,7 +8467,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 il,
                                 "gdn",
                                 "gdn_fallback",
-                            );
+                            )?;
                         }
                     }
                 }
@@ -8558,7 +8595,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 chunk_start,
                                 il,
                                 if use_fused_qkv { "qkv_matmul" } else { "proj" },
-                            );
+                            )?;
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
                                 encode_rms_norm_batched_src_strided_f32(
@@ -8594,7 +8631,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 chunk_start,
                                 il,
                                 "norm",
-                            );
+                            )?;
                         } else {
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
@@ -8812,7 +8849,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 chunk_start,
                                 il,
                                 "rope_scatter",
-                            );
+                            )?;
 
                             let mut traced_matrix_subphases = false;
                             if use_packed_g8 || use_packed_g16 || use_matrix {
@@ -8988,7 +9025,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             chunk_start,
                                             il,
                                             "body_matrix_vt_rebuild",
-                                        );
+                                        )?;
                                     }
 
                                     {
@@ -9077,7 +9114,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         chunk_start,
                                         il,
                                         "body_matrix_kq",
-                                    );
+                                    )?;
 
                                     if !matrix_online {
                                         {
@@ -9124,7 +9161,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             chunk_start,
                                             il,
                                             "body_matrix_softmax",
-                                        );
+                                        )?;
                                     }
 
                                     {
@@ -9213,7 +9250,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         chunk_start,
                                         il,
                                         "body_matrix_kqv",
-                                    );
+                                    )?;
 
                                     target_session.kv_n_pos[ai] = chunk_start as usize + chunk_p;
                                     attn_matrix_vt_valid_until[ai] = n_pos;
@@ -9495,6 +9532,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     if attn_packed_oracle {
                                         cmd_buf.commit();
                                         cmd_buf.waitUntilCompleted();
+                                        require_prefill_command_completed(&cmd_buf)?;
                                         prefill_gpu_total_ms +=
                                             (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
@@ -9556,6 +9594,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         }
                                         oracle_cmd.commit();
                                         oracle_cmd.waitUntilCompleted();
+                                        require_prefill_command_completed(&oracle_cmd)?;
 
                                         let packed = cpu_read_f32buf(&attn_o_pack_p);
                                         let oracle = cpu_read_f32buf(&attn_oracle_pack);
@@ -9688,7 +9727,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     chunk_start,
                                     il,
                                     "body",
-                                );
+                                )?;
                             }
 
                             if let Some(capture) = attention_capture.as_deref_mut()
@@ -9870,7 +9909,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 } else {
                                     "attn"
                                 },
-                            );
+                            )?;
                         }
                     } else {
                         // F32 oracle / fallback: per-token encode_attn.
@@ -9910,7 +9949,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 il,
                                 "attn",
                                 "attn_fallback",
-                            );
+                            )?;
                         }
                     }
                 }
@@ -9931,7 +9970,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                     il,
                     block_kind,
                     "mixer_resid",
-                );
+                )?;
             }
 
             // 2e/f/g: post-norm + FFN/MoE tail + residual #2 + hidden_capture.
@@ -9977,7 +10016,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                     il,
                     "moe",
                     "post_norm",
-                );
+                )?;
 
                 let router_mat_mat_eligible = |dtype: GgmlType| {
                     matches!(
@@ -10228,7 +10267,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                         } else {
                             "route_token_loop"
                         },
-                    );
+                    )?;
                     if grouped_routed_path && fused_route_bucket {
                         trace_prefill_moe_bucket_stats(
                             trace_moe_buckets,
@@ -10372,7 +10411,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             "moe",
                             "tail_concurrent",
-                        );
+                        )?;
 
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-tail-concurrent-final");
@@ -10397,7 +10436,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             "moe",
                             "tail_concurrent_final",
-                        );
+                        )?;
                     } else if skip_moe_routed {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-routed-skip");
@@ -10413,7 +10452,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             "moe",
                             "routed_skip",
-                        );
+                        )?;
                     } else if grouped_routed_path {
                         let zero_grouped_buffers = prefill_moe_grouped_zero_fill_enabled();
                         let grouped_q4_n32_all =
@@ -10442,7 +10481,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     il,
                                     "moe",
                                     "route_bucket",
-                                );
+                                )?;
                                 trace_prefill_moe_bucket_stats(
                                     trace_moe_buckets,
                                     chunk_idx,
@@ -10523,7 +10562,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             il,
                                             "moe",
                                             phase,
-                                        );
+                                        )?;
                                     }
                                 } else {
                                     let enc = KernelEncoder::begin(&cmd_buf);
@@ -10572,7 +10611,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         il,
                                         "moe",
                                         "routed_swiglu",
-                                    );
+                                    )?;
                                 }
                             }
                             {
@@ -10666,7 +10705,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                             il,
                                             "moe",
                                             phase,
-                                        );
+                                        )?;
                                     }
                                 } else {
                                     let enc = KernelEncoder::begin(&cmd_buf);
@@ -10712,7 +10751,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                         il,
                                         "moe",
                                         "routed_down",
-                                    );
+                                    )?;
                                 }
                             }
                             if !fused_grouped_finalizer {
@@ -10742,7 +10781,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     il,
                                     "moe",
                                     "routed_reduce",
-                                );
+                                )?;
                             }
                         } else {
                             let enc = KernelEncoder::begin(&cmd_buf);
@@ -10829,7 +10868,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 il,
                                 "moe",
                                 "routed_grouped",
-                            );
+                            )?;
                         }
                     } else if let Some(hot_threshold) = hot_expert_min_slots {
                         layer_scratch.ensure_moe_packed_fallback(base.ctx)?;
@@ -10856,6 +10895,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
 
                         cmd_buf.commit();
                         cmd_buf.waitUntilCompleted();
+                        require_prefill_command_completed(&cmd_buf)?;
                         prefill_gpu_total_ms +=
                             (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
 
@@ -10961,7 +11001,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             "moe",
                             "routed_cpu_hot_down",
-                        );
+                        )?;
                     } else if prefill_moe_packed_down_sum_enabled() {
                         layer_scratch.ensure_moe_packed_fallback(base.ctx)?;
                         let moe_inner_pack_p = layer_scratch
@@ -11008,7 +11048,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             "moe",
                             "routed_packed_down_sum",
-                        );
+                        )?;
                     } else {
                         layer_scratch.ensure_moe_packed_fallback(base.ctx)?;
                         let moe_inner_pack_p = layer_scratch
@@ -11079,7 +11119,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             "moe",
                             "routed_token_loop",
-                        );
+                        )?;
                     }
 
                     if concurrent_grouped_shared {
@@ -11119,7 +11159,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             "moe",
                             "shared_skip",
-                        );
+                        )?;
                     } else if packed_shared_path {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         label_prefill_encoder(&enc, il, "moe-shared-packed");
@@ -11201,7 +11241,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             "moe",
                             "shared_packed",
-                        );
+                        )?;
                     } else {
                         for n_idx in 0..chunk_p {
                             let enc = KernelEncoder::begin(&cmd_buf);
@@ -11269,7 +11309,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             "moe",
                             "shared_token_loop",
-                        );
+                        )?;
                     }
                 } else if !skip_ffn {
                     if trace_layer_phases {
@@ -11309,7 +11349,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 base.ctx,
                                 &mut cmd_buf,
                                 &mut prefill_gpu_total_ms,
-                            );
+                            )?;
 
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
@@ -11320,7 +11360,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 base.ctx,
                                 &mut cmd_buf,
                                 &mut prefill_gpu_total_ms,
-                            );
+                            )?;
 
                             if matches!(
                                 (moe.gate_exps.dtype, moe.up_exps.dtype, moe.down_exps.dtype),
@@ -11366,7 +11406,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     base.ctx,
                                     &mut cmd_buf,
                                     &mut prefill_gpu_total_ms,
-                                );
+                                )?;
 
                                 {
                                     let enc = KernelEncoder::begin(&cmd_buf);
@@ -11388,7 +11428,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     base.ctx,
                                     &mut cmd_buf,
                                     &mut prefill_gpu_total_ms,
-                                );
+                                )?;
 
                                 {
                                     let enc = KernelEncoder::begin(&cmd_buf);
@@ -11401,7 +11441,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     base.ctx,
                                     &mut cmd_buf,
                                     &mut prefill_gpu_total_ms,
-                                );
+                                )?;
 
                                 {
                                     let enc = KernelEncoder::begin(&cmd_buf);
@@ -11423,7 +11463,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     base.ctx,
                                     &mut cmd_buf,
                                     &mut prefill_gpu_total_ms,
-                                );
+                                )?;
 
                                 {
                                     let enc = KernelEncoder::begin(&cmd_buf);
@@ -11442,7 +11482,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     base.ctx,
                                     &mut cmd_buf,
                                     &mut prefill_gpu_total_ms,
-                                );
+                                )?;
                             } else {
                                 {
                                     let enc = KernelEncoder::begin(&cmd_buf);
@@ -11453,7 +11493,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                     base.ctx,
                                     &mut cmd_buf,
                                     &mut prefill_gpu_total_ms,
-                                );
+                                )?;
                             }
 
                             {
@@ -11471,7 +11511,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 base.ctx,
                                 &mut cmd_buf,
                                 &mut prefill_gpu_total_ms,
-                            );
+                            )?;
 
                             {
                                 let enc = KernelEncoder::begin(&cmd_buf);
@@ -11495,7 +11535,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                                 base.ctx,
                                 &mut cmd_buf,
                                 &mut prefill_gpu_total_ms,
-                            );
+                            )?;
                         }
 
                         emit_prefill_layer_phase(
@@ -11658,7 +11698,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                         il,
                         block_kind,
                         "ffn_norm",
-                    );
+                    )?;
 
                     let use_fused_swiglu = prefill_dense_ffn_fused_swiglu_q4_enabled(h)
                         && g_w.dtype == GgmlType::Q4_K
@@ -11692,7 +11732,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             block_kind,
                             "ffn_gate",
-                        );
+                        )?;
 
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);
@@ -11718,7 +11758,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             block_kind,
                             "ffn_up",
-                        );
+                        )?;
 
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);
@@ -11741,7 +11781,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             block_kind,
                             "ffn_swiglu",
-                        );
+                        )?;
                     } else {
                         let enc = KernelEncoder::begin(&cmd_buf);
                         if use_fused_swiglu {
@@ -11800,7 +11840,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             } else {
                                 "ffn_gate_up_swiglu"
                             },
-                        );
+                        )?;
                     }
 
                     if split_ffn_subphases {
@@ -11828,7 +11868,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             block_kind,
                             "ffn_down",
-                        );
+                        )?;
 
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);
@@ -11860,7 +11900,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             block_kind,
                             "ffn_resid",
-                        );
+                        )?;
                     } else {
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);
@@ -11902,7 +11942,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                             il,
                             block_kind,
                             "ffn_down_resid",
-                        );
+                        )?;
                     }
                 } else {
                     let enc = KernelEncoder::begin(&cmd_buf);
@@ -12028,7 +12068,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
                         il,
                         block_kind,
                         "ffn",
-                    );
+                    )?;
                 }
             }
         } // end per-layer loop
@@ -12067,20 +12107,15 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
             let after_commit = Instant::now();
             cmd_buf.waitUntilCompleted();
             let after_wait = Instant::now();
-            let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
-            prefill_gpu_total_ms += chunk_gpu_ms;
             if let Some(evidence) = tail_evidence.as_mut() {
                 let status = cmd_buf.status();
                 let error = cmd_buf.error();
                 evidence.command_completed = status == MTLCommandBufferStatus::Completed;
                 evidence.command_error_none = error.is_none();
-                if !evidence.command_completed || !evidence.command_error_none {
-                    return Err(DFlashError::MetalForward(MfError::CommandBuffer {
-                        status: format!("{status:?}"),
-                        error: format!("{error:?}"),
-                    }));
-                }
             }
+            require_prefill_command_completed(&cmd_buf)?;
+            let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
+            prefill_gpu_total_ms += chunk_gpu_ms;
             let mut tail_readback_ms = 0.0f64;
             let result_logits = if matches!(tail_mode, PrefillTailMode::ReadLogits) {
                 let readback_start = Instant::now();
@@ -12141,6 +12176,7 @@ fn prefill_tokens_with_multi_hidden_profiled_inner<'a>(
         let after_commit = Instant::now();
         cmd_buf.waitUntilCompleted();
         let after_wait = Instant::now();
+        require_prefill_command_completed(&cmd_buf)?;
         let chunk_gpu_ms = (cmd_buf.GPUEndTime() - cmd_buf.GPUStartTime()) * 1e3;
         let chunk_wall_ms = chunk_wall.elapsed().as_secs_f64() * 1e3;
         prefill_gpu_total_ms += chunk_gpu_ms;
@@ -13342,6 +13378,22 @@ mod tests {
         assert_eq!(attn_matrix_vt_prefix_rebuild_rows(true, 46, 47), Some(47));
         assert_eq!(attn_matrix_vt_prefix_rebuild_rows(true, 47, 47), None);
         assert_eq!(attn_matrix_vt_prefix_rebuild_rows(true, 64, 47), None);
+    }
+
+    #[test]
+    fn prefill_command_completion_check_fails_closed() {
+        let ctx = match MetalContext::new() {
+            Ok(ctx) => ctx,
+            Err(crate::metal::MetalError::EmptyLibrary | crate::metal::MetalError::NoDevice) => {
+                return;
+            }
+            Err(error) => panic!("Metal context: {error}"),
+        };
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        assert!(require_prefill_command_completed(&cmd).is_err());
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        require_prefill_command_completed(&cmd).unwrap();
     }
 
     #[test]

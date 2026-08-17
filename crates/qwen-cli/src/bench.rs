@@ -34,6 +34,7 @@ mod integrated_grammar_row;
 mod lm_head_screening_oracle;
 mod messages;
 mod moe_gdn_repair;
+mod prefix_cache_vt_ab;
 mod q4_mma_ceiling;
 mod response_shape_runtime;
 mod shutdown;
@@ -583,6 +584,8 @@ enum Cmd {
     /// **H2 falsification**: compare cold prefill TTFT vs snapshot-restore
     /// TTFT for two requests sharing a token prefix.
     PrefixCache(PrefixCacheArgs),
+    #[command(hide = true)]
+    PrefixCacheVtAb(prefix_cache_vt_ab::PrefixCacheVtAbArgs),
     /// **H3 falsification**: measure rank distribution of argmax tokens
     /// over a prompt corpus to determine whether vocab pruning at lm_head
     /// is viable. Reports miss rate at K ∈ {1K, 4K, 8K, 16K, 32K, 48K,
@@ -1936,6 +1939,10 @@ fn default_prefill_chunk(kind: qwen_llm::model::ArchKind, prompt_len: usize) -> 
     }
 }
 
+fn prefix_cache_scratch_args(kind: qwen_llm::model::ArchKind, total_len: usize) -> (usize, usize) {
+    (default_prefill_chunk(kind, total_len), total_len)
+}
+
 fn fresh_prefill_scratch_for_prompt(
     ctx: &MetalContext,
     model: &MetalModel,
@@ -1951,6 +1958,23 @@ fn fresh_prefill_scratch_for_prompt(
         matrix_max_pos,
     )
     .context("prefill scratch")
+}
+
+#[cfg(test)]
+mod prefix_cache_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn long_prefix_keeps_chunk_and_prompt_arguments_in_order() {
+        for kind in [
+            qwen_llm::model::ArchKind::Dense,
+            qwen_llm::model::ArchKind::Moe,
+        ] {
+            assert_eq!(prefix_cache_scratch_args(kind, 4096), (1024, 4096));
+            assert_eq!(prefix_cache_scratch_args(kind, 16_384), (1024, 16_384));
+            assert_eq!(prefix_cache_scratch_args(kind, 128), (128, 128));
+        }
+    }
 }
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -2790,6 +2814,9 @@ fn run() -> Result<()> {
             gguf_arena_floor::run(a, serde_json::to_value(qwen_build_identity_packet())?)
         }
         Cmd::PrefixCache(a) => run_prefix_cache(a),
+        Cmd::PrefixCacheVtAb(a) => {
+            prefix_cache_vt_ab::run(a, serde_json::to_value(qwen_build_identity_packet())?)
+        }
         Cmd::VocabAudit(a) => run_vocab_audit(a),
         Cmd::Decode(a) => run_decode(a),
         Cmd::Pp(a) => run_pp(a),
@@ -17152,13 +17179,13 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
     let mf = MetalForward::new(ctx, mm);
     let cap = total_len + tokens + 16;
 
-    let prefill_chunk = default_prefill_chunk(mm.arch.kind, total_len);
+    let (prefill_chunk, scratch_prompt_len) = prefix_cache_scratch_args(mm.arch.kind, total_len);
     let mut cold_scratch = if prefill_mode == PrefixCachePrefillMode::Packed {
         Some(fresh_prefill_scratch_for_prompt(
             ctx,
             mm,
-            total_len,
             prefill_chunk,
+            scratch_prompt_len,
         )?)
     } else {
         None
@@ -17167,8 +17194,8 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         Some(fresh_prefill_scratch_for_prompt(
             ctx,
             mm,
-            total_len,
             prefill_chunk,
+            scratch_prompt_len,
         )?)
     } else {
         None
@@ -17177,8 +17204,8 @@ fn run_prefix_cache(args: PrefixCacheArgs) -> Result<()> {
         Some(fresh_prefill_scratch_for_prompt(
             ctx,
             mm,
-            total_len,
             prefill_chunk,
+            scratch_prompt_len,
         )?)
     } else {
         None

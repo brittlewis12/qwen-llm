@@ -47,10 +47,12 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
+use std::rc::Rc;
 use std::sync::{
     Arc, OnceLock,
     atomic::{AtomicUsize, Ordering},
@@ -124,8 +126,40 @@ static KERNEL_TRACE_ACTIVE_THREADS: AtomicUsize = AtomicUsize::new(0);
 const ATTN_V4_SUBGROUP_MIN_POS_DEFAULT: usize = 256;
 const ATTN_V4_NWG_MAX: usize = 1024;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AttnMatrixVtDispatchStats {
+    pub calls: u64,
+    pub row_sum: u64,
+    pub element_sum: u64,
+    pub threadgroup_sum: u64,
+    pub compact_calls: u64,
+    pub legacy_calls: u64,
+    pub base_pos_sum: u64,
+    pub n_pos_sum: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttnMatrixVtDispatchCapture {
+    pub owner_thread: String,
+    pub stats: AttnMatrixVtDispatchStats,
+}
+
 thread_local! {
     static ATTN_V4_GROUP_TILE_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+    static ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+    static ATTN_MATRIX_VT_CAPTURE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static ATTN_MATRIX_VT_CAPTURE_STATS: Cell<AttnMatrixVtDispatchStats> = const {
+        Cell::new(AttnMatrixVtDispatchStats {
+            calls: 0,
+            row_sum: 0,
+            element_sum: 0,
+            threadgroup_sum: 0,
+            compact_calls: 0,
+            legacy_calls: 0,
+            base_pos_sum: 0,
+            n_pos_sum: 0,
+        })
+    };
     static MATMAT_F16_HALF_ACT_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static MATMAT_Q4_LEGACY_MM_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static KERNEL_TRACE_ACTIVE: Cell<bool> = const { Cell::new(false) };
@@ -165,6 +199,128 @@ pub fn with_matmat_q4_legacy_mm_override<R>(enabled: bool, f: impl FnOnce() -> R
     let out = f();
     MATMAT_Q4_LEGACY_MM_OVERRIDE.with(|slot| slot.set(previous));
     out
+}
+
+fn attn_matrix_vt_override_owner() -> &'static Mutex<Option<std::thread::ThreadId>> {
+    static OWNER: OnceLock<Mutex<Option<std::thread::ThreadId>>> = OnceLock::new();
+    OWNER.get_or_init(|| Mutex::new(None))
+}
+
+fn attn_matrix_vt_capture_owner() -> &'static Mutex<Option<std::thread::ThreadId>> {
+    static OWNER: OnceLock<Mutex<Option<std::thread::ThreadId>>> = OnceLock::new();
+    OWNER.get_or_init(|| Mutex::new(None))
+}
+
+fn claim_attn_matrix_vt_scope(
+    owner_slot: &Mutex<Option<std::thread::ThreadId>>,
+    kernel: &'static str,
+) -> Result<std::thread::ThreadId, MetalError> {
+    let owner = std::thread::current().id();
+    let mut active = owner_slot.lock();
+    if let Some(active_owner) = active.as_ref() {
+        return Err(MetalError::BadShape {
+            kernel,
+            detail: format!("scope already owned by {active_owner:?}"),
+        });
+    }
+    *active = Some(owner);
+    Ok(owner)
+}
+
+fn release_attn_matrix_vt_scope(
+    owner_slot: &Mutex<Option<std::thread::ThreadId>>,
+    owner: &std::thread::ThreadId,
+) {
+    let mut active = owner_slot.lock();
+    if active.as_ref() == Some(owner) {
+        *active = None;
+    }
+}
+
+struct AttnMatrixVtOverrideGuard {
+    previous: Option<bool>,
+    owner: std::thread::ThreadId,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl Drop for AttnMatrixVtOverrideGuard {
+    fn drop(&mut self) {
+        ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE.with(|slot| slot.set(self.previous));
+        release_attn_matrix_vt_scope(attn_matrix_vt_override_owner(), &self.owner);
+    }
+}
+
+pub fn with_attn_matrix_vt_compact_dispatch_override<R>(
+    enabled: bool,
+    f: impl FnOnce() -> R,
+) -> Result<R, MetalError> {
+    let owner =
+        claim_attn_matrix_vt_scope(attn_matrix_vt_override_owner(), "attn_matrix_vt_override")?;
+    let previous = ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE.with(|slot| {
+        let previous = slot.get();
+        slot.set(Some(enabled));
+        previous
+    });
+    if previous.is_some() {
+        ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE.with(|slot| slot.set(previous));
+        release_attn_matrix_vt_scope(attn_matrix_vt_override_owner(), &owner);
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_vt_override",
+            detail: "nested compact-dispatch override is forbidden".into(),
+        });
+    }
+    let guard = AttnMatrixVtOverrideGuard {
+        previous,
+        owner,
+        _not_send: PhantomData,
+    };
+    let out = f();
+    drop(guard);
+    Ok(out)
+}
+
+struct AttnMatrixVtCaptureGuard {
+    owner: std::thread::ThreadId,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl Drop for AttnMatrixVtCaptureGuard {
+    fn drop(&mut self) {
+        ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(|slot| slot.set(false));
+        release_attn_matrix_vt_scope(attn_matrix_vt_capture_owner(), &self.owner);
+    }
+}
+
+pub fn capture_attn_matrix_vt_dispatches<R>(
+    f: impl FnOnce() -> R,
+) -> Result<(R, AttnMatrixVtDispatchCapture), MetalError> {
+    let owner =
+        claim_attn_matrix_vt_scope(attn_matrix_vt_capture_owner(), "attn_matrix_vt_capture")?;
+    let already_active = ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(|slot| slot.replace(true));
+    if already_active {
+        ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(|slot| slot.set(true));
+        release_attn_matrix_vt_scope(attn_matrix_vt_capture_owner(), &owner);
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_vt_capture",
+            detail: "nested V_T dispatch capture is forbidden".into(),
+        });
+    }
+    ATTN_MATRIX_VT_CAPTURE_STATS.with(|slot| slot.set(AttnMatrixVtDispatchStats::default()));
+    let guard = AttnMatrixVtCaptureGuard {
+        owner,
+        _not_send: PhantomData,
+    };
+    let owner_thread = format!("{:?}", std::thread::current().id());
+    let out = f();
+    let stats = ATTN_MATRIX_VT_CAPTURE_STATS.with(Cell::get);
+    drop(guard);
+    Ok((
+        out,
+        AttnMatrixVtDispatchCapture {
+            owner_thread,
+            stats,
+        },
+    ))
 }
 
 use crate::tensor::{GgmlType, TensorDesc, checked_shape_elements, ggml_type_layout};
@@ -17160,11 +17316,101 @@ fn validate_attn_matrix_common(
 }
 
 crate::env_flag!(
-    default_off attn_matrix_vt_compact_dispatch_enabled,
+    default_off attn_matrix_vt_compact_dispatch_env_enabled,
     "QWEN_ATTN_MATRIX_VT_COMPACT_DISPATCH"
 );
 
+fn attn_matrix_vt_compact_dispatch_enabled() -> Result<bool, MetalError> {
+    let current = std::thread::current().id();
+    let active_owner = attn_matrix_vt_override_owner().lock().clone();
+    if let Some(owner) = active_owner.as_ref()
+        && owner != &current
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_vt_override",
+            detail: format!("dispatch on {current:?} while override is owned by {owner:?}"),
+        });
+    }
+    let scoped = ATTN_MATRIX_VT_COMPACT_DISPATCH_OVERRIDE.with(Cell::get);
+    if active_owner.is_some() && scoped.is_none() {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_vt_override",
+            detail: "active override owner has no thread-local treatment".into(),
+        });
+    }
+    Ok(scoped.unwrap_or_else(attn_matrix_vt_compact_dispatch_env_enabled))
+}
+
 const ATTN_MATRIX_VT_THREADS: usize = 256;
+
+fn record_attn_matrix_vt_dispatch(
+    base_pos: usize,
+    n_rows: usize,
+    n_pos: usize,
+    total: usize,
+    threadgroups: usize,
+    compact: bool,
+) -> Result<(), MetalError> {
+    let current = std::thread::current().id();
+    let active_owner = attn_matrix_vt_capture_owner().lock().clone();
+    match active_owner.as_ref() {
+        None => {
+            if ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(Cell::get) {
+                return Err(MetalError::BadShape {
+                    kernel: "attn_matrix_vt_capture",
+                    detail: "thread-local capture is active without a process owner".into(),
+                });
+            }
+            return Ok(());
+        }
+        Some(owner) if owner != &current => {
+            return Err(MetalError::BadShape {
+                kernel: "attn_matrix_vt_capture",
+                detail: format!("dispatch on {current:?} while capture is owned by {owner:?}"),
+            });
+        }
+        Some(_) => {}
+    }
+    if !ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(Cell::get) {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_vt_capture",
+            detail: "capture owner has no thread-local accumulator".into(),
+        });
+    }
+    let to_u64 = |name: &'static str, value: usize| {
+        u64::try_from(value).map_err(|_| MetalError::BadShape {
+            kernel: "attn_matrix_vt_capture",
+            detail: format!("{name}={value} does not fit u64"),
+        })
+    };
+    let row_sum = to_u64("n_rows", n_rows)?;
+    let element_sum = to_u64("total", total)?;
+    let threadgroup_sum = to_u64("threadgroups", threadgroups)?;
+    let base_pos_sum = to_u64("base_pos", base_pos)?;
+    let n_pos_sum = to_u64("n_pos", n_pos)?;
+    ATTN_MATRIX_VT_CAPTURE_STATS.with(|slot| {
+        let mut stats = slot.get();
+        let add = |name: &'static str, lhs: u64, rhs: u64| {
+            lhs.checked_add(rhs).ok_or_else(|| MetalError::BadShape {
+                kernel: "attn_matrix_vt_capture",
+                detail: format!("{name} counter overflow"),
+            })
+        };
+        stats.calls = add("calls", stats.calls, 1)?;
+        stats.row_sum = add("row_sum", stats.row_sum, row_sum)?;
+        stats.element_sum = add("element_sum", stats.element_sum, element_sum)?;
+        stats.threadgroup_sum = add("threadgroup_sum", stats.threadgroup_sum, threadgroup_sum)?;
+        stats.base_pos_sum = add("base_pos_sum", stats.base_pos_sum, base_pos_sum)?;
+        stats.n_pos_sum = add("n_pos_sum", stats.n_pos_sum, n_pos_sum)?;
+        if compact {
+            stats.compact_calls = add("compact_calls", stats.compact_calls, 1)?;
+        } else {
+            stats.legacy_calls = add("legacy_calls", stats.legacy_calls, 1)?;
+        }
+        slot.set(stats);
+        Ok(())
+    })
+}
 
 fn attn_matrix_vt_threadgroups(total: usize, compact: bool) -> Result<usize, MetalError> {
     if total == 0 || total > u32::MAX as usize {
@@ -17327,7 +17573,6 @@ fn encode_attn_matrix_transpose_v_f16_mode(
             ),
         })?;
     let threadgroups = attn_matrix_vt_threadgroups(total, compact_dispatch)?;
-
     let pso = ctx.pipeline("kernel_attn_matrix_transpose_v_f16")?;
     enc.set_pipeline(&pso);
     enc.set_bytes(
@@ -17348,6 +17593,14 @@ fn encode_attn_matrix_transpose_v_f16_mode(
     );
     enc.set_tensor(1, v_cache);
     enc.set_tensor(2, v_t);
+    record_attn_matrix_vt_dispatch(
+        base_pos,
+        n_rows,
+        n_pos,
+        total,
+        threadgroups,
+        compact_dispatch,
+    )?;
     enc.dispatch(
         MTLSize {
             width: threadgroups,
@@ -17388,7 +17641,7 @@ pub fn encode_attn_matrix_transpose_v_f16(
         vt_stride,
         n_kv_heads,
         head_dim,
-        attn_matrix_vt_compact_dispatch_enabled(),
+        attn_matrix_vt_compact_dispatch_enabled()?,
     )
 }
 
@@ -31734,6 +31987,8 @@ mod tests {
         out
     }
 
+    static ATTN_MATRIX_VT_SCOPE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn attn_matrix_vt_dispatch_groups_cover_exact_thread_range() {
         for total in [1usize, 255, 256, 257] {
@@ -31752,6 +32007,121 @@ mod tests {
         assert!(attn_matrix_vt_threadgroups(legacy_max + 1, false).is_err());
         assert!(attn_matrix_vt_threadgroups(u32::MAX as usize, true).is_ok());
         assert!(attn_matrix_vt_threadgroups(u32::MAX as usize + 1, true).is_err());
+    }
+
+    #[test]
+    fn attn_matrix_vt_scoped_override_restores_and_rejects_nesting() {
+        let _serial = ATTN_MATRIX_VT_SCOPE_TEST_LOCK.lock().unwrap();
+        let baseline = attn_matrix_vt_compact_dispatch_enabled().unwrap();
+        assert_eq!(
+            with_attn_matrix_vt_compact_dispatch_override(!baseline, || {
+                attn_matrix_vt_compact_dispatch_enabled()
+            })
+            .unwrap()
+            .unwrap(),
+            !baseline
+        );
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+
+        let nested = with_attn_matrix_vt_compact_dispatch_override(true, || {
+            with_attn_matrix_vt_compact_dispatch_override(false, || ())
+        })
+        .unwrap();
+        assert!(nested.is_err());
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+
+        let cross_thread = with_attn_matrix_vt_compact_dispatch_override(true, || {
+            std::thread::spawn(attn_matrix_vt_compact_dispatch_enabled)
+                .join()
+                .unwrap()
+        })
+        .unwrap();
+        assert!(cross_thread.is_err());
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+
+        let panicked = std::panic::catch_unwind(|| {
+            let _ = with_attn_matrix_vt_compact_dispatch_override(!baseline, || {
+                panic!("exercise override unwind restoration")
+            });
+        });
+        assert!(panicked.is_err());
+        assert_eq!(attn_matrix_vt_compact_dispatch_enabled().unwrap(), baseline);
+    }
+
+    #[test]
+    fn attn_matrix_vt_dispatch_capture_is_exact_and_scoped() {
+        let _serial = ATTN_MATRIX_VT_SCOPE_TEST_LOCK.lock().unwrap();
+        let Some(ctx) = metal_test_context() else {
+            return;
+        };
+        const ROWS: usize = 257;
+        let cache = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&vec![0x3555u16; ROWS]),
+            vec![ROWS as u64],
+            GgmlType::F16,
+        )
+        .unwrap();
+        let make_vt = || {
+            MetalTensor::from_bytes(
+                &ctx,
+                bytemuck::cast_slice(&vec![0x3aaau16; ROWS]),
+                vec![ROWS as u64],
+                GgmlType::F16,
+            )
+            .unwrap()
+        };
+
+        for (compact, expected_groups) in [(false, ROWS), (true, ROWS.div_ceil(256))] {
+            let vt = make_vt();
+            let (encoded, capture) = with_attn_matrix_vt_compact_dispatch_override(compact, || {
+                capture_attn_matrix_vt_dispatches(|| {
+                    one_shot(&ctx, |enc| {
+                        encode_attn_matrix_transpose_v_f16(
+                            &ctx, enc, &cache, &vt, 0, ROWS, ROWS, 1, ROWS, 1, 1,
+                        )
+                    })
+                })
+            })
+            .unwrap()
+            .unwrap();
+            encoded.unwrap();
+            assert!(capture.owner_thread.starts_with("ThreadId("));
+            assert_eq!(
+                capture.stats,
+                AttnMatrixVtDispatchStats {
+                    calls: 1,
+                    row_sum: ROWS as u64,
+                    element_sum: ROWS as u64,
+                    threadgroup_sum: expected_groups as u64,
+                    compact_calls: u64::from(compact),
+                    legacy_calls: u64::from(!compact),
+                    base_pos_sum: 0,
+                    n_pos_sum: ROWS as u64,
+                }
+            );
+        }
+
+        let (nested, outer) =
+            capture_attn_matrix_vt_dispatches(|| capture_attn_matrix_vt_dispatches(|| ())).unwrap();
+        assert!(nested.is_err());
+        assert_eq!(outer.stats, AttnMatrixVtDispatchStats::default());
+
+        let (cross_thread, capture) = capture_attn_matrix_vt_dispatches(|| {
+            std::thread::spawn(|| record_attn_matrix_vt_dispatch(0, 1, 1, 1, 1, true))
+                .join()
+                .unwrap()
+        })
+        .unwrap();
+        assert!(cross_thread.is_err());
+        assert_eq!(capture.stats, AttnMatrixVtDispatchStats::default());
+
+        let panicked = std::panic::catch_unwind(|| {
+            let _ = capture_attn_matrix_vt_dispatches(|| panic!("exercise capture unwind"));
+        });
+        assert!(panicked.is_err());
+        let (_, capture) = capture_attn_matrix_vt_dispatches(|| ()).unwrap();
+        assert_eq!(capture.stats, AttnMatrixVtDispatchStats::default());
     }
 
     #[test]

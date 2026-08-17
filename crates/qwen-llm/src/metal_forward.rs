@@ -1213,6 +1213,8 @@ thread_local! {
     static T9_FFN_CAPTURE: std::cell::RefCell<Option<Vec<(usize, MetalTensor, MetalTensor)>>> =
         const { std::cell::RefCell::new(None) };
     static T9_FFN_CALL_IDX: Cell<usize> = const { Cell::new(0) };
+    static GDN_ALPHA_CENSUS_CAPTURE: std::cell::RefCell<Option<Vec<(usize, MetalTensor)>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Install capture slots: (ffn_call_index, h_dst, inner_dst) triples.
@@ -1244,6 +1246,27 @@ fn t9_ffn_capture_slots_for_current_call() -> Option<(MetalTensor, MetalTensor)>
             .iter()
             .find(|(want, _, _)| *want == idx)
             .map(|(_, h, inner)| (h.clone(), inner.clone()))
+    })
+}
+
+/// Install bench-only per-GDN-layer decay capture destinations.
+pub fn gdn_alpha_census_capture_install(slots: Vec<(usize, MetalTensor)>) {
+    GDN_ALPHA_CENSUS_CAPTURE.with(|capture| *capture.borrow_mut() = Some(slots));
+}
+
+/// Uninstall bench-only GDN decay capture.
+pub fn gdn_alpha_census_capture_uninstall() {
+    GDN_ALPHA_CENSUS_CAPTURE.with(|capture| *capture.borrow_mut() = None);
+}
+
+fn gdn_alpha_census_capture_slot(gdn_index: usize) -> Option<MetalTensor> {
+    GDN_ALPHA_CENSUS_CAPTURE.with(|capture| {
+        capture
+            .borrow()
+            .as_ref()?
+            .iter()
+            .find(|(index, _)| *index == gdn_index)
+            .map(|(_, destination)| destination.clone())
     })
 }
 
@@ -12547,6 +12570,9 @@ impl<'a> MetalForward<'a> {
             &s.gdn_alpha,
         )?;
         // Now `gdn_alpha` is the per-head decay exp(g), reused by every state row.
+        if let Some(alpha_destination) = gdn_alpha_census_capture_slot(gdn_i) {
+            encode_scatter_offset_f32(self.ctx, enc, &s.gdn_alpha, &alpha_destination, 0, n_v)?;
+        }
 
         // Conv1d step + SiLU. Mutates the conv buffer in place.
         encode_ssm_conv_silu_f32(

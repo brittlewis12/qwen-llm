@@ -3199,26 +3199,53 @@ impl DeepSeekV4Session {
             }
 
             #[cfg(feature = "dsv4-diagnostics")]
-            let (csa_decision, indexer_head_weights) = if self.decision_diagnostics.is_capturing()
-                && self.residency.config().attention_kinds[layer] == AttentionKind::CompressedSparse
-            {
-                let rows = self.compressor_frontiers.csa_rows(layer, position)?;
-                match rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
-                    Some(rows) => (
-                        Some(
-                            self.sparse_csa
-                                .capture_decision(rows.count, &selection_record)?,
-                        ),
-                        host_read_f32(
-                            &self.sparse_csa.head_weights,
-                            "diagnostic sparse CSA head weights",
-                        )?,
-                    ),
-                    None => (None, Vec::new()),
-                }
-            } else {
-                (None, Vec::new())
-            };
+            let (csa_decision, indexer_head_weights, indexer_query_norms, indexer_key_norms) =
+                if self.decision_diagnostics.is_capturing()
+                    && self.residency.config().attention_kinds[layer]
+                        == AttentionKind::CompressedSparse
+                {
+                    let rows = self.compressor_frontiers.csa_rows(layer, position)?;
+                    match rows.filter(|rows| rows.count > DEEPSEEK_V4_CSA_TOP_K) {
+                        Some(rows) => {
+                            let query_norms =
+                                if self.sparse_csa.use_f16_matrix_score(ctx, rows.count) {
+                                    host_l2_norms_f16_rows(
+                                        &self.sparse_csa.matrix_queries_f16,
+                                        64,
+                                        128,
+                                        "diagnostic sparse CSA F16 matrix queries",
+                                    )?
+                                } else {
+                                    host_l2_norms_f32_rows(
+                                        &self.sparse_csa.index_queries,
+                                        64,
+                                        128,
+                                        "diagnostic sparse CSA index queries",
+                                    )?
+                                };
+                            (
+                                Some(
+                                    self.sparse_csa
+                                        .capture_decision(rows.count, &selection_record)?,
+                                ),
+                                host_read_f32(
+                                    &self.sparse_csa.head_weights,
+                                    "diagnostic sparse CSA head weights",
+                                )?,
+                                query_norms,
+                                host_l2_norms_f16_rows(
+                                    rows.indexer_cache,
+                                    rows.count,
+                                    128,
+                                    "diagnostic sparse CSA index keys",
+                                )?,
+                            )
+                        }
+                        None => (None, Vec::new(), Vec::new(), Vec::new()),
+                    }
+                } else {
+                    (None, Vec::new(), Vec::new(), Vec::new())
+                };
 
             #[cfg(feature = "dsv4-diagnostics")]
             if self.decision_diagnostics.is_capturing() {
@@ -3227,6 +3254,8 @@ impl DeepSeekV4Session {
                     layer,
                     csa_decision,
                     indexer_head_weights,
+                    indexer_query_norms,
+                    indexer_key_norms,
                     route,
                 )?;
             }
@@ -9756,6 +9785,88 @@ fn host_read_i32(tensor: &MetalTensor, name: &str) -> Result<Vec<i32>, DeepSeekV
         std::ptr::copy_nonoverlapping(source, values.as_mut_ptr(), len);
     }
     Ok(values)
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+fn next_up_nonnegative(value: f64) -> Result<f64, DeepSeekV4MetalError> {
+    if !value.is_finite() || value < 0.0 {
+        return invalid(format!("cannot outward-round invalid norm {value}"));
+    }
+    Ok(f64::from_bits(value.to_bits() + 1))
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+fn host_l2_norms_f32_rows(
+    tensor: &MetalTensor,
+    rows: usize,
+    width: usize,
+    name: &str,
+) -> Result<Vec<f64>, DeepSeekV4MetalError> {
+    let values = host_read_f32(tensor, name)?;
+    let required = checked_mul(rows, width, name)?;
+    if required > values.len() {
+        return invalid(format!(
+            "{name} requires {required} values for {rows}x{width} rows, tensor has {}",
+            values.len()
+        ));
+    }
+    values[..required]
+        .chunks_exact(width)
+        .map(|row| {
+            let mut squared_norm = 0.0f64;
+            for &value in row {
+                if !value.is_finite() {
+                    return invalid(format!("{name} contains a non-finite value"));
+                }
+                let value = f64::from(value).abs();
+                let square = next_up_nonnegative(value * value)?;
+                squared_norm = next_up_nonnegative(squared_norm + square)?;
+            }
+            next_up_nonnegative(squared_norm.sqrt())
+        })
+        .collect()
+}
+
+#[cfg(feature = "dsv4-diagnostics")]
+fn host_l2_norms_f16_rows(
+    tensor: &MetalTensor,
+    rows: usize,
+    width: usize,
+    name: &str,
+) -> Result<Vec<f64>, DeepSeekV4MetalError> {
+    validate_f16(tensor, &tensor.shape, false, name)?;
+    let required = checked_mul(rows, width, name)?;
+    if required > tensor.n_elements() as usize {
+        return invalid(format!(
+            "{name} requires {required} values for {rows}x{width} rows, tensor has {}",
+            tensor.n_elements()
+        ));
+    }
+    let source = unsafe {
+        tensor
+            .buffer
+            .contents()
+            .as_ptr()
+            .cast::<u8>()
+            .add(tensor.offset as usize)
+            .cast::<u16>()
+    };
+    (0..rows)
+        .map(|row| {
+            let mut squared_norm = 0.0f64;
+            for column in 0..width {
+                let value =
+                    half::f16::from_bits(unsafe { *source.add(row * width + column) }).to_f32();
+                if !value.is_finite() {
+                    return invalid(format!("{name} contains a non-finite value"));
+                }
+                let value = f64::from(value).abs();
+                let square = next_up_nonnegative(value * value)?;
+                squared_norm = next_up_nonnegative(squared_norm + square)?;
+            }
+            next_up_nonnegative(squared_norm.sqrt())
+        })
+        .collect()
 }
 
 /// Host writes must occur between completed and not-yet-committed commands.

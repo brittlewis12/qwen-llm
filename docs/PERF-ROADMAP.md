@@ -156,6 +156,20 @@ decode uses one Metal command/encoder and runs at about 37-38 ms command-GPU /
 b10254 36.1 ms wall floor. Practical long context is the leading measured
 optimization opportunity, not yet a demonstrated product-speed differentiator.
 
+The latest capture-first Lightning screen closes two proposed representation
+shortcuts. On one real-text 8,412-token request, a positive-weight
+real-arithmetic query/key norm envelope has zero observed violations over
+397,635 deployed scores but retains 100% of rows at block sizes 16-256;
+126/189 rank-512 cutoffs are nonpositive. This is not a formal fast-math error
+certificate, but any required safety allowance only loosens the failed bound.
+Even a perfect fixed-block oracle must retain 62.31% of rows at block 8 and
+78.28% at block 16, far above the 20-25% charged-work target. Cache-order top-512
+IDs have median 205 exact runs; one-gap merging still leaves 153 spans, while
+eight-row pages amplify selected payload 2.55x. Keep the current cooperative F32
+scorer and direct cache-order ID attention. Reopen certification only for a
+materially tighter row-specific bound with complete charged economics; do not
+build norm-cone blocks, page loading, or run descriptors from overlap alone.
+
 That baseline remains historical rather than being silently transferred across
 weights. The 2026-08-04 97.05 GiB refresh is now the sole resident product asset;
 an initial fixed boundary probe measured 43.08 decode tokens/s versus 30.90 on

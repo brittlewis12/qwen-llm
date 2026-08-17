@@ -39,6 +39,45 @@ Close host zero deletion as acceleration and broad anonymous no-copy output
 allocation under this premise. Evidence:
 `docs/bench/2026-08-17-dead-init-direct-destination/`.
 
+## 2026-08-17 — Structural Thinness Census KILLs
+
+Status: capture-first falsifiers close broad block-sparse FFN support deletion,
+the tested Lightning norm-cone/fixed-block/page-run family, and a universal
+rank-24 GDN state. No sparse, factor-state, or certificate execution kernel was
+written; reusable diagnostic observers remain.
+
+- Two Ridge traces cover 1,024 layer/token FFN-inner vectors. Although
+  24.60-26.42% of scalar values satisfy `abs(inner) <= 1e-2`, only
+  0.0086-0.0460% of physical 256-wide blocks do. At a 0.1% activation-energy
+  budget the median removable block count is zero; even at 1% the p95 is only
+  four of 68 blocks. Broad sparse down cannot clear selection/index overhead or
+  a useful whole-token ceiling.
+- A real-text DSV4 8,412-token prompt captures 189 CSA decisions and 397,635
+  visible rows. A real-arithmetic positive-weight Cauchy envelope has zero
+  observed violations but retains 100% of rows for 16/32/64/128/256-row blocks.
+  It is not an admissible fast-math error certificate; any required safety
+  allowance only loosens it. Even a perfect selected-row oracle retains 62.31%
+  at block 8 and 78.28% at block 16, versus the required 20-25% charged-work band.
+- Those selected sets have median 205 exact runs. Merging one-row gaps still
+  leaves 153 spans and 1.105x payload; eight-row page loading amplifies selected
+  payload 2.55x median. Kill page/run loading under the current direct-ID
+  attention contract.
+- A 512-token Ridge GDN census records 1,179,648 alpha values and F64 SVDs for
+  144 mature state heads. Alpha has no exact zeros but reaches `2.31e-20`, has
+  eight exact ones, and has a p95 decay half-life of 9,493 tokens. At position
+  512, rank 24 has 1.42% median / 20.28% p95 relative Frobenius residual; 1%
+  residual requires median rank 31 / p95 rank 100. Fixed-rank-24 storage and
+  numerically exact inverse rollback are not supported.
+- All model workloads were serialized with ordinary pageable storage. DSV4
+  explicitly used `QWEN_DSV4_PREFETCH=off` and
+  `QWEN_DSV4_RESIDENCY_SET=0`; the user-owned llama server remained untouched.
+
+Decision: retain only the observers. Reopen FFN sparsity for independently high
+complete-block occupancy, Lightning certification for a materially tighter
+row-specific bound below 20-25% fully charged work, and GDN factors only for an
+adaptive representation with an explicit state-error/continuation contract.
+Evidence: `docs/bench/2026-08-17-structural-thinness-falsifiers/`.
+
 ## 2026-08-13 — DeepSeek V4 Maintained Retention Quality Rows
 
 Status: REAP quality governance now has a maintained v4.1 fixture, hardened

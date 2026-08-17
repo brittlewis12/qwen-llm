@@ -201,7 +201,13 @@ For consecutive sparse-CSA decision analysis, build `qwen` with
 `dsv4-diagnostics` and set `QWEN_DSV4_TEMPORAL_WINDOW=65`. Sixty-five captured
 score states cover 64 transitions. `QWEN_DSV4_TEMPORAL_JSON=PATH` retains
 per-layer candidate economics plus compact per-position selected-ID, boundary,
-head-weight, and route records; stderr receives only the aggregate summary.
+head-weight, and route records; stderr receives only the aggregate summary. The
+current schema also computes exact selected-ID run/page economics and a
+real-arithmetic positive-weight query/key norm envelope for fixed Lightning
+blocks. These are attribution observers, not admissible certificates: deployed
+fast-math accumulation error is checked empirically rather than enclosed, F32
+refinement remains mandatory, and locality payload amplification must be charged
+before any descriptor implementation.
 With `--deepseek-v4-snapshot`, the report also records final logits and causal
 digests, so independent restored arms can be compared without replaying the
 prefix. This schedule performs host readback and is correctness/attribution

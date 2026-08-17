@@ -6,7 +6,7 @@ pub const LAYER_COUNT: usize = 43;
 pub const CSA_LAYER_COUNT: usize = 21;
 pub const CSA_TOP_K: usize = 512;
 pub const ROUTE_TOP_K: usize = 6;
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const FP4_SHADOW_SCHEMA_VERSION: u32 = 1;
 pub(crate) const FIRST_SPARSE_CSA_POSITION: u32 = (CSA_TOP_K as u32) * 4 + 3;
 
@@ -44,6 +44,10 @@ pub struct DeepSeekV4DecisionLayer {
     pub layer: u32,
     pub csa: Option<DeepSeekV4CsaDecision>,
     pub indexer_head_weights: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexer_query_norms: Vec<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexer_key_norms: Vec<f64>,
     pub route: DeepSeekV4RouteDecision,
 }
 
@@ -638,6 +642,8 @@ impl DeepSeekV4DecisionCapture {
         layer: usize,
         csa: Option<DeepSeekV4CsaDecision>,
         indexer_head_weights: Vec<f32>,
+        indexer_query_norms: Vec<f64>,
+        indexer_key_norms: Vec<f64>,
         route: DeepSeekV4RouteDecision,
     ) -> Result<(), DeepSeekV4DiagnosticsError> {
         let CaptureState::Capturing { layers, .. } = &mut self.state else {
@@ -667,9 +673,43 @@ impl DeepSeekV4DecisionCapture {
             {
                 return Err(DeepSeekV4DiagnosticsError::NonFinite("indexer head weight"));
             }
-        } else if !indexer_head_weights.is_empty() {
+            if indexer_query_norms.len() != 64 {
+                return Err(DeepSeekV4DiagnosticsError::Shape(format!(
+                    "layer {layer} captured {} indexer query norms, expected 64",
+                    indexer_query_norms.len()
+                )));
+            }
+            if indexer_key_norms.len()
+                != csa
+                    .as_ref()
+                    .expect("CSA presence checked")
+                    .visible_scores
+                    .len()
+            {
+                return Err(DeepSeekV4DiagnosticsError::Shape(format!(
+                    "layer {layer} captured {} indexer key norms for {} visible rows",
+                    indexer_key_norms.len(),
+                    csa.as_ref()
+                        .expect("CSA presence checked")
+                        .visible_scores
+                        .len()
+                )));
+            }
+            if indexer_query_norms
+                .iter()
+                .chain(&indexer_key_norms)
+                .any(|norm| !norm.is_finite() || *norm < 0.0)
+            {
+                return Err(DeepSeekV4DiagnosticsError::NonFinite(
+                    "indexer query or key norm",
+                ));
+            }
+        } else if !indexer_head_weights.is_empty()
+            || !indexer_query_norms.is_empty()
+            || !indexer_key_norms.is_empty()
+        {
             return Err(DeepSeekV4DiagnosticsError::Shape(format!(
-                "non-CSA layer {layer} captured indexer head weights"
+                "non-CSA layer {layer} captured indexer diagnostics"
             )));
         }
         validate_csa(csa.as_ref())?;
@@ -678,6 +718,8 @@ impl DeepSeekV4DecisionCapture {
             layer: layer as u32,
             csa,
             indexer_head_weights,
+            indexer_query_norms,
+            indexer_key_norms,
             route,
         });
         Ok(())
@@ -1127,6 +1169,14 @@ mod tests {
         }
     }
 
+    fn indexer_norms(layer: usize) -> (Vec<f64>, Vec<f64>) {
+        if is_csa_layer(layer) {
+            (vec![1.0; 64], vec![100.0; 513])
+        } else {
+            (Vec::new(), Vec::new())
+        }
+    }
+
     fn csa() -> DeepSeekV4CsaDecision {
         build_csa_decision(
             (0..513).map(|row| row as f32).collect(),
@@ -1239,7 +1289,9 @@ mod tests {
                 operation: "restore a snapshot"
             }
         );
-        capture.capture_layer(0, None, Vec::new(), route()).unwrap();
+        capture
+            .capture_layer(0, None, Vec::new(), Vec::new(), Vec::new(), route())
+            .unwrap();
         assert_eq!(
             capture.take().unwrap_err(),
             DeepSeekV4DiagnosticsError::Incomplete {
@@ -1256,8 +1308,16 @@ mod tests {
         capture.begin_forward(TEST_POSITION).unwrap();
         for layer in 0..LAYER_COUNT {
             let csa = is_csa_layer(layer).then(csa);
+            let (query_norms, key_norms) = indexer_norms(layer);
             capture
-                .capture_layer(layer, csa, indexer_head_weights(layer), route())
+                .capture_layer(
+                    layer,
+                    csa,
+                    indexer_head_weights(layer),
+                    query_norms,
+                    key_norms,
+                    route(),
+                )
                 .unwrap();
         }
         capture.finish().unwrap();
@@ -1293,11 +1353,14 @@ mod tests {
             capture.arm(position).unwrap();
             capture.begin_forward(position).unwrap();
             for layer in 0..LAYER_COUNT {
+                let (query_norms, key_norms) = indexer_norms(layer);
                 capture
                     .capture_layer(
                         layer,
                         is_csa_layer(layer).then(csa),
                         indexer_head_weights(layer),
+                        query_norms,
+                        key_norms,
                         route(),
                     )
                     .unwrap();

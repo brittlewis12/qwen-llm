@@ -5,6 +5,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 const CADENCES: [usize; 7] = [1, 2, 4, 8, 16, 32, 64];
+const CONE_BLOCK_ROWS: [usize; 5] = [16, 32, 64, 128, 256];
+const LOCALITY_PAGE_ROWS: [usize; 4] = [8, 16, 32, 64];
+const LOCALITY_MERGE_GAPS: [usize; 4] = [1, 3, 7, 15];
 
 #[derive(Clone, Copy, Debug)]
 struct CandidateSample {
@@ -106,6 +109,14 @@ fn upper_sum(left: f64, right: f64) -> f64 {
     f64::from_bits(if value >= 0.0 { bits + 1 } else { bits - 1 })
 }
 
+fn upper_product(left: f64, right: f64) -> f64 {
+    let value = left * right;
+    if !value.is_finite() || value == f64::INFINITY {
+        return value;
+    }
+    f64::from_bits(value.to_bits() + 1)
+}
+
 #[derive(Debug)]
 struct LayerState {
     previous_scores: Vec<f32>,
@@ -136,6 +147,224 @@ struct LayerSamples {
     cadence_oracle_candidates: BTreeMap<usize, Vec<CandidateSample>>,
     cadence_charged_work: BTreeMap<usize, Vec<CandidateSample>>,
     cadence_refresh_endpoints: BTreeMap<usize, Vec<CandidateSample>>,
+    cone_envelope: ConeEnvelopeSamples,
+    selected_locality: SelectedLocalitySamples,
+}
+
+#[derive(Debug, Default)]
+struct ConeEnvelopeSamples {
+    bound_checks: u64,
+    bound_violations: u64,
+    max_violation: f64,
+    nonpositive_cutoffs: usize,
+    retained_work: BTreeMap<usize, Vec<CandidateSample>>,
+}
+
+impl ConeEnvelopeSamples {
+    fn record(
+        &mut self,
+        decision: &DeepSeekV4CsaDecision,
+        head_weights: &[f32],
+        query_norms: &[f64],
+        key_norms: &[f64],
+    ) -> Result<()> {
+        ensure!(
+            head_weights.len() == 64,
+            "Lightning capture requires 64 head weights"
+        );
+        ensure!(
+            query_norms.len() == 64,
+            "Lightning capture requires 64 query norms"
+        );
+        ensure!(
+            key_norms.len() == decision.visible_scores.len(),
+            "Lightning capture has {} key norms for {} visible scores",
+            key_norms.len(),
+            decision.visible_scores.len()
+        );
+        ensure!(
+            query_norms
+                .iter()
+                .chain(key_norms)
+                .all(|norm| norm.is_finite() && *norm >= 0.0),
+            "Lightning capture contains an invalid norm"
+        );
+
+        let mut positive_scale = 0.0f64;
+        for (&weight, &query_norm) in head_weights.iter().zip(query_norms) {
+            if weight > 0.0 {
+                positive_scale =
+                    upper_sum(positive_scale, upper_product(f64::from(weight), query_norm));
+            }
+        }
+        let row_bounds = key_norms
+            .iter()
+            .map(|&key_norm| upper_product(positive_scale, key_norm))
+            .collect::<Vec<_>>();
+        for (&score, &bound) in decision.visible_scores.iter().zip(&row_bounds) {
+            self.bound_checks += 1;
+            let violation = f64::from(score) - bound;
+            if violation > 0.0 {
+                self.bound_violations += 1;
+                self.max_violation = self.max_violation.max(violation);
+            }
+        }
+
+        let cutoff = f64::from(decision.rank_512.score);
+        if cutoff <= 0.0 {
+            self.nonpositive_cutoffs += 1;
+        }
+        for block_rows in CONE_BLOCK_ROWS {
+            let candidate_rows = row_bounds
+                .chunks(block_rows)
+                .map(|block| {
+                    let upper = block.iter().copied().fold(0.0f64, f64::max);
+                    if upper >= cutoff { block.len() } else { 0 }
+                })
+                .sum();
+            self.retained_work
+                .entry(block_rows)
+                .or_default()
+                .push(CandidateSample {
+                    candidate_rows,
+                    visible_rows: row_bounds.len(),
+                });
+        }
+        Ok(())
+    }
+
+    fn extend_from(&mut self, other: &Self) {
+        self.bound_checks += other.bound_checks;
+        self.bound_violations += other.bound_violations;
+        self.max_violation = self.max_violation.max(other.max_violation);
+        self.nonpositive_cutoffs += other.nonpositive_cutoffs;
+        for (&rows, values) in &other.retained_work {
+            self.retained_work
+                .entry(rows)
+                .or_default()
+                .extend_from_slice(values);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct SelectedLocalitySamples {
+    runs: Vec<f64>,
+    mean_run_length: Vec<f64>,
+    max_run_length: Vec<f64>,
+    contiguous_adjacency_fraction: Vec<f64>,
+    run_descriptor_to_id_bytes: Vec<f64>,
+    page_payload_amplification: BTreeMap<usize, Vec<f64>>,
+    merged_span_count: BTreeMap<usize, Vec<f64>>,
+    merged_span_payload_amplification: BTreeMap<usize, Vec<f64>>,
+}
+
+impl SelectedLocalitySamples {
+    fn record(&mut self, selected_ids: &[u32], visible_rows: usize) -> Result<()> {
+        ensure!(!selected_ids.is_empty(), "CSA selection is empty");
+        ensure!(
+            selected_ids.windows(2).all(|pair| pair[0] < pair[1]),
+            "CSA cache-order IDs are not strictly ascending"
+        );
+        ensure!(
+            selected_ids.last().copied().unwrap_or_default() < visible_rows as u32,
+            "CSA selected ID exceeds visible rows"
+        );
+
+        let mut runs = 1usize;
+        let mut current_run = 1usize;
+        let mut max_run = 1usize;
+        for pair in selected_ids.windows(2) {
+            if pair[1] == pair[0] + 1 {
+                current_run += 1;
+                max_run = max_run.max(current_run);
+            } else {
+                runs += 1;
+                current_run = 1;
+            }
+        }
+        let selected_rows = selected_ids.len();
+        self.runs.push(runs as f64);
+        self.mean_run_length
+            .push(selected_rows as f64 / runs as f64);
+        self.max_run_length.push(max_run as f64);
+        self.contiguous_adjacency_fraction.push(
+            selected_rows.saturating_sub(runs) as f64
+                / selected_rows.saturating_sub(1).max(1) as f64,
+        );
+        self.run_descriptor_to_id_bytes
+            .push((runs * 8) as f64 / (selected_rows * 4) as f64);
+
+        for page_rows in LOCALITY_PAGE_ROWS {
+            let mut pages = Vec::new();
+            for &row in selected_ids {
+                let page = row as usize / page_rows;
+                if pages.last().copied() != Some(page) {
+                    pages.push(page);
+                }
+            }
+            let loaded_rows = pages
+                .into_iter()
+                .map(|page| (visible_rows - page * page_rows).min(page_rows))
+                .sum::<usize>();
+            self.page_payload_amplification
+                .entry(page_rows)
+                .or_default()
+                .push(loaded_rows as f64 / selected_rows as f64);
+        }
+
+        for max_gap in LOCALITY_MERGE_GAPS {
+            let mut spans = 1usize;
+            let mut loaded_rows = 1usize;
+            for pair in selected_ids.windows(2) {
+                let gap = (pair[1] - pair[0] - 1) as usize;
+                if gap <= max_gap {
+                    loaded_rows += (pair[1] - pair[0]) as usize;
+                } else {
+                    spans += 1;
+                    loaded_rows += 1;
+                }
+            }
+            self.merged_span_count
+                .entry(max_gap)
+                .or_default()
+                .push(spans as f64);
+            self.merged_span_payload_amplification
+                .entry(max_gap)
+                .or_default()
+                .push(loaded_rows as f64 / selected_rows as f64);
+        }
+        Ok(())
+    }
+
+    fn extend_from(&mut self, other: &Self) {
+        self.runs.extend_from_slice(&other.runs);
+        self.mean_run_length
+            .extend_from_slice(&other.mean_run_length);
+        self.max_run_length.extend_from_slice(&other.max_run_length);
+        self.contiguous_adjacency_fraction
+            .extend_from_slice(&other.contiguous_adjacency_fraction);
+        self.run_descriptor_to_id_bytes
+            .extend_from_slice(&other.run_descriptor_to_id_bytes);
+        for (&key, values) in &other.page_payload_amplification {
+            self.page_payload_amplification
+                .entry(key)
+                .or_default()
+                .extend_from_slice(values);
+        }
+        for (&key, values) in &other.merged_span_count {
+            self.merged_span_count
+                .entry(key)
+                .or_default()
+                .extend_from_slice(values);
+        }
+        for (&key, values) in &other.merged_span_payload_amplification {
+            self.merged_span_payload_amplification
+                .entry(key)
+                .or_default()
+                .extend_from_slice(values);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -236,6 +465,74 @@ impl HeadWeightSummary {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SelectedLocalityReport {
+    runs: MetricSummary,
+    mean_run_length: MetricSummary,
+    max_run_length: MetricSummary,
+    contiguous_adjacency_fraction: MetricSummary,
+    run_descriptor_to_id_bytes: MetricSummary,
+    page_payload_amplification: BTreeMap<usize, MetricSummary>,
+    merged_span_count: BTreeMap<usize, MetricSummary>,
+    merged_span_payload_amplification: BTreeMap<usize, MetricSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConeEnvelopeReport {
+    bound_checks: u64,
+    bound_violations: u64,
+    max_violation: f64,
+    nonpositive_cutoffs: usize,
+    retained_work: BTreeMap<usize, CandidateSummary>,
+}
+
+impl ConeEnvelopeReport {
+    fn from_samples(samples: &ConeEnvelopeSamples) -> Self {
+        Self {
+            bound_checks: samples.bound_checks,
+            bound_violations: samples.bound_violations,
+            max_violation: samples.max_violation,
+            nonpositive_cutoffs: samples.nonpositive_cutoffs,
+            retained_work: samples
+                .retained_work
+                .iter()
+                .map(|(&rows, values)| (rows, CandidateSummary::from_samples(values)))
+                .collect(),
+        }
+    }
+}
+
+impl SelectedLocalityReport {
+    fn from_samples(samples: &SelectedLocalitySamples) -> Self {
+        Self {
+            runs: MetricSummary::from_values(&samples.runs),
+            mean_run_length: MetricSummary::from_values(&samples.mean_run_length),
+            max_run_length: MetricSummary::from_values(&samples.max_run_length),
+            contiguous_adjacency_fraction: MetricSummary::from_values(
+                &samples.contiguous_adjacency_fraction,
+            ),
+            run_descriptor_to_id_bytes: MetricSummary::from_values(
+                &samples.run_descriptor_to_id_bytes,
+            ),
+            page_payload_amplification: samples
+                .page_payload_amplification
+                .iter()
+                .map(|(&rows, values)| (rows, MetricSummary::from_values(values)))
+                .collect(),
+            merged_span_count: samples
+                .merged_span_count
+                .iter()
+                .map(|(&gap, values)| (gap, MetricSummary::from_values(values)))
+                .collect(),
+            merged_span_payload_amplification: samples
+                .merged_span_payload_amplification
+                .iter()
+                .map(|(&gap, values)| (gap, MetricSummary::from_values(values)))
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct DecisionPoint {
     position: u32,
@@ -265,6 +562,8 @@ pub struct LayerReport {
     cadence_oracle_candidates: BTreeMap<usize, CandidateSummary>,
     cadence_charged_work: BTreeMap<usize, CandidateSummary>,
     cadence_refresh_endpoints: BTreeMap<usize, CandidateSummary>,
+    cone_envelope: ConeEnvelopeReport,
+    selected_locality: SelectedLocalityReport,
 }
 
 #[derive(Debug, Serialize)]
@@ -281,6 +580,8 @@ pub struct TemporalReport {
     aggregate_cadence_oracle_candidates: BTreeMap<usize, CandidateSummary>,
     aggregate_cadence_charged_work: BTreeMap<usize, CandidateSummary>,
     aggregate_cadence_refresh_endpoints: BTreeMap<usize, CandidateSummary>,
+    aggregate_cone_envelope: ConeEnvelopeReport,
+    aggregate_selected_locality: SelectedLocalityReport,
     selection_trace_sha256: String,
     route_trace_sha256: String,
     final_logits_sha256: Option<String>,
@@ -301,6 +602,8 @@ pub struct TemporalSummary {
     aggregate_one_step_candidates: CandidateSummary,
     aggregate_cadence_oracle_candidates: BTreeMap<usize, CandidateSummary>,
     aggregate_cadence_charged_work: BTreeMap<usize, CandidateSummary>,
+    aggregate_cone_envelope: ConeEnvelopeReport,
+    aggregate_selected_locality: SelectedLocalityReport,
     selection_trace_sha256: String,
     route_trace_sha256: String,
     final_logits_sha256: Option<String>,
@@ -320,6 +623,8 @@ impl TemporalReport {
             aggregate_one_step_candidates: self.aggregate_one_step_candidates.clone(),
             aggregate_cadence_oracle_candidates: self.aggregate_cadence_oracle_candidates.clone(),
             aggregate_cadence_charged_work: self.aggregate_cadence_charged_work.clone(),
+            aggregate_cone_envelope: self.aggregate_cone_envelope.clone(),
+            aggregate_selected_locality: self.aggregate_selected_locality.clone(),
             selection_trace_sha256: self.selection_trace_sha256.clone(),
             route_trace_sha256: self.route_trace_sha256.clone(),
             final_logits_sha256: self.final_logits_sha256.clone(),
@@ -401,6 +706,8 @@ impl TemporalCapture {
             self.route_trace
                 .update(layer.route.routed_scale.to_bits().to_le_bytes());
             let head_weights = layer.indexer_head_weights;
+            let query_norms = layer.indexer_query_norms;
+            let key_norms = layer.indexer_key_norms;
             let Some(decision) = layer.csa else {
                 continue;
             };
@@ -442,8 +749,15 @@ impl TemporalCapture {
             );
             let samples = self.samples.entry(layer_id).or_default();
             samples
+                .cone_envelope
+                .record(&decision, &head_weights, &query_norms, &key_norms)?;
+            samples
                 .head_weights
                 .extend(head_weights.into_iter().map(f64::from));
+            samples.selected_locality.record(
+                &decision.cache_order_selected_ids,
+                decision.visible_scores.len(),
+            )?;
             let Some(state) = self.states.get_mut(&layer_id) else {
                 self.states.insert(layer_id, LayerState::new(&decision));
                 continue;
@@ -516,6 +830,8 @@ impl TemporalCapture {
         let mut aggregate_oracle: BTreeMap<usize, Vec<CandidateSample>> = BTreeMap::new();
         let mut aggregate_charged: BTreeMap<usize, Vec<CandidateSample>> = BTreeMap::new();
         let mut aggregate_endpoints: BTreeMap<usize, Vec<CandidateSample>> = BTreeMap::new();
+        let mut aggregate_cone = ConeEnvelopeSamples::default();
+        let mut aggregate_locality = SelectedLocalitySamples::default();
         let mut layers = Vec::with_capacity(self.samples.len());
         for (layer, samples) in self.samples {
             aggregate_jaccard.extend_from_slice(&samples.jaccard);
@@ -539,6 +855,8 @@ impl TemporalCapture {
                     .or_default()
                     .extend_from_slice(values);
             }
+            aggregate_cone.extend_from(&samples.cone_envelope);
+            aggregate_locality.extend_from(&samples.selected_locality);
             layers.push(LayerReport {
                 layer,
                 comparisons: samples.jaccard.len(),
@@ -562,11 +880,13 @@ impl TemporalCapture {
                     .into_iter()
                     .map(|(cadence, values)| (cadence, CandidateSummary::from_samples(&values)))
                     .collect(),
+                cone_envelope: ConeEnvelopeReport::from_samples(&samples.cone_envelope),
+                selected_locality: SelectedLocalityReport::from_samples(&samples.selected_locality),
             });
         }
         TemporalReport {
-            schema_version: 3,
-            interpretation: "direct upward-drift hindsight ceiling; charged work includes full-score anchor refreshes and is not an admissible future bound",
+            schema_version: 5,
+            interpretation: "direct upward-drift hindsight ceiling, real-arithmetic positive-weight Lightning norm envelope with observed-score validation, and exact cache-order selected-ID locality; neither temporal nor norm observations are an admissible future certificate",
             requested_tokens: self.requested_tokens,
             captured_tokens: self.positions.len(),
             first_position: self.positions.first().copied(),
@@ -586,6 +906,8 @@ impl TemporalCapture {
                 .into_iter()
                 .map(|(cadence, values)| (cadence, CandidateSummary::from_samples(&values)))
                 .collect(),
+            aggregate_cone_envelope: ConeEnvelopeReport::from_samples(&aggregate_cone),
+            aggregate_selected_locality: SelectedLocalityReport::from_samples(&aggregate_locality),
             selection_trace_sha256,
             route_trace_sha256,
             final_logits_sha256: None,
@@ -673,8 +995,9 @@ mod tests {
             row_id: ranked[512] as u32,
             score: scores[ranked[512]],
         };
+        let key_norms = vec![100.0; scores.len()];
         DeepSeekV4DecisionTranscript {
-            schema_version: 2,
+            schema_version: 3,
             position,
             layer_count: 1,
             csa_layer_count: 1,
@@ -692,6 +1015,8 @@ mod tests {
                 indexer_head_weights: std::iter::once(-0.5)
                     .chain(std::iter::repeat_n(0.25, 63))
                     .collect(),
+                indexer_query_norms: vec![1.0; 64],
+                indexer_key_norms: key_norms,
                 route: DeepSeekV4RouteDecision {
                     expert_ids: vec![0, 1, 2, 3, 4, 5],
                     normalized_scaled_weights: vec![1.0 / 6.0; 6],
@@ -731,6 +1056,21 @@ mod tests {
             1.0
         );
         assert_eq!(report.layers[0].head_weights.negative_values, 2);
+        assert_eq!(report.schema_version, 5);
+        assert_eq!(report.aggregate_cone_envelope.bound_violations, 0);
+        assert_eq!(
+            report.aggregate_cone_envelope.retained_work[&16].weighted_fraction,
+            1.0
+        );
+        assert_eq!(report.layers[0].selected_locality.runs.max, 1.0);
+        assert_eq!(report.aggregate_selected_locality.runs.samples, 2);
+        assert_eq!(
+            report
+                .aggregate_selected_locality
+                .page_payload_amplification[&8]
+                .max,
+            513.0 / 512.0
+        );
         assert_eq!(report.selection_trace_sha256.len(), 64);
         assert_eq!(report.route_trace_sha256.len(), 64);
         assert_eq!(report.decision_points.len(), 2);

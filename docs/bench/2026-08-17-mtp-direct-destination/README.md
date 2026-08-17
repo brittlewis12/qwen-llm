@@ -131,13 +131,13 @@ digest. The direct path won every pair:
 
 | Endpoint | Staged | Direct | Candidate result |
 |---|---:|---:|---:|
-| Median MTP load | 572.928 ms | 314.979 ms | 255.068 ms paired saving |
-| MTP load ratio | 1.000x | 0.550x | **1.819x speedup** |
-| Whole-process wall | 3.680 s | 3.450 s | 0.220 s paired saving |
+| Median MTP load | 579.631 ms | 314.819 ms | 265.030 ms paired saving |
+| MTP load ratio | 1.000x | 0.543x | **1.841x speedup** |
+| Whole-process wall | 3.670 s | 3.455 s | 0.270 s paired saving |
 
-The marginal medians imply a **45.02%** load reduction; the primary median
-paired saving is 44.52% of the control median. Candidate wins are `6/6`; AB
-median saving is `247.008 ms` and BA median saving is `260.014 ms`.
+The marginal medians imply a **45.69%** load reduction; the primary median
+paired saving is 45.72% of the control median. Candidate wins are `6/6`; AB
+median saving is `265.515 ms` and BA median saving is `264.545 ms`.
 Whole-process wall tracks the isolated deletion, but remains supporting evidence
 rather than a general inference-speed claim.
 
@@ -145,10 +145,10 @@ Memory is consistent with the deleted representation:
 
 | Endpoint | Staged median | Direct median | Median paired deletion |
 |---|---:|---:|---:|
-| Maximum RSS | 49,251,794,944 B | 48,253,190,144 B | **998,326,272 B** |
-| Peak footprint | 26,607,226,028 B | 25,973,090,912 B | **634,471,012 B** |
+| Maximum RSS | 49,251,901,440 B | 48,252,731,392 B | **999,383,040 B** |
+| Peak footprint | 26,608,315,408 B | 25,970,625,060 B | **637,075,972 B** |
 
-The RSS deletion is 952.08 MiB, consistent with removing one sequential 1 GiB
+The RSS deletion is 953.09 MiB, consistent with removing one sequential 1 GiB
 host bank temporary. The implementation also deletes 3 GiB of aggregate bank
 population copies across gate, up, and down.
 
@@ -167,7 +167,10 @@ All 12 production arms report `identical=true`, the same F32/F32/F32
 3,221,225,472-byte bank ledger, and target token digest
 `3af19c4e6c6bc7ca867fd41488b65ef22933de2c31e6c5541c43654591a856a6`.
 Every arm's build and runtime source digest is
-`git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734`.
+`git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7`.
+The stable benchmarked implementation commit is
+`c918ff0dc3987c88317f225858d31f2b62430eec`; the evidence follow-up changes no
+runtime or harness code.
 The oracle embeds that same build identity, a timestamp inside its manifest
 event, and test-binary SHA-256
 `e447b4f9919e8e362b0ca59a2edc1352215139d9a29bdc694df756e0904bf283`.

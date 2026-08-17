@@ -8,19 +8,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -46,7 +46,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 570.0389580000001,
+        "mtp_load_ms": 571.763667,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -68,13 +68,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 141.013875,
-          "decode_only_tps": 113.46401196336176,
+          "decode_ms": 141.97620899999998,
+          "decode_only_tps": 112.69493750181765,
           "emitted": 16,
-          "prefill_ms": 135.559958,
+          "prefill_ms": 135.093,
           "target_transitions": 15,
-          "total_ms": 276.573917,
-          "total_tps": 57.850719162356874
+          "total_ms": 277.069291,
+          "total_tps": 57.747287482682445
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -90,8 +90,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 166.26799999999997,
-          "decode_only_tps": 96.2301825967715,
+          "decode_ms": 165.773209,
+          "decode_only_tps": 96.51740529436213,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -101,20 +101,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 166.26799999999997,
+            "other": 165.773209,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 83.0785,
+          "prefill_ms": 83.784541,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 249.3465,
-          "total_tps": 64.16773445787288
+          "total_ms": 249.55775,
+          "total_tps": 64.1134166340256
         },
-        "speedup_total_ms": 1.1091951040018608,
+        "speedup_total_ms": 1.1102411806485675,
         "stop_tokens": [
           248046
         ],
@@ -156,9 +156,9 @@
       },
       "pair": 1,
       "time": {
-        "max_rss_bytes": 49251368960,
-        "peak_footprint_bytes": 26608208936,
-        "real_s": 3.59
+        "max_rss_bytes": 49252777984,
+        "peak_footprint_bytes": 26609716408,
+        "real_s": 3.63
       }
     },
     {
@@ -169,19 +169,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -207,7 +207,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 325.30333299999995,
+        "mtp_load_ms": 308.059916,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -229,13 +229,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 141.4425,
-          "decode_only_tps": 113.12017250826308,
+          "decode_ms": 141.80070899999998,
+          "decode_only_tps": 112.83441467136811,
           "emitted": 16,
-          "prefill_ms": 142.24675,
+          "prefill_ms": 142.163041,
           "target_transitions": 15,
-          "total_ms": 283.689459,
-          "total_tps": 56.39969865782007
+          "total_ms": 283.963791,
+          "total_tps": 56.34521198514355
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -251,8 +251,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 165.260083,
-          "decode_only_tps": 96.81708800787665,
+          "decode_ms": 166.540792,
+          "decode_only_tps": 96.07255860774337,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -262,20 +262,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 165.260083,
+            "other": 166.540792,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 83.42633400000001,
+          "prefill_ms": 83.655833,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 248.686417,
-          "total_tps": 64.33805349328749
+          "total_ms": 250.196625,
+          "total_tps": 63.94970355815151
         },
-        "speedup_total_ms": 1.1407517242889869,
+        "speedup_total_ms": 1.1349625159811807,
         "stop_tokens": [
           248046
         ],
@@ -317,9 +317,9 @@
       },
       "pair": 1,
       "time": {
-        "max_rss_bytes": 48252272640,
-        "peak_footprint_bytes": 25975851520,
-        "real_s": 3.45
+        "max_rss_bytes": 48251174912,
+        "peak_footprint_bytes": 25968773608,
+        "real_s": 3.34
       }
     },
     {
@@ -330,19 +330,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -368,7 +368,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 312.356709,
+        "mtp_load_ms": 315.27462499999996,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -390,13 +390,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 140.635708,
-          "decode_only_tps": 113.7691147400488,
+          "decode_ms": 141.448208,
+          "decode_only_tps": 113.11560765760993,
           "emitted": 16,
-          "prefill_ms": 143.77820799999998,
+          "prefill_ms": 143.58154100000002,
           "target_transitions": 15,
-          "total_ms": 284.41395800000004,
-          "total_tps": 56.256029459707456
+          "total_ms": 285.029791,
+          "total_tps": 56.13448314951752
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -412,8 +412,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 165.113125,
-          "decode_only_tps": 96.90325950768602,
+          "decode_ms": 166.32691599999998,
+          "decode_only_tps": 96.19609612673875,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -423,20 +423,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 165.113125,
+            "other": 166.32691599999998,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 83.15025,
+          "prefill_ms": 83.62775,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 248.263375,
-          "total_tps": 64.44768584975532
+          "total_ms": 249.954666,
+          "total_tps": 64.01160760887737
         },
-        "speedup_total_ms": 1.1456138385293442,
+        "speedup_total_ms": 1.1403259461457702,
         "stop_tokens": [
           248046
         ],
@@ -478,9 +478,9 @@
       },
       "pair": 2,
       "time": {
-        "max_rss_bytes": 48254107648,
-        "peak_footprint_bytes": 25971788384,
-        "real_s": 3.44
+        "max_rss_bytes": 48255418368,
+        "peak_footprint_bytes": 25973115488,
+        "real_s": 3.38
       }
     },
     {
@@ -491,19 +491,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -529,7 +529,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 562.4790830000001,
+        "mtp_load_ms": 561.565875,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -551,13 +551,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 140.256792,
-          "decode_only_tps": 114.07647196151471,
+          "decode_ms": 141.091708,
+          "decode_only_tps": 113.40141973474444,
           "emitted": 16,
-          "prefill_ms": 142.707458,
+          "prefill_ms": 137.180333,
           "target_transitions": 15,
-          "total_ms": 282.964292,
-          "total_tps": 56.54423703751284
+          "total_ms": 278.27212499999996,
+          "total_tps": 57.49767426399608
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -573,8 +573,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 167.342084,
-          "decode_only_tps": 95.61252984037178,
+          "decode_ms": 167.498875,
+          "decode_only_tps": 95.52302963228858,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -584,20 +584,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 167.342084,
+            "other": 167.498875,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 83.402958,
+          "prefill_ms": 83.622333,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 250.74504199999998,
-          "total_tps": 63.80983596876066
+          "total_ms": 251.121208,
+          "total_tps": 63.71425228250734
         },
-        "speedup_total_ms": 1.1284940660960308,
+        "speedup_total_ms": 1.1081187734649633,
         "stop_tokens": [
           248046
         ],
@@ -639,9 +639,9 @@
       },
       "pair": 2,
       "time": {
-        "max_rss_bytes": 49251663872,
-        "peak_footprint_bytes": 26608503848,
-        "real_s": 3.62
+        "max_rss_bytes": 49251450880,
+        "peak_footprint_bytes": 26608290856,
+        "real_s": 3.63
       }
     },
     {
@@ -652,19 +652,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -690,7 +690,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 560.2635,
+        "mtp_load_ms": 582.019083,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -712,13 +712,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 140.682041,
-          "decode_only_tps": 113.7316453917526,
+          "decode_ms": 140.73070800000002,
+          "decode_only_tps": 113.69231511291764,
           "emitted": 16,
-          "prefill_ms": 140.50283299999998,
+          "prefill_ms": 139.670667,
           "target_transitions": 15,
-          "total_ms": 281.184958,
-          "total_tps": 56.902048081818094
+          "total_ms": 280.401417,
+          "total_tps": 57.0610525837678
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -734,8 +734,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 167.17262399999998,
-          "decode_only_tps": 95.7094506095687,
+          "decode_ms": 166.45466600000003,
+          "decode_only_tps": 96.12226790926965,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -745,20 +745,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 167.17262399999998,
+            "other": 166.45466600000003,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 83.886334,
+          "prefill_ms": 82.94283399999999,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 251.058958,
-          "total_tps": 63.73005021394218
+          "total_ms": 249.3975,
+          "total_tps": 64.15461261640554
         },
-        "speedup_total_ms": 1.1199957182965763,
+        "speedup_total_ms": 1.1243152677953867,
         "stop_tokens": [
           248046
         ],
@@ -800,9 +800,9 @@
       },
       "pair": 3,
       "time": {
-        "max_rss_bytes": 49252466688,
-        "peak_footprint_bytes": 26607340776,
-        "real_s": 3.7
+        "max_rss_bytes": 49252139008,
+        "peak_footprint_bytes": 26606914648,
+        "real_s": 3.65
       }
     },
     {
@@ -813,19 +813,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -851,7 +851,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 313.25595899999996,
+        "mtp_load_ms": 316.504375,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -873,13 +873,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 142.09154199999998,
-          "decode_only_tps": 112.60346516613917,
+          "decode_ms": 141.494125,
+          "decode_only_tps": 113.07889991898958,
           "emitted": 16,
-          "prefill_ms": 141.291417,
+          "prefill_ms": 144.66637500000002,
           "target_transitions": 15,
-          "total_ms": 283.383042,
-          "total_tps": 56.460682640283046
+          "total_ms": 286.16058300000003,
+          "total_tps": 55.91266215724756
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -895,8 +895,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 165.562166,
-          "decode_only_tps": 96.64043655964251,
+          "decode_ms": 166.42429099999998,
+          "decode_only_tps": 96.13981170573233,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -906,20 +906,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 165.562166,
+            "other": 166.42429099999998,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 82.74716699999999,
+          "prefill_ms": 83.308167,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 248.30933299999998,
-          "total_tps": 64.43575763622223
+          "total_ms": 249.73245799999998,
+          "total_tps": 64.0685641271348
         },
-        "speedup_total_ms": 1.1412500632829616,
+        "speedup_total_ms": 1.1458686039121115,
         "stop_tokens": [
           248046
         ],
@@ -961,9 +961,9 @@
       },
       "pair": 3,
       "time": {
-        "max_rss_bytes": 48251043840,
-        "peak_footprint_bytes": 25970690608,
-        "real_s": 3.45
+        "max_rss_bytes": 48250847232,
+        "peak_footprint_bytes": 25968413112,
+        "real_s": 3.44
       }
     },
     {
@@ -974,19 +974,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -1012,7 +1012,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 311.863917,
+        "mtp_load_ms": 316.400667,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -1034,13 +1034,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 141.453458,
-          "decode_only_tps": 113.1114094078916,
+          "decode_ms": 141.424459,
+          "decode_only_tps": 113.13460283415331,
           "emitted": 16,
-          "prefill_ms": 142.736125,
+          "prefill_ms": 146.541584,
           "target_transitions": 15,
-          "total_ms": 284.189667,
-          "total_tps": 56.30042840368296
+          "total_ms": 287.96612500000003,
+          "total_tps": 55.56209085356828
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -1056,8 +1056,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 166.130625,
-          "decode_only_tps": 96.30975625355047,
+          "decode_ms": 166.05179099999998,
+          "decode_only_tps": 96.35547983941952,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -1067,20 +1067,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 166.130625,
+            "other": 166.05179099999998,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 83.74900000000001,
+          "prefill_ms": 83.708084,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 249.879625,
-          "total_tps": 64.0308308450519
+          "total_ms": 249.759875,
+          "total_tps": 64.06153110062215
         },
-        "speedup_total_ms": 1.137306280974289,
+        "speedup_total_ms": 1.1529719295383216,
         "stop_tokens": [
           248046
         ],
@@ -1122,9 +1122,9 @@
       },
       "pair": 4,
       "time": {
-        "max_rss_bytes": 48256712704,
-        "peak_footprint_bytes": 25974393440,
-        "real_s": 3.47
+        "max_rss_bytes": 48254320640,
+        "peak_footprint_bytes": 25971968584,
+        "real_s": 3.49
       }
     },
     {
@@ -1135,19 +1135,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -1173,7 +1173,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 575.81725,
+        "mtp_load_ms": 582.220709,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -1195,13 +1195,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 141.61275,
-          "decode_only_tps": 112.98417691909802,
+          "decode_ms": 142.055375,
+          "decode_only_tps": 112.63213377177738,
           "emitted": 16,
-          "prefill_ms": 139.177833,
+          "prefill_ms": 138.830958,
           "target_transitions": 15,
-          "total_ms": 280.79066600000004,
-          "total_tps": 56.98195110232047
+          "total_ms": 280.886542,
+          "total_tps": 56.96250125077192
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -1217,8 +1217,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 166.884209,
-          "decode_only_tps": 95.87485895684713,
+          "decode_ms": 167.00370800000002,
+          "decode_only_tps": 95.80625599043584,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -1228,20 +1228,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 166.884209,
+            "other": 167.00370800000002,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 83.12683299999999,
+          "prefill_ms": 83.310709,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 250.011042,
-          "total_tps": 63.99717337284646
+          "total_ms": 250.31441700000002,
+          "total_tps": 63.91961035148846
         },
-        "speedup_total_ms": 1.1231130583424394,
+        "speedup_total_ms": 1.1221348948510625,
         "stop_tokens": [
           248046
         ],
@@ -1283,9 +1283,9 @@
       },
       "pair": 4,
       "time": {
-        "max_rss_bytes": 49251729408,
-        "peak_footprint_bytes": 26606455824,
-        "real_s": 3.66
+        "max_rss_bytes": 49251532800,
+        "peak_footprint_bytes": 26608339960,
+        "real_s": 3.69
       }
     },
     {
@@ -1296,19 +1296,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -1334,7 +1334,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 621.422083,
+        "mtp_load_ms": 591.6675,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -1356,13 +1356,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 140.65875,
-          "decode_only_tps": 113.75047766313862,
+          "decode_ms": 141.744959,
+          "decode_only_tps": 112.87879380599348,
           "emitted": 16,
-          "prefill_ms": 145.448041,
+          "prefill_ms": 147.274459,
           "target_transitions": 15,
-          "total_ms": 286.106833,
-          "total_tps": 55.9231662950182
+          "total_ms": 289.0195,
+          "total_tps": 55.359586463889116
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -1378,8 +1378,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 167.13433400000002,
-          "decode_only_tps": 95.73137737216817,
+          "decode_ms": 165.786792,
+          "decode_only_tps": 96.5094975720382,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -1389,20 +1389,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 167.13433400000002,
+            "other": 165.786792,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 83.404833,
+          "prefill_ms": 84.15475,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 250.53916700000002,
-          "total_tps": 63.86227028526841
+          "total_ms": 249.941542,
+          "total_tps": 64.01496874817232
         },
-        "speedup_total_ms": 1.1419644937192595,
+        "speedup_total_ms": 1.1563483912570245,
         "stop_tokens": [
           248046
         ],
@@ -1444,9 +1444,9 @@
       },
       "pair": 5,
       "time": {
-        "max_rss_bytes": 49252319232,
-        "peak_footprint_bytes": 26607111280,
-        "real_s": 3.82
+        "max_rss_bytes": 49252040704,
+        "peak_footprint_bytes": 26606816344,
+        "real_s": 3.8
       }
     },
     {
@@ -1457,19 +1457,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -1495,7 +1495,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 319.29125000000005,
+        "mtp_load_ms": 314.363375,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -1517,13 +1517,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 142.38125,
-          "decode_only_tps": 112.37434704358897,
+          "decode_ms": 141.391458,
+          "decode_only_tps": 113.16100863745248,
           "emitted": 16,
-          "prefill_ms": 136.748625,
+          "prefill_ms": 145.241083,
           "target_transitions": 15,
-          "total_ms": 279.129958,
-          "total_tps": 57.32097018407462
+          "total_ms": 286.632667,
+          "total_tps": 55.8205740031718
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -1539,8 +1539,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 166.787834,
-          "decode_only_tps": 95.93025831848144,
+          "decode_ms": 165.93679200000003,
+          "decode_only_tps": 96.42225697601769,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -1550,20 +1550,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 166.787834,
+            "other": 165.93679200000003,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 83.801625,
+          "prefill_ms": 83.741625,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 250.589459,
-          "total_tps": 63.84945346005156
+          "total_ms": 249.67841700000002,
+          "total_tps": 64.08243128199582
         },
-        "speedup_total_ms": 1.1138934539141967,
+        "speedup_total_ms": 1.1480073866376683,
         "stop_tokens": [
           248046
         ],
@@ -1605,9 +1605,9 @@
       },
       "pair": 5,
       "time": {
-        "max_rss_bytes": 48250945536,
-        "peak_footprint_bytes": 25970526672,
-        "real_s": 3.47
+        "max_rss_bytes": 48249667584,
+        "peak_footprint_bytes": 25969281536,
+        "real_s": 3.51
       }
     },
     {
@@ -1618,19 +1618,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -1656,7 +1656,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 316.702541,
+        "mtp_load_ms": 312.69725,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -1678,13 +1678,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 141.851,
-          "decode_only_tps": 112.79441103693311,
+          "decode_ms": 141.868041,
+          "decode_only_tps": 112.7808623226143,
           "emitted": 16,
-          "prefill_ms": 149.639667,
+          "prefill_ms": 140.84375,
           "target_transitions": 15,
-          "total_ms": 291.49075000000005,
-          "total_tps": 54.89024951906707
+          "total_ms": 282.71191699999997,
+          "total_tps": 56.594713692242415
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -1700,8 +1700,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 166.15670899999998,
-          "decode_only_tps": 96.29463713078238,
+          "decode_ms": 166.824833,
+          "decode_only_tps": 95.90898256736153,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -1711,20 +1711,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 166.15670899999998,
+            "other": 166.824833,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 84.471166,
+          "prefill_ms": 83.792625,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 250.627875,
-          "total_tps": 63.839666677140364
+          "total_ms": 250.61745800000003,
+          "total_tps": 63.84232019462905
         },
-        "speedup_total_ms": 1.1630420199668534,
+        "speedup_total_ms": 1.1280615454969618,
         "stop_tokens": [
           248046
         ],
@@ -1766,9 +1766,9 @@
       },
       "pair": 6,
       "time": {
-        "max_rss_bytes": 48255680512,
-        "peak_footprint_bytes": 25975310944,
-        "real_s": 3.44
+        "max_rss_bytes": 48254287872,
+        "peak_footprint_bytes": 25971968608,
+        "real_s": 3.47
       }
     },
     {
@@ -1779,19 +1779,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -1817,7 +1817,7 @@
         "logical_verify_n": null,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 576.7169170000001,
+        "mtp_load_ms": 577.242708,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -1839,13 +1839,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 141.175292,
-          "decode_only_tps": 113.33427948567656,
+          "decode_ms": 142.128417,
+          "decode_only_tps": 112.57425036964986,
           "emitted": 16,
-          "prefill_ms": 138.807916,
+          "prefill_ms": 143.428833,
           "target_transitions": 15,
-          "total_ms": 279.98325,
-          "total_tps": 57.14627571470793
+          "total_ms": 285.557333,
+          "total_tps": 56.03077964031832
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -1861,8 +1861,8 @@
           "accepted_per_step": 0.875,
           "accepted_prefix_histogram": [],
           "base_forward_calls": 24,
-          "decode_ms": 167.12958299999997,
-          "decode_only_tps": 95.73409873223942,
+          "decode_ms": 165.341833,
+          "decode_only_tps": 96.76921871308876,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -1872,20 +1872,20 @@
           "phase_ms": {
             "bridge": 0.0,
             "draft": 0.0,
-            "other": 167.12958299999997,
+            "other": 165.341833,
             "restore": 0.0,
             "verify": 0.0
           },
-          "prefill_ms": 83.090333,
+          "prefill_ms": 83.689042,
           "rank_rows": 0,
           "steps": 8,
           "target_state": null,
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 250.21991599999998,
-          "total_tps": 63.94375098423421
+          "total_ms": 249.030875,
+          "total_tps": 64.24906148685379
         },
-        "speedup_total_ms": 1.118948701109787,
+        "speedup_total_ms": 1.1466744153711865,
         "stop_tokens": [
           248046
         ],
@@ -1927,9 +1927,9 @@
       },
       "pair": 6,
       "time": {
-        "max_rss_bytes": 49251860480,
-        "peak_footprint_bytes": 26606603304,
-        "real_s": 3.7
+        "max_rss_bytes": 49251762176,
+        "peak_footprint_bytes": 26608585744,
+        "real_s": 3.77
       }
     }
   ],
@@ -1980,22 +1980,22 @@
       }
     ],
     "fixture": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
-    "recorded_unix_ms": 1786993466884,
+    "recorded_unix_ms": 1786994096630,
     "schema": "qwen-mtp-direct-f32-byte-oracle/v2",
     "source_identity": {
-      "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-      "build_commit_short": "38777fb9b",
+      "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+      "build_commit_short": "c918ff0dc",
       "build_dirty": true,
-      "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+      "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
       "overrides": [
         "allow_dirty"
       ],
       "problems": [
         "dirty"
       ],
-      "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+      "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
       "runtime_dirty": true,
-      "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+      "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
       "schema_version": 2,
       "stamp_error": null,
       "stamp_source": "git",
@@ -2011,19 +2011,19 @@
       "packet": {
         "base_hidden": "PostNorm",
         "build_identity": {
-          "build_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-          "build_commit_short": "38777fb9b",
+          "build_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+          "build_commit_short": "c918ff0dc",
           "build_dirty": true,
-          "build_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "build_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "overrides": [
             "allow_dirty"
           ],
           "problems": [
             "dirty"
           ],
-          "runtime_commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
+          "runtime_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
           "runtime_dirty": true,
-          "runtime_source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734",
+          "runtime_source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7",
           "schema_version": 2,
           "stamp_error": null,
           "stamp_source": "git",
@@ -2049,7 +2049,7 @@
         "logical_verify_n": 2,
         "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
         "mtp_history": "Committed",
-        "mtp_load_ms": 555.044875,
+        "mtp_load_ms": 555.903708,
         "mtp_moe_banks": {
           "bytes": 3221225472,
           "down_dtype": "F32",
@@ -2071,13 +2071,13 @@
         "rank_topk": null,
         "recursive_hidden": "PostNorm",
         "reference": {
-          "decode_ms": 142.867834,
-          "decode_only_tps": 111.9916187712344,
+          "decode_ms": 143.174,
+          "decode_only_tps": 111.75213376730412,
           "emitted": 16,
-          "prefill_ms": 139.911125,
+          "prefill_ms": 139.433417,
           "target_transitions": 15,
-          "total_ms": 282.779042,
-          "total_tps": 56.58127945705397
+          "total_ms": 282.60754199999997,
+          "total_tps": 56.61561572903812
         },
         "semantics": {
           "correction_accounting": "deferred_next_step_carry",
@@ -2102,8 +2102,8 @@
             }
           ],
           "base_forward_calls": 9,
-          "decode_ms": 267.20683399999996,
-          "decode_only_tps": 59.87870804232501,
+          "decode_ms": 267.75133400000004,
+          "decode_only_tps": 59.756938503245685,
           "drafts_attempted": 8,
           "drafts_per_step": 1.0,
           "emitted": 16,
@@ -2111,13 +2111,13 @@
           "final_effective_verify_n": null,
           "mtp_calls": 23,
           "phase_ms": {
-            "bridge": 2.8390839999999997,
-            "draft": 29.962999999999997,
-            "other": 0.025832999999920503,
-            "restore": 0.42000000000000004,
-            "verify": 233.95891699999999
+            "bridge": 2.9970410000000003,
+            "draft": 29.934373,
+            "other": 0.023170000000050095,
+            "restore": 0.426417,
+            "verify": 234.37033299999996
           },
-          "prefill_ms": 74.21858300000001,
+          "prefill_ms": 73.807375,
           "rank_rows": 0,
           "steps": 8,
           "target_state": {
@@ -2137,10 +2137,10 @@
           },
           "target_transitions": null,
           "target_transitions_per_verify": 1.875,
-          "total_ms": 341.425417,
-          "total_tps": 46.862357643397125
+          "total_ms": 341.558709,
+          "total_tps": 46.84406978479357
         },
-        "speedup_total_ms": 0.8282307875163261,
+        "speedup_total_ms": 0.8274054636973112,
         "stop_tokens": [
           248046
         ],
@@ -2182,9 +2182,9 @@
       },
       "reason": "staged packed-N2 baseline failed its preexisting terminal-state assay",
       "time": {
-        "max_rss_bytes": 49252564992,
-        "peak_footprint_bytes": 26607422672,
-        "real_s": 4.63
+        "max_rss_bytes": 49251713024,
+        "peak_footprint_bytes": 26608553000,
+        "real_s": 4.66
       }
     }
   ],
@@ -2193,205 +2193,205 @@
       "arm": null,
       "artifact": "build-info-before.json",
       "direct": null,
-      "ended_utc": "2026-08-17T19:03:09Z",
+      "ended_utc": "2026-08-17T19:13:41Z",
       "event": "build-info-before",
       "event_sequence": 1,
       "exit_status": 0,
       "order": null,
       "pair": null,
-      "started_utc": "2026-08-17T19:03:09Z"
+      "started_utc": "2026-08-17T19:13:40Z"
     },
     {
       "arm": "control",
       "artifact": "packed-control.json",
       "direct": false,
-      "ended_utc": "2026-08-17T19:03:13Z",
+      "ended_utc": "2026-08-17T19:13:45Z",
       "event": "packed-control",
       "event_sequence": 2,
       "exit_status": 1,
       "order": null,
       "pair": null,
-      "started_utc": "2026-08-17T19:03:09Z"
+      "started_utc": "2026-08-17T19:13:41Z"
     },
     {
       "arm": null,
       "artifact": "byte-oracle.json",
       "direct": null,
-      "ended_utc": "2026-08-17T19:04:26Z",
+      "ended_utc": "2026-08-17T19:14:56Z",
       "event": "byte-oracle",
       "event_sequence": 3,
       "exit_status": 0,
       "order": null,
       "pair": null,
-      "started_utc": "2026-08-17T19:03:13Z"
+      "started_utc": "2026-08-17T19:13:45Z"
     },
     {
       "arm": null,
       "artifact": "build-info-after-oracle.json",
       "direct": null,
-      "ended_utc": "2026-08-17T19:04:27Z",
+      "ended_utc": "2026-08-17T19:14:56Z",
       "event": "build-info-after-oracle",
       "event_sequence": 4,
       "exit_status": 0,
       "order": null,
       "pair": null,
-      "started_utc": "2026-08-17T19:04:26Z"
+      "started_utc": "2026-08-17T19:14:56Z"
     },
     {
       "arm": "control",
       "artifact": "pair01-ab-control.json",
       "direct": false,
-      "ended_utc": "2026-08-17T19:04:30Z",
+      "ended_utc": "2026-08-17T19:15:00Z",
       "event": "arm",
       "event_sequence": 5,
       "exit_status": 0,
       "order": "ab",
       "pair": 1,
-      "started_utc": "2026-08-17T19:04:27Z"
+      "started_utc": "2026-08-17T19:14:56Z"
     },
     {
       "arm": "direct",
       "artifact": "pair01-ab-direct.json",
       "direct": true,
-      "ended_utc": "2026-08-17T19:04:34Z",
+      "ended_utc": "2026-08-17T19:15:03Z",
       "event": "arm",
       "event_sequence": 6,
       "exit_status": 0,
       "order": "ab",
       "pair": 1,
-      "started_utc": "2026-08-17T19:04:30Z"
+      "started_utc": "2026-08-17T19:15:00Z"
     },
     {
       "arm": "direct",
       "artifact": "pair02-ba-direct.json",
       "direct": true,
-      "ended_utc": "2026-08-17T19:04:37Z",
+      "ended_utc": "2026-08-17T19:15:07Z",
       "event": "arm",
       "event_sequence": 7,
       "exit_status": 0,
       "order": "ba",
       "pair": 2,
-      "started_utc": "2026-08-17T19:04:34Z"
+      "started_utc": "2026-08-17T19:15:03Z"
     },
     {
       "arm": "control",
       "artifact": "pair02-ba-control.json",
       "direct": false,
-      "ended_utc": "2026-08-17T19:04:41Z",
+      "ended_utc": "2026-08-17T19:15:10Z",
       "event": "arm",
       "event_sequence": 8,
       "exit_status": 0,
       "order": "ba",
       "pair": 2,
-      "started_utc": "2026-08-17T19:04:37Z"
+      "started_utc": "2026-08-17T19:15:07Z"
     },
     {
       "arm": "control",
       "artifact": "pair03-ab-control.json",
       "direct": false,
-      "ended_utc": "2026-08-17T19:04:44Z",
+      "ended_utc": "2026-08-17T19:15:14Z",
       "event": "arm",
       "event_sequence": 9,
       "exit_status": 0,
       "order": "ab",
       "pair": 3,
-      "started_utc": "2026-08-17T19:04:41Z"
+      "started_utc": "2026-08-17T19:15:10Z"
     },
     {
       "arm": "direct",
       "artifact": "pair03-ab-direct.json",
       "direct": true,
-      "ended_utc": "2026-08-17T19:04:48Z",
+      "ended_utc": "2026-08-17T19:15:17Z",
       "event": "arm",
       "event_sequence": 10,
       "exit_status": 0,
       "order": "ab",
       "pair": 3,
-      "started_utc": "2026-08-17T19:04:44Z"
+      "started_utc": "2026-08-17T19:15:14Z"
     },
     {
       "arm": "direct",
       "artifact": "pair04-ba-direct.json",
       "direct": true,
-      "ended_utc": "2026-08-17T19:04:51Z",
+      "ended_utc": "2026-08-17T19:15:21Z",
       "event": "arm",
       "event_sequence": 11,
       "exit_status": 0,
       "order": "ba",
       "pair": 4,
-      "started_utc": "2026-08-17T19:04:48Z"
+      "started_utc": "2026-08-17T19:15:17Z"
     },
     {
       "arm": "control",
       "artifact": "pair04-ba-control.json",
       "direct": false,
-      "ended_utc": "2026-08-17T19:04:55Z",
+      "ended_utc": "2026-08-17T19:15:25Z",
       "event": "arm",
       "event_sequence": 12,
       "exit_status": 0,
       "order": "ba",
       "pair": 4,
-      "started_utc": "2026-08-17T19:04:51Z"
+      "started_utc": "2026-08-17T19:15:21Z"
     },
     {
       "arm": "control",
       "artifact": "pair05-ab-control.json",
       "direct": false,
-      "ended_utc": "2026-08-17T19:04:59Z",
+      "ended_utc": "2026-08-17T19:15:28Z",
       "event": "arm",
       "event_sequence": 13,
       "exit_status": 0,
       "order": "ab",
       "pair": 5,
-      "started_utc": "2026-08-17T19:04:55Z"
+      "started_utc": "2026-08-17T19:15:25Z"
     },
     {
       "arm": "direct",
       "artifact": "pair05-ab-direct.json",
       "direct": true,
-      "ended_utc": "2026-08-17T19:05:02Z",
+      "ended_utc": "2026-08-17T19:15:32Z",
       "event": "arm",
       "event_sequence": 14,
       "exit_status": 0,
       "order": "ab",
       "pair": 5,
-      "started_utc": "2026-08-17T19:04:59Z"
+      "started_utc": "2026-08-17T19:15:28Z"
     },
     {
       "arm": "direct",
       "artifact": "pair06-ba-direct.json",
       "direct": true,
-      "ended_utc": "2026-08-17T19:05:06Z",
+      "ended_utc": "2026-08-17T19:15:36Z",
       "event": "arm",
       "event_sequence": 15,
       "exit_status": 0,
       "order": "ba",
       "pair": 6,
-      "started_utc": "2026-08-17T19:05:02Z"
+      "started_utc": "2026-08-17T19:15:32Z"
     },
     {
       "arm": "control",
       "artifact": "pair06-ba-control.json",
       "direct": false,
-      "ended_utc": "2026-08-17T19:05:10Z",
+      "ended_utc": "2026-08-17T19:15:39Z",
       "event": "arm",
       "event_sequence": 16,
       "exit_status": 0,
       "order": "ba",
       "pair": 6,
-      "started_utc": "2026-08-17T19:05:06Z"
+      "started_utc": "2026-08-17T19:15:36Z"
     },
     {
       "arm": null,
       "artifact": "build-info-after-campaign.json",
       "direct": null,
-      "ended_utc": "2026-08-17T19:05:10Z",
+      "ended_utc": "2026-08-17T19:15:39Z",
       "event": "build-info-after-campaign",
       "event_sequence": 17,
       "exit_status": 0,
       "order": null,
       "pair": null,
-      "started_utc": "2026-08-17T19:05:10Z"
+      "started_utc": "2026-08-17T19:15:39Z"
     }
   ],
   "gates": {
@@ -2407,52 +2407,52 @@
   },
   "pairs": [
     {
-      "max_rss_deleted_bytes": 999096320,
-      "mtp_load_saving_ms": 244.73562500000014,
+      "max_rss_deleted_bytes": 1001603072,
+      "mtp_load_saving_ms": 263.70375100000007,
       "order": "ab",
       "pair": 1,
-      "peak_footprint_deleted_bytes": 632357416,
-      "whole_process_wall_saving_s": 0.13999999999999968
+      "peak_footprint_deleted_bytes": 640942800,
+      "whole_process_wall_saving_s": 0.29000000000000004
     },
     {
-      "max_rss_deleted_bytes": 997556224,
-      "mtp_load_saving_ms": 250.12237400000004,
+      "max_rss_deleted_bytes": 996032512,
+      "mtp_load_saving_ms": 246.29125000000005,
       "order": "ba",
       "pair": 2,
-      "peak_footprint_deleted_bytes": 636715464,
-      "whole_process_wall_saving_s": 0.18000000000000016
-    },
-    {
-      "max_rss_deleted_bytes": 1001422848,
-      "mtp_load_saving_ms": 247.00754100000006,
-      "order": "ab",
-      "pair": 3,
-      "peak_footprint_deleted_bytes": 636650168,
+      "peak_footprint_deleted_bytes": 635175368,
       "whole_process_wall_saving_s": 0.25
     },
     {
-      "max_rss_deleted_bytes": 995016704,
-      "mtp_load_saving_ms": 263.95333299999993,
+      "max_rss_deleted_bytes": 1001291776,
+      "mtp_load_saving_ms": 265.51470800000004,
+      "order": "ab",
+      "pair": 3,
+      "peak_footprint_deleted_bytes": 638501536,
+      "whole_process_wall_saving_s": 0.20999999999999996
+    },
+    {
+      "max_rss_deleted_bytes": 997212160,
+      "mtp_load_saving_ms": 265.82004200000006,
       "order": "ba",
       "pair": 4,
-      "peak_footprint_deleted_bytes": 632062384,
-      "whole_process_wall_saving_s": 0.18999999999999995
+      "peak_footprint_deleted_bytes": 636371376,
+      "whole_process_wall_saving_s": 0.19999999999999973
     },
     {
-      "max_rss_deleted_bytes": 1001373696,
-      "mtp_load_saving_ms": 302.130833,
+      "max_rss_deleted_bytes": 1002373120,
+      "mtp_load_saving_ms": 277.304125,
       "order": "ab",
       "pair": 5,
-      "peak_footprint_deleted_bytes": 636584608,
-      "whole_process_wall_saving_s": 0.34999999999999964
+      "peak_footprint_deleted_bytes": 637534808,
+      "whole_process_wall_saving_s": 0.29000000000000004
     },
     {
-      "max_rss_deleted_bytes": 996179968,
-      "mtp_load_saving_ms": 260.0143760000001,
+      "max_rss_deleted_bytes": 997474304,
+      "mtp_load_saving_ms": 264.545458,
       "order": "ba",
       "pair": 6,
-      "peak_footprint_deleted_bytes": 631292360,
-      "whole_process_wall_saving_s": 0.26000000000000023
+      "peak_footprint_deleted_bytes": 636617136,
+      "whole_process_wall_saving_s": 0.2999999999999998
     }
   ],
   "protocol": {
@@ -2542,6 +2542,7 @@
         "pair": 6
       }
     ],
+    "benchmarked_commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
     "generated_requested": 16,
     "model": "/Users/tito/models/unsloth-Qwen3.6-35B-A3B-MTP-GGUF/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf",
     "no_warmup": true,
@@ -2564,44 +2565,44 @@
   },
   "schema": "qwen-mtp-direct-f32-destination/v3",
   "source_identity": {
-    "commit": "38777fb9b1e7f9e908b7c02781f900c16839e5b6",
-    "source_state": "git-source-sha256-v2:a9886c41e9d7c05f5f774ecf4be64f087464c84c3be8cce0cd70ae4a411f5734"
+    "commit": "c918ff0dc3987c88317f225858d31f2b62430eec",
+    "source_state": "git-source-sha256-v2:500f12d186993a989dd51a6a20dbd4a25e0ab8f4f00d8052e8d88081bbe48dc7"
   },
   "summary": {
-    "ab_median_mtp_load_saving_ms": 247.00754100000006,
-    "ba_median_mtp_load_saving_ms": 260.0143760000001,
+    "ab_median_mtp_load_saving_ms": 265.51470800000004,
+    "ba_median_mtp_load_saving_ms": 264.545458,
     "candidate_wins": 6,
-    "control_median_max_rss_bytes": 49251794944.0,
-    "control_median_mtp_load_ms": 572.9281040000001,
-    "control_median_peak_footprint_bytes": 26607226028.0,
-    "control_median_whole_process_wall_s": 3.68,
+    "control_median_max_rss_bytes": 49251901440.0,
+    "control_median_mtp_load_ms": 579.6308955,
+    "control_median_peak_footprint_bytes": 26608315408.0,
+    "control_median_whole_process_wall_s": 3.67,
     "control_mtp_load_ms": [
-      570.0389580000001,
-      562.4790830000001,
-      560.2635,
-      575.81725,
-      621.422083,
-      576.7169170000001
+      571.763667,
+      561.565875,
+      582.019083,
+      582.220709,
+      591.6675,
+      577.242708
     ],
-    "direct_median_max_rss_bytes": 48253190144.0,
-    "direct_median_mtp_load_ms": 314.97925,
-    "direct_median_peak_footprint_bytes": 25973090912.0,
-    "direct_median_whole_process_wall_s": 3.45,
+    "direct_median_max_rss_bytes": 48252731392.0,
+    "direct_median_mtp_load_ms": 314.81899999999996,
+    "direct_median_peak_footprint_bytes": 25970625060.0,
+    "direct_median_whole_process_wall_s": 3.455,
     "direct_mtp_load_ms": [
-      325.30333299999995,
-      312.356709,
-      313.25595899999996,
-      311.863917,
-      319.29125000000005,
-      316.702541
+      308.059916,
+      315.27462499999996,
+      316.504375,
+      316.400667,
+      314.363375,
+      312.69725
     ],
-    "marginal_median_load_reduction_fraction": 0.4502290116317982,
-    "median_max_rss_deleted_bytes": 998326272.0,
-    "median_paired_mtp_load_saving_ms": 255.06837500000006,
-    "median_peak_footprint_deleted_bytes": 634471012.0,
-    "median_speedup": 1.8189391967883601,
-    "median_whole_process_wall_saving_s": 0.21999999999999997,
-    "paired_saving_over_control_median": 0.4452013668367716,
+    "marginal_median_load_reduction_fraction": 0.4568629753104664,
+    "median_max_rss_deleted_bytes": 999383040.0,
+    "median_paired_mtp_load_saving_ms": 265.030083,
+    "median_peak_footprint_deleted_bytes": 637075972.0,
+    "median_speedup": 1.8411560150435649,
+    "median_whole_process_wall_saving_s": 0.27,
+    "paired_saving_over_control_median": 0.4572394002072307,
     "pairs": 6
   },
   "target_generated_token_sha256": "3af19c4e6c6bc7ca867fd41488b65ef22933de2c31e6c5541c43654591a856a6"

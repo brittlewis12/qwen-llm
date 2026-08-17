@@ -1,0 +1,14 @@
+[metal-load] native quantized token embedding policy: auto-promoted (Q4_K [5120, 248320])
+[metal-load-ledger] source=851/16806250496 direct_copy=851/16806250496 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+[gdn-proj-micro] model=/Users/tito/models/Qwen3.8-27B-Q4_K_M.gguf layers=48 h=5120 conv_dim=10240 v_dim=6144 tokens=2 warmup=5 iters=20
+phase	mode	tokens	bytes_gb_per_token	avg_wall_ms	avg_gpu_ms	avg_gpu_ms_per_tok	eff_weight_gb_s
+qkv	matvec_seq	2	1.7400	7.6550	7.5166	3.7583	463.0
+qkv	matmat_batch	2	1.7400	6.1095	5.9577	2.9789	584.1
+z	matvec_seq	2	0.8493	4.0738	3.9474	1.9737	430.3
+z	matmat_batch	2	0.8493	3.2060	3.1093	1.5546	546.3
+qkv+z	matvec_seq	2	2.5893	11.5547	11.4258	5.7129	453.2
+qkv+z	matmat_batch	2	2.5893	9.2021	9.0410	4.5205	572.8
+beta	matvec+sigmoid	2	0.0472	1.0058	0.8891	0.4445	106.1
+beta	matvec_sigmoid_fused	2	0.0472	1.4001	1.2817	0.6408	73.6
+out	matvec_seq	2	1.0381	5.7163	5.5765	2.7883	372.3
+out	matmat_batch	2	1.0381	5.7769	5.6455	2.8228	367.8

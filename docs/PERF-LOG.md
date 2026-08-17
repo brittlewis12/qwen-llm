@@ -78,6 +78,102 @@ row-specific bound below 20-25% fully charged work, and GDN factors only for an
 adaptive representation with an explicit state-error/continuation contract.
 Evidence: `docs/bench/2026-08-17-structural-thinness-falsifiers/`.
 
+## 2026-08-15 — Qwen3.8 Packed D1 Reframe And Exact Redundancy KILL
+
+Status: the old 0.788x D1 result was a topology failure, not an MTP-head
+ceiling. Ordinary packed D1/N2 plus exact work deletion reaches a 1.061x short
+request pilot. It remains research-only because the generation-heavy cell is not
+yet positive and the long-context shared-KV scratch is not lazy.
+
+- The legacy D1 loop target-ran the carry and then target-ran an accepted draft
+  serially, making acceptance cancel from the speed equation. The replacement
+  verifies `[carry, draft]` in one physical N2 target packet and preserves the
+  target-authoritative greedy stream.
+- Q5_K N2 no longer computes a 32-column MMA tile to retain two columns. Two
+  mature row-view matvecs move the all-48-GDN output-projection micro from 16.10
+  to 5.64 ms and save about 10.3 ms per verifier packet. The final verifier row
+  is also unreachable as a partial-restore source, so its GDN/conv checkpoint
+  publication is skipped, saving 33.2 ms over 34 packets (0.98 ms/packet) in the
+  retained final pair.
+- Packed base prefill captures every final residual row in one target pass, then
+  executes only the shifted MTP KV bridge calls required by official post/post
+  semantics. In the direct 64-token pair, speculative prefill moves
+  `992.0 -> 369.9 ms`; decode is unchanged at `2349 ms`; total moves from a
+  `0.868x` rollback to a `1.061x` candidate. All 64 IDs and a 16-step terminal
+  continuation audit pass.
+- A forced 512-token candidate is `0.961x` total with acceptance 0.862. The next
+  process changes operating point from 19.95 to 25.95 seconds baseline decode,
+  consistent with thermal drift but lacking temperature telemetry. This closes
+  any immediate promotion claim rather than establishing a precise regression.
+- The N2 verifier rereads nearly the same attention prefix for both causal rows.
+  An opt-in 24Q/4KV group-6 kernel shares each K/V tile while retaining separate
+  online-softmax states. Measured outputs print `max|Δ|=0.00e0`, which is
+  numerical identity rather than a byte-level proof; at base position
+  20,480 a complete attention layer moves `4.10 -> 1.94 ms`, and at 32,768 the
+  attention body moves `4.71 -> 2.33 ms`. Short/medium cells do not reliably win,
+  so execution is gated at 16K and remains opt-in behind
+  `QWEN_MTP_ATTN_Q2_SHARED_KV=1` pending lazy scratch and a product packet.
+- The reusable CPU-only payload census hashes all 866 tensors / 17,095,778,304
+  bytes and 3,297,792 rows across 130 typed same-input projection groups. Exact
+  byte verification finds zero duplicate tensors, zero duplicate rows, and zero
+  reclaimable payload bytes. Runtime is 48.60 seconds with 195,362,816-byte max
+  RSS and zero swaps. Whole-descriptor duplicates and exact stored-row duplicates
+  are closed for the 373 selected front-projection tensors, not arbitrary
+  subranges or excluded output/down projections.
+- Recursive D3/N4 and D7/N8 remain closed; the perfect D7/N8 oracle's 1.417x
+  result executes zero MTP calls, skipping prompt history, draft bodies, and KV
+  bridges. It is a verifier-only structural ceiling, not a charged total. Generic
+  GDN algebra, exact payload deduplication, and local recurrence retunes stay
+  below current leverage.
+- Operator observation: no residency API, pre-wire, `mlock`, cache-bypass read,
+  or residency-coupled A10B path ran. All qwen processes exited; the user's tiny
+  idle OvisOCR server remained untouched.
+
+Decision: retain packed D1/N2 behind explicit research surfaces. Next evidence
+must interleave thermal order across named request archetypes and allocate the
+long-context partial scratch only when selected. Keep the native embedding win,
+capability packet, reasoning-effort controls, and exact repeated-prefix reuse
+ahead of any broad MTP default. Evidence:
+`docs/bench/2026-08-14-qwen38-27b-launch/`.
+
+## 2026-08-14 — Qwen3.8 27B Text Launch And Native Embedding GO
+
+Status: the pinned Unsloth Qwen3.8-27B Q4_K_M asset runs through the ordinary
+text contract. Native quantized embedding promotion is retained; current native
+MTP execution is not promoted.
+
+- The 64-layer text backbone has exactly the same 16,806,250,496 base source
+  bytes and 851 base requests as Qwen3.6-27B. Qwen3.8 adds one detached
+  289,527,808-byte MTP head.
+- MTP presence alone had blocked the supported 715,161,600-byte Q4_K embedding,
+  forcing a 5,085,593,600-byte F32 conversion. Removing that coupling saves
+  4,370,432,000 private bytes (4.07 GiB). Live ordinary and MTP paths pass, and
+  observed warm-filesystem load moves directionally from about 2.85 to 2.06 s.
+- Default xhigh and no-thinking prompt transitions both reach visible answers.
+  A trivial default-xhigh request needed 174 generated tokens; a 128-token cap
+  ended inside reasoning, so mode and answer-budget policy remain product work.
+- Counterbalanced synthetic suites do not support a throughput-win claim. In the
+  reversed packet Qwen3.8/Qwen3.6 is 0.988x pp512, 0.984x pp8192, and 0.944x
+  tg128; absolute cross-campaign drift is too large for finer attribution.
+- The maintained no-thinking retention row is 24/24 retained and strict in both
+  misleading and neutral cells. It reuses the frozen Qwen3.6 prompt bytes and
+  matches that anchor's historical ceiling, so it is a guardrail, not a general
+  capability ranking.
+- Native MTP preserves the greedy stream in these probes but is uneconomic:
+  D1/D3-N4/D7-N8 total speedups are 0.788x/0.670x/0.740x. Recursive D7
+  acceptance falls to 0.293. A perfect-draft D7/N8 oracle reaches 1.417x total
+  and 2.34x decode, proving verifier leverage but not a deployable drafter. Do
+  not tune the current scheduler; reopen only for a changed draft mechanism that
+  prices near the oracle.
+- Operator observation: no Metal residency set, pre-wire, `mlock`, cache-bypass
+  read, or residency-coupled pread path ran. Every model process exited normally
+  and memory remained healthy.
+
+Decision: use Qwen3.8 as the current text capability candidate, retain Qwen3.6 as
+the regression comparator, and prioritize a small executable coding/reasoning
+packet plus reasoning-effort controls. Keep vision, tools, and production MTP as
+separate gates. Evidence: `docs/bench/2026-08-14-qwen38-27b-launch/`.
+
 ## 2026-08-13 — DeepSeek V4 Maintained Retention Quality Rows
 
 Status: REAP quality governance now has a maintained v4.1 fixture, hardened

@@ -1,0 +1,1 @@
+[attn-prefill-micro] base_pos=32768 rows=2 nwg=64 qt=2 decode_loop_ms=4.71 packed_ms=2.33 speedup=2.020 max|Δ|=0.00e0 cos=1.000000

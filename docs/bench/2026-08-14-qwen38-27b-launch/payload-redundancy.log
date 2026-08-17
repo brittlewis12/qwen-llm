@@ -1,0 +1,20 @@
+[payload-redundancy] hashing 866 tensors (17095778304 bytes) and 3297792 projection rows
+[payload-redundancy] exact duplicates: tensors=0 rows=0 tensor_redundant_bytes=0 row_redundant_bytes=0 (scopes may overlap)
+       48.60 real        47.74 user         0.85 sys
+           195362816  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               12169  page reclaims
+                   5  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 315  involuntary context switches
+        824942546459  instructions retired
+        192116679416  cycles elapsed
+           181420608  peak memory footprint

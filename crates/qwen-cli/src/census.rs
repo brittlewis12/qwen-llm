@@ -2,6 +2,7 @@
 
 #[allow(dead_code)]
 mod messages;
+mod payload_redundancy;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, ValueEnum};
@@ -53,6 +54,11 @@ struct Args {
     /// Thinking policy used by the shared Qwen messages renderer.
     #[arg(long, value_enum, default_value_t = ThinkingPolicy::Auto)]
     thinking: ThinkingPolicy,
+
+    /// Hash every tensor and exact-check rows in typed same-input front
+    /// projection groups. This is CPU-only and uses bounded retained-file reads.
+    #[arg(long)]
+    payload_redundancy: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -207,7 +213,12 @@ fn main() -> Result<()> {
         .into_iter()
         .filter_map(|name| std::env::var_os(name).map(|_| name))
         .collect::<Vec<_>>();
-    let document = json!({
+    let payload_redundancy = if args.payload_redundancy {
+        Some(payload_redundancy::census(&gguf, &model)?)
+    } else {
+        None
+    };
+    let mut document = json!({
         "schema_version": SCHEMA_VERSION,
         "tool": {
             "name": "qwen-census",
@@ -241,6 +252,9 @@ fn main() -> Result<()> {
         "loader": loader,
         "conversations": conversations,
     });
+    if let Some(payload_redundancy) = payload_redundancy {
+        document["payload_redundancy"] = payload_redundancy;
+    }
     serde_json::to_writer_pretty(std::io::stdout().lock(), &document)
         .context("write census JSON")?;
     println!();

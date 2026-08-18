@@ -159,7 +159,6 @@ pub fn tracked_source_state(repo: &Path) -> Option<String> {
     let index = git_bytes(&root, &["ls-files", "--stage", "-z"])?;
     let index_flags = git_bytes(&root, &["ls-files", "-v", "-z"])?;
     let tracked = git_bytes(&root, &["ls-files", "-z"])?;
-    let untracked = git_bytes(&root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
 
     let mut hasher = Sha256::new();
     hasher.update(b"qwen-git-source-state-v2\0");
@@ -167,18 +166,11 @@ pub fn tracked_source_state(repo: &Path) -> Option<String> {
     hash_section(&mut hasher, b"index", &index);
     hash_section(&mut hasher, b"index-flags", &index_flags);
     hash_section(&mut hasher, b"tracked-paths", &tracked);
-    hash_section(&mut hasher, b"untracked-paths", &untracked);
     for path in tracked
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
     {
         hash_worktree_entry(&mut hasher, &root, b"tracked", path)?;
-    }
-    for path in untracked
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-    {
-        hash_worktree_entry(&mut hasher, &root, b"untracked", path)?;
     }
     Some(format!("{SOURCE_STATE_PREFIX}{:x}", hasher.finalize()))
 }

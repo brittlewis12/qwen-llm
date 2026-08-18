@@ -300,6 +300,21 @@ pub fn prefetch_opened_gguf(gguf: &GgufFile, config: &LoadedModelConfig) -> Pref
     )
 }
 
+/// Exact `qwen_diag` line emitted when prefetch is suppressed on the
+/// authenticated-disposable auto-A3B direct-pread path.
+///
+/// Downstream profile scripts (v0625, v0651, v0652, v0626, v0628) anchor
+/// `stderr.count(SUPPRESSION_LINE) == 1` and `line.startswith(...)`
+/// against this exact string, so the tracing subscriber and the emit
+/// site must both keep it byte-for-byte stable. This constant is the
+/// single source of truth — tests in `qwen-cli::tracing_init` pin it,
+/// and [`apply_prefetch_policy`] emits it verbatim.
+pub const AUTHENTICATED_DISPOSABLE_AUTO_A3B_PREAD_SUPPRESSION_LINE: &str = concat!(
+    "[runtime-prefetch] schema=1 configured=cold-only action=suppressed ",
+    "reason=authenticated-disposable-auto-a3b-direct-pread ",
+    "profile=a3b-q4km-v1 population=pread",
+);
+
 /// Runs the prefetch policy against the freshly-opened GGUF and returns
 /// a per-shard outcome record for observability. On any I/O error we
 /// log via `tracing::warn` and mark the shard as `skipped: true` — a
@@ -317,11 +332,19 @@ fn apply_prefetch_policy(
         reason: PrefetchSuppressionReason::AuthenticatedDisposableAutoA3bDirectPread,
     } = action
     {
-        eprintln!(concat!(
-            "[runtime-prefetch] schema=1 configured=cold-only action=suppressed ",
-            "reason=authenticated-disposable-auto-a3b-direct-pread ",
-            "profile=a3b-q4km-v1 population=pread"
-        ));
+        // Sole `[runtime-prefetch]` emitter in the tree. Migrated from
+        // `eprintln!` to the `qwen_diag` target; the CLI subscriber prints
+        // `AUTHENTICATED_DISPOSABLE_AUTO_A3B_PREAD_SUPPRESSION_LINE`
+        // verbatim so profile scripts (v0625, v0651, v0652, v0626, v0628)
+        // that anchor `line.startswith("[runtime-prefetch]")` or
+        // `stderr.count(SUPPRESSION_LINE)` keep matching. The literal
+        // lives in one place so byte-format tests can pin the same
+        // string the emit site uses.
+        tracing::info!(
+            target: "qwen_diag",
+            "{}",
+            AUTHENTICATED_DISPOSABLE_AUTO_A3B_PREAD_SUPPRESSION_LINE,
+        );
         return PrefetchOutcome::suppressed(config.prefetch_policy, action);
     }
 

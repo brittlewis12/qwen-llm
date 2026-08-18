@@ -39,6 +39,10 @@ use qwen_llm::gguf::GgufFile;
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
 use qwen_llm::prefetch;
 
+#[path = "support/diag_subscriber.rs"]
+mod diag_subscriber;
+use diag_subscriber::install_example_diag_subscriber;
+
 #[derive(Debug, Default)]
 struct Args {
     model: Option<PathBuf>,
@@ -120,6 +124,7 @@ fn arm_label(args: &Args) -> &'static str {
 }
 
 fn main() {
+    install_example_diag_subscriber();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

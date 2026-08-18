@@ -291,8 +291,13 @@ fn native_quant_embedding_mode() -> NativeQuantEmbeddingMode {
             Err(std::env::VarError::NotUnicode(_)) => NativeQuantEmbeddingMode::Invalid,
         };
         if mode == NativeQuantEmbeddingMode::Invalid {
-            eprintln!(
-                "[metal-load] invalid QWEN_NATIVE_QUANT_EMBED value; disabling native embeddings"
+            // Not routed through `qwen_diag`: no profile script parses this
+            // specific `[metal-load] invalid …` line (unlike sibling
+            // `[metal-load]` load-time lines). The default `Full` formatter
+            // gives operators the visible `WARN` badge they need to notice
+            // a misconfigured environment variable.
+            tracing::warn!(
+                "[metal-load] invalid QWEN_NATIVE_QUANT_EMBED value; disabling native embeddings",
             );
         }
         mode
@@ -1279,14 +1284,27 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Shared emitter for load-time diagnostic lines (all the
+/// `[metal-load]`, `[metal-load-ledger]`, `[metal-gguf-parallel-*]` etc.
+/// prefixes). Historically these went straight to `stderr` via
+/// `eprintln!`; they now go through `tracing::info!` at the `qwen_diag`
+/// target so that
+///
+/// * the CLI's `DiagAwareFormat` emits them as bare bodies for the
+///   downstream Python profile scripts (byte-for-byte compatible), and
+/// * `RUST_LOG=qwen_diag=off` can suppress them without silencing real
+///   warnings/errors from other targets.
+///
+/// Test builds also push each formatted line into a per-thread capture
+/// buffer that `capture_metal_load_lines` drains for assertions.
 fn emit_metal_load_line(arguments: std::fmt::Arguments<'_>) {
     #[cfg(not(test))]
-    eprintln!("{arguments}");
+    tracing::info!(target: "qwen_diag", "{arguments}");
 
     #[cfg(test)]
     {
         let line = arguments.to_string();
-        eprintln!("{line}");
+        tracing::info!(target: "qwen_diag", "{}", line);
         METAL_LOAD_TEST_LINES.with(|lines| {
             if let Some(lines) = lines.borrow_mut().as_mut() {
                 lines.push(line);
@@ -3614,9 +3632,10 @@ impl<'a> MetalWeightLoader<'a> {
         if weight_dtype_kept_native(desc.dtype) {
             return self.load_direct(desc);
         }
-        eprintln!(
+        tracing::info!(
+            target: "qwen_diag",
             "[metal-load] {} is {:?}; dequanting to F32 (no active native path)",
-            desc.name, desc.dtype
+            desc.name, desc.dtype,
         );
         self.load_f32(desc)
     }
@@ -4256,11 +4275,16 @@ fn planned_owned_storage_for_load(
             "forced owned arena physical realization drifted".to_string(),
         ));
     }
-    eprintln!(
+    // Migrated from `eprintln!` to `qwen_diag`; consumed by v0598 (owned
+    // arena pilot) which anchors `line.startswith("[metal-gguf-owned]")`.
+    // The CLI subscriber's bare-body renderer keeps the byte format so
+    // that downstream match logic continues to work without changes.
+    tracing::info!(
+        target: "qwen_diag",
         concat!(
             "[metal-gguf-owned] windows=1 window_bytes={} gaps={} fallback=1/{} ",
             "resources=2/{} workers={} page={} alignment={} allocation_ms={:.3} ",
-            "copy_ms={:.3} ready_ms={:.3}"
+            "copy_ms={:.3} ready_ms={:.3}",
         ),
         window_bytes,
         GGUF_OWNED_A3B_GAP_BYTES,
@@ -4895,12 +4919,17 @@ fn planned_retained_storage_for_load(
             )
         })
         .count();
-    eprintln!(
+    // Migrated from `eprintln!` to `qwen_diag`; consumed by v0595/v0596
+    // and the dense-27b parallel-pread scripts (v0605 etc.) that anchor
+    // `line.startswith("[metal-gguf-retained]")` and parse the
+    // `source=/direct_copy=` fields.
+    tracing::info!(
+        target: "qwen_diag",
         concat!(
             "[metal-gguf-retained] windows={} window_bytes={} direct={} view={}/{} ",
             "alias={}/{} fallback={}/{} page={} max_buffer={} alignment={} ",
             "prefault={} prefault_pages={} prefault_bytes={} prefault_ms={:.3} ",
-            "checksum={:#018x}"
+            "checksum={:#018x}",
         ),
         plan.windows.len(),
         window_bytes,
@@ -5019,11 +5048,15 @@ fn direct_storage_for_load(
     } else {
         None
     };
-    eprintln!(
+    // Migrated from `eprintln!` to `qwen_diag`; consumed by v0593 (no-copy
+    // demand-paged) which uses `re.match(r"^\[metal-...")` anchored regex
+    // on the line body. Bare-body rendering keeps the anchor intact.
+    tracing::info!(
+        target: "qwen_diag",
         concat!(
             "[metal-gguf-no-copy] mapped={} exposed={} suffix={} page={} pages={} ",
             "alignment={} prefault={} prefault_pages={} prefault_ms={:.3} ",
-            "checksum={:#018x}"
+            "checksum={:#018x}",
         ),
         backing.mapped_len(),
         backing.exposed_len(),

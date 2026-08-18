@@ -9,6 +9,7 @@ mod fixed_cohort_jsonl;
 mod messages;
 mod qwen_file_root;
 mod shutdown;
+mod tracing_init;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
@@ -2360,13 +2361,7 @@ fn main() -> std::process::ExitCode {
 
 fn run() -> Result<()> {
     shutdown::install()?;
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    tracing_init::install_default_subscriber();
 
     let matches = Args::command().get_matches();
     let explicit_options = matches.subcommand().map_or_else(
@@ -6126,12 +6121,16 @@ fn run_single_turn(
         } else {
             "stats".to_owned()
         };
-        eprintln!(
+        // Single-prompt stats line consumed by v0622/23/38/39/40. The
+        // `qwen_diag` target keeps the bare `stats: prompt_tokens=…`
+        // format that those scripts anchor `re.fullmatch` against.
+        tracing::info!(
+            target: "qwen_diag",
             concat!(
                 "{}: prompt_tokens={} generated_tokens={} transitions={} stop_reason={} ",
                 "load_ms={:.1} prefill_ms={:.1} ttft_ms={:.1} ",
                 "decode_tps={:.2} transition_tps={:.2} cache_entries={} ",
-                "cache_mib={:.1}/{:.1}"
+                "cache_mib={:.1}/{:.1}",
             ),
             stats_prefix,
             result.prompt_ids.len(),
@@ -7245,7 +7244,13 @@ fn run_requests_jsonl(
     );
 
     let stats = loaded.prefix_cache_stats();
-    eprintln!(
+    // JSONL aggregate stats line. No existing script pins this grammar
+    // (the per-request stats in `stats: prompt_tokens=…` are the anchored
+    // ones), but keep it flowing through `qwen_diag` for consistency and
+    // so operators get a summary in interactive JSONL runs. Per-request
+    // detail is available via `--request-stats <path>` when needed.
+    tracing::info!(
+        target: "qwen_diag",
         "stats: requests={} cache_entries={} cache_mib={:.1}/{:.1}",
         n_requests,
         stats.entries,

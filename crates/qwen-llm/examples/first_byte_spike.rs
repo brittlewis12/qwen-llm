@@ -28,6 +28,10 @@
 
 use std::io::Write;
 use std::os::unix::fs::MetadataExt;
+
+#[path = "support/diag_subscriber.rs"]
+mod diag_subscriber;
+use diag_subscriber::install_example_diag_subscriber;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -336,6 +340,7 @@ fn argmax(logits: &[f32]) -> usize {
 }
 
 fn main() {
+    install_example_diag_subscriber();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

@@ -1170,7 +1170,10 @@ def child_environment() -> tuple[dict[str, str], dict[str, Any]]:
         {
             "QWEN_DSV4_PREFETCH": "off",
             "QWEN_DSV4_RESIDENCY_SET": "0",
-            "RUST_LOG": "warn",
+            # `warn` for tracing generally, but keep the `qwen_diag`
+            # bare-body load diagnostics (`[metal-load-ledger]` etc.) at
+            # `info` so failure-artifact stderr tails still capture them.
+            "RUST_LOG": "warn,qwen_diag=info",
         }
     )
     qwen_controls = sorted(key for key in environment if key.startswith("QWEN_"))
@@ -1184,7 +1187,7 @@ def child_environment() -> tuple[dict[str, str], dict[str, Any]]:
         "overlay": {
             "QWEN_DSV4_PREFETCH": "off",
             "QWEN_DSV4_RESIDENCY_SET": "0",
-            "RUST_LOG": "warn",
+            "RUST_LOG": "warn,qwen_diag=info",
         },
     }
     return environment, record

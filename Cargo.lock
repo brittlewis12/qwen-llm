@@ -1149,6 +1149,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
  "unicode-general-category",
 ]
 

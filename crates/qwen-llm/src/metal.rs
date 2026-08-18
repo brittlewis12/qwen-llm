@@ -1022,9 +1022,21 @@ fn open_metal_process_lease(path: &Path, wait: bool) -> Result<MetalProcessLease
                     path.display(),
                 )));
             }
-            eprintln!(
+            // No profile script anchors this line, so choosing the
+            // `qwen_diag` target (bare body, no `WARN` badge) is a
+            // stylistic call rather than a byte-preservation requirement:
+            // operators have hit `metal: waiting for process lease` at
+            // column zero for years, and preserving that muscle-memory
+            // anchor for the "why is it hanging?" case reads better than
+            // burying it under a timestamp+level+target prefix. Level is
+            // `warn` rather than `info` so it survives `RUST_LOG=warn`
+            // while an operator investigates the hang; severity here is a
+            // filter directive, not a visual marker. Users who want it
+            // gone can `RUST_LOG=qwen_diag=off`.
+            tracing::warn!(
+                target: "qwen_diag",
                 "metal: waiting for process lease {} ({owner})",
-                path.display()
+                path.display(),
             );
             flock_file(&file, libc::LOCK_EX).map_err(|error| {
                 MetalError::ProcessLease(format!("wait for {}: {error}", path.display()))
@@ -1075,8 +1087,12 @@ fn host_wired_memory_is_unsafe(wired_bytes: u64, physical_bytes: u64) -> bool {
 fn ensure_host_wired_memory_is_safe() -> Result<(), MetalError> {
     if cfg!(test) || crate::env_flag::read_default_off(METAL_PROCESS_LEASE_SKIP_WIRED_GATE_ENV) {
         if !cfg!(test) {
-            eprintln!(
-                "metal: bypassing wired-memory poison gate via {METAL_PROCESS_LEASE_SKIP_WIRED_GATE_ENV}=1"
+            // Not routed through `qwen_diag`: no profile script parses this
+            // line, so we prefer the default `Full` formatter — the visible
+            // `WARN` badge matters for a safety-gate bypass and the extra
+            // module-path prefix is fine.
+            tracing::warn!(
+                "metal: bypassing wired-memory poison gate via {METAL_PROCESS_LEASE_SKIP_WIRED_GATE_ENV}=1",
             );
         }
         return Ok(());

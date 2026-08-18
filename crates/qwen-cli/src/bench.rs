@@ -40,6 +40,7 @@ mod response_shape_runtime;
 mod shutdown;
 #[path = "../source_identity.rs"]
 mod source_identity;
+mod tracing_init;
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -2777,12 +2778,7 @@ fn main() -> std::process::ExitCode {
 
 fn run() -> Result<()> {
     shutdown::install()?;
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    tracing_init::install_default_subscriber();
 
     let args = Args::parse();
     let policy = BuildIdentityPolicy {

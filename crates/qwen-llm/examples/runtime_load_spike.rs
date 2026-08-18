@@ -28,6 +28,10 @@ use std::time::{Duration, Instant};
 
 use qwen_llm::cache_probe::{invalidate_file_cache, probe_file_residency};
 use qwen_llm::pid_metrics::{PidDelta, PidSnapshot};
+
+#[path = "support/diag_subscriber.rs"]
+mod diag_subscriber;
+use diag_subscriber::install_example_diag_subscriber;
 use qwen_llm::runtime::{DEFAULT_COLD_ONLY_THRESHOLD, LoadedModelConfig, PrefetchPolicy, Runtime};
 
 #[derive(Debug)]
@@ -103,6 +107,7 @@ fn fmt_wall(d: Duration) -> String {
 }
 
 fn main() {
+    install_example_diag_subscriber();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

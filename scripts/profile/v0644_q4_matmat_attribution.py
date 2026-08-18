@@ -265,7 +265,10 @@ def canonical_environment() -> tuple[dict[str, str], list[str]]:
         ):
             removed.append(key)
             env.pop(key)
-    env["RUST_LOG"] = "warn"
+    # `warn` for tracing itself, but keep the `qwen_diag` bare-body
+    # diagnostics at `info` so lines like `[metal-load-ledger] …` still
+    # emit on stderr after the eprintln!→tracing migration in this repo.
+    env["RUST_LOG"] = "warn,qwen_diag=info"
     return env, removed
 
 

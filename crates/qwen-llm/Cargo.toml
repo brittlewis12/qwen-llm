@@ -49,6 +49,10 @@ parking_lot.workspace = true
 criterion.workspace = true
 fancy-regex = "0.14"
 proptest = "1"
+# Examples install a stock `tracing_subscriber::fmt` subscriber so the
+# `qwen_diag` events emitted by the load path (previously bare
+# `eprintln!` lines) remain visible when running via `cargo run --example`.
+tracing-subscriber.workspace = true
 
 [build-dependencies]
 anyhow.workspace = true

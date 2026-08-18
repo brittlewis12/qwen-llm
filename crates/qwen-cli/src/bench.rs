@@ -16454,12 +16454,12 @@ fn run_decode_window(args: DecodeWindowArgs) -> Result<()> {
 
     if pipelined {
         let ids_ping = [
-            MetalTensor::zeros_f32(&ctx, vec![1])?,
-            MetalTensor::zeros_f32(&ctx, vec![1])?,
+            MetalTensor::zeros_i32(&ctx, vec![1])?,
+            MetalTensor::zeros_i32(&ctx, vec![1])?,
         ];
         let argmax_ping = [
-            MetalTensor::zeros_f32(&ctx, vec![1])?,
-            MetalTensor::zeros_f32(&ctx, vec![1])?,
+            MetalTensor::zeros_i32(&ctx, vec![1])?,
+            MetalTensor::zeros_i32(&ctx, vec![1])?,
         ];
 
         let mut encode_ms = Vec::with_capacity(window);

@@ -17322,7 +17322,7 @@ crate::env_flag!(
 
 fn attn_matrix_vt_compact_dispatch_enabled() -> Result<bool, MetalError> {
     let current = std::thread::current().id();
-    let active_owner = attn_matrix_vt_override_owner().lock().clone();
+    let active_owner = *attn_matrix_vt_override_owner().lock();
     if let Some(owner) = active_owner.as_ref()
         && owner != &current
     {
@@ -17352,7 +17352,7 @@ fn record_attn_matrix_vt_dispatch(
     compact: bool,
 ) -> Result<(), MetalError> {
     let current = std::thread::current().id();
-    let active_owner = attn_matrix_vt_capture_owner().lock().clone();
+    let active_owner = *attn_matrix_vt_capture_owner().lock();
     match active_owner.as_ref() {
         None => {
             if ATTN_MATRIX_VT_CAPTURE_ACTIVE.with(Cell::get) {

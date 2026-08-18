@@ -138,7 +138,7 @@ fn main() -> Result<()> {
     let hidden_size = model.arch.hidden_size as usize;
     let intermediate_size = model.arch.intermediate_size as usize;
     ensure!(
-        intermediate_size % 256 == 0,
+        intermediate_size.is_multiple_of(256),
         "intermediate size {intermediate_size} is not block-256 aligned"
     );
     let layers = parse_layers(std::env::var("FFN_CENSUS_LAYERS").ok(), n_layers)?;

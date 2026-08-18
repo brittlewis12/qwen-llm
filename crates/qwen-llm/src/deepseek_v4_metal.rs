@@ -16864,8 +16864,8 @@ mod tests {
         }
 
         let bad = MetalTensor::zeros_f32(&ctx, vec![64]).unwrap();
-        let x = offset_f32(&ctx, &vec![0.0; 192], vec![192]);
-        let y = offset_f32(&ctx, &vec![0.0; 15], vec![15]);
+        let x = offset_f32(&ctx, &[0.0; 192], vec![192]);
+        let y = offset_f32(&ctx, &[0.0; 15], vec![15]);
         let command = ctx.queue.commandBuffer().expect("rejection command");
         let encoder = KernelEncoder::begin(&command);
         let error =

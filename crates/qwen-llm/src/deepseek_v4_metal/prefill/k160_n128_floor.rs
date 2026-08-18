@@ -19,7 +19,7 @@ fn guarded_f32(ctx: &MetalContext, shape: Vec<u64>, poison: f32) -> MetalTensor 
     let elements = shape.iter().product::<u64>() as usize;
     let mut bytes = vec![0xa5u8; GUARD_BYTES];
     bytes.extend_from_slice(bytemuck::cast_slice(&vec![poison; elements]));
-    bytes.extend_from_slice(&vec![0x5au8; GUARD_BYTES]);
+    bytes.extend_from_slice(&[0x5au8; GUARD_BYTES]);
     MetalTensor {
         buffer: ctx.buffer_from(&bytes).expect("guarded N128 output"),
         offset: GUARD_BYTES as u64,
@@ -49,8 +49,13 @@ fn representative_route_counts() -> Vec<usize> {
     counts[0] = REPRESENTATIVE_HOT_ROUTES;
     let remaining = ROUTES - REPRESENTATIVE_HOT_ROUTES;
     let peers = REPRESENTATIVE_ACTIVE_EXPERTS - 1;
-    for expert in 1..REPRESENTATIVE_ACTIVE_EXPERTS {
-        counts[expert] = remaining / peers + usize::from(expert <= remaining % peers);
+    for (expert, slot) in counts
+        .iter_mut()
+        .enumerate()
+        .take(REPRESENTATIVE_ACTIVE_EXPERTS)
+        .skip(1)
+    {
+        *slot = remaining / peers + usize::from(expert <= remaining % peers);
     }
     assert_eq!(counts.iter().sum::<usize>(), ROUTES);
     assert!(counts.iter().all(|&count| count <= N_TOKENS));

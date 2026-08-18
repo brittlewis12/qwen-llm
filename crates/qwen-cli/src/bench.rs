@@ -13723,16 +13723,16 @@ fn run_tg(args: TgArgs) -> Result<()> {
     let cap = n_gen + 16;
     let ids_ping = if pipelined {
         Some([
-            MetalTensor::zeros_f32(ctx, vec![1]).context("tg pipelined ids ping0")?,
-            MetalTensor::zeros_f32(ctx, vec![1]).context("tg pipelined ids ping1")?,
+            MetalTensor::zeros_i32(ctx, vec![1]).context("tg pipelined ids ping0")?,
+            MetalTensor::zeros_i32(ctx, vec![1]).context("tg pipelined ids ping1")?,
         ])
     } else {
         None
     };
     let argmax_ping = if pipelined {
         Some([
-            MetalTensor::zeros_f32(ctx, vec![1]).context("tg pipelined argmax ping0")?,
-            MetalTensor::zeros_f32(ctx, vec![1]).context("tg pipelined argmax ping1")?,
+            MetalTensor::zeros_i32(ctx, vec![1]).context("tg pipelined argmax ping0")?,
+            MetalTensor::zeros_i32(ctx, vec![1]).context("tg pipelined argmax ping1")?,
         ])
     } else {
         None

@@ -24992,3 +24992,62 @@ Interpretation:
   contributes little by 16K.
 - The combined branch is still a stronger overall decode checkpoint than either
   attention-only or pipelined submission.
+
+## 2026-08-19 — DFlash 2 Support, N=8 Policy Calibration, Verify Microbench
+
+### What Changed
+
+- **DFlash 2 drafter support** (`incoai/Qwen3.8-27B-DFlash2-GGUF`, llama.cpp
+  PR 27342 semantics): v2 (`dflash` arch) GGUF loading alongside v1
+  (`dflash-draft`); two-tap dynamic depthwise conv around each drafter
+  sublayer (`kernels/dflash2.metal`); top-16 path selector
+  (`kernel_topk16_f32` + CPU lattice walk over Q8_0 codebooks). Block size 8.
+- **N=8 adaptive policy**: block-size-aware `NPolicy` with ctx-keyed
+  break-even (`3.3 + ctx/8000`) and trailing-α backoff (window 16, margin
+  0.6 ≈ 1 SE); Off remains terminal.
+- **Verify microbench**: `--n-policy cycle` interleaves Spec(8/4/2/1) with
+  Off single_token reference steps in one process.
+- **Kernel routing fixes**: `encode_mat_mat_dispatch` n=1 now routes to
+  mat-vec (was: generic 32-wide tile, c 5.1–8.3); Q5_K sequential arm
+  extended n=2 → n∈2..=4.
+- **Draft single-cmd mode** (`QWEN_DFLASH_DRAFT_SINGLE_CMD`, default on):
+  draft_block's 13 commit+wait round-trips collapse to 1; pos_k staging
+  hoisted (layer-invariant); watermarks advance only after the final wait.
+- A/B gates from the adversarial review, retained default-off:
+  `QWEN_DFLASH2_CAPTURE_SHIFT`, `QWEN_DFLASH_NONCAUSAL_NOISE`,
+  `QWEN_DFLASH2_NO_SELECTOR`.
+
+### Validation
+
+- Greedy equivalence PASS on every configuration touched: 3.8-27B + DFlash2
+  (static-8 and adaptive, 64–256 tok) and 3.6-27B + DFlash1 regression.
+- Factorial A/B (capture-shift × noncausal-noise, 3 prompts): all effects
+  within single-run noise (±0.4 emitted/step, no consistent sign) — both
+  suspected reference divergences are immaterial; implementation cleared.
+- Selector ablation: +0.16–0.25 emitted/step (reference implementation
+  reports +0.34 under different eval conditions).
+
+### Results (M4 Max, Qwen3.8-27B Q4_K_M target, DFlash2 Q8_0 drafter)
+
+- Acceptance: mean emitted/step 2.5–5.8, strongly content-dependent
+  (chat/code-writing 3.6–5.8; raw continuation / explain ~1.6–2.9).
+- Decode speedup: 1.49× (adaptive, code-writing instruction prompt, 128
+  tok); worst-case content bounded at −9% by α-backoff (was −39% static).
+- Verify microbench (interleaved, ±1 ms medians), ctx≈460:
+  - before: n=1 202.5 ms | n=2 66.5 | n=4 133.1 | n=8 115.8 | single 38.8
+  - after:  n=1 **40.3** | n=2 67.3 | n=4 130.2 | n=8 117.2 | single 39.0
+- Draft steady-state: 24.6 → 23.0 ms/step (single-cmd); first call reported
+  separately (prompt-projection amortization polluted earlier sweeps).
+
+### Interpretation
+
+- Packed verify has **no meaningful fixed overhead**: at n=1 it costs 1.3 ms
+  over a bare forward (checkpoints + hidden capture + argmax ≈ free). The
+  entire verify premium is per-dispatch kernel efficiency c(n) on the ~17 GB
+  weight sweep; the non-monotone curve was kernel-table selection, not
+  physics. The GDN-checkpointing hypothesis is dead.
+- Remaining lever: c(8) ≈ 2.4–3.0 (Q4_K mma8 2.25–2.78, Q6_K 1.6–1.8).
+  Reaching ~1.8 ⇒ verify ≈ 95 ms ⇒ break-even ≈ 3.0, flipping parity-α chat
+  content into wins. Same disease bounds drafter phase 3 (Q8_0 mat-mat).
+- n=4 remains anomalous (nc4 band tops at c≈3.3); fix is pad-to-8 routing —
+  parked, off the production path.

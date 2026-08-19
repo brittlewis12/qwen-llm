@@ -2591,9 +2591,12 @@ struct DflashArgs {
     /// **v0.76**: verify-chain length policy. One of:
     /// `adaptive` (default; ctx-keyed schedule with Off-terminal),
     /// `static-16` / `static-8` / `static-4` (fixed N, no Off ramp),
-    /// `off` (no speculation; single_token decode loop). The static
-    /// modes exist for the calibration sweep + as A/B comparators
-    /// against `adaptive`. `static-16` matches pre-v0.76 behavior.
+    /// `off` (no speculation; single_token decode loop), `cycle`
+    /// (**v0.77** verify microbench: interleaves Spec(8/4/2/1) with Off
+    /// reference steps and reports per-n_eff packed_verify wall stats).
+    /// The static modes exist for the calibration sweep + as A/B
+    /// comparators against `adaptive`. `static-16` matches pre-v0.76
+    /// behavior.
     /// Current `adaptive` tuning is calibrated on M4 Max + 27B Q4_K_M
     /// code-prompt sweeps; treat it as a heuristic outside that regime.
     #[arg(long, default_value = "adaptive")]
@@ -12806,6 +12809,10 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     // within a generation, so a ctx that earned `Off` will never
     // cool back to favor `Spec`).
     let mut spec_disabled = false;
+    // v0.77 α-backoff state (adaptive + N≤8 only): trailing per-step
+    // accepted-draft counts. Windowed mean below break-even → terminal Off.
+    let mut alpha_window: Vec<usize> = Vec::with_capacity(DFLASH2_ALPHA_WINDOW + 1);
+    let mut alpha_backoff_triggered = false;
 
     let mut decoder = DFlashDecoder::new(&mf, &mhead, dsess);
     if profile {
@@ -12817,9 +12824,15 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     // `tokens`), so append/restore of the final step may be skipped; run
     // with --tokens >= 256 when using these numbers for economics.
     let mut acct_draft_ms = 0.0f64;
+    let mut acct_draft_first_ms = 0.0f64;
     let mut acct_verify_ms = 0.0f64;
     let mut acct_append_ms = 0.0f64;
     let mut acct_restore_ms = 0.0f64;
+    // v0.77 verify-microbench samples: (n_eff, wall ms) per packed_verify
+    // call, plus Off-step single_token wall times. Cheap to collect
+    // unconditionally; reported only under `--n-policy cycle`.
+    let mut verify_samples: Vec<(usize, f64)> = Vec::new();
+    let mut off_single_ms: Vec<f64> = Vec::new();
 
     let t_decode = Instant::now();
     'outer: loop {
@@ -12842,21 +12855,39 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         // which is `processed_pos + 1`.
         let mode = if spec_disabled {
             VerifyMode::Off
+        } else if matches!(n_policy, NPolicy::Cycle) {
+            // Verify microbench: fixed interleave; Off steps are the
+            // in-process single_token reference.
+            const CYCLE_PATTERN: [VerifyMode; 8] = [
+                VerifyMode::Spec { n_eff: 8 },
+                VerifyMode::Off,
+                VerifyMode::Spec { n_eff: 4 },
+                VerifyMode::Off,
+                VerifyMode::Spec { n_eff: 2 },
+                VerifyMode::Off,
+                VerifyMode::Spec { n_eff: 1 },
+                VerifyMode::Off,
+            ];
+            CYCLE_PATTERN[steps as usize % CYCLE_PATTERN.len()]
         } else {
-            n_policy.for_ctx((processed_pos + 1) as usize)
+            n_policy.for_ctx((processed_pos + 1) as usize, n_block)
         };
 
         if matches!(mode, VerifyMode::Off) {
             // Off branch: no drafter, no packed_verify, no restore.
-            // No drafter ctx update — drafter is permanently disabled
-            // for the remainder of this generation.
-            spec_disabled = true;
+            // No drafter ctx update. Terminal — except under Cycle, where
+            // Off steps are reference measurements, not a policy decision.
+            if !matches!(n_policy, NPolicy::Cycle) {
+                spec_disabled = true;
+            }
             off_steps += 1;
             steps += 1;
             let single_pos = processed_pos + 1;
+            let t_single = Instant::now();
             let logits = mf
                 .single_token(carry_tok, single_pos, &mut target_session)
                 .context("off-mode single_token")?;
+            off_single_ms.push(t_single.elapsed().as_secs_f64() * 1e3);
             let next_tok = argmax_i32(&logits);
             // Advance cursors. carry_tok was already emitted at top of
             // the loop; next iter's carry is `next_tok`.
@@ -12867,7 +12898,10 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
 
         // ---- Spec branch: existing drafter + packed_verify + restore ----
         let n_eff = match mode {
-            VerifyMode::Spec { n_eff } => n_eff,
+            // Clamp to the drafter's block size: the N=16 policy schedules
+            // were calibrated for the 3.6 drafter; the DFlash 2 drafter
+            // ships block_size=8 and can't fill a 16-token verify chain.
+            VerifyMode::Spec { n_eff } => n_eff.min(n_block),
             VerifyMode::Off => unreachable!("Off handled above"),
         };
         match n_eff {
@@ -12891,7 +12925,17 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         let argmaxes = decoder
             .draft_block(carry_tok, drafter_pos)
             .context("drafter draft_block")?;
-        acct_draft_ms += t_acct.elapsed().as_secs_f64() * 1e3;
+        // v0.77: the FIRST draft_block call projects the entire prompt
+        // through the drafter's fc + per-layer K/V caches (O(prompt) one-
+        // time work; ~290 ms at ctx 8.8K). Folding it into the per-step
+        // mean inflated the sweep's high-ctx draft numbers by 10-30%
+        // (2026-08-19 adversarial review) — account it separately.
+        let draft_elapsed_ms = t_acct.elapsed().as_secs_f64() * 1e3;
+        if drafter_calls == 0 {
+            acct_draft_first_ms = draft_elapsed_ms;
+        } else {
+            acct_draft_ms += draft_elapsed_ms;
+        }
         drafter_calls += 1;
         let drafts: Vec<i32> = argmaxes[1..].to_vec();
         debug_assert_eq!(drafts.len(), d);
@@ -12918,7 +12962,9 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             Some(n_eff as u32), // adaptive-N: truncate verify chain to n_eff
         )
         .context("packed_verify")?;
-        acct_verify_ms += t_acct.elapsed().as_secs_f64() * 1e3;
+        let verify_elapsed_ms = t_acct.elapsed().as_secs_f64() * 1e3;
+        acct_verify_ms += verify_elapsed_ms;
+        verify_samples.push((n_eff, verify_elapsed_ms));
         verify_calls += 1;
         debug_assert_eq!(verify_argmax.len(), n_eff);
 
@@ -12962,6 +13008,29 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         // broke (or the slot beyond the last accepted draft if all
         // accepted).
         let bonus_tok = verify_argmax[n_accepted];
+
+        // ---- v0.77 α-backoff (adaptive N≤8 schedule only) ----
+        // Content-keyed complement to the ctx guard: the sweep showed
+        // win/loss is dominated by acceptance (mean emitted 2.5–5.8 at
+        // the SAME ctx), not by ctx. Bail to terminal Off when the
+        // trailing window's mean emitted/step can't cover the ctx-keyed
+        // draft+verify premium.
+        if matches!(n_policy, NPolicy::Adaptive) && n_block <= 8 {
+            alpha_window.push(n_accepted);
+            if alpha_window.len() > DFLASH2_ALPHA_WINDOW {
+                alpha_window.remove(0);
+            }
+            if alpha_window.len() == DFLASH2_ALPHA_WINDOW {
+                let mean_emitted =
+                    1.0 + alpha_window.iter().sum::<usize>() as f64 / DFLASH2_ALPHA_WINDOW as f64;
+                let threshold =
+                    dflash2_n8_breakeven(processed_pos as usize) - DFLASH2_ALPHA_OFF_MARGIN;
+                if mean_emitted < threshold {
+                    spec_disabled = true;
+                    alpha_backoff_triggered = true;
+                }
+            }
+        }
 
         // ---- Append target_ctx with hidden_capture columns ----
         // Per H5.3a contract: hidden_capture[n] (in [N, K, H] layout
@@ -13099,18 +13168,58 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     // see terminal-step caveat above — use --tokens >= 256 for economics).
     if steps > 0 {
         let s = steps as f64;
-        let acct_sum = acct_draft_ms + acct_verify_ms + acct_append_ms + acct_restore_ms;
+        let acct_sum =
+            acct_draft_ms + acct_draft_first_ms + acct_verify_ms + acct_append_ms + acct_restore_ms;
+        // Steady-state draft mean excludes the first call (one-time prompt
+        // projection through the drafter caches; reported separately).
+        let draft_steady_calls = drafter_calls.saturating_sub(1).max(1) as f64;
         eprintln!();
         eprintln!("[dflash] === step accounting (H5.6 M1c) ===");
         eprintln!(
-            "[dflash] per-step means over {steps} steps: draft {:.1} ms | verify {:.1} ms | append {:.1} ms | restore {:.1} ms | unaccounted {:.1} ms | TOTAL {:.1} ms",
-            acct_draft_ms / s,
+            "[dflash] per-step means over {steps} steps: draft {:.1} ms (steady-state; first call {:.1} ms excluded) | verify {:.1} ms | append {:.1} ms | restore {:.1} ms | unaccounted {:.1} ms | TOTAL {:.1} ms",
+            acct_draft_ms / draft_steady_calls,
+            acct_draft_first_ms,
             acct_verify_ms / s,
             acct_append_ms / s,
             acct_restore_ms / s,
             (decode_ms - acct_sum).max(0.0) / s,
             decode_ms / s,
         );
+    }
+
+    // v0.77 verify microbench report (interleaved same-process samples).
+    if matches!(n_policy, NPolicy::Cycle) {
+        let stats = |xs: &mut Vec<f64>| -> (usize, f64, f64, f64) {
+            xs.sort_by(|a, b| a.total_cmp(b));
+            let n = xs.len();
+            let mean = xs.iter().sum::<f64>() / n.max(1) as f64;
+            let med = if n == 0 { 0.0 } else { xs[n / 2] };
+            let min = xs.first().copied().unwrap_or(0.0);
+            (n, mean, med, min)
+        };
+        eprintln!();
+        eprintln!("[dflash] === verify microbench (--n-policy cycle) ===");
+        for target_n in [8usize, 4, 2, 1] {
+            let mut xs: Vec<f64> = verify_samples
+                .iter()
+                .filter(|(ne, _)| *ne == target_n)
+                .map(|(_, ms)| *ms)
+                .collect();
+            if xs.is_empty() {
+                continue;
+            }
+            let (n, mean, med, min) = stats(&mut xs);
+            eprintln!(
+                "[dflash] packed_verify n_eff={target_n}: samples={n} mean {mean:.1} ms | median {med:.1} | min {min:.1}"
+            );
+        }
+        if !off_single_ms.is_empty() {
+            let mut xs = off_single_ms.clone();
+            let (n, mean, med, min) = stats(&mut xs);
+            eprintln!(
+                "[dflash] single_token (interleaved ref): samples={n} mean {mean:.1} ms | median {med:.1} | min {min:.1}"
+            );
+        }
     }
 
     eprintln!();
@@ -13123,7 +13232,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     eprintln!(
         "[dflash] n_policy={n_policy:?}  step distribution: \
          spec16={spec16_steps} spec8={spec8_steps} spec4={spec4_steps} off={off_steps}  \
-         (spec_disabled={spec_disabled} terminally)"
+         (spec_disabled={spec_disabled} terminally, alpha_backoff={alpha_backoff_triggered})"
     );
     eprintln!(
         "[dflash] α_chain = {accepted_total} / {steps} = {alpha_chain:.3} drafts/step (max D={d})"
@@ -16937,6 +17046,64 @@ enum VerifyMode {
     Off,
 }
 
+/// **v0.77**: hard Spec(8)→Off ctx guard for the DFlash 2 N=8 adaptive
+/// schedule. Unlike the N=16 schedule there is NO cliff inside the
+/// calibrated range: the 2026-08-18 sweep (M4 Max, Qwen3.8-27B Q4_K_M +
+/// incoai DFlash2 Q8_0, 64-tok gens) measured Spec(8) at 11.5 t/s even
+/// at ctx 8.8K (the old N=16 path fell to 3.65 t/s by ctx 8.2K), with
+/// break-even climbing only gently (see `dflash2_n8_breakeven`). The
+/// guard sits past the calibrated range, where extrapolated break-even
+/// (≈5.6) exceeds what even the best measured content sustains (5.8
+/// peak, rare); the α-backoff below handles everything inside it.
+const DFLASH2_N8_OFF_CTX: usize = 16384;
+
+/// **v0.77** α-backoff for the DFlash 2 N=8 adaptive schedule: after
+/// `DFLASH2_ALPHA_WINDOW` consecutive Spec steps, enter terminal Off if
+/// the window's mean emitted tokens/step (1 + α_chain) falls below the
+/// ctx-keyed break-even minus a noise margin.
+///
+/// Rationale: acceptance is strongly CONTENT-dependent — the same ctx
+/// band measured mean-emitted 2.5 (code explanation) to 5.8 (repetitive
+/// tensor-binding code continuation). A ctx-keyed schedule can't see
+/// content; trailing α can. 2026-08-18 sweep, break-even =
+/// (draft + verify) / t_single per ctx:
+///
+///   ctx    draft+verify   off ms/tok   break-even   sample mean-emitted
+///   221        142 ms       42.6          3.33        2.9  (0.87×)
+///   460        146 ms       41.5          3.55        3.6  (1.00×)
+///   896        152 ms       38.8          3.93        2.9  (0.74×)
+///  1358        171 ms       42.1          4.05        5.8  (1.43×)
+///  2850        180 ms       41.7          4.32        2.7  (0.61×)
+///  8835        222 ms       48.3          4.59        2.5  (0.56×)
+///
+/// Measured throughput ratio matched mean_emitted / break-even within a
+/// few percent on every row — note this is a FIT-consistency check, not
+/// independent validation (2026-08-19 adversarial review).
+///
+/// 2026-08-19 corrections from that review:
+/// * The high-ctx draft means above include the FIRST `draft_block`
+///   call, which projects the whole prompt through fc + per-layer K/V
+///   (~290 ms at ctx 8.8K, amortized over ~25 steps ≈ +12 ms/step).
+///   Steady-state draft plateaus at the SWA window (2048). The slope is
+///   refit on first-call-corrected numbers: ctx/8000.
+/// * Window/margin were statistically unsound (window 8 ⇒ SE of the
+///   mean ≈ 0.8 emitted/step with per-step accepts σ≈2.3; margin 0.2 ≈
+///   0.25 SE ⇒ ~18%/window false-trigger on content winning by +0.5,
+///   compounding across overlapping windows). Window 16 (SE ≈ 0.57) +
+///   margin 0.6 (≈ 1 SE) puts a +0.5 winner at z ≈ 1.9 ⇒ ~3%/window.
+///   Terminal-Off re-probe remains future work.
+const DFLASH2_ALPHA_WINDOW: usize = 16;
+/// Break-even fit intercept / inverse slope (see table + corrections).
+const DFLASH2_N8_BREAKEVEN_BASE: f64 = 3.3;
+const DFLASH2_N8_BREAKEVEN_CTX_DIV: f64 = 8000.0;
+/// Trigger margin below break-even, sized ≈ 1 SE of the window mean.
+const DFLASH2_ALPHA_OFF_MARGIN: f64 = 0.6;
+
+/// Ctx-keyed Spec(8)-vs-Off break-even in mean emitted tokens/step.
+fn dflash2_n8_breakeven(kv_n_pos: usize) -> f64 {
+    DFLASH2_N8_BREAKEVEN_BASE + kv_n_pos as f64 / DFLASH2_N8_BREAKEVEN_CTX_DIV
+}
+
 /// **v0.76**: verify-chain length policy as selected by `--n-policy`.
 ///
 /// `Adaptive` is the default — ctx-keyed schedule with `Off`-terminal.
@@ -16948,6 +17115,18 @@ enum NPolicy {
     Static8,
     Static4,
     OffOnly,
+    /// **v0.77 verify microbench**: interleave Spec(8)/Off/Spec(4)/Off/
+    /// Spec(2)/Off/Spec(1)/Off within one process — same thermal state,
+    /// same ctx band, Off steps double as in-process `single_token`
+    /// reference timings. Decides the packed-verify fixed-vs-marginal
+    /// cost split (2026-08-19 adversarial review, F5: the sweep's
+    /// verify(4) > verify(8) anomaly survived an order-swap test, so
+    /// only an interleaved same-process measurement settles it).
+    /// Note: Off steps don't capture target hiddens, so the drafter's
+    /// cross-ctx accumulates holes and α degrades slightly — irrelevant
+    /// here because verify cost is target-side and independent of draft
+    /// quality.
+    Cycle,
 }
 
 impl NPolicy {
@@ -16958,25 +17137,42 @@ impl NPolicy {
             "static-8" => Ok(Self::Static8),
             "static-4" => Ok(Self::Static4),
             "off" => Ok(Self::OffOnly),
+            "cycle" => Ok(Self::Cycle),
             other => anyhow::bail!(
                 "unknown n-policy {other:?}; expected adaptive, static-16, \
-                 static-8, static-4, or off"
+                 static-8, static-4, off, or cycle"
             ),
         }
     }
 
     /// Choose `VerifyMode` for an outer step at given `kv_n_pos` (the
     /// session's current KV position, i.e. the absolute token position
-    /// of the carry token's predecessor). The schedule is calibrated
-    /// against M4 Max + 27B Q4_K_M; re-run the calibration sweep if
-    /// hardware/quant changes (see `qwen-bench dflash --n-policy
+    /// of the carry token's predecessor) and the drafter's block size
+    /// (`n_block`, GGUF-fixed: 16 for the 3.6 DFlash 1 drafter, 8 for
+    /// the 3.8 DFlash 2 drafter). The schedules are calibrated against
+    /// M4 Max + 27B Q4_K_M; re-run the calibration sweep if hardware/
+    /// quant changes (see `qwen-bench dflash --n-policy
     /// static-{16,8,4,off} --prompt ...` for sweep harness).
-    fn for_ctx(self, kv_n_pos: usize) -> VerifyMode {
+    fn for_ctx(self, kv_n_pos: usize, n_block: usize) -> VerifyMode {
         match self {
             Self::Static16 => VerifyMode::Spec { n_eff: 16 },
             Self::Static8 => VerifyMode::Spec { n_eff: 8 },
             Self::Static4 => VerifyMode::Spec { n_eff: 4 },
             Self::OffOnly => VerifyMode::Off,
+            // Intercepted in the decode loop (pattern is keyed on the step
+            // index, which for_ctx doesn't see); this arm is unreachable in
+            // practice but kept total.
+            Self::Cycle => VerifyMode::Spec { n_eff: 8 },
+            Self::Adaptive if n_block <= 8 => {
+                // v0.77 DFlash 2 (N=8) schedule — calibrated 2026-08-18
+                // on M4 Max + Qwen3.8-27B Q4_K_M + incoai DFlash2 Q8_0
+                // (see sweep table at `DFLASH2_N8_OFF_CTX`).
+                if kv_n_pos < DFLASH2_N8_OFF_CTX {
+                    VerifyMode::Spec { n_eff: 8 }
+                } else {
+                    VerifyMode::Off
+                }
+            }
             Self::Adaptive => {
                 // Calibrated schedule from v0.76 sweep (M4 Max, 27B
                 // Q4_K_M, code prompts, 32-token gen, 2026-05-07).

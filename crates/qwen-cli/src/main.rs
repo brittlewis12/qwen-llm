@@ -8,6 +8,7 @@ mod execution_selector;
 mod fixed_cohort_jsonl;
 mod messages;
 mod qwen_file_root;
+mod serve;
 mod shutdown;
 mod tracing_init;
 

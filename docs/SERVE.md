@@ -28,13 +28,24 @@ connection-local continuation (post-S4, measurement-gated),
 One new subcommand:
 
 ```sh
-qwen serve -m MODEL [--addr 127.0.0.1:8737] [--durable-prefix-cache DIR]
+qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N]
 ```
 
 - **Residency:** model loads once; the process is the warm tier. S0's F2
   finding makes this the TTFT mechanism (per-process paging floor is
   5–8 s on A3B even with checkpoint hits; `load_ms` does not cover
-  first-touch). Durable checkpoints remain the cross-restart substrate.
+  first-touch). **S1-as-built is RAM-cache-only**: durable checkpoint
+  publication/restore is not wired into serve and lands S2+;
+  cross-restart warmth currently re-prefills (closing k3 review, D3).
+  Durable checkpoints remain the intended cross-restart substrate.
+- **Determinism scope (F7):** no serve surface promises temp-0 byte
+  identity across differing checkpoint-restore topologies; transcripts
+  are byte-deterministic conditional on restore partitioning.
+- **Stats contracts (frozen):** the stderr `qwen_diag` line carries
+  `version=serve_stats_v1`; the `x_qwen` response echo's field names
+  `matched_tokens`, `restore_ms`, `prompt_tokens` are frozen;
+  `usage.input_tokens_details.cached_tokens` reports tokens restored
+  from checkpoints.
 - **Serial, blocking, no async runtime.** `std::net` listener, one
   request in flight, OS listen backlog queues the rest. HTTP/1.1 with
   `Connection: close`; hand-rolled request parse (loopback threat model;
@@ -150,7 +161,9 @@ because client model-pickers probe it).
 
 Client disconnect (write failure on SSE, read failure on socket) aborts
 generation between token steps and prefill between chunks; the request
-slot frees within 250 ms. No signals, no threads beyond the accept loop.
+slot frees within 250 ms (measured: 24 ms). No signals, no threads beyond
+the accept loop. Known limitation (D5): a TERM received while parked in
+`accept()` unwinds on the next connection, not immediately.
 
 ## S1 gates
 

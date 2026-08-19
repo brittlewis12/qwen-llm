@@ -304,7 +304,7 @@ impl GenerationBackend for EngineBackend {
         );
         tracing::info!(
             target: "qwen_diag",
-            "serve stats: prompt_tokens={} generated_tokens={} stop_reason={} matched_tokens={} restore_ms={:.1} decode_tps={:.2}",
+            "serve stats: version=serve_stats_v1 prompt_tokens={} generated_tokens={} stop_reason={} matched_tokens={} restore_ms={:.1} decode_tps={:.2}",
             prompt_ids.len(),
             generation.tokens.len(),
             match stop_reason {

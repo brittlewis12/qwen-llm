@@ -1,6 +1,8 @@
 # qwen serve — facade contract (S1 preregistration)
 
-Status: preregistered design, 2026-08-18. No implementation exists yet.
+Status: implemented on `serve/s1`; gates executed 2026-08-18 — see
+`docs/bench/2026-08-18-serve-s1-gates/` (1 pass, 2 conditional pass,
+3–7 pass). Originally preregistered earlier the same day.
 Evidence base: S0 packet
 (`docs/bench/2026-08-18-facade-s0-render-prefix-stability/`), adversarial
 jam (`ses_fe8ee25c6ffe`, three rounds), and the full investigation session
@@ -75,6 +77,8 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--durable-prefix-cache DIR]
   closed on context overflow (S0 F3); serve maps that to the spec error
   instead of a process exit.
 - `tools`, `tool_choice` — `invalid_request` in S1 (S2 scope).
+- `/responses/compact` — not implemented (404); compaction is outside the
+  S1–S4 arc and revisits with the WebSocket transport question.
 - `x_qwen.stats: true` — echoes `{matched_tokens, restore_ms,
   prompt_tokens}` into the response object, so thin clients (the game)
   get per-request checkpoint stats without correlating server stderr

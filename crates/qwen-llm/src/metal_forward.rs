@@ -13515,6 +13515,7 @@ pub fn encode_mat_vec_dispatch(
 
 crate::env_flag!(default_on matmat_smalln_table_enabled, "QWEN_MATMAT_SMALLN_TABLE");
 crate::env_flag!(default_on matmat_q5_k_n2_seq_enabled, "QWEN_MATMAT_Q5_K_N2_SEQ");
+crate::env_flag!(default_on matmat_n1_matvec_enabled, "QWEN_MATMAT_N1_MATVEC");
 crate::env_flag!(default_on matmat_iq2_s_n2_nc2_enabled, "QWEN_MATMAT_IQ2_S_N2_NC2");
 crate::env_flag!(default_on matmat_iq3_s_n2_nc2_enabled, "QWEN_MATMAT_IQ3_S_N2_NC2");
 
@@ -13544,12 +13545,31 @@ pub fn encode_mat_mat_dispatch(
     n_out: usize,
     n_query: usize,
 ) -> Result<(), MfError> {
+    // v0.77: n_query == 1 is exactly the mat-vec contract (x = [n_in],
+    // y = [n_out]) — route to the production single-token kernels (c=1).
+    // Before this arm, n=1 fell through the small-N table to the GENERIC
+    // 32-wide tile (c 5.1-8.3): the 2026-08-19 interleaved verify
+    // microbench measured packed_verify(n_eff=1) at 202 ms vs a 39 ms
+    // single_token forward — a 5.2× pure kernel-selection artifact hit by
+    // every n_eff_override=1 caller (adaptive-N tails, MTP packet tails).
+    // Exactness: mat-vec is E0, tighter than the tile it replaces.
+    // Rollback: QWEN_MATMAT_N1_MATVEC=0.
+    if matmat_n1_matvec_enabled() && n_query == 1 {
+        return encode_mat_vec_dispatch(ctx, enc, weight, x, y, n_in, n_out);
+    }
+
     // The generic Q5_K matrix kernel owns a physical 32-column tile. At N=2
     // it computes that tile to retain two columns and is substantially slower
     // than two mature Q5_K mat-vec dispatches. Keep the packed row contract,
     // but compose exact row views until a true dequant-once NC2 body exists.
+    // v0.77: extended from n_query == 2 to 2..=4 — the 2026-08-19 verify
+    // microbench showed Q5_K n≥3 leaking to the generic tile (c 5.1-8.0);
+    // sequential mat-vec is c≈n, a clear win through n=4 (the 48 GDN
+    // out_proj dispatches in packed verify are the production victim).
+    // At n≥8 c≈n ≈ generic; left on the generic tile pending a re-sweep.
     // Rollback: QWEN_MATMAT_Q5_K_N2_SEQ=0.
-    if matmat_q5_k_n2_seq_enabled() && weight.dtype == GgmlType::Q5_K && n_query == 2 {
+    if matmat_q5_k_n2_seq_enabled() && weight.dtype == GgmlType::Q5_K && (2..=4).contains(&n_query)
+    {
         for row in 0..n_query {
             let x_row = x.view_subrange((row * n_in) as u64, vec![n_in as u64]);
             let y_row = y.view_subrange((row * n_out) as u64, vec![n_out as u64]);

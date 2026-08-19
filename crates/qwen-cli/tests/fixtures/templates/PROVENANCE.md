@@ -1,0 +1,23 @@
+# Chat template oracles
+
+Extracted verbatim from `tokenizer.chat_template` GGUF metadata on
+2026-08-18. These are reference oracles for the hand-frozen cases in
+`../serve_render_fixtures_v1.json`; no Jinja engine consumes them.
+
+| File | Bytes | SHA-256 (first 16) | Source model file |
+| --- | ---: | --- | --- |
+| `qwen36_a3b_chat_template.jinja` | 8,057 | `55d4931433fe502b` | `Qwen3.6-35B-A3B-UD-Q4_K_S.gguf` |
+| `qwen38_27b_chat_template.jinja` | 8,945 | `701ba13a085c0c1b` | `Qwen3.8-27B-Q4_K_M.gguf` |
+| `ds4_flash_chat_template.jinja` | 13,772 | `e643c31fcec17f34` | `DeepSeek-V4-Flash-0731-UD-IQ3_XXS-00001-of-00004.gguf` |
+
+Key facts pinned from these oracles (see SERVE.md S2 correction):
+
+- Qwen3.6 and Qwen3.8 tool calls use the XML-parameter function form
+  (`<tool_call>\n<function=NAME>\n<parameter=KEY>\nVALUE\n</parameter>…`),
+  not hermes JSON.
+- Consecutive tool results coalesce into one `<|im_start|>user` block,
+  each wrapped `\n<tool_response>\n{content}\n</tool_response>`, with a
+  single `<|im_end|>\n` closing the run.
+- DS4 uses a DSML invoke dialect (`<{dsml}tool_calls>` /
+  `<{dsml}invoke name=…>`); its fixture cases land with DS4 serve
+  support in S3.

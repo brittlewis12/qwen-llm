@@ -1,0 +1,113 @@
+{
+  "fixture": "serve_render_fixtures_v1",
+  "contract": "docs/SERVE.md gate 4: turn-append prefix stability per family with documented divergence points; frozen before the serve renderer exists (k3 review R3). Oracles: tests/fixtures/templates/*.jinja (PROVENANCE.md).",
+  "cases": [
+    {
+      "name": "qwen_single_user_auto",
+      "family": "qwen_generic",
+      "policy": "preserve",
+      "generation_mode": "auto",
+      "messages": [{"role": "user", "content": "Add 2 and 3."}],
+      "prompt": "<|im_start|>user\nAdd 2 and 3.<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "name": "qwen_system_user_auto",
+      "family": "qwen_generic",
+      "policy": "preserve",
+      "generation_mode": "auto",
+      "messages": [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "Add 2 and 3."}
+      ],
+      "prompt": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nAdd 2 and 3.<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "name": "qwen_multiturn_preserve_append",
+      "family": "qwen_generic",
+      "policy": "preserve",
+      "generation_mode": "auto",
+      "assert_prefix_stable_over": "qwen_system_user_auto",
+      "messages": [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "Add 2 and 3."},
+        {"role": "assistant", "content": "<think>\n2+3=5.\n</think>\n\n5."},
+        {"role": "user", "content": "Now add 4."}
+      ],
+      "prompt": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nAdd 2 and 3.<|im_end|>\n<|im_start|>assistant\n<think>\n2+3=5.\n</think>\n\n5.<|im_end|>\n<|im_start|>user\nNow add 4.<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "name": "qwen_multiturn_strip_append",
+      "family": "qwen_generic",
+      "policy": "strip",
+      "generation_mode": "auto",
+      "assert_prefix_stable_over": "qwen_system_user_auto",
+      "messages": [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "Add 2 and 3."},
+        {"role": "assistant", "content": "<think>\n2+3=5.\n</think>\n\n5."},
+        {"role": "user", "content": "Now add 4."}
+      ],
+      "prompt": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nAdd 2 and 3.<|im_end|>\n<|im_start|>assistant\n5.<|im_end|>\n<|im_start|>user\nNow add 4.<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "name": "qwen_no_thinking_single",
+      "family": "qwen_generic",
+      "policy": "strip",
+      "generation_mode": "no_thinking",
+      "messages": [{"role": "user", "content": "Add 2 and 3."}],
+      "prompt": "<|im_start|>user\nAdd 2 and 3.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "qwen_no_thinking_naive_history_diverges",
+      "family": "qwen_generic",
+      "policy": "strip",
+      "generation_mode": "no_thinking",
+      "assert_prefix_stable_over": null,
+      "documented_divergence": "Naive strip-history rendering omits the preclosed think block that the prior generation prompt ended with; under whole-blob matching (S0 F1) the previous turn's checkpoints never match. Serve MUST NOT render no-thinking history this way; see qwen_no_thinking_preclosed_history_stable.",
+      "diverges_from": "qwen_no_thinking_single",
+      "common_prefix_ends_after": "<|im_start|>assistant\n",
+      "messages": [
+        {"role": "user", "content": "Add 2 and 3."},
+        {"role": "assistant", "content": "5."},
+        {"role": "user", "content": "Now add 4."}
+      ],
+      "prompt": "<|im_start|>user\nAdd 2 and 3.<|im_end|>\n<|im_start|>assistant\n5.<|im_end|>\n<|im_start|>user\nNow add 4.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "qwen_no_thinking_preclosed_history_stable",
+      "family": "qwen_generic",
+      "policy": "serve_no_thinking",
+      "generation_mode": "no_thinking",
+      "normative_for": "serve items renderer (does not exist yet; fixture frozen first)",
+      "assert_prefix_stable_over": "qwen_no_thinking_single",
+      "messages": [
+        {"role": "user", "content": "Add 2 and 3."},
+        {"role": "assistant", "content": "5."},
+        {"role": "user", "content": "Now add 4."}
+      ],
+      "prompt": "<|im_start|>user\nAdd 2 and 3.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n5.<|im_end|>\n<|im_start|>user\nNow add 4.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    {
+      "name": "qwen36_tool_continuation_turn_a",
+      "family": "qwen_generic",
+      "policy": "preserve",
+      "generation_mode": "auto",
+      "messages": [{"role": "user", "content": "List files in /tmp."}],
+      "prompt": "<|im_start|>user\nList files in /tmp.<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "name": "qwen36_tool_continuation_turn_b",
+      "family": "qwen_generic",
+      "policy": "preserve",
+      "generation_mode": "auto",
+      "normative_for": "S2 tool-continuation rendering; call syntax and tool_response coalescing pinned from qwen36_a3b_chat_template.jinja (XML-parameter function form, NOT hermes JSON)",
+      "assert_prefix_stable_over": "qwen36_tool_continuation_turn_a",
+      "messages": [
+        {"role": "user", "content": "List files in /tmp."},
+        {"role": "assistant", "content": "<think>\nUse fs.list.\n</think>\n\nListing now.\n<tool_call>\n<function=fs.list>\n<parameter=path>\n/tmp\n</parameter>\n</function>\n</tool_call>"},
+        {"role": "tool", "content": "{\"entries\":[\"a.txt\"]}"}
+      ],
+      "prompt": "<|im_start|>user\nList files in /tmp.<|im_end|>\n<|im_start|>assistant\n<think>\nUse fs.list.\n</think>\n\nListing now.\n<tool_call>\n<function=fs.list>\n<parameter=path>\n/tmp\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n{\"entries\":[\"a.txt\"]}\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+    }
+  ]
+}

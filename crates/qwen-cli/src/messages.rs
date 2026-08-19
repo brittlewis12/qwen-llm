@@ -1792,4 +1792,99 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn serve_render_fixtures_match_existing_qwen_renderer() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/serve_render_fixtures_v1.json"
+        ))
+        .expect("parse serve render fixture JSON");
+        let cases = fixture["cases"].as_array().expect("fixture cases");
+        assert_eq!(cases.len(), 9, "fixture case census");
+        let mut consumed = 0usize;
+        for case in cases {
+            let name = case["name"].as_str().expect("case name");
+            if case.get("normative_for").is_some() {
+                // Frozen ahead of the serve/S2 renderers (SERVE.md gate 4,
+                // fixture-before-renderer); not consumable by the existing
+                // generic renderer.
+                continue;
+            }
+            let messages: Vec<ChatMessage> = serde_json::from_value(case["messages"].clone())
+                .unwrap_or_else(|error| panic!("parse {name} messages: {error}"));
+            let preserve = match case["policy"].as_str().expect("policy") {
+                "preserve" => true,
+                "strip" => false,
+                other => panic!("unmapped policy {other} in {name}"),
+            };
+            let mode = match case["generation_mode"].as_str().expect("generation mode") {
+                "auto" => QwenGenerationMode::Auto,
+                "no_thinking" => QwenGenerationMode::NoThinking,
+                other => panic!("unmapped generation mode {other} in {name}"),
+            };
+            let rendered =
+                render_qwen_messages_prompt_with_generation(&messages, preserve, true, mode);
+            assert_eq!(
+                rendered,
+                case["prompt"].as_str().expect("case prompt"),
+                "fixture case {name} diverged from the generic renderer"
+            );
+            consumed += 1;
+        }
+        assert_eq!(consumed, 7, "consumable case census");
+    }
+
+    #[test]
+    fn serve_render_fixtures_pin_prefix_stability_topology() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/serve_render_fixtures_v1.json"
+        ))
+        .expect("parse serve render fixture JSON");
+        let cases = fixture["cases"].as_array().expect("fixture cases");
+        let prompt_of = |name: &str| -> &str {
+            cases
+                .iter()
+                .find(|case| case["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("missing fixture case {name}"))["prompt"]
+                .as_str()
+                .expect("case prompt")
+        };
+        let mut stability_checked = 0usize;
+        for case in cases {
+            let name = case["name"].as_str().expect("case name");
+            let prompt = case["prompt"].as_str().expect("case prompt");
+            if let Some(base) = case
+                .get("assert_prefix_stable_over")
+                .and_then(|value| value.as_str())
+            {
+                assert!(
+                    prompt.starts_with(prompt_of(base)),
+                    "{name}: expected {base} render to be a byte prefix"
+                );
+                stability_checked += 1;
+            }
+            if let Some(diverges) = case.get("diverges_from").and_then(|value| value.as_str()) {
+                let base_prompt = prompt_of(diverges);
+                assert!(
+                    !prompt.starts_with(base_prompt),
+                    "{name}: documented divergence unexpectedly stable against {diverges}"
+                );
+                let boundary = case["common_prefix_ends_after"]
+                    .as_str()
+                    .expect("divergence boundary");
+                let common: String = prompt
+                    .chars()
+                    .zip(base_prompt.chars())
+                    .take_while(|(left, right)| left == right)
+                    .map(|(left, _)| left)
+                    .collect();
+                assert!(
+                    common.ends_with(boundary),
+                    "{name}: common prefix does not end at the documented boundary"
+                );
+                stability_checked += 1;
+            }
+        }
+        assert_eq!(stability_checked, 5, "stability assertion census");
+    }
 }

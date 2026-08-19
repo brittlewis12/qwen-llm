@@ -34,18 +34,18 @@ use crate::metal::{
     encode_add_inplace_f32, encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32,
     encode_dflash_attn_f32, encode_dflash_attn_full_gqa_split4_f32,
     encode_dflash_attn_online_two_range_scan_f32, encode_dflash_attn_two_range_f32,
-    encode_fill_f32, encode_gdn_decay_chain_batched_f32, encode_gdn_decay_chain_f32,
-    encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32, encode_get_rows_f32,
-    encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32, encode_mat_mat_f32_router_e8p32,
-    encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
+    encode_dflash2_conv_f32, encode_fill_f32, encode_gdn_decay_chain_batched_f32,
+    encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32,
+    encode_get_rows_f32, encode_l2_norm_batched_f32, encode_l2_norm_pair_batched_f32,
+    encode_mat_mat_f32_router_e8p32, encode_moe_down_iq4_xs_f32, encode_moe_down_q5_K_f32,
     encode_moe_down_weighted_sum_q5_K_f32_packed_slots, encode_moe_mat_vec_f32,
     encode_moe_swiglu_q4_K_f32_packed_slots, encode_moe_weighted_sum_f32,
     encode_rms_norm_batched_f32, encode_rms_norm_batched_src_strided_f32, encode_rms_norm_mul_f32,
     encode_rmsnorm_gated_f32, encode_rope_neox_f32, encode_rope_neox_f32_packed_consecutive,
     encode_scatter_offset_f32_to_f16_kv, encode_scatter_offset_f32_to_f16_kv_vt,
     encode_sigmoid_f32, encode_silu_mul_f32, encode_split_qkv_fused_f32,
-    encode_topk_logits_softmax_dot_sigmoid_packed_f32, kernel_trace_begin, kernel_trace_snapshot,
-    kernel_trace_take_delta,
+    encode_topk_logits_softmax_dot_sigmoid_packed_f32, encode_topk16_f32, kernel_trace_begin,
+    kernel_trace_snapshot, kernel_trace_take_delta,
 };
 use crate::metal_forward::{
     ATTN_V4_MAX_NWG, LmHeadTail, LmHeadTailEvidence, MetalBlock, MetalForward, MetalModel,
@@ -256,12 +256,26 @@ crate::env_flag!(default_off dflash_trace_phase3_split_enabled, "QWEN_DFLASH_TRA
 
 crate::env_flag!(default_off dflash_attn_two_range_enabled, "QWEN_DFLASH_ATTN_TWO_RANGE");
 
+// DFlash 2 ablation: take each position's top-1 candidate instead of the
+// selector lattice walk (conv stays active). Isolates the selector's
+// acceptance contribution. Bench-only; changes drafts, never correctness
+// (verification still gates every token).
+crate::env_flag!(default_off dflash2_selector_disabled, "QWEN_DFLASH2_NO_SELECTOR");
+
 crate::env_flag!(
     default_on dflash_attn_online_two_range_enabled,
     "QWEN_DFLASH_ATTN_ONLINE_TWO_RANGE"
 );
 
 crate::env_flag!(default_on dflash_attn_swa_scan_enabled, "QWEN_DFLASH_ATTN_SWA_SCAN");
+
+// v0.77: encode the entire drafter forward into ONE command buffer with a
+// single commit + waitUntilCompleted before the readback. The multi-buffer
+// structure (up to 13 CPU/GPU round-trips per draft_block: phase 1, embed,
+// 5× phase 2, 5× phase 3, phase 4) existed for per-phase GPU timing and a
+// per-layer pos_k host write — the former is profiling-only, the latter is
+// layer-invariant and hoisted. Profiled runs keep the multi-buffer path.
+crate::env_flag!(default_on dflash_draft_single_cmd_enabled, "QWEN_DFLASH_DRAFT_SINGLE_CMD");
 
 crate::env_flag!(
     default_on dflash_attn_full_gqa_split4_enabled,
@@ -1977,6 +1991,8 @@ pub enum DFlashError {
     BadToken(i32, u32),
     #[error("ctx_len {0} > capacity {1}")]
     CtxOverflow(usize, usize),
+    #[error("dflash2 drafter: {0}")]
+    BadDrafter(&'static str),
 }
 
 /// All DFlash drafter weights resident on Metal. Loaded once at session
@@ -1995,6 +2011,9 @@ pub struct MetalDFlashHead {
     pub hidden_norm: MetalTensor,
     pub output_norm: MetalTensor,
     pub layers: Vec<MetalDFlashLayer>,
+    /// DFlash 2 path-selector state. `Some` iff the drafter GGUF carries
+    /// selector tensors (`config.selector_top_k > 0`).
+    pub selector: Option<MetalDFlash2Selector>,
 }
 
 pub struct MetalDFlashLayer {
@@ -2010,6 +2029,135 @@ pub struct MetalDFlashLayer {
     pub ffn_up: MetalTensor,
     pub ffn_down: MetalTensor,
     pub is_swa: bool,
+    /// DFlash 2 two-tap dynamic conv weights (GPU-resident). `None` for
+    /// DFlash 1 drafters.
+    pub conv: Option<MetalDFlash2Conv>,
+}
+
+/// DFlash 2 per-layer conv weights on Metal. Base kernels are tiny F32
+/// (`[H, kernel, 2]`); projections stay native (Q8_0) and route through
+/// `encode_mat_mat_dispatch` like every other drafter projection.
+pub struct MetalDFlash2Conv {
+    pub attn_base: MetalTensor,
+    pub attn_proj: MetalTensor,
+    pub ffn_base: MetalTensor,
+    pub ffn_proj: MetalTensor,
+}
+
+/// DFlash 2 selector state. `hidden` (the context-gate projection
+/// `[H, rank]`) lives on the GPU — it runs as one small mat-mat in the
+/// phase-4 tail. The two token-embedding codebooks (`[rank, V]`, ~64 MB
+/// each at Q8_0) stay on the CPU: the greedy path walk only ever touches
+/// ~16 rows per draft position, so per-row dequant beats a 254 MB F32
+/// upload or a GPU gather kernel.
+pub struct MetalDFlash2Selector {
+    pub hidden: MetalTensor,
+    pub predecessor: DFlash2Codebook,
+    pub successor: DFlash2Codebook,
+    pub rank: usize,
+    pub top_k: usize,
+}
+
+/// CPU-side row-dequantizable copy of a selector codebook tensor
+/// (`[rank, n_rows]` GGUF layout — one `rank`-wide row per token id).
+pub struct DFlash2Codebook {
+    raw: Vec<u8>,
+    dtype: GgmlType,
+    rank: usize,
+    n_rows: usize,
+}
+
+impl DFlash2Codebook {
+    fn from_gguf(desc: &TensorDesc, bytes: &[u8]) -> Result<Self, DFlashError> {
+        let &[rank, n_rows] = desc.shape.as_slice() else {
+            return Err(DFlashError::BadDrafter("selector codebook must be 2-D"));
+        };
+        let (rank, n_rows) = (rank as usize, n_rows as usize);
+        match desc.dtype {
+            GgmlType::Q8_0 => {
+                if !rank.is_multiple_of(32) {
+                    return Err(DFlashError::BadDrafter(
+                        "Q8_0 selector codebook rank must be a multiple of 32",
+                    ));
+                }
+                let expect = n_rows * (rank / 32) * 34;
+                if bytes.len() < expect {
+                    return Err(DFlashError::BadDrafter("selector codebook truncated"));
+                }
+            }
+            GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 => {
+                let elem = if desc.dtype == GgmlType::F32 { 4 } else { 2 };
+                if bytes.len() < n_rows * rank * elem {
+                    return Err(DFlashError::BadDrafter("selector codebook truncated"));
+                }
+            }
+            _ => {
+                return Err(DFlashError::BadDrafter(
+                    "selector codebook dtype must be Q8_0/F32/F16/BF16",
+                ));
+            }
+        }
+        Ok(Self {
+            raw: bytes.to_vec(),
+            dtype: desc.dtype,
+            rank,
+            n_rows,
+        })
+    }
+
+    /// Dequantize one token's embedding row into `out` (`len == rank`).
+    fn dequant_row(&self, row: usize, out: &mut [f32]) -> Result<(), DFlashError> {
+        debug_assert_eq!(out.len(), self.rank);
+        if row >= self.n_rows {
+            return Err(DFlashError::BadDrafter(
+                "selector codebook row out of range",
+            ));
+        }
+        match self.dtype {
+            GgmlType::Q8_0 => {
+                // block_q8_0: f16 scale + 32 * i8, 34 bytes / 32 elems.
+                let blocks_per_row = self.rank / 32;
+                let row_bytes = &self.raw[row * blocks_per_row * 34..];
+                for b in 0..blocks_per_row {
+                    let blk = &row_bytes[b * 34..b * 34 + 34];
+                    let d = half::f16::from_le_bytes([blk[0], blk[1]]).to_f32();
+                    for (j, &q) in blk[2..34].iter().enumerate() {
+                        out[b * 32 + j] = d * (q as i8) as f32;
+                    }
+                }
+            }
+            GgmlType::F32 => {
+                let base = row * self.rank * 4;
+                for (j, slot) in out.iter_mut().enumerate() {
+                    let o = base + j * 4;
+                    *slot = f32::from_le_bytes([
+                        self.raw[o],
+                        self.raw[o + 1],
+                        self.raw[o + 2],
+                        self.raw[o + 3],
+                    ]);
+                }
+            }
+            GgmlType::F16 => {
+                let base = row * self.rank * 2;
+                for (j, slot) in out.iter_mut().enumerate() {
+                    let o = base + j * 2;
+                    *slot = half::f16::from_le_bytes([self.raw[o], self.raw[o + 1]]).to_f32();
+                }
+            }
+            GgmlType::BF16 => {
+                let base = row * self.rank * 2;
+                for (j, slot) in out.iter_mut().enumerate() {
+                    let o = base + j * 2;
+                    *slot = f32::from_bits(
+                        (u16::from_le_bytes([self.raw[o], self.raw[o + 1]]) as u32) << 16,
+                    );
+                }
+            }
+            _ => unreachable!("dtype validated in from_gguf"),
+        }
+        Ok(())
+    }
 }
 
 impl MetalDFlashHead {
@@ -2051,6 +2199,15 @@ impl MetalDFlashHead {
             .layers
             .iter()
             .map(|l: &DFlashLayer| {
+                let conv = match l.conv.as_ref() {
+                    Some(c) => Some(MetalDFlash2Conv {
+                        attn_base: load_f32(c.attn_base)?,
+                        attn_proj: load_weight(c.attn_proj)?,
+                        ffn_base: load_f32(c.ffn_base)?,
+                        ffn_proj: load_weight(c.ffn_proj)?,
+                    }),
+                    None => None,
+                };
                 Ok(MetalDFlashLayer {
                     attn_norm: load_f32(l.attn_norm)?,
                     q: load_weight(l.q)?,
@@ -2064,9 +2221,36 @@ impl MetalDFlashHead {
                     ffn_up: load_weight(l.ffn_up)?,
                     ffn_down: load_weight(l.ffn_down)?,
                     is_swa: l.is_swa,
+                    conv,
                 })
             })
             .collect();
+
+        let selector = match head.selector.as_ref() {
+            Some(sel) => {
+                // kernel_topk16_f32 is specialized to k=16; the released
+                // DFlash 2 drafters all ship selector_top_k=16.
+                if head.config.selector_top_k != 16 {
+                    return Err(DFlashError::BadDrafter(
+                        "only selector_top_k=16 is supported",
+                    ));
+                }
+                Some(MetalDFlash2Selector {
+                    hidden: load_weight(sel.hidden)?,
+                    predecessor: DFlash2Codebook::from_gguf(
+                        sel.predecessor,
+                        drafter_gguf.slice(sel.predecessor),
+                    )?,
+                    successor: DFlash2Codebook::from_gguf(
+                        sel.successor,
+                        drafter_gguf.slice(sel.successor),
+                    )?,
+                    rank: head.config.selector_rank as usize,
+                    top_k: head.config.selector_top_k as usize,
+                })
+            }
+            None => None,
+        };
 
         Ok(Self {
             config: head.config,
@@ -2075,6 +2259,7 @@ impl MetalDFlashHead {
             hidden_norm: load_f32(head.hidden_norm)?,
             output_norm: load_f32(head.output_norm)?,
             layers: layers?,
+            selector,
         })
     }
 }
@@ -2162,6 +2347,24 @@ pub struct MetalDFlashSession {
     /// did. v0.72.0 codex-recommended port from packed_verify's batched
     /// tail.
     pub draft_argmax: MetalTensor,
+
+    // ---- DFlash 2 buffers (Some iff config.selector_top_k > 0) ----
+    /// `[N, H]` F32 — conv output scratch. Side-0 conv writes here and the
+    /// following projections read it; side-1 conv writes here and the
+    /// residual add reads it. Never aliases its input (taps read
+    /// neighboring rows).
+    pub conv_buf: Option<MetalTensor>,
+    /// `[N, 2·kernel·n_groups]` F32 — attention conv dynamic coefficients
+    /// (computed from the pre-conv normed input; used by both sides).
+    pub conv_dyn_attn: Option<MetalTensor>,
+    /// `[N, 2·kernel·n_groups]` F32 — FFN conv dynamic coefficients.
+    pub conv_dyn_ffn: Option<MetalTensor>,
+    /// `[N, 16]` I32 — per-position top-16 candidate token ids.
+    pub topk_ids: Option<MetalTensor>,
+    /// `[N, 16]` F32 — matching top-16 logits (the selector's unary term).
+    pub topk_vals: Option<MetalTensor>,
+    /// `[N, rank]` F32 — context gate `W_h · h` per position.
+    pub sel_h: Option<MetalTensor>,
 
     // ---- v0.72.1 Metal phase 3 buffers ----
     /// `[(ctx_capacity + N) * kv_dim]` F32 — concatenated K (ctx rows
@@ -2327,6 +2530,32 @@ impl MetalDFlashSession {
             cfg.intermediate_size as u64,
             "dflash ffn scratch size overflow",
         )?;
+        // DFlash 2 scratch (conv + selector), sized from the GGUF conv
+        // metadata. ~90 KB total at N=8, H=5120 — negligible.
+        let (conv_buf, conv_dyn_attn, conv_dyn_ffn, topk_ids, topk_vals, sel_h) =
+            if cfg.selector_top_k > 0 {
+                let n_groups = (cfg.hidden_size / cfg.conv_group_size) as u64;
+                let dyn_dim = checked_u64_mul(
+                    2 * cfg.conv_kernel_size as u64,
+                    n_groups,
+                    "dflash2 conv dyn dim overflow",
+                )?;
+                let dyn_elems = checked_u64_mul(n, dyn_dim, "dflash2 conv dyn size overflow")?;
+                let topk_elems =
+                    checked_u64_mul(n, cfg.selector_top_k as u64, "dflash2 topk size overflow")?;
+                let sel_elems =
+                    checked_u64_mul(n, cfg.selector_rank as u64, "dflash2 sel_h size overflow")?;
+                (
+                    Some(MetalTensor::zeros_f32(ctx, vec![x_elems])?),
+                    Some(MetalTensor::zeros_f32(ctx, vec![dyn_elems])?),
+                    Some(MetalTensor::zeros_f32(ctx, vec![dyn_elems])?),
+                    Some(MetalTensor::zeros_i32(ctx, vec![topk_elems])?),
+                    Some(MetalTensor::zeros_f32(ctx, vec![topk_elems])?),
+                    Some(MetalTensor::zeros_f32(ctx, vec![sel_elems])?),
+                )
+            } else {
+                (None, None, None, None, None, None)
+            };
         Ok(Self {
             target_ctx_stacked: MetalTensor::zeros_f32(
                 ctx,
@@ -2364,6 +2593,12 @@ impl MetalDFlashSession {
             mixer_out: MetalTensor::zeros_f32(ctx, vec![x_elems])?,
             draft_logits: MetalTensor::zeros_f32(ctx, vec![logits_elems])?,
             draft_argmax: MetalTensor::zeros_i32(ctx, vec![n])?,
+            conv_buf,
+            conv_dyn_attn,
+            conv_dyn_ffn,
+            topk_ids,
+            topk_vals,
+            sel_h,
             // v0.72.1 phase 3 buffers
             k_full: MetalTensor::zeros_f32(ctx, vec![kv_full_elems])?,
             v_full: MetalTensor::zeros_f32(ctx, vec![kv_full_elems])?,
@@ -12385,6 +12620,14 @@ impl<'a> DFlashDecoder<'a> {
         let v = arch.vocab_size as usize;
         let k_layers = self.head.target_layer_ids.len();
         let n_target_features = k_layers * arch.hidden_size as usize;
+        // DFlash 2 conv dims (0 / unused for DFlash 1 drafters).
+        let conv_kernel = cfg.conv_kernel_size as usize;
+        let conv_group = cfg.conv_group_size as usize;
+        let conv_dyn_dim = if cfg.selector_top_k > 0 {
+            2 * conv_kernel * (h / conv_group)
+        } else {
+            0
+        };
 
         // Stage noise_ids: [carry_tok, MASK × (N-1)].
         unsafe {
@@ -12396,6 +12639,50 @@ impl<'a> DFlashDecoder<'a> {
         }
 
         let ctx_metal = self.base.ctx;
+
+        // v0.77 single-command-buffer mode: no data dependency requires
+        // CPU intervention between phases (all per-layer constants are
+        // known up front; pos_k is layer-invariant and staged below), so
+        // everything can queue into one command buffer with one wait at
+        // phase 4. Profiled runs keep per-phase buffers for attribution.
+        // Rollback: QWEN_DFLASH_DRAFT_SINGLE_CMD=0.
+        let single_cmd_mode =
+            dflash_draft_single_cmd_enabled() && !self.session.enable_phase_timers;
+        let shared_cmd = if single_cmd_mode {
+            Some(ctx_metal.queue.commandBuffer().expect("cmd draft"))
+        } else {
+            None
+        };
+
+        // Read pos_ctx once (used by RoPE on K_ctx, the SWA mask, and the
+        // pos_k staging below). CPU-visible and synced: all writers ran
+        // under previous calls' waits.
+        let mut pos_ctx_cpu = vec![0i32; ctx_len];
+        if ctx_len > 0 {
+            unsafe {
+                let src = self.session.pos_ctx.buffer.contents().as_ptr() as *const i32;
+                std::ptr::copy_nonoverlapping(src, pos_ctx_cpu.as_mut_ptr(), ctx_len);
+            }
+        }
+
+        // v0.77: pos_k staging hoisted out of the per-layer loop — the
+        // per-layer host write into the shared buffer is what forced a
+        // CPU sync between layers. Layout is layer-invariant: ctx
+        // positions followed by noise positions. Two-range kernels read
+        // only the first ctx_len entries; the legacy concat kernel reads
+        // all ctx_len + n.
+        {
+            let n_kv_total = ctx_len + n;
+            let mut pos_k_host: Vec<i32> = Vec::with_capacity(n_kv_total);
+            pos_k_host.extend(pos_ctx_cpu.iter().take(ctx_len).copied());
+            for i in 0..n {
+                pos_k_host.push((noise_start_pos + i as u32) as i32);
+            }
+            unsafe {
+                let dst = self.session.pos_k.buffer.contents().as_ptr() as *mut i32;
+                std::ptr::copy_nonoverlapping(pos_k_host.as_ptr(), dst, n_kv_total);
+            }
+        }
 
         // ----- Phase 1 (Metal, v0.74.0 cached): cross-context fc + hidden_norm -----
         // Per-column mat-vec into ctx_h, then per-column RMSNorm —
@@ -12416,7 +12703,9 @@ impl<'a> DFlashDecoder<'a> {
         let phase1_start = self.session.ctx_h_ready_n;
         if ctx_len > phase1_start {
             let phase1_delta = ctx_len - phase1_start;
-            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let cmd = shared_cmd
+                .clone()
+                .unwrap_or_else(|| ctx_metal.queue.commandBuffer().expect("cmd"));
             let enc = KernelEncoder::begin(&cmd);
             if dflash_batched_proj_enabled() && phase1_delta > 1 {
                 let src = self.session.target_ctx_stacked.view_subrange(
@@ -12485,19 +12774,23 @@ impl<'a> DFlashDecoder<'a> {
                 }
             }
             enc.end();
-            cmd.commit();
-            cmd.waitUntilCompleted();
-            self.session.maybe_record("phase1_ctx_fc_norm", &cmd);
-            // Cache watermark advances; phase 1 is complete for all
-            // currently-stacked positions.
-            self.session.ctx_h_ready_n = ctx_len;
+            if shared_cmd.is_none() {
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                self.session.maybe_record("phase1_ctx_fc_norm", &cmd);
+            }
+            // ctx_h_ready_n watermark advances after the final wait (see
+            // the phase-4 tail) — in single-cmd mode nothing has executed
+            // yet at this point.
         }
 
         // ----- Phase 2 (Metal): noise embed + per-layer fwd through
         //     pre-attn-norm, Q/K/V projections, per-head Q/K-norm, RoPE.
         //     v0.527 batches the regular projection/RoPE work; phase 3
         //     handles asymmetric SWA attention and the FFN fully on Metal.
-        let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+        let cmd = shared_cmd
+            .clone()
+            .unwrap_or_else(|| ctx_metal.queue.commandBuffer().expect("cmd"));
         let enc = KernelEncoder::begin(&cmd);
         encode_get_rows_f32(
             ctx_metal,
@@ -12509,17 +12802,10 @@ impl<'a> DFlashDecoder<'a> {
             h,
         )?;
         enc.end();
-        cmd.commit();
-        cmd.waitUntilCompleted();
-        self.session.maybe_record("phase2_embed", &cmd);
-
-        // Read pos_ctx once (used by RoPE on K_ctx and SWA mask).
-        let mut pos_ctx_cpu = vec![0i32; ctx_len];
-        if ctx_len > 0 {
-            unsafe {
-                let src = self.session.pos_ctx.buffer.contents().as_ptr() as *const i32;
-                std::ptr::copy_nonoverlapping(src, pos_ctx_cpu.as_mut_ptr(), ctx_len);
-            }
+        if shared_cmd.is_none() {
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            self.session.maybe_record("phase2_embed", &cmd);
         }
 
         // v0.74.x notes:
@@ -12549,7 +12835,9 @@ impl<'a> DFlashDecoder<'a> {
 
         for (layer_idx, layer) in self.head.layers.iter().enumerate() {
             // Pre-attn norm: x → h (Metal).
-            let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+            let cmd = shared_cmd
+                .clone()
+                .unwrap_or_else(|| ctx_metal.queue.commandBuffer().expect("cmd"));
             let enc = KernelEncoder::begin(&cmd);
             encode_rms_norm_batched_f32(
                 ctx_metal,
@@ -12561,12 +12849,66 @@ impl<'a> DFlashDecoder<'a> {
                 h,
                 RMS_EPS,
             )?;
+            // DFlash 2 attention conv: dynamic coefficients from the
+            // PRE-conv normed input (shared by both sides), then the
+            // side-0 conv. Q/K/V projections read the conv'd result.
+            let attn_qkv_src: &MetalTensor = if let Some(cv) = layer.conv.as_ref() {
+                let dyn_attn = self
+                    .session
+                    .conv_dyn_attn
+                    .as_ref()
+                    .expect("dflash2 dyn_attn");
+                let conv_buf = self.session.conv_buf.as_ref().expect("dflash2 conv_buf");
+                if batched_proj {
+                    encode_mat_mat_dispatch(
+                        ctx_metal,
+                        &enc,
+                        &cv.attn_proj,
+                        &self.session.h,
+                        dyn_attn,
+                        h,
+                        conv_dyn_dim,
+                        n,
+                    )?;
+                } else {
+                    for i in 0..n {
+                        let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
+                        let row_out = dyn_attn
+                            .view_subrange((i * conv_dyn_dim) as u64, vec![conv_dyn_dim as u64]);
+                        encode_mat_vec_dispatch(
+                            ctx_metal,
+                            &enc,
+                            &cv.attn_proj,
+                            &row_in,
+                            &row_out,
+                            h,
+                            conv_dyn_dim,
+                        )?;
+                    }
+                }
+                encode_dflash2_conv_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.h,
+                    dyn_attn,
+                    &cv.attn_base,
+                    conv_buf,
+                    n,
+                    h,
+                    conv_kernel,
+                    conv_group,
+                    0,
+                )?;
+                conv_buf
+            } else {
+                &self.session.h
+            };
             if batched_proj {
                 encode_mat_mat_dispatch(
                     ctx_metal,
                     &enc,
                     &layer.q,
-                    &self.session.h,
+                    attn_qkv_src,
                     &self.session.q_buf,
                     h,
                     q_dim,
@@ -12576,7 +12918,7 @@ impl<'a> DFlashDecoder<'a> {
                     ctx_metal,
                     &enc,
                     &layer.k,
-                    &self.session.h,
+                    attn_qkv_src,
                     &self.session.k_noise,
                     h,
                     kv_dim,
@@ -12586,7 +12928,7 @@ impl<'a> DFlashDecoder<'a> {
                     ctx_metal,
                     &enc,
                     &layer.v,
-                    &self.session.h,
+                    attn_qkv_src,
                     &self.session.v_noise,
                     h,
                     kv_dim,
@@ -12595,7 +12937,7 @@ impl<'a> DFlashDecoder<'a> {
             } else {
                 // Q proj per noise row.
                 for i in 0..n {
-                    let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
+                    let row_in = attn_qkv_src.view_subrange((i * h) as u64, vec![h as u64]);
                     let row_out = self
                         .session
                         .q_buf
@@ -12606,7 +12948,7 @@ impl<'a> DFlashDecoder<'a> {
                 }
                 // K, V proj on noise rows.
                 for i in 0..n {
-                    let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
+                    let row_in = attn_qkv_src.view_subrange((i * h) as u64, vec![h as u64]);
                     let k_row = self
                         .session
                         .k_noise
@@ -12802,9 +13144,11 @@ impl<'a> DFlashDecoder<'a> {
                 }
             }
             enc.end();
-            cmd.commit();
-            cmd.waitUntilCompleted();
-            self.session.maybe_record("phase2_proj_norm_rope", &cmd);
+            if shared_cmd.is_none() {
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                self.session.maybe_record("phase2_proj_norm_rope", &cmd);
+            }
 
             // ----- Phase 3 (Metal, v0.72.1): attention + O proj + residual #1 +
             //       post-norm + SwiGLU FFN + residual #2. NO CPU readback. -----
@@ -12831,27 +13175,14 @@ impl<'a> DFlashDecoder<'a> {
             let online_two_range_attn = dflash_attn_online_two_range_enabled();
             let two_range_attn =
                 full_gqa_split4_attn || online_two_range_attn || dflash_attn_two_range_enabled();
-            let pos_k_uploaded;
-            {
-                // Build pos_k on host. The legacy concat kernel wants
-                // pos_ctx ++ noise positions; the two-range kernel only
-                // needs ctx positions because noise positions are implicit.
-                let n_kv_total = ctx_len + n;
-                pos_k_uploaded = if two_range_attn { ctx_len } else { n_kv_total };
-                let mut pos_k_host: Vec<i32> = Vec::with_capacity(pos_k_uploaded);
-                pos_k_host.extend(pos_ctx_cpu.iter().take(ctx_len).copied());
-                if !two_range_attn {
-                    for i in 0..n {
-                        pos_k_host.push((noise_start_pos + i as u32) as i32);
-                    }
-                }
-                unsafe {
-                    let dst = self.session.pos_k.buffer.contents().as_ptr() as *mut i32;
-                    std::ptr::copy_nonoverlapping(pos_k_host.as_ptr(), dst, pos_k_uploaded);
-                }
-            }
+            // pos_k staging hoisted to the top of draft_block (v0.77) —
+            // the full ctx ‖ noise layout serves both the two-range
+            // kernels (read the first ctx_len entries) and the legacy
+            // concat kernel (reads all of it).
 
-            let cmd = ctx_metal.queue.commandBuffer().expect("cmd phase3");
+            let cmd = shared_cmd
+                .clone()
+                .unwrap_or_else(|| ctx_metal.queue.commandBuffer().expect("cmd phase3"));
             let phase3_attention_label = if layer.is_swa {
                 "phase3_split_attention_swa"
             } else {
@@ -13014,7 +13345,6 @@ impl<'a> DFlashDecoder<'a> {
                     swa_window_arg,
                 )?;
             }
-            let _ = pos_k_uploaded;
 
             if let Some(recorder) = phase3_split.as_mut() {
                 enc.end();
@@ -13079,9 +13409,37 @@ impl<'a> DFlashDecoder<'a> {
                 enc = recorder.begin(&cmd, "phase3_split_resid1_post_norm")?;
             }
 
-            // (e) Residual #1: x += ffn_out_buf (reusing ffn_out_buf as
-            //     a transient holder for the O proj output).
-            encode_add_inplace_f32(ctx_metal, &enc, &self.session.x, &self.session.ffn_out_buf)?;
+            // (e) Residual #1: x += O-proj output (DFlash 2: the attention
+            //     side-1 conv sits between the O proj and the residual).
+            if let Some(cv) = layer.conv.as_ref() {
+                let dyn_attn = self
+                    .session
+                    .conv_dyn_attn
+                    .as_ref()
+                    .expect("dflash2 dyn_attn");
+                let conv_buf = self.session.conv_buf.as_ref().expect("dflash2 conv_buf");
+                encode_dflash2_conv_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.ffn_out_buf,
+                    dyn_attn,
+                    &cv.attn_base,
+                    conv_buf,
+                    n,
+                    h,
+                    conv_kernel,
+                    conv_group,
+                    1,
+                )?;
+                encode_add_inplace_f32(ctx_metal, &enc, &self.session.x, conv_buf)?;
+            } else {
+                encode_add_inplace_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.x,
+                    &self.session.ffn_out_buf,
+                )?;
+            }
 
             // (f) Pre-FFN RMSNorm: x → h_buf (reuse session.h, batched).
             encode_rms_norm_batched_f32(
@@ -13094,6 +13452,55 @@ impl<'a> DFlashDecoder<'a> {
                 h,
                 RMS_EPS,
             )?;
+            // DFlash 2 FFN conv: dynamic coefficients from the pre-conv
+            // normed input, then side-0. gate/up read the conv'd result.
+            let ffn_src: &MetalTensor = if let Some(cv) = layer.conv.as_ref() {
+                let dyn_ffn = self.session.conv_dyn_ffn.as_ref().expect("dflash2 dyn_ffn");
+                let conv_buf = self.session.conv_buf.as_ref().expect("dflash2 conv_buf");
+                if phase3_batched {
+                    encode_mat_mat_dispatch(
+                        ctx_metal,
+                        &enc,
+                        &cv.ffn_proj,
+                        &self.session.h,
+                        dyn_ffn,
+                        h,
+                        conv_dyn_dim,
+                        n,
+                    )?;
+                } else {
+                    for i in 0..n {
+                        let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
+                        let row_out = dyn_ffn
+                            .view_subrange((i * conv_dyn_dim) as u64, vec![conv_dyn_dim as u64]);
+                        encode_mat_vec_dispatch(
+                            ctx_metal,
+                            &enc,
+                            &cv.ffn_proj,
+                            &row_in,
+                            &row_out,
+                            h,
+                            conv_dyn_dim,
+                        )?;
+                    }
+                }
+                encode_dflash2_conv_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.h,
+                    dyn_ffn,
+                    &cv.ffn_base,
+                    conv_buf,
+                    n,
+                    h,
+                    conv_kernel,
+                    conv_group,
+                    0,
+                )?;
+                conv_buf
+            } else {
+                &self.session.h
+            };
 
             if let Some(recorder) = phase3_split.as_mut() {
                 enc.end();
@@ -13108,7 +13515,7 @@ impl<'a> DFlashDecoder<'a> {
                     ctx_metal,
                     &enc,
                     &layer.ffn_gate,
-                    &self.session.h,
+                    ffn_src,
                     &self.session.ffn_gate_buf,
                     h,
                     f,
@@ -13118,7 +13525,7 @@ impl<'a> DFlashDecoder<'a> {
                     ctx_metal,
                     &enc,
                     &layer.ffn_up,
-                    &self.session.h,
+                    ffn_src,
                     &self.session.ffn_up_buf,
                     h,
                     f,
@@ -13126,7 +13533,7 @@ impl<'a> DFlashDecoder<'a> {
                 )?;
             } else {
                 for i in 0..n {
-                    let row_in = self.session.h.view_subrange((i * h) as u64, vec![h as u64]);
+                    let row_in = ffn_src.view_subrange((i * h) as u64, vec![h as u64]);
                     let gate_row = self
                         .session
                         .ffn_gate_buf
@@ -13211,24 +13618,46 @@ impl<'a> DFlashDecoder<'a> {
                 enc.end();
                 enc = recorder.begin(&cmd, "phase3_split_resid2")?;
             }
-            // (h) Residual #2: x += ffn_out_buf.
-            encode_add_inplace_f32(ctx_metal, &enc, &self.session.x, &self.session.ffn_out_buf)?;
+            // (h) Residual #2: x += FFN output (DFlash 2: the FFN side-1
+            //     conv sits between ffn_down and the residual).
+            if let Some(cv) = layer.conv.as_ref() {
+                let dyn_ffn = self.session.conv_dyn_ffn.as_ref().expect("dflash2 dyn_ffn");
+                let conv_buf = self.session.conv_buf.as_ref().expect("dflash2 conv_buf");
+                encode_dflash2_conv_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.ffn_out_buf,
+                    dyn_ffn,
+                    &cv.ffn_base,
+                    conv_buf,
+                    n,
+                    h,
+                    conv_kernel,
+                    conv_group,
+                    1,
+                )?;
+                encode_add_inplace_f32(ctx_metal, &enc, &self.session.x, conv_buf)?;
+            } else {
+                encode_add_inplace_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.x,
+                    &self.session.ffn_out_buf,
+                )?;
+            }
 
             enc.end();
-            cmd.commit();
-            cmd.waitUntilCompleted();
-            let phase3_gpu_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
-            self.session
-                .maybe_record("phase3_attn_oproj_ffn_residuals", &cmd);
-            if let Some(recorder) = phase3_split {
-                recorder.record(ctx_metal, &mut self.session, phase3_gpu_ms)?;
+            if shared_cmd.is_none() {
+                cmd.commit();
+                cmd.waitUntilCompleted();
+                let phase3_gpu_ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+                self.session
+                    .maybe_record("phase3_attn_oproj_ffn_residuals", &cmd);
+                if let Some(recorder) = phase3_split {
+                    recorder.record(ctx_metal, &mut self.session, phase3_gpu_ms)?;
+                }
             }
         }
-
-        // v0.74.1: all drafter layers now have post-norm post-RoPE
-        // K/V cached for `[0, ctx_len)`. Advance the watermark so the
-        // next outer step only projects the new appended positions.
-        self.session.kv_ctx_ready_n = ctx_len;
 
         // ----- Phase 4 (Metal): batched final norm + lm_head + argmax -----
         //
@@ -13246,7 +13675,9 @@ impl<'a> DFlashDecoder<'a> {
         //
         // Falls back to per-row mat-vec for non-mat-mat-eligible
         // lm_head dtypes (F32 0.8B oracle path).
-        let cmd = ctx_metal.queue.commandBuffer().expect("cmd");
+        let cmd = shared_cmd
+            .clone()
+            .unwrap_or_else(|| ctx_metal.queue.commandBuffer().expect("cmd"));
         let enc = KernelEncoder::begin(&cmd);
         encode_rms_norm_batched_f32(
             ctx_metal,
@@ -13289,19 +13720,57 @@ impl<'a> DFlashDecoder<'a> {
                 )?;
             }
         }
-        encode_argmax_f32(
-            ctx_metal,
-            &enc,
-            &self.session.draft_logits,
-            &self.session.draft_argmax,
-            n,
-            v,
-        )?;
+        if let Some(sel) = self.head.selector.as_ref() {
+            // DFlash 2 tail: top-16 candidates + logits per position, and
+            // the selector context gate `W_h · h`. The greedy path walk
+            // happens on the CPU after the wait (≤20 KB readback).
+            encode_topk16_f32(
+                ctx_metal,
+                &enc,
+                &self.session.draft_logits,
+                self.session.topk_ids.as_ref().expect("dflash2 topk_ids"),
+                self.session.topk_vals.as_ref().expect("dflash2 topk_vals"),
+                n,
+                v,
+            )?;
+            encode_mat_mat_dispatch(
+                ctx_metal,
+                &enc,
+                &sel.hidden,
+                &self.session.h,
+                self.session.sel_h.as_ref().expect("dflash2 sel_h"),
+                h,
+                sel.rank,
+                n,
+            )?;
+        } else {
+            encode_argmax_f32(
+                ctx_metal,
+                &enc,
+                &self.session.draft_logits,
+                &self.session.draft_argmax,
+                n,
+                v,
+            )?;
+        }
         enc.end();
         cmd.commit();
         cmd.waitUntilCompleted();
         self.session
             .maybe_record("phase4_tail_norm_lmhead_argmax", &cmd);
+
+        // Watermarks advance only after ALL GPU work is complete — in
+        // single-cmd mode nothing executed before the commit above, and
+        // in multi-buffer mode every earlier phase already waited. An
+        // early error return leaves the watermarks untouched, so a
+        // retried call re-projects the delta instead of trusting
+        // never-executed work.
+        self.session.ctx_h_ready_n = ctx_len;
+        self.session.kv_ctx_ready_n = ctx_len;
+
+        if let Some(sel) = self.head.selector.as_ref() {
+            return self.select_draft_path(sel, carry_tok, n);
+        }
 
         // Read back `[N]` i32 argmaxes (64 B, vs the v0.71 per-token
         // `[V]` F32 readback = 16 MB/outer step at V=248320, N=16).
@@ -13311,6 +13780,93 @@ impl<'a> DFlashDecoder<'a> {
             std::ptr::copy_nonoverlapping(src, argmaxes.as_mut_ptr(), n);
         }
         Ok(argmaxes)
+    }
+
+    /// DFlash 2 greedy path selection — the CPU tail of `draft_block`.
+    ///
+    /// Mirrors llama.cpp PR 27342's lattice walk at T=0: starting from the
+    /// carry token (block position 0), at each draft position pick the
+    /// candidate `b` maximizing `U(b) + ⟨A(prev) ⊙ (W_h·h_pos), B(b)⟩`,
+    /// where `U` is the drafter's own logit, `A`/`B` are the predecessor/
+    /// successor codebook embeddings, and `h_pos` is the position's final
+    /// (post-`output_norm`) hidden. Returns `[N]` tokens laid out like the
+    /// DFlash 1 argmax vector: slot 0 is the anchor position's top-1
+    /// (unused by the driver), slots 1..N are the drafts.
+    fn select_draft_path(
+        &self,
+        sel: &MetalDFlash2Selector,
+        carry_tok: i32,
+        n: usize,
+    ) -> Result<Vec<i32>, DFlashError> {
+        let top_k = sel.top_k;
+        let rank = sel.rank;
+        let ids_t = self.session.topk_ids.as_ref().expect("dflash2 topk_ids");
+        let vals_t = self.session.topk_vals.as_ref().expect("dflash2 topk_vals");
+        let sel_h_t = self.session.sel_h.as_ref().expect("dflash2 sel_h");
+        let mut ids = vec![0i32; n * top_k];
+        let mut vals = vec![0f32; n * top_k];
+        let mut sel_h = vec![0f32; n * rank];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                ids_t.buffer.contents().as_ptr() as *const i32,
+                ids.as_mut_ptr(),
+                ids.len(),
+            );
+            std::ptr::copy_nonoverlapping(
+                vals_t.buffer.contents().as_ptr() as *const f32,
+                vals.as_mut_ptr(),
+                vals.len(),
+            );
+            std::ptr::copy_nonoverlapping(
+                sel_h_t.buffer.contents().as_ptr() as *const f32,
+                sel_h.as_mut_ptr(),
+                sel_h.len(),
+            );
+        }
+
+        let mut out = vec![0i32; n];
+        out[0] = ids[0]; // anchor top-1; the driver never reads slot 0
+        if dflash2_selector_disabled() {
+            // Ablation: per-position top-1, no path selection.
+            for pos in 1..n {
+                out[pos] = ids[pos * top_k];
+            }
+            return Ok(out);
+        }
+        let mut pred = vec![0f32; rank];
+        let mut succ = vec![0f32; rank];
+        let mut gate = vec![0f32; rank];
+        sel.predecessor.dequant_row(carry_tok as usize, &mut pred)?;
+        for pos in 1..n {
+            let hrow = &sel_h[pos * rank..(pos + 1) * rank];
+            for r in 0..rank {
+                gate[r] = pred[r] * hrow[r];
+            }
+            let mut best_b = 0usize;
+            let mut best_score = f32::NEG_INFINITY;
+            for b in 0..top_k {
+                let cand = ids[pos * top_k + b];
+                if cand < 0 || (cand as usize) >= sel.successor.n_rows {
+                    continue; // unfilled top-k sentinel
+                }
+                sel.successor.dequant_row(cand as usize, &mut succ)?;
+                let mut dot = 0f32;
+                for r in 0..rank {
+                    dot += gate[r] * succ[r];
+                }
+                // Strict `>` keeps the FIRST (highest-unary-rank) candidate
+                // on ties — matches std::max_element in the reference.
+                let score = vals[pos * top_k + b] + dot;
+                if score > best_score {
+                    best_score = score;
+                    best_b = b;
+                }
+            }
+            let chosen = ids[pos * top_k + best_b];
+            out[pos] = chosen;
+            sel.predecessor.dequant_row(chosen as usize, &mut pred)?;
+        }
+        Ok(out)
     }
 
     /// Same as `draft_block` but returns full `[N, V]` logits (CPU readback)

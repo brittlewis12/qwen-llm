@@ -298,6 +298,45 @@ pub struct DFlashLayer<'a> {
     /// True for sliding-window-attention layers (per the GGUF
     /// `sliding_window_pattern` array). False for full-attention layers.
     pub is_swa: bool,
+    /// DFlash 2 two-tap dynamic convolution tensors. `Some` iff the
+    /// drafter GGUF carries `blk.N.{attn,ffn}_conv_{base,proj}` (llama.cpp
+    /// PR 27342 conventions). `None` for DFlash 1 drafters.
+    pub conv: Option<DFlashConvTensors<'a>>,
+}
+
+/// DFlash 2 per-layer two-tap dynamic depthwise convolution weights.
+/// One conv pair wraps attention (side 0 after `attn_norm`, side 1 after
+/// `attn_output` before residual), one wraps the FFN (side 0 after
+/// `ffn_norm`, side 1 after `ffn_down` before residual). See
+/// inco.ai/blog/dflash2 "A Lightweight Local Convolution".
+#[derive(Clone)]
+pub struct DFlashConvTensors<'a> {
+    /// `blk.N.attn_conv_base`, F32 `[H, kernel, 2]` — static base kernel,
+    /// last dim = side (0 = pre-sublayer, 1 = post-sublayer).
+    pub attn_base: &'a TensorDesc,
+    /// `blk.N.attn_conv_proj.weight`, `[H, 2 · kernel · n_groups]` —
+    /// dynamic per-token coefficient projection (computed from the normed
+    /// sublayer input, used by BOTH sides).
+    pub attn_proj: &'a TensorDesc,
+    /// `blk.N.ffn_conv_base`, F32 `[H, kernel, 2]`.
+    pub ffn_base: &'a TensorDesc,
+    /// `blk.N.ffn_conv_proj.weight`, `[H, 2 · kernel · n_groups]`.
+    pub ffn_proj: &'a TensorDesc,
+}
+
+/// DFlash 2 candidate path-selector weights (global, not per-layer).
+/// Scores adjacent candidate pairs: `S(a,b) = U(b) + ⟨A(a) ⊙ W_h·h, B(b)⟩`.
+#[derive(Clone)]
+pub struct DFlashSelectorTensors<'a> {
+    /// `selector_predecessor.weight`, `[rank, V_target]` — per-token A
+    /// embedding table (row per token id).
+    pub predecessor: &'a TensorDesc,
+    /// `selector_successor.weight`, `[rank, V_target]` — per-token B
+    /// embedding table.
+    pub successor: &'a TensorDesc,
+    /// `selector_hidden.weight`, `[H, rank]` — context gate projection
+    /// applied to the drafter's final (post-`output_norm`) hidden.
+    pub hidden: &'a TensorDesc,
 }
 
 /// Static config for the DFlash drafter, derived from GGUF metadata.
@@ -323,6 +362,17 @@ pub struct DFlashConfig {
     /// `K = target_layer_ids.len()`. Number of target layers whose hidden
     /// states get fused via `dflash_fc`.
     pub n_target_features_layers: u32,
+    /// DFlash 2 conv kernel size (taps). 0 for DFlash 1 drafters.
+    pub conv_kernel_size: u32,
+    /// DFlash 2 conv group size (channels sharing one dynamic
+    /// correction coefficient). 0 for DFlash 1 drafters.
+    pub conv_group_size: u32,
+    /// DFlash 2 selector embedding rank (256 for the released drafters).
+    /// 0 for DFlash 1 drafters.
+    pub selector_rank: u32,
+    /// DFlash 2 selector top-k candidates per draft position. 0 for
+    /// DFlash 1 drafters — this doubles as the "is DFlash 2" flag.
+    pub selector_top_k: u32,
 }
 
 /// DFlash drafter head. Loaded from a separate GGUF (e.g.
@@ -333,14 +383,18 @@ pub struct DFlashHead<'a> {
     pub config: DFlashConfig,
     /// K target layer indices whose hiddens get fused.
     pub target_layer_ids: Vec<u32>,
-    /// `dflash_fc.weight`, shape `[K · H_target, H_drafter]`.
+    /// `dflash_fc.weight` (v1) / `fc.weight` (v2), shape `[K · H_target, H_drafter]`.
     pub fc: &'a TensorDesc,
-    /// `dflash_hidden_norm.weight`, shape `[H_drafter]`.
+    /// `dflash_hidden_norm.weight` (v1) / `enc.output_norm.weight` (v2),
+    /// shape `[H_drafter]`.
     pub hidden_norm: &'a TensorDesc,
     /// `output_norm.weight`, shape `[H_drafter]`. The drafter's own final
     /// RMSNorm before the (target's) lm_head.
     pub output_norm: &'a TensorDesc,
     pub layers: Vec<DFlashLayer<'a>>,
+    /// DFlash 2 path-selector tensors. `Some` iff `selector_hidden.weight`
+    /// is present in the drafter GGUF.
+    pub selector: Option<DFlashSelectorTensors<'a>>,
 }
 
 /// Bound model: a static description (Arch) plus tensor references into the
@@ -754,75 +808,209 @@ pub fn open_dflash_drafter<'a>(
     drafter_gguf: &'a GgufFile,
     target_model: &Model<'_>,
 ) -> Result<DFlashHead<'a>, LoadError> {
-    let arch_str = drafter_gguf.architecture();
-    if arch_str.as_deref() != Some("dflash-draft") {
-        return Err(LoadError::UnsupportedArch(arch_str));
+    /// Metadata-key + tensor-name table for the two drafter GGUF
+    /// conventions:
+    /// * v1 — arch `dflash-draft` (spiritbuun converter): KV under
+    ///   `dflash-draft.*` / `dflash-draft.dflash.*`; tensors
+    ///   `dflash_fc.weight`, `dflash_hidden_norm.weight`,
+    ///   `blk.N.post_attention_norm.weight`.
+    /// * v2 — arch `dflash` (llama.cpp PR 27342 converter, DFlash 2 era,
+    ///   e.g. `incoai/Qwen3.8-27B-DFlash2-GGUF`): KV under `dflash.*`;
+    ///   mask token in `tokenizer.ggml.mask_token_id`; tensors
+    ///   `fc.weight`, `enc.output_norm.weight`, `blk.N.ffn_norm.weight`;
+    ///   optional DFlash 2 conv/selector tensors.
+    struct DrafterKeys {
+        block_count: &'static str,
+        embedding_length: &'static str,
+        feed_forward_length: &'static str,
+        head_count: &'static str,
+        head_count_kv: &'static str,
+        key_length: &'static str,
+        freq_base: &'static str,
+        sliding_window: &'static str,
+        sliding_window_pattern: &'static str,
+        block_size: &'static str,
+        mask_token_id: &'static str,
+        target_layer_ids: &'static str,
+        /// `Some` for v1 (explicit key); `None` for v2 (derived as
+        /// `K · H_target`).
+        n_target_features: Option<&'static str>,
+        fc_tensor: &'static str,
+        hidden_norm_tensor: &'static str,
+        /// Per-layer pre-FFN norm tensor suffix under `blk.{i}.`.
+        post_attn_norm_suffix: &'static str,
     }
+    const V1_KEYS: DrafterKeys = DrafterKeys {
+        block_count: "dflash-draft.block_count",
+        embedding_length: "dflash-draft.embedding_length",
+        feed_forward_length: "dflash-draft.feed_forward_length",
+        head_count: "dflash-draft.attention.head_count",
+        head_count_kv: "dflash-draft.attention.head_count_kv",
+        key_length: "dflash-draft.attention.key_length",
+        freq_base: "dflash-draft.rope.freq_base",
+        sliding_window: "dflash-draft.attention.sliding_window",
+        sliding_window_pattern: "dflash-draft.attention.sliding_window_pattern",
+        block_size: "dflash-draft.dflash.block_size",
+        mask_token_id: "dflash-draft.dflash.mask_token_id",
+        target_layer_ids: "dflash-draft.dflash.target_layer_ids",
+        n_target_features: Some("dflash-draft.dflash.n_target_features"),
+        fc_tensor: "dflash_fc.weight",
+        hidden_norm_tensor: "dflash_hidden_norm.weight",
+        post_attn_norm_suffix: "post_attention_norm",
+    };
+    const V2_KEYS: DrafterKeys = DrafterKeys {
+        block_count: "dflash.block_count",
+        embedding_length: "dflash.embedding_length",
+        feed_forward_length: "dflash.feed_forward_length",
+        head_count: "dflash.attention.head_count",
+        head_count_kv: "dflash.attention.head_count_kv",
+        key_length: "dflash.attention.key_length",
+        freq_base: "dflash.rope.freq_base",
+        sliding_window: "dflash.attention.sliding_window",
+        sliding_window_pattern: "dflash.attention.sliding_window_pattern",
+        block_size: "dflash.block_size",
+        mask_token_id: "tokenizer.ggml.mask_token_id",
+        target_layer_ids: "dflash.target_layers",
+        n_target_features: None,
+        fc_tensor: "fc.weight",
+        hidden_norm_tensor: "enc.output_norm.weight",
+        post_attn_norm_suffix: "ffn_norm",
+    };
+
+    let arch_str = drafter_gguf.architecture();
+    let keys: &DrafterKeys = match arch_str.as_deref() {
+        Some("dflash-draft") => &V1_KEYS,
+        Some("dflash") => &V2_KEYS,
+        _ => return Err(LoadError::UnsupportedArch(arch_str)),
+    };
 
     // -------- Read drafter config from KV metadata --------
     let n_layer = drafter_gguf
-        .get_u64("dflash-draft.block_count")
-        .ok_or(LoadError::BadMetadata("dflash-draft.block_count"))?;
-    let n_layer = u64_to_u32("dflash-draft.block_count", n_layer)?;
+        .get_u64(keys.block_count)
+        .ok_or(LoadError::BadMetadata(keys.block_count))?;
+    let n_layer = u64_to_u32(keys.block_count, n_layer)?;
     let hidden_size_raw = drafter_gguf
-        .get_u64("dflash-draft.embedding_length")
-        .ok_or(LoadError::BadMetadata("dflash-draft.embedding_length"))?;
-    let hidden_size = u64_to_u32("dflash-draft.embedding_length", hidden_size_raw)?;
+        .get_u64(keys.embedding_length)
+        .ok_or(LoadError::BadMetadata(keys.embedding_length))?;
+    let hidden_size = u64_to_u32(keys.embedding_length, hidden_size_raw)?;
     let intermediate_size_raw = drafter_gguf
-        .get_u64("dflash-draft.feed_forward_length")
-        .ok_or(LoadError::BadMetadata("dflash-draft.feed_forward_length"))?;
-    let intermediate_size = u64_to_u32("dflash-draft.feed_forward_length", intermediate_size_raw)?;
+        .get_u64(keys.feed_forward_length)
+        .ok_or(LoadError::BadMetadata(keys.feed_forward_length))?;
+    let intermediate_size = u64_to_u32(keys.feed_forward_length, intermediate_size_raw)?;
     let n_q_heads_raw = drafter_gguf
-        .get_u64("dflash-draft.attention.head_count")
-        .ok_or(LoadError::BadMetadata("dflash-draft.attention.head_count"))?;
-    let n_q_heads = u64_to_u32("dflash-draft.attention.head_count", n_q_heads_raw)?;
+        .get_u64(keys.head_count)
+        .ok_or(LoadError::BadMetadata(keys.head_count))?;
+    let n_q_heads = u64_to_u32(keys.head_count, n_q_heads_raw)?;
     let n_kv_heads_raw = drafter_gguf
-        .get_u64("dflash-draft.attention.head_count_kv")
-        .ok_or(LoadError::BadMetadata(
-            "dflash-draft.attention.head_count_kv",
-        ))?;
-    let n_kv_heads = u64_to_u32("dflash-draft.attention.head_count_kv", n_kv_heads_raw)?;
+        .get_u64(keys.head_count_kv)
+        .ok_or(LoadError::BadMetadata(keys.head_count_kv))?;
+    let n_kv_heads = u64_to_u32(keys.head_count_kv, n_kv_heads_raw)?;
     let head_dim_raw = drafter_gguf
-        .get_u64("dflash-draft.attention.key_length")
-        .ok_or(LoadError::BadMetadata("dflash-draft.attention.key_length"))?;
-    let head_dim = u64_to_u32("dflash-draft.attention.key_length", head_dim_raw)?;
-    let rope_theta = drafter_gguf
-        .get_f32("dflash-draft.rope.freq_base")
-        .unwrap_or(10_000_000.0);
+        .get_u64(keys.key_length)
+        .ok_or(LoadError::BadMetadata(keys.key_length))?;
+    let head_dim = u64_to_u32(keys.key_length, head_dim_raw)?;
+    let rope_theta = drafter_gguf.get_f32(keys.freq_base).unwrap_or(10_000_000.0);
     let swa_window = drafter_gguf
-        .get_u64("dflash-draft.attention.sliding_window")
-        .map_or(Ok(0), |v| {
-            u64_to_u32("dflash-draft.attention.sliding_window", v)
-        })?;
+        .get_u64(keys.sliding_window)
+        .map_or(Ok(0), |v| u64_to_u32(keys.sliding_window, v))?;
     let block_size = drafter_gguf
-        .get_u64("dflash-draft.dflash.block_size")
-        .ok_or(LoadError::BadMetadata("dflash-draft.dflash.block_size"))?;
-    let block_size = u64_to_u32("dflash-draft.dflash.block_size", block_size)?;
+        .get_u64(keys.block_size)
+        .ok_or(LoadError::BadMetadata(keys.block_size))?;
+    let block_size = u64_to_u32(keys.block_size, block_size)?;
     let mask_token_id = drafter_gguf
-        .get_u64("dflash-draft.dflash.mask_token_id")
-        .ok_or(LoadError::BadMetadata("dflash-draft.dflash.mask_token_id"))?;
-    let mask_token_id = u64_to_i32("dflash-draft.dflash.mask_token_id", mask_token_id)?;
+        .get_u64(keys.mask_token_id)
+        .ok_or(LoadError::BadMetadata(keys.mask_token_id))?;
+    let mask_token_id = u64_to_i32(keys.mask_token_id, mask_token_id)?;
     let target_layer_ids: Vec<u32> = drafter_gguf
-        .get_u64_array("dflash-draft.dflash.target_layer_ids")
-        .map_err(|_| LoadError::BadMetadata("dflash-draft.dflash.target_layer_ids"))?
-        .ok_or(LoadError::BadMetadata(
-            "dflash-draft.dflash.target_layer_ids",
-        ))?
+        .get_u64_array(keys.target_layer_ids)
+        .map_err(|_| LoadError::BadMetadata(keys.target_layer_ids))?
+        .ok_or(LoadError::BadMetadata(keys.target_layer_ids))?
         .into_iter()
-        .map(|v| u64_to_u32("dflash-draft.dflash.target_layer_ids", v))
+        .map(|v| u64_to_u32(keys.target_layer_ids, v))
         .collect::<Result<Vec<_>, _>>()?;
-    let n_target_features = drafter_gguf
-        .get_u64("dflash-draft.dflash.n_target_features")
-        .ok_or(LoadError::BadMetadata(
-            "dflash-draft.dflash.n_target_features",
-        ))?;
-    let n_target_features = u64_to_u32("dflash-draft.dflash.n_target_features", n_target_features)?;
+    let n_target_features = match keys.n_target_features {
+        Some(key) => {
+            let raw = drafter_gguf
+                .get_u64(key)
+                .ok_or(LoadError::BadMetadata(key))?;
+            u64_to_u32(key, raw)?
+        }
+        // v2 drops the explicit key; the fc shape check below still
+        // cross-validates the derived value.
+        None => {
+            let derived = checked_mul_dim(
+                target_layer_ids.len() as u64,
+                target_model.arch.hidden_size as u64,
+                "dflash target_layer_ids.len * target_h",
+            )?;
+            u64_to_u32(keys.target_layer_ids, derived)?
+        }
+    };
     let swa_pattern: Vec<bool> = drafter_gguf
-        .get_bool_array("dflash-draft.attention.sliding_window_pattern")
-        .map_err(|_| LoadError::BadMetadata("dflash-draft.attention.sliding_window_pattern"))?
-        .ok_or(LoadError::BadMetadata(
-            "dflash-draft.attention.sliding_window_pattern",
-        ))?;
+        .get_bool_array(keys.sliding_window_pattern)
+        .map_err(|_| LoadError::BadMetadata(keys.sliding_window_pattern))?
+        .ok_or(LoadError::BadMetadata(keys.sliding_window_pattern))?;
+
+    // A/B experiment (adversarial review F1, QWEN_DFLASH2_CAPTURE_SHIFT=1,
+    // v2 drafters only): llama.cpp feeds the drafter the INPUT to target
+    // layer `lid` (`llama_get_embeddings_layer_inp` = output of `lid-1`),
+    // while this engine's capture machinery snapshots the OUTPUT of layer
+    // `lid`. Shifting the ids by -1 makes our post-layer capture deliver
+    // the reference's features. The v1 (`dflash-draft`) GGUF's ids are
+    // trusted as already matching this engine's convention.
+    let target_layer_ids = if keys.n_target_features.is_none()
+        && std::env::var("QWEN_DFLASH2_CAPTURE_SHIFT").as_deref() == Ok("1")
+    {
+        target_layer_ids
+            .into_iter()
+            .map(|lid| {
+                lid.checked_sub(1).ok_or(LoadError::BadMetadata(
+                    "QWEN_DFLASH2_CAPTURE_SHIFT cannot shift target layer id 0",
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        target_layer_ids
+    };
+
+    // -------- DFlash 2 conv/selector metadata (v2 only, presence-gated) --------
+    // Presence contract mirrors llama.cpp PR 27342: `selector_hidden.weight`
+    // in the GGUF means "this is a DFlash 2 drafter" and all four keys +
+    // conv tensors become mandatory.
+    let is_dflash2 = drafter_gguf.find("selector_hidden.weight").is_some();
+    let (conv_kernel_size, conv_group_size, selector_rank, selector_top_k) = if is_dflash2 {
+        let kernel = drafter_gguf
+            .get_u64("dflash.conv_kernel_size")
+            .ok_or(LoadError::BadMetadata("dflash.conv_kernel_size"))?;
+        let kernel = u64_to_u32("dflash.conv_kernel_size", kernel)?;
+        let group = drafter_gguf
+            .get_u64("dflash.conv_group_size")
+            .ok_or(LoadError::BadMetadata("dflash.conv_group_size"))?;
+        let group = u64_to_u32("dflash.conv_group_size", group)?;
+        let rank = drafter_gguf
+            .get_u64("dflash.selector_rank")
+            .ok_or(LoadError::BadMetadata("dflash.selector_rank"))?;
+        let rank = u64_to_u32("dflash.selector_rank", rank)?;
+        let top_k = drafter_gguf
+            .get_u64("dflash.selector_top_k")
+            .ok_or(LoadError::BadMetadata("dflash.selector_top_k"))?;
+        let top_k = u64_to_u32("dflash.selector_top_k", top_k)?;
+        ensure_nonzero("dflash.conv_kernel_size", kernel)?;
+        ensure_cap("dflash.conv_kernel_size", kernel, 8)?;
+        ensure_nonzero("dflash.conv_group_size", group)?;
+        ensure_nonzero("dflash.selector_rank", rank)?;
+        ensure_cap("dflash.selector_rank", rank, MAX_ARCH_DIM)?;
+        ensure_nonzero("dflash.selector_top_k", top_k)?;
+        ensure_cap("dflash.selector_top_k", top_k, 64)?;
+        if hidden_size % group != 0 {
+            return Err(LoadError::BadMetadata(
+                "dflash.conv_group_size must divide embedding_length",
+            ));
+        }
+        (kernel, group, rank, top_k)
+    } else {
+        (0, 0, 0, 0)
+    };
 
     // -------- Compatibility validation --------
     let target_h = target_model.arch.hidden_size;
@@ -907,6 +1095,15 @@ pub fn open_dflash_drafter<'a>(
             "dflash-draft.attention.sliding_window_pattern length must equal block_count",
         ));
     }
+    // Fail closed: a missing/zero sliding_window with SWA layers present
+    // would silently run those layers as FULL attention (swa_window=0 is
+    // the kernels' "no SWA" sentinel) — a semantic corruption, not an
+    // error (2026-08-19 adversarial review, F9).
+    if swa_window == 0 && swa_pattern.iter().any(|&is_swa| is_swa) {
+        return Err(LoadError::BadMetadata(
+            "drafter declares SWA layers but attention.sliding_window is missing or 0",
+        ));
+    }
 
     let q_dim = checked_mul_dim(n_q_heads as u64, head_dim as u64, "dflash q_dim")?;
     if q_dim > MAX_KERNEL_DIM {
@@ -926,12 +1123,31 @@ pub fn open_dflash_drafter<'a>(
     }
 
     // -------- Top-level adornment tensors --------
-    let fc = need(drafter_gguf, "dflash_fc.weight")?;
+    let fc = need(drafter_gguf, keys.fc_tensor)?;
     check_shape(fc, &[n_target_features as u64, hidden_size as u64])?;
-    let hidden_norm = need(drafter_gguf, "dflash_hidden_norm.weight")?;
+    let hidden_norm = need(drafter_gguf, keys.hidden_norm_tensor)?;
     check_shape(hidden_norm, &[hidden_size as u64])?;
     let output_norm = need(drafter_gguf, "output_norm.weight")?;
     check_shape(output_norm, &[hidden_size as u64])?;
+
+    // -------- DFlash 2 selector tensors --------
+    let selector: Option<DFlashSelectorTensors<'a>> = if is_dflash2 {
+        let v_target = target_model.arch.vocab_size as u64;
+        let rank = selector_rank as u64;
+        let predecessor = need(drafter_gguf, "selector_predecessor.weight")?;
+        check_shape(predecessor, &[rank, v_target])?;
+        let successor = need(drafter_gguf, "selector_successor.weight")?;
+        check_shape(successor, &[rank, v_target])?;
+        let sel_hidden = need(drafter_gguf, "selector_hidden.weight")?;
+        check_shape(sel_hidden, &[hidden_size as u64, rank])?;
+        Some(DFlashSelectorTensors {
+            predecessor,
+            successor,
+            hidden: sel_hidden,
+        })
+    } else {
+        None
+    };
 
     // -------- Per-layer tensors --------
     let h = hidden_size as u64;
@@ -953,8 +1169,10 @@ pub fn open_dflash_drafter<'a>(
         check_shape(q_norm, &[head_dim as u64])?;
         let k_norm = need(drafter_gguf, &format!("blk.{i}.attn_k_norm.weight"))?;
         check_shape(k_norm, &[head_dim as u64])?;
-        let post_attention_norm =
-            need(drafter_gguf, &format!("blk.{i}.post_attention_norm.weight"))?;
+        let post_attention_norm = need(
+            drafter_gguf,
+            &format!("blk.{i}.{}.weight", keys.post_attn_norm_suffix),
+        )?;
         check_shape(post_attention_norm, &[h])?;
         let ffn_gate = need(drafter_gguf, &format!("blk.{i}.ffn_gate.weight"))?;
         check_shape(ffn_gate, &[h, f])?;
@@ -962,6 +1180,27 @@ pub fn open_dflash_drafter<'a>(
         check_shape(ffn_up, &[h, f])?;
         let ffn_down = need(drafter_gguf, &format!("blk.{i}.ffn_down.weight"))?;
         check_shape(ffn_down, &[f, h])?;
+        let conv = if is_dflash2 {
+            let kernel = conv_kernel_size as u64;
+            let n_groups = (hidden_size / conv_group_size) as u64;
+            let proj_out = checked_mul_dim(2 * kernel, n_groups, "dflash2 conv proj out")?;
+            let attn_base = need(drafter_gguf, &format!("blk.{i}.attn_conv_base"))?;
+            check_shape(attn_base, &[h, kernel, 2])?;
+            let attn_proj = need(drafter_gguf, &format!("blk.{i}.attn_conv_proj.weight"))?;
+            check_shape(attn_proj, &[h, proj_out])?;
+            let ffn_base = need(drafter_gguf, &format!("blk.{i}.ffn_conv_base"))?;
+            check_shape(ffn_base, &[h, kernel, 2])?;
+            let ffn_proj = need(drafter_gguf, &format!("blk.{i}.ffn_conv_proj.weight"))?;
+            check_shape(ffn_proj, &[h, proj_out])?;
+            Some(DFlashConvTensors {
+                attn_base,
+                attn_proj,
+                ffn_base,
+                ffn_proj,
+            })
+        } else {
+            None
+        };
         layers.push(DFlashLayer {
             attn_norm,
             q,
@@ -975,6 +1214,7 @@ pub fn open_dflash_drafter<'a>(
             ffn_up,
             ffn_down,
             is_swa: swa_pattern[i as usize],
+            conv,
         });
     }
 
@@ -991,12 +1231,17 @@ pub fn open_dflash_drafter<'a>(
             block_size,
             mask_token_id,
             n_target_features_layers: target_feature_layers,
+            conv_kernel_size,
+            conv_group_size,
+            selector_rank,
+            selector_top_k,
         },
         target_layer_ids,
         fc,
         hidden_norm,
         output_norm,
         layers,
+        selector,
     })
 }
 

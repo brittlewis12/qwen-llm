@@ -14342,6 +14342,186 @@ pub fn encode_argmax_f32(
     Ok(())
 }
 
+/// DFlash 2 two-tap dynamic depthwise convolution over the noise block
+/// (kernels/dflash2.metal). `y[t][c] = Σ_tap (base[side][tap][c] +
+/// dyn[t][side][tap][group(c)]) · x[t-tap][c]`, zero-padded before the
+/// block start. `y` must not alias `x` (taps read neighboring rows).
+///
+/// Layouts (all F32):
+/// * `x`, `y`: `[n_tokens, h]` row-major
+/// * `dyn`:    `[n_tokens, 2 · kernel_size · n_groups]` — per-token conv
+///   projection output, `(group, tap, side)` fastest-to-slowest
+/// * `base`:   `[h, kernel_size, 2]` GGUF tensor — `(channel, tap, side)`
+#[allow(clippy::too_many_arguments)]
+pub fn encode_dflash2_conv_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    dynamic: &MetalTensor,
+    base: &MetalTensor,
+    y: &MetalTensor,
+    n_tokens: usize,
+    h: usize,
+    kernel_size: usize,
+    group_size: usize,
+    side: u32,
+) -> Result<(), MetalError> {
+    if side > 1 || group_size == 0 || kernel_size == 0 || !h.is_multiple_of(group_size) {
+        return Err(MetalError::BadShape {
+            kernel: "dflash2_conv",
+            detail: format!("bad params side={side} kernel={kernel_size} group={group_size} h={h}"),
+        });
+    }
+    let n_groups = h / group_size;
+    let dyn_stride = 2 * kernel_size * n_groups;
+    if x.n_elements() as usize != n_tokens * h || y.n_elements() as usize != n_tokens * h {
+        return Err(MetalError::BadShape {
+            kernel: "dflash2_conv",
+            detail: format!(
+                "x/y elements {}/{} != n_tokens*h={}",
+                x.n_elements(),
+                y.n_elements(),
+                n_tokens * h
+            ),
+        });
+    }
+    if (dynamic.n_elements() as usize) < n_tokens * dyn_stride {
+        return Err(MetalError::BadShape {
+            kernel: "dflash2_conv",
+            detail: format!(
+                "dyn elements {} < n_tokens*dyn_stride={}",
+                dynamic.n_elements(),
+                n_tokens * dyn_stride
+            ),
+        });
+    }
+    if (base.n_elements() as usize) < h * kernel_size * 2 {
+        return Err(MetalError::BadShape {
+            kernel: "dflash2_conv",
+            detail: format!(
+                "base elements {} < h*kernel*2={}",
+                base.n_elements(),
+                h * kernel_size * 2
+            ),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        h: u32,
+        n_tokens: u32,
+        kernel_size: u32,
+        group_size: u32,
+        n_groups: u32,
+        side: u32,
+        dyn_stride: u32,
+    }
+    let pso = ctx.pipeline("kernel_dflash2_conv_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            h: h as u32,
+            n_tokens: n_tokens as u32,
+            kernel_size: kernel_size as u32,
+            group_size: group_size as u32,
+            n_groups: n_groups as u32,
+            side,
+            dyn_stride: dyn_stride as u32,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, dynamic);
+    enc.set_tensor(3, base);
+    enc.set_tensor(4, y);
+
+    let total = n_tokens * h;
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(256);
+    enc.dispatch(
+        MTLSize {
+            width: total.div_ceil(tg_threads),
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
+/// GPU-side top-16 over `[n_rows, n]` rows of F32 (kernels/dflash2.metal):
+/// writes `[n_rows, 16]` I32 indices + `[n_rows, 16]` F32 values, sorted
+/// descending, ties toward the lower index. DFlash 2 selector candidates:
+/// replaces the `[N, V]` logits readback with an `[N, 16]` pair readback.
+pub fn encode_topk16_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_val: &MetalTensor,
+    n_rows: usize,
+    n: usize,
+) -> Result<(), MetalError> {
+    const TOP_K: usize = 16;
+    if x.n_elements() as usize != n_rows * n {
+        return Err(MetalError::BadShape {
+            kernel: "topk16",
+            detail: format!("x.n_elements={} != n_rows*n={}", x.n_elements(), n_rows * n),
+        });
+    }
+    validate_i32_output("topk16", out_idx, n_rows * TOP_K)?;
+    if (out_val.n_elements() as usize) < n_rows * TOP_K {
+        return Err(MetalError::BadShape {
+            kernel: "topk16",
+            detail: format!(
+                "out_val elements {} < n_rows*16={}",
+                out_val.n_elements(),
+                n_rows * TOP_K
+            ),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        stride_x: u32,
+    }
+    let pso = ctx.pipeline("kernel_topk16_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            stride_x: n as u32,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, out_idx);
+    enc.set_tensor(3, out_val);
+
+    // 128 threads → 128 · 16 · 4 B = 8 KB per threadgroup array (16 KB
+    // total), safely under the 32 KB Apple GPU threadgroup limit.
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(128);
+    enc.set_threadgroup_memory(0, tg_threads * TOP_K * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, tg_threads * TOP_K * std::mem::size_of::<u32>());
+    enc.dispatch(
+        MTLSize {
+            width: n_rows,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// GPU-side greedy selection matching the sampler's `f32::total_cmp` order.
 /// Equal bit patterns choose the highest token id. Any NaN is encoded as the
 /// negative value `~token_id`, with the lowest NaN token taking precedence.
@@ -18692,6 +18872,12 @@ pub fn encode_attn_decode_f32(
     Ok(())
 }
 
+// A/B experiment (adversarial review F2): llama.cpp runs the DFlash drafter
+// with `causal_attn = false` (bidirectional attention within the noise block);
+// this engine has always applied a block-causal mask over noise keys. Nonzero
+// drops the restriction. Applies to every dflash_attn kernel variant.
+crate::env_flag!(default_off dflash_noncausal_noise_enabled, "QWEN_DFLASH_NONCAUSAL_NOISE");
+
 /// **DFlash drafter attention** (v0.72.1) — fused small-N attention
 /// with per-layer SWA mask. Replaces the CPU phase-3 attention in
 /// `draft_block`. See `kernels/dflash_attn.metal` for design.
@@ -18801,6 +18987,7 @@ pub fn encode_dflash_attn_f32(
         swa_window: u32,
         ctx_scan_start: u32,
         scale: f32,
+        noncausal_noise: u32,
     }
     let scale = 1.0f32 / (head_dim as f32).sqrt();
     enc.set_bytes(
@@ -18816,6 +19003,7 @@ pub fn encode_dflash_attn_f32(
             swa_window,
             ctx_scan_start: 0,
             scale,
+            noncausal_noise: dflash_noncausal_noise_enabled() as u32,
         },
     );
     enc.set_tensor(1, q);
@@ -19082,6 +19270,7 @@ fn encode_dflash_attn_two_range_pipeline(
         swa_window: u32,
         ctx_scan_start: u32,
         scale: f32,
+        noncausal_noise: u32,
     }
     let scale = 1.0f32 / (head_dim as f32).sqrt();
     enc.set_bytes(
@@ -19097,6 +19286,7 @@ fn encode_dflash_attn_two_range_pipeline(
             swa_window,
             ctx_scan_start: ctx_scan_start as u32,
             scale,
+            noncausal_noise: dflash_noncausal_noise_enabled() as u32,
         },
     );
     enc.set_tensor(1, q);
@@ -19229,6 +19419,7 @@ pub fn encode_dflash_attn_full_gqa_split4_f32(
         swa_window: u32,
         ctx_scan_start: u32,
         scale: f32,
+        noncausal_noise: u32,
     }
     let args = Args {
         n_q_heads: N_Q as u32,
@@ -19244,6 +19435,7 @@ pub fn encode_dflash_attn_full_gqa_split4_f32(
         swa_window: 0,
         ctx_scan_start: 0,
         scale: 1.0 / (HEAD_DIM as f32).sqrt(),
+        noncausal_noise: dflash_noncausal_noise_enabled() as u32,
     };
 
     let main = ctx.pipeline("kernel_dflash_attn_full_gqa_split4_main_f32")?;

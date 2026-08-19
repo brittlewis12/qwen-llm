@@ -108,6 +108,12 @@ struct dflash_attn_args {
     uint  ctx_scan_start;        // first context row worth scanning for SWA;
                                  // ignored for full-attn layers.
     float scale;                 // 1/sqrt(head_dim)
+    uint  noncausal_noise;       // A/B experiment (QWEN_DFLASH_NONCAUSAL_NOISE):
+                                 // nonzero drops the block-causal restriction
+                                 // over noise keys (llama.cpp sets
+                                 // `causal_attn=false` for the DFlash drafter;
+                                 // this engine has historically masked
+                                 // noise_idx > q_idx).
 };
 
 kernel void kernel_dflash_attn_f32(
@@ -182,7 +188,7 @@ kernel void kernel_dflash_attn_f32(
             }
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (noise_idx <= q_idx);
+            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
         }
         if (!allowed) continue;
         device const float * k_row = k + (ulong)kk * k_stride
@@ -210,7 +216,7 @@ kernel void kernel_dflash_attn_f32(
             }
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (noise_idx <= q_idx);
+            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
         }
         if (!allowed) continue;
         device const float * k_row = k + (ulong)kk * k_stride
@@ -241,7 +247,7 @@ kernel void kernel_dflash_attn_f32(
             }
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (noise_idx <= q_idx);
+            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
         }
         if (!allowed) continue;
         device const float * k_row = k + (ulong)kk * k_stride
@@ -320,7 +326,7 @@ kernel void kernel_dflash_attn_two_range_f32(
             k_row = k_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (noise_idx <= q_idx);
+            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
             k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
         }
         if (!allowed) continue;
@@ -347,7 +353,7 @@ kernel void kernel_dflash_attn_two_range_f32(
             k_row = k_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (noise_idx <= q_idx);
+            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
             k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
         }
         if (!allowed) continue;
@@ -379,7 +385,7 @@ kernel void kernel_dflash_attn_two_range_f32(
             v_row = v_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (noise_idx <= q_idx);
+            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
             k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
             v_row = v_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
         }
@@ -459,7 +465,7 @@ kernel void kernel_dflash_attn_online_two_range_f32(
             v_row = v_ctx + (ulong)kk * k_stride + (ulong)kv_head * head_dim;
         } else {
             const uint noise_idx = kk - args.ctx_len;
-            allowed = (noise_idx <= q_idx);
+            allowed = (args.noncausal_noise != 0) || (noise_idx <= q_idx);
             k_row = k_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
             v_row = v_noise + (ulong)noise_idx * k_stride + (ulong)kv_head * head_dim;
         }

@@ -13,7 +13,7 @@ jam positions are not.
 |---|---|---|---|
 | S0 | Prefix-stability falsifier | measurement | DONE — see packet RESULTS |
 | **S1 (this doc)** | Resident serial server, Open Responses subset, no tools | the game (thin HTTP client) | below |
-| S2 | Tool items (hermes/DS4 → `function_call`), `allowed_tools`, continuation rendering | opencode via stock `@ai-sdk/open-responses` | ≥8/10 turns checkpoint-hit in a 10-turn opencode session, by server `matched_tokens` log |
+| S2 | Tool items (family-native formats → `function_call`; NOT hermes JSON — the extracted Qwen3.6 template oracle uses an XML-parameter `<function=…><parameter=…>` form), `allowed_tools`, continuation rendering | opencode via stock `@ai-sdk/open-responses` | ≥8/10 turns checkpoint-hit in a 10-turn opencode session, by server `matched_tokens` log |
 | S3 | Reasoning `encrypted_content` opaque round-trip; DS4 family support | opencode, lossless | zero tail re-prefill on preserve conversations, by metric |
 | S4 | Public v0: CC shim, install, memory admission UX, bench repro, compliance claim | the world | sub-100 ms turn-2 TTFT demo, resident @32k |
 

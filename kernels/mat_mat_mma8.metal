@@ -118,6 +118,64 @@ inline void mma8_dequantize_q6_K_half(device const uchar * blk_bytes,
     }
 }
 
+// --- Q5_K dequant (identical math to mat_mat_q5_k.metal's helper, which
+// lifts llama's `dequantize_q5_K`; duplicated here because .metal units
+// compile separately) -----------------------------------------------------
+inline void mma8_dequantize_q5_K_half(device const uchar * blk_bytes,
+                                      short il,
+                                      thread half4x4 & reg) {
+    const half d_h    = ((device const half *)blk_bytes)[0];
+    const half dmin_h = ((device const half *)blk_bytes)[1];
+    device const uchar * scales = blk_bytes + 4;
+    device const uchar * qh     = blk_bytes + 4 + 12;
+    device const uchar * qs     = blk_bytes + 4 + 12 + 32;
+
+    const short is  = (il / 4) * 2;
+    const short k01 = (il / 2) & 1;
+    uchar sc_u, m_u;
+    if (is < 4) {
+        sc_u = scales[is + k01] & 63;
+        m_u  = scales[is + k01 + 4] & 63;
+    } else {
+        sc_u = (scales[is + k01 + 4] & 0x0F) | ((scales[is + k01 - 4] >> 6) << 4);
+        m_u  = (scales[is + k01 + 4] >>   4) | ((scales[is + k01    ] >> 6) << 4);
+    }
+
+    qs = qs + 32 * (il / 4) + 16 * (il & 1);
+    qh = qh + 16 * (il & 1);
+    const uchar ul = 1u << (il / 2);
+    short il_inner = il & 3;
+
+    const float d    = il_inner < 2 ? (float)d_h : (float)d_h / 16.0f;
+    const float dmin = (float)dmin_h;
+    const float dl   = d * (float)sc_u;
+    const float ml   = dmin * (float)m_u;
+    const ushort mask = il_inner < 2 ? 0x0F : 0xF0;
+    const float qh_val = il_inner < 2 ? 16.0f : 256.0f;
+
+    FOR_UNROLL (int i = 0; i < 16; ++i) {
+        const float q_low  = (float)(qs[i] & mask);
+        const float q_high = (qh[i] & ul) ? qh_val : 0.0f;
+        reg[i / 4][i % 4] = (half)(dl * (q_low + q_high) - ml);
+    }
+}
+
+// --- Q8_0 dequant: eight consecutive 34-byte blocks (f16 scale + 32 i8)
+// form one 256-element superblock, BLK_BYTES = 272. Chunk il reads
+// sub-block il/2 at half-offset il&1. The simplest dequant in the file —
+// added for the DFlash 2 drafter, whose Q8_0 projections at N=8 fell
+// through to the generic 32-wide tile (v0.77 small-N sweep) ---------------
+inline void mma8_dequantize_q8_0_half(device const uchar * blk_bytes,
+                                      short il,
+                                      thread half4x4 & reg) {
+    device const uchar * blk = blk_bytes + (ulong)(il / 2) * 34;
+    const float d = (float)((device const half *)blk)[0];
+    device const char * qs = (device const char *)(blk + 2) + 16 * (il & 1);
+    FOR_UNROLL (int i = 0; i < 16; ++i) {
+        reg[i / 4][i % 4] = (half)(d * (float)qs[i]);
+    }
+}
+
 // --- Shared 8x8-tile body -------------------------------------------------
 // DEQ: dequant fn; BLK_BYTES: quant block size in bytes.
 //
@@ -362,3 +420,28 @@ MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q4_K_mma8v_r2c2k128_f32,
                      mma8_dequantize_q4_K_half, 144, 2, 2, 128, 1)
 MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q6_K_mma8v_r2c2k128_f32,
                      mma8_dequantize_q6_K_half, 210, 2, 2, 128, 1)
+
+// v0.77: Q5_K + Q8_0 join the mma8v family (ct=1 / N=8 tier only). The
+// small-N sweep showed both leaking to the generic tile at N=8: Q5_K on
+// the 48 GDN out_proj dispatches in packed verify (64 GB/s), Q8_0 on
+// every DFlash 2 drafter projection.
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q5_K_mma8v_r2c1k64_f32,
+                     mma8_dequantize_q5_K_half, 176, 2, 1, 64, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q5_K_mma8v_r1c1k128_f32,
+                     mma8_dequantize_q5_K_half, 176, 1, 1, 128, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q5_K_mma8v_r1c1k64_sg2_f32,
+                     mma8_dequantize_q5_K_half, 176, 1, 1, 64, 2)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q5_K_mma8v_r2c1k128_f32,
+                     mma8_dequantize_q5_K_half, 176, 2, 1, 128, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q5_K_mma8v_r4c1k64_f32,
+                     mma8_dequantize_q5_K_half, 176, 4, 1, 64, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q8_0_mma8v_r2c1k64_f32,
+                     mma8_dequantize_q8_0_half, 272, 2, 1, 64, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q8_0_mma8v_r1c1k128_f32,
+                     mma8_dequantize_q8_0_half, 272, 1, 1, 128, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q8_0_mma8v_r1c1k64_sg2_f32,
+                     mma8_dequantize_q8_0_half, 272, 1, 1, 64, 2)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q8_0_mma8v_r2c1k128_f32,
+                     mma8_dequantize_q8_0_half, 272, 2, 1, 128, 1)
+MAT_MAT_MMA8V_KERNEL(kernel_mat_mat_q8_0_mma8v_r4c1k64_f32,
+                     mma8_dequantize_q8_0_half, 272, 4, 1, 64, 1)

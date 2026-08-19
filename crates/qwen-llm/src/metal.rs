@@ -6895,6 +6895,10 @@ pub fn encode_mat_mat_mma8_variant(
     let dt = match weight.dtype {
         GgmlType::Q4_K => "q4_K",
         GgmlType::Q6_K => "q6_K",
+        // v0.77: Q5_K (packed-verify GDN out_proj) and Q8_0 (DFlash 2
+        // drafter projections) join the N=8 tier — ct=1 variants only.
+        GgmlType::Q5_K => "q5_K",
+        GgmlType::Q8_0 => "q8_0",
         other => {
             return Err(MetalError::BadShape {
                 kernel: "mat_mat_mma8v",

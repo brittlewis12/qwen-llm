@@ -13610,7 +13610,10 @@ pub fn encode_mat_mat_dispatch(
     // greedy equivalence re-gated at v0.501. Rollback:
     // QWEN_MATMAT_SMALLN_TABLE=0.
     if matmat_smalln_table_enabled()
-        && matches!(weight.dtype, GgmlType::Q4_K | GgmlType::Q6_K)
+        && matches!(
+            weight.dtype,
+            GgmlType::Q4_K | GgmlType::Q6_K | GgmlType::Q5_K | GgmlType::Q8_0
+        )
         && n_in.is_multiple_of(256)
     {
         match n_query {
@@ -13620,7 +13623,10 @@ pub fn encode_mat_mat_dispatch(
                     ctx, enc, weight, x, y, n_in, n_out,
                 )?);
             }
-            2 | 4 => {
+            // nc kernels exist only for Q4_K/Q6_K (Q5_K n=2..4 already
+            // routed to sequential mat-vec above; Q8_0 n=2/4 falls
+            // through to the generic tile — unswept).
+            2 | 4 if matches!(weight.dtype, GgmlType::Q4_K | GgmlType::Q6_K) => {
                 // nc2 (Q6_K) / nc4: c 1.6-3.3 vs generic 5.1-8.3.
                 return Ok(crate::metal::encode_mat_vec_nc_dispatch(
                     ctx, enc, weight, x, y, n_in, n_out, n_query,
@@ -13628,6 +13634,30 @@ pub fn encode_mat_mat_dispatch(
             }
             8 if weight.dtype == GgmlType::Q6_K && n_out.is_multiple_of(8) => {
                 // r1c1k128: flat c ~1.6-1.8 across N on Q6_K shapes.
+                return Ok(crate::metal::encode_mat_mat_mma8_variant(
+                    ctx, enc, weight, x, y, n_in, n_out, "r1c1k128",
+                )?);
+            }
+            // v0.77 sweep (matmat-smalln-micro, production shapes): Q5_K
+            // and Q8_0 had NO tuned N=8 arm and paid the generic tile.
+            // r1c1k128 won every swept shape for both dtypes:
+            //   Q5_K [6144,5120]: 0.336 -> 0.105 ms/dispatch (the 48 GDN
+            //     out_proj dispatches in packed verify: ~-11 ms/pass)
+            //   Q8_0 drafter shapes: -49% to -75% (DFlash 2 draft_block
+            //     phases 2/3: ~-8 ms/draft)
+            8 if matches!(weight.dtype, GgmlType::Q5_K | GgmlType::Q8_0)
+                && n_out.is_multiple_of(8) =>
+            {
+                return Ok(crate::metal::encode_mat_mat_mma8_variant(
+                    ctx, enc, weight, x, y, n_in, n_out, "r1c1k128",
+                )?);
+            }
+            // v0.77 sweep: Q4_K down-projections (n_in > n_out) prefer
+            // r1c1k128 over the sg2 all-rounder — [6144,5120] 0.103 ->
+            // 0.094, [17408,5120] 0.311 -> 0.268 ms. Up/square shapes
+            // keep sg2 ([5120,6144] 0.099 vs 0.123, [5120,12288] 0.186
+            // vs 0.194, [5120,17408] 0.247 vs 0.263).
+            8 if weight.dtype == GgmlType::Q4_K && n_in > n_out && n_out.is_multiple_of(8) => {
                 return Ok(crate::metal::encode_mat_mat_mma8_variant(
                     ctx, enc, weight, x, y, n_in, n_out, "r1c1k128",
                 )?);
@@ -13646,7 +13676,12 @@ pub fn encode_mat_mat_dispatch(
                     "r1c1k64_sg2",
                 )?);
             }
-            16 if n_out.is_multiple_of(16) && n_out < 100_000 => {
+            // ct=2 variants (16 columns) exist only for Q4_K/Q6_K — the
+            // v1 (N=16) drafter's Q8_0 mat-mats must NOT land here.
+            16 if matches!(weight.dtype, GgmlType::Q4_K | GgmlType::Q6_K)
+                && n_out.is_multiple_of(16)
+                && n_out < 100_000 =>
+            {
                 // r2c2k64 beats n16 by 8-35% on ffn/gdn/attn shapes;
                 // n16 retained for lm_head-class (n_out >= 100k) where
                 // it still wins (2.35 vs 2.81).

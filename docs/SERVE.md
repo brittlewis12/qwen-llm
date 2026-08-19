@@ -94,7 +94,7 @@ Truncated thinking (S0 F4) yields `reasoning` with `status:
 
 Streaming events: `response.created`, `response.in_progress`,
 `response.output_item.added`, `response.content_part.added`,
-`response.reasoning_text.delta|done`, `response.output_text.delta|done`,
+`response.reasoning.delta|done` (spec event names, adjudicated by the gate-5 conformance suite), `response.output_text.delta|done`,
 `response.content_part.done`, `response.output_item.done`,
 `response.completed|incomplete|failed`, terminal `[DONE]`. **Every
 event carries a monotonic `sequence_number`** (review defect 4 — the
@@ -157,7 +157,7 @@ slot frees within 250 ms. No signals, no threads beyond the accept loop.
    the comparison.
 2. **TTFT:** warm (resident, RAM-cache) turn-2 TTFT <150 ms at 8k
    context on Qwen3.6-35B-A3B; measured from request byte one to the
-   first byte of the first `response.reasoning_text.delta` or
+   first byte of the first `response.reasoning.delta` or
    `response.output_text.delta` event. Comments and lifecycle events
    excluded (review defect 5: heartbeats are SSE bytes; `response.created`
    fires at admission and measures nothing).

@@ -7,7 +7,7 @@
 //! [`SseWriter`]; the HTTP slice owns the socket.
 //!
 //! Part-type note: reasoning item content parts use `reasoning_text`
-//! (matching the OpenAI-lineage `response.reasoning_text.delta` events this
+//! (matching the OpenAI-lineage `response.reasoning.delta` events this
 //! module emits). The gate-5 conformance run adjudicates this choice; it is
 //! isolated behind `REASONING_PART_TYPE`.
 
@@ -29,6 +29,8 @@ pub(crate) enum StopReason {
 pub(crate) struct Usage {
     pub(crate) input_tokens: usize,
     pub(crate) output_tokens: usize,
+    /// Tokens restored from checkpoints (spec `cached_tokens`).
+    pub(crate) cached_tokens: usize,
 }
 
 impl Usage {
@@ -37,7 +39,29 @@ impl Usage {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "total_tokens": self.input_tokens + self.output_tokens,
+            "input_tokens_details": {"cached_tokens": self.cached_tokens},
+            "output_tokens_details": {"reasoning_tokens": 0},
         })
+    }
+}
+
+/// Request-derived fields echoed into every response envelope; the
+/// conformance suite validates the full ResponseResource field set
+/// (gate 5), so absent-but-required keys are spec violations.
+#[derive(Debug, Clone)]
+pub(crate) struct EnvelopeEcho {
+    pub(crate) temperature: f64,
+    pub(crate) top_p: f64,
+    pub(crate) max_output_tokens: Option<u64>,
+}
+
+impl Default for EnvelopeEcho {
+    fn default() -> Self {
+        Self {
+            temperature: 0.0,
+            top_p: 1.0,
+            max_output_tokens: None,
+        }
     }
 }
 
@@ -120,6 +144,7 @@ pub(crate) struct ResponseStream<'a, W: EventWrite> {
     response_id: String,
     model: String,
     created_at: u64,
+    echo: EnvelopeEcho,
     open: OpenItem,
     output_index: usize,
     reasoning_item_id: String,
@@ -137,6 +162,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
         response_id: String,
         model: String,
         created_at: u64,
+        echo: EnvelopeEcho,
     ) -> io::Result<Self> {
         let mut stream = Self {
             writer,
@@ -144,6 +170,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
             response_id,
             model,
             created_at,
+            echo,
             open: OpenItem::None,
             output_index: 0,
             reasoning_item_id: String::new(),
@@ -213,22 +240,40 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
         usage: Option<&Usage>,
         incomplete_reason: Option<&str>,
     ) -> Value {
-        let mut envelope = json!({
+        let terminal = matches!(status, "completed" | "incomplete" | "failed");
+        json!({
             "id": self.response_id,
             "object": "response",
             "created_at": self.created_at,
+            "completed_at": if terminal { json!(self.created_at) } else { Value::Null },
             "model": self.model,
             "status": status,
             "output": output,
             "store": false,
-        });
-        if let Some(usage) = usage {
-            envelope["usage"] = usage.to_json();
-        }
-        if let Some(reason) = incomplete_reason {
-            envelope["incomplete_details"] = json!({"reason": reason});
-        }
-        envelope
+            "usage": usage.map_or(Value::Null, Usage::to_json),
+            "incomplete_details": incomplete_reason.map_or(Value::Null, |reason| json!({"reason": reason})),
+            "error": Value::Null,
+            "previous_response_id": Value::Null,
+            "instructions": Value::Null,
+            "tools": json!([]),
+            "tool_choice": "auto",
+            "truncation": "disabled",
+            "parallel_tool_calls": false,
+            "text": json!({"format": {"type": "text"}}),
+            "temperature": self.echo.temperature,
+            "top_p": self.echo.top_p,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "top_logprobs": 0,
+            "reasoning": Value::Null,
+            "max_output_tokens": self.echo.max_output_tokens.map_or(Value::Null, |v| json!(v)),
+            "max_tool_calls": Value::Null,
+            "background": false,
+            "service_tier": "default",
+            "metadata": json!({}),
+            "safety_identifier": Value::Null,
+            "prompt_cache_key": Value::Null,
+        })
     }
 
     fn open_reasoning(&mut self) -> io::Result<()> {
@@ -239,6 +284,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
             "id": self.reasoning_item_id,
             "type": "reasoning",
             "status": "in_progress",
+            "summary": [],
             "content": [],
         });
         self.emit(
@@ -277,7 +323,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
                 "item_id": self.message_item_id,
                 "output_index": self.output_index,
                 "content_index": 0,
-                "part": {"type": "output_text", "text": ""},
+                "part": {"type": "output_text", "text": "", "annotations": []},
             }),
         )
     }
@@ -288,7 +334,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
         let output_index = self.output_index;
         let text = self.reasoning_text.clone();
         self.emit(
-            "response.reasoning_text.done",
+            "response.reasoning.done",
             json!({
                 "item_id": item_id,
                 "output_index": output_index,
@@ -330,7 +376,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
                 "text": text,
             }),
         )?;
-        let part = json!({"type": "output_text", "text": self.visible_text});
+        let part = json!({"type": "output_text", "text": self.visible_text, "annotations": []});
         self.emit(
             "response.content_part.done",
             json!({
@@ -355,6 +401,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
             "id": self.reasoning_item_id,
             "type": "reasoning",
             "status": status,
+            "summary": [],
             "content": [{"type": REASONING_PART_TYPE, "text": self.reasoning_text}],
         })
     }
@@ -365,7 +412,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
             "type": "message",
             "role": "assistant",
             "status": status,
-            "content": [{"type": "output_text", "text": self.visible_text}],
+            "content": [{"type": "output_text", "text": self.visible_text, "annotations": []}],
         })
     }
 
@@ -383,7 +430,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
                     "content_index": 0,
                     "delta": text,
                 });
-                self.emit("response.reasoning_text.delta", payload)
+                self.emit("response.reasoning.delta", payload)
             }
             PartitionEvent::ReasoningClosed => {
                 if self.open == OpenItem::Reasoning {
@@ -481,12 +528,26 @@ pub(crate) fn build_response_object(
     stats: Option<&ServeStats>,
 ) -> io::Result<Value> {
     let mut sink = CollectEvents::default();
-    let mut stream =
-        ResponseStream::begin(&mut sink, response_id, request.model.clone(), created_at)?;
+    let mut stream = ResponseStream::begin(
+        &mut sink,
+        response_id,
+        request.model.clone(),
+        created_at,
+        envelope_echo(request),
+    )?;
     for event in partition_events {
         stream.on_partition(event)?;
     }
     stream.finish(stop_reason, usage, stats)
+}
+
+/// Envelope echo derived from a validated request.
+pub(crate) fn envelope_echo(request: &ServeRequest) -> EnvelopeEcho {
+    EnvelopeEcho {
+        temperature: f64::from(request.temperature.unwrap_or(0.0)),
+        top_p: f64::from(request.top_p.unwrap_or(1.0)),
+        max_output_tokens: request.max_output_tokens.map(|value| value as u64),
+    }
 }
 
 #[cfg(test)]
@@ -501,6 +562,7 @@ mod tests {
             "resp_test".into(),
             "qwen-test".into(),
             1_755_500_000,
+            EnvelopeEcho::default(),
         )
         .unwrap();
         let mut partition = StreamPartition::new();
@@ -523,6 +585,7 @@ mod tests {
                 Usage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    cached_tokens: 0,
                 },
                 None,
             )
@@ -544,8 +607,8 @@ mod tests {
                 "response.in_progress",
                 "response.output_item.added",
                 "response.content_part.added",
-                "response.reasoning_text.delta",
-                "response.reasoning_text.done",
+                "response.reasoning.delta",
+                "response.reasoning.done",
                 "response.content_part.done",
                 "response.output_item.done",
                 "response.output_item.added",
@@ -638,6 +701,7 @@ mod tests {
             Usage {
                 input_tokens: 10,
                 output_tokens: 5,
+                cached_tokens: 0,
             },
             None,
         )

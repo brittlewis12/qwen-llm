@@ -84,7 +84,35 @@ recorded for client-timeout guidance.
 
 ## Gate 4 — render goldens: PASS (committed at f4e8bcc/2910512)
 
-## Gate 5 — conformance suite: PENDING
+## Gate 5 — conformance suite: PASS (6/6 in scope; 11 documented skips)
+
+Suite: `openresponses/openresponses` `bin/compliance-test.ts` (bun),
+against Qwen3.6-35B-A3B-UD-Q4_K_S, serve `--max-tokens 2048`.
+
+**Pass:** Basic Text Response, Assistant Message Phase, Response Output
+Phase Schema, Streaming Response (219 events zod-validated on a full
+thinking generation), System Prompt, Multi-turn Conversation.
+
+**Documented skips (11), each mapping to a SERVE.md subset exclusion:**
+7× WebSocket transport (spec MAY; parked post-S4), Tool Calling (S2
+scope — serve rejects with the spec envelope), Image Input (text-only
+surface; vision is the H6 program), Compaction Endpoint ×2 (no
+`/responses/compact`; added to the SERVE.md exclusion list).
+
+The suite adjudicated two contract details exactly as gate 4/5 were
+designed to: reasoning streaming events are `response.reasoning.delta|
+done` (not the newer OpenAI `reasoning_text.*` names this tree had
+chosen provisionally), and reasoning items require `summary: []` from
+the first `output_item.added` payload onward. It also forced the full
+31-field ResponseResource envelope (explicit nulls, echoes, usage
+detail objects — `cached_tokens` now honestly reports restored
+checkpoint tokens).
+
+Operational note: the suite sends no `max_output_tokens` and enforces a
+20 s fetch timeout per test on a serial server — conformance runs need
+a serve `--max-tokens` small enough for the model to finish, and a
+model that reaches EOS (the 0.8B rambles past any budget at greedy;
+A3B completes).
 
 ## Gate 6 — cancellation <250 ms next-admission: PASS
 

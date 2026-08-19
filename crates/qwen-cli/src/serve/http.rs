@@ -328,7 +328,13 @@ fn handle_responses(
         // ticks between prefill chunks.
         sse.heartbeat()?;
         let mut response =
-            ResponseStream::begin(&mut sse, response_id, request.model.clone(), created_at)?;
+            ResponseStream::begin(
+            &mut sse,
+            response_id,
+            request.model.clone(),
+            created_at,
+            super::events::envelope_echo(&request),
+        )?;
         let mut sink = StreamingSink {
             stream: &mut response,
             partition: StreamPartition::new(),
@@ -403,6 +409,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 7,
                     output_tokens: 3,
+                    cached_tokens: 0,
                 },
                 stats: Some(ServeStats {
                     matched_tokens: 5,
@@ -484,7 +491,7 @@ mod tests {
             "admission heartbeat first"
         );
         assert!(payload.contains("event: response.created\n"));
-        assert!(payload.contains("event: response.reasoning_text.delta\n"));
+        assert!(payload.contains("event: response.reasoning.delta\n"));
         assert!(payload.contains("event: response.output_text.delta\n"));
         assert!(payload.contains("event: response.completed\n"));
         assert!(payload.ends_with("data: [DONE]\n\n"));

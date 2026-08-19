@@ -324,6 +324,7 @@ impl GenerationBackend for EngineBackend {
             usage: Usage {
                 input_tokens: prompt_ids.len(),
                 output_tokens: generation.tokens.len(),
+                cached_tokens: matched_tokens,
             },
             stats: Some(ServeStats {
                 matched_tokens,

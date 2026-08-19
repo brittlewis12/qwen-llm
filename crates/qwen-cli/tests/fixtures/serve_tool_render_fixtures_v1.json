@@ -1,0 +1,126 @@
+{
+  "fixture": "serve_tool_render_fixtures_v1",
+  "contract": "S2 tool rendering, frozen before the parser/renderer exist (fixture-before-renderer). Byte oracle: templates/qwen36_a3b_chat_template.jinja; request shapes: docs/bench/2026-08-19-s2-provider-capture/provider_capture_v1.json. Serve-specific semantics documented per case; divergences from upstream normalization are deliberate and noted.",
+  "decisions": {
+    "tool_json_serialization": "serde_json compact, field order type,name,description,parameters (serve-owned; upstream tojson whitespace is jinja-implementation-defined, so serve freezes its own).",
+    "raw_echo_identity": "The S2 parser MUST retain each assistant turn's raw emission span; self-echo renders that span verbatim so completed-checkpoint identity survives parsing (S0 F1). Structured re-render (client-reconstructed function_call items) uses the normalized glue below and may downgrade to prompt-boundary hits.",
+    "malformed_disposition": "Malformed tool-call XML is never salvaged: no function_call item is emitted, the entire emission remains visible message text, and checkpoint capture proceeds (raw echo keeps token identity). This is the fail-vs-salvage decision from the k3 S2 review."
+  },
+  "cases": [
+    {
+      "name": "qwen36_tools_system_block_with_system",
+      "normative_for": "S2 tools-definition rendering",
+      "tools": [
+        {
+          "type": "function",
+          "name": "fs_list",
+          "description": "List directory entries",
+          "parameters": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "system": "You are terse.",
+      "prompt": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\":\"function\",\"name\":\"fs_list\",\"description\":\"List directory entries\",\"parameters\":{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are terse.<|im_end|>\n"
+    },
+    {
+      "name": "qwen36_assistant_single_call_with_content",
+      "normative_for": "S2 structured continuation rendering (client-supplied function_call items)",
+      "turn": {
+        "reasoning": "\nneed the listing\n",
+        "visible": "\n\nListing now.",
+        "calls": [{ "name": "fs_list", "arguments": { "path": "/tmp" } }]
+      },
+      "rendered_turn": "<|im_start|>assistant\n<think>\nneed the listing\n</think>\n\nListing now.\n\n<tool_call>\n<function=fs_list>\n<parameter=path>\n/tmp\n</parameter>\n</function>\n</tool_call><|im_end|>\n",
+      "note": "Serve glue: reasoning renders exact-inverse (<think>{r}</think>{v}); first call glue \\n\\n because trimmed visible is nonempty (oracle content|trim rule applied to the visible span)."
+    },
+    {
+      "name": "qwen36_assistant_call_no_content",
+      "normative_for": "S2 structured continuation rendering",
+      "turn": {
+        "reasoning": null,
+        "visible": "",
+        "calls": [{ "name": "fs_list", "arguments": { "path": "/tmp" } }]
+      },
+      "rendered_turn": "<|im_start|>assistant\n<tool_call>\n<function=fs_list>\n<parameter=path>\n/tmp\n</parameter>\n</function>\n</tool_call><|im_end|>\n"
+    },
+    {
+      "name": "qwen36_assistant_parallel_calls_sequential_items",
+      "normative_for": "S2 structured continuation rendering (parallel calls emitted as ordered items, k3 S1-review scope cut)",
+      "turn": {
+        "reasoning": null,
+        "visible": "Checking both.",
+        "calls": [
+          { "name": "fs_list", "arguments": { "path": "/tmp" } },
+          { "name": "fs_list", "arguments": { "path": "/var" } }
+        ]
+      },
+      "rendered_turn": "<|im_start|>assistant\nChecking both.\n\n<tool_call>\n<function=fs_list>\n<parameter=path>\n/tmp\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=fs_list>\n<parameter=path>\n/var\n</parameter>\n</function>\n</tool_call><|im_end|>\n"
+    },
+    {
+      "name": "qwen36_mapping_parameter_renders_compact_json",
+      "normative_for": "S2 structured continuation rendering",
+      "turn": {
+        "reasoning": null,
+        "visible": "",
+        "calls": [
+          {
+            "name": "fs_write",
+            "arguments": {
+              "path": "/tmp/a.json",
+              "content": { "keys": ["x", "y"], "count": 2 }
+            }
+          }
+        ]
+      },
+      "rendered_turn": "<|im_start|>assistant\n<tool_call>\n<function=fs_write>\n<parameter=path>\n/tmp/a.json\n</parameter>\n<parameter=content>\n{\"keys\":[\"x\",\"y\"],\"count\":2}\n</parameter>\n</function>\n</tool_call><|im_end|>\n",
+      "note": "Non-string parameter values serialize as compact JSON (oracle: tojson for mappings/sequences, string passthrough otherwise)."
+    },
+    {
+      "name": "qwen36_raw_echo_identity",
+      "normative_for": "S2 emission parser (raw-span retention)",
+      "emission": "<think>\nneed the listing\n</think>\n\nListing now.\n\n<tool_call>\n<function=fs_list>\n<parameter=path>\n/tmp\n</parameter>\n</function>\n</tool_call>",
+      "expect_parse": {
+        "reasoning": "\nneed the listing\n",
+        "visible_before_calls": "\n\nListing now.\n\n",
+        "calls": [{ "name": "fs_list", "arguments": { "path": "/tmp" } }]
+      },
+      "assert": "parse(emission) then verbatim re-render == emission, byte-exact"
+    },
+    {
+      "name": "malformed_corpus",
+      "normative_for": "S2 emission parser dispositions (no salvage; whole emission stays visible; checkpoint capture proceeds)",
+      "corpus": [
+        {
+          "emission": "Sure.\n<tool_call>\n<function=fs_list>\n<parameter=path>\n/tmp\n</parameter>\n</function>",
+          "defect": "unclosed tool_call tag",
+          "expect": "no function_call items; visible = full emission"
+        },
+        {
+          "emission": "<tool_call>\n<function=fs_list>\n<parameter=path>\n/tmp\n</function>\n</tool_call>",
+          "defect": "unclosed parameter tag",
+          "expect": "no function_call items; visible = full emission"
+        },
+        {
+          "emission": "<tool_call>\n<function=>\n<parameter=path>\n/tmp\n</parameter>\n</function>\n</tool_call>",
+          "defect": "empty function name",
+          "expect": "no function_call items; visible = full emission"
+        },
+        {
+          "emission": "<tool_call>\n<function=fs_list>\n<parameter=path>\n/tm",
+          "defect": "truncated mid-parameter (token_limit)",
+          "expect": "no function_call items; visible = full emission; response status incomplete"
+        },
+        {
+          "emission": "<tool_call>\nnot xml at all\n</tool_call>",
+          "defect": "no function block inside tool_call",
+          "expect": "no function_call items; visible = full emission"
+        }
+      ]
+    }
+  ]
+}

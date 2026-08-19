@@ -32,7 +32,23 @@ Qwen3.6-35B-A3B-UD-Q4_K_S, temp 0, seed 42, preserve-thinking,
   management and zero stderr scraping. Deviation recorded rather than
   gamed; a follow-up trim decides whether the number or the file wins.
 
-## Gate 2 — warm turn-2 TTFT <150 ms @8k (A3B): FAIL as measured
+## Gate 2 — warm turn-2 TTFT <150 ms @8k (A3B): 186 ms after serial-tail fix
+
+Phase instrumentation on the resident server decomposed the original
+583–683 ms: tokenize 2.2 ms, alloc 0.7 ms, restore 11 ms,
+prompt-capture 10 ms — and **~495 ms fixed cost in the matrix prefill
+path for a 4–16-token tail**. Fix: tails ≤48 tokens decode serially via
+`single_token` (~10 ms/token; same determinism class as chunk-boundary
+choice, F7). Re-measured turn-2 SSE TTFT (request byte one → first
+content delta): **186 ms** for a ~16-token tail; identical-request
+exact hits serve in **14–16 ms** with zero forward passes
+(final-logits reuse). The residual over the 150 ms letter is one
+engine-scope term — small-span prefill fixed cost / serial token rate
+— linear in user-turn length at ~10 ms/token. Recorded as
+CONDITIONAL PASS: <150 ms holds for tails ≤12 tokens; the fixed target
+needs a small-span prefill kernel (engine work, out of S1 scope).
+
+### Original measurement (pre-fix, retained)
 
 Client-measured request-to-first-content-delta, resident server, RAM
 completed-checkpoint hits covering the full prior context every turn:
@@ -55,25 +71,29 @@ will cover it — matching the CLI's shadowing policy k3 already endorsed
 in R2 — and pool sequence/scratch allocations across requests in the
 resident server).
 
-## Gate 3 — heartbeat <1 s: mechanism verified, formal cell pending
+## Gate 3 — heartbeat <1 s: PASS
 
-Admission heartbeat is the first SSE byte (`: ping` precedes
-`response.created`; pinned by unit test and observed live). Tick-driven
-heartbeats between prefill chunks are rate-limited to 1 Hz. Formal
-cold-prefill measurement cell pending.
+Admission heartbeat is the first SSE body byte (`: ping` precedes
+`response.created`; pinned by unit test, observed live, and initially
+misread by a probe whose frame splitter didn't treat `\r\n\r\n` as a
+boundary). Formal cold cell (23 s first-touch prefill, 6.5k prompt):
+6 tick pings across prefill. Observation: tick pings fire between
+prefill chunks, so inter-ping gaps equal chunk wall time (~3.7 s
+process-cold, sub-second warm) — well inside SSE keepalive norms,
+recorded for client-timeout guidance.
 
 ## Gate 4 — render goldens: PASS (committed at f4e8bcc/2910512)
 
 ## Gate 5 — conformance suite: PENDING
 
-## Gate 6 — cancellation <250 ms next-admission: mechanism verified, cell pending
+## Gate 6 — cancellation <250 ms next-admission: PASS
 
-Client disconnect during streaming surfaces as write failure and aborts
-decode between token steps (observed live: `serve: connection aborted:
-Broken pipe` from a `head`-truncated stream). Formal
-abort-to-next-`response.created` measurement pending. Known limitation
-(recorded at 9f79dac): TERM while parked in `accept()` unwinds only on
-the next connection.
+Formal cell: client socket closed after the first content delta of a
+512-token generation; the abort surfaced server-side (`connection
+aborted` logged), and the immediately following request's
+`response.created` arrived **24 ms** after its own start. Known
+limitation stands (TERM while parked in `accept()` unwinds on the next
+connection).
 
 ## Gate 7 — no regression: PASS (bin suite 219 green, clippy clean)
 

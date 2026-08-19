@@ -76,10 +76,12 @@ impl GenerationBackend for EngineBackend {
         }
         // Rendered ChatML carries its own special-token markers; matches the
         // legacy messages path (prompt_add_special_tokens = false).
+        let tokenize_t0 = Instant::now();
         let prompt_ids = self
             .tokenizer
             .encode(prompt, false)
             .map_err(|error| ServeError::server_error(format!("tokenize prompt: {error}")))?;
+        let tokenize_ms = tokenize_t0.elapsed().as_secs_f64() * 1e3;
         if prompt_ids.is_empty() {
             return Err(ServeError::invalid_request(
                 Some("input"),
@@ -106,6 +108,7 @@ impl GenerationBackend for EngineBackend {
             .into());
         }
 
+        let alloc_t0 = Instant::now();
         let allocated = crate::allocate_prefill_request_state(
             &self.loaded,
             crate::PrefillChunkArg::Auto,
@@ -114,6 +117,7 @@ impl GenerationBackend for EngineBackend {
             true,
         )
         .map_err(|error| ServeError::server_error(format!("allocate request state: {error:#}")))?;
+        let alloc_ms = alloc_t0.elapsed().as_secs_f64() * 1e3;
         let chunk = allocated.chunk;
         let mut scratch = allocated.scratch;
         let mut sequence = allocated.sequence;
@@ -136,9 +140,36 @@ impl GenerationBackend for EngineBackend {
 
         // Chunked prefill of whatever the restore left; tick between chunks
         // carries heartbeats and surfaces client disconnects (cancellation).
+        // Tails at or below SERIAL_TAIL_THRESHOLD decode token-by-token: the
+        // matrix prefill path costs ~500 ms per call regardless of span size
+        // (gate-2 phase measurement), while single_token runs ~10 ms/token.
+        // Same determinism class as chunk-boundary choice (F7).
+        const SERIAL_TAIL_THRESHOLD: usize = 48;
+        let prefill_t0 = Instant::now();
         while sequence.position() < prompt_ids.len() {
             sink.tick().map_err(BackendFailure::Aborted)?;
             let start = sequence.position();
+            let remaining = prompt_ids.len() - start;
+            if remaining <= SERIAL_TAIL_THRESHOLD {
+                for (offset, &token) in prompt_ids[start..].iter().enumerate() {
+                    let position = start + offset;
+                    let logits = forward
+                        .single_token(
+                            token,
+                            u32::try_from(position)
+                                .map_err(|_| ServeError::server_error("position overflow"))?,
+                            unsafe { sequence.metal_session_mut() },
+                        )
+                        .map_err(|error| {
+                            ServeError::server_error(format!("serial tail prefill: {error:#}"))
+                        })?;
+                    sequence
+                        .advance_by(1)
+                        .map_err(|error| ServeError::server_error(format!("advance: {error:#}")))?;
+                    prompt_logits = Some(logits);
+                }
+                break;
+            }
             let end = prompt_ids.len().min(start + chunk);
             let (logits, _span_ms) = crate::prefill_span(
                 &forward,
@@ -150,11 +181,13 @@ impl GenerationBackend for EngineBackend {
             .map_err(|error| ServeError::server_error(format!("prefill: {error:#}")))?;
             prompt_logits = Some(logits);
         }
+        let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
         let logits = prompt_logits
             .ok_or_else(|| ServeError::server_error("prefill produced no prompt logits"))?;
 
         // Prompt-boundary capture into the RAM cache (skip when this exact
         // prompt was already an exact hit).
+        let capture_t0 = Instant::now();
         if !restore.as_ref().is_some_and(|restore| restore.exact) {
             match self.loaded.prepare_checkpoint_boundary(
                 &sequence,
@@ -173,6 +206,7 @@ impl GenerationBackend for EngineBackend {
             }
         }
 
+        let prompt_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
         let sampling = SamplingConfig {
             temperature: request.temperature.unwrap_or(0.0),
             top_k: request.top_k.unwrap_or(200),
@@ -264,6 +298,10 @@ impl GenerationBackend for EngineBackend {
             crate::StopReason::Eos => StopReason::Eos,
             crate::StopReason::TokenLimit => StopReason::TokenLimit,
         };
+        tracing::info!(
+            target: "qwen_diag",
+            "serve phases: tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}",
+        );
         tracing::info!(
             target: "qwen_diag",
             "serve stats: prompt_tokens={} generated_tokens={} stop_reason={} matched_tokens={} restore_ms={:.1} decode_tps={:.2}",

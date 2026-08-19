@@ -158,12 +158,22 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
     }
     if non_null(map, "tools")
         .and_then(Value::as_array)
-        .is_some_and(|t| !t.is_empty())
-        || non_null(map, "tool_choice").is_some()
+        .is_some_and(|tools| !tools.is_empty())
     {
         return Err(ServeError::invalid_request(
             Some("tools"),
             "tool use is not supported yet (S2 scope)",
+        ));
+    }
+    // The stock @ai-sdk/open-responses provider sends tool_choice:"auto"
+    // unconditionally, including plain chat (provider_capture_v1, every
+    // request). Accept the no-op value; anything else is S2 scope.
+    if let Some(tool_choice) = non_null(map, "tool_choice")
+        && tool_choice.as_str() != Some("auto")
+    {
+        return Err(ServeError::invalid_request(
+            Some("tool_choice"),
+            "only tool_choice:\"auto\" is accepted until tool use lands (S2 scope)",
         ));
     }
 
@@ -573,11 +583,48 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.param.as_deref(), Some("tools"));
 
+        let error =
+            parse(json!({"model": "m", "input": "q", "tool_choice": "required"})).unwrap_err();
+        assert_eq!(error.param.as_deref(), Some("tool_choice"));
+
         let error = parse(json!({"model": "m", "input": [
             {"type": "function_call", "name": "f", "call_id": "c", "arguments": "{}"},
         ]}))
         .unwrap_err();
         assert!(error.message.contains("unsupported item type"));
+    }
+
+    #[test]
+    fn stock_provider_chat_request_shape_is_accepted() {
+        // Byte-shape from provider_capture_v1 chat-replay#1: the stock
+        // @ai-sdk/open-responses provider replays reasoning items verbatim
+        // (id + summary + reasoning_text parts), assistant messages as
+        // output_text parts with ids, sends instructions for system, and
+        // tool_choice:"auto" unconditionally.
+        let request = parse(json!({
+            "model": "m",
+            "tool_choice": "auto",
+            "instructions": "You are terse.",
+            "input": [
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "Add 2 and 3."}]},
+                {"type": "reasoning", "summary": [], "id": "rs_1",
+                 "content": [{"type": "reasoning_text", "text": "\nplan the answer\n"}]},
+                {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "It is 5."}], "id": "msg_1"},
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "Now add 10."}]},
+            ],
+        }))
+        .expect("stock provider chat replay must parse");
+        assert_eq!(request.system.as_deref(), Some("You are terse."));
+        assert_eq!(
+            request.turns[1],
+            Turn::Assistant {
+                reasoning: Some("\nplan the answer\n".into()),
+                visible: "It is 5.".into()
+            }
+        );
     }
 
     #[test]

@@ -1,0 +1,17 @@
+{
+  "name": "provider-capture",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@ai-sdk/open-responses": "^2.0.29",
+    "ai": "^7.0.70",
+    "zod": "^4.4.3"
+  }
+}

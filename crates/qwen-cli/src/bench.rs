@@ -12461,8 +12461,28 @@ fn run_dflash_lazy(args: DflashLazyArgs) -> Result<()> {
         GgufFile::open(&drafter).with_context(|| format!("open drafter {}", drafter.display()))?;
     let head = open_dflash_drafter(&drafter_g, &target_m).context("bind drafter")?;
 
+    // v0.77: the DFlash path predates the prefetch subsystem (H5-era) —
+    // apply the runtime's residency-gated ColdOnly warmer to BOTH files
+    // before the copy loops (cold mmap page-in ~0.8 GB/s vs ~6 GB/s
+    // parallel pread; no-op when already resident). Also keeps cold-start
+    // bench runs from polluting decode numbers with page-in time.
+    let prefetch_cfg = qwen_llm::runtime::LoadedModelConfig::default();
+    let target_pf = qwen_llm::runtime::prefetch_opened_gguf(&target_g, &prefetch_cfg);
+    let drafter_pf = qwen_llm::runtime::prefetch_opened_gguf(&drafter_g, &prefetch_cfg);
+    eprintln!(
+        "[dflash] prefetch: target {:.0} ms, drafter {:.0} ms ({:?})",
+        target_pf.total_wall.as_secs_f64() * 1e3,
+        drafter_pf.total_wall.as_secs_f64() * 1e3,
+        drafter_pf.action,
+    );
+
     let mm = MetalModel::load(&ctx, &target_g, &target_m).context("metal-load target")?;
+    let t_head = Instant::now();
     let mhead = MetalDFlashHead::load(&ctx, &drafter_g, &head).context("metal-load drafter")?;
+    eprintln!(
+        "[dflash] drafter metal-load {:.0} ms",
+        t_head.elapsed().as_secs_f64() * 1e3
+    );
     let tok = Tokenizer::from_gguf(&target_g).context("open tokenizer")?;
 
     let prompt_ids = tok.encode(&prompt, false).context("tokenize prompt")?;
@@ -12969,8 +12989,24 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     let drafter_g =
         GgufFile::open(&drafter).with_context(|| format!("open drafter {}", drafter.display()))?;
     let head = open_dflash_drafter(&drafter_g, &target_m).context("bind drafter")?;
+    // v0.77: residency-gated prefetch for both files (see run_dflash_lazy
+    // for rationale; the DFlash path predates the prefetch subsystem).
+    let prefetch_cfg = qwen_llm::runtime::LoadedModelConfig::default();
+    let target_pf = qwen_llm::runtime::prefetch_opened_gguf(&target_g, &prefetch_cfg);
+    let drafter_pf = qwen_llm::runtime::prefetch_opened_gguf(&drafter_g, &prefetch_cfg);
+    eprintln!(
+        "[dflash] prefetch: target {:.0} ms, drafter {:.0} ms ({:?})",
+        target_pf.total_wall.as_secs_f64() * 1e3,
+        drafter_pf.total_wall.as_secs_f64() * 1e3,
+        drafter_pf.action,
+    );
     let mm = MetalModel::load(&ctx, &target_g, &target_m).context("metal-load target")?;
+    let t_head = Instant::now();
     let mhead = MetalDFlashHead::load(&ctx, &drafter_g, &head).context("metal-load drafter")?;
+    eprintln!(
+        "[dflash] drafter metal-load {:.0} ms",
+        t_head.elapsed().as_secs_f64() * 1e3
+    );
     let tok = Tokenizer::from_gguf(&target_g).context("open tokenizer")?;
 
     let prompt_ids = tok.encode(&prompt, false).context("tokenize prompt")?;

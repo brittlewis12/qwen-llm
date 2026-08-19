@@ -2371,6 +2371,10 @@ fn run() -> Result<()> {
     );
     let mut args = Args::from_arg_matches(&matches).expect("validated clap arguments");
     let invocation = cli::normalize(&mut args);
+    let invocation = match invocation {
+        cli::Invocation::Serve(serve_invocation) => return serve::run_serve(serve_invocation),
+        other => other,
+    };
     invocation.apply_option_overrides(&mut args);
     let modern_run = invocation.is_run();
     validate_deepseek_v4_reasoning_scope(&args)?;

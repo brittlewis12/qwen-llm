@@ -11,12 +11,45 @@ pub(crate) enum Command {
         after_help = "Examples:\n  qwen run -m MODEL --user 'Explain this'\n  qwen run -m MODEL --system 'Be concise' --user 'Explain this'\n  qwen run -m Qwen3.8-27B.gguf --reasoning-effort low --user 'Explain this'\n  qwen run -m MODEL --user -\n  qwen run -m MODEL --messages -\n  qwen run -m MODEL --raw-prompt '<exact model input>'\n  qwen run -m Qwen3.6-35B-A3B.gguf --user 'Explain this' --no-thinking"
     )]
     Run(RunArgs),
+    /// Serve the Open Responses subset over loopback HTTP (docs/SERVE.md).
+    #[command(
+        after_help = "Examples:\n  qwen serve -m MODEL\n  qwen serve -m MODEL --addr 127.0.0.1:8737 --max-tokens 4096\n\nEndpoints: POST /v1/responses (stream and non-stream), GET /v1/models.\nSerial: one request in flight; stateless (store:false only)."
+    )]
+    Serve(ServeArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+pub(crate) struct ServeArgs {
+    /// Path to a Qwen-family GGUF file (DeepSeek V4 serve lands in S3).
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+
+    /// Listen address (loopback recommended; there is no auth).
+    #[arg(long, default_value = "127.0.0.1:8737")]
+    addr: String,
+
+    /// Default max_output_tokens when a request omits it.
+    #[arg(long = "max-tokens", default_value_t = 4096)]
+    max_tokens: usize,
+
+    /// Fixed sequence capacity; default sizes per request (prompt + generation + slack).
+    #[arg(long)]
+    max_context_tokens: Option<usize>,
 }
 
 #[derive(Debug)]
 pub(crate) enum Invocation {
     Legacy,
     Run(RunInvocation),
+    Serve(ServeInvocation),
+}
+
+#[derive(Debug)]
+pub(crate) struct ServeInvocation {
+    pub(crate) model: PathBuf,
+    pub(crate) addr: String,
+    pub(crate) max_tokens: usize,
+    pub(crate) max_context_tokens: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -242,6 +275,12 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
     };
 
     match command {
+        Command::Serve(serve) => Invocation::Serve(ServeInvocation {
+            model: serve.model,
+            addr: serve.addr,
+            max_tokens: serve.max_tokens,
+            max_context_tokens: serve.max_context_tokens,
+        }),
         Command::Run(run) => {
             let input = match (run.user, run.messages, run.raw_prompt) {
                 (Some(user), None, None) => RunInput::User {

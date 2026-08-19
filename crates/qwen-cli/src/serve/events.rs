@@ -13,11 +13,14 @@
 
 use super::items::ServeRequest;
 use super::partition::PartitionEvent;
+use super::partition::safe_emit_len;
+use super::tool_parse::{ParsedCall, parse_emission};
 use serde_json::{Value, json};
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 pub(crate) const REASONING_PART_TYPE: &str = "reasoning_text";
+const TOOL_CALL_OPEN: &str = "<tool_call>";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StopReason {
@@ -154,6 +157,14 @@ pub(crate) struct ResponseStream<'a, W: EventWrite> {
     reasoning_opened: bool,
     message_opened: bool,
     last_activity: Instant,
+    /// Visible bytes held back while a `<tool_call>` prefix is ambiguous.
+    pending_visible: String,
+    /// Emission bytes from the first `<tool_call>` onward (S2: the format
+    /// guarantees no suffix after calls, so everything after the opener is
+    /// call syntax until proven malformed).
+    tool_buffer: String,
+    in_tool_span: bool,
+    tool_items: Vec<Value>,
 }
 
 impl<'a, W: EventWrite> ResponseStream<'a, W> {
@@ -180,6 +191,10 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
             reasoning_opened: false,
             message_opened: false,
             last_activity: Instant::now(),
+            pending_visible: String::new(),
+            tool_buffer: String::new(),
+            in_tool_span: false,
+            tool_items: Vec::new(),
         };
         stream.reasoning_item_id = format!("rs_{}", stream.response_id);
         stream.message_item_id = format!("msg_{}", stream.response_id);
@@ -442,19 +457,130 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
                 if self.open == OpenItem::Reasoning {
                     self.close_reasoning("completed")?;
                 }
-                if self.open != OpenItem::Message {
-                    self.open_message()?;
+                if self.in_tool_span {
+                    self.tool_buffer.push_str(text);
+                    return Ok(());
                 }
-                self.visible_text.push_str(text);
-                let payload = json!({
-                    "item_id": self.message_item_id,
-                    "output_index": self.output_index,
-                    "content_index": 0,
-                    "delta": text,
-                });
-                self.emit("response.output_text.delta", payload)
+                self.pending_visible.push_str(text);
+                if let Some(index) = self.pending_visible.find(TOOL_CALL_OPEN) {
+                    let prose: String = self.pending_visible[..index].to_owned();
+                    let call_span: String = self.pending_visible[index..].to_owned();
+                    self.pending_visible.clear();
+                    if !prose.is_empty() {
+                        self.emit_visible(&prose)?;
+                    }
+                    self.tool_buffer.push_str(&call_span);
+                    self.in_tool_span = true;
+                    return Ok(());
+                }
+                let safe = safe_emit_len(&self.pending_visible, TOOL_CALL_OPEN);
+                if safe > 0 {
+                    let chunk: String = self.pending_visible[..safe].to_owned();
+                    self.pending_visible.drain(..safe);
+                    self.emit_visible(&chunk)?;
+                }
+                Ok(())
             }
         }
+    }
+
+    fn emit_visible(&mut self, text: &str) -> io::Result<()> {
+        if self.open != OpenItem::Message {
+            self.open_message()?;
+        }
+        self.visible_text.push_str(text);
+        let payload = json!({
+            "item_id": self.message_item_id,
+            "output_index": self.output_index,
+            "content_index": 0,
+            "delta": text,
+        });
+        self.emit("response.output_text.delta", payload)
+    }
+
+    /// Emit one `function_call` item's full lifecycle.
+    fn emit_function_call(&mut self, index: usize, call: &ParsedCall) -> io::Result<()> {
+        let item_id = format!("fc_{}_{index}", self.response_id);
+        let call_id = format!("call_{}_{index}", self.response_id);
+        let arguments =
+            serde_json::to_string(&Value::Object(call.arguments.clone())).expect("serialize args");
+        let output_index = self.output_index;
+        self.emit(
+            "response.output_item.added",
+            json!({
+                "output_index": output_index,
+                "item": {
+                    "id": item_id,
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": call_id,
+                    "name": call.name,
+                    "arguments": "",
+                },
+            }),
+        )?;
+        self.emit(
+            "response.function_call_arguments.delta",
+            json!({
+                "item_id": item_id,
+                "output_index": output_index,
+                "delta": arguments,
+            }),
+        )?;
+        self.emit(
+            "response.function_call_arguments.done",
+            json!({
+                "item_id": item_id,
+                "output_index": output_index,
+                "arguments": arguments,
+            }),
+        )?;
+        let item = json!({
+            "id": item_id,
+            "type": "function_call",
+            "status": "completed",
+            "call_id": call_id,
+            "name": call.name,
+            "arguments": arguments,
+        });
+        self.emit(
+            "response.output_item.done",
+            json!({"output_index": output_index, "item": item.clone()}),
+        )?;
+        self.output_index += 1;
+        self.tool_items.push(item);
+        Ok(())
+    }
+
+    /// Resolve buffered tool-span bytes at end of generation: parse into
+    /// calls, or (no salvage, S2 fixture `malformed_corpus`) flush the raw
+    /// bytes back as visible text.
+    fn resolve_tool_span(&mut self) -> io::Result<()> {
+        let pending = std::mem::take(&mut self.pending_visible);
+        if !pending.is_empty() {
+            self.emit_visible(&pending)?;
+        }
+        if !self.in_tool_span {
+            return Ok(());
+        }
+        let buffer = std::mem::take(&mut self.tool_buffer);
+        self.in_tool_span = false;
+        let parsed = parse_emission(&buffer);
+        if parsed.calls.is_empty() {
+            self.emit_visible(&buffer)?;
+            return Ok(());
+        }
+        if !parsed.visible.is_empty() {
+            self.emit_visible(&parsed.visible)?;
+        }
+        if self.open == OpenItem::Message {
+            self.close_message("completed")?;
+        }
+        for (index, call) in parsed.calls.iter().enumerate() {
+            let call = call.clone();
+            self.emit_function_call(index, &call)?;
+        }
+        Ok(())
     }
 
     /// Close open items, emit the terminal response event, and return the
@@ -465,6 +591,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
         usage: Usage,
         stats: Option<&ServeStats>,
     ) -> io::Result<Value> {
+        self.resolve_tool_span()?;
         let truncated_in_reasoning = self.open == OpenItem::Reasoning;
         match self.open {
             OpenItem::Reasoning => self.close_reasoning(match stop_reason {
@@ -487,13 +614,17 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
             output.push(self.reasoning_item_json(status));
         }
         if self.message_opened {
-            let status = if stop_reason == StopReason::TokenLimit && !truncated_in_reasoning {
+            let status = if stop_reason == StopReason::TokenLimit
+                && !truncated_in_reasoning
+                && self.tool_items.is_empty()
+            {
                 "incomplete"
             } else {
                 "completed"
             };
             output.push(self.message_item_json(status));
         }
+        output.extend(self.tool_items.iter().cloned());
         let (status, event_type, incomplete_reason) = match stop_reason {
             StopReason::Eos => ("completed", "response.completed", None),
             StopReason::TokenLimit => (
@@ -636,6 +767,82 @@ mod tests {
         assert_eq!(output[0]["content"][0]["text"], "\nplan\n");
         assert_eq!(output[1]["content"][0]["text"], "\n\nanswer tail");
         assert_eq!(envelope["usage"]["total_tokens"], 15);
+    }
+
+    #[test]
+    fn tool_call_emission_streams_function_call_items() {
+        let (events, envelope) = drive(
+            &[
+                "<think>\nuse the tool\n</think>\n\nListing now.\n",
+                "<tool_call>\n<function=fs_list>\n<parameter=path>\n/tmp\n",
+                "</parameter>\n</function>\n</tool_call>",
+            ],
+            StopReason::Eos,
+        );
+        let types: Vec<&str> = events.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(types.contains(&"response.function_call_arguments.delta"));
+        assert!(types.contains(&"response.function_call_arguments.done"));
+        // No visible delta may leak the call syntax.
+        for (event_type, payload) in &events {
+            if event_type.as_str() == "response.output_text.delta" {
+                assert!(
+                    !payload["delta"].as_str().unwrap().contains("<tool_call>"),
+                    "call syntax leaked into visible deltas"
+                );
+            }
+        }
+        let output = envelope["output"].as_array().unwrap();
+        assert_eq!(output.len(), 3, "reasoning + message + function_call");
+        assert_eq!(output[2]["type"], "function_call");
+        assert_eq!(output[2]["name"], "fs_list");
+        assert_eq!(output[2]["arguments"], "{\"path\":\"/tmp\"}");
+        assert!(output[2]["call_id"].as_str().unwrap().starts_with("call_"));
+        assert_eq!(output[1]["content"][0]["text"], "\n\nListing now.\n");
+        assert_eq!(envelope["status"], "completed");
+    }
+
+    #[test]
+    fn call_without_prose_emits_no_message_item() {
+        let (_, envelope) = drive(
+            &["<tool_call>\n<function=ping>\n</function>\n</tool_call>"],
+            StopReason::Eos,
+        );
+        let output = envelope["output"].as_array().unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"], "function_call");
+        assert_eq!(output[0]["arguments"], "{}");
+    }
+
+    #[test]
+    fn malformed_call_syntax_stays_visible_text() {
+        let (_, envelope) = drive(
+            &["Sure.\n<tool_call>\n<function=fs_list>\n<parameter=path>\n/tm"],
+            StopReason::TokenLimit,
+        );
+        let output = envelope["output"].as_array().unwrap();
+        assert_eq!(output.len(), 1, "no function_call salvaged");
+        assert_eq!(output[0]["type"], "message");
+        assert_eq!(
+            output[0]["content"][0]["text"],
+            "Sure.\n<tool_call>\n<function=fs_list>\n<parameter=path>\n/tm"
+        );
+        assert_eq!(envelope["status"], "incomplete");
+    }
+
+    #[test]
+    fn parallel_calls_emit_ordered_items_with_distinct_ids() {
+        let (_, envelope) = drive(
+            &[concat!(
+                "<tool_call>\n<function=a>\n</function>\n</tool_call>\n",
+                "<tool_call>\n<function=b>\n</function>\n</tool_call>",
+            )],
+            StopReason::Eos,
+        );
+        let output = envelope["output"].as_array().unwrap();
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0]["name"], "a");
+        assert_eq!(output[1]["name"], "b");
+        assert_ne!(output[0]["call_id"], output[1]["call_id"]);
     }
 
     #[test]

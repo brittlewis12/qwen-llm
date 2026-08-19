@@ -114,7 +114,7 @@ impl StreamPartition {
 }
 
 /// Longest prefix of `pending` that cannot be the start of `tag`.
-fn safe_emit_len(pending: &str, tag: &str) -> usize {
+pub(crate) fn safe_emit_len(pending: &str, tag: &str) -> usize {
     let max_hold = tag.len().saturating_sub(1).min(pending.len());
     for hold in (1..=max_hold).rev() {
         let candidate_start = pending.len() - hold;

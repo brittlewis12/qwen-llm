@@ -1,6 +1,6 @@
 # qwen serve — facade contract (S1 preregistration)
 
-Status: implemented on `serve/s1`; gates executed 2026-08-18 — see
+Status: S1 + S2 implemented on `serve/s1`; S1 gates executed 2026-08-18, S2 gate 2026-08-19 — see docs/bench/2026-08-19-s2-agent-gate/ and
 `docs/bench/2026-08-18-serve-s1-gates/` (1 pass, 2 conditional pass,
 3–7 pass). Originally preregistered earlier the same day.
 Evidence base: S0 packet
@@ -15,7 +15,7 @@ jam positions are not.
 |---|---|---|---|
 | S0 | Prefix-stability falsifier | measurement | DONE — see packet RESULTS |
 | **S1 (this doc)** | Resident serial server, Open Responses subset, no tools | the game (thin HTTP client) | below |
-| S2 | Tool items (family-native formats → `function_call`; NOT hermes JSON — the extracted Qwen3.6 template oracle uses an XML-parameter `<function=…><parameter=…>` form), `allowed_tools`, continuation rendering | opencode via stock `@ai-sdk/open-responses` | ≥8/10 turns checkpoint-hit in a 10-turn opencode session, by server `matched_tokens` log |
+| S2 ✅ | Tool items (XML-parameter form from the template oracle), `allowed_tools`, continuation rendering | opencode via stock `@ai-sdk/open-responses` | **PASS: 10/10 requests checkpoint-hit** (94–100 % restored), 5/5 turns tool-called — docs/bench/2026-08-19-s2-agent-gate/ |
 | S3 | Reasoning `encrypted_content` opaque round-trip; DS4 family support | opencode, lossless | zero tail re-prefill on preserve conversations, by metric |
 | S4 | Public v0: CC shim, install, memory admission UX, bench repro, compliance claim | the world | sub-100 ms turn-2 TTFT demo, resident @32k |
 

@@ -1,0 +1,5 @@
+[metal-load] native quantized token embedding policy: auto-promoted (Q4_K [5120, 248320])
+[metal-load-ledger] source=851/16806250496 direct_copy=851/16806250496 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+durable_prefix_cache: identity_cache=hit hashed_bytes=0 checkpoint_hit=false matched=0 restored=0 exact=false candidates=0 corrupt_removed=0 restore_total_ms=24.5
+durable_prefix_cache: publish=published capture=completed matched_tokens=1852 restored_tokens=1851 pending=true stop_reason=token_limit blob_bytes=278224268 evicted=0 staging_examined=0 staging_removed=0 staging_allocated_bytes_reclaimed=0 staging_live=0 staging_legacy=0 staging_foreign=0 staging_truncated=false identity=hit capture_ms=26.0 publish_ms=306.0
+stats: prompt_tokens=1820 generated_tokens=32 transitions=31 stop_reason=token_limit load_ms=2289.3 prefill_ms=16390.9 ttft_ms=16443.7 decode_tps=3.45 transition_tps=3.35 cache_entries=0 cache_mib=0.0/16384.0

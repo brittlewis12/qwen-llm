@@ -165,9 +165,17 @@ pub(crate) struct ResponseStream<'a, W: EventWrite> {
     tool_buffer: String,
     in_tool_span: bool,
     tool_items: Vec<Value>,
+    /// Executable subset; empty means unrestricted. Spec requires
+    /// `allowed_tools` be enforced as a hard constraint on emitted calls.
+    allowed_tools: Vec<String>,
 }
 
 impl<'a, W: EventWrite> ResponseStream<'a, W> {
+    /// Restrict emitted calls to this subset (empty = unrestricted).
+    pub(crate) fn set_allowed_tools(&mut self, allowed: Vec<String>) {
+        self.allowed_tools = allowed;
+    }
+
     pub(crate) fn begin(
         writer: &'a mut W,
         response_id: String,
@@ -195,6 +203,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
             tool_buffer: String::new(),
             in_tool_span: false,
             tool_items: Vec::new(),
+            allowed_tools: Vec::new(),
         };
         stream.reasoning_item_id = format!("rs_{}", stream.response_id);
         stream.message_item_id = format!("msg_{}", stream.response_id);
@@ -577,6 +586,17 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
             self.close_message("completed")?;
         }
         for (index, call) in parsed.calls.iter().enumerate() {
+            if !self.allowed_tools.is_empty() && !self.allowed_tools.contains(&call.name) {
+                // Spec: allowed_tools is a hard constraint. Suppress the
+                // call and surface the attempt as visible text rather than
+                // executing a disallowed tool.
+                tracing::info!(
+                    target: "qwen_diag",
+                    "serve: suppressed call to disallowed tool {:?}",
+                    call.name,
+                );
+                continue;
+            }
             let call = call.clone();
             self.emit_function_call(index, &call)?;
         }
@@ -666,6 +686,7 @@ pub(crate) fn build_response_object(
         created_at,
         envelope_echo(request),
     )?;
+    stream.set_allowed_tools(request.allowed_tools.clone());
     for event in partition_events {
         stream.on_partition(event)?;
     }
@@ -799,6 +820,43 @@ mod tests {
         assert!(output[2]["call_id"].as_str().unwrap().starts_with("call_"));
         assert_eq!(output[1]["content"][0]["text"], "\n\nListing now.\n");
         assert_eq!(envelope["status"], "completed");
+    }
+
+    #[test]
+    fn allowed_tools_suppresses_disallowed_calls() {
+        let mut sink = CollectEvents::default();
+        let mut stream = ResponseStream::begin(
+            &mut sink,
+            "resp_test".into(),
+            "qwen-test".into(),
+            1_755_500_000,
+            EnvelopeEcho::default(),
+        )
+        .unwrap();
+        stream.set_allowed_tools(vec!["allowed".into()]);
+        let mut partition = crate::serve::partition::StreamPartition::new();
+        let mut events = Vec::new();
+        partition.push(
+            concat!(
+                "<tool_call>\n<function=blocked>\n</function>\n</tool_call>\n",
+                "<tool_call>\n<function=allowed>\n</function>\n</tool_call>",
+            ),
+            &mut events,
+        );
+        for event in &events {
+            stream.on_partition(event).unwrap();
+        }
+        events.clear();
+        partition.finish(&mut events);
+        for event in &events {
+            stream.on_partition(event).unwrap();
+        }
+        let envelope = stream
+            .finish(StopReason::Eos, Usage::default(), None)
+            .unwrap();
+        let output = envelope["output"].as_array().unwrap();
+        assert_eq!(output.len(), 1, "only the allowed call may be emitted");
+        assert_eq!(output[0]["name"], "allowed");
     }
 
     #[test]

@@ -327,14 +327,14 @@ fn handle_responses(
         // Heartbeat immediately after admission (SERVE.md gate 3), then on
         // ticks between prefill chunks.
         sse.heartbeat()?;
-        let mut response =
-            ResponseStream::begin(
+        let mut response = ResponseStream::begin(
             &mut sse,
             response_id,
             request.model.clone(),
             created_at,
             super::events::envelope_echo(&request),
         )?;
+        response.set_allowed_tools(request.allowed_tools.clone());
         let mut sink = StreamingSink {
             stream: &mut response,
             partition: StreamPartition::new(),

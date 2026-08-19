@@ -87,7 +87,15 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N]
 - `truncation` — only `"disabled"` (default). The engine already fails
   closed on context overflow (S0 F3); serve maps that to the spec error
   instead of a process exit.
-- `tools`, `tool_choice` — `invalid_request` in S1 (S2 scope).
+- `tools` — function tools are supported (S2). Hosted tool types fail
+  closed. Definitions render into the family template's `# Tools` system
+  block, byte-pinned to the template oracle.
+- `tool_choice` — `"auto"` (default) or an `allowed_tools` object.
+  Narrowing is enforced as a hard constraint on emitted calls while
+  leaving rendered bytes identical, so prompt prefixes and their
+  checkpoints stay valid across tool-menu changes (the spec's
+  cache-preserving intent, test-pinned). `required`, `none`, and
+  forced-function are not implemented.
 - `/responses/compact` — not implemented (404); compaction is outside the
   S1–S4 arc and revisits with the WebSocket transport question.
 - `x_qwen.stats: true` — echoes `{matched_tokens, restore_ms,

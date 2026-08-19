@@ -109,6 +109,11 @@ pub(crate) struct ServeRequest {
     pub(crate) system: Option<String>,
     pub(crate) turns: Vec<Turn>,
     pub(crate) tools: Vec<ToolDefinition>,
+    /// Executable subset (spec `tool_choice.allowed_tools`). Empty means
+    /// every declared tool is executable. Enforced as a hard constraint
+    /// on emitted calls; the rendered `tools` block is unchanged, which is
+    /// the point — narrowing must not invalidate prompt prefixes.
+    pub(crate) allowed_tools: Vec<String>,
     pub(crate) stream: bool,
     pub(crate) max_output_tokens: Option<usize>,
     pub(crate) temperature: Option<f32>,
@@ -182,17 +187,19 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
     }
     // The stock @ai-sdk/open-responses provider sends tool_choice:"auto"
     // unconditionally, including plain chat (provider_capture_v1, every
-    // request). Other modes (`required`, `none`, forced-function,
-    // allowed_tools) are not implemented yet.
-    if let Some(tool_choice) = non_null(map, "tool_choice")
-        && tool_choice.as_str() != Some("auto")
-    {
-        return Err(ServeError::invalid_request(
-            Some("tool_choice"),
-            "only tool_choice:\"auto\" is supported",
-        ));
-    }
+    // request). `allowed_tools` narrows the executable subset without
+    // touching the rendered tools block (cache-preserving per spec).
+    // `required`, `none`, and forced-function remain unimplemented.
+    let allowed_tools = parse_tool_choice(non_null(map, "tool_choice"))?;
     let tools = parse_tool_definitions(non_null(map, "tools"))?;
+    for name in &allowed_tools {
+        if !tools.iter().any(|tool| &tool.name == name) {
+            return Err(ServeError::invalid_request(
+                Some("tool_choice"),
+                format!("allowed_tools names {name:?}, which is not a declared tool"),
+            ));
+        }
+    }
 
     let model = non_null(map, "model")
         .and_then(Value::as_str)
@@ -202,6 +209,7 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
     let mut request = ServeRequest {
         model,
         tools,
+        allowed_tools,
         stream: non_null(map, "stream")
             .and_then(Value::as_bool)
             .unwrap_or(false),
@@ -475,6 +483,52 @@ fn required_str(
         .ok_or_else(|| {
             ServeError::invalid_request(Some("input"), format!("item {index}: {key} is required"))
         })
+}
+
+/// `tool_choice`: `"auto"` (default) or an `allowed_tools` object.
+/// Returns the allowed subset (empty when unrestricted).
+fn parse_tool_choice(tool_choice: Option<&Value>) -> Result<Vec<String>, ServeError> {
+    let Some(tool_choice) = tool_choice else {
+        return Ok(Vec::new());
+    };
+    if tool_choice.as_str() == Some("auto") {
+        return Ok(Vec::new());
+    }
+    let map = tool_choice.as_object().ok_or_else(|| {
+        ServeError::invalid_request(
+            Some("tool_choice"),
+            "only tool_choice:\"auto\" or an allowed_tools object is supported",
+        )
+    })?;
+    if map.get("type").and_then(Value::as_str) != Some("allowed_tools") {
+        return Err(ServeError::invalid_request(
+            Some("tool_choice"),
+            "only tool_choice:\"auto\" or an allowed_tools object is supported",
+        ));
+    }
+    let entries = map.get("tools").and_then(Value::as_array).ok_or_else(|| {
+        ServeError::invalid_request(
+            Some("tool_choice"),
+            "allowed_tools requires a tools array",
+        )
+    })?;
+    let mut names = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let map = entry.as_object().ok_or_else(|| {
+            ServeError::invalid_request(
+                Some("tool_choice"),
+                format!("allowed_tools entry {index} must be an object"),
+            )
+        })?;
+        names.push(required_str(map, "name", index)?);
+    }
+    if names.is_empty() {
+        return Err(ServeError::invalid_request(
+            Some("tool_choice"),
+            "allowed_tools must name at least one tool",
+        ));
+    }
+    Ok(names)
 }
 
 fn parse_tool_definitions(tools: Option<&Value>) -> Result<Vec<ToolDefinition>, ServeError> {
@@ -833,6 +887,58 @@ mod tests {
             request.turns[2],
             Turn::ToolResults(vec!["{\"entries\":[\"a.txt\"],\"path\":\"/tmp\"}".into()])
         );
+    }
+
+    #[test]
+    fn allowed_tools_narrows_without_changing_the_rendered_tools_block() {
+        let tools = json!([
+            {"type": "function", "name": "fs_list", "parameters": {"type": "object"}},
+            {"type": "function", "name": "fs_write", "parameters": {"type": "object"}},
+        ]);
+        let unrestricted = parse(json!({
+            "model": "m", "tools": tools, "tool_choice": "auto", "input": "go",
+        }))
+        .expect("auto parses");
+        let narrowed = parse(json!({
+            "model": "m", "tools": tools,
+            "tool_choice": {"type": "allowed_tools", "tools": [{"name": "fs_list"}]},
+            "input": "go",
+        }))
+        .expect("allowed_tools parses");
+        assert!(unrestricted.allowed_tools.is_empty());
+        assert_eq!(narrowed.allowed_tools, vec!["fs_list".to_string()]);
+        // The cache-preserving property: narrowing must not perturb the
+        // rendered prompt, so prior prefixes (and their checkpoints) stay
+        // valid across a narrowing change.
+        assert_eq!(
+            crate::serve::render::render_qwen_serve_prompt(&unrestricted),
+            crate::serve::render::render_qwen_serve_prompt(&narrowed),
+            "allowed_tools must not change rendered bytes"
+        );
+    }
+
+    #[test]
+    fn allowed_tools_validation_fails_closed() {
+        let tools = json!([{"type": "function", "name": "fs_list",
+                            "parameters": {"type": "object"}}]);
+        for (choice, fragment) in [
+            (json!({"type": "allowed_tools", "tools": [{"name": "nope"}]}),
+             "not a declared tool"),
+            (json!({"type": "allowed_tools", "tools": []}), "at least one tool"),
+            (json!({"type": "function", "name": "fs_list"}), "allowed_tools object"),
+            (json!("required"), "allowed_tools object"),
+            (json!("none"), "allowed_tools object"),
+        ] {
+            let error = parse(json!({"model": "m", "tools": tools,
+                                      "tool_choice": choice, "input": "go"}))
+                .unwrap_err();
+            assert_eq!(error.param.as_deref(), Some("tool_choice"));
+            assert!(
+                error.message.contains(fragment),
+                "unexpected message: {}",
+                error.message
+            );
+        }
     }
 
     #[test]

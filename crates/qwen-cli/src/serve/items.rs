@@ -76,7 +76,30 @@ pub(crate) enum Turn {
     Assistant {
         reasoning: Option<String>,
         visible: String,
+        /// Tool calls emitted in this assistant turn, in wire order
+        /// (provider_capture_v1: `function_call` items follow the
+        /// assistant message / reasoning within one logical turn).
+        calls: Vec<ToolCall>,
     },
+    /// One or more tool results; consecutive results coalesce into a
+    /// single user block per the template oracle.
+    ToolResults(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ToolCall {
+    pub(crate) call_id: String,
+    pub(crate) name: String,
+    /// Raw `arguments` JSON string exactly as the provider replayed it.
+    pub(crate) arguments: String,
+}
+
+/// One declared function tool (`tools[]` entry).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ToolDefinition {
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) parameters: Value,
 }
 
 /// Validated transcript plus generation controls, ready for rendering.
@@ -85,6 +108,7 @@ pub(crate) struct ServeRequest {
     pub(crate) model: String,
     pub(crate) system: Option<String>,
     pub(crate) turns: Vec<Turn>,
+    pub(crate) tools: Vec<ToolDefinition>,
     pub(crate) stream: bool,
     pub(crate) max_output_tokens: Option<usize>,
     pub(crate) temperature: Option<f32>,
@@ -156,26 +180,19 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
             "only truncation:\"disabled\" is supported; context overflow fails closed",
         ));
     }
-    if non_null(map, "tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| !tools.is_empty())
-    {
-        return Err(ServeError::invalid_request(
-            Some("tools"),
-            "tool use is not supported yet (S2 scope)",
-        ));
-    }
     // The stock @ai-sdk/open-responses provider sends tool_choice:"auto"
     // unconditionally, including plain chat (provider_capture_v1, every
-    // request). Accept the no-op value; anything else is S2 scope.
+    // request). Other modes (`required`, `none`, forced-function,
+    // allowed_tools) are not implemented yet.
     if let Some(tool_choice) = non_null(map, "tool_choice")
         && tool_choice.as_str() != Some("auto")
     {
         return Err(ServeError::invalid_request(
             Some("tool_choice"),
-            "only tool_choice:\"auto\" is accepted until tool use lands (S2 scope)",
+            "only tool_choice:\"auto\" is supported",
         ));
     }
+    let tools = parse_tool_definitions(non_null(map, "tools"))?;
 
     let model = non_null(map, "model")
         .and_then(Value::as_str)
@@ -184,6 +201,7 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
 
     let mut request = ServeRequest {
         model,
+        tools,
         stream: non_null(map, "stream")
             .and_then(Value::as_bool)
             .unwrap_or(false),
@@ -336,6 +354,7 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                         request.turns.push(Turn::Assistant {
                             reasoning: pending_reasoning.take(),
                             visible: text,
+                            calls: Vec::new(),
                         });
                     }
                     other => {
@@ -356,6 +375,69 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
                 head = false;
                 pending_reasoning = Some(reasoning_text(item_map, index)?);
             }
+            // provider_capture_v1 tool-loop: reasoning may precede a
+            // function_call rather than an assistant message, and calls
+            // may follow an assistant message inside one logical turn.
+            "function_call" => {
+                let call = ToolCall {
+                    call_id: required_str(item_map, "call_id", index)?,
+                    name: required_str(item_map, "name", index)?,
+                    arguments: item_map
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .unwrap_or("{}")
+                        .to_owned(),
+                };
+                head = false;
+                match request.turns.last_mut() {
+                    // Attach to the assistant turn opened by this same
+                    // logical turn (no intervening user/tool item).
+                    Some(Turn::Assistant {
+                        calls,
+                        reasoning: existing,
+                        ..
+                    }) if pending_reasoning.is_none() || existing.is_none() => {
+                        if let Some(reasoning) = pending_reasoning.take()
+                            && existing.is_none()
+                        {
+                            *existing = Some(reasoning);
+                        }
+                        calls.push(call);
+                    }
+                    _ => request.turns.push(Turn::Assistant {
+                        reasoning: pending_reasoning.take(),
+                        visible: String::new(),
+                        calls: vec![call],
+                    }),
+                }
+            }
+            "function_call_output" => {
+                if pending_reasoning.is_some() {
+                    return Err(ServeError::invalid_request(
+                        Some("input"),
+                        format!(
+                            "item {index}: reasoning item must precede an assistant message or function call"
+                        ),
+                    ));
+                }
+                let output = match item_map.get("output") {
+                    Some(Value::String(text)) => text.clone(),
+                    Some(value @ (Value::Array(_) | Value::Object(_))) => {
+                        serde_json::to_string(value).expect("serialize tool output")
+                    }
+                    _ => {
+                        return Err(ServeError::invalid_request(
+                            Some("input"),
+                            format!("item {index}: function_call_output requires output"),
+                        ));
+                    }
+                };
+                head = false;
+                match request.turns.last_mut() {
+                    Some(Turn::ToolResults(results)) => results.push(output),
+                    _ => request.turns.push(Turn::ToolResults(vec![output])),
+                }
+            }
             other => {
                 return Err(ServeError::invalid_request(
                     Some("input"),
@@ -371,12 +453,61 @@ fn validate_items(items: &[Value], request: &mut ServeRequest) -> Result<(), Ser
         ));
     }
     match request.turns.last() {
-        Some(Turn::User(_)) => Ok(()),
+        // A tool loop resumes generation after tool results, so
+        // function_call_output is a legal terminal item (capture F-S2.3).
+        Some(Turn::User(_) | Turn::ToolResults(_)) => Ok(()),
         _ => Err(ServeError::invalid_request(
             Some("input"),
-            "the final input item must be a user message",
+            "the final input item must be a user message or function_call_output",
         )),
     }
+}
+
+fn required_str(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
+    index: usize,
+) -> Result<String, ServeError> {
+    map.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            ServeError::invalid_request(Some("input"), format!("item {index}: {key} is required"))
+        })
+}
+
+fn parse_tool_definitions(tools: Option<&Value>) -> Result<Vec<ToolDefinition>, ServeError> {
+    let Some(tools) = tools else {
+        return Ok(Vec::new());
+    };
+    let entries = tools
+        .as_array()
+        .ok_or_else(|| ServeError::invalid_request(Some("tools"), "tools must be an array"))?;
+    let mut definitions = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let map = entry.as_object().ok_or_else(|| {
+            ServeError::invalid_request(Some("tools"), format!("tool {index} must be an object"))
+        })?;
+        match map.get("type").and_then(Value::as_str) {
+            Some("function") | None => {}
+            Some(other) => {
+                return Err(ServeError::invalid_request(
+                    Some("tools"),
+                    format!("tool {index}: hosted tool type {other:?} is not supported"),
+                ));
+            }
+        }
+        definitions.push(ToolDefinition {
+            name: required_str(map, "name", index)?,
+            description: map
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            parameters: map.get("parameters").cloned().unwrap_or(Value::Null),
+        });
+    }
+    Ok(definitions)
 }
 
 fn content_text(content: Option<&Value>, role: &str, index: usize) -> Result<String, ServeError> {
@@ -507,7 +638,8 @@ mod tests {
             request.turns[1],
             Turn::Assistant {
                 reasoning: Some("\nplan\n".into()),
-                visible: "a".into()
+                visible: "a".into(),
+                calls: Vec::new()
             }
         );
     }
@@ -579,7 +711,8 @@ mod tests {
         let error = parse(json!({"model": "m", "input": "q", "truncation": "auto"})).unwrap_err();
         assert_eq!(error.param.as_deref(), Some("truncation"));
 
-        let error = parse(json!({"model": "m", "input": "q", "tools": [{"type": "function"}]}))
+        let error = parse(json!({"model": "m", "input": "q",
+            "tools": [{"type": "web_search"}]}))
             .unwrap_err();
         assert_eq!(error.param.as_deref(), Some("tools"));
 
@@ -588,7 +721,7 @@ mod tests {
         assert_eq!(error.param.as_deref(), Some("tool_choice"));
 
         let error = parse(json!({"model": "m", "input": [
-            {"type": "function_call", "name": "f", "call_id": "c", "arguments": "{}"},
+            {"type": "web_search_call", "id": "ws_1"},
         ]}))
         .unwrap_err();
         assert!(error.message.contains("unsupported item type"));
@@ -622,7 +755,8 @@ mod tests {
             request.turns[1],
             Turn::Assistant {
                 reasoning: Some("\nplan the answer\n".into()),
-                visible: "It is 5.".into()
+                visible: "It is 5.".into(),
+                calls: Vec::new()
             }
         );
     }
@@ -649,6 +783,81 @@ mod tests {
         assert_eq!(request.top_k, Some(200));
         assert!(request.strip_history_thinking);
         assert!(request.echo_stats);
+    }
+
+    #[test]
+    fn stock_provider_tool_loop_replay_parses_to_turns() {
+        // Byte-shape from provider_capture_v1 tool-loop#1: reasoning binds
+        // to a function_call (not an assistant message), and the input
+        // legally terminates with function_call_output.
+        let request = parse(json!({
+            "model": "m",
+            "tool_choice": "auto",
+            "tools": [{
+                "type": "function", "name": "fs_list",
+                "description": "List directory entries",
+                "parameters": {"type": "object",
+                               "properties": {"path": {"type": "string"}},
+                               "required": ["path"]},
+            }],
+            "input": [
+                {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "List files in /tmp."}]},
+                {"type": "reasoning", "summary": [], "id": "rs_t1",
+                 "content": [{"type": "reasoning_text", "text": "\nneed the listing\n"}]},
+                {"type": "function_call", "id": "fc_1", "call_id": "call_abc123",
+                 "name": "fs_list", "arguments": "{\"path\":\"/tmp\"}"},
+                {"type": "function_call_output", "call_id": "call_abc123",
+                 "output": "{\"entries\":[\"a.txt\"],\"path\":\"/tmp\"}"},
+            ],
+        }))
+        .expect("stock provider tool-loop replay must parse");
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0].name, "fs_list");
+        assert_eq!(request.turns.len(), 3);
+        match &request.turns[1] {
+            Turn::Assistant {
+                reasoning,
+                visible,
+                calls,
+            } => {
+                assert_eq!(reasoning.as_deref(), Some("\nneed the listing\n"));
+                assert!(visible.is_empty());
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].call_id, "call_abc123");
+                assert_eq!(calls[0].name, "fs_list");
+            }
+            other => panic!("expected assistant turn with call, got {other:?}"),
+        }
+        assert_eq!(
+            request.turns[2],
+            Turn::ToolResults(vec!["{\"entries\":[\"a.txt\"],\"path\":\"/tmp\"}".into()])
+        );
+    }
+
+    #[test]
+    fn consecutive_tool_outputs_coalesce_and_calls_attach_to_assistant_text() {
+        let request = parse(json!({"model": "m", "input": [
+            {"role": "user", "content": "go"},
+            {"type": "message", "role": "assistant", "content": "Checking both."},
+            {"type": "function_call", "call_id": "c1", "name": "a", "arguments": "{}"},
+            {"type": "function_call", "call_id": "c2", "name": "b", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "c1", "output": "r1"},
+            {"type": "function_call_output", "call_id": "c2", "output": "r2"},
+        ]}))
+        .expect("parallel calls and coalesced outputs must parse");
+        assert_eq!(request.turns.len(), 3);
+        match &request.turns[1] {
+            Turn::Assistant { visible, calls, .. } => {
+                assert_eq!(visible, "Checking both.");
+                assert_eq!(calls.len(), 2);
+            }
+            other => panic!("expected assistant turn, got {other:?}"),
+        }
+        assert_eq!(
+            request.turns[2],
+            Turn::ToolResults(vec!["r1".into(), "r2".into()])
+        );
     }
 
     #[test]

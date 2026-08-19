@@ -19,7 +19,8 @@
 //! it); the bespoke Qwen3.8 pre-closed-history renderer remains a modern
 //! `qwen run` surface and is out of S1 serve scope.
 
-use super::items::{ServeRequest, Turn};
+use super::items::{ServeRequest, ToolDefinition, Turn};
+use super::tool_parse::{ParsedCall, render_calls};
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>\n";
@@ -92,11 +93,59 @@ fn render_assistant_body(
     }
 }
 
+const TOOLS_FORMAT_INSTRUCTION: &str = concat!(
+    "\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n",
+    "<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n",
+    "</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\n",
+    "that can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\n",
+    "Reminder:\n- Function calls MUST follow the specified format: an inner ",
+    "<function=...></function> block must be nested within <tool_call></tool_call> XML tags\n",
+    "- Required parameters MUST be specified\n",
+    "- You may provide optional reasoning for your function call in natural language BEFORE the ",
+    "function call, but NOT after\n",
+    "- If there is no function call available, answer the question like normal with your current ",
+    "knowledge and do not tell the user about function calls\n</IMPORTANT>",
+);
+
+/// Tools block, byte-pinned to the template oracle
+/// (`qwen36_tools_system_block_with_system`): the tools system message
+/// absorbs the caller's system text after `</IMPORTANT>`.
+fn render_tools_system_block(tools: &[ToolDefinition], system: Option<&str>, output: &mut String) {
+    output.push_str(IM_START);
+    output.push_str("system\n");
+    output.push_str("# Tools\n\nYou have access to the following functions:\n\n<tools>");
+    for tool in tools {
+        output.push('\n');
+        let mut entry = serde_json::Map::new();
+        entry.insert("type".into(), serde_json::json!("function"));
+        entry.insert("name".into(), serde_json::json!(tool.name));
+        if let Some(description) = tool.description.as_deref() {
+            entry.insert("description".into(), serde_json::json!(description));
+        }
+        if !tool.parameters.is_null() {
+            entry.insert("parameters".into(), tool.parameters.clone());
+        }
+        output.push_str(
+            &serde_json::to_string(&serde_json::Value::Object(entry))
+                .expect("serialize tool definition"),
+        );
+    }
+    output.push_str("\n</tools>");
+    output.push_str(TOOLS_FORMAT_INSTRUCTION);
+    if let Some(system) = system.filter(|text| !text.trim().is_empty()) {
+        output.push_str("\n\n");
+        output.push_str(system);
+    }
+    output.push_str(IM_END);
+}
+
 /// Render the full prompt for a validated request, including the
 /// generation suffix.
 pub(crate) fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
     let mut output = String::new();
-    if let Some(system) = request.system.as_deref() {
+    if !request.tools.is_empty() {
+        render_tools_system_block(&request.tools, request.system.as_deref(), &mut output);
+    } else if let Some(system) = request.system.as_deref() {
         output.push_str(IM_START);
         output.push_str("system\n");
         output.push_str(system);
@@ -110,16 +159,45 @@ pub(crate) fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
                 output.push_str(text);
                 output.push_str(IM_END);
             }
-            Turn::Assistant { reasoning, visible } => {
+            Turn::Assistant {
+                reasoning,
+                visible,
+                calls,
+            } => {
                 output.push_str(IM_START);
                 output.push_str("assistant\n");
+                let body = if calls.is_empty() {
+                    visible.clone()
+                } else {
+                    let parsed: Vec<ParsedCall> = calls
+                        .iter()
+                        .map(|call| ParsedCall {
+                            name: call.name.clone(),
+                            arguments: serde_json::from_str(&call.arguments)
+                                .unwrap_or_else(|_| serde_json::Map::new()),
+                        })
+                        .collect();
+                    render_calls(visible, &parsed)
+                };
                 render_assistant_body(
                     reasoning.as_deref(),
-                    visible,
+                    &body,
                     request.no_thinking,
                     request.strip_history_thinking,
                     &mut output,
                 );
+                output.push_str(IM_END);
+            }
+            // Coalesced tool results in one user block, each wrapped per
+            // the template oracle.
+            Turn::ToolResults(results) => {
+                output.push_str(IM_START);
+                output.push_str("user");
+                for result in results {
+                    output.push_str("\n<tool_response>\n");
+                    output.push_str(result);
+                    output.push_str("\n</tool_response>");
+                }
                 output.push_str(IM_END);
             }
         }
@@ -261,6 +339,70 @@ mod tests {
         assert!(
             rendered.starts_with(single_prompt),
             "no-thinking append lost prompt-boundary prefix stability"
+        );
+    }
+
+    #[test]
+    fn tools_system_block_matches_frozen_fixture_bytes() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/serve_tool_render_fixtures_v1.json"
+        ))
+        .expect("parse tool fixtures");
+        let case = fixture["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "qwen36_tools_system_block_with_system")
+            .expect("tools block case")
+            .clone();
+        let request = parse_request(&json!({
+            "model": "m",
+            "instructions": case["system"],
+            "tools": case["tools"],
+            "input": "List files in /tmp.",
+        }))
+        .expect("tools request must parse");
+        let rendered = render_qwen_serve_prompt(&request);
+        let expected_block = case["prompt"].as_str().unwrap();
+        assert!(
+            rendered.starts_with(expected_block),
+            "tools system block diverged from frozen fixture:\n got: {:?}\nwant: {:?}",
+            &rendered[..expected_block.len().min(rendered.len())],
+            expected_block
+        );
+    }
+
+    #[test]
+    fn tool_continuation_prompt_matches_oracle_shape() {
+        // Full loop: tools block, user, assistant(reasoning + call),
+        // coalesced tool_response user block, generation prompt.
+        let request = parse_request(&json!({
+            "model": "m",
+            "tools": [{"type": "function", "name": "fs_list",
+                        "parameters": {"type": "object"}}],
+            "input": [
+                {"role": "user", "content": "List files in /tmp."},
+                {"type": "reasoning", "content": "\nUse fs.list.\n"},
+                {"type": "function_call", "call_id": "c1", "name": "fs_list",
+                 "arguments": "{\"path\":\"/tmp\"}"},
+                {"type": "function_call_output", "call_id": "c1",
+                 "output": "{\"entries\":[\"a.txt\"]}"},
+            ],
+        }))
+        .expect("tool loop must parse");
+        let rendered = render_qwen_serve_prompt(&request);
+        let tail_start = rendered.find("<|im_start|>user\nList files").expect("user turn");
+        assert_eq!(
+            &rendered[tail_start..],
+            concat!(
+                "<|im_start|>user\nList files in /tmp.<|im_end|>\n",
+                "<|im_start|>assistant\n<think>\nUse fs.list.\n</think>",
+                "<tool_call>\n<function=fs_list>\n<parameter=path>\n/tmp\n</parameter>\n",
+                "</function>\n</tool_call><|im_end|>\n",
+                "<|im_start|>user\n<tool_response>\n{\"entries\":[\"a.txt\"]}\n</tool_response>",
+                "<|im_end|>\n",
+                "<|im_start|>assistant\n",
+            ),
         );
     }
 

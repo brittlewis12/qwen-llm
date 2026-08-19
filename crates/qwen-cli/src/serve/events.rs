@@ -15,6 +15,7 @@ use super::items::ServeRequest;
 use super::partition::PartitionEvent;
 use serde_json::{Value, json};
 use std::io::{self, Write};
+use std::time::{Duration, Instant};
 
 pub(crate) const REASONING_PART_TYPE: &str = "reasoning_text";
 
@@ -61,6 +62,10 @@ impl ServeStats {
 
 pub(crate) trait EventWrite {
     fn event(&mut self, event_type: &str, payload: Value) -> io::Result<()>;
+    /// Transport-level keepalive (SSE comment). No-op for collectors.
+    fn comment(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Test/collection sink.
@@ -95,6 +100,9 @@ impl<W: Write> EventWrite for SseWriter<W> {
         write!(self.0, "event: {event_type}\ndata: {payload}\n\n")?;
         self.0.flush()
     }
+    fn comment(&mut self) -> io::Result<()> {
+        self.heartbeat()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +128,7 @@ pub(crate) struct ResponseStream<'a, W: EventWrite> {
     visible_text: String,
     reasoning_opened: bool,
     message_opened: bool,
+    last_activity: Instant,
 }
 
 impl<'a, W: EventWrite> ResponseStream<'a, W> {
@@ -143,6 +152,7 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
             visible_text: String::new(),
             reasoning_opened: false,
             message_opened: false,
+            last_activity: Instant::now(),
         };
         stream.reasoning_item_id = format!("rs_{}", stream.response_id);
         stream.message_item_id = format!("msg_{}", stream.response_id);
@@ -161,7 +171,39 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
         let sequence = self.next_sequence();
         payload["type"] = json!(event_type);
         payload["sequence_number"] = json!(sequence);
+        self.last_activity = Instant::now();
         self.writer.event(event_type, payload)
+    }
+
+    /// Rate-limited transport keepalive; called between prefill chunks
+    /// (SERVE.md gate 3, client-timeout defense). Write failure here is the
+    /// cancellation signal.
+    pub(crate) fn heartbeat_if_idle(&mut self) -> io::Result<()> {
+        if self.last_activity.elapsed() >= Duration::from_secs(1) {
+            self.writer.comment()?;
+            self.last_activity = Instant::now();
+        }
+        Ok(())
+    }
+
+    /// Mid-stream failure: close open items as incomplete, emit
+    /// `response.failed` with the spec error inside the response envelope.
+    pub(crate) fn fail(mut self, error: &super::items::ServeError) -> io::Result<()> {
+        match self.open {
+            OpenItem::Reasoning => self.close_reasoning("incomplete")?,
+            OpenItem::Message => self.close_message("incomplete")?,
+            OpenItem::None => {}
+        }
+        let mut output = Vec::new();
+        if self.reasoning_opened {
+            output.push(self.reasoning_item_json("incomplete"));
+        }
+        if self.message_opened {
+            output.push(self.message_item_json("incomplete"));
+        }
+        let mut envelope = self.response_envelope("failed", Value::Array(output), None, None);
+        envelope["error"] = error.to_json()["error"].clone();
+        self.emit("response.failed", json!({"response": envelope}))
     }
 
     fn response_envelope(

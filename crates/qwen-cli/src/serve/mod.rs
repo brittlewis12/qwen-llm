@@ -14,6 +14,7 @@
 #![allow(dead_code)] // consumed incrementally; the HTTP slice wires the rest
 
 pub(crate) mod events;
+pub(crate) mod http;
 pub(crate) mod items;
 pub(crate) mod partition;
 pub(crate) mod render;

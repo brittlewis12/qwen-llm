@@ -531,6 +531,14 @@ enum Cmd {
     AttnIntra(AttnIntraArgs),
     /// Exact-shape GDN projection primitive microbench.
     GdnProjMicro(GdnProjMicroArgs),
+    /// **v0.77** small-N mat-mat kernel-variant sweep on production
+    /// shapes at N=8: times the v0.501 table pick against the generic
+    /// tile, sequential mat-vec, nc8, and every N=8-capable mma8 variant
+    /// per weight family (GDN qkv/z/out, attn q/o, FFN gate/down,
+    /// lm_head). The 2026-08-19 verify microbench showed packed-verify
+    /// cost is per-dispatch kernel efficiency c(n); this finds free wins
+    /// before any kernel engineering.
+    MatmatSmallnMicro(MatmatSmallnMicroArgs),
     /// Decode projection batching probe across GDN, attention, FFN, and lm_head.
     DecodeProjBatch(DecodeProjBatchArgs),
     /// One-layer GDN replay probe with batched qkv/z/out projections.
@@ -1001,6 +1009,23 @@ struct GdnProjMicroArgs {
     /// Synthetic token rows for the mat-mat batch path.
     #[arg(long, default_value = "1")]
     tokens: usize,
+}
+
+#[derive(Parser, Debug)]
+struct MatmatSmallnMicroArgs {
+    /// Path to a GGUF file.
+    #[arg(short = 'm', long)]
+    model: PathBuf,
+    /// Timed repetitions after warmup.
+    #[arg(long, default_value = "10")]
+    iters: usize,
+    /// Untimed warmup repetitions.
+    #[arg(long, default_value = "3")]
+    warmup: usize,
+    /// Max tensors dispatched per family per rep (caps rep cost; the
+    /// dense 27B has 48 GDN / 16 attn / 64 FFN instances per family).
+    #[arg(long, default_value = "8")]
+    tensors_per_family: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -2835,6 +2860,7 @@ fn run() -> Result<()> {
         Cmd::Phase(a) => run_phase(a),
         Cmd::AttnIntra(a) => run_attn_intra(a),
         Cmd::GdnProjMicro(a) => run_gdn_proj_micro(a),
+        Cmd::MatmatSmallnMicro(a) => run_matmat_smalln_micro(a),
         Cmd::DecodeProjBatch(a) => run_decode_proj_batch(a),
         Cmd::DecodeGdnLayerReplay(a) => run_decode_gdn_layer_replay(a),
         Cmd::DecodeGdnChainReplay(a) => run_decode_gdn_chain_replay(a),
@@ -4898,6 +4924,235 @@ fn run_gdn_proj_micro(args: GdnProjMicroArgs) -> Result<()> {
     })?;
     report("out", "matmat_batch", out_bytes, wall, gpu);
 
+    Ok(())
+}
+
+/// v0.77 small-N mat-mat variant sweep at N=8 on production shapes.
+///
+/// Motivation: the interleaved verify microbench showed packed-verify cost
+/// is per-dispatch kernel efficiency c(n) on the weight sweep (fixed
+/// overhead ≈ 0), so the whole Spec(8) premium sits in the v0.501 table's
+/// N=8 picks (Q4_K `r1c1k64_sg2` c 2.25-2.78, Q6_K `r1c1k128` c 1.6-1.8,
+/// Q5_K generic). This times every drop-in alternative per weight family;
+/// winners get promoted into `encode_mat_mat_dispatch`'s table.
+fn run_matmat_smalln_micro(args: MatmatSmallnMicroArgs) -> Result<()> {
+    let MatmatSmallnMicroArgs {
+        model,
+        iters,
+        warmup,
+        tensors_per_family,
+    } = args;
+    if iters == 0 || tensors_per_family == 0 {
+        return Err(anyhow!("--iters and --tensors-per-family must be >= 1"));
+    }
+    const N_COLS: usize = 8;
+
+    let ctx = MetalContext::new().context("init MetalContext")?;
+    let g = GgufFile::open(&model).with_context(|| format!("open {}", model.display()))?;
+    let m = Model::from_gguf(&g).context("parse model")?;
+    let mm = MetalModel::load(&ctx, &g, &m).context("metal-load model")?;
+
+    // Synthetic Q8_0 tensors at the DFlash 2 drafter's production shapes:
+    // the drafter GGUF is a different arch (`dflash`) this subcommand
+    // can't load, and timing is content-independent for memory-bound
+    // kernels, so valid-format synthetic blocks stand in. Created before
+    // `families` so the borrows below outlive it.
+    let q8_shapes: [(&'static str, usize, usize); 6] = [
+        ("q8_attn_q", 5120, 4096),
+        ("q8_attn_kv", 5120, 1024),
+        ("q8_attn_o", 4096, 5120),
+        ("q8_ffn_gate", 5120, 17408),
+        ("q8_ffn_down", 17408, 5120),
+        ("q8_conv_proj", 5120, 1280),
+    ];
+    let mut q8_synth: Vec<(&'static str, MetalTensor)> = Vec::new();
+    for (label, n_in, n_out) in q8_shapes {
+        // block_q8_0: f16 scale + 32 i8, 34 bytes / 32 elems.
+        let n_blocks = n_in * n_out / 32;
+        let mut block = [0u8; 34];
+        block[..2].copy_from_slice(&half::f16::from_f32(1.0).to_le_bytes());
+        for (i, b) in block[2..].iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_sub(16);
+        }
+        let bytes: Vec<u8> = block.iter().copied().cycle().take(n_blocks * 34).collect();
+        let t = MetalTensor::from_bytes(
+            &ctx,
+            &bytes,
+            vec![n_in as u64, n_out as u64],
+            GgmlType::Q8_0,
+        )?;
+        q8_synth.push((label, t));
+    }
+
+    // Weight families in verify-path dispatch order. gate/up share shape +
+    // dtype, so gate stands in for both.
+    // Group by (family, dtype): Q4_K_M quantizes some instances of a
+    // family at Q4_K and others at Q6_K — mixing them blurs per-shape
+    // winner attribution (the first sweep run hit exactly that).
+    let mut families: Vec<(String, Vec<&MetalTensor>)> = vec![(
+        format!("lm_head[{:?}]", mm.lm_head.dtype),
+        vec![&mm.lm_head],
+    )];
+    for (label, t) in &q8_synth {
+        families.push((format!("{label}[Q8_0]"), vec![t]));
+    }
+    fn push_family<'a>(
+        families: &mut Vec<(String, Vec<&'a MetalTensor>)>,
+        cap: usize,
+        label: &str,
+        t: &'a MetalTensor,
+    ) {
+        let key = format!("{label}[{:?}]", t.dtype);
+        match families.iter_mut().find(|(l, _)| *l == key) {
+            Some((_, v)) => {
+                if v.len() < cap {
+                    v.push(t);
+                }
+            }
+            None => families.push((key, vec![t])),
+        }
+    }
+    let cap = tensors_per_family;
+    for b in &mm.blocks {
+        match b {
+            MetalBlock::Gdn(gb) => {
+                push_family(&mut families, cap, "gdn_qkv", &gb.in_proj_qkv);
+                push_family(&mut families, cap, "gdn_z", &gb.in_proj_z);
+                push_family(&mut families, cap, "gdn_out", &gb.out_proj);
+                push_family(&mut families, cap, "ffn_gate", &gb.ffn_gate);
+                push_family(&mut families, cap, "ffn_down", &gb.ffn_down);
+            }
+            MetalBlock::Attn(ab) => {
+                push_family(&mut families, cap, "attn_q", &ab.q);
+                push_family(&mut families, cap, "attn_o", &ab.o);
+            }
+        }
+    }
+    let mut max_in = 0usize;
+    let mut max_out = 0usize;
+    for (_, ts) in &families {
+        for t in ts {
+            let [n_in, n_out] = t.shape.as_slice() else {
+                continue;
+            };
+            max_in = max_in.max(*n_in as usize);
+            max_out = max_out.max(*n_out as usize);
+        }
+    }
+    let x8 = MetalTensor::zeros_f32(&ctx, vec![(N_COLS * max_in) as u64])?;
+    let y8 = MetalTensor::zeros_f32(&ctx, vec![(N_COLS * max_out) as u64])?;
+    {
+        let cmd = ctx.queue.commandBuffer().context("fill cmd")?;
+        let enc = KernelEncoder::begin(&cmd);
+        encode_fill_f32(&ctx, &enc, &x8, 0.125)?;
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+    }
+
+    println!(
+        "[matmat-smalln-micro] model={} n_cols={N_COLS} warmup={warmup} iters={iters} tensors_per_family={tensors_per_family}",
+        model.display()
+    );
+    println!("family\tdtype\tn_in\tn_out\tcount\tcandidate\tgpu_ms_per_dispatch\teff_weight_gb_s");
+
+    for (label, tensors) in &families {
+        let Some(first) = tensors.first() else {
+            continue;
+        };
+        let [n_in, n_out] = first.shape.as_slice() else {
+            continue;
+        };
+        let (n_in, n_out) = (*n_in as usize, *n_out as usize);
+        let dtype = first.dtype;
+        let count = tensors.len();
+        let bytes_per_dispatch: u64 =
+            tensors.iter().map(|t| t.n_bytes()).sum::<u64>() / count as u64;
+        let x = x8.view_subrange(0, vec![(N_COLS * n_in) as u64]);
+        let y = y8.view_subrange(0, vec![(N_COLS * n_out) as u64]);
+
+        let candidates: Vec<&'static str> = match dtype {
+            GgmlType::Q4_K | GgmlType::Q6_K => vec![
+                "table",
+                "generic",
+                "seq8",
+                "nc8",
+                "mma8_r2c1k64",
+                "mma8_r1c1k128",
+                "mma8_r1c1k64_sg2",
+                "mma8_r2c1k128",
+                "mma8_r4c1k64",
+            ],
+            // v0.77: Q5_K/Q8_0 mma8v variants exist now (no nc kernels).
+            GgmlType::Q5_K | GgmlType::Q8_0 => vec![
+                "table",
+                "generic",
+                "seq8",
+                "mma8_r2c1k64",
+                "mma8_r1c1k128",
+                "mma8_r1c1k64_sg2",
+                "mma8_r2c1k128",
+                "mma8_r4c1k64",
+            ],
+            _ => vec!["table", "seq8"],
+        };
+
+        for cand in candidates {
+            let result = time_gpu_reps(&ctx, warmup, iters, |enc| {
+                for w in tensors {
+                    match cand {
+                        "table" => {
+                            encode_mat_mat_dispatch(&ctx, enc, w, &x, &y, n_in, n_out, N_COLS)?
+                        }
+                        "generic" => match dtype {
+                            GgmlType::Q4_K => qwen_llm::metal::encode_mat_mat_q4_k_f32(
+                                &ctx, enc, w, &x, &y, n_in, n_out, N_COLS,
+                            )?,
+                            GgmlType::Q5_K => qwen_llm::metal::encode_mat_mat_q5_k_f32(
+                                &ctx, enc, w, &x, &y, n_in, n_out, N_COLS,
+                            )?,
+                            GgmlType::Q6_K => qwen_llm::metal::encode_mat_mat_q6_k_f32(
+                                &ctx, enc, w, &x, &y, n_in, n_out, N_COLS,
+                            )?,
+                            GgmlType::Q8_0 => qwen_llm::metal::encode_mat_mat_q8_0_f32(
+                                &ctx, enc, w, &x, &y, n_in, n_out, N_COLS,
+                            )?,
+                            other => return Err(anyhow!("no generic arm for {other:?}")),
+                        },
+                        "seq8" => {
+                            for r in 0..N_COLS {
+                                let xr = x.view_subrange((r * n_in) as u64, vec![n_in as u64]);
+                                let yr = y.view_subrange((r * n_out) as u64, vec![n_out as u64]);
+                                encode_mat_vec_dispatch(&ctx, enc, w, &xr, &yr, n_in, n_out)?;
+                            }
+                        }
+                        "nc8" => qwen_llm::metal::encode_mat_vec_nc_dispatch(
+                            &ctx, enc, w, &x, &y, n_in, n_out, N_COLS,
+                        )?,
+                        v => {
+                            let variant = v.strip_prefix("mma8_").expect("mma8 candidate");
+                            qwen_llm::metal::encode_mat_mat_mma8_variant(
+                                &ctx, enc, w, &x, &y, n_in, n_out, variant,
+                            )?
+                        }
+                    }
+                }
+                Ok(())
+            });
+            match result {
+                Ok((_wall, gpu)) => {
+                    let gpu_per_dispatch = gpu / count as f64;
+                    let gb_s = (bytes_per_dispatch as f64 / 1e9) / (gpu_per_dispatch / 1e3);
+                    println!(
+                        "{label}\t{dtype:?}\t{n_in}\t{n_out}\t{count}\t{cand}\t{gpu_per_dispatch:.4}\t{gb_s:.1}"
+                    );
+                }
+                Err(e) => {
+                    println!("{label}\t{dtype:?}\t{n_in}\t{n_out}\t{count}\t{cand}\tn/a\t({e})");
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -17094,7 +17349,14 @@ const DFLASH2_N8_OFF_CTX: usize = 16384;
 ///   Terminal-Off re-probe remains future work.
 const DFLASH2_ALPHA_WINDOW: usize = 16;
 /// Break-even fit intercept / inverse slope (see table + corrections).
-const DFLASH2_N8_BREAKEVEN_BASE: f64 = 3.3;
+///
+/// v0.77 kernel round (Q5_K/Q8_0 mma8v arms + Q4_K down-shape routing):
+/// draft 23.0 -> 13.5 ms, verify(8) 113 -> 101 ms at short ctx, so the
+/// intercept drops 3.3 -> 2.9 ((13.5+101.3)/39.3). Measured flip: the
+/// α≈3.56 content that sat at 1.00× now wins 1.15×; the α≈4.6
+/// instruction workload went 1.49× -> 1.76×. Slope retained (both draft
+/// and verify improvements are ctx-independent kernel-efficiency terms).
+const DFLASH2_N8_BREAKEVEN_BASE: f64 = 2.9;
 const DFLASH2_N8_BREAKEVEN_CTX_DIV: f64 = 8000.0;
 /// Trigger margin below break-even, sized ≈ 1 SE of the window mean.
 const DFLASH2_ALPHA_OFF_MARGIN: f64 = 0.6;

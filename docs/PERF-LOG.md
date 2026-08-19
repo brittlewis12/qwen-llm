@@ -25051,3 +25051,47 @@ Interpretation:
   content into wins. Same disease bounds drafter phase 3 (Q8_0 mat-mat).
 - n=4 remains anomalous (nc4 band tops at c≈3.3); fix is pad-to-8 routing —
   parked, off the production path.
+
+## 2026-08-19 — Q5_K + Q8_0 mma8v N=8 Tier, Small-N Variant Sweep Harness
+
+### What Changed
+
+- New `qwen-bench matmat-smalln-micro`: per-(family, dtype) kernel-variant
+  sweep at N=8 on production weight tensors (GDN qkv/z/out, attn q/o, FFN
+  gate/down, lm_head) plus synthetic Q8_0 tensors at the DFlash 2 drafter's
+  shapes. Candidates: table pick, generic tile, seq mat-vec, nc8, all five
+  ct=1 mma8v variants.
+- `mma8_dequantize_q5_K_half` (ported from mat_mat_q5_k.metal) and
+  `mma8_dequantize_q8_0_half` (8×34-byte sub-blocks per 256-elem
+  superblock) + ct=1 kernel instantiations for both dtypes.
+- `encode_mat_mat_dispatch` table: Q5_K/Q8_0 N=8 → mma8v `r1c1k128`;
+  Q4_K N=8 down-projections (n_in > n_out) → `r1c1k128` (sg2 retained for
+  up/square); N=16 arm guarded to Q4_K/Q6_K (the v1 drafter's Q8_0 N=16
+  mat-mats must keep the tuned n16 kernel, not a nonexistent ct=2 variant).
+
+### Sweep Results (per-dispatch GPU ms, M4 Max)
+
+- Q5_K [6144,5120] (48× GDN out_proj in packed verify): generic 0.336
+  (64 GB/s) → r1c1k128 **0.105** (206 GB/s)
+- Q8_0 drafter shapes: generic → r1c1k128 −49% to −75% (e.g. ffn_down
+  [17408,5120] 0.852 → 0.316; conv_proj [5120,1280] 0.144 → 0.036)
+- Q4_K [17408,5120]: sg2 0.311 → r1c1k128 0.268; [6144,5120] 0.103 → 0.094
+- Everything else already within noise of its best variant; lm_head at
+  344 GB/s ≈ roofline.
+
+### End-to-End (Qwen3.8-27B Q4_K_M + DFlash2 Q8_0, adaptive, 128 tok)
+
+- draft 23.0 → **13.5 ms** steady-state; verify(8) 113 → **101 ms**
+- decode 38.8 → **46.0 t/s**; speedup 1.49× → **1.763×**
+- break-even intercept 3.3 → 2.9 (policy constant recalibrated): the
+  α≈3.56 parity content flipped 1.00× → **1.15×** and adaptive no longer
+  backs off on it; v1 (3.6 + DFlash1) regression PASS
+- greedy equivalence PASS on every configuration (the new arms are E1
+  like the incumbent mma8v tier)
+
+### Interpretation
+
+- c(8) after this round: verify 101 ms ≈ 2.6× a single forward; remaining
+  headroom is the Q4_K/Q6_K mma8v kernels themselves (190-290 GB/s vs 344
+  roofline-ish on lm_head) and per-token mixer work — diminishing returns
+  territory. The n=4 nc4 anomaly still stands (off production path).

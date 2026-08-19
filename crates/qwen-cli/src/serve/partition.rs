@@ -1,0 +1,211 @@
+//! Incremental reasoning/visible partition of a streamed decode.
+//!
+//! The batch splitter (`render::split_reasoning`) defines the byte
+//! contract; this state machine produces the same partition incrementally
+//! while token pieces arrive, buffering only enough bytes to disambiguate
+//! a possibly-split `<think>` prefix or `</think>` delimiter. Invariant
+//! (tested): for any chunking of any input, concatenated reasoning and
+//! visible outputs equal the batch splitter's result, and no non-tag byte
+//! is withheld longer than the longest ambiguous tag prefix.
+
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Deciding whether the emission starts with `<think>`.
+    Detect,
+    /// Inside the think block, scanning for `</think>`.
+    Reasoning,
+    /// Past the think block (or there never was one).
+    Visible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PartitionEvent {
+    Reasoning(String),
+    Visible(String),
+    /// The `</think>` boundary was crossed this push.
+    ReasoningClosed,
+}
+
+#[derive(Debug)]
+pub(crate) struct StreamPartition {
+    phase: Phase,
+    pending: String,
+}
+
+impl StreamPartition {
+    pub(crate) fn new() -> Self {
+        Self {
+            phase: Phase::Detect,
+            pending: String::new(),
+        }
+    }
+
+    /// True once the stream is known to have opened a think block that has
+    /// not yet closed (used for `incomplete` reasoning items on
+    /// token_limit, S0 F4).
+    pub(crate) fn in_open_reasoning(&self) -> bool {
+        self.phase == Phase::Reasoning
+    }
+
+    pub(crate) fn push(&mut self, piece: &str, events: &mut Vec<PartitionEvent>) {
+        self.pending.push_str(piece);
+        loop {
+            match self.phase {
+                Phase::Detect => {
+                    if let Some(rest) = self.pending.strip_prefix(THINK_OPEN) {
+                        self.pending = rest.to_owned();
+                        self.phase = Phase::Reasoning;
+                        continue;
+                    }
+                    if THINK_OPEN.starts_with(self.pending.as_str()) {
+                        // Ambiguous prefix of `<think>`; wait for more.
+                        return;
+                    }
+                    self.phase = Phase::Visible;
+                    continue;
+                }
+                Phase::Reasoning => {
+                    if let Some((reasoning, rest)) = self.pending.split_once(THINK_CLOSE) {
+                        if !reasoning.is_empty() {
+                            events.push(PartitionEvent::Reasoning(reasoning.to_owned()));
+                        }
+                        events.push(PartitionEvent::ReasoningClosed);
+                        self.pending = rest.to_owned();
+                        self.phase = Phase::Visible;
+                        continue;
+                    }
+                    let safe = safe_emit_len(&self.pending, THINK_CLOSE);
+                    if safe > 0 {
+                        events.push(PartitionEvent::Reasoning(self.pending[..safe].to_owned()));
+                        self.pending.drain(..safe);
+                    }
+                    return;
+                }
+                Phase::Visible => {
+                    if !self.pending.is_empty() {
+                        events.push(PartitionEvent::Visible(std::mem::take(&mut self.pending)));
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Flush at end of stream. Any bytes still buffered are emitted in the
+    /// current phase; an ambiguous detect buffer becomes visible text, and
+    /// an open reasoning buffer flushes as reasoning (truncated thinking).
+    pub(crate) fn finish(mut self, events: &mut Vec<PartitionEvent>) {
+        match self.phase {
+            Phase::Detect | Phase::Visible => {
+                if !self.pending.is_empty() {
+                    events.push(PartitionEvent::Visible(std::mem::take(&mut self.pending)));
+                }
+            }
+            Phase::Reasoning => {
+                if !self.pending.is_empty() {
+                    events.push(PartitionEvent::Reasoning(std::mem::take(&mut self.pending)));
+                }
+            }
+        }
+    }
+}
+
+/// Longest prefix of `pending` that cannot be the start of `tag`.
+fn safe_emit_len(pending: &str, tag: &str) -> usize {
+    let max_hold = tag.len().saturating_sub(1).min(pending.len());
+    for hold in (1..=max_hold).rev() {
+        let candidate_start = pending.len() - hold;
+        if !pending.is_char_boundary(candidate_start) {
+            continue;
+        }
+        if tag.starts_with(&pending[candidate_start..]) {
+            return candidate_start;
+        }
+    }
+    pending.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::serve::render::split_reasoning;
+
+    fn run_chunked(full: &str, chunk: usize) -> (String, String, bool) {
+        let mut partition = StreamPartition::new();
+        let mut events = Vec::new();
+        let bytes: Vec<char> = full.chars().collect();
+        for piece in bytes.chunks(chunk) {
+            partition.push(&piece.iter().collect::<String>(), &mut events);
+        }
+        let open = partition.in_open_reasoning();
+        partition.finish(&mut events);
+        let mut reasoning = String::new();
+        let mut visible = String::new();
+        for event in events {
+            match event {
+                PartitionEvent::Reasoning(text) => reasoning.push_str(&text),
+                PartitionEvent::Visible(text) => visible.push_str(&text),
+                PartitionEvent::ReasoningClosed => {}
+            }
+        }
+        (reasoning, visible, open)
+    }
+
+    #[test]
+    fn matches_batch_splitter_for_all_chunkings() {
+        let inputs = [
+            "<think>\nplan carefully\n</think>\n\nThe answer is 5.",
+            "<think></think>direct",
+            "no thinking at all, just text with < and </ inside",
+            "<think>\ntruncated reasoning that never closes",
+            "<thin", // ambiguous prefix, never resolves to a tag
+            "<think>\na</think>b<think>later tags are visible</think>",
+        ];
+        for full in inputs {
+            let batch = split_reasoning(full);
+            for chunk in 1..=9 {
+                let (reasoning, visible, open) = run_chunked(full, chunk);
+                assert_eq!(
+                    reasoning,
+                    batch.reasoning.unwrap_or(""),
+                    "reasoning diverged for {full:?} chunk {chunk}"
+                );
+                assert_eq!(
+                    visible, batch.visible,
+                    "visible diverged for {full:?} chunk {chunk}"
+                );
+                assert_eq!(
+                    open, !batch.closed,
+                    "open-reasoning flag diverged for {full:?} chunk {chunk}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn emits_reasoning_incrementally_not_only_at_close() {
+        let mut partition = StreamPartition::new();
+        let mut events = Vec::new();
+        partition.push("<think>\nlong reasoning that should stream ", &mut events);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, PartitionEvent::Reasoning(_))),
+            "reasoning must stream before the close tag arrives"
+        );
+    }
+
+    #[test]
+    fn multibyte_content_is_never_split_or_lost() {
+        let full = "<think>\n数学: 2+3=5 → ✓\n</think>\n\n答案是5。";
+        let batch = split_reasoning(full);
+        for chunk in 1..=5 {
+            let (reasoning, visible, _) = run_chunked(full, chunk);
+            assert_eq!(reasoning, batch.reasoning.unwrap());
+            assert_eq!(visible, batch.visible);
+        }
+    }
+}

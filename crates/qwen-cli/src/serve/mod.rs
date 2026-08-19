@@ -13,5 +13,7 @@
 //! The serial HTTP/SSE loop lands in the next slice and consumes these.
 #![allow(dead_code)] // consumed incrementally; the HTTP slice wires the rest
 
+pub(crate) mod events;
 pub(crate) mod items;
+pub(crate) mod partition;
 pub(crate) mod render;

@@ -42,7 +42,7 @@ half = { version = "2.6", features = ["bytemuck"] }
 bytemuck = { version = "1.16", features = ["derive"] }
 gguf-rs = { path = "../gguf" }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
 sha2 = "0.10"
 blake3 = { version = "1", features = ["rayon"] }
 unicode-general-category = "=1.1.0"

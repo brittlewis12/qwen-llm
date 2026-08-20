@@ -43,6 +43,23 @@ pub(crate) struct SplitReasoning<'a> {
     pub(crate) closed: bool,
 }
 
+/// Headless split for pre-opened think blocks (DeepSeek V4 thinking
+/// tiers): everything before the first `</think>` is reasoning.
+pub(crate) fn split_preopened_reasoning(full: &str) -> SplitReasoning<'_> {
+    match full.split_once(THINK_CLOSE) {
+        Some((reasoning, visible)) => SplitReasoning {
+            reasoning: Some(reasoning),
+            visible,
+            closed: true,
+        },
+        None => SplitReasoning {
+            reasoning: Some(full),
+            visible: "",
+            closed: false,
+        },
+    }
+}
+
 pub(crate) fn split_reasoning(full: &str) -> SplitReasoning<'_> {
     if let Some(rest) = full.strip_prefix(THINK_OPEN) {
         if let Some((reasoning, visible)) = rest.split_once(THINK_CLOSE) {

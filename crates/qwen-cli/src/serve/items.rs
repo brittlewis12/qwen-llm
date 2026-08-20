@@ -121,6 +121,10 @@ pub(crate) struct ServeRequest {
     pub(crate) seed: Option<u64>,
     pub(crate) top_k: Option<usize>,
     pub(crate) min_p: Option<f32>,
+    /// Spec `reasoning.effort`, passed through verbatim (the AI SDK
+    /// provider forwards arbitrary strings). Families that support tiers
+    /// map it; others reject or ignore per their contract.
+    pub(crate) reasoning_effort: Option<String>,
     pub(crate) no_thinking: bool,
     pub(crate) strip_history_thinking: bool,
     pub(crate) echo_stats: bool,
@@ -137,6 +141,7 @@ const KNOWN_TOP_LEVEL: &[&str] = &[
     "store",
     "previous_response_id",
     "truncation",
+    "reasoning",
     "tools",
     "tool_choice",
     "x_qwen",
@@ -191,6 +196,26 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
     // touching the rendered tools block (cache-preserving per spec).
     // `required`, `none`, and forced-function remain unimplemented.
     let allowed_tools = parse_tool_choice(non_null(map, "tool_choice"))?;
+    let reasoning_effort = match non_null(map, "reasoning") {
+        None => None,
+        Some(value) => {
+            let reasoning = value.as_object().ok_or_else(|| {
+                ServeError::invalid_request(Some("reasoning"), "reasoning must be an object")
+            })?;
+            reasoning
+                .get("effort")
+                .filter(|effort| !effort.is_null())
+                .map(|effort| {
+                    effort.as_str().map(str::to_owned).ok_or_else(|| {
+                        ServeError::invalid_request(
+                            Some("reasoning.effort"),
+                            "reasoning.effort must be a string",
+                        )
+                    })
+                })
+                .transpose()?
+        }
+    };
     let tools = parse_tool_definitions(non_null(map, "tools"))?;
     for name in &allowed_tools {
         if !tools.iter().any(|tool| &tool.name == name) {
@@ -210,6 +235,7 @@ pub(crate) fn parse_request(body: &Value) -> Result<ServeRequest, ServeError> {
         model,
         tools,
         allowed_tools,
+        reasoning_effort,
         stream: non_null(map, "stream")
             .and_then(Value::as_bool)
             .unwrap_or(false),

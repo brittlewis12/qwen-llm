@@ -19,6 +19,7 @@ pub(crate) mod http;
 pub(crate) mod items;
 pub(crate) mod partition;
 pub(crate) mod render;
+pub(crate) mod render_ds4;
 pub(crate) mod tool_parse;
 
 use anyhow::{Context, Result, ensure};

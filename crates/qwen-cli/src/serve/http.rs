@@ -35,6 +35,11 @@ pub(crate) struct GenerationOutcome {
 
 pub(crate) trait GenerationBackend {
     fn model_id(&self) -> &str;
+    /// True when the rendered prompt leaves `<think>` open, so generated
+    /// bytes arrive headless (DeepSeek V4 thinking tiers). Default false.
+    fn preopens_reasoning(&self, _request: &ServeRequest) -> bool {
+        false
+    }
     /// Render is already done; `prompt` is the exact model input. The
     /// backend streams raw generated text into `sink` and returns the
     /// outcome, or a spec error (e.g., context overflow → invalid_request
@@ -293,11 +298,20 @@ fn handle_responses(
     let response_id = next_response_id();
     let created_at = now_unix();
 
+    // Resolved before the mutable generate borrow.
+    let preopened = backend.preopens_reasoning(&request);
+    let partition_mode = move || {
+        if preopened {
+            StreamPartition::with_preopened_reasoning()
+        } else {
+            StreamPartition::new()
+        }
+    };
     if !request.stream {
         let mut sink = CollectSink { pieces: Vec::new() };
         match backend.generate(&request, &prompt, &mut sink) {
             Ok(outcome) => {
-                let mut partition = StreamPartition::new();
+                let mut partition = partition_mode();
                 let mut partition_events = Vec::new();
                 for piece in &sink.pieces {
                     partition.push(piece, &mut partition_events);
@@ -337,7 +351,7 @@ fn handle_responses(
         response.set_allowed_tools(request.allowed_tools.clone());
         let mut sink = StreamingSink {
             stream: &mut response,
-            partition: StreamPartition::new(),
+            partition: partition_mode(),
         };
         let outcome = backend.generate(&request, &prompt, &mut sink);
         let StreamingSink { partition, .. } = sink;

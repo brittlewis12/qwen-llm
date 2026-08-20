@@ -1,29 +1,109 @@
-# qwen serve — facade contract (S1 preregistration)
+# qwen serve — contract and program
 
-Status: S1 + S2 implemented on `serve/s1`; S1 gates executed 2026-08-18, S2 gate 2026-08-19 — see docs/bench/2026-08-19-s2-agent-gate/ and
-`docs/bench/2026-08-18-serve-s1-gates/` (1 pass, 2 conditional pass,
-3–7 pass). Originally preregistered earlier the same day.
+Status: S0–S3 shipped and gated on main (2026-08-18/19). The document is
+the binding contract for what serve does today and what it does next;
+superseded planning positions are not.
+
 Evidence base: S0 packet
-(`docs/bench/2026-08-18-facade-s0-render-prefix-stability/`), adversarial
-jam (`ses_fe8ee25c6ffe`, three rounds), and the full investigation session
-(OpenCode Recall). This document is the binding slice contract; superseded
-jam positions are not.
+(`docs/bench/2026-08-18-facade-s0-render-prefix-stability/`), the S1/S2/S3
+gate records under `docs/bench/`, an overnight production session
+(2026-08-20, 5 h / 58 requests / 133 k tokens), adversarial reviews
+(`ses_fe8ee25c6ffe`), and the full investigation session (OpenCode Recall).
+
+## Scope
+
+Private, single-box engine serving local clients over loopback.
+
+Operating goals, in order:
+
+1. **Foundations that hold** — durable continuity across restarts,
+   honest behaviour when busy, and DeepSeek V4 that is actually usable.
+2. **Concurrency / batch-serving responsiveness** (continuous batching).
+3. **Long-context performance stability.**
 
 ## Program arc (decision record)
 
 | Unit              | Contents                                                                                                                                                                                                                                                                     | Consumer                                    | Gate                                                                                                                                                                                                                                  |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | S0                | Prefix-stability falsifier                                                                                                                                                                                                                                                   | measurement                                 | DONE — see packet RESULTS                                                                                                                                                                                                             |
-| **S1 (this doc)** | Resident serial server, Open Responses subset, no tools                                                                                                                                                                                                                      | the game (thin HTTP client)                 | below                                                                                                                                                                                                                                 |
+| S1 ✅             | Resident serial server, Open Responses subset, no tools                                                                                                                                                                                                                      | the game (thin HTTP client)                 | **PASS: 7 gates** — byte-identical transcripts, conformance 6/6 in scope, cancellation 24 ms — docs/bench/2026-08-18-serve-s1-gates/                                                                                                    |
 | S2 ✅             | Tool items (XML-parameter form from the template oracle), `allowed_tools`, continuation rendering                                                                                                                                                                            | opencode via stock `@ai-sdk/open-responses` | **PASS: 10/10 requests checkpoint-hit** (94–100 % restored), 5/5 turns tool-called — docs/bench/2026-08-19-s2-agent-gate/                                                                                                             |
 | S3 ✅             | Pre-opened (headless) reasoning support, DeepSeek V4 family backend, DFlash drafter integration. `encrypted_content` opaque round-trip is **not** built — the S2 capture showed plain reasoning content already replays verbatim, so it demoted from necessity to hardening. | opencode, DS4 clients                       | **PASS: 5/5 gate cells** — warm snapshot hits every continuation, byte identity vs CLI incl. CJK/emoji, verbatim reasoning round-trip restores 91%, headless partition clean, fail-closed intact — docs/bench/2026-08-19-s3-ds4-gate/ |
-| S4                | Public v0: CC shim, install, memory admission UX, bench repro, compliance claim                                                                                                                                                                                              | the world                                   | sub-100 ms turn-2 TTFT demo, resident @32k                                                                                                                                                                                            |
+## Remaining program (2026-08-20)
 
-Parked: items npm provider (stock AI SDK provider exists), WS
-connection-local continuation (post-S4, measurement-gated),
-`previous_response_id` stored mode, concurrency.
+**F1 — Durable continuity.** Serve holds checkpoints in RAM, so a
+restart drops the session; rebuilding the 133 k-token session from the
+overnight run costs ~10 minutes of prefill. The engine ships
+`DurableCheckpointStore`: private dir, flock'd single writer, blobs
+named by compat-namespace + prefix length + digest, LRU to a byte
+budget, corrupt-blob self-heal, atomic staged publish. Wire serve to it,
+defaulting to a canonical location (`~/.cache/qwen-llm/…`, the path
+`game/play.py` uses), enabled by default with the flag as override, and
+log the resolved path and budget at startup.
 
-## S1 scope
+**F2 — Per-family publication policy.** Publication cost is not uniform,
+and this decides the policy:
+
+| model | KV per token | snapshot at 133 k |
+| --- | ---: | ---: |
+| DeepSeek V4 | 6.9 KB | 0.94 GB |
+| Qwen3.6 35B A3B | 20.5 KB | 2.7 GB |
+| Qwen3.8 27B | 93 KB | 12.4 GB |
+
+DeepSeek V4 can afford DwarfStar-style periodic writes during
+generation plus a shutdown flush. A dense 27B cannot: 12 GB per turn is
+unwritable, so Qwen families get **publish on graceful shutdown and idle
+only** until content-addressed delta chains exist (S0 F6 — consecutive
+snapshots share nearly all their bytes). F1 covers restart continuity; crash
+resilience waits on those chains.
+
+**F3 — Honest behaviour when busy.** Serve is single-flight, and a
+second client waits in the accept backlog receiving nothing until the
+first request finishes. Measured 2026-08-20: 3.0 s of silence
+behind a 3.5 s request, and overnight a second agent starved behind
+60–80 s prefills until its socket died. Either fail fast (`503` +
+`Retry-After`) or accept, parse, enqueue, and heartbeat while queued.
+
+**F4 — DeepSeek V4 tool support.** DS4 serve handles chat and reasoning;
+tool definitions are rejected. Agent loops need them.
+
+**F5 — Memory admission.** The DS4 snapshot LRU and the Qwen prefix
+cache sit outside the engine's admission envelope, and the CLI's three
+reconciliation points are skipped (k3 R1.2). At the context sizes now in
+routine use the failure mode is an OS kill mid-request, not an error.
+
+**F6 — Concurrency / continuous batching.** The engine already provides
+`admit_independent_queue2`, `create_dense_batch8_executor`,
+`create_moe_batch16_executor`, and `concurrent_jsonl.rs` runs width-2
+overlapped decode today. Route serve through them: wiring and
+scheduling, with F3 as the on-ramp.
+
+**F7 — Long-context performance stability.** Measured overnight:
+decode fell 14.5 → 8.4 tok/s from 31 k → 133 k, and restore grew to
+~1.5 s.
+
+Also open, smaller: selector `emit_completion` telemetry (k3 R1.4);
+deferred S3 gate cells 6–9 (LRU eviction, DS4 cancellation/heartbeat,
+DS4 TTFT @8k, memory envelope); S1 gate 2's <150 ms TTFT, which needs a
+small-span prefill kernel (engine scope).
+
+## Parked, with reasons
+
+- **WebSocket transport / connection-local continuation.** Optional in
+  the spec. On loopback, posting 133 k of history costs ~16–23 ms of
+  tokenization and ~1 ms of bandwidth against a ~1.5 s restore and tens
+  of seconds of generation. Its value is skipping that restore by
+  holding session state on the connection, which requires the server to
+  stay up between turns.
+- **`previous_response_id` stored mode** — same reasoning.
+- **`encrypted_content` opaque reasoning** — the S2 capture showed plain
+  reasoning content already replays verbatim through the stock provider,
+  so this is hardening, not a requirement.
+- **CC (chat-completions) shim, items npm provider, `/responses/compact`,
+  installers** — no consumer on this box.
+- **`tool_choice` `required` / `none` / forced-function** — unused.
+
+## Current behaviour
 
 One new subcommand:
 
@@ -205,7 +285,7 @@ slot frees within 250 ms (measured: 24 ms). No signals, no threads beyond
 the accept loop. Known limitation (D5): a TERM received while parked in
 `accept()` unwinds on the next connection, not immediately.
 
-## S1 gates
+## S1 gate definitions (executed; see gate record)
 
 1. **Thin client:** play.py rewritten against serve (direct HTTP + SSE,
    `x_qwen.seed`) at <150 lines. Artifact-named check: save-file bytes

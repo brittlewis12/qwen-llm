@@ -23,11 +23,11 @@
 use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
-use super::utf8::Utf8Assembler;
 use super::render_ds4;
+use super::utf8::Utf8Assembler;
+use crate::DeepSeekV4MultigroupSelectorPlan;
 use anyhow::Context as _;
 use objc2_metal::MTLDevice;
-use crate::DeepSeekV4MultigroupSelectorPlan;
 use qwen_llm::deepseek_v4_metal::{
     DeepSeekV4CausalSnapshot, DeepSeekV4MetalResidency, DeepSeekV4ModelContentId,
     DeepSeekV4Session, DeepSeekV4SessionCapacity,
@@ -123,8 +123,11 @@ impl DeepSeekV4Backend {
         let plan = DeepSeekV4MetalResidency::plan_for_forward_limit(&ctx, &gguf, forward_limit)
             .context("plan DeepSeek V4 residency for serve")?;
         let session_capacity = plan.session_capacity();
-        let selector_plan =
-            DeepSeekV4MultigroupSelectorPlan::new(selector, ctx.device.name().to_string(), session_capacity)?;
+        let selector_plan = DeepSeekV4MultigroupSelectorPlan::new(
+            selector,
+            ctx.device.name().to_string(),
+            session_capacity,
+        )?;
         let admitted = plan
             .admit(ctx.memory_signals())
             .context("admit DeepSeek V4 residency for serve")?;
@@ -362,7 +365,8 @@ impl DeepSeekV4Backend {
         // chunks (k3 R1.3: a cold DS4 prefill is tens of seconds).
         let prefill_t0 = Instant::now();
         let suffix = &prompt_ids[matched_tokens..];
-        let ranges = crate::deepseek_v4_prefill_chunk_ranges(suffix.len(), self.prefill_chunk_tokens);
+        let ranges =
+            crate::deepseek_v4_prefill_chunk_ranges(suffix.len(), self.prefill_chunk_tokens);
         let chunk_count = ranges.len();
         for (index, range) in ranges.into_iter().enumerate() {
             sink.tick().map_err(BackendFailure::Aborted)?;

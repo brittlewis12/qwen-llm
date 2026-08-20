@@ -19,8 +19,9 @@
 //! it); the bespoke Qwen3.8 pre-closed-history renderer remains a modern
 //! `qwen run` surface and is out of S1 serve scope.
 
-use super::items::{ServeRequest, ToolDefinition, Turn};
+use super::items::{QwenTemplate, ServeRequest, ToolDefinition, Turn};
 use super::tool_parse::{ParsedCall, render_calls};
+use crate::messages::{Qwen38GenerationMode, Qwen38ReasoningEffort};
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>\n";
@@ -82,6 +83,17 @@ pub(crate) fn split_reasoning(full: &str) -> SplitReasoning<'_> {
             closed: true,
         }
     }
+}
+
+/// Qwen3.8 renders history assistant turns with a preclosed empty think
+/// block and trims content — the upstream contract implemented by
+/// `messages::render_qwen38_messages_prompt_with_generation`. Kept in sync
+/// by `serve_generic_matches_cli_renderer` /
+/// `serve_qwen38_matches_cli_renderer` below, which assert byte equality
+/// against those CLI renderers on every non-tool case.
+fn render_qwen38_assistant_body(visible: &str, output: &mut String) {
+    output.push_str(PRECLOSED_THINK);
+    output.push_str(visible.trim());
 }
 
 fn render_assistant_body(
@@ -160,13 +172,31 @@ fn render_tools_system_block(tools: &[ToolDefinition], system: Option<&str>, out
 /// generation suffix.
 pub(crate) fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
     let mut output = String::new();
+    let qwen38_mode = qwen38_generation_mode(request);
+    let effort_instruction = qwen38_mode.and_then(|mode| match mode {
+        Qwen38GenerationMode::Thinking(effort) => effort.instruction(),
+        Qwen38GenerationMode::NoThinking => None,
+    });
     if !request.tools.is_empty() {
         render_tools_system_block(&request.tools, request.system.as_deref(), &mut output);
-    } else if let Some(system) = request.system.as_deref() {
-        output.push_str(IM_START);
-        output.push_str("system\n");
-        output.push_str(system);
-        output.push_str(IM_END);
+    } else if effort_instruction.is_some() || request.system.is_some() {
+        let system = request.system.as_deref().unwrap_or("").trim();
+        if effort_instruction.is_some() || !system.is_empty() {
+            output.push_str(IM_START);
+            output.push_str("system\n");
+            if let Some(instruction) = effort_instruction {
+                output.push_str(instruction);
+                if !system.is_empty() {
+                    output.push_str("\n\n");
+                }
+            }
+            output.push_str(if qwen38_mode.is_some() {
+                system
+            } else {
+                request.system.as_deref().unwrap_or("")
+            });
+            output.push_str(IM_END);
+        }
     }
     for turn in &request.turns {
         match turn {
@@ -183,6 +213,11 @@ pub(crate) fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
             } => {
                 output.push_str(IM_START);
                 output.push_str("assistant\n");
+                if qwen38_mode.is_some() && calls.is_empty() {
+                    render_qwen38_assistant_body(visible, &mut output);
+                    output.push_str(IM_END);
+                    continue;
+                }
                 let body = if calls.is_empty() {
                     visible.clone()
                 } else {
@@ -221,10 +256,30 @@ pub(crate) fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
     }
     output.push_str(IM_START);
     output.push_str("assistant\n");
-    if request.no_thinking {
-        output.push_str(PRECLOSED_THINK);
+    match qwen38_mode {
+        Some(Qwen38GenerationMode::Thinking(_)) => output.push_str("<think>\n"),
+        Some(Qwen38GenerationMode::NoThinking) => output.push_str(PRECLOSED_THINK),
+        None if request.no_thinking => output.push_str(PRECLOSED_THINK),
+        None => {}
     }
     output
+}
+
+/// Qwen3.8 generation mode from the request, or `None` for generic Qwen.
+/// Absent effort defaults to upstream xhigh, matching `qwen run`.
+fn qwen38_generation_mode(request: &ServeRequest) -> Option<Qwen38GenerationMode> {
+    if request.template != QwenTemplate::Qwen38 {
+        return None;
+    }
+    if request.no_thinking {
+        return Some(Qwen38GenerationMode::NoThinking);
+    }
+    Some(match request.reasoning_effort.as_deref() {
+        Some("none") => Qwen38GenerationMode::NoThinking,
+        Some("low") => Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Low),
+        Some("medium") => Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
+        _ => Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh),
+    })
 }
 
 #[cfg(test)]
@@ -408,7 +463,9 @@ mod tests {
         }))
         .expect("tool loop must parse");
         let rendered = render_qwen_serve_prompt(&request);
-        let tail_start = rendered.find("<|im_start|>user\nList files").expect("user turn");
+        let tail_start = rendered
+            .find("<|im_start|>user\nList files")
+            .expect("user turn");
         assert_eq!(
             &rendered[tail_start..],
             concat!(
@@ -420,6 +477,154 @@ mod tests {
                 "<|im_end|>\n",
                 "<|im_start|>assistant\n",
             ),
+        );
+    }
+
+    /// Anti-drift: serve's renderer must agree byte-for-byte with the CLI
+    /// renderers on every case the CLI can express. Serve's is a superset
+    /// (tools), so agreement is asserted on the non-tool cases — the exact
+    /// class where a divergence would silently change model behaviour, as
+    /// it did for Qwen3.8 before this.
+    fn cli_messages(turns: &[(&str, Option<&str>, &str)]) -> Vec<crate::messages::ChatMessage> {
+        turns
+            .iter()
+            .map(|(role, reasoning, content)| crate::messages::ChatMessage {
+                role: (*role).into(),
+                content: match reasoning {
+                    Some(reasoning) => format!("<think>{reasoning}</think>{content}"),
+                    None => (*content).into(),
+                },
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn serve_request(
+        template: crate::serve::items::QwenTemplate,
+        effort: Option<&str>,
+        turns: &[(&str, Option<&str>, &str)],
+        system: Option<&str>,
+    ) -> ServeRequest {
+        let mut request = ServeRequest {
+            template,
+            reasoning_effort: effort.map(str::to_owned),
+            system: system.map(str::to_owned),
+            ..ServeRequest::default()
+        };
+        for (role, reasoning, content) in turns {
+            request.turns.push(match *role {
+                "user" => Turn::User((*content).into()),
+                "assistant" => Turn::Assistant {
+                    reasoning: reasoning.map(str::to_owned),
+                    visible: (*content).into(),
+                    calls: Vec::new(),
+                },
+                other => panic!("unexpected role {other}"),
+            });
+        }
+        request
+    }
+
+    #[test]
+    fn serve_generic_matches_cli_renderer() {
+        let turns = [
+            ("user", None, "Add 2 and 3."),
+            ("assistant", Some("\n2+3=5.\n"), "5."),
+            ("user", None, "Now add 4."),
+        ];
+        let request = serve_request(
+            crate::serve::items::QwenTemplate::Generic,
+            None,
+            &turns,
+            Some("You are terse."),
+        );
+        let mut cli = vec![crate::messages::ChatMessage {
+            role: "system".into(),
+            content: "You are terse.".into(),
+            ..Default::default()
+        }];
+        cli.extend(cli_messages(&turns));
+        assert_eq!(
+            render_qwen_serve_prompt(&request),
+            crate::messages::render_qwen_messages_prompt_with_generation(
+                &cli,
+                true,
+                true,
+                crate::messages::QwenGenerationMode::Auto,
+            ),
+            "serve generic renderer diverged from the CLI renderer"
+        );
+    }
+
+    #[test]
+    fn serve_qwen38_matches_cli_renderer() {
+        let turns = [
+            ("user", None, "Add 2 and 3."),
+            ("assistant", None, "5."),
+            ("user", None, "Now add 4."),
+        ];
+        for (effort, mode) in [
+            (
+                None,
+                Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Xhigh),
+            ),
+            (Some("none"), Qwen38GenerationMode::NoThinking),
+            (
+                Some("low"),
+                Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Low),
+            ),
+            (
+                Some("medium"),
+                Qwen38GenerationMode::Thinking(Qwen38ReasoningEffort::Medium),
+            ),
+        ] {
+            let request = serve_request(
+                crate::serve::items::QwenTemplate::Qwen38,
+                effort,
+                &turns,
+                Some("You are terse."),
+            );
+            let mut cli = vec![crate::messages::ChatMessage {
+                role: "system".into(),
+                content: "You are terse.".into(),
+                ..Default::default()
+            }];
+            cli.extend(cli_messages(&turns));
+            assert_eq!(
+                render_qwen_serve_prompt(&request),
+                crate::messages::render_qwen38_messages_prompt_with_generation(&cli, true, mode),
+                "serve Qwen3.8 renderer diverged from the CLI renderer (effort {effort:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn qwen38_differs_from_generic_which_was_the_bug() {
+        let turns = [
+            ("user", None, "hi"),
+            ("assistant", None, "hello"),
+            ("user", None, "again"),
+        ];
+        let generic = render_qwen_serve_prompt(&serve_request(
+            crate::serve::items::QwenTemplate::Generic,
+            None,
+            &turns,
+            None,
+        ));
+        let qwen38 = render_qwen_serve_prompt(&serve_request(
+            crate::serve::items::QwenTemplate::Qwen38,
+            None,
+            &turns,
+            None,
+        ));
+        assert_ne!(generic, qwen38, "3.8 must not render as generic ChatML");
+        assert!(
+            qwen38.contains("<think>\n\n</think>\n\n"),
+            "preclosed history"
+        );
+        assert!(
+            qwen38.ends_with("<|im_start|>assistant\n<think>\n"),
+            "thinking suffix"
         );
     }
 

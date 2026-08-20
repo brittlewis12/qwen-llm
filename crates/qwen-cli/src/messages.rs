@@ -117,7 +117,7 @@ pub(crate) enum Qwen38ReasoningEffort {
 }
 
 impl Qwen38ReasoningEffort {
-    fn instruction(self) -> Option<&'static str> {
+    pub(crate) fn instruction(self) -> Option<&'static str> {
         match self {
             Self::Low => Some(QWEN38_REASONING_EFFORT_LOW),
             Self::Medium => None,

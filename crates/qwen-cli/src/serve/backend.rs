@@ -9,7 +9,7 @@
 
 use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
-use super::items::{ServeError, ServeRequest};
+use super::items::{QwenTemplate, ServeError, ServeRequest};
 use super::utf8::Utf8Assembler;
 use anyhow::Context as _;
 use qwen_llm::gguf::GgufFile;
@@ -40,6 +40,7 @@ pub(crate) struct EngineBackend {
     model_id: String,
     default_max_tokens: usize,
     max_context_tokens: Option<usize>,
+    template: super::items::QwenTemplate,
     /// DFlash drafter (v0.77 speculative decode). Speculation requires
     /// captured target hidden states for every context position, which
     /// restored checkpoints do not carry — so a request uses the drafter
@@ -55,6 +56,7 @@ impl EngineBackend {
         default_max_tokens: usize,
         max_context_tokens: Option<usize>,
         drafter: Option<&std::path::Path>,
+        template: super::items::QwenTemplate,
     ) -> anyhow::Result<Self> {
         let tokenizer = loaded.tokenizer().context("initialize serve tokenizer")?;
         let dflash_head = match drafter {
@@ -90,14 +92,50 @@ impl EngineBackend {
             model_id,
             default_max_tokens,
             max_context_tokens,
+            template,
             dflash_head,
         })
     }
 }
 
+fn preopens(template: QwenTemplate, request: &ServeRequest) -> bool {
+    template == QwenTemplate::Qwen38
+        && !request.no_thinking
+        && request.reasoning_effort.as_deref() != Some("none")
+}
+
 impl GenerationBackend for EngineBackend {
     fn model_id(&self) -> &str {
         &self.model_id
+    }
+
+    fn preopens_reasoning(&self, request: &ServeRequest) -> bool {
+        preopens(self.template, request)
+    }
+
+    fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
+        let mut request = request.clone();
+        request.template = self.template;
+        if self.template == QwenTemplate::Qwen38 {
+            match (request.no_thinking, request.reasoning_effort.as_deref()) {
+                (true, Some(_)) => {
+                    return Err(ServeError::invalid_request(
+                        Some("reasoning.effort"),
+                        "reasoning.effort cannot be combined with x_qwen.no_thinking",
+                    ));
+                }
+                (_, None | Some("none" | "low" | "medium" | "xhigh")) => {}
+                (_, Some(other)) => {
+                    return Err(ServeError::invalid_request(
+                        Some("reasoning.effort"),
+                        format!(
+                            "Qwen3.8 supports reasoning.effort none|low|medium|xhigh; got {other:?}"
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(super::render::render_qwen_serve_prompt(&request))
     }
 
     fn generate(
@@ -252,10 +290,7 @@ impl GenerationBackend for EngineBackend {
                     // The seeding offset below assumes the capture covers the
                     // whole context; true only because speculate ⇒ no restore
                     // ⇒ start == 0 (k3 R3).
-                    debug_assert_eq!(
-                        start, 0,
-                        "speculative capture must start at position zero"
-                    );
+                    debug_assert_eq!(start, 0, "speculative capture must start at position zero");
                     out
                 }
                 None => crate::prefill_span(
@@ -372,7 +407,9 @@ impl GenerationBackend for EngineBackend {
                 Err(error) => {
                     return Err(match abort {
                         Some(io_error) => BackendFailure::Aborted(io_error),
-                        None => ServeError::server_error(format!("dflash decode: {error:#}")).into(),
+                        None => {
+                            ServeError::server_error(format!("dflash decode: {error:#}")).into()
+                        }
                     });
                 }
             };
@@ -447,6 +484,32 @@ impl GenerationBackend for EngineBackend {
             restore_ms,
             format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=serial"),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qwen38_thinking_prompt_is_headless() {
+        let request = ServeRequest::default();
+        assert!(preopens(QwenTemplate::Qwen38, &request));
+        assert!(!preopens(
+            QwenTemplate::Qwen38,
+            &ServeRequest {
+                no_thinking: true,
+                ..request
+            }
+        ));
+        assert!(!preopens(
+            QwenTemplate::Qwen38,
+            &ServeRequest {
+                reasoning_effort: Some("none".into()),
+                ..ServeRequest::default()
+            }
+        ));
+        assert!(!preopens(QwenTemplate::Generic, &ServeRequest::default()));
     }
 }
 

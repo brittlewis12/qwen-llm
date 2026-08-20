@@ -102,6 +102,16 @@ pub(crate) struct ToolDefinition {
     pub(crate) parameters: Value,
 }
 
+/// Which family template renders this request. Resolved from the loaded
+/// GGUF identity, mirroring the CLI's dispatch — serve must not render a
+/// Qwen3.8 model with the generic ChatML contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum QwenTemplate {
+    #[default]
+    Generic,
+    Qwen38,
+}
+
 /// Validated transcript plus generation controls, ready for rendering.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct ServeRequest {
@@ -126,6 +136,9 @@ pub(crate) struct ServeRequest {
     /// map it; others reject or ignore per their contract.
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) no_thinking: bool,
+    /// Rendering family, resolved from the loaded model at startup rather
+    /// than per request.
+    pub(crate) template: QwenTemplate,
     pub(crate) strip_history_thinking: bool,
     pub(crate) echo_stats: bool,
 }
@@ -533,10 +546,7 @@ fn parse_tool_choice(tool_choice: Option<&Value>) -> Result<Vec<String>, ServeEr
         ));
     }
     let entries = map.get("tools").and_then(Value::as_array).ok_or_else(|| {
-        ServeError::invalid_request(
-            Some("tool_choice"),
-            "allowed_tools requires a tools array",
-        )
+        ServeError::invalid_request(Some("tool_choice"), "allowed_tools requires a tools array")
     })?;
     let mut names = Vec::with_capacity(entries.len());
     for (index, entry) in entries.iter().enumerate() {
@@ -793,7 +803,7 @@ mod tests {
 
         let error = parse(json!({"model": "m", "input": "q",
             "tools": [{"type": "web_search"}]}))
-            .unwrap_err();
+        .unwrap_err();
         assert_eq!(error.param.as_deref(), Some("tools"));
 
         let error =
@@ -948,16 +958,24 @@ mod tests {
         let tools = json!([{"type": "function", "name": "fs_list",
                             "parameters": {"type": "object"}}]);
         for (choice, fragment) in [
-            (json!({"type": "allowed_tools", "tools": [{"name": "nope"}]}),
-             "not a declared tool"),
-            (json!({"type": "allowed_tools", "tools": []}), "at least one tool"),
-            (json!({"type": "function", "name": "fs_list"}), "allowed_tools object"),
+            (
+                json!({"type": "allowed_tools", "tools": [{"name": "nope"}]}),
+                "not a declared tool",
+            ),
+            (
+                json!({"type": "allowed_tools", "tools": []}),
+                "at least one tool",
+            ),
+            (
+                json!({"type": "function", "name": "fs_list"}),
+                "allowed_tools object",
+            ),
             (json!("required"), "allowed_tools object"),
             (json!("none"), "allowed_tools object"),
         ] {
             let error = parse(json!({"model": "m", "tools": tools,
                                       "tool_choice": choice, "input": "go"}))
-                .unwrap_err();
+            .unwrap_err();
             assert_eq!(error.param.as_deref(), Some("tool_choice"));
             assert!(
                 error.message.contains(fragment),

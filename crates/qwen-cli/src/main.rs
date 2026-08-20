@@ -2859,7 +2859,7 @@ fn validated_qwen_no_thinking_model(family: ModelFamily, gguf: &GgufFile) -> boo
     ) || validated_qwen38_prompt_model(family, gguf)
 }
 
-fn validated_qwen38_prompt_model(family: ModelFamily, gguf: &GgufFile) -> bool {
+pub(crate) fn validated_qwen38_prompt_model(family: ModelFamily, gguf: &GgufFile) -> bool {
     validated_qwen38_prompt_identity(
         family,
         gguf.get_str("general.name"),

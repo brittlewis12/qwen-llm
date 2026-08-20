@@ -11,13 +11,13 @@ jam positions are not.
 
 ## Program arc (decision record)
 
-| Unit | Contents | Consumer | Gate |
-|---|---|---|---|
-| S0 | Prefix-stability falsifier | measurement | DONE — see packet RESULTS |
-| **S1 (this doc)** | Resident serial server, Open Responses subset, no tools | the game (thin HTTP client) | below |
-| S2 ✅ | Tool items (XML-parameter form from the template oracle), `allowed_tools`, continuation rendering | opencode via stock `@ai-sdk/open-responses` | **PASS: 10/10 requests checkpoint-hit** (94–100 % restored), 5/5 turns tool-called — docs/bench/2026-08-19-s2-agent-gate/ |
-| S3 ✅ | Pre-opened (headless) reasoning support, DeepSeek V4 family backend, DFlash drafter integration. `encrypted_content` opaque round-trip is **not** built — the S2 capture showed plain reasoning content already replays verbatim, so it demoted from necessity to hardening. | opencode, DS4 clients | **PASS: 5/5 gate cells** — warm snapshot hits every continuation, byte identity vs CLI incl. CJK/emoji, verbatim reasoning round-trip restores 91%, headless partition clean, fail-closed intact — docs/bench/2026-08-19-s3-ds4-gate/ |
-| S4 | Public v0: CC shim, install, memory admission UX, bench repro, compliance claim | the world | sub-100 ms turn-2 TTFT demo, resident @32k |
+| Unit              | Contents                                                                                                                                                                                                                                                                     | Consumer                                    | Gate                                                                                                                                                                                                                                  |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S0                | Prefix-stability falsifier                                                                                                                                                                                                                                                   | measurement                                 | DONE — see packet RESULTS                                                                                                                                                                                                             |
+| **S1 (this doc)** | Resident serial server, Open Responses subset, no tools                                                                                                                                                                                                                      | the game (thin HTTP client)                 | below                                                                                                                                                                                                                                 |
+| S2 ✅             | Tool items (XML-parameter form from the template oracle), `allowed_tools`, continuation rendering                                                                                                                                                                            | opencode via stock `@ai-sdk/open-responses` | **PASS: 10/10 requests checkpoint-hit** (94–100 % restored), 5/5 turns tool-called — docs/bench/2026-08-19-s2-agent-gate/                                                                                                             |
+| S3 ✅             | Pre-opened (headless) reasoning support, DeepSeek V4 family backend, DFlash drafter integration. `encrypted_content` opaque round-trip is **not** built — the S2 capture showed plain reasoning content already replays verbatim, so it demoted from necessity to hardening. | opencode, DS4 clients                       | **PASS: 5/5 gate cells** — warm snapshot hits every continuation, byte identity vs CLI incl. CJK/emoji, verbatim reasoning round-trip restores 91%, headless partition clean, fail-closed intact — docs/bench/2026-08-19-s3-ds4-gate/ |
+| S4                | Public v0: CC shim, install, memory admission UX, bench repro, compliance claim                                                                                                                                                                                              | the world                                   | sub-100 ms turn-2 TTFT demo, resident @32k                                                                                                                                                                                            |
 
 Parked: items npm provider (stock AI SDK provider exists), WS
 connection-local continuation (post-S4, measurement-gated),
@@ -77,7 +77,8 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] [--drafter GGUF]
 
 ## Wire subset (Open Responses)
 
-`POST /v1/responses` accepting:
+`POST /v1/responses` accepting. If `max_output_tokens` is omitted, serve
+defaults to 65536 tokens unless overridden with `--max-tokens` at startup:
 
 - `model` — must equal the loaded model id; else `model_not_found`.
 - `input` — string (one user message) or item array in the subset:
@@ -90,11 +91,14 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] [--drafter GGUF]
   `instructions` at head only, `reasoning` items must immediately
   precede their assistant message, final item must be a `user` message
   (S1) or `function_call_output` (S2), everything else accepted in
-  order. Unknown item *types* → `invalid_request`; unknown *fields* are
+  order. Unknown item _types_ → `invalid_request`; unknown _fields_ are
   ignored (top-level request fields logged once per name; `id`/`status`
   on replayed input items accepted and ignored).
 - `instructions` — optional system text (exclusive with a system item).
 - `max_output_tokens`, `temperature`, `top_p` — standard.
+- `reasoning.effort` — Qwen3.8 accepts `none`, `low`, `medium`, and `xhigh`;
+  absent defaults to `xhigh`. Other model families apply their own documented
+  reasoning rules.
 - `x_qwen` extension object — `seed`, `top_k`, `min_p`, `no_thinking`
   (identity-gated exactly as `qwen run`); spec-legal implementor
   extension, documented.
@@ -118,7 +122,7 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] [--drafter GGUF]
 - `/responses/compact` — not implemented (404); compaction is outside the
   S1–S4 arc and revisits with the WebSocket transport question.
 - `x_qwen.stats: true` — echoes `{matched_tokens, restore_ms,
-  prompt_tokens}` into the response object, so thin clients (the game)
+prompt_tokens}` into the response object, so thin clients (the game)
   get per-request checkpoint stats without correlating server stderr
   (review R4). `usage` is always populated (agent clients budget on
   it).

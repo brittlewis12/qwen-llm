@@ -655,7 +655,7 @@ kernel void kernel_dflash_attn_full_gqa_split4_reduce_f32(
 //     the window;
 //   * ctx keys carry the SWA mask (causal + window) from `pos_ctx`, matching
 //     kernel_dflash_attn_online_two_range_f32;
-//   * n_rows is dynamic (block_size 8 for DFlash 2, 16 for DFlash 1).
+//   * n_rows remains an argument, with the product host qualified to DFlash 2 N8.
 // Fully-masked partitions write m=-inf, l=0 and the reduce already skips
 // them (`l[part] > 0` guards), so empty partitions are safe.
 [[max_total_threads_per_threadgroup(32)]]
@@ -701,15 +701,17 @@ kernel void kernel_dflash_attn_swa_split4_main_f32(
     float4 o2 = float4(0.0f);
     float4 o3 = float4(0.0f);
 
-    // Visible-window partitioning (the whole point of the variant).
-    const uint scan_start = min(args.ctx_scan_start, args.ctx_len);
+    const bool full_attn = (args.swa_window == 0);
+    // Full attention must ignore the SWA scan hint, matching the incumbent
+    // two-range kernel. SWA partitions only the visible context suffix.
+    const uint scan_start = full_attn ? 0 : min(args.ctx_scan_start, args.ctx_len);
     const uint span = args.ctx_len - scan_start;
     const uint ctx_begin = scan_start + uint(((ulong)span * part) / SPLIT);
     const uint ctx_end   = scan_start + uint(((ulong)span * (part + 1)) / SPLIT);
-    const uint scan_end  = ctx_end + ((part == SPLIT - 1) ? q_idx + 1 : 0);
+    const uint noise_rows = (args.noncausal_noise != 0) ? args.n_rows : q_idx + 1;
+    const uint scan_end  = ctx_end + ((part == SPLIT - 1) ? noise_rows : 0);
     const ulong kv_stride = NKV * HD;
     const uint q_pos = args.noise_start_pos + q_idx;
-    const bool full_attn = (args.swa_window == 0);
 
     for (uint kk = ctx_begin; kk < scan_end; ++kk) {
         device const float * k_row;

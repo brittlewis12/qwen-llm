@@ -19491,11 +19491,13 @@ pub fn encode_dflash_attn_full_gqa_split4_f32(
 /// noise block, K/V from the per-layer ctx cache plus the noise block,
 /// `pos_ctx` for the SWA mask) but partitions the visible window across 4
 /// simdgroups per (kv_head, query) and combines with the split4 reduce
-/// shape. Fixed geometry: 32 Q heads / 8 KV heads / head_dim 128 (both
-/// released drafters); `n` up to 16.
+/// shape. Product-qualified geometry: N8 / 32 Q heads / 8 KV heads /
+/// head_dim 128.
 ///
 /// Partials borrow caller-provided scratch sized
 /// `n * N_KV * SPLIT * GROUP * head_dim` (o) and `... * 2` (ml).
+/// Their accessed prefixes and the output must be mutually disjoint from all
+/// inputs because the serial reduce consumes main's partial writes in place.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_dflash_attn_swa_split4_f32(
     ctx: &MetalContext,
@@ -19515,47 +19517,232 @@ pub fn encode_dflash_attn_swa_split4_f32(
     swa_window: u32,
     ctx_scan_start: usize,
 ) -> Result<(), MetalError> {
+    encode_dflash_attn_swa_split4_with_noncausal_f32(
+        ctx,
+        enc,
+        q,
+        k_ctx,
+        v_ctx,
+        k_noise,
+        v_noise,
+        pos_ctx,
+        o_partial,
+        ml_partial,
+        o,
+        n,
+        ctx_len,
+        noise_start_pos,
+        swa_window,
+        ctx_scan_start,
+        dflash_noncausal_noise_enabled(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_dflash_attn_swa_split4_with_noncausal_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_ctx: &MetalTensor,
+    v_ctx: &MetalTensor,
+    k_noise: &MetalTensor,
+    v_noise: &MetalTensor,
+    pos_ctx: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    o: &MetalTensor,
+    n: usize,
+    ctx_len: usize,
+    noise_start_pos: u32,
+    swa_window: u32,
+    ctx_scan_start: usize,
+    noncausal_noise: bool,
+) -> Result<(), MetalError> {
     const KERNEL: &str = "dflash_attn_swa_split4";
     const N_Q: usize = 32;
     const N_KV: usize = 8;
     const GROUP: usize = 4;
     const HEAD_DIM: usize = 128;
     const SPLIT: usize = 4;
-    if n == 0 || n > 16 {
+    if enc.concurrent {
         return Err(MetalError::BadShape {
-            kernel: "dflash_attn_swa_split4",
-            detail: format!("n={n} outside 1..=16"),
+            kernel: KERNEL,
+            detail: "main/reduce dependency requires a serial encoder".into(),
         });
     }
-    if q.n_elements() as usize != n * N_Q * HEAD_DIM
-        || o.n_elements() as usize != n * N_Q * HEAD_DIM
+    if n != 8 {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("expected product-qualified n=8, got {n}"),
+        });
+    }
+    if ctx_scan_start > ctx_len {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("ctx_scan_start={ctx_scan_start} > ctx_len={ctx_len}"),
+        });
+    }
+    let n_u32 = u32::try_from(n).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("n={n} does not fit u32"),
+    })?;
+    let ctx_len_u32 = u32::try_from(ctx_len).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("ctx_len={ctx_len} does not fit u32"),
+    })?;
+    let ctx_scan_start_u32 = u32::try_from(ctx_scan_start).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("ctx_scan_start={ctx_scan_start} does not fit u32"),
+    })?;
+    let total_rows = ctx_len.checked_add(n).ok_or_else(|| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: "ctx_len + n overflow".into(),
+    })?;
+    let n_kv_total = u32::try_from(total_rows).map_err(|_| MetalError::BadShape {
+        kernel: KERNEL,
+        detail: format!("ctx_len + n={total_rows} does not fit u32"),
+    })?;
+    if noise_start_pos.checked_add(n_u32 - 1).is_none() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: format!("noise positions overflow u32: start={noise_start_pos} n={n}"),
+        });
+    }
+
+    let q_elems = n
+        .checked_mul(N_Q * HEAD_DIM)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "q/output element count overflow".into(),
+        })?;
+    let kv_stride = N_KV * HEAD_DIM;
+    let ctx_elems = ctx_len
+        .checked_mul(kv_stride)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "context element count overflow".into(),
+        })?;
+    let noise_elems = n
+        .checked_mul(kv_stride)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "noise element count overflow".into(),
+        })?;
+    let partial_groups =
+        n.checked_mul(N_KV * SPLIT * GROUP)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: "partial group count overflow".into(),
+            })?;
+    let o_partial_elems =
+        partial_groups
+            .checked_mul(HEAD_DIM)
+            .ok_or_else(|| MetalError::BadShape {
+                kernel: KERNEL,
+                detail: "output partial element count overflow".into(),
+            })?;
+    let ml_partial_elems = partial_groups
+        .checked_mul(2)
+        .ok_or_else(|| MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "softmax partial element count overflow".into(),
+        })?;
+
+    let tensors = [
+        q, k_ctx, v_ctx, k_noise, v_noise, pos_ctx, o_partial, ml_partial, o,
+    ];
+    if tensors.iter().any(|tensor| tensor.dtype != GgmlType::F32) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "all inputs, positions, scratch, and output must be F32-backed".into(),
+        });
+    }
+    if !o_partial.is_writable() || !ml_partial.is_writable() || !o.is_writable() {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "partials and output must be writable".into(),
+        });
+    }
+    if q.n_elements() as usize != q_elems
+        || o.n_elements() as usize != q_elems
+        || (k_ctx.n_elements() as usize) < ctx_elems
+        || (v_ctx.n_elements() as usize) < ctx_elems
+        || k_noise.n_elements() as usize != noise_elems
+        || v_noise.n_elements() as usize != noise_elems
+        || (pos_ctx.n_elements() as usize) < ctx_len
+        || (o_partial.n_elements() as usize) < o_partial_elems
+        || (ml_partial.n_elements() as usize) < ml_partial_elems
     {
         return Err(MetalError::BadShape {
-            kernel: "dflash_attn_swa_split4",
+            kernel: KERNEL,
             detail: format!(
-                "q/o elements {}/{} != n*32*128={}",
+                "shape mismatch: q={} o={} k_ctx={} v_ctx={} k_noise={} v_noise={} \
+                 pos_ctx={} o_partial={} ml_partial={} n={n} ctx_len={ctx_len}",
                 q.n_elements(),
                 o.n_elements(),
-                n * N_Q * HEAD_DIM
-            ),
-        });
-    }
-    let partial_groups = n * N_KV * SPLIT * GROUP;
-    if (o_partial.n_elements() as usize) < partial_groups * HEAD_DIM
-        || (ml_partial.n_elements() as usize) < partial_groups * 2
-    {
-        return Err(MetalError::BadShape {
-            kernel: "dflash_attn_swa_split4",
-            detail: format!(
-                "partials too small: o={} ml={} need {}/{}",
+                k_ctx.n_elements(),
+                v_ctx.n_elements(),
+                k_noise.n_elements(),
+                v_noise.n_elements(),
+                pos_ctx.n_elements(),
                 o_partial.n_elements(),
                 ml_partial.n_elements(),
-                partial_groups * HEAD_DIM,
-                partial_groups * 2
             ),
         });
     }
-    let _ = KERNEL;
+    let physical_requirements = [
+        (q, q_elems),
+        (k_ctx, ctx_elems),
+        (v_ctx, ctx_elems),
+        (k_noise, noise_elems),
+        (v_noise, noise_elems),
+        (pos_ctx, ctx_len),
+        (o_partial, o_partial_elems),
+        (ml_partial, ml_partial_elems),
+        (o, q_elems),
+    ];
+    if physical_requirements.iter().any(|(tensor, elems)| {
+        elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .is_none_or(|bytes| !tensor_physical_range_valid(tensor, bytes, 4))
+    }) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "tensor physical range is short or misaligned".into(),
+        });
+    }
+    let required_bytes = |elems: usize| {
+        elems
+            .checked_mul(std::mem::size_of::<f32>())
+            .expect("physical range validation already rejected byte overflow")
+    };
+    let writes = [
+        (o_partial, required_bytes(o_partial_elems)),
+        (ml_partial, required_bytes(ml_partial_elems)),
+        (o, required_bytes(q_elems)),
+    ];
+    let reads = [
+        (q, required_bytes(q_elems)),
+        (k_ctx, required_bytes(ctx_elems)),
+        (v_ctx, required_bytes(ctx_elems)),
+        (k_noise, required_bytes(noise_elems)),
+        (v_noise, required_bytes(noise_elems)),
+        (pos_ctx, required_bytes(ctx_len)),
+    ];
+    if writes.iter().enumerate().any(|(index, left)| {
+        writes[index + 1..]
+            .iter()
+            .any(|right| tensor_byte_ranges_overlap(left.0, left.1, right.0, right.1))
+    }) || writes.iter().any(|write| {
+        reads
+            .iter()
+            .any(|read| tensor_byte_ranges_overlap(write.0, write.1, read.0, read.1))
+    }) {
+        return Err(MetalError::BadShape {
+            kernel: KERNEL,
+            detail: "scratch/output ranges must be mutually disjoint from inputs".into(),
+        });
+    }
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -19576,14 +19763,14 @@ pub fn encode_dflash_attn_swa_split4_f32(
         n_q_heads: N_Q as u32,
         n_kv_heads: N_KV as u32,
         head_dim: HEAD_DIM as u32,
-        n_kv_total: (ctx_len + n) as u32,
-        ctx_len: ctx_len as u32,
-        n_rows: n as u32,
+        n_kv_total,
+        ctx_len: ctx_len_u32,
+        n_rows: n_u32,
         noise_start_pos,
         swa_window,
-        ctx_scan_start: ctx_scan_start as u32,
+        ctx_scan_start: ctx_scan_start_u32,
         scale: 1.0 / (HEAD_DIM as f32).sqrt(),
-        noncausal_noise: dflash_noncausal_noise_enabled() as u32,
+        noncausal_noise: noncausal_noise as u32,
     };
 
     let main = ctx.pipeline("kernel_dflash_attn_swa_split4_main_f32")?;
@@ -21795,6 +21982,30 @@ fn tensor_ranges_overlap(left: &MetalTensor, right: &MetalTensor) -> bool {
     }
     let left_end = left.offset.saturating_add(left.n_bytes());
     let right_end = right.offset.saturating_add(right.n_bytes());
+    left.offset < right_end && right.offset < left_end
+}
+
+fn tensor_byte_ranges_overlap(
+    left: &MetalTensor,
+    left_bytes: usize,
+    right: &MetalTensor,
+    right_bytes: usize,
+) -> bool {
+    if Retained::as_ptr(&left.buffer) != Retained::as_ptr(&right.buffer) {
+        return false;
+    }
+    let Ok(left_bytes) = u64::try_from(left_bytes) else {
+        return true;
+    };
+    let Ok(right_bytes) = u64::try_from(right_bytes) else {
+        return true;
+    };
+    let Some(left_end) = left.offset.checked_add(left_bytes) else {
+        return true;
+    };
+    let Some(right_end) = right.offset.checked_add(right_bytes) else {
+        return true;
+    };
     left.offset < right_end && right.offset < left_end
 }
 
@@ -35608,6 +35819,7 @@ mod tests {
         ctx_len: usize,
         noise_start_pos: u32,
         swa_window: u32,
+        noncausal_noise: bool,
     ) -> Vec<f32> {
         let group = n_q_heads / n_kv_heads;
         let q_dim = n_q_heads * head_dim;
@@ -35632,7 +35844,7 @@ mod tests {
                             k_pos <= q_pos && (q_pos - k_pos) <= swa_window
                         }
                     } else {
-                        (kk - ctx_len) <= q_idx
+                        noncausal_noise || (kk - ctx_len) <= q_idx
                     };
                     if !allowed {
                         continue;
@@ -35658,7 +35870,7 @@ mod tests {
                             k_pos <= q_pos && (q_pos - k_pos) <= swa_window
                         }
                     } else {
-                        (kk - ctx_len) <= q_idx
+                        noncausal_noise || (kk - ctx_len) <= q_idx
                     };
                     if !allowed {
                         continue;
@@ -35682,7 +35894,7 @@ mod tests {
                             k_pos <= q_pos && (q_pos - k_pos) <= swa_window
                         }
                     } else {
-                        (kk - ctx_len) <= q_idx
+                        noncausal_noise || (kk - ctx_len) <= q_idx
                     };
                     if !allowed {
                         continue;
@@ -35786,6 +35998,8 @@ mod tests {
         swa_window: u32,
         online: bool,
         full_gqa_split4: bool,
+        swa_split4: bool,
+        noncausal_noise: bool,
         ctx_scan_start: usize,
     ) -> Result<Vec<f32>, MetalError> {
         let q_t = MetalTensor::from_bytes(
@@ -35828,8 +36042,8 @@ mod tests {
             crate::tensor::GgmlType::F32,
         )?;
         let o_t = MetalTensor::zeros_f32(ctx, vec![(n * n_q_heads * head_dim) as u64])?;
-        let o_partial_len = 16 * 8 * 4 * 4 * 128;
-        let ml_partial_len = 16 * 8 * 4 * 4 * 2;
+        let o_partial_len = n * 8 * 4 * 4 * 128;
+        let ml_partial_len = n * 8 * 4 * 4 * 2;
         let o_partial_host = vec![f32::NAN; o_partial_len];
         let ml_partial_host = vec![f32::NAN; ml_partial_len];
         let o_partial_t = MetalTensor::from_bytes(
@@ -35845,7 +36059,27 @@ mod tests {
             crate::tensor::GgmlType::F32,
         )?;
         one_shot(ctx, |enc| {
-            if full_gqa_split4 {
+            if swa_split4 {
+                encode_dflash_attn_swa_split4_with_noncausal_f32(
+                    ctx,
+                    enc,
+                    &q_t,
+                    &k_ctx_t,
+                    &v_ctx_t,
+                    &k_noise_t,
+                    &v_noise_t,
+                    &pos_t,
+                    &o_partial_t,
+                    &ml_partial_t,
+                    &o_t,
+                    n,
+                    ctx_len,
+                    noise_start_pos,
+                    swa_window,
+                    ctx_scan_start,
+                    noncausal_noise,
+                )
+            } else if full_gqa_split4 {
                 encode_dflash_attn_full_gqa_split4_f32(
                     ctx,
                     enc,
@@ -36072,6 +36306,7 @@ mod tests {
                 c.ctx_len,
                 c.noise_start_pos,
                 c.swa_window,
+                false,
             );
             let gpu = dflash_attn_readback(
                 &ctx,
@@ -36106,6 +36341,8 @@ mod tests {
                 c.swa_window,
                 false,
                 false,
+                false,
+                false,
                 0,
             )
             .expect("dflash_attn_two_range dispatch");
@@ -36125,6 +36362,8 @@ mod tests {
                 c.noise_start_pos,
                 c.swa_window,
                 true,
+                false,
+                false,
                 false,
                 0,
             )
@@ -36152,6 +36391,8 @@ mod tests {
                 c.swa_window,
                 true,
                 false,
+                false,
+                false,
                 ctx_scan_start,
             )
             .expect("dflash_attn_online_two_range scan dispatch");
@@ -36174,6 +36415,8 @@ mod tests {
                         c.swa_window,
                         false,
                         true,
+                        false,
+                        false,
                         0,
                     )
                     .expect("dflash_attn_full_gqa_split4 dispatch"),
@@ -36292,6 +36535,245 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dflash_attn_swa_split4_matches_cpu_oracle_n8() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let n = 8;
+        let n_q = 32;
+        let n_kv = 8;
+        let hd = 128;
+        let ctx_len = 40;
+        let swa_window = 16u32;
+        let noise_start_pos = 80u32;
+        let kv_stride = n_kv * hd;
+        let make_buf = |seed: u32, len: usize| -> Vec<f32> {
+            let mut state = seed;
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    ((state >> 8) as f32 / (1 << 24) as f32 - 0.5) * 0.5
+                })
+                .collect()
+        };
+        let q = make_buf(11, n * n_q * hd);
+        let k_ctx = make_buf(12, ctx_len * kv_stride);
+        let v_ctx = make_buf(13, ctx_len * kv_stride);
+        let k_noise = make_buf(14, n * kv_stride);
+        let v_noise = make_buf(15, n * kv_stride);
+        let pos_ctx: Vec<i32> = (0..ctx_len)
+            .map(|index| noise_start_pos as i32 - ctx_len as i32 + index as i32)
+            .collect();
+        let min_pos = noise_start_pos.saturating_sub(swa_window);
+        let ctx_scan_start = pos_ctx.partition_point(|&pos| pos >= 0 && (pos as u32) < min_pos);
+        let mut k = k_ctx.clone();
+        k.extend_from_slice(&k_noise);
+        let mut v = v_ctx.clone();
+        v.extend_from_slice(&v_noise);
+        let mut pos_k = pos_ctx.clone();
+        pos_k.extend((0..n).map(|index| (noise_start_pos + index as u32) as i32));
+        let cpu = dflash_attn_cpu_oracle(
+            &q,
+            &k,
+            &v,
+            &pos_k,
+            n,
+            n_q,
+            n_kv,
+            hd,
+            ctx_len + n,
+            ctx_len,
+            noise_start_pos,
+            swa_window,
+            false,
+        );
+        let split4 = dflash_attn_two_range_readback(
+            &ctx,
+            &q,
+            &k_ctx,
+            &v_ctx,
+            &k_noise,
+            &v_noise,
+            &pos_ctx,
+            n,
+            n_q,
+            n_kv,
+            hd,
+            ctx_len,
+            noise_start_pos,
+            swa_window,
+            false,
+            false,
+            true,
+            false,
+            ctx_scan_start,
+        )
+        .expect("SWA split4 N8 dispatch");
+        let cpu_noncausal = dflash_attn_cpu_oracle(
+            &q,
+            &k,
+            &v,
+            &pos_k,
+            n,
+            n_q,
+            n_kv,
+            hd,
+            ctx_len + n,
+            ctx_len,
+            noise_start_pos,
+            swa_window,
+            true,
+        );
+        let split4_noncausal = dflash_attn_two_range_readback(
+            &ctx,
+            &q,
+            &k_ctx,
+            &v_ctx,
+            &k_noise,
+            &v_noise,
+            &pos_ctx,
+            n,
+            n_q,
+            n_kv,
+            hd,
+            ctx_len,
+            noise_start_pos,
+            swa_window,
+            false,
+            false,
+            true,
+            true,
+            ctx_scan_start,
+        )
+        .expect("noncausal SWA split4 N8 dispatch");
+
+        let assert_close = |label: &str, got: &[f32], want: &[f32]| {
+            let mut max_abs = 0.0f32;
+            let mut diff_sq = 0.0f64;
+            let mut ref_sq = 0.0f64;
+            for (index, (&got, &want)) in got.iter().zip(want).enumerate() {
+                assert!(got.is_finite(), "{label}: nonfinite output at {index}");
+                let diff = (got - want).abs();
+                max_abs = max_abs.max(diff);
+                diff_sq += (diff as f64).powi(2);
+                ref_sq += (want as f64).powi(2);
+            }
+            let rel_l2 = diff_sq.sqrt() / (ref_sq.sqrt() + 1e-30);
+            eprintln!("[{label}] max|delta|={max_abs:.3e} rel_l2={rel_l2:.3e}");
+            assert!(max_abs < 1e-4, "{label}: max|delta|={max_abs} too large");
+            assert!(rel_l2 < 1e-5, "{label}: rel_l2={rel_l2} too large");
+        };
+        assert_close("dflash-swa-split4-n8", &split4, &cpu);
+        assert_close(
+            "dflash-swa-split4-n8-noncausal",
+            &split4_noncausal,
+            &cpu_noncausal,
+        );
+    }
+
+    #[test]
+    fn dflash_attn_swa_split4_rejects_unsafe_contracts() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("metal init: {e}"),
+        };
+        let n = 8usize;
+        let ctx_len = 16usize;
+        let q_elems = n * 32 * 128;
+        let kv_stride = 8 * 128;
+        let partial_groups = n * 8 * 4 * 4;
+        let q = MetalTensor::zeros_f32(&ctx, vec![q_elems as u64]).unwrap();
+        let k_ctx = MetalTensor::zeros_f32(&ctx, vec![(ctx_len * kv_stride) as u64]).unwrap();
+        let v_ctx = MetalTensor::zeros_f32(&ctx, vec![(ctx_len * kv_stride) as u64]).unwrap();
+        let k_noise = MetalTensor::zeros_f32(&ctx, vec![(n * kv_stride) as u64]).unwrap();
+        let v_noise = MetalTensor::zeros_f32(&ctx, vec![(n * kv_stride) as u64]).unwrap();
+        let pos_ctx = MetalTensor::zeros_f32(&ctx, vec![ctx_len as u64]).unwrap();
+        let short_pos = MetalTensor::zeros_f32(&ctx, vec![(ctx_len - 1) as u64]).unwrap();
+        let o_partial = MetalTensor::zeros_f32(&ctx, vec![(partial_groups * 128) as u64]).unwrap();
+        let ml_partial = MetalTensor::zeros_f32(&ctx, vec![(partial_groups * 2) as u64]).unwrap();
+        let o = MetalTensor::zeros_f32(&ctx, vec![q_elems as u64]).unwrap();
+
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        let concurrent = KernelEncoder::begin_concurrent(&cmd);
+        let concurrent_error = encode_dflash_attn_swa_split4_f32(
+            &ctx,
+            &concurrent,
+            &q,
+            &k_ctx,
+            &v_ctx,
+            &k_noise,
+            &v_noise,
+            &pos_ctx,
+            &o_partial,
+            &ml_partial,
+            &o,
+            n,
+            ctx_len,
+            32,
+            16,
+            0,
+        )
+        .expect_err("concurrent main/reduce must be rejected");
+        concurrent.end();
+        assert!(concurrent_error.to_string().contains("serial encoder"));
+
+        let cmd = ctx.queue.commandBuffer().expect("command buffer");
+        let enc = KernelEncoder::begin(&cmd);
+        let short_pos_error = encode_dflash_attn_swa_split4_f32(
+            &ctx,
+            &enc,
+            &q,
+            &k_ctx,
+            &v_ctx,
+            &k_noise,
+            &v_noise,
+            &short_pos,
+            &o_partial,
+            &ml_partial,
+            &o,
+            n,
+            ctx_len,
+            32,
+            16,
+            0,
+        )
+        .expect_err("short positions must be rejected");
+        assert!(short_pos_error.to_string().contains("shape mismatch"));
+
+        let alias_error = encode_dflash_attn_swa_split4_f32(
+            &ctx, &enc, &q, &k_ctx, &v_ctx, &k_noise, &v_noise, &pos_ctx, &o_partial, &o_partial,
+            &o, n, ctx_len, 32, 16, 0,
+        )
+        .expect_err("aliased partials must be rejected");
+        assert!(alias_error.to_string().contains("disjoint"));
+
+        let position_error = encode_dflash_attn_swa_split4_f32(
+            &ctx,
+            &enc,
+            &q,
+            &k_ctx,
+            &v_ctx,
+            &k_noise,
+            &v_noise,
+            &pos_ctx,
+            &o_partial,
+            &ml_partial,
+            &o,
+            n,
+            ctx_len,
+            u32::MAX,
+            16,
+            0,
+        )
+        .expect_err("overflowing noise positions must be rejected");
+        assert!(position_error.to_string().contains("overflow"));
+        enc.end();
     }
 
     /// **v0.72.2 codex code-review test #2**: head_dim > 256 must be

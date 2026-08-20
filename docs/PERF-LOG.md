@@ -176,6 +176,20 @@ proposes and every emitted token is verified, so FP reassociation cannot change
 output. Re-run to four samples per arm on a quiet box. Evidence:
 `/tmp/dflash2-sweep/d1-abba.txt`.
 
+Post-landing safety correction (2026-08-20): adversarial review found the first
+commit broader and less defensive than its evidence. The retained default is now
+restricted to the measured DFlash2 shape: selector top-k 16, N8,
+Q32/KV8/head_dim-128, SWA-2048, and an exact 2,048-row visible suffix. Short,
+gapped/unsaturated, full-attention, N16, and other geometries stay on the
+incumbent path. Scratch views use active N8 size; the wrapper now rejects
+concurrent main/reduce encoding, invalid shapes/dtypes/ranges/aliases, and
+integer or position overflow. The shader now honors explicitly requested
+noncausal noise. Focused Metal oracle results are `4.470e-8` maximum absolute /
+`1.386e-7` relative L2 for causal N8 and `4.470e-8` / `1.542e-7` for noncausal
+N8; contract and route-scope tests pass. The measured causal shader arithmetic
+and accessed prefixes did not change, so this correction does not claim a new
+timing result.
+
 ## 2026-08-19 — Long-Context Verify Levers: Chunked Attention And Program T Both KILL
 
 Status: the two candidate ways to buy long-context throughput on the verify side
@@ -25306,4 +25320,3 @@ Interpretation:
   contributes little by 16K.
 - The combined branch is still a stronger overall decode checkpoint than either
   attention-only or pipelined submission.
-

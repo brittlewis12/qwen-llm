@@ -283,6 +283,58 @@ crate::env_flag!(default_on dflash_attn_swa_scan_enabled, "QWEN_DFLASH_ATTN_SWA_
 // `encode_dflash_attn_swa_split4_f32`.
 crate::env_flag!(default_on dflash_attn_swa_split4_enabled, "QWEN_DFLASH_ATTN_SWA_SPLIT4");
 
+fn dflash_swa_split4_eligible(
+    layer_is_swa: bool,
+    n: usize,
+    n_q: usize,
+    n_kv: usize,
+    head_dim: usize,
+    ctx_len: usize,
+    ctx_scan_start: usize,
+    exact_visible_suffix: bool,
+    swa_window: u32,
+    selector_top_k: u32,
+) -> bool {
+    layer_is_swa
+        && n == 8
+        && n_q == 32
+        && n_kv == 8
+        && head_dim == 128
+        && swa_window == 2048
+        && selector_top_k == 16
+        && ctx_scan_start <= ctx_len
+        && ctx_len - ctx_scan_start == swa_window as usize
+        && exact_visible_suffix
+}
+
+fn dflash_swa_exact_visible_suffix(
+    pos_ctx: &[i32],
+    ctx_len: usize,
+    ctx_scan_start: usize,
+    noise_start_pos: u32,
+    swa_window: u32,
+) -> bool {
+    let Ok(window) = usize::try_from(swa_window) else {
+        return false;
+    };
+    let Some(first_pos) = noise_start_pos.checked_sub(swa_window) else {
+        return false;
+    };
+    if window == 0 || ctx_len > pos_ctx.len() || ctx_scan_start.checked_add(window) != Some(ctx_len)
+    {
+        return false;
+    }
+    pos_ctx[ctx_scan_start..ctx_len]
+        .iter()
+        .enumerate()
+        .all(|(index, &position)| {
+            u32::try_from(position).ok()
+                == u32::try_from(index)
+                    .ok()
+                    .and_then(|index| first_pos.checked_add(index))
+        })
+}
+
 // v0.77: encode the entire drafter forward into ONE command buffer with a
 // single commit + waitUntilCompleted before the readback. The multi-buffer
 // structure (up to 13 CPU/GPU round-trips per draft_block: phase 1, embed,
@@ -13277,6 +13329,19 @@ impl<'a> DFlashDecoder<'a> {
             //
             // Drafter projection/FFN weights stay native where the GGUF dtype
             // is supported; the dispatchers route Q8_0 and K-quants directly.
+            let swa_window_arg = if layer.is_swa { cfg.swa_window } else { 0 };
+            let ctx_scan_start = if layer.is_swa && dflash_attn_swa_scan_enabled() {
+                dflash_swa_ctx_scan_start(&pos_ctx_cpu, ctx_len, noise_start_pos, swa_window_arg)
+            } else {
+                0
+            };
+            let exact_visible_suffix = dflash_swa_exact_visible_suffix(
+                &pos_ctx_cpu,
+                ctx_len,
+                ctx_scan_start,
+                noise_start_pos,
+                swa_window_arg,
+            );
             let full_gqa_split4_attn = dflash_attn_full_gqa_split4_enabled()
                 && !layer.is_swa
                 && n == 16
@@ -13284,15 +13349,23 @@ impl<'a> DFlashDecoder<'a> {
                 && n_kv == 8
                 && head_dim == 128
                 && (7986..=8241).contains(&ctx_len);
-            // Split-K over the visible window for SWA layers (all 5 on
-            // the DFlash 2 drafter).
+            // The retained measurement covers DFlash 2 at its saturated SWA
+            // window. Keep short windows and the unmeasured N16 drafter on the
+            // incumbent online path.
             let swa_split4_attn = dflash_attn_swa_split4_enabled()
                 && !full_gqa_split4_attn
-                && n_q == 32
-                && n_kv == 8
-                && head_dim == 128
-                && n <= 16
-                && ctx_len > 0;
+                && dflash_swa_split4_eligible(
+                    layer.is_swa,
+                    n,
+                    n_q,
+                    n_kv,
+                    head_dim,
+                    ctx_len,
+                    ctx_scan_start,
+                    exact_visible_suffix,
+                    cfg.swa_window,
+                    cfg.selector_top_k,
+                );
             let online_two_range_attn = dflash_attn_online_two_range_enabled();
             let two_range_attn = full_gqa_split4_attn
                 || swa_split4_attn
@@ -13325,7 +13398,6 @@ impl<'a> DFlashDecoder<'a> {
 
             // (a) Fused attention: writes attn_o_full [N, n_q*head_dim].
             let n_kv_total = ctx_len + n;
-            let swa_window_arg = if layer.is_swa { cfg.swa_window } else { 0 };
             if full_gqa_split4_attn {
                 const O_PARTIAL_ELEMS: u64 = 16 * 8 * 4 * 4 * 128;
                 const ML_PARTIAL_ELEMS: u64 = 16 * 8 * 4 * 4 * 2;
@@ -13350,23 +13422,18 @@ impl<'a> DFlashDecoder<'a> {
                 )?;
             } else if swa_split4_attn {
                 // Same borrowed partials as the split4 path (k_full/v_full
-                // are unused when a two-range kernel runs). Sized for the
-                // max block (16 rows); n <= 16 is gated above.
-                const O_PARTIAL_ELEMS: u64 = 16 * 8 * 4 * 4 * 128;
-                const ML_PARTIAL_ELEMS: u64 = 16 * 8 * 4 * 4 * 2;
-                let o_partial = self.session.k_full.view_subrange(0, vec![O_PARTIAL_ELEMS]);
-                let ml_partial = self.session.v_full.view_subrange(0, vec![ML_PARTIAL_ELEMS]);
+                // are unused when a two-range kernel runs). Size the views
+                // from the active block rather than assuming N16 capacity.
+                let partial_groups = n as u64 * 8 * 4 * 4;
+                let o_partial = self
+                    .session
+                    .k_full
+                    .view_subrange(0, vec![partial_groups * 128]);
+                let ml_partial = self
+                    .session
+                    .v_full
+                    .view_subrange(0, vec![partial_groups * 2]);
                 let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
-                let ctx_scan_start = if dflash_attn_swa_scan_enabled() {
-                    dflash_swa_ctx_scan_start(
-                        &pos_ctx_cpu,
-                        ctx_len,
-                        noise_start_pos,
-                        swa_window_arg,
-                    )
-                } else {
-                    0
-                };
                 crate::metal::encode_dflash_attn_swa_split4_f32(
                     ctx_metal,
                     &enc,
@@ -13387,16 +13454,6 @@ impl<'a> DFlashDecoder<'a> {
                 )?;
             } else if online_two_range_attn {
                 let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
-                let ctx_scan_start = if dflash_attn_swa_scan_enabled() {
-                    dflash_swa_ctx_scan_start(
-                        &pos_ctx_cpu,
-                        ctx_len,
-                        noise_start_pos,
-                        swa_window_arg,
-                    )
-                } else {
-                    0
-                };
                 encode_dflash_attn_online_two_range_scan_f32(
                     ctx_metal,
                     &enc,
@@ -14065,6 +14122,58 @@ mod tests {
     };
     use crate::metal_forward::{MetalModel, MetalSession};
     use std::time::Instant;
+
+    #[test]
+    fn dflash_swa_split4_scope_matches_measured_product_cell() {
+        assert!(dflash_swa_split4_eligible(
+            true, 8, 32, 8, 128, 2048, 0, true, 2048, 16
+        ));
+        assert!(dflash_swa_split4_eligible(
+            true, 8, 32, 8, 128, 8853, 6805, true, 2048, 16
+        ));
+        assert!(!dflash_swa_split4_eligible(
+            false, 8, 32, 8, 128, 8853, 6805, true, 2048, 16
+        ));
+        assert!(!dflash_swa_split4_eligible(
+            true, 16, 32, 8, 128, 8853, 6805, true, 2048, 16
+        ));
+        assert!(!dflash_swa_split4_eligible(
+            true, 8, 32, 8, 128, 2047, 0, true, 2048, 16
+        ));
+        assert!(!dflash_swa_split4_eligible(
+            true, 8, 32, 8, 128, 8853, 0, true, 2048, 16
+        ));
+        assert!(!dflash_swa_split4_eligible(
+            true, 8, 32, 8, 128, 8853, 8837, true, 16, 16
+        ));
+        assert!(!dflash_swa_split4_eligible(
+            true, 8, 32, 8, 128, 8853, 6805, true, 2048, 0
+        ));
+        assert!(!dflash_swa_split4_eligible(
+            true, 8, 24, 4, 256, 8853, 6805, true, 2048, 16
+        ));
+        assert!(!dflash_swa_split4_eligible(
+            true, 8, 32, 8, 128, 8853, 6805, false, 2048, 16
+        ));
+
+        let exact_positions: Vec<i32> = (0..8853).collect();
+        assert!(dflash_swa_exact_visible_suffix(
+            &exact_positions,
+            8853,
+            6805,
+            8853,
+            2048,
+        ));
+        let mut gapped_positions = exact_positions;
+        gapped_positions[7000] += 1;
+        assert!(!dflash_swa_exact_visible_suffix(
+            &gapped_positions,
+            8853,
+            6805,
+            8853,
+            2048,
+        ));
+    }
 
     #[test]
     fn matrix_query_tiles_cover_nonzero_prefix_and_tail() {

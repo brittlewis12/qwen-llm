@@ -38,57 +38,162 @@ packed causal N=8 attention, and Q8 N=2/N=4 kernels closed until a new phase or
 long-context packet clears their separate gates. Evidence:
 `target/profiles/q8-dflash-investigation/`.
 
-## 2026-08-19 — DFlash 2 GO, Split-K Drafter GO, Program T And Packed-Verify Attention KILL
+## 2026-08-19 — SWA Split-K Drafter Attention GO
+
+Status: drafter attention on SWA layers now partitions the visible window across
+four simdgroups per (kv_head, query) and combines through the split4 reduce.
+Default-on for 32Q/8KV/head_dim-128 drafters; rollback
+`QWEN_DFLASH_ATTN_SWA_SPLIT4=0`.
+
+- Within-session ratios put the long-context slope in the drafter, not the
+  verifier: at ctx `8853` vs `~460`, `verify(8)/single` moves `3.01 -> 3.09`
+  while `draft/single` moves `0.35 -> 1.01`.
+- The incumbent path is latency-bound, not bandwidth-bound: ~84 MB of K/V in
+  ~24 ms is `3.5 GB/s`, ~1% of stream, from one simdgroup per (head, query)
+  walking the 2048-key window serially.
+- `kernel_dflash_attn_swa_split4_{main,reduce}_f32` reuses the
+  `full_gqa_split4` template with three changes: partitions over
+  `[ctx_scan_start, ctx_len)` instead of `[0, ctx_len)`, SWA mask from
+  `pos_ctx` on ctx keys, and dynamic `n_rows` (8 for DFlash 2, 16 for
+  DFlash 1). Fully-masked partitions write `m=-inf, l=0`; the reduce's `l>0`
+  guards already skip them.
+- Paired A/B at ctx `8853` on code content: draft `39.2 -> 14.5 ms/step`,
+  decode `24.07 -> 27.20 t/s`, alpha `3.879 -> 3.840`, greedy equivalence PASS.
+  `draft/single` returns to `0.35`, i.e. ctx-flat. One sample per arm; the
+  batch was cut short by the GPU lease.
+
+Decision: retain default-on. Correctness is structural here — the drafter only
+proposes and every emitted token is verified, so FP reassociation cannot change
+output. Re-run to four samples per arm on a quiet box. Evidence:
+`/tmp/dflash2-sweep/d1-abba.txt`.
+
+## 2026-08-19 — Chunked Packed-Verify Attention KILL
+
+Status: `QWEN_MTP_ATTN_QN_SHARED_KV` generalizes the n==2 shared-KV verify path
+to the whole chain (`2 <= n <= 8`) and ships default-off after measuring inside
+the noise band.
+
+- Counterbalanced A/B/B/A at ctx `8853`: verify `130.8 ms` off versus
+  `128.2/128.8 ms` on, a `-2.3 ms` delta against a `~9%` run-to-run band.
+  Greedy equivalence PASS with alpha bit-identical (`3.879`).
+- The `+24 ms` premise was an artifact of comparing absolute rows across
+  sessions (`101 ms` and `125 ms` measured in different thermal states).
+  Within-session the verify ctx slope is `+0.08` singles (`~5 ms`), and this
+  path captures about 2 ms of it.
+- Noise floor for the record: single-token decode at one ctx measured
+  `44.8/48.9/45.9 ms` across clean runs and `63.1 ms` in a batch row.
+- Semantics are equivalent by construction: the prefill v4 kernel masks
+  `k_pos <= base_pos + row`, so row i sees `[0, start+i]`, the same set the
+  per-token loop gives it; only FP summation order differs.
+
+Decision: keep default-off. Reopen only if a within-session verify ctx-slope
+measurement shows a real per-row KV cost. Evidence:
+`/tmp/dflash2-sweep/v1-abba2.txt`.
+
+## 2026-08-19 — Acceptance Survives Long Context
+
+Status: measurement only. DFlash 2 acceptance at ctx `8853` decays mildly
+against the short-context reference rather than collapsing, which is the premise
+the N=8 adaptive schedule and the long-context work rest on.
+
+- `dflash-lazy` at ctx `8853`, code content, 256 tokens: `alpha_pos1 = 0.933`,
+  `alpha_chain = 3.167`, mean emitted `4.167` under a D=5 cap; the short-ctx
+  packed reference is `4.571`.
+- Per-position alpha `0.933 / 0.828 / 0.692 / 0.778 / 0.786`; greedy
+  equivalence versus no-spec PASS.
+- The drafter's SWA-2048 window is not starving at this length; the captured
+  target hiddens carry conditioning past the window.
+
+Decision: treat alpha as roughly ctx-stable for policy purposes. Reported as an
+alpha measurement (token-deterministic, unaffected by thermal state or lease
+queuing), not a timing claim; single run per point. Evidence:
+`/tmp/dflash2-sweep/log6-lazy-9k.txt`.
+
+## 2026-08-19 — Program T Reopen Repriced Under DFlash 2: STAYS CLOSED
+
+Status: measurement only. PERF-ROADMAP's Program T closure records the reopen
+recipe "stronger drafter -> reprice trees"; DFlash 2 qualifies, so the condition
+was tested rather than assumed.
+
+- Kill line pre-registered from the measured `8 ms` verify marginal: kill unless
+  the tree shows `>= +0.8` emitted/step at `<= +2` extra nodes.
+- `--tree-sim` at ctx `8853`, D=5 chain plus sibling sets at the first two
+  depths with B=2 (7 of 15 nodes): chain `4.167` versus tree `4.267`
+  emitted/step, `+0.10` for `+2` nodes, 8x below the line. Rescues fired 6
+  times in 60 steps; post-rescue continuation `5/10`.
+- DFlash 2's `p1 = 0.933` consumed the rescue mass trees exist to harvest,
+  leaving 7-9% miss mass of which about half does not continue.
+- The `8 ms` verify marginal is ctx-independent (GDN tail, checkpoint blits,
+  kernel c-factors), so no attention-side work makes tree nodes cheaper.
+
+Decision: Program T stays closed, now on DFlash-2-era evidence. Cost of knowing
+was one bench run and no engine changes. Evidence:
+`/tmp/dflash2-sweep/rank-9k.jsonl`.
+
+## 2026-08-19 — Q5_K And Q8_0 mma8v N=8 Tier GO
+
+Status: the v0.501 small-N table now covers Q5_K and Q8_0 at N=8, and routes
+`n_query == 1` to mat-vec. Rollback `QWEN_MATMAT_N1_MATVEC=0` and
+`QWEN_MATMAT_SMALLN_TABLE=0`.
+
+- `n_query == 1` had no table arm and fell through to the generic 32-wide tile:
+  `packed_verify(n_eff=1)` measured `202.5 ms` against a `39.0 ms` single-token
+  forward. Routing to mat-vec moves it to `40.3 ms`, so packed verify carries no
+  meaningful fixed overhead — checkpoints, hidden capture and argmax together
+  cost about `1.3 ms`.
+- Q5_K and Q8_0 had no N=8 arm either. `r1c1k128` wins every swept shape:
+  Q5_K `[6144,5120]` (the 48 GDN out_proj dispatches per verify pass) moves
+  `0.336 -> 0.105 ms/dispatch`, and Q8_0 drafter shapes move `-49%` to `-75%`.
+  Q4_K down-projections (`n_in > n_out`) prefer `r1c1k128` over the `sg2`
+  all-rounder; up/square shapes keep `sg2`.
+- New `qwen-bench matmat-smalln-micro` prices every drop-in candidate per
+  (family, dtype) on production tensors, with synthetic Q8_0 tensors standing in
+  for the drafter shapes. The N=16 arm is now guarded to Q4_K/Q6_K so the
+  block-16 drafter's Q8_0 mat-mats keep their tuned kernel.
+- End to end on code content: draft `23.0 -> 13.5 ms` steady-state, verify(8)
+  `113 -> 101 ms`, decode `1.49x -> 1.76x`; alpha `~3.56` content moved
+  `1.00x -> 1.15x`. Greedy equivalence PASS, including the DFlash 1 regression.
+
+Decision: retain the new arms. Remaining N=8 headroom is the Q4_K/Q6_K mma8v
+kernels themselves (190-290 GB/s against ~344 demonstrated on lm_head), which is
+kernel work, not routing. Evidence: `/tmp/dflash2-sweep/matmat-smalln.tsv`.
+
+## 2026-08-19 — DFlash 2 Drafter Support GO
 
 Status: DFlash 2 drafters (`incoai/Qwen3.8-27B-DFlash2-GGUF`, block 8) load and
-run alongside DFlash 1; two-tap dynamic conv, top-16 path selector, and SWA
-split-K drafter attention are default-on. Greedy equivalence PASS on every
-configuration measured, including the DFlash 1 (3.6) regression.
+run beside DFlash 1, with two-tap dynamic convolution, the top-16 path selector,
+single-command-buffer drafting, and a block-size-aware N=8 adaptive policy.
 
-- DFlash 2 support: v2 `dflash` GGUF arch (llama.cpp PR 27342 conventions)
-  beside v1 `dflash-draft`; `kernels/dflash2.metal` two-tap conv + top-16;
-  CPU lattice walk over Q8_0 selector codebooks. Selector ablation is worth
-  `+0.16-0.25` emitted/step (upstream reports `+0.34` under other eval
-  conditions). Short-ctx code decode `1.33x -> 1.76x` across the session.
-- Small-N kernel routing: `n_query == 1` fell through the v0.501 table to the
-  generic 32-wide tile; routing it to mat-vec moves `packed_verify(n_eff=1)`
-  from `202.5 -> 40.3 ms` against `39.0 ms` single-token, i.e. packed verify
-  has no meaningful fixed overhead. Q5_K/Q8_0 gained mma8v `r1c1k128` arms
-  (`0.336 -> 0.105 ms` per Q5_K GDN out_proj dispatch; Q8_0 drafter shapes
-  `-49%` to `-75%`). New `qwen-bench matmat-smalln-micro` prices variants per
-  (family, dtype) on production shapes.
-- Long-context slope is the DRAFTER, not verify. Within-session ratios at ctx
-  `8853` vs `~460`: `verify(8)/single` moves `3.01 -> 3.09`, `draft/single`
-  moves `0.35 -> 1.01`. SWA split-K drafter attention (visible-window
-  partitions, `pos_ctx` mask, dynamic `n_rows`) restores `draft/single` to
-  `0.35`: paired A/B measures draft `39.2 -> 14.5 ms/step`, decode
-  `24.07 -> 27.20 t/s`, alpha `3.879 -> 3.840`.
-- KILL, packed-verify chunked attention (`QWEN_MTP_ATTN_QN_SHARED_KV`, kept
-  default-off): counterbalanced A/B/B/A moves verify `130.8 -> 128.5 ms`,
-  inside the measured `~9%` run-to-run band. Its `+24 ms` premise came from
-  comparing absolute rows across sessions; the same defect infected the
-  break-even fit and the "parity at 8.8K" headline. Single-token decode at one
-  ctx measured `44.8/48.9/45.9 ms` clean and `63.1 ms` in a batch row.
-- KILL, Program T reopen (PERF-ROADMAP records "stronger drafter -> reprice
-  trees"): `--tree-sim` at ctx `8853` gives `4.167 -> 4.267` emitted/step for
-  `+2` nodes against a pre-registered `>= +0.8` line. DFlash 2's higher `p1`
-  (`0.933`) consumed the rescue mass trees exist to harvest, and the `8 ms`
-  verify marginal is ctx-independent, so no attention work makes nodes cheaper.
-- Acceptance survives long context: `alpha_pos1 = 0.933`, mean emitted `4.167`
-  at ctx `8853` on code (short-ctx reference `4.571`) — mild decay, no collapse,
-  despite the SWA-2048 drafter window. Break-even there is now `~3.44`.
-- N=8 adaptive policy is block-size-aware with a trailing-alpha backoff (window
-  16, margin `0.6` ~= 1 SE); worst-case content is bounded near baseline instead
-  of `-39%`. Capture-shift and non-causal-noise A/Bs were both within noise, so
-  the drafter's capture convention and block-causal mask are cleared.
+- Loader takes the v2 `dflash` GGUF arch (llama.cpp PR 27342 tensor and KV
+  conventions) alongside v1 `dflash-draft`, and fails closed when a drafter
+  declares SWA layers with `sliding_window = 0`.
+- `kernels/dflash2.metal` adds the two-tap dynamic depthwise convolution and a
+  vocab top-16; the selector's lattice walk runs on CPU over Q8_0 codebook rows,
+  which is ~20 KB of readback per block. Selector ablation
+  (`QWEN_DFLASH2_NO_SELECTOR=1`) is worth `+0.16-0.25` emitted/step; upstream
+  reports `+0.34` under different eval conditions.
+- `draft_block` now encodes into one command buffer (13 commit/wait round-trips
+  to 1) with `pos_k` staging hoisted out of the layer loop; cache watermarks
+  advance only after the final wait. Steady-state draft `24.6 -> 23.0 ms`, and
+  the first call (prompt projection through the drafter caches) is reported
+  separately instead of polluting per-step means.
+- N=8 adaptive policy replaces the N=16 ctx cliff, which does not exist at N=8
+  (`11.5 t/s` at ctx `8.8K` where the N=16 path fell to `3.65`), with a
+  trailing-alpha backoff (window 16, margin `0.6` ~= 1 SE). Acceptance is
+  content-dominated — mean emitted `2.5-5.8` at the same ctx — so the backoff,
+  not a ctx guard, does the work; worst-case content is bounded near baseline
+  instead of `-39%`.
+- Capture-shift and non-causal-noise A/Bs (`QWEN_DFLASH2_CAPTURE_SHIFT`,
+  `QWEN_DFLASH_NONCAUSAL_NOISE`, both default-off) came back within single-run
+  noise, clearing the drafter's capture convention and block-causal mask against
+  the reference implementation.
+- Greedy equivalence PASS on every configuration measured, including the
+  DFlash 1 (3.6) regression. Short-ctx code decode reached `1.33x` at first
+  light.
 
-Decision: retain DFlash 2, the small-N routing arms, and split-K drafting
-default-on. Program T stays closed on DFlash-2-era evidence. Chunked verify
-attention stays default-off pending a within-session verify ctx-slope
-measurement. Re-run the split-K A/B to four samples per arm and re-fit the
-adaptive break-even constant now that `draft/single` is ctx-flat. Evidence:
-`/tmp/dflash2-sweep/` (session artifacts), `QWEN_DFLASH_ATTN_SWA_SPLIT4=0` and
-`QWEN_MATMAT_N1_MATVEC=0` roll back the two default-on kernel changes.
+Decision: retain DFlash 2 support and the N=8 policy. The backoff remains
+terminal-Off; a re-probe for multi-phase agent sessions is the open policy item.
+Evidence: `/tmp/dflash2-sweep/`.
 
 ## 2026-08-17 — Direct Converted-F32 Destination GO
 

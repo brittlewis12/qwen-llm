@@ -25174,3 +25174,60 @@ EOS-terminating requests.
   where the target's KV is F16 (320 MB at 8K ctx, 2× the scan bytes) —
   bundle with the D1 split-K drafter-attention work since both touch the
   same kernels.
+
+## 2026-08-20 — Packed-Verify Marginal Attribution: Checkpoints Are Not The Lever
+
+### Method
+
+Zero-code ablation using the existing `QWEN_MTP_SKIP_FINAL_CKPT` gate
+(default-on; skips exactly the final row's GDN/conv checkpoint publication,
+which cannot be a partial-restore source). Toggling it prices exactly ONE
+checkpoint set — at n=1 the arms are 0 vs 1 set, which is the cleanest
+contrast available without touching the verify encoder. Counterbalanced
+A/B/A via `qwen-bench dflash --n-policy cycle` (18 samples per n_eff per
+arm, ±1 ms medians), Qwen3.8-27B Q4_K_M + DFlash2 Q8_0, ctx ~460.
+
+### Results (median ms)
+
+| n_eff | A (skip=1) | B (skip=0) | delta = 1 ckpt set |
+| --- | --- | --- | --- |
+| 8 | 107.05 | 107.90 | 0.85 |
+| 1 | 41.00 | 42.50 | 1.50 |
+| single_token ref | 39.35 | 39.35 | — |
+
+- Per-token marginal at n=8: (107.0 − 41.0) / 7 = **9.44 ms/token**.
+- Checkpoint publication is **0.85–1.50 ms/token = 9–16%** of that
+  marginal (6–10.5 ms of the 107 ms verify(8) pass).
+- `verify(1) − single_token = 1.65 ms`: the whole packed-verify apparatus
+  (hidden capture, batched argmax, scratch views) is nearly free, and at
+  n=1 it publishes no checkpoints at all.
+- Checkpoint effective bandwidth: 157 MB (48 layers × 2 tensors × 3.27 MB
+  gdn_state + gdn_conv) in ~1.5 ms = **~105 GB/s**, well under the ~400
+  GB/s blit ceiling — the blits are themselves encoder/latency-bound, not
+  bandwidth-bound (96 blit-encoder switches per set).
+
+### Interpretation
+
+- **Checkpoints are not the lever.** ~85–91% of the per-token marginal is
+  elsewhere: 48 sequential `gdn_tail` recurrence dispatches, 16 attention
+  decode calls, and 16 KV scatters per row. This retires the standing
+  hypothesis that per-token GDN state publication dominates packed verify
+  (first raised in the 2026-08-19 leverage map, already once falsified by
+  the interleaved microbench for *fixed* overhead).
+- Combined with the 2026-08-20 Q8 alpha/beta promotion (measured −1.9%),
+  two of the three cheap structural suspects are now priced and small.
+  The remaining term is the **48-layer sequential GDN recurrence**, which
+  is consistent with the marginal being roughly quant-independent
+  (Q4_K_M ~9.4-11 ms/token vs Q8_0 ~7.9 ms/token despite 1.7× the weight
+  bytes) — i.e. per-token latency, not weight traffic.
+- Corollary: the alpha/beta batching arm is dtype-gated to `Q8_0`
+  (`beta_proj`/`alpha_proj` dtype check). Q4_K_M carries F32 alpha/beta
+  projections and does not get the sidecar today; extending the gate is a
+  small (~2%, by analogy to the measured Q8 win) low-risk Q4 follow-up.
+
+### Decision
+
+Do not invest in checkpoint elimination/ring-buffering. Point the next
+verify packet at recurrence fusion, and treat the ~9.4 ms/token marginal
+as the ctx-independent ceiling term it is: at n=8 it is ~66 ms of every
+verify pass, worth more than any remaining mat-mul tuning.

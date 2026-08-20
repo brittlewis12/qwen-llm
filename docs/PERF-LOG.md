@@ -6,6 +6,31 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-20 — Serve DFlash Short-Prompt Capture Repair Correctness PASS
+
+Correctness-only validation of the repaired all-position target-hidden capture
+path passed on Qwen3.8-27B Q8_0 + DFlash2 Q8_0. Release 27B gates measured a
+24-token final-logit cosine of 1.0, minimum hidden cosine of 0.999998, exact
+GDN/KV state cosine of 1.0, and packed verify at 16/16 argmax agreement with
+minimum cosine 1.0. A live cold 19-token request (`max_output_tokens=16`, seed
+42, reasoning effort `none`) exercised `decode_path=dflash`; DFlash and serial
+both emitted exactly `orange` and EOS after two generated tokens. This validates
+the corrected short-prompt path for that cell only. It does not revive the
+retracted 25-token performance result or establish a broad speedup/equivalence
+claim.
+
+## 2026-08-20 — Serve Warm-8K TTFT Still Misses Gate After Serial-Tail Repair
+
+The original 4–16-token warm tail paid roughly 495 ms of fixed matrix-prefill
+setup. Routing tails up to 48 tokens through `single_token` removed that cost.
+The named turn-2 cell then measured 186 ms request-to-first-content-delta for an
+approximately 16-token uncached tail, versus the frozen `<150 ms` gate; exact
+final-logits hits measured 14–16 ms with no forward pass. The attempted repair
+is therefore a real improvement but a literal gate failure, not a conditional
+pass. Keep the measurement packet in
+`docs/bench/2026-08-18-serve-s1-gates/`; keep only the unimplemented small-tail
+optimization direction in `docs/PERF-ROADMAP.md`.
+
 ## 2026-08-20 — Break-Even Ctx Term Was Cross-Session Noise; Refit Within-Session
 
 ### Why

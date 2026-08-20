@@ -37,53 +37,80 @@ use qwen_llm::metal::MetalContext;
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use qwen_llm::tokenizer::Tokenizer;
 use std::io;
+use std::sync::Arc;
 use std::time::Instant;
 
-/// Bounded LRU of causal snapshots keyed by their exact token prefix.
-/// DS4 snapshots are self-describing and `Clone`, but large (tens to
-/// hundreds of MB), so the budget is entries rather than bytes here and is
-/// deliberately small; durable publication remains the cross-restart path.
-struct SnapshotCache {
-    entries: Vec<(Vec<u32>, DeepSeekV4CausalSnapshot)>,
-    capacity: usize,
+struct SnapshotCacheEntry<V> {
+    prefix: Vec<u32>,
+    value: Arc<V>,
+    bytes: u64,
 }
 
-impl SnapshotCache {
-    fn new(capacity: usize) -> Self {
+/// Byte-bounded LRU keyed by exact token prefixes. Values are shared on
+/// lookup so restoring a large snapshot does not clone its state arenas.
+struct SnapshotCache<V> {
+    entries: Vec<SnapshotCacheEntry<V>>,
+    indexed_bytes: u64,
+    max_bytes: u64,
+}
+
+impl<V> SnapshotCache<V> {
+    fn new(max_bytes: u64) -> Self {
         Self {
             entries: Vec::new(),
-            capacity,
+            indexed_bytes: 0,
+            max_bytes,
         }
     }
 
     /// Longest cached prefix of `tokens`, strictly shorter than the request
     /// (snapshots carry no observation, so at least one endpoint token must
     /// be prefilled to produce logits).
-    fn best_prefix(&mut self, tokens: &[u32]) -> Option<(usize, DeepSeekV4CausalSnapshot)> {
+    fn best_prefix(&mut self, tokens: &[u32]) -> Option<(usize, Arc<V>)> {
         let mut best: Option<usize> = None;
-        for (index, (prefix, _)) in self.entries.iter().enumerate() {
-            if prefix.len() < tokens.len()
-                && tokens.starts_with(prefix)
-                && best.is_none_or(|current| prefix.len() > self.entries[current].0.len())
+        for (index, entry) in self.entries.iter().enumerate() {
+            if entry.prefix.len() < tokens.len()
+                && tokens.starts_with(&entry.prefix)
+                && best
+                    .is_none_or(|current| entry.prefix.len() > self.entries[current].prefix.len())
             {
                 best = Some(index);
             }
         }
         let index = best?;
         let entry = self.entries.remove(index);
-        let restored = (entry.0.len(), entry.1.clone());
+        let restored = (entry.prefix.len(), Arc::clone(&entry.value));
         self.entries.push(entry); // most-recently-used
         Some(restored)
     }
 
-    fn insert(&mut self, tokens: Vec<u32>, snapshot: DeepSeekV4CausalSnapshot) {
-        if self.entries.iter().any(|(prefix, _)| prefix == &tokens) {
-            return;
+    fn entry_bytes(prefix_len: usize, value_bytes: u64) -> Option<u64> {
+        value_bytes.checked_add((prefix_len as u64).checked_mul(size_of::<u32>() as u64)?)
+    }
+
+    fn strict_eligibility(&self, tokens: &[u32], value_bytes: u64) -> Option<u64> {
+        if self.entries.iter().any(|entry| entry.prefix == tokens) {
+            return None;
         }
-        if self.entries.len() == self.capacity && !self.entries.is_empty() {
-            self.entries.remove(0);
+        let bytes = Self::entry_bytes(tokens.len(), value_bytes)?;
+        (bytes <= self.max_bytes).then_some(bytes)
+    }
+
+    fn insert_strict(&mut self, tokens: Vec<u32>, value: V, bytes: u64) -> bool {
+        if bytes > self.max_bytes || self.entries.iter().any(|entry| entry.prefix == tokens) {
+            return false;
         }
-        self.entries.push((tokens, snapshot));
+        while self.indexed_bytes.saturating_add(bytes) > self.max_bytes {
+            let evicted = self.entries.remove(0);
+            self.indexed_bytes = self.indexed_bytes.saturating_sub(evicted.bytes);
+        }
+        self.entries.push(SnapshotCacheEntry {
+            prefix: tokens,
+            value: Arc::new(value),
+            bytes,
+        });
+        self.indexed_bytes += bytes;
+        true
     }
 }
 
@@ -98,7 +125,7 @@ pub(crate) struct DeepSeekV4Backend {
     vocab_size: u32,
     default_max_tokens: usize,
     prefill_chunk_tokens: usize,
-    cache: SnapshotCache,
+    cache: SnapshotCache<DeepSeekV4CausalSnapshot>,
     /// Snapshots are scoped by a bound identity; capture and restore both
     /// hard-fail without one. Serve's cache is process-local and never
     /// published, so an ephemeral per-process id is the sanctioned binding
@@ -114,6 +141,7 @@ impl DeepSeekV4Backend {
         default_max_tokens: usize,
         forward_limit: usize,
         selector: crate::DeepSeekV4MultigroupSelectorArg,
+        snapshot_cache_max_bytes: u64,
     ) -> anyhow::Result<Self> {
         let tokenizer = Tokenizer::from_gguf(&gguf).context("initialize DeepSeek V4 tokenizer")?;
         let vocab_size = tokenizer.n_vocab();
@@ -168,7 +196,7 @@ impl DeepSeekV4Backend {
             vocab_size,
             default_max_tokens,
             prefill_chunk_tokens,
-            cache: SnapshotCache::new(4),
+            cache: SnapshotCache::new(snapshot_cache_max_bytes),
             model_content_id,
         })
     }
@@ -207,6 +235,17 @@ fn decoded_text_closed_reasoning(
     text.contains("</think>")
 }
 
+fn request_sampler(request: &ServeRequest) -> Result<Sampler, ServeError> {
+    Sampler::new(SamplingConfig {
+        temperature: request.temperature.unwrap_or(0.0),
+        top_k: request.top_k.unwrap_or(200),
+        top_p: request.top_p.unwrap_or(1.0),
+        min_p: request.min_p.unwrap_or(0.05),
+        seed: request.seed.unwrap_or(42),
+    })
+    .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))
+}
+
 impl GenerationBackend for DeepSeekV4Backend {
     fn model_id(&self) -> &str {
         &self.model_id
@@ -234,6 +273,9 @@ impl GenerationBackend for DeepSeekV4Backend {
             )
             .into());
         }
+        // Sampling validation precedes tokenization, admission, residency
+        // transfer, session allocation, and all model execution.
+        let sampler = request_sampler(request)?;
         let tokenize_t0 = Instant::now();
         let prompt_ids = self.encode(prompt)?;
         let tokenize_ms = tokenize_t0.elapsed().as_secs_f64() * 1e3;
@@ -268,10 +310,10 @@ impl GenerationBackend for DeepSeekV4Backend {
         })?;
         self.run_request(
             residency,
-            request,
             &prompt_ids,
             max_tokens,
             tokenize_ms,
+            sampler,
             sink,
         )
     }
@@ -282,22 +324,24 @@ impl DeepSeekV4Backend {
     fn run_request(
         &mut self,
         residency: DeepSeekV4MetalResidency,
-        request: &ServeRequest,
         prompt_ids: &[u32],
         max_tokens: usize,
         tokenize_ms: f64,
+        mut sampler: Sampler,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
         // Session per request over the long-lived residency; the slot is
         // restored on every exit path below.
         let session_t0 = Instant::now();
-        let mut session = match DeepSeekV4Session::new_with_model_content_id(
+        let mut session = match DeepSeekV4Session::new_with_model_content_id_recoverable(
             &self.ctx,
             residency,
             self.model_content_id,
         ) {
             Ok(session) => session,
-            Err(error) => {
+            Err(failure) => {
+                let (residency, error) = failure.into_parts();
+                self.residency = Some(residency);
                 return Err(ServeError::server_error(format!("create session: {error:#}")).into());
             }
         };
@@ -309,11 +353,11 @@ impl DeepSeekV4Backend {
 
         let result = self.decode_with_session(
             &mut session,
-            request,
             prompt_ids,
             max_tokens,
             tokenize_ms,
             session_ms,
+            &mut sampler,
             sink,
         );
         self.restore_residency(session);
@@ -339,11 +383,11 @@ impl DeepSeekV4Backend {
     fn decode_with_session(
         &mut self,
         session: &mut DeepSeekV4Session,
-        request: &ServeRequest,
         prompt_ids: &[u32],
         max_tokens: usize,
         tokenize_ms: f64,
         session_ms: f64,
+        sampler: &mut Sampler,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure> {
         // Warm restore from the serve-owned snapshot cache.
@@ -386,16 +430,14 @@ impl DeepSeekV4Backend {
 
         // Capture the prompt boundary for the next turn before decoding.
         let capture_t0 = Instant::now();
-        match session.capture_causal_snapshot() {
-            Ok(snapshot) => self.cache.insert(prompt_ids.to_vec(), snapshot),
-            Err(error) => {
-                // Loud: a capture failure means the warm path is dead, which
-                // is otherwise invisible (k3 R1.1).
-                tracing::error!(
-                    target: "qwen_diag",
-                    "serve: deepseek_v4 prompt capture FAILED (warm path disabled): {error}"
-                );
+        let prompt_snapshot_bytes = session.current_causal_snapshot_payload_bytes();
+        match prompt_snapshot_bytes {
+            Ok(payload_bytes) => {
+                self.capture_snapshot(session, prompt_ids, payload_bytes, "prompt")
             }
+            Err(error) => tracing::warn!(
+                "serve: deepseek_v4 prompt snapshot estimate failed; skipping cache capture: {error}"
+            ),
         }
         let capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
 
@@ -416,16 +458,6 @@ impl DeepSeekV4Backend {
                 |error| ServeError::server_error(format!("invalid stop token: {error}")),
             )?;
         }
-        let sampling = SamplingConfig {
-            temperature: request.temperature.unwrap_or(0.0),
-            top_k: request.top_k.unwrap_or(200),
-            top_p: request.top_p.unwrap_or(1.0),
-            min_p: request.min_p.unwrap_or(0.05),
-            seed: request.seed.unwrap_or(42),
-        };
-        let mut sampler = Sampler::new(sampling)
-            .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))?;
-
         let mut abort: Option<io::Error> = None;
         let mut assembler = Utf8Assembler::new();
         let tokenizer = &self.tokenizer;
@@ -437,7 +469,7 @@ impl DeepSeekV4Backend {
                 logits,
                 max_tokens,
                 &stop_tokens,
-                &mut sampler,
+                sampler,
                 |token| {
                     let bytes = tokenizer
                         .try_decode_piece_bytes_exact(token)
@@ -470,6 +502,10 @@ impl DeepSeekV4Backend {
                 });
             }
         };
+        let tail = assembler.finish();
+        if !tail.is_empty() {
+            sink.piece(&tail).map_err(BackendFailure::Aborted)?;
+        }
 
         // Completed-turn capture: the next turn's history extends this exact
         // token prefix (render_ds4 preserves reasoning verbatim for that
@@ -490,11 +526,13 @@ impl DeepSeekV4Backend {
                     }
                 }
             }
-            match session.capture_causal_snapshot() {
-                Ok(snapshot) => self.cache.insert(consumed, snapshot),
-                Err(error) => {
-                    tracing::warn!("serve: deepseek_v4 completed capture failed: {error}")
+            match session.current_causal_snapshot_payload_bytes() {
+                Ok(payload_bytes) => {
+                    self.capture_snapshot(session, &consumed, payload_bytes, "completed")
                 }
+                Err(error) => tracing::warn!(
+                    "serve: deepseek_v4 completed snapshot estimate failed; skipping cache capture: {error}"
+                ),
             }
         }
 
@@ -537,15 +575,54 @@ impl DeepSeekV4Backend {
             }),
         })
     }
+
+    fn capture_snapshot(
+        &mut self,
+        session: &DeepSeekV4Session,
+        tokens: &[u32],
+        payload_bytes: u64,
+        boundary: &'static str,
+    ) {
+        let Some(entry_bytes) = self.cache.strict_eligibility(tokens, payload_bytes) else {
+            tracing::warn!(
+                "serve: deepseek_v4 {boundary} snapshot denied by cache budget; payload_bytes={payload_bytes} cache_bytes={} cache_budget_bytes={}",
+                self.cache.indexed_bytes,
+                self.cache.max_bytes,
+            );
+            return;
+        };
+        let signals = self.ctx.memory_signals();
+        if let Err(reason) = super::snapshot_capture_admission(entry_bytes, signals) {
+            tracing::warn!(
+                "serve: deepseek_v4 {boundary} snapshot denied by memory headroom; reason={reason:?} payload_bytes={payload_bytes} metal_current_bytes={} metal_recommended_bytes={} process_remaining_bytes={:?}",
+                signals.current_allocated_bytes,
+                signals.recommended_max_bytes,
+                signals.process_limit_remaining_bytes,
+            );
+            return;
+        }
+        match session.capture_causal_snapshot() {
+            Ok(snapshot) => {
+                debug_assert_eq!(snapshot.payload_bytes(), payload_bytes);
+                if !self
+                    .cache
+                    .insert_strict(tokens.to_vec(), snapshot, entry_bytes)
+                {
+                    tracing::warn!(
+                        "serve: deepseek_v4 {boundary} snapshot rejected at strict cache insertion; request continues"
+                    );
+                }
+            }
+            Err(error) => tracing::warn!(
+                "serve: deepseek_v4 {boundary} snapshot capture failed; request continues: {error}"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn snapshot_stub() -> Option<DeepSeekV4CausalSnapshot> {
-        None // constructing a real snapshot needs a resident model
-    }
 
     #[test]
     fn ephemeral_identity_fills_exactly_32_bytes() {
@@ -561,13 +638,57 @@ mod tests {
 
     #[test]
     fn snapshot_cache_prefers_longest_strict_prefix() {
-        // Cache mechanics are model-free; exercised with the real type only
-        // when a model is resident, so assert the selection arithmetic on
-        // the key layout instead.
-        assert!(snapshot_stub().is_none());
-        let mut cache = SnapshotCache::new(2);
-        assert!(cache.best_prefix(&[1, 2, 3]).is_none());
-        assert_eq!(cache.entries.len(), 0);
-        assert_eq!(cache.capacity, 2);
+        let mut cache = SnapshotCache::new(1024);
+        let bytes = cache.strict_eligibility(&[1], 5).unwrap();
+        assert!(cache.insert_strict(vec![1], "short", bytes));
+        let bytes = cache.strict_eligibility(&[1, 2], 4).unwrap();
+        assert!(cache.insert_strict(vec![1, 2], "long", bytes));
+        let (prefix_len, value) = cache.best_prefix(&[1, 2, 3]).unwrap();
+        assert_eq!(prefix_len, 2);
+        assert_eq!(*value, "long");
+        assert!(cache.best_prefix(&[1, 2]).is_some_and(|hit| hit.0 == 1));
+    }
+
+    #[test]
+    fn snapshot_cache_accounts_bytes_and_evicts_lru() {
+        let mut cache = SnapshotCache::new(20);
+        let bytes = cache.strict_eligibility(&[1], 6).unwrap();
+        assert!(cache.insert_strict(vec![1], "first", bytes)); // 10 bytes with key
+        let bytes = cache.strict_eligibility(&[2], 6).unwrap();
+        assert!(cache.insert_strict(vec![2], "second", bytes));
+        assert_eq!(cache.indexed_bytes, 20);
+        assert!(cache.best_prefix(&[1, 9]).is_some()); // first is now MRU
+        let bytes = cache.strict_eligibility(&[3], 6).unwrap();
+        assert!(cache.insert_strict(vec![3], "third", bytes));
+        assert_eq!(cache.indexed_bytes, 20);
+        assert!(cache.best_prefix(&[2, 9]).is_none());
+        assert!(cache.best_prefix(&[1, 9]).is_some());
+        assert!(cache.strict_eligibility(&[4], 17).is_none());
+        assert_eq!(cache.indexed_bytes, 20);
+    }
+
+    #[test]
+    fn snapshot_cache_eligibility_does_not_evict() {
+        let mut cache = SnapshotCache::new(20);
+        let bytes = cache.strict_eligibility(&[1], 6).unwrap();
+        assert!(cache.insert_strict(vec![1], "first", bytes));
+        let bytes = cache.strict_eligibility(&[2], 6).unwrap();
+        assert!(cache.insert_strict(vec![2], "second", bytes));
+
+        assert!(cache.strict_eligibility(&[3], 6).is_some());
+        assert!(cache.strict_eligibility(&[4], 17).is_none());
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.indexed_bytes, 20);
+        assert!(cache.best_prefix(&[1, 9]).is_some());
+        assert!(cache.best_prefix(&[2, 9]).is_some());
+    }
+
+    #[test]
+    fn invalid_sampling_is_rejected_before_model_work() {
+        let request = ServeRequest {
+            min_p: Some(f32::NAN),
+            ..ServeRequest::default()
+        };
+        assert!(request_sampler(&request).is_err());
     }
 }

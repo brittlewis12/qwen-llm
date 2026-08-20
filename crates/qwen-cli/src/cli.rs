@@ -24,22 +24,28 @@ pub(crate) struct ServeArgs {
     #[arg(short = 'm', long)]
     model: PathBuf,
 
-    /// Listen address (loopback recommended; there is no auth).
+    /// Loopback listen address (required; there is no auth).
     #[arg(long, default_value = "127.0.0.1:8737")]
     addr: String,
 
     /// Default max_output_tokens when a request omits it.
-    #[arg(long = "max-tokens", default_value_t = 65_536)]
+    #[arg(long = "max-tokens", default_value_t = 65_536, value_parser = parse_positive_usize)]
     max_tokens: usize,
 
-    /// Fixed sequence capacity; default sizes per request (prompt + generation + slack).
-    #[arg(long)]
+    /// Fixed sequence capacity; omitted caps at 262144 and sizes each request to need.
+    #[arg(long, value_parser = parse_positive_usize)]
     max_context_tokens: Option<usize>,
+
+    /// RAM snapshot-cache budget in MiB.
+    #[arg(long, default_value_t = crate::serve::DEFAULT_SNAPSHOT_CACHE_MIB)]
+    snapshot_cache_mib: u64,
 
     /// DFlash drafter GGUF for speculative decode (greedy requests only).
     ///
-    /// Output is identical to non-speculative decoding. Speculation needs
-    /// captured target hidden states for every context position, which
+    /// Speculation is target-authoritative greedy accept-prefix. The corrected
+    /// all-position capture path is live-gated on a short cold Qwen3.8 request;
+    /// this is not a blanket performance or output-equivalence claim.
+    /// Speculation needs captured target hidden states for every context position, which
     /// restored checkpoints do not carry, so a request speculates only
     /// when it cold-prefills its whole prompt; restored requests decode
     /// serially. The per-request `serve phases:` line reports which path
@@ -50,6 +56,16 @@ pub(crate) struct ServeArgs {
     /// Append request and streamed SSE events as JSONL for wire debugging.
     #[arg(long, value_name = "PATH")]
     trace_sse: Option<PathBuf>,
+}
+
+fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid positive integer {value:?}: {error}"))?;
+    if parsed == 0 {
+        return Err("value must be at least 1".into());
+    }
+    Ok(parsed)
 }
 
 #[derive(Debug)]
@@ -65,6 +81,7 @@ pub(crate) struct ServeInvocation {
     pub(crate) addr: String,
     pub(crate) max_tokens: usize,
     pub(crate) max_context_tokens: Option<usize>,
+    pub(crate) snapshot_cache_mib: u64,
     pub(crate) drafter: Option<PathBuf>,
     pub(crate) trace_sse: Option<PathBuf>,
 }
@@ -306,6 +323,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
             addr: serve.addr,
             max_tokens: serve.max_tokens,
             max_context_tokens: serve.max_context_tokens,
+            snapshot_cache_mib: serve.snapshot_cache_mib,
             drafter: serve.drafter,
             trace_sse: serve.trace_sse,
         }),
@@ -363,6 +381,15 @@ mod tests {
         let invocation = normalize(&mut args);
         invocation.apply_option_overrides(&mut args);
         (args, invocation)
+    }
+
+    #[test]
+    fn serve_rejects_zero_generation_and_context_limits() {
+        for option in ["--max-tokens", "--max-context-tokens"] {
+            assert!(
+                Args::try_parse_from(["qwen", "serve", "-m", "model.gguf", option, "0"]).is_err()
+            );
+        }
     }
 
     #[test]

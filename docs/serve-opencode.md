@@ -8,13 +8,16 @@ provider — no first-party provider package, no OpenAI-compatible shim.
 
 ```sh
 qwen serve -m ~/models/Qwen3.6-35B-A3B-UD-Q4_K_S.gguf \
-  --addr 127.0.0.1:8737 --max-tokens 4096
+  --addr 127.0.0.1:8737 --max-tokens 4096 --snapshot-cache-mib 4096
 ```
 
 Notes:
 
 - The model stays resident; the first request pays first-touch paging,
   later turns restore from checkpoints (~4 ms in the S2 agent gate).
+- Serve enforces loopback binding and one request in flight. A concurrent
+  connection now receives fail-fast `503` plus `Retry-After: 1`; OpenCode may
+  retry instead of waiting silently behind another session.
 - Serve holds the engine's Metal process lease, so `qwen-bench` runs and
   serve are mutually exclusive tenants. Use `QWEN_METAL_LEASE_WAIT=1` to
   queue politely behind a running bench.
@@ -63,16 +66,29 @@ loops through the stock provider, reasoning items round-tripping
 verbatim, `store:false` throughout, and 10/10 requests hitting
 checkpoints with 94–100 % of each prompt restored.
 
+Production evidence is separate from that provider gate: real OpenCode session
+`ses_fe307ea3effefOzYcDBgTbYiie` ran successfully for five hours overnight on
+2026-08-20 (58 requests, reaching 133k prompt tokens). This proves sustained use
+for that session, not every model-family or deferred live gate.
+
 Current limits worth knowing:
 
-- One request in flight (serial). opencode serializes per session, so
-  this is normally invisible; a second concurrent session waits.
-- Reasoning is plain `content` in S1/S2; `encrypted_content` opaque
-  round-trip is S3.
-- `tool_choice` supports `"auto"` and `allowed_tools` narrowing;
-  `required` / `none` / forced-function are not implemented.
+- One request runs at a time. A second concurrent OpenCode session receives
+  `503` and must retry.
+- Reasoning round-trips as plain `content`; `encrypted_content` is not
+  implemented or advertised.
+- `tool_choice` supports `"auto"` and exact `allowed_tools` narrowing with
+  mode `"auto"` only. Names must be declared; `strict:true`, `required`,
+  `none`, and forced-function choices are unsupported.
 - No image input, no `/responses/compact`, no WebSocket transport.
-- Qwen3.5/3.6-family models only; DeepSeek V4 serve support is S3.
+- Validated Qwen3.8 27B identities support text, `none|low|medium|xhigh`
+  reasoning effort, no-thinking, and Qwen tool rendering. This is not a vision
+  surface; unvalidated identities fail family-specific controls closed.
+- DeepSeek V4 requires an explicit startup `--max-context-tokens`, supports
+  chat plus `none|low|high|max` reasoning effort, and preserves reasoning
+  history for non-`none` thinking tiers. It does not support tools,
+  `x_qwen.no_thinking`, or DFlash. Its core
+  S3 cells 1–5 passed; live cells 6–9 still require rerun.
 
 ## 4. Checking checkpoint reuse
 

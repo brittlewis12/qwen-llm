@@ -1,12 +1,13 @@
 # S1 gate execution record
 
-Status: in progress, 2026-08-18. Binary: `serve/s1` @ 9f79dac (release).
+Status: executed with two literal gate deviations, 2026-08-18. Binary:
+`serve/s1` @ 9f79dac (release).
 Host: Apple M4 Max. Contract: docs/SERVE.md. Client artifact:
 `~/code/llm/game/play_serve.py` (thin serve client sharing play.py's save
 format); `play.py` repaired in passing (`RUST_LOG=warn,qwen_diag=info` —
 the 1ecf208 tracing migration had silently broken its stop_reason gate).
 
-## Gate 1 — thin client, byte-identical saves: PASS (one finding, one letter-miss)
+## Gate 1 — thin client: functional PASS, line-count criterion FAIL
 
 Scripted 5-turn session, The Current ring0 v0.2 (~7.3k-token system),
 Qwen3.6-35B-A3B-UD-Q4_K_S, temp 0, seed 42, preserve-thinking,
@@ -32,7 +33,7 @@ Qwen3.6-35B-A3B-UD-Q4_K_S, temp 0, seed 42, preserve-thinking,
   management and zero stderr scraping. Deviation recorded rather than
   gamed; a follow-up trim decides whether the number or the file wins.
 
-## Gate 2 — warm turn-2 TTFT <150 ms @8k (A3B): 186 ms after serial-tail fix
+## Gate 2 — warm turn-2 TTFT <150 ms @8k (A3B): FAIL, 186 ms
 
 Phase instrumentation on the resident server decomposed the original
 583–683 ms: tokenize 2.2 ms, alloc 0.7 ms, restore 11 ms,
@@ -44,9 +45,11 @@ content delta): **186 ms** for a ~16-token tail; identical-request
 exact hits serve in **14–16 ms** with zero forward passes
 (final-logits reuse). The residual over the 150 ms letter is one
 engine-scope term — small-span prefill fixed cost / serial token rate
-— linear in user-turn length at ~10 ms/token. Recorded as
-CONDITIONAL PASS: <150 ms holds for tails ≤12 tokens; the fixed target
-needs a small-span prefill kernel (engine work, out of S1 scope).
+— linear in user-turn length at ~10 ms/token. The literal gate fails at 186 ms.
+The observed `~10 ms/token` slope estimates
+that tails up to 12 tokens may fit below 150 ms, but that cell was not measured
+and is not a conditional pass. The unimplemented small-span prefill-kernel
+candidate is tracked in `docs/PERF-ROADMAP.md`, not as shipped serve behavior.
 
 ### Original measurement (pre-fix, retained)
 
@@ -120,10 +123,21 @@ Formal cell: client socket closed after the first content delta of a
 512-token generation; the abort surfaced server-side (`connection
 aborted` logged), and the immediately following request's
 `response.created` arrived **24 ms** after its own start. Known
-limitation stands (TERM while parked in `accept()` unwinds on the next
-connection).
+limitation in the historical gate binary: TERM while parked in blocking
+`accept()` unwound on the next connection. Current serve instead uses a
+nonblocking, polled acceptor and joins it during shutdown.
 
 ## Gate 7 — no regression: PASS (bin suite 219 green, clippy clean)
+
+## Overall disposition
+
+The functional evidence is useful, but S1 is not a literal seven-of-seven gate
+pass: gate 1 missed the frozen line-count criterion (187 versus `<150`) and gate
+2 failed at 186 ms. The 24 ms cancellation result is evidence for its
+specific streaming mid-decode cell, not a universal `<250 ms` contract;
+streaming cancellation is SSE-write/prefill-chunk bounded (UTF-8 and response
+partitioning may buffer token boundaries), while non-stream graceful
+disconnect detection before the first response write is inherently best-effort.
 
 ## Operational finding (unnumbered): GPU lease contention
 

@@ -54,6 +54,18 @@ pub(crate) fn preopens_reasoning(request: &ServeRequest) -> Result<bool, ServeEr
 pub(crate) fn render_deepseek_v4_serve_prompt(
     request: &ServeRequest,
 ) -> Result<String, ServeError> {
+    if request.no_thinking {
+        return Err(ServeError::invalid_request(
+            Some("x_qwen.no_thinking"),
+            "DeepSeek V4 uses reasoning.effort; x_qwen.no_thinking is unsupported",
+        ));
+    }
+    if request.strip_history_thinking {
+        return Err(ServeError::invalid_request(
+            Some("x_qwen.history_thinking"),
+            "DeepSeek V4 serve preserves reasoning history; strip is unsupported",
+        ));
+    }
     let options = encode_options(request)?;
     if !request.tools.is_empty() {
         // Fail closed rather than dropping definitions the model never sees
@@ -197,5 +209,13 @@ mod tests {
         ]}));
         let error = render_deepseek_v4_serve_prompt(&tools).unwrap_err();
         assert!(error.message.contains("does not support tool"));
+
+        for x_qwen in [
+            json!({"no_thinking": true}),
+            json!({"history_thinking": "strip"}),
+        ] {
+            let unsupported = request(json!({"model":"ds", "input":"hi", "x_qwen":x_qwen}));
+            assert!(render_deepseek_v4_serve_prompt(&unsupported).is_err());
+        }
     }
 }

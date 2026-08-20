@@ -58,7 +58,14 @@ provider with no serve-side special-casing.
 
 ## Status
 
-S2 units 0–5 complete and gated. Remaining before S2 close: `allowed_tools`
-(k3's cache-preserving tool narrowing), and an opencode-config smoke
-against the fork (the provider path is proven; the remaining question is
-config wiring, not protocol).
+The recorded provider gate passed. Since this capture, `allowed_tools` has
+landed: mode is `auto` only, names must be a unique subset of declared function
+tools, and the resulting set is the exact executable set without changing the
+rendered tool block. `strict:true` remains unsupported. Replayed call batches
+also enforce complete, unique `call_id` linkage to their outputs.
+
+Production evidence is now available separately: real OpenCode session
+`ses_fe307ea3effefOzYcDBgTbYiie` ran successfully for five hours overnight on
+2026-08-20 (58 requests, reaching 133k prompt tokens). That demonstrates the
+stock-provider configuration under sustained real use; it does not retroactively
+turn S1's line-count/TTFT deviations or S3's deferred cells into passes.

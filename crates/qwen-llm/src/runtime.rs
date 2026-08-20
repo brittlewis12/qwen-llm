@@ -1029,6 +1029,23 @@ pub struct PrefixCacheRestore {
     pub stats_at_lookup: PrefixCacheStats,
 }
 
+pub struct PreparedPrefixCacheLookup {
+    checkpoint: PreparedCheckpoint,
+    matched_prefix_len: usize,
+    restored_prefix_len: usize,
+    exact: bool,
+    has_exact_final_logits: bool,
+    stats_at_lookup: PrefixCacheStats,
+}
+
+impl PreparedPrefixCacheLookup {
+    pub fn is_exact_with_final_logits(&self) -> bool {
+        self.exact
+            && self.restored_prefix_len == self.matched_prefix_len
+            && self.has_exact_final_logits
+    }
+}
+
 /// An immutable CPU snapshot which may retain hundreds of MiB until dropped.
 /// RAM insertion shares its arenas; it does not transfer their ownership.
 pub struct PreparedCheckpoint {
@@ -1376,12 +1393,25 @@ impl LoadedModel {
 
     pub fn snapshot_identity(&self, sequence: &Sequence) -> Result<SnapshotIdentity, RuntimeError> {
         self.ensure_owns(sequence)?;
+        Ok(self.snapshot_identity_for_abi(sequence.snapshot_abi()))
+    }
+
+    fn snapshot_identity_for_abi(&self, abi: SnapshotAbi) -> SnapshotIdentity {
         let &(model_id, tokenizer_id) = self.identity_parts.get_or_init(|| {
             snapshot_identity_parts(&self.gguf, self.metal_model.arch, &self.identity_shards)
         });
-        Ok(sequence
-            .metal_session()
-            .snapshot_identity(model_id, tokenizer_id))
+        SnapshotIdentity {
+            model_id,
+            tokenizer_id,
+            layout_version: abi.layout_version,
+            n_attn_layers: abi.n_attn_layers,
+            n_gdn_layers: abi.n_gdn_layers,
+            kv_dim_elements: abi.kv_dim_elements,
+            kv_bytes_per_token: abi.kv_bytes_per_token,
+            kv_storage_kind: abi.kv_storage_kind,
+            gdn_state_elements_per_layer: abi.gdn_state_elements_per_layer,
+            gdn_conv_elements_per_layer: abi.gdn_conv_elements_per_layer,
+        }
     }
 
     /// Resolve the strong durable-checkpoint identity lazily. A cache hit only
@@ -1418,6 +1448,11 @@ impl LoadedModel {
         let mut cache = self.prefix_cache.lock();
         cache.clear();
         cache.stats()
+    }
+
+    /// Check strict cache-budget eligibility without evicting any entry.
+    pub fn prefix_cache_strict_eligible(&self, snapshot_bytes: u64) -> bool {
+        self.prefix_cache.lock().eligible_strict(snapshot_bytes)
     }
 
     pub fn cache_sequence_prefix(
@@ -1545,6 +1580,24 @@ impl LoadedModel {
             snapshot_bytes,
             stats: cache.stats(),
         })
+    }
+
+    /// Strict byte-bounded insertion for long-running services. This never
+    /// retains an oversized snapshot alone.
+    pub fn cache_prepared_checkpoint_strict(
+        &self,
+        prepared: &PreparedCheckpoint,
+    ) -> Result<Option<PrefixCacheInsert>, RuntimeError> {
+        ensure_same_model_owner(&self.owner, &prepared.owner)?;
+        let snapshot_bytes = prepared.snapshot.n_bytes();
+        let mut cache = self.prefix_cache.lock();
+        if !cache.insert_shared_strict(Arc::clone(&prepared.snapshot)) {
+            return Ok(None);
+        }
+        Ok(Some(PrefixCacheInsert {
+            snapshot_bytes,
+            stats: cache.stats(),
+        }))
     }
 
     /// Restore one already captured causal boundary directly into a fresh
@@ -1711,35 +1764,65 @@ impl LoadedModel {
         sequence: &mut Sequence,
         request_tokens: &[i32],
     ) -> Result<Option<PrefixCacheRestore>, RuntimeError> {
-        self.ensure_owns(sequence)?;
-        sequence.check_position(0)?;
-        sequence.ensure_can_append(request_tokens.len())?;
-        let identity = self.snapshot_identity(sequence)?;
+        let Some(lookup) = self.lookup_cached_prefix(request_tokens) else {
+            return Ok(None);
+        };
+        Ok(Some(self.restore_prepared_cached_prefix(
+            lookup,
+            sequence,
+            request_tokens,
+        )?))
+    }
+
+    /// Resolve and retain the best in-process prefix before allocating a
+    /// destination sequence. Long-running services use this to avoid charging
+    /// exact-final-logits hits for prefill scratch they will never allocate.
+    pub fn lookup_cached_prefix(
+        &self,
+        request_tokens: &[i32],
+    ) -> Option<PreparedPrefixCacheLookup> {
+        let identity = self.snapshot_identity_for_abi(self.metal_model.snapshot_abi());
         let (hit, stats) = {
-            let mut cache = self.prefix_cache.lock();
-            let Some(hit) = cache.lookup_longest_for_completion(&identity, request_tokens) else {
-                return Ok(None);
-            };
+            let cache = self.prefix_cache.lock();
+            let hit = cache.peek_longest_for_completion(&identity, request_tokens)?;
             (hit, cache.stats())
         };
-        hit.snapshot.validate_for_restore(
-            &identity,
-            sequence.max_context_tokens(),
-            Some(self.metal_model.arch.vocab_size as usize),
-        )?;
-        sequence.restore_from_snapshot(&hit.snapshot, &identity)?;
-        let exact_final_logits = if hit.exact && hit.restored_prefix_len == hit.matched_prefix_len {
-            hit.snapshot.final_logits.clone()
-        } else {
-            None
-        };
-        Ok(Some(PrefixCacheRestore {
+        let has_exact_final_logits = hit.snapshot.final_logits.is_some();
+        Some(PreparedPrefixCacheLookup {
+            checkpoint: PreparedCheckpoint {
+                owner: Arc::clone(&self.owner),
+                snapshot: hit.snapshot,
+                max_context_tokens: request_tokens.len().max(1),
+            },
             matched_prefix_len: hit.matched_prefix_len,
             restored_prefix_len: hit.restored_prefix_len,
             exact: hit.exact,
-            exact_final_logits,
+            has_exact_final_logits,
             stats_at_lookup: stats,
-        }))
+        })
+    }
+
+    pub fn restore_prepared_cached_prefix(
+        &self,
+        lookup: PreparedPrefixCacheLookup,
+        sequence: &mut Sequence,
+        request_tokens: &[i32],
+    ) -> Result<PrefixCacheRestore, RuntimeError> {
+        let restored =
+            self.restore_prepared_checkpoint(&lookup.checkpoint, sequence, request_tokens)?;
+        self.prefix_cache
+            .lock()
+            .touch_shared(&lookup.checkpoint.snapshot);
+        debug_assert_eq!(restored.matched_prefix_len, lookup.matched_prefix_len);
+        debug_assert_eq!(restored.restored_prefix_len, lookup.restored_prefix_len);
+        debug_assert_eq!(restored.exact, lookup.exact);
+        Ok(PrefixCacheRestore {
+            matched_prefix_len: restored.matched_prefix_len,
+            restored_prefix_len: restored.restored_prefix_len,
+            exact: restored.exact,
+            exact_final_logits: restored.exact_final_logits,
+            stats_at_lookup: lookup.stats_at_lookup,
+        })
     }
 }
 

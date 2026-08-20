@@ -154,6 +154,9 @@ fn render_tools_system_block(tools: &[ToolDefinition], system: Option<&str>, out
         if !tool.parameters.is_null() {
             entry.insert("parameters".into(), tool.parameters.clone());
         }
+        if let Some(strict) = tool.strict {
+            entry.insert("strict".into(), serde_json::json!(strict));
+        }
         output.push_str(
             &serde_json::to_string(&serde_json::Value::Object(entry))
                 .expect("serialize tool definition"),
@@ -226,7 +229,7 @@ pub(crate) fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
                         .map(|call| ParsedCall {
                             name: call.name.clone(),
                             arguments: serde_json::from_str(&call.arguments)
-                                .unwrap_or_else(|_| serde_json::Map::new()),
+                                .expect("validated function_call arguments object"),
                         })
                         .collect();
                     render_calls(visible, &parsed)
@@ -234,7 +237,8 @@ pub(crate) fn render_qwen_serve_prompt(request: &ServeRequest) -> String {
                 render_assistant_body(
                     reasoning.as_deref(),
                     &body,
-                    request.no_thinking,
+                    request.no_thinking
+                        || matches!(qwen38_mode, Some(Qwen38GenerationMode::NoThinking)),
                     request.strip_history_thinking,
                     &mut output,
                 );
@@ -478,6 +482,49 @@ mod tests {
                 "<|im_start|>assistant\n",
             ),
         );
+    }
+
+    #[test]
+    fn qwen38_no_thinking_tool_replay_preserves_preclosed_block() {
+        for extension in [
+            json!({"reasoning": {"effort": "none"}}),
+            json!({"x_qwen": {"no_thinking": true}}),
+        ] {
+            let mut body = json!({
+                "model": "m",
+                "tools": [{"type": "function", "name": "ping",
+                           "parameters": {"type": "object"}}],
+                "input": [
+                    {"role": "user", "content": "Ping."},
+                    {"type": "function_call", "call_id": "c1", "name": "ping",
+                     "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "c1", "output": "pong"},
+                ],
+            });
+            for (key, value) in extension.as_object().unwrap() {
+                body[key] = value.clone();
+            }
+            let mut request = parse_request(&body).expect("no-thinking tool replay parses");
+            request.template = QwenTemplate::Qwen38;
+            let rendered = render_qwen_serve_prompt(&request);
+            let tail = rendered
+                .split_once("<|im_start|>user\nPing.")
+                .expect("user turn")
+                .1;
+            assert_eq!(
+                tail,
+                concat!(
+                    "<|im_end|>\n",
+                    "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                    "<tool_call>\n<function=ping>\n</function>\n</tool_call>",
+                    "<|im_end|>\n",
+                    "<|im_start|>user\n<tool_response>\npong\n</tool_response>",
+                    "<|im_end|>\n",
+                    "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                ),
+                "effective Qwen3.8 no-thinking mode lost replay identity"
+            );
+        }
     }
 
     /// Anti-drift: serve's renderer must agree byte-for-byte with the CLI

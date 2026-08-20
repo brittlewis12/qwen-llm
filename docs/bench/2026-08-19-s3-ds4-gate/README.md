@@ -17,9 +17,24 @@ would catch every critical finding the review had just made.
 | 4 | Headless partition | reasoning item separate; no `</think>` in visible text | **PASS** — `['reasoning','message']`, both `completed`, no leakage |
 | 5 | Fail-closed | tools / effort=medium / over-budget / store:true rejected, residency healthy after | **PASS** — all four rejected with correct `param`; server served normally afterwards |
 
-Cells 6–9 (LRU eviction, cancellation/heartbeat timing, TTFT at 8k,
-memory envelope) are deferred; they are the conditional-pass class and
-need dedicated runs.
+Cells 6–9 (LRU eviction, cancellation/heartbeat timing, TTFT at 8k, and
+memory envelope) did not run. They still require fresh live execution and must
+not be reported as passes.
+
+## Current implementation after this packet
+
+The post-packet serve implementation changes the surfaces covered by those live
+cells: DS4 snapshots now use a configurable byte-bounded LRU
+(`--snapshot-cache-mib`, default 4096 MiB), and boundary capture is admitted
+against cache budget plus Metal/process headroom. Capture is best-effort: denial
+or failure is logged while the request continues. Session construction is
+recoverable and returns residency on failure. Busy connections fail fast with
+`503` and `Retry-After: 1`; streaming cancellation is SSE-write/prefill-chunk
+bounded, with an immediate heartbeat followed by heartbeats only between chunks.
+
+These are implemented properties, not evidence from the 2026-08-19 binary.
+Cells 6–9 must be rerun against the current implementation to validate eviction,
+heartbeat/cancellation timing, 8k TTFT, memory admission, and residency recovery.
 
 ## What each cell proved about the review findings
 

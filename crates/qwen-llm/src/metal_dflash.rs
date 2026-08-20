@@ -2475,6 +2475,114 @@ pub struct MetalDFlashSession {
     pub phase_timings: Vec<(String, f64)>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DFlashSessionGeometry {
+    n: u64,
+    n_target_features: u64,
+    cc: u64,
+    ctx_h_elems: u64,
+    kv_ctx_elems: u64,
+    x_elems: u64,
+    q_elems: u64,
+    kv_noise_elems: u64,
+    logits_elems: u64,
+    full_ctx_tokens: u64,
+    kv_full_elems: u64,
+    ffn_elems: u64,
+}
+
+impl DFlashSessionGeometry {
+    fn new(
+        cfg: &crate::loader::DFlashConfig,
+        k_layers: usize,
+        target_h: u64,
+        vocab: u64,
+        ctx_capacity: usize,
+    ) -> Result<Self, DFlashError> {
+        let n = cfg.block_size as u64;
+        let h = cfg.hidden_size as u64;
+        let q_dim = checked_u64_mul(
+            cfg.n_q_heads as u64,
+            cfg.head_dim as u64,
+            "dflash q_dim overflow",
+        )?;
+        let kv_dim = checked_u64_mul(
+            cfg.n_kv_heads as u64,
+            cfg.head_dim as u64,
+            "dflash kv_dim overflow",
+        )?;
+        let n_target_features = checked_u64_mul(
+            k_layers as u64,
+            target_h,
+            "dflash n_target_features overflow",
+        )?;
+        let cc = ctx_capacity as u64;
+        let ctx_h_elems = checked_u64_mul(h, cc, "dflash ctx_h size overflow")?;
+        let kv_ctx_elems = checked_u64_mul(cc, kv_dim, "dflash kv ctx cache size overflow")?;
+        let x_elems = checked_u64_mul(n, h, "dflash x size overflow")?;
+        let q_elems = checked_u64_mul(n, q_dim, "dflash q size overflow")?;
+        let kv_noise_elems = checked_u64_mul(n, kv_dim, "dflash kv noise size overflow")?;
+        let logits_elems = checked_u64_mul(n, vocab, "dflash logits size overflow")?;
+        let full_ctx_tokens = checked_u64_add(cc, n, "dflash cc + n overflow")?;
+        let kv_full_elems =
+            checked_u64_mul(full_ctx_tokens, kv_dim, "dflash full kv size overflow")?;
+        let ffn_elems = checked_u64_mul(
+            n,
+            cfg.intermediate_size as u64,
+            "dflash ffn scratch size overflow",
+        )?;
+        Ok(Self {
+            n,
+            n_target_features,
+            cc,
+            ctx_h_elems,
+            kv_ctx_elems,
+            x_elems,
+            q_elems,
+            kv_noise_elems,
+            logits_elems,
+            full_ctx_tokens,
+            kv_full_elems,
+            ffn_elems,
+        })
+    }
+
+    fn context_allocation_elements(&self, drafter_layers: u32) -> Result<Vec<u64>, DFlashError> {
+        let target_ctx = checked_u64_mul(
+            self.n_target_features,
+            self.cc,
+            "dflash target context size overflow",
+        )?;
+        let mut elements = vec![target_ctx, self.cc, self.ctx_h_elems];
+        for _ in 0..drafter_layers {
+            elements.push(self.kv_ctx_elems);
+            elements.push(self.kv_ctx_elems);
+        }
+        elements.extend([
+            self.kv_ctx_elems,
+            self.kv_ctx_elems,
+            self.kv_full_elems,
+            self.kv_full_elems,
+            self.full_ctx_tokens,
+        ]);
+        Ok(elements)
+    }
+
+    #[cfg(test)]
+    fn context_logical_bytes(&self, drafter_layers: u32) -> Result<u64, DFlashError> {
+        self.context_allocation_elements(drafter_layers)?
+            .into_iter()
+            .try_fold(0u64, |total, elements| {
+                let bytes = checked_u64_mul(elements, 4, "dflash context byte size overflow")?;
+                Ok(checked_u64_add(
+                    total,
+                    bytes,
+                    "dflash context byte total overflow",
+                )?)
+            })
+    }
+}
+
 struct DFlashPhase3SplitRecord {
     name: &'static str,
     start_sample: usize,
@@ -2565,6 +2673,107 @@ impl DFlashPhase3SplitRecorder {
 }
 
 impl MetalDFlashSession {
+    /// Priced bytes for every session allocation that grows with context
+    /// capacity. Fixed block/verify/layer scratch is intentionally excluded so
+    /// callers can cover it with a separate reserve.
+    pub fn context_capacity_priced_bytes(
+        ctx: &MetalContext,
+        head: &MetalDFlashHead,
+        target_h: u64,
+        ctx_capacity: usize,
+    ) -> Result<u64, DFlashError> {
+        let geometry = DFlashSessionGeometry::new(
+            &head.config,
+            head.target_layer_ids.len(),
+            target_h,
+            0,
+            ctx_capacity,
+        )?;
+        geometry
+            .context_allocation_elements(head.config.n_layer)?
+            .into_iter()
+            .try_fold(0u64, |total, elements| {
+                let logical = checked_u64_mul(elements, 4, "dflash context byte size overflow")?;
+                let priced = ctx.shared_buffer_size_and_align(logical)?.size;
+                checked_u64_add(total, priced, "dflash context priced byte total overflow")
+                    .map_err(DFlashError::from)
+            })
+    }
+
+    /// Priced bytes for every Metal buffer allocated by [`Self::fresh`].
+    /// Keep this list in constructor order so admission cannot silently omit
+    /// fixed draft scratch while accounting only for context-sized buffers.
+    pub fn priced_bytes(
+        ctx: &MetalContext,
+        head: &MetalDFlashHead,
+        target_h: u64,
+        vocab: u64,
+        ctx_capacity: usize,
+    ) -> Result<u64, DFlashError> {
+        let cfg = &head.config;
+        let geometry = DFlashSessionGeometry::new(
+            cfg,
+            head.target_layer_ids.len(),
+            target_h,
+            vocab,
+            ctx_capacity,
+        )?;
+        let mut allocations = geometry.context_allocation_elements(cfg.n_layer)?;
+        allocations.extend([
+            geometry.n,
+            geometry.x_elems,
+            geometry.x_elems,
+            geometry.q_elems,
+            geometry.kv_noise_elems,
+            geometry.kv_noise_elems,
+            geometry.q_elems,
+            geometry.x_elems,
+            geometry.logits_elems,
+            geometry.n,
+            geometry.q_elems,
+            geometry.ffn_elems,
+            geometry.ffn_elems,
+            geometry.ffn_elems,
+            geometry.x_elems,
+        ]);
+        if cfg.selector_top_k > 0 {
+            let n_groups = (cfg.hidden_size / cfg.conv_group_size) as u64;
+            let dyn_dim = checked_u64_mul(
+                2 * cfg.conv_kernel_size as u64,
+                n_groups,
+                "dflash2 conv dyn dim overflow",
+            )?;
+            let dyn_elems = checked_u64_mul(geometry.n, dyn_dim, "dflash2 conv dyn size overflow")?;
+            let topk_elems = checked_u64_mul(
+                geometry.n,
+                cfg.selector_top_k as u64,
+                "dflash2 topk size overflow",
+            )?;
+            let sel_elems = checked_u64_mul(
+                geometry.n,
+                cfg.selector_rank as u64,
+                "dflash2 sel_h size overflow",
+            )?;
+            allocations.extend([
+                geometry.x_elems,
+                dyn_elems,
+                dyn_elems,
+                topk_elems,
+                topk_elems,
+                sel_elems,
+            ]);
+        }
+        allocations.into_iter().try_fold(0u64, |total, elements| {
+            let logical = checked_u64_mul(elements, 4, "dflash session byte size overflow")?;
+            let priced = ctx.shared_buffer_size_and_align(logical)?.size;
+            Ok(checked_u64_add(
+                total,
+                priced,
+                "dflash session priced byte total overflow",
+            )?)
+        })
+    }
+
     pub fn fresh(
         ctx: &MetalContext,
         head: &MetalDFlashHead,
@@ -2573,36 +2782,27 @@ impl MetalDFlashSession {
         ctx_capacity: usize,
     ) -> Result<Self, DFlashError> {
         let cfg = &head.config;
-        let n = cfg.block_size as u64;
-        let h = cfg.hidden_size as u64;
-        let q_dim = checked_u64_mul(
-            cfg.n_q_heads as u64,
-            cfg.head_dim as u64,
-            "dflash q_dim overflow",
+        let geometry = DFlashSessionGeometry::new(
+            cfg,
+            head.target_layer_ids.len(),
+            target_h,
+            vocab,
+            ctx_capacity,
         )?;
-        let kv_dim = checked_u64_mul(
-            cfg.n_kv_heads as u64,
-            cfg.head_dim as u64,
-            "dflash kv_dim overflow",
-        )?;
-        let k_layers = head.target_layer_ids.len() as u64;
-        let n_target_features =
-            checked_u64_mul(k_layers, target_h, "dflash n_target_features overflow")?;
-        let cc = ctx_capacity as u64;
-        let ctx_h_elems = checked_u64_mul(h, cc, "dflash ctx_h size overflow")?;
-        let kv_ctx_elems = checked_u64_mul(cc, kv_dim, "dflash kv ctx cache size overflow")?;
-        let x_elems = checked_u64_mul(n, h, "dflash x size overflow")?;
-        let q_elems = checked_u64_mul(n, q_dim, "dflash q size overflow")?;
-        let kv_noise_elems = checked_u64_mul(n, kv_dim, "dflash kv noise size overflow")?;
-        let logits_elems = checked_u64_mul(n, vocab, "dflash logits size overflow")?;
-        let full_ctx_tokens = checked_u64_add(cc, n, "dflash cc + n overflow")?;
-        let kv_full_elems =
-            checked_u64_mul(full_ctx_tokens, kv_dim, "dflash full kv size overflow")?;
-        let ffn_elems = checked_u64_mul(
+        let DFlashSessionGeometry {
             n,
-            cfg.intermediate_size as u64,
-            "dflash ffn scratch size overflow",
-        )?;
+            n_target_features,
+            cc,
+            ctx_h_elems,
+            kv_ctx_elems,
+            x_elems,
+            q_elems,
+            kv_noise_elems,
+            logits_elems,
+            full_ctx_tokens,
+            kv_full_elems,
+            ffn_elems,
+        } = geometry;
         // DFlash 2 scratch (conv + selector), sized from the GGUF conv
         // metadata. ~90 KB total at N=8, H=5120 — negligible.
         let (conv_buf, conv_dyn_attn, conv_dyn_ffn, topk_ids, topk_vals, sel_h) =
@@ -2975,6 +3175,82 @@ pub struct MetalDFlashVerifyScratch {
 }
 
 impl MetalDFlashVerifyScratch {
+    /// Priced bytes for every Metal buffer allocated by [`Self::fresh`].
+    pub fn priced_bytes(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        block_size: u32,
+        k_target_layers: u32,
+    ) -> Result<u64, DFlashError> {
+        let arch = &target_model.arch;
+        let n = block_size as u64;
+        let k = k_target_layers as u64;
+        let h = arch.hidden_size as u64;
+        let n_gdn_layers = u64::try_from(
+            target_model
+                .blocks
+                .iter()
+                .filter(|block| matches!(block, crate::metal_forward::MetalBlock::Gdn(_)))
+                .count(),
+        )
+        .map_err(|_| {
+            DFlashError::Metal(MetalError::BadShape {
+                kernel: "dflash_verify_scratch",
+                detail: "GDN layer count does not fit u64".into(),
+            })
+        })?;
+        let ssm_state_elems = checked_u64_mul3(
+            arch.gdn_n_v_heads as u64,
+            arch.gdn_head_dim as u64,
+            arch.gdn_head_dim as u64,
+            "dflash verify ssm_state_elems overflow",
+        )?;
+        let conv_heads = checked_u64_add(
+            checked_u64_double(
+                arch.gdn_n_k_heads as u64,
+                "dflash verify 2 * gdn_n_k_heads overflow",
+            )?,
+            arch.gdn_n_v_heads as u64,
+            "dflash verify conv heads overflow",
+        )?;
+        let conv_dim = checked_u64_mul(
+            conv_heads,
+            arch.gdn_head_dim as u64,
+            "dflash verify conv_dim overflow",
+        )?;
+        let conv_state_elems = checked_u64_mul(
+            (arch.gdn_conv_kernel as u64).saturating_sub(1),
+            conv_dim,
+            "dflash verify conv_state_elems overflow",
+        )?;
+        let allocations = [
+            n,
+            n,
+            checked_u64_mul3(n, k, h, "dflash verify hidden capture overflow")?,
+            checked_u64_mul3(
+                n_gdn_layers,
+                n,
+                ssm_state_elems,
+                "dflash verify GDN checkpoint overflow",
+            )?,
+            checked_u64_mul3(
+                n_gdn_layers,
+                n,
+                conv_state_elems,
+                "dflash verify conv checkpoint overflow",
+            )?,
+        ];
+        allocations.into_iter().try_fold(0u64, |total, elements| {
+            let logical = checked_u64_mul(elements, 4, "dflash verify byte size overflow")?;
+            let priced = ctx.shared_buffer_size_and_align(logical)?.size;
+            Ok(checked_u64_add(
+                total,
+                priced,
+                "dflash verify priced byte total overflow",
+            )?)
+        })
+    }
+
     /// Allocate scratch for one DFlash outer step.
     ///
     /// `block_size` (= N) and `target_layer_ids.len()` (= K) come from the
@@ -4973,6 +5249,44 @@ impl MetalDFlashLayerMajorScratch {
         block_size: u32,
     ) -> Result<Self, MetalError> {
         Self::fresh_inner(ctx, target_model, block_size, true, None, None, None)
+    }
+
+    /// Priced bytes for the speculative layer-major constructor, including
+    /// full logits and MoE fallback packs.
+    pub fn speculative_priced_bytes(
+        ctx: &MetalContext,
+        target_model: &crate::metal_forward::MetalModel,
+        block_size: u32,
+    ) -> Result<u64, MetalError> {
+        let n_attn_layers = u64::try_from(
+            target_model
+                .blocks
+                .iter()
+                .filter(|block| matches!(block, MetalBlock::Attn(_)))
+                .count()
+                .max(1),
+        )
+        .map_err(|_| MetalError::BadShape {
+            kernel: "dflash_layer_scratch",
+            detail: "attention layer count does not fit u64".into(),
+        })?;
+        let has_gdn = target_model
+            .blocks
+            .iter()
+            .any(|block| matches!(block, MetalBlock::Gdn(_)));
+        let modes =
+            resolve_prefill_scratch_plan_modes(&target_model.arch, block_size, true, None, None)?;
+        let plan = build_prefill_scratch_plan_from_arch(
+            &target_model.arch,
+            n_attn_layers,
+            has_gdn,
+            block_size,
+            true,
+            modes,
+        )?;
+        plan.priced_upper_bound(|logical_bytes| {
+            Ok(ctx.shared_buffer_size_and_align(logical_bytes)?.size)
+        })
     }
 
     pub fn fresh_prefill(
@@ -14122,6 +14436,45 @@ mod tests {
     };
     use crate::metal_forward::{MetalModel, MetalSession};
     use std::time::Instant;
+
+    fn memory_estimate_config() -> crate::loader::DFlashConfig {
+        crate::loader::DFlashConfig {
+            n_layer: 2,
+            hidden_size: 8,
+            intermediate_size: 16,
+            n_q_heads: 2,
+            n_kv_heads: 2,
+            head_dim: 4,
+            rope_theta: 10_000.0,
+            swa_window: 0,
+            block_size: 4,
+            mask_token_id: 0,
+            n_target_features_layers: 3,
+            conv_kernel_size: 0,
+            conv_group_size: 0,
+            selector_rank: 0,
+            selector_top_k: 0,
+        }
+    }
+
+    #[test]
+    fn dflash_context_estimate_is_exact_and_monotonic() {
+        let cfg = memory_estimate_config();
+        let at_10 = DFlashSessionGeometry::new(&cfg, 3, 16, 100, 10)
+            .unwrap()
+            .context_logical_bytes(cfg.n_layer)
+            .unwrap();
+        // 122 context-scaled F32 elements per position plus 68 fixed
+        // elements from the two full-context buffers and position vector.
+        assert_eq!(at_10, (122 * 10 + 68) * 4);
+        let at_11 = DFlashSessionGeometry::new(&cfg, 3, 16, 100, 11)
+            .unwrap()
+            .context_logical_bytes(cfg.n_layer)
+            .unwrap();
+        assert_eq!(at_11 - at_10, 122 * 4);
+        assert!(at_11 > at_10);
+        assert!(DFlashSessionGeometry::new(&cfg, usize::MAX, u64::MAX, 100, 10).is_err());
+    }
 
     #[test]
     fn dflash_swa_split4_scope_matches_measured_product_cell() {

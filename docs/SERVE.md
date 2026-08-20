@@ -1,13 +1,14 @@
 # qwen serve — contract and program
 
-Status: S0–S3 shipped and gated on main (2026-08-18/19). The document is
-the binding contract for what serve does today and what it does next;
-superseded planning positions are not.
+Status: S0–S3 functionality is present in the current working tree. Gate
+evidence is mixed and is recorded separately below; implementation status must
+not be read as a blanket gate pass.
 
 Evidence base: S0 packet
 (`docs/bench/2026-08-18-facade-s0-render-prefix-stability/`), the S1/S2/S3
-gate records under `docs/bench/`, an overnight production session
-(2026-08-20, 5 h / 58 requests / 133 k tokens), adversarial reviews
+gate records under `docs/bench/`, the successful real OpenCode session
+`ses_fe307ea3effefOzYcDBgTbYiie` (2026-08-20, 5 h overnight / 58 requests /
+133 k tokens), adversarial reviews
 (`ses_fe8ee25c6ffe`), and the full investigation session (OpenCode Recall).
 
 ## Scope
@@ -26,9 +27,10 @@ Operating goals, in order:
 | Unit              | Contents                                                                                                                                                                                                                                                                     | Consumer                                    | Gate                                                                                                                                                                                                                                  |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | S0                | Prefix-stability falsifier                                                                                                                                                                                                                                                   | measurement                                 | DONE — see packet RESULTS                                                                                                                                                                                                             |
-| S1 ✅             | Resident serial server, Open Responses subset, no tools                                                                                                                                                                                                                      | the game (thin HTTP client)                 | **PASS: 7 gates** — byte-identical transcripts, conformance 6/6 in scope, cancellation 24 ms — docs/bench/2026-08-18-serve-s1-gates/                                                                                                    |
-| S2 ✅             | Tool items (XML-parameter form from the template oracle), `allowed_tools`, continuation rendering                                                                                                                                                                            | opencode via stock `@ai-sdk/open-responses` | **PASS: 10/10 requests checkpoint-hit** (94–100 % restored), 5/5 turns tool-called — docs/bench/2026-08-19-s2-agent-gate/                                                                                                             |
-| S3 ✅             | Pre-opened (headless) reasoning support, DeepSeek V4 family backend, DFlash drafter integration. `encrypted_content` opaque round-trip is **not** built — the S2 capture showed plain reasoning content already replays verbatim, so it demoted from necessity to hardening. | opencode, DS4 clients                       | **PASS: 5/5 gate cells** — warm snapshot hits every continuation, byte identity vs CLI incl. CJK/emoji, verbatim reasoning round-trip restores 91%, headless partition clean, fail-closed intact — docs/bench/2026-08-19-s3-ds4-gate/ |
+| S1                | Resident serial server, Open Responses subset, no tools                                                                                                                                                                                                                      | the game (thin HTTP client)                 | Functional evidence passed, but not the literal full gate: client was 187 lines versus `<150`, and the `<150 ms` TTFT gate failed at 186 ms. Conformance was 6/6 in scope and cancellation measured 24 ms — docs/bench/2026-08-18-serve-s1-gates/ |
+| S2                | Tool items (XML-parameter form from the template oracle), exact declared/allowed-tool enforcement, continuation rendering                                                                                                                                                    | OpenCode via stock `@ai-sdk/open-responses` | Provider gate: 10/10 requests checkpoint-hit (94–100% restored), 5/5 turns tool-called. `allowed_tools` subsequently landed. Production evidence: real OpenCode session `ses_fe307ea3effefOzYcDBgTbYiie` ran successfully for 5 h overnight — docs/bench/2026-08-19-s2-agent-gate/ |
+| S3                | Pre-opened (headless) reasoning support, DeepSeek V4 family backend, DFlash drafter integration. `encrypted_content` is **not** implemented.                                                                                                                                    | OpenCode, DS4 clients                       | Core cells 1–5 passed: warm snapshot hits, CLI byte identity including CJK/emoji, 91% reasoning replay restore, clean headless partition, fail-closed behavior. Live cells 6–9 still require rerun — docs/bench/2026-08-19-s3-ds4-gate/ |
+
 ## Remaining program (2026-08-20)
 
 **F1 — Durable continuity.** Serve holds checkpoints in RAM, so a
@@ -57,20 +59,19 @@ only** until content-addressed delta chains exist (S0 F6 — consecutive
 snapshots share nearly all their bytes). F1 covers restart continuity; crash
 resilience waits on those chains.
 
-**F3 — Honest behaviour when busy.** Serve is single-flight, and a
-second client waits in the accept backlog receiving nothing until the
-first request finishes. Measured 2026-08-20: 3.0 s of silence
-behind a 3.5 s request, and overnight a second agent starved behind
-60–80 s prefills until its socket died. Either fail fast (`503` +
-`Retry-After`) or accept, parse, enqueue, and heartbeat while queued.
+**F3 — Honest behaviour when busy: implemented, live rerun pending.** Serve
+remains single-flight, but a separate acceptor now fails concurrent connections
+fast with `503 Service Unavailable`, `Retry-After: 1`, and a `server_busy`
+envelope instead of leaving them silent in the listen backlog.
 
 **F4 — DeepSeek V4 tool support.** DS4 serve handles chat and reasoning;
 tool definitions are rejected. Agent loops need them.
 
-**F5 — Memory admission.** The DS4 snapshot LRU and the Qwen prefix
-cache sit outside the engine's admission envelope, and the CLI's three
-reconciliation points are skipped (k3 R1.2). At the context sizes now in
-routine use the failure mode is an OS kill mid-request, not an error.
+**F5 — Memory admission: implemented, live rerun pending.** Qwen requests are
+priced before execution and fail with `503` when denied. Qwen and DS4 boundary
+capture is memory-admitted and best-effort: denial or capture failure skips the
+snapshot while the request continues. Both caches are byte-bounded; DS4 session
+construction returns ownership on failure so residency remains recoverable.
 
 **F6 — Concurrency / continuous batching.** The engine already provides
 `admit_independent_queue2`, `create_dense_batch8_executor`,
@@ -82,10 +83,9 @@ scheduling, with F3 as the on-ramp.
 decode fell 14.5 → 8.4 tok/s from 31 k → 133 k, and restore grew to
 ~1.5 s.
 
-Also open, smaller: selector `emit_completion` telemetry (k3 R1.4);
-deferred S3 gate cells 6–9 (LRU eviction, DS4 cancellation/heartbeat,
-DS4 TTFT @8k, memory envelope); S1 gate 2's <150 ms TTFT, which needs a
-small-span prefill kernel (engine scope).
+Also open: selector `emit_completion` telemetry (k3 R1.4), and fresh execution
+of S3 live cells 6–9 (LRU eviction, DS4 cancellation/heartbeat, DS4 TTFT @8k,
+memory envelope). Engine optimization candidates live in `docs/PERF-ROADMAP.md`.
 
 ## Parked, with reasons
 
@@ -108,34 +108,56 @@ small-span prefill kernel (engine scope).
 One new subcommand:
 
 ```sh
-qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] [--drafter GGUF]
-# Optional wire trace: request JSON and streamed SSE events as JSONL.
-qwen serve -m MODEL --trace-sse /tmp/qwen.sse.jsonl
+qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] \
+  [--max-context-tokens N] [--snapshot-cache-mib 4096] [--drafter GGUF]
 # DeepSeek V4 additionally requires --max-context-tokens (startup-fixed forward budget)
+```
+
+The listener rejects every resolved non-loopback address. Request bodies are
+limited to 16 MiB. The whole request read has a 30 s absolute deadline; the
+socket read timeout is 35 s so it cannot preempt that mapping, and writes have a
+30 s timeout. For an optional trace,
+prepare a private directory rather than using a predictable shared `/tmp` name:
+
+```sh
+trace_dir="${XDG_CACHE_HOME:-$HOME/.cache}/qwen-llm/traces"
+install -d -m 700 "$trace_dir"
+qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
 ```
 
 - **Residency:** model loads once; the process is the warm tier. S0's F2
   finding makes this the TTFT mechanism (per-process paging floor is
   5–8 s on A3B even with checkpoint hits; `load_ms` does not cover
-  first-touch). **S1-as-built is RAM-cache-only**: durable checkpoint
-  publication/restore is not wired into serve and lands S2+;
-  cross-restart warmth currently re-prefills (closing k3 review, D3).
-  Durable checkpoints remain the intended cross-restart substrate.
+  first-touch). **Current serve is RAM-cache-only**: durable checkpoint
+  publication/restore is not wired into serve, so cross-restart warmth
+  currently re-prefills (closing k3 review, D3).
+  Durable checkpoints remain the intended cross-restart substrate. The finite
+  default Qwen context ceiling is 262,144 tokens; an omitted limit sizes each
+  request to need without making the ceiling unbounded.
 - **Speculative decode (`--drafter`, v0.77 DFlash):** a request
   speculates only when it cold-prefills its whole prompt and decodes
   greedily. Restored checkpoint positions carry no captured target hidden
   states, so seeding the drafter's cross-context from them is impossible
   (same reason the CLI excludes `--durable-prefix-cache`); restored
-  requests decode serially. Output is identical either way — greedy
-  accept-prefix over an exact target verify — and the per-request
+  requests decode serially. The intended contract is target-authoritative
+  greedy output: accept-prefix uses an exact target verify. The per-request
   `serve phases:` line reports `decode_path=dflash|serial`, with a
   `serve dflash:` line carrying acceptance and backoff counters.
-  Measured on Qwen3.8-27B + DFlash2-Q8_0 (25-token prompt, 200 tokens
-  out): cold/dflash 25.3 tok/s vs warm/serial 24.7 tok/s with
-  acceptance 56/203 and alpha-backoff engaged — i.e. the policy
-  correctly detected weak acceptance on this prompt and stopped
-  speculating rather than losing time. Byte-identical outputs across
-  both paths were verified live.
+  DFlash now starts only after the target hiddens for every prompt position have
+  been captured: `start == 0`, captured positions equal prompt length, and the
+  target sequence is at prompt length. The old 25-token performance run is
+  retracted: its short-prompt serial-tail path did not seed prompt hiddens, so it
+  cannot support a DFlash performance or output-equivalence claim. The corrected
+  path has since passed scoped GPU validation: release 27B prefill and
+  packed-verify gates passed (24-token final-logit cosine 1.0, minimum hidden
+  cosine 0.999998, and packed verify 16/16 argmax with minimum cosine 1.0), and a
+  live cold 19-token Qwen3.8-27B Q8_0 + DFlash2 Q8_0 request logged
+  `decode_path=dflash` and matched serial output (`orange`, EOS after two
+  generated tokens). This is correctness evidence for that cell, not a revived
+  performance claim or blanket output-equivalence claim. Optional DFlash
+  admission prices prompt capture, drafter session, verify scratch, and
+  layer-major scratch; allocation, capture, or seeding failure restarts or falls
+  back to serial generation rather than rejecting an otherwise viable request.
 - **Determinism scope (F7):** no serve surface promises temp-0 byte
   identity across differing checkpoint-restore topologies; transcripts
   are byte-deterministic conditional on restore partitioning.
@@ -144,68 +166,96 @@ qwen serve -m MODEL --trace-sse /tmp/qwen.sse.jsonl
   `matched_tokens`, `restore_ms`, `prompt_tokens` are frozen;
   `usage.input_tokens_details.cached_tokens` reports tokens restored
   from checkpoints.
-- **Serial, blocking, no async runtime.** `std::net` listener, one
-  request in flight, OS listen backlog queues the rest. HTTP/1.1 with
+- **Serial generation, fail-fast admission.** `std::net`, one request in
+  flight; the acceptor rejects other connections immediately with `503` and
+  `Retry-After: 1`. HTTP/1.1 with
   `Connection: close`; hand-rolled request parse (loopback threat model;
   request bodies are `Content-Length` JSON).
-- **Qwen35/Qwen35Moe and DeepSeek V4.** DS4 runs its own session and
+- **Qwen3.5/3.6-family (including validated Qwen3.8 identities) and DeepSeek
+  V4.** DS4 runs its own session and
   snapshot stack (`serve/backend_ds4.rs`) with a startup-fixed forward
-  budget, a serve-owned snapshot LRU (DS4 has no engine-side RAM prefix
-  cache), and no tool support yet — tool definitions fail closed there.
+  budget, a serve-owned byte-bounded snapshot LRU (DS4 has no engine-side RAM
+  prefix cache), and no tool support — tool definitions fail closed there.
+  `--snapshot-cache-mib` configures both family cache implementations and
+  defaults to 4096 MiB.
 - **Stdout is never written.** All diagnostics via the existing stderr
   tracing surface; per-request `qwen_diag` stats line retained and
   extended with `matched_tokens` and `restore_ms` (the S2/S3 gates are
   defined on this log, never on "the session completed").
-- **Opt-in SSE trace:** `--trace-sse PATH` appends one JSON object per line
+- **Opt-in asynchronous SSE trace:** `--trace-sse PATH` appends one JSON object per line
   for each `/v1/responses` request, plus each streamed response's heartbeat,
   event (including its exact JSON `data` payload), and terminal `[DONE]` marker.
   It is disabled by default and may contain prompts, tool definitions, and
-  generated text.
+  generated text. The file is opened append-only with `O_NOFOLLOW|O_CLOEXEC`,
+  using nonblocking open so a FIFO cannot hang startup; it must be a regular file
+  owned by the current user and is forced to mode 0600.
+  A bounded background-writer queue keeps trace I/O off the response path; a
+  full queue or writer failure disables tracing rather than blocking serving.
+  Shutdown gives the writer 250 ms to drain, then detaches it so a stalled
+  filesystem cannot hold process exit; queued trace events may be lost in that
+  case.
 
 ## Wire subset (Open Responses)
 
 `POST /v1/responses` accepting. If `max_output_tokens` is omitted, serve
 defaults to 65536 tokens unless overridden with `--max-tokens` at startup:
 
+- Supported non-null fields are type-checked strictly. Known standard controls
+  outside this subset (including `max_tool_calls`, `text`, `metadata`, and
+  `stream_options`) fail closed rather than being silently ignored. Other
+  unknown fields are ignored; request, `reasoning`, and `x_qwen` scopes log each
+  unknown name once, while input-item and tool-object extras are silently
+  normalized away. Unknown item/content types fail closed.
 - `model` — must equal the loaded model id; else `model_not_found`.
 - `input` — string (one user message) or item array in the subset:
   `message` (roles `system`|`developer` (system-equivalent, documented
   mapping)|`user`|`assistant`, content string or `input_text` parts),
-  `reasoning` (plain `content` only in S1). **Item-sequence validation,
+  `reasoning` (plain `content`; `encrypted_content` is unsupported).
+  **Item-sequence validation,
   not turn grammar** (review defect 1: the spec's `input` is an item
   list; stock AI SDK traffic legally contains consecutive user
   messages and, in S2, interleaved tool items): system/developer/
   `instructions` at head only, `reasoning` items must immediately
-  precede their assistant message, final item must be a `user` message
-  (S1) or `function_call_output` (S2), everything else accepted in
-  order. Unknown item _types_ → `invalid_request`; unknown _fields_ are
+  precede their assistant message or function call, and the final item must be
+  a `user` message or `function_call_output`. Unknown item _types_ →
+  `invalid_request`; unknown _fields_ are
   ignored (top-level request fields logged once per name; `id`/`status`
   on replayed input items accepted and ignored).
 - `instructions` — optional system text (exclusive with a system item).
 - `max_output_tokens`, `temperature`, `top_p` — standard.
-- `reasoning.effort` — Qwen3.8 accepts `none`, `low`, `medium`, and `xhigh`;
-  absent defaults to `xhigh`. Other model families apply their own documented
-  reasoning rules.
-- `x_qwen` extension object — `seed`, `top_k`, `min_p`, `no_thinking`
-  (identity-gated exactly as `qwen run`); spec-legal implementor
-  extension, documented.
+- `reasoning.effort` — validated Qwen3.8 identities accept `none`, `low`,
+  `medium`, and `xhigh`; absent defaults to `xhigh`. It is rejected on generic
+  Qwen identities. DS4 applies its separate renderer rules.
+- `x_qwen` extension object — `seed`, `top_k`, and `min_p` are generation
+  controls for every served family. `no_thinking` is accepted only for the same
+  validated Qwen3.6 no-thinking and Qwen3.8 identities as `qwen run`; DS4 uses
+  `reasoning.effort` instead. This is a documented implementor extension.
 - `stream` — SSE when true, single JSON response otherwise.
-- `store` — must be `false`/absent; `true` → `invalid_request`.
+- `store` — `false`, `null`, or absent; `true` → `invalid_request`.
 - `previous_response_id` — → error code `previous_response_not_found`.
 - `truncation` — only `"disabled"` (default). The engine already fails
   closed on context overflow (S0 F3); serve maps that to the spec error
   instead of a process exit.
-- `tools` — function tools are supported on Qwen families (S2); DeepSeek
-  V4 fails closed on any tool definition. Hosted tool types fail closed. Definitions render into the family template's `# Tools` system
-  block, byte-pinned to the template oracle.
+- `tools` — uniquely named function tools are supported on Qwen families (S2);
+  known definition fields have strict types, and `strict:true` is rejected
+  because schema enforcement is unsupported. DeepSeek V4 fails closed on any
+  tool definition; hosted tool types fail closed. Definitions render into the
+  family template's `# Tools` system block, byte-pinned to the template oracle.
+  Function names must match `[A-Za-z0-9_-]{1,64}`; replay `call_id` values are
+  limited to 64 bytes.
 - `tool_choice` — `"auto"` (default) or an `allowed_tools` object.
-  Narrowing is enforced as a hard constraint on emitted calls while
+  `allowed_tools` accepts only mode `"auto"`, requires a non-empty unique list
+  of declared function names, and defines the exact executable set. Narrowing
+  is enforced as a hard constraint on emitted calls while
   leaving rendered bytes identical, so prompt prefixes and their
   checkpoints stay valid across tool-menu changes (the spec's
   cache-preserving intent, test-pinned). Enforcement is post-generation:
   a suppressed call has already consumed tokens and remains in the
   completed-turn checkpoint key, so that continuation will not hit.
   `required`, `none`, and forced-function are not implemented.
+- Replayed `function_call_output` items must link by unique `call_id` to every
+  call in the immediately preceding call batch; unknown, duplicate, or missing
+  links fail closed. Argument delta/done events carry that same `call_id`.
 - `/responses/compact` — not implemented (404); compaction is outside the
   S1–S4 arc and revisits with the WebSocket transport question.
 - `x_qwen.stats: true` — echoes `{matched_tokens, restore_ms,
@@ -214,8 +264,8 @@ prompt_tokens}` into the response object, so thin clients (the game)
   (review R4). `usage` is always populated (agent clients budget on
   it).
 
-Provenance notes: `no_thinking`/`top_k`/`min_p` in `x_qwen` are cheap
-identity-gated pass-throughs of `qwen run` semantics, kept deliberately;
+Provenance notes: `top_k`/`min_p` pass through normal sampling semantics;
+`no_thinking` is identity-gated to the validated `qwen run` surface;
 `stream: false` exists for the stock provider's `doGenerate` path in S2,
 not for S1's consumer.
 
@@ -225,18 +275,27 @@ Truncated thinking (S0 F4) yields `reasoning` with `status:
 "incomplete"` and `response.status = "incomplete"` with
 `incomplete_details.reason = "max_output_tokens"`.
 
+Response envelopes truthfully echo normalized, validated `instructions`, `tools`,
+`tool_choice`, `reasoning`, `parallel_tool_calls`, sampling values, and output
+limit rather than emitting fixed placeholders.
+
 Streaming events: `response.created`, `response.in_progress`,
 `response.output_item.added`, `response.content_part.added`,
-`response.reasoning.delta|done` (spec event names, adjudicated by the gate-5 conformance suite), `response.output_text.delta|done`,
+`response.reasoning.delta|done` (the gate-5 contract), plus one
+`response.reasoning_text.delta` compatibility alias per reasoning delta for the
+stock AI SDK provider, `response.output_text.delta|done`,
 `response.content_part.done`, `response.output_item.done`,
 `response.completed|incomplete|failed`, terminal `[DONE]`. Tool turns
 add `function_call` output items with
 `response.function_call_arguments.delta|done` (S2). **Every
 event carries a monotonic `sequence_number`** (review defect 4 — the
 conformance suite asserts ordering; retrofitting into a hand-rolled SSE
-writer later costs more). SSE comment heartbeats (`: ping`) at ≥1 Hz
-during prefill (client-timeout defense). Errors stream as
-`response.failed` with the spec error envelope.
+writer later costs more). One SSE comment heartbeat (`: ping`) is written
+immediately, then idle heartbeats are attempted between prefill chunks; this is
+not a `>=1 Hz` guarantee because a chunk may run longer than one second.
+Parse, validation, model-id, and render failures occur before SSE and return an
+HTTP error. Backend failures after SSE begins emit `response.failed` with the
+spec error envelope; disconnect/write failures cannot emit a terminal event.
 
 `GET /v1/models` returns the single loaded model (trivial, ships in S1
 because client model-pickers probe it).
@@ -253,37 +312,50 @@ because client model-pickers probe it).
   rejected (`invalid_request`) — reasoning travels as items, never
   inline (F1: verbatim echo is what makes preserve reuse exact, and
   items make echo structural).
-- Per turn the server captures **both** boundaries — prompt-boundary and
-  completed — into the **RAM** prefix cache (8–42 ms each per S0; this
+- The server attempts prompt and completed boundaries when each is useful and
+  representable: an exact Qwen prompt hit skips redundant prompt capture, and
+  DS4 skips a completed boundary with no transition or a truncation inside open
+  reasoning. Eligible boundaries enter the **RAM** prefix cache (8–42 ms each
+  per S0; this
   makes the server's own next-turn path immune to client echo policy).
+  Capture is best-effort and admitted against cache bytes plus Metal/process
+  headroom; denial or failure is logged and generation continues. Both family
+  caches enforce the configured byte budget.
   Durable publication keeps the existing completed-else-prompt shadowing
-  policy. **Durable publication remains parked**: S1-S3 shipped RAM-only,
+  policy. **Durable publication remains parked**: current serve is RAM-only,
   so cross-restart warmth still re-prefills. `--durable-dual-publish` is
   designed but unbuilt (review R2: at q38's ~90 KB/token, dual durable publish
   of a 32k context is ~6 GB/turn — LRU churn that evicts the prefixes it
   is meant to protect, and publish time serializes the next request on a
-  serial server). Pre-implementation task: verify
-  `prepare_checkpoint_boundary`/`cache_prepared_checkpoint` actually
-  supports dual capture per turn (asserted, not yet demonstrated —
-  review R6 runner-up).
+  serial server). Live cache-pressure behavior remains part of the S3 rerun.
 - **Replay-fidelity coverage (review R6):** render→items→render byte
   identity is asserted by unit tests (`render.rs` split/render inverse,
   `tool_parse.rs` `qwen36_raw_echo_identity`, `render_ds4.rs` preserved
   history round-trip) rather than by a JSON fixture case.
 - Tool-continuation golden fixtures are **written before the renderer**
   (review R3), so the renderer is fit to the fixture, never the reverse.
-- Preserve/strip rendering policy: preserve is the default for the
-  validated Qwen3.6 identities (owner position, Amendment 1 of S0;
-  economics measured in S0 G2); strip remains available via `x_qwen`.
-  Extension beyond Qwen3.6 waits on the behavioral packet.
+- Preserve/strip rendering policy: preserve is the default for the validated
+  Qwen3.6 identity (owner position, Amendment 1 of S0; economics measured in S0
+  G2), and strip remains available there via `x_qwen`. Validated Qwen3.8 uses
+  its preclosed-history renderer. DS4 rejects strip mode and preserves reasoning
+  history whenever the current request selects a non-`none` thinking tier.
 
 ## Cancellation
 
-Client disconnect (write failure on SSE, read failure on socket) aborts
-generation between token steps and prefill between chunks; the request
-slot frees within 250 ms (measured: 24 ms). No signals, no threads beyond
-the accept loop. Known limitation (D5): a TERM received while parked in
-`accept()` unwinds on the next connection, not immediately.
+SIGINT/SIGTERM is checked around expensive startup phases, before admission,
+while idle on a 100 ms admission poll, and at generation sink/chunk checkpoints.
+The dedicated acceptor uses nonblocking accept with a 50 ms poll and is joined
+during unwind, so a signal pending before the accept loop or arriving while idle
+does not require a connection to wake the listener. Active-request shutdown is
+bounded by the next checkpoint rather than immediate preemption.
+
+For streaming requests, a disconnect is observed on an SSE write or a prefill
+chunk heartbeat. UTF-8 assembly and reasoning/tool partitioning can buffer token
+boundaries that do not produce a write, so cancellation is write/chunk bounded,
+not universally token- or time-bounded. The S1 cell measured 24 ms to the
+following admission in its tested mid-decode case, but serve makes no universal
+`<250 ms` claim. A non-stream response has no required write before completion;
+graceful disconnect detection before that first write is inherently best-effort.
 
 ## S1 gate definitions (executed; see gate record)
 

@@ -2850,7 +2850,7 @@ fn resolve_qwen38_generation_mode(
     Ok(Some(Qwen38GenerationMode::Thinking(effort)))
 }
 
-fn validated_qwen_no_thinking_model(family: ModelFamily, gguf: &GgufFile) -> bool {
+pub(crate) fn validated_qwen_no_thinking_model(family: ModelFamily, gguf: &GgufFile) -> bool {
     validated_qwen36_no_thinking_identity(
         family,
         gguf.get_str("general.base_model.0.name"),
@@ -6539,11 +6539,13 @@ fn execute_single_turn_request(
                     )
                     .context("seed drafter cross-context from prompt prefill")?;
             }
+            let dflash_scratch = allocate_dflash_decode_scratch(loaded, head)?;
             let result = generate_dflash(
                 loaded,
                 &forward,
                 head,
                 dsess,
+                dflash_scratch,
                 sequence,
                 logits,
                 args.tokens,
@@ -8642,6 +8644,37 @@ struct DflashGeneration {
     sequence: Sequence,
 }
 
+struct DflashDecodeScratch {
+    verify: MetalDFlashVerifyScratch,
+    layer: MetalDFlashLayerMajorScratch,
+    allocation_ms: f64,
+}
+
+fn allocate_dflash_decode_scratch(
+    loaded: &LoadedModel,
+    head: &MetalDFlashHead,
+) -> Result<DflashDecodeScratch> {
+    let allocation_t0 = Instant::now();
+    let verify = MetalDFlashVerifyScratch::fresh(
+        loaded.context(),
+        loaded.metal_model(),
+        head.config.block_size,
+        u32::try_from(head.target_layer_ids.len()).context("DFlash target layer count overflow")?,
+    )
+    .context("allocate dflash verify scratch")?;
+    let layer = MetalDFlashLayerMajorScratch::fresh(
+        loaded.context(),
+        loaded.metal_model(),
+        head.config.block_size,
+    )
+    .context("allocate dflash layer scratch")?;
+    Ok(DflashDecodeScratch {
+        verify,
+        layer,
+        allocation_ms: allocation_t0.elapsed().as_secs_f64() * 1e3,
+    })
+}
+
 /// **v0.77** DFlash speculative decode for `qwen run --drafter`.
 ///
 /// Same contract as [`generate_prompt_lookup`] — greedy accept-prefix over
@@ -8660,6 +8693,7 @@ fn generate_dflash<OnToken>(
     forward: &MetalForward<'_>,
     head: &MetalDFlashHead,
     dsess: MetalDFlashSession,
+    scratch: DflashDecodeScratch,
     mut sequence: Sequence,
     logits: Vec<f32>,
     max_tokens: usize,
@@ -8687,18 +8721,12 @@ where
     let k_layers = head.target_layer_ids.len();
     let n_target_features = k_layers * loaded.arch().hidden_size as usize;
 
-    let scratch_t0 = Instant::now();
-    let mut verify_scratch = MetalDFlashVerifyScratch::fresh(
-        loaded.context(),
-        loaded.metal_model(),
-        cfg.block_size,
-        k_layers as u32,
-    )
-    .context("allocate dflash verify scratch")?;
-    let mut layer_scratch =
-        MetalDFlashLayerMajorScratch::fresh(loaded.context(), loaded.metal_model(), cfg.block_size)
-            .context("allocate dflash layer scratch")?;
-    stats.scratch_allocation_ms = scratch_t0.elapsed().as_secs_f64() * 1e3;
+    let DflashDecodeScratch {
+        verify: mut verify_scratch,
+        layer: mut layer_scratch,
+        allocation_ms,
+    } = scratch;
+    stats.scratch_allocation_ms = allocation_ms;
 
     let mut decoder = DFlashDecoder::new(forward, head, dsess);
 

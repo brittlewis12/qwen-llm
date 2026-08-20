@@ -205,6 +205,19 @@ impl DeepSeekV4Session {
         )
     }
 
+    /// Exact payload bytes a snapshot of the current ready boundary would
+    /// allocate. This performs geometry validation only and copies no state.
+    pub fn current_causal_snapshot_payload_bytes(&self) -> Result<u64, DeepSeekV4MetalError> {
+        let next_position = self.phase.ready_position()?;
+        validate_prefix(
+            &self.committed_tokens,
+            next_position,
+            self.residency.config().vocab_size as usize,
+        )?;
+        let geometry = snapshot_geometry(self.residency.config(), self.capacity, next_position)?;
+        snapshot_payload_bytes(geometry, self.committed_tokens.len())
+    }
+
     /// Replace this ready session's causal state with a compatible snapshot.
     ///
     /// Every expected failure is checked before destination mutation. Once
@@ -530,6 +543,27 @@ fn snapshot_geometry(
         compressor_elements,
         published_elements,
         published_capacity_elements,
+    })
+}
+
+fn snapshot_payload_bytes(
+    geometry: SnapshotGeometry,
+    prefix_len: usize,
+) -> Result<u64, DeepSeekV4MetalError> {
+    let u32_elements = checked_add(
+        prefix_len,
+        geometry.compressor_elements,
+        "snapshot U32 payload",
+    )?;
+    let u16_elements = checked_add(
+        geometry.raw_elements,
+        geometry.published_elements,
+        "snapshot U16 payload",
+    )?;
+    let bytes = (u32_elements as u128) * (size_of::<u32>() as u128)
+        + (u16_elements as u128) * (size_of::<u16>() as u128);
+    u64::try_from(bytes).map_err(|_| {
+        DeepSeekV4MetalError::Invalid("snapshot payload byte estimate overflow".into())
     })
 }
 
@@ -1633,6 +1667,19 @@ mod tests {
         assert_eq!(terminal.published_elements, 3_607_101_440);
         assert_eq!(terminal.published_capacity_elements, 3_607_101_440);
         assert!(snapshot_geometry(&config, capacity, 1_048_577).is_err());
+    }
+
+    #[test]
+    fn snapshot_payload_estimate_is_exact_from_geometry() {
+        let geometry = SnapshotGeometry {
+            raw_start_position: 0,
+            raw_rows: 2,
+            raw_elements: 11,
+            compressor_elements: 13,
+            published_elements: 17,
+            published_capacity_elements: 19,
+        };
+        assert_eq!(snapshot_payload_bytes(geometry, 23).unwrap(), 200);
     }
 
     #[test]

@@ -113,6 +113,11 @@ impl PrefixCache {
         self.total_bytes = 0;
     }
 
+    /// Check whether an entry can ever fit without changing cache contents.
+    pub(crate) fn eligible_strict(&self, bytes: u64) -> bool {
+        bytes <= self.max_bytes
+    }
+
     pub fn insert(&mut self, snap: SessionSnapshot) {
         self.insert_shared(Arc::new(snap));
     }
@@ -182,6 +187,18 @@ impl PrefixCache {
         self.evict_to_budget();
     }
 
+    pub(crate) fn insert_shared_strict(&mut self, snap: Arc<SessionSnapshot>) -> bool {
+        if !self.eligible_strict(snap.n_bytes()) {
+            return false;
+        }
+        // Deduplicate or replace the canonical boundary before enforcing the
+        // budget. Reserving the full incoming size first can evict unrelated
+        // LRU entries even when an equivalent complete snapshot already wins.
+        self.insert_shared(snap);
+        debug_assert!(self.total_bytes <= self.max_bytes);
+        true
+    }
+
     /// Evict least-recently-used entries until `total_bytes <= max_bytes`,
     /// never evicting the most-recently-stamped entry (the one just
     /// inserted/updated).
@@ -223,7 +240,7 @@ impl PrefixCache {
         identity: &SnapshotIdentity,
         request_tokens: &[i32],
     ) -> Option<PrefixCacheHit> {
-        self.lookup_longest_impl(identity, request_tokens, false)
+        self.lookup_and_touch(identity, request_tokens, false)
     }
 
     /// Find the longest prefix that can produce prompt-final logits. An exact
@@ -234,11 +251,19 @@ impl PrefixCache {
         identity: &SnapshotIdentity,
         request_tokens: &[i32],
     ) -> Option<PrefixCacheHit> {
+        self.lookup_and_touch(identity, request_tokens, true)
+    }
+
+    pub(crate) fn peek_longest_for_completion(
+        &self,
+        identity: &SnapshotIdentity,
+        request_tokens: &[i32],
+    ) -> Option<PrefixCacheHit> {
         self.lookup_longest_impl(identity, request_tokens, true)
     }
 
     fn lookup_longest_impl(
-        &mut self,
+        &self,
         identity: &SnapshotIdentity,
         request_tokens: &[i32],
         exact_requires_logits: bool,
@@ -268,10 +293,6 @@ impl PrefixCache {
                     .map(|(idx, _)| idx)
             });
             if let Some(idx) = hit_idx {
-                // Bump LRU stamp so hot prefixes survive eviction pressure.
-                self.clock += 1;
-                let stamp = self.clock;
-                self.last_used.insert((key.clone(), idx), stamp);
                 let snap = Arc::clone(&self.buckets[&key][idx]);
                 return Some(PrefixCacheHit {
                     restored_prefix_len: snap.prefix_len(),
@@ -282,6 +303,34 @@ impl PrefixCache {
             }
         }
         None
+    }
+
+    fn lookup_and_touch(
+        &mut self,
+        identity: &SnapshotIdentity,
+        request_tokens: &[i32],
+        exact_requires_logits: bool,
+    ) -> Option<PrefixCacheHit> {
+        let hit = self.lookup_longest_impl(identity, request_tokens, exact_requires_logits)?;
+        self.touch_shared(&hit.snapshot);
+        Some(hit)
+    }
+
+    pub(crate) fn touch_shared(&mut self, snapshot: &Arc<SessionSnapshot>) {
+        let key = PrefixCacheKey {
+            identity: snapshot.identity.clone(),
+            prefix_len: snapshot.matched_prefix_len(),
+            prefix_hash: hash_snapshot_prefix(snapshot),
+        };
+        let Some(index) = self
+            .buckets
+            .get(&key)
+            .and_then(|bucket| bucket.iter().position(|entry| Arc::ptr_eq(entry, snapshot)))
+        else {
+            return;
+        };
+        self.clock += 1;
+        self.last_used.insert((key, index), self.clock);
     }
 }
 
@@ -599,6 +648,20 @@ mod tests {
     }
 
     #[test]
+    fn pre_admission_peek_does_not_promote_lru() {
+        let id = ident(1);
+        let one = snap_bytes(&[1], 64);
+        let mut cache = PrefixCache::with_max_bytes(2 * one);
+        cache.insert(snap(id.clone(), &[1], 64));
+        cache.insert(snap(id.clone(), &[2], 64));
+        assert!(cache.peek_longest_for_completion(&id, &[1]).is_some());
+        cache.insert(snap(id.clone(), &[3], 64));
+        assert!(cache.lookup_longest(&id, &[1]).is_none());
+        assert!(cache.lookup_longest(&id, &[2]).is_some());
+        assert!(cache.lookup_longest(&id, &[3]).is_some());
+    }
+
+    #[test]
     fn oversized_snapshot_is_kept_alone() {
         let id = ident(1);
         let mut cache = PrefixCache::with_max_bytes(1); // absurdly small
@@ -611,6 +674,52 @@ mod tests {
         assert_eq!(cache.len(), 1);
         assert!(cache.lookup_longest(&id, &[1, 2]).is_none());
         assert!(cache.lookup_longest(&id, &[3, 4]).is_some());
+    }
+
+    #[test]
+    fn strict_insertion_rejects_oversized_and_evicts_lru() {
+        let id = ident(1);
+        let one = snap_bytes(&[1], 64);
+        let mut cache = PrefixCache::with_max_bytes(2 * one);
+        cache.insert(snap(id.clone(), &[1], 64));
+        cache.insert(snap(id.clone(), &[2], 64));
+        assert!(cache.lookup_longest(&id, &[1]).is_some());
+        assert!(cache.insert_shared_strict(Arc::new(snap(id.clone(), &[3], 64))));
+        assert!(cache.lookup_longest(&id, &[2]).is_none());
+        assert!(!cache.insert_shared_strict(Arc::new(snap(
+            id.clone(),
+            &[4],
+            (2 * one + 1) as usize,
+        ))));
+        assert!(cache.total_bytes() <= cache.max_bytes());
+    }
+
+    #[test]
+    fn strict_equivalent_winner_does_not_evict_unrelated_lru() {
+        let id = ident(1);
+        let complete = snap(id.clone(), &[1], 64);
+        let unrelated = snap(id.clone(), &[2], 64);
+        let budget = complete.n_bytes() + unrelated.n_bytes();
+        let mut cache = PrefixCache::with_max_bytes(budget);
+        cache.insert(complete.clone());
+        cache.insert(unrelated);
+
+        assert!(cache.insert_shared_strict(Arc::new(complete)));
+        assert_eq!(cache.len(), 2);
+        assert!(cache.lookup_longest(&id, &[1]).is_some());
+        assert!(cache.lookup_longest(&id, &[2]).is_some());
+    }
+
+    #[test]
+    fn strict_eligibility_never_evicts() {
+        let id = ident(1);
+        let one = snap_bytes(&[1], 64);
+        let mut cache = PrefixCache::with_max_bytes(one);
+        cache.insert(snap(id.clone(), &[1], 64));
+        assert!(cache.eligible_strict(one));
+        assert!(!cache.eligible_strict(one + 1));
+        assert_eq!(cache.len(), 1);
+        assert!(cache.lookup_longest(&id, &[1]).is_some());
     }
 
     #[test]

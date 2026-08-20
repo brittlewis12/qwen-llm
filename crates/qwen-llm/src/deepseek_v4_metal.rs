@@ -1794,6 +1794,25 @@ pub struct DeepSeekV4Session {
 /// Compatibility name retained for the position-zero live differential.
 pub type DeepSeekV4PositionZeroForward = DeepSeekV4Session;
 
+pub struct DeepSeekV4SessionConstructionFailure {
+    residency: Arc<DeepSeekV4MetalResidency>,
+    error: DeepSeekV4MetalError,
+}
+
+impl DeepSeekV4SessionConstructionFailure {
+    pub fn into_parts(self) -> (DeepSeekV4MetalResidency, DeepSeekV4MetalError) {
+        let Self { residency, error } = self;
+        let residency = Arc::try_unwrap(residency).unwrap_or_else(|_| {
+            unreachable!("failed DeepSeek V4 session construction retained shared residency")
+        });
+        (residency, error)
+    }
+
+    fn into_error(self) -> DeepSeekV4MetalError {
+        self.error
+    }
+}
+
 impl DeepSeekV4Session {
     pub fn new(
         ctx: &MetalContext,
@@ -1843,7 +1862,25 @@ impl DeepSeekV4Session {
         residency: DeepSeekV4MetalResidency,
         model_content_id: DeepSeekV4ModelContentId,
     ) -> Result<Self, DeepSeekV4MetalError> {
-        Self::new_inner(ctx, Arc::new(residency), Some(model_content_id))
+        Self::new_with_model_content_id_recoverable(ctx, residency, model_content_id)
+            .map_err(DeepSeekV4SessionConstructionFailure::into_error)
+    }
+
+    /// Construct an exclusively-owned session without losing residency when
+    /// session scratch allocation or validation fails.
+    pub fn new_with_model_content_id_recoverable(
+        ctx: &MetalContext,
+        residency: DeepSeekV4MetalResidency,
+        model_content_id: DeepSeekV4ModelContentId,
+    ) -> Result<Self, DeepSeekV4SessionConstructionFailure> {
+        let residency = Arc::new(residency);
+        match Self::new_inner(ctx, Arc::clone(&residency), Some(model_content_id)) {
+            Ok(session) => {
+                drop(residency);
+                Ok(session)
+            }
+            Err(error) => Err(DeepSeekV4SessionConstructionFailure { residency, error }),
+        }
     }
 
     fn new_inner(

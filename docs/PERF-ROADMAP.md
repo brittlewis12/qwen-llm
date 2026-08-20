@@ -153,6 +153,14 @@ Decision rules:
   for decision-changing results. A focused regression and ordinary endpoint
   check are preferable to replaying unrelated historical gates.
 
+## Serve Follow-ups — 2026-08-20
+
+1. **Small-span warm-tail TTFT:** design and test a path that beats the current
+   serial-tail strategy for longer small uncached tails without changing output.
+   Do not assume fixed matrix setup is the current limiter: tails up to 48 tokens
+   bypass that path. Require a named warm-8k TTFT packet below the original 150 ms
+   target before promotion.
+
 ## Qwen3.8 27B Launch Lane — 2026-08-14
 
 The pinned Qwen3.8 Q4_K_M asset is a near-drop-in dense text backbone with one

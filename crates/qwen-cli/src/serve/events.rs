@@ -587,9 +587,9 @@ impl<'a, W: EventWrite> ResponseStream<'a, W> {
         }
         for (index, call) in parsed.calls.iter().enumerate() {
             if !self.allowed_tools.is_empty() && !self.allowed_tools.contains(&call.name) {
-                // Spec: allowed_tools is a hard constraint. Suppress the
-                // call and surface the attempt as visible text rather than
-                // executing a disallowed tool.
+                // Spec: allowed_tools is a hard constraint. The call is
+                // dropped (not re-surfaced as text) and logged; enforcement
+                // is post-generation, so its tokens were already spent.
                 tracing::info!(
                     target: "qwen_diag",
                     "serve: suppressed call to disallowed tool {:?}",

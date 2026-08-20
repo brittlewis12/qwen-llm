@@ -16,7 +16,7 @@ jam positions are not.
 | S0 | Prefix-stability falsifier | measurement | DONE — see packet RESULTS |
 | **S1 (this doc)** | Resident serial server, Open Responses subset, no tools | the game (thin HTTP client) | below |
 | S2 ✅ | Tool items (XML-parameter form from the template oracle), `allowed_tools`, continuation rendering | opencode via stock `@ai-sdk/open-responses` | **PASS: 10/10 requests checkpoint-hit** (94–100 % restored), 5/5 turns tool-called — docs/bench/2026-08-19-s2-agent-gate/ |
-| S3 | Reasoning `encrypted_content` opaque round-trip; DS4 family support | opencode, lossless | zero tail re-prefill on preserve conversations, by metric |
+| S3 (in progress) | Pre-opened (headless) reasoning support, DeepSeek V4 family backend, DFlash drafter integration. `encrypted_content` opaque round-trip is **not** built — the S2 capture showed plain reasoning content already replays verbatim, so it demoted from necessity to hardening. | opencode, DS4 clients | DS4 live gate (pending): warm snapshot hit rate, byte identity vs CLI, headless partition conformance |
 | S4 | Public v0: CC shim, install, memory admission UX, bench repro, compliance claim | the world | sub-100 ms turn-2 TTFT demo, resident @32k |
 
 Parked: items npm provider (stock AI SDK provider exists), WS
@@ -29,6 +29,7 @@ One new subcommand:
 
 ```sh
 qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] [--drafter GGUF]
+# DeepSeek V4 additionally requires --max-context-tokens (startup-fixed forward budget)
 ```
 
 - **Residency:** model loads once; the process is the warm tier. S0's F2
@@ -65,9 +66,10 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] [--drafter GGUF]
   request in flight, OS listen backlog queues the rest. HTTP/1.1 with
   `Connection: close`; hand-rolled request parse (loopback threat model;
   request bodies are `Content-Length` JSON).
-- **Qwen35/Qwen35Moe families only.** DS4 serve support lands in S3 with
-  its own session/checkpoint stack; until then serve fails closed at
-  startup on DS4 models.
+- **Qwen35/Qwen35Moe and DeepSeek V4.** DS4 runs its own session and
+  snapshot stack (`serve/backend_ds4.rs`) with a startup-fixed forward
+  budget, a serve-owned snapshot LRU (DS4 has no engine-side RAM prefix
+  cache), and no tool support yet — tool definitions fail closed there.
 - **Stdout is never written.** All diagnostics via the existing stderr
   tracing surface; per-request `qwen_diag` stats line retained and
   extended with `matched_tokens` and `restore_ms` (the S2/S3 gates are
@@ -102,15 +104,17 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] [--drafter GGUF]
 - `truncation` — only `"disabled"` (default). The engine already fails
   closed on context overflow (S0 F3); serve maps that to the spec error
   instead of a process exit.
-- `tools` — function tools are supported (S2). Hosted tool types fail
-  closed. Definitions render into the family template's `# Tools` system
+- `tools` — function tools are supported on Qwen families (S2); DeepSeek
+  V4 fails closed on any tool definition. Hosted tool types fail closed. Definitions render into the family template's `# Tools` system
   block, byte-pinned to the template oracle.
 - `tool_choice` — `"auto"` (default) or an `allowed_tools` object.
   Narrowing is enforced as a hard constraint on emitted calls while
   leaving rendered bytes identical, so prompt prefixes and their
   checkpoints stay valid across tool-menu changes (the spec's
-  cache-preserving intent, test-pinned). `required`, `none`, and
-  forced-function are not implemented.
+  cache-preserving intent, test-pinned). Enforcement is post-generation:
+  a suppressed call has already consumed tokens and remains in the
+  completed-turn checkpoint key, so that continuation will not hit.
+  `required`, `none`, and forced-function are not implemented.
 - `/responses/compact` — not implemented (404); compaction is outside the
   S1–S4 arc and revisits with the WebSocket transport question.
 - `x_qwen.stats: true` — echoes `{matched_tokens, restore_ms,
@@ -134,7 +138,9 @@ Streaming events: `response.created`, `response.in_progress`,
 `response.output_item.added`, `response.content_part.added`,
 `response.reasoning.delta|done` (spec event names, adjudicated by the gate-5 conformance suite), `response.output_text.delta|done`,
 `response.content_part.done`, `response.output_item.done`,
-`response.completed|incomplete|failed`, terminal `[DONE]`. **Every
+`response.completed|incomplete|failed`, terminal `[DONE]`. Tool turns
+add `function_call` output items with
+`response.function_call_arguments.delta|done` (S2). **Every
 event carries a monotonic `sequence_number`** (review defect 4 — the
 conformance suite asserts ordering; retrofitting into a hand-rolled SSE
 writer later costs more). SSE comment heartbeats (`: ping`) at ≥1 Hz
@@ -160,19 +166,19 @@ because client model-pickers probe it).
   completed — into the **RAM** prefix cache (8–42 ms each per S0; this
   makes the server's own next-turn path immune to client echo policy).
   Durable publication keeps the existing completed-else-prompt shadowing
-  policy; `--durable-dual-publish` exists but defaults off until CC-shim
-  clients exist (review R2: at q38's ~90 KB/token, dual durable publish
+  policy. **Durable publication remains parked**: S1-S3 shipped RAM-only,
+  so cross-restart warmth still re-prefills. `--durable-dual-publish` is
+  designed but unbuilt (review R2: at q38's ~90 KB/token, dual durable publish
   of a 32k context is ~6 GB/turn — LRU churn that evicts the prefixes it
   is meant to protect, and publish time serializes the next request on a
   serial server). Pre-implementation task: verify
   `prepare_checkpoint_boundary`/`cache_prepared_checkpoint` actually
   supports dual capture per turn (asserted, not yet demonstrated —
   review R6 runner-up).
-- **Replay-fidelity golden (review R6):** a render→items→render identity
-  fixture — serialize a turn's output to items, re-ingest, re-render,
-  assert byte identity — ships in S1's golden set, so stock-provider
-  drift in S2 surfaces as a unit-test failure rather than a silent
-  degradation of completed-turn hits to prompt-boundary hits.
+- **Replay-fidelity coverage (review R6):** render→items→render byte
+  identity is asserted by unit tests (`render.rs` split/render inverse,
+  `tool_parse.rs` `qwen36_raw_echo_identity`, `render_ds4.rs` preserved
+  history round-trip) rather than by a JSON fixture case.
 - Tool-continuation golden fixtures are **written before the renderer**
   (review R3), so the renderer is fit to the fixture, never the reverse.
 - Preserve/strip rendering policy: preserve is the default for the

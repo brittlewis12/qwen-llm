@@ -10,6 +10,7 @@
 use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
+use super::utf8::Utf8Assembler;
 use anyhow::Context as _;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::{Model, open_dflash_drafter};
@@ -248,6 +249,13 @@ impl GenerationBackend for EngineBackend {
                         ServeError::server_error(format!("capture prefill: {error:#}"))
                     })?;
                     dflash_capture = Some((dst, span, n_features));
+                    // The seeding offset below assumes the capture covers the
+                    // whole context; true only because speculate ⇒ no restore
+                    // ⇒ start == 0 (k3 R3).
+                    debug_assert_eq!(
+                        start, 0,
+                        "speculative capture must start at position zero"
+                    );
                     out
                 }
                 None => crate::prefill_span(
@@ -303,6 +311,7 @@ impl GenerationBackend for EngineBackend {
             .map_err(|error| ServeError::server_error(format!("stop tokens: {error}")))?;
 
         let mut abort: Option<io::Error> = None;
+        let mut assembler = Utf8Assembler::new();
         let tokenizer = &self.tokenizer;
         // Speculative path: seed the drafter cross-context from the captured
         // prompt hiddens, then greedy accept-prefix over an exact target
@@ -344,7 +353,13 @@ impl GenerationBackend for EngineBackend {
                     max_tokens,
                     &stop_tokens,
                     |token| {
-                        let piece = tokenizer.decode_piece(token);
+                        let bytes = tokenizer
+                            .try_decode_piece_bytes_exact(token)
+                            .with_context(|| format!("decode token {token}"))?;
+                        let piece = assembler.push(bytes);
+                        if piece.is_empty() {
+                            return Ok(());
+                        }
                         sink.piece(&piece).map_err(|error| {
                             *abort = Some(error);
                             anyhow::anyhow!("client disconnected during decode")
@@ -384,7 +399,16 @@ impl GenerationBackend for EngineBackend {
                 &stop_tokens,
                 &mut sampler,
                 |token| {
-                    let piece = tokenizer.decode_piece(token);
+                    // Exact bytes + incremental UTF-8 assembly: per-token
+                    // lossy decode corrupts multibyte characters split
+                    // across tokens (k3 R1.6).
+                    let bytes = tokenizer
+                        .try_decode_piece_bytes_exact(token)
+                        .with_context(|| format!("decode token {token}"))?;
+                    let piece = assembler.push(bytes);
+                    if piece.is_empty() {
+                        return Ok(());
+                    }
                     sink.piece(&piece).map_err(|error| {
                         *abort = Some(error);
                         anyhow::anyhow!("client disconnected during decode")

@@ -23,13 +23,14 @@
 use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
+use super::utf8::Utf8Assembler;
 use super::render_ds4;
 use anyhow::Context as _;
 use objc2_metal::MTLDevice;
 use crate::DeepSeekV4MultigroupSelectorPlan;
 use qwen_llm::deepseek_v4_metal::{
-    DeepSeekV4CausalSnapshot, DeepSeekV4MetalResidency, DeepSeekV4Session,
-    DeepSeekV4SessionCapacity,
+    DeepSeekV4CausalSnapshot, DeepSeekV4MetalResidency, DeepSeekV4ModelContentId,
+    DeepSeekV4Session, DeepSeekV4SessionCapacity,
 };
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::metal::MetalContext;
@@ -98,6 +99,11 @@ pub(crate) struct DeepSeekV4Backend {
     default_max_tokens: usize,
     prefill_chunk_tokens: usize,
     cache: SnapshotCache,
+    /// Snapshots are scoped by a bound identity; capture and restore both
+    /// hard-fail without one. Serve's cache is process-local and never
+    /// published, so an ephemeral per-process id is the sanctioned binding
+    /// (durable publication would require the full content identity).
+    model_content_id: DeepSeekV4ModelContentId,
 }
 
 impl DeepSeekV4Backend {
@@ -136,6 +142,17 @@ impl DeepSeekV4Backend {
             session_capacity.forward_limit(),
             load_t0.elapsed().as_secs_f64() * 1e3,
         );
+        let mut ephemeral = [0u8; 32];
+        ephemeral[..8].copy_from_slice(&std::process::id().to_le_bytes()[..4].repeat(2));
+        ephemeral[8..16].copy_from_slice(
+            &std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0)
+                .to_le_bytes(),
+        );
+        ephemeral[16..].copy_from_slice(b"qwen-serve-ephemeral-ds4-cache..");
+        let model_content_id = DeepSeekV4ModelContentId::new(ephemeral);
         Ok(Self {
             ctx,
             gguf,
@@ -148,6 +165,7 @@ impl DeepSeekV4Backend {
             default_max_tokens,
             prefill_chunk_tokens,
             cache: SnapshotCache::new(4),
+            model_content_id,
         })
     }
 
@@ -163,6 +181,26 @@ impl DeepSeekV4Backend {
             })
             .collect()
     }
+}
+
+fn stop_reason_is_token_limit(generation: &crate::GenerationResult) -> bool {
+    matches!(generation.stop_reason, crate::StopReason::TokenLimit)
+}
+
+/// True when the generated text contains the reasoning terminator, i.e. the
+/// transcript can still be extended verbatim by the next turn.
+fn decoded_text_closed_reasoning(
+    generation: &crate::GenerationResult,
+    tokenizer: &Tokenizer,
+) -> bool {
+    let mut assembler = super::utf8::Utf8Assembler::new();
+    let mut text = String::new();
+    for token in &generation.tokens {
+        if let Ok(bytes) = tokenizer.try_decode_piece_bytes_exact(*token) {
+            text.push_str(&assembler.push(bytes));
+        }
+    }
+    text.contains("</think>")
 }
 
 impl GenerationBackend for DeepSeekV4Backend {
@@ -217,10 +255,13 @@ impl GenerationBackend for DeepSeekV4Backend {
             .into());
         }
 
-        let residency = self
-            .residency
-            .take()
-            .ok_or_else(|| ServeError::server_error("DeepSeek V4 residency slot is empty"))?;
+        let residency = self.residency.take().ok_or_else(|| {
+            // Unreachable unless a prior request poisoned the slot; a server
+            // that can never serve again must not pretend otherwise (k3 R1.5).
+            ServeError::server_error(
+                "DeepSeek V4 residency slot is empty; the server can no longer serve requests",
+            )
+        })?;
         self.run_request(
             residency,
             request,
@@ -246,14 +287,18 @@ impl DeepSeekV4Backend {
         // Session per request over the long-lived residency; the slot is
         // restored on every exit path below.
         let session_t0 = Instant::now();
-        let mut session = match DeepSeekV4Session::new(&self.ctx, residency) {
+        let mut session = match DeepSeekV4Session::new_with_model_content_id(
+            &self.ctx,
+            residency,
+            self.model_content_id,
+        ) {
             Ok(session) => session,
             Err(error) => {
                 return Err(ServeError::server_error(format!("create session: {error:#}")).into());
             }
         };
         if let Err(error) = self.selector_plan.seal_session(&mut session, "serve") {
-            self.residency = Some(session.into_residency().map_err(|error| ServeError::server_error(format!("recycle residency: {error:#}")))?);
+            self.restore_residency(session);
             return Err(ServeError::server_error(format!("seal selector: {error:#}")).into());
         }
         let session_ms = session_t0.elapsed().as_secs_f64() * 1e3;
@@ -267,8 +312,23 @@ impl DeepSeekV4Backend {
             session_ms,
             sink,
         );
-        self.residency = Some(session.into_residency().map_err(|error| ServeError::server_error(format!("recycle residency: {error:#}")))?);
+        self.restore_residency(session);
         result
+    }
+
+    /// Return the residency to its slot. A failure here permanently disables
+    /// the server, so it is fatal rather than silently poisoning the slot.
+    fn restore_residency(&mut self, session: DeepSeekV4Session) {
+        match session.into_residency() {
+            Ok(residency) => self.residency = Some(residency),
+            Err(error) => {
+                tracing::error!(
+                    target: "qwen_diag",
+                    "serve: deepseek_v4 residency could not be recovered ({error}); aborting"
+                );
+                std::process::abort();
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -296,15 +356,26 @@ impl DeepSeekV4Backend {
         };
         let restore_ms = restore_t0.elapsed().as_secs_f64() * 1e3;
 
-        sink.tick().map_err(BackendFailure::Aborted)?;
+        // Chunk locally rather than calling execute_deepseek_v4_prompt_suffix
+        // so the transport can heartbeat and detect disconnects between
+        // chunks (k3 R1.3: a cold DS4 prefill is tens of seconds).
         let prefill_t0 = Instant::now();
-        if let Err(error) = crate::execute_deepseek_v4_prompt_suffix(
-            session,
-            &self.ctx,
-            &prompt_ids[matched_tokens..],
-            self.prefill_chunk_tokens,
-        ) {
-            return Err(ServeError::server_error(format!("prefill: {error:#}")).into());
+        let suffix = &prompt_ids[matched_tokens..];
+        let ranges = crate::deepseek_v4_prefill_chunk_ranges(suffix.len(), self.prefill_chunk_tokens);
+        let chunk_count = ranges.len();
+        for (index, range) in ranges.into_iter().enumerate() {
+            sink.tick().map_err(BackendFailure::Aborted)?;
+            let chunk = &suffix[range];
+            let result = if index + 1 == chunk_count {
+                session.prefill_tokens(&self.ctx, chunk).map(|_| ())
+            } else {
+                session.advance_tokens(&self.ctx, chunk)
+            };
+            if let Err(error) = result {
+                return Err(
+                    ServeError::server_error(format!("prefill chunk {index}: {error:#}")).into(),
+                );
+            }
         }
         let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
 
@@ -312,7 +383,14 @@ impl DeepSeekV4Backend {
         let capture_t0 = Instant::now();
         match session.capture_causal_snapshot() {
             Ok(snapshot) => self.cache.insert(prompt_ids.to_vec(), snapshot),
-            Err(error) => tracing::warn!("serve: deepseek_v4 prompt capture failed: {error}"),
+            Err(error) => {
+                // Loud: a capture failure means the warm path is dead, which
+                // is otherwise invisible (k3 R1.1).
+                tracing::error!(
+                    target: "qwen_diag",
+                    "serve: deepseek_v4 prompt capture FAILED (warm path disabled): {error}"
+                );
+            }
         }
         let capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
 
@@ -328,6 +406,11 @@ impl DeepSeekV4Backend {
                 return Err(ServeError::server_error(format!("stop tokens: {error}")).into());
             }
         };
+        for token in &stop_tokens {
+            crate::checked_deepseek_v4_token_id(*token, self.vocab_size, "stop").map_err(
+                |error| ServeError::server_error(format!("invalid stop token: {error}")),
+            )?;
+        }
         let sampling = SamplingConfig {
             temperature: request.temperature.unwrap_or(0.0),
             top_k: request.top_k.unwrap_or(200),
@@ -339,6 +422,7 @@ impl DeepSeekV4Backend {
             .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))?;
 
         let mut abort: Option<io::Error> = None;
+        let mut assembler = Utf8Assembler::new();
         let tokenizer = &self.tokenizer;
         let ctx = &self.ctx;
         let vocab_size = self.vocab_size;
@@ -350,7 +434,13 @@ impl DeepSeekV4Backend {
                 &stop_tokens,
                 &mut sampler,
                 |token| {
-                    let piece = tokenizer.decode_piece(token);
+                    let bytes = tokenizer
+                        .try_decode_piece_bytes_exact(token)
+                        .with_context(|| format!("decode token {token}"))?;
+                    let piece = assembler.push(bytes);
+                    if piece.is_empty() {
+                        return Ok(());
+                    }
                     sink.piece(&piece).map_err(|error| {
                         *abort = Some(error);
                         anyhow::anyhow!("client disconnected during decode")
@@ -379,7 +469,12 @@ impl DeepSeekV4Backend {
         // Completed-turn capture: the next turn's history extends this exact
         // token prefix (render_ds4 preserves reasoning verbatim for that
         // reason), so cache it under prompt + consumed generated tokens.
-        if generation.transitions > 0 {
+        // A turn truncated *inside* reasoning re-renders as a closed think
+        // block, so its token prefix can never be extended — capturing it
+        // only churns the LRU (k3 R1.8).
+        let truncated_in_reasoning = stop_reason_is_token_limit(&generation)
+            && !decoded_text_closed_reasoning(&generation, &self.tokenizer);
+        if generation.transitions > 0 && !truncated_in_reasoning {
             let mut consumed = prompt_ids.to_vec();
             for token in generation.tokens.iter().take(generation.transitions) {
                 match crate::checked_deepseek_v4_token_id(*token, vocab_size, "consumed") {

@@ -22,6 +22,7 @@ pub(crate) mod partition;
 pub(crate) mod render;
 pub(crate) mod render_ds4;
 pub(crate) mod tool_parse;
+pub(crate) mod utf8;
 
 use anyhow::{Context, Result, ensure};
 use qwen_llm::gguf::GgufFile;

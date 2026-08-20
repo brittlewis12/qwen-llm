@@ -55,6 +55,14 @@ pub(crate) fn render_deepseek_v4_serve_prompt(
     request: &ServeRequest,
 ) -> Result<String, ServeError> {
     let options = encode_options(request)?;
+    if !request.tools.is_empty() {
+        // Fail closed rather than dropping definitions the model never sees
+        // (k3 R1.7); DS4 tool support is not implemented.
+        return Err(ServeError::invalid_request(
+            Some("tools"),
+            "DeepSeek V4 serve does not support tools yet",
+        ));
+    }
     let mut messages = Vec::with_capacity(request.turns.len() + 1);
     if let Some(system) = request.system.as_deref() {
         messages.push(ChatMessage {

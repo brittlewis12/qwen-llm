@@ -14,6 +14,7 @@
 #![allow(dead_code)] // consumed incrementally; the HTTP slice wires the rest
 
 pub(crate) mod backend;
+pub(crate) mod backend_ds4;
 pub(crate) mod events;
 pub(crate) mod http;
 pub(crate) mod items;
@@ -35,10 +36,12 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         .with_context(|| format!("open model {}", invocation.model.display()))?;
     let family = ModelFamily::detect(&gguf);
     ensure!(
-        matches!(family, Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe)),
-        "qwen serve currently supports Qwen3.5/3.6-family models only (docs/SERVE.md; DeepSeek V4 serve lands in S3)"
+        matches!(
+            family,
+            Some(ModelFamily::Qwen35 | ModelFamily::Qwen35Moe | ModelFamily::DeepSeek4)
+        ),
+        "qwen serve supports Qwen3.5/3.6-family and DeepSeek V4 models (docs/SERVE.md)"
     );
-    drop(gguf);
     let model_id = invocation
         .model
         .file_stem()
@@ -46,6 +49,30 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         .context("model path has no printable file stem")?
         .to_owned();
 
+    if family == Some(ModelFamily::DeepSeek4) {
+        ensure!(
+            invocation.drafter.is_none(),
+            "--drafter is not supported for DeepSeek V4 serve"
+        );
+        // DS4 sizes its session from a forward budget fixed at startup, so
+        // serve must be told the context ceiling up front (the CLI's stdin
+        // JSONL lane has the same requirement).
+        let context_limit = invocation.max_context_tokens.context(
+            "DeepSeek V4 serve requires --max-context-tokens: the session forward budget is fixed at startup",
+        )?;
+        let forward_limit = crate::deepseek_v4_forward_budget_for_context_limit(context_limit)?;
+        let ctx = qwen_llm::metal::MetalContext::new().context("initialize Metal context")?;
+        let mut backend = backend_ds4::DeepSeekV4Backend::new(
+            ctx,
+            gguf,
+            model_id.clone(),
+            invocation.max_tokens,
+            forward_limit,
+            crate::DeepSeekV4MultigroupSelectorArg::Auto,
+        )?;
+        return accept_loop(&invocation.addr, &model_id, 0.0, &mut backend);
+    }
+    drop(gguf);
     let runtime = Runtime::metal().context("initialize Metal runtime")?;
     let load_t0 = Instant::now();
     let loaded = runtime
@@ -60,12 +87,23 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         invocation.drafter.as_deref(),
     )?;
 
-    let listener =
-        TcpListener::bind(&invocation.addr).with_context(|| format!("bind {}", invocation.addr))?;
+    accept_loop(&invocation.addr, &model_id, load_ms, &mut backend)
+}
+
+/// Serial accept loop shared by every family backend.
+fn accept_loop(
+    addr: &str,
+    model_id: &str,
+    load_ms: f64,
+    backend: &mut dyn http::GenerationBackend,
+) -> Result<()> {
+    let listener = TcpListener::bind(addr).with_context(|| format!("bind {addr}"))?;
     tracing::info!(
         target: "qwen_diag",
         "serve: listening on http://{} model={} load_ms={:.1} (serial; POST /v1/responses, GET /v1/models)",
-        listener.local_addr().map_or_else(|_| invocation.addr.clone(), |addr| addr.to_string()),
+        listener
+            .local_addr()
+            .map_or_else(|_| addr.to_owned(), |addr| addr.to_string()),
         model_id,
         load_ms,
     );
@@ -73,16 +111,11 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         crate::shutdown::checkpoint()?;
         match stream {
             Ok(stream) => {
-                if let Err(error) = http::handle_connection(&stream, &mut backend) {
-                    tracing::info!(
-                        target: "qwen_diag",
-                        "serve: connection aborted: {error}"
-                    );
+                if let Err(error) = http::handle_connection(&stream, backend) {
+                    tracing::info!(target: "qwen_diag", "serve: connection aborted: {error}");
                 }
             }
-            Err(error) => {
-                tracing::warn!("serve: accept failed: {error}");
-            }
+            Err(error) => tracing::warn!("serve: accept failed: {error}"),
         }
     }
     Ok(())

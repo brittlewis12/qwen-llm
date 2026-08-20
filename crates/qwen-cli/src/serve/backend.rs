@@ -22,7 +22,7 @@ use std::io;
 use std::time::Instant;
 
 impl ServeError {
-    fn server_error(message: impl Into<String>) -> Self {
+    pub(crate) fn server_error(message: impl Into<String>) -> Self {
         Self {
             status: 500,
             error_type: "server_error",

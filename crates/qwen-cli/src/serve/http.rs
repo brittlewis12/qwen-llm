@@ -40,6 +40,10 @@ pub(crate) trait GenerationBackend {
     fn preopens_reasoning(&self, _request: &ServeRequest) -> bool {
         false
     }
+    /// Family-specific prompt rendering. Defaults to the Qwen ChatML path.
+    fn render_prompt(&self, request: &ServeRequest) -> Result<String, ServeError> {
+        Ok(render_qwen_serve_prompt(request))
+    }
     /// Render is already done; `prompt` is the exact model input. The
     /// backend streams raw generated text into `sink` and returns the
     /// outcome, or a spec error (e.g., context overflow → invalid_request
@@ -294,7 +298,10 @@ fn handle_responses(
             &ServeError::model_not_found(&request.model, backend.model_id()),
         );
     }
-    let prompt = render_qwen_serve_prompt(&request);
+    let prompt = match backend.render_prompt(&request) {
+        Ok(prompt) => prompt,
+        Err(error) => return write_serve_error(&mut writer, &error),
+    };
     let response_id = next_response_id();
     let created_at = now_unix();
 

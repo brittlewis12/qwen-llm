@@ -53,9 +53,9 @@ use qwen_llm::metal::{
 };
 use qwen_llm::metal_dflash::{
     DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
-    MetalDFlashVerifyScratch, PrefillScratchConfig, PrefillScratchOverlayStats,
-    PrefillScratchPlan, ensure_prompt_lookup_n8_supported,
-    plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
+    MetalDFlashVerifyScratch, PrefillScratchConfig, PrefillScratchOverlayStats, PrefillScratchPlan,
+    ensure_prompt_lookup_n8_supported, plan_prefill_scratch_with_matrix_max_pos_configured,
+    prefill_tokens_with_multi_hidden,
 };
 use qwen_llm::metal_forward::{
     LogitsReadbackProfile, MetalForward, MfError, SnapshotValidationError, StructuralRowEvidence,
@@ -5957,11 +5957,11 @@ fn run_single_turn(
     let dflash_head = match args.drafter.as_ref() {
         Some(path) => {
             let t0 = Instant::now();
-            let drafter_gguf = GgufFile::open(path)
-                .with_context(|| format!("open drafter {}", path.display()))?;
+            let drafter_gguf =
+                GgufFile::open(path).with_context(|| format!("open drafter {}", path.display()))?;
             qwen_llm::runtime::prefetch_opened_gguf(&drafter_gguf, &LoadedModelConfig::default());
-            let target_model = Model::from_gguf(loaded.gguf())
-                .context("parse target arch for drafter binding")?;
+            let target_model =
+                Model::from_gguf(loaded.gguf()).context("parse target arch for drafter binding")?;
             let bound = open_dflash_drafter(&drafter_gguf, &target_model)
                 .with_context(|| format!("bind drafter {}", path.display()))?;
             let head = MetalDFlashHead::load(loaded.context(), &drafter_gguf, &bound)
@@ -6450,11 +6450,9 @@ fn execute_single_turn_request(
                 let k_layers = head.target_layer_ids.len();
                 let n_features = k_layers * loaded.arch().hidden_size as usize;
                 let span = prompt_ids.len() - position;
-                let dst = MetalTensor::zeros_f32(
-                    loaded.context(),
-                    vec![(span * n_features) as u64],
-                )
-                .context("allocate drafter prefill hidden capture")?;
+                let dst =
+                    MetalTensor::zeros_f32(loaded.context(), vec![(span * n_features) as u64])
+                        .context("allocate drafter prefill hidden capture")?;
                 let out = prefill_span_with_capture(
                     &forward,
                     &mut sequence,
@@ -6516,238 +6514,240 @@ fn execute_single_turn_request(
     let use_gpu_greedy = greedy_gpu_decision.enabled;
     #[allow(unused_assignments)]
     let mut dflash_stats: Option<DflashDecodeStats> = None;
-    let (generation, prompt_lookup_stats, sampling_attribution, sampled_structural) = if let Some(
-        head,
-    ) = dflash_head
-    {
-        // v0.77 DFlash speculative decode. Seed the drafter's cross-context
-        // with the captured prompt hiddens, then run the greedy
-        // accept-prefix loop; output is identical to serial greedy.
-        let capacity = sequence.position() + args.tokens + 16;
-        let mut dsess = MetalDFlashSession::fresh(
-            loaded.context(),
-            head,
-            loaded.arch().hidden_size as u64,
-            loaded.arch().vocab_size as u64,
-            capacity,
-        )
-        .context("allocate dflash drafter session")?;
-        if let Some((dst, span, n_features)) = dflash_prefill_capture.as_ref() {
-            dsess
-                .append_target_ctx_columns_contiguous_now(
-                    loaded.context(),
-                    dst,
-                    (sequence.position() - span) as u32,
-                    *span,
-                    *n_features,
-                )
-                .context("seed drafter cross-context from prompt prefill")?;
-        }
-        let result = generate_dflash(
-            loaded,
-            &forward,
-            head,
-            dsess,
-            sequence,
-            logits,
-            args.tokens,
-            &stop_tokens,
-            |token| {
-                let callback_t0 = Instant::now();
-                write!(stdout, "{}", tokenizer.decode_piece(token))?;
-                stdout.flush().context("flush generated token")?;
-                if first_delivery_ms.is_none() {
-                    first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
-                    first_callback_duration_ms = Some(callback_t0.elapsed().as_secs_f64() * 1e3);
-                    first_delivery_allocated =
-                        timing_enabled.then(|| loaded.context().current_allocated_size());
-                }
-                Ok(())
-            },
-        )?;
-        sequence = result.sequence;
-        let s = &result.stats;
-        let steps = s.spec_steps.max(1) as f64;
-        // Emitted tokens per verify step = 1 bonus + accepted drafts; the
-        // economics of the whole mode reduce to this number vs the
-        // ctx-keyed break-even.
-        tracing::info!(
-            target: "qwen_diag",
-            concat!(
-                "dflash: spec_steps={} off_steps={} accepted={}/{} ",
-                "mean_emitted={:.2} alpha_backoff={} ",
-                "draft_ms={:.1} draft_first_ms={:.1} verify_ms={:.1} ",
-                "append_ms={:.1} restore_ms={:.1} serial_ms={:.1}",
-            ),
-            s.spec_steps,
-            s.off_steps,
-            s.accepted_drafts,
-            s.drafts_scored,
-            1.0 + s.accepted_drafts as f64 / steps,
-            s.alpha_backoff,
-            s.draft_ms / steps,
-            s.draft_first_call_ms,
-            s.verify_ms / steps,
-            s.append_ms / steps,
-            s.restore_ms / steps,
-            s.serial_ms,
-        );
-        dflash_stats = Some(result.stats);
-        (result.generation, None, None, None)
-    } else if args.prompt_lookup {
-        let result = generate_prompt_lookup(
-            loaded,
-            &forward,
-            sequence,
-            &prompt_ids,
-            logits,
-            args.tokens,
-            &stop_tokens,
-            |token| {
-                let callback_t0 = Instant::now();
-                write!(stdout, "{}", tokenizer.decode_piece(token))?;
-                stdout.flush().context("flush generated token")?;
-                if first_delivery_ms.is_none() {
-                    first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
-                    first_callback_duration_ms = Some(callback_t0.elapsed().as_secs_f64() * 1e3);
-                    first_delivery_allocated =
-                        timing_enabled.then(|| loaded.context().current_allocated_size());
-                }
-                Ok(())
-            },
-        )?;
-        sequence = result.sequence;
-        (result.generation, Some(result.stats), None, None)
-    } else {
-        let mut on_token = |token| {
-            let callback_t0 = Instant::now();
-            write!(stdout, "{}", tokenizer.decode_piece(token))?;
-            stdout.flush().context("flush generated token")?;
-            if first_delivery_ms.is_none() {
-                first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
-                first_callback_duration_ms = Some(callback_t0.elapsed().as_secs_f64() * 1e3);
-                first_delivery_allocated =
-                    timing_enabled.then(|| loaded.context().current_allocated_size());
+    let (generation, prompt_lookup_stats, sampling_attribution, sampled_structural) =
+        if let Some(head) = dflash_head {
+            // v0.77 DFlash speculative decode. Seed the drafter's cross-context
+            // with the captured prompt hiddens, then run the greedy
+            // accept-prefix loop; output is identical to serial greedy.
+            let capacity = sequence.position() + args.tokens + 16;
+            let mut dsess = MetalDFlashSession::fresh(
+                loaded.context(),
+                head,
+                loaded.arch().hidden_size as u64,
+                loaded.arch().vocab_size as u64,
+                capacity,
+            )
+            .context("allocate dflash drafter session")?;
+            if let Some((dst, span, n_features)) = dflash_prefill_capture.as_ref() {
+                dsess
+                    .append_target_ctx_columns_contiguous_now(
+                        loaded.context(),
+                        dst,
+                        (sequence.position() - span) as u32,
+                        *span,
+                        *n_features,
+                    )
+                    .context("seed drafter cross-context from prompt prefill")?;
             }
-            Ok(())
-        };
-        let (generation, sampling_attribution, sampled_structural) = if args.sampling_attribution {
-            let (generation, sampler_attribution, transition_attribution) =
-                generate_serial_attributed(
-                    logits,
-                    args.tokens,
-                    &stop_tokens,
-                    &mut sampler,
-                    &mut on_token,
-                    |token| {
-                        let position = sequence.position();
-                        let next = forward
-                            .single_token_sampled_attribution(
-                                token,
-                                u32::try_from(position).context("position does not fit u32")?,
-                                unsafe { sequence.metal_session_mut() },
-                            )
-                            .context("decode token with sampling attribution")?;
-                        sequence.advance_by(1)?;
-                        Ok(next)
-                    },
-                )?;
-            let clock_probe = sampling_clock_probe
-                .context("sampling attribution clock probe was not prepared")?
-                .clone();
-            let attribution = finalize_sampling_attribution(
-                &prompt_ids,
-                clock_probe,
-                sampler_attribution,
-                transition_attribution,
-                generation.transition_ms,
-                generation.wall_ms,
-            );
-            (generation, Some(attribution), None)
-        } else if args.sampled_structural {
-            let (generation, telemetry) = generate_sampled_structural(
+            let result = generate_dflash(
+                loaded,
+                &forward,
+                head,
+                dsess,
+                sequence,
                 logits,
                 args.tokens,
                 &stop_tokens,
-                &mut sampler,
-                &mut on_token,
-                |token, trial, trial_telemetry| {
-                    let position = sequence.position();
-                    let (sampled, _profile, row) = forward
-                        .single_token_sampled_structural(
-                            token,
-                            u32::try_from(position).context("position does not fit u32")?,
-                            unsafe { sequence.metal_session_mut() },
-                            trial,
-                        )
-                        .context("decode token with sampled structural path")?;
-                    let state = match sampled {
-                        Ok((sampled, evidence)) => {
-                            ensure!(
-                                evidence.used_bounded_path,
-                                "sampled structural transition selection fell back"
-                            );
-                            trial_telemetry.record_transition(evidence, row)?;
-                            SampledStructuralDecodeState::Selected(Ok(sampled))
-                        }
-                        Err(error) => SampledStructuralDecodeState::Selected(Err(error)),
-                    };
-                    sequence.advance_by(1)?;
-                    Ok(state)
+                |token| {
+                    let callback_t0 = Instant::now();
+                    write!(stdout, "{}", tokenizer.decode_piece(token))?;
+                    stdout.flush().context("flush generated token")?;
+                    if first_delivery_ms.is_none() {
+                        first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
+                        first_callback_duration_ms =
+                            Some(callback_t0.elapsed().as_secs_f64() * 1e3);
+                        first_delivery_allocated =
+                            timing_enabled.then(|| loaded.context().current_allocated_size());
+                    }
+                    Ok(())
                 },
             )?;
-            (generation, None, Some(telemetry))
-        } else if use_gpu_greedy {
-            (
-                generate_gpu_greedy(
-                    logits,
-                    args.tokens,
-                    &stop_tokens,
-                    &mut sampler,
-                    &mut on_token,
-                    |token| {
-                        let position = sequence.position();
-                        let next = forward
-                            .single_token_greedy(
-                                token,
-                                u32::try_from(position).context("position does not fit u32")?,
-                                unsafe { sequence.metal_session_mut() },
-                            )
-                            .context("decode token with GPU greedy selection")?;
-                        sequence.advance_by(1)?;
-                        Ok(next)
-                    },
-                )?,
-                None,
-                None,
-            )
+            sequence = result.sequence;
+            let s = &result.stats;
+            let steps = s.spec_steps.max(1) as f64;
+            // Emitted tokens per verify step = 1 bonus + accepted drafts; the
+            // economics of the whole mode reduce to this number vs the
+            // ctx-keyed break-even.
+            tracing::info!(
+                target: "qwen_diag",
+                concat!(
+                    "dflash: spec_steps={} off_steps={} accepted={}/{} ",
+                    "mean_emitted={:.2} alpha_backoff={} ",
+                    "draft_ms={:.1} draft_first_ms={:.1} verify_ms={:.1} ",
+                    "append_ms={:.1} restore_ms={:.1} serial_ms={:.1}",
+                ),
+                s.spec_steps,
+                s.off_steps,
+                s.accepted_drafts,
+                s.drafts_scored,
+                1.0 + s.accepted_drafts as f64 / steps,
+                s.alpha_backoff,
+                s.draft_ms / steps,
+                s.draft_first_call_ms,
+                s.verify_ms / steps,
+                s.append_ms / steps,
+                s.restore_ms / steps,
+                s.serial_ms,
+            );
+            dflash_stats = Some(result.stats);
+            (result.generation, None, None, None)
+        } else if args.prompt_lookup {
+            let result = generate_prompt_lookup(
+                loaded,
+                &forward,
+                sequence,
+                &prompt_ids,
+                logits,
+                args.tokens,
+                &stop_tokens,
+                |token| {
+                    let callback_t0 = Instant::now();
+                    write!(stdout, "{}", tokenizer.decode_piece(token))?;
+                    stdout.flush().context("flush generated token")?;
+                    if first_delivery_ms.is_none() {
+                        first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
+                        first_callback_duration_ms =
+                            Some(callback_t0.elapsed().as_secs_f64() * 1e3);
+                        first_delivery_allocated =
+                            timing_enabled.then(|| loaded.context().current_allocated_size());
+                    }
+                    Ok(())
+                },
+            )?;
+            sequence = result.sequence;
+            (result.generation, Some(result.stats), None, None)
         } else {
-            (
-                generate_serial(
+            let mut on_token = |token| {
+                let callback_t0 = Instant::now();
+                write!(stdout, "{}", tokenizer.decode_piece(token))?;
+                stdout.flush().context("flush generated token")?;
+                if first_delivery_ms.is_none() {
+                    first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
+                    first_callback_duration_ms = Some(callback_t0.elapsed().as_secs_f64() * 1e3);
+                    first_delivery_allocated =
+                        timing_enabled.then(|| loaded.context().current_allocated_size());
+                }
+                Ok(())
+            };
+            let (generation, sampling_attribution, sampled_structural) = if args
+                .sampling_attribution
+            {
+                let (generation, sampler_attribution, transition_attribution) =
+                    generate_serial_attributed(
+                        logits,
+                        args.tokens,
+                        &stop_tokens,
+                        &mut sampler,
+                        &mut on_token,
+                        |token| {
+                            let position = sequence.position();
+                            let next = forward
+                                .single_token_sampled_attribution(
+                                    token,
+                                    u32::try_from(position).context("position does not fit u32")?,
+                                    unsafe { sequence.metal_session_mut() },
+                                )
+                                .context("decode token with sampling attribution")?;
+                            sequence.advance_by(1)?;
+                            Ok(next)
+                        },
+                    )?;
+                let clock_probe = sampling_clock_probe
+                    .context("sampling attribution clock probe was not prepared")?
+                    .clone();
+                let attribution = finalize_sampling_attribution(
+                    &prompt_ids,
+                    clock_probe,
+                    sampler_attribution,
+                    transition_attribution,
+                    generation.transition_ms,
+                    generation.wall_ms,
+                );
+                (generation, Some(attribution), None)
+            } else if args.sampled_structural {
+                let (generation, telemetry) = generate_sampled_structural(
                     logits,
                     args.tokens,
                     &stop_tokens,
                     &mut sampler,
                     &mut on_token,
-                    |token| {
+                    |token, trial, trial_telemetry| {
                         let position = sequence.position();
-                        let next = forward
-                            .single_token(
+                        let (sampled, _profile, row) = forward
+                            .single_token_sampled_structural(
                                 token,
                                 u32::try_from(position).context("position does not fit u32")?,
                                 unsafe { sequence.metal_session_mut() },
+                                trial,
                             )
-                            .context("decode token")?;
+                            .context("decode token with sampled structural path")?;
+                        let state = match sampled {
+                            Ok((sampled, evidence)) => {
+                                ensure!(
+                                    evidence.used_bounded_path,
+                                    "sampled structural transition selection fell back"
+                                );
+                                trial_telemetry.record_transition(evidence, row)?;
+                                SampledStructuralDecodeState::Selected(Ok(sampled))
+                            }
+                            Err(error) => SampledStructuralDecodeState::Selected(Err(error)),
+                        };
                         sequence.advance_by(1)?;
-                        Ok(next)
+                        Ok(state)
                     },
-                )?,
-                None,
-                None,
-            )
+                )?;
+                (generation, None, Some(telemetry))
+            } else if use_gpu_greedy {
+                (
+                    generate_gpu_greedy(
+                        logits,
+                        args.tokens,
+                        &stop_tokens,
+                        &mut sampler,
+                        &mut on_token,
+                        |token| {
+                            let position = sequence.position();
+                            let next = forward
+                                .single_token_greedy(
+                                    token,
+                                    u32::try_from(position).context("position does not fit u32")?,
+                                    unsafe { sequence.metal_session_mut() },
+                                )
+                                .context("decode token with GPU greedy selection")?;
+                            sequence.advance_by(1)?;
+                            Ok(next)
+                        },
+                    )?,
+                    None,
+                    None,
+                )
+            } else {
+                (
+                    generate_serial(
+                        logits,
+                        args.tokens,
+                        &stop_tokens,
+                        &mut sampler,
+                        &mut on_token,
+                        |token| {
+                            let position = sequence.position();
+                            let next = forward
+                                .single_token(
+                                    token,
+                                    u32::try_from(position).context("position does not fit u32")?,
+                                    unsafe { sequence.metal_session_mut() },
+                                )
+                                .context("decode token")?;
+                            sequence.advance_by(1)?;
+                            Ok(next)
+                        },
+                    )?,
+                    None,
+                    None,
+                )
+            };
+            (generation, None, sampling_attribution, sampled_structural)
         };
-        (generation, None, sampling_attribution, sampled_structural)
-    };
     let mut inference_complete_ms = request_t0.elapsed().as_secs_f64() * 1e3;
     let pipeline_cache_generation_exit =
         timing_enabled.then(|| loaded.context().pipeline_cache_metrics());

@@ -13183,10 +13183,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             let logits = mf
                 .single_token(carry_tok, single_pos, &mut target_session)
                 .context("off-mode single_token")?;
-            off_single_ms.push((
-                t_single.elapsed().as_secs_f64() * 1e3,
-                single_pos as usize,
-            ));
+            off_single_ms.push((t_single.elapsed().as_secs_f64() * 1e3, single_pos as usize));
             let next_tok = argmax_i32(&logits);
             // Advance cursors. carry_tok was already emitted at top of
             // the loop; next iter's carry is `next_tok`.

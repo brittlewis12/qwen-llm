@@ -6,13 +6,15 @@
 //! model-shaped hides behind [`GenerationBackend`] so this layer tests
 //! against a mock over real loopback sockets.
 
-use super::events::{ResponseStream, ServeStats, SseWriter, StopReason, Usage};
+use super::events::{EventWrite, ResponseStream, ServeStats, SseWriter, StopReason, Usage};
 use super::items::{ServeError, ServeRequest, parse_request};
 use super::partition::StreamPartition;
 use super::render::render_qwen_serve_prompt;
 use serde_json::{Value, json};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::net::TcpStream;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -54,6 +56,74 @@ pub(crate) trait GenerationBackend {
         prompt: &str,
         sink: &mut dyn GenerationSink,
     ) -> Result<GenerationOutcome, BackendFailure>;
+}
+
+pub(crate) struct TraceLog {
+    file: BufWriter<File>,
+}
+
+impl TraceLog {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            file: BufWriter::new(file),
+        })
+    }
+
+    fn line(&mut self, value: Value) -> io::Result<()> {
+        serde_json::to_writer(&mut self.file, &value)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        self.file.write_all(b"\n")?;
+        self.file.flush()
+    }
+}
+
+struct TraceSseWriter<'a, 'b> {
+    inner: SseWriter<&'a TcpStream>,
+    trace: Option<&'b mut TraceLog>,
+}
+
+impl<'a, 'b> TraceSseWriter<'a, 'b> {
+    fn new(stream: &'a TcpStream, trace: Option<&'b mut TraceLog>) -> Self {
+        Self {
+            inner: SseWriter(stream),
+            trace,
+        }
+    }
+
+    fn heartbeat(&mut self) -> io::Result<()> {
+        self.inner.heartbeat()?;
+        if let Some(trace) = self.trace.as_deref_mut() {
+            trace.line(json!({"kind": "heartbeat"}))?;
+        }
+        Ok(())
+    }
+
+    fn done(&mut self) -> io::Result<()> {
+        self.inner.done()?;
+        if let Some(trace) = self.trace.as_deref_mut() {
+            trace.line(json!({"kind": "done"}))?;
+        }
+        Ok(())
+    }
+}
+
+impl EventWrite for TraceSseWriter<'_, '_> {
+    fn event(&mut self, event_type: &str, payload: Value) -> io::Result<()> {
+        self.inner.event(event_type, payload.clone())?;
+        if let Some(trace) = self.trace.as_deref_mut() {
+            trace.line(json!({
+                "kind": "event",
+                "event": event_type,
+                "data": payload,
+            }))?;
+        }
+        Ok(())
+    }
+
+    fn comment(&mut self) -> io::Result<()> {
+        self.heartbeat()
+    }
 }
 
 /// Backend failures split transport aborts (client gone; nothing left to
@@ -202,12 +272,12 @@ impl GenerationSink for CollectSink {
     }
 }
 
-struct StreamingSink<'a, 'b> {
-    stream: &'a mut ResponseStream<'b, SseWriter<&'b TcpStream>>,
+struct StreamingSink<'a, 'b, W: EventWrite> {
+    stream: &'a mut ResponseStream<'b, W>,
     partition: StreamPartition,
 }
 
-impl GenerationSink for StreamingSink<'_, '_> {
+impl<W: EventWrite> GenerationSink for StreamingSink<'_, '_, W> {
     fn piece(&mut self, text: &str) -> io::Result<()> {
         let mut events = Vec::new();
         self.partition.push(text, &mut events);
@@ -227,6 +297,7 @@ impl GenerationSink for StreamingSink<'_, '_> {
 pub(crate) fn handle_connection(
     stream: &TcpStream,
     backend: &mut dyn GenerationBackend,
+    trace: Option<&mut TraceLog>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut writer = stream;
@@ -249,7 +320,7 @@ pub(crate) fn handle_connection(
                 "data": [{"id": backend.model_id(), "object": "model", "owned_by": "local"}],
             }),
         ),
-        ("POST", "/v1/responses") => handle_responses(&request.body, stream, backend),
+        ("POST", "/v1/responses") => handle_responses(&request.body, stream, backend, trace),
         ("GET", _) | ("POST", _) => write_serve_error(
             &mut writer,
             &ServeError {
@@ -277,11 +348,23 @@ fn handle_responses(
     body: &[u8],
     stream: &TcpStream,
     backend: &mut dyn GenerationBackend,
+    mut trace: Option<&mut TraceLog>,
 ) -> io::Result<()> {
     let mut writer = stream;
-    let parsed: Value = match serde_json::from_slice(body) {
-        Ok(parsed) => parsed,
+    let parsed: Value = match serde_json::from_slice::<Value>(body) {
+        Ok(parsed) => {
+            if let Some(trace) = trace.as_deref_mut() {
+                trace.line(json!({"kind": "request", "body": parsed.clone()}))?;
+            }
+            parsed
+        }
         Err(error) => {
+            if let Some(trace) = trace.as_deref_mut() {
+                trace.line(json!({
+                    "kind": "request",
+                    "body": String::from_utf8_lossy(body),
+                }))?;
+            }
             return write_serve_error(
                 &mut writer,
                 &ServeError::invalid_request(None, format!("request body is not JSON: {error}")),
@@ -344,7 +427,7 @@ fn handle_responses(
             "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-store\r\nconnection: close\r\n\r\n"
         )?;
         writer.flush()?;
-        let mut sse = SseWriter(stream);
+        let mut sse = TraceSseWriter::new(stream, trace);
         // Heartbeat immediately after admission (SERVE.md gate 3), then on
         // ticks between prefill chunks.
         sse.heartbeat()?;
@@ -374,11 +457,11 @@ fn handle_responses(
                     outcome.usage,
                     outcome.stats.as_ref().filter(|_| request.echo_stats),
                 )?;
-                SseWriter(stream).done()
+                sse.done()
             }
             Err(BackendFailure::Serve(error)) => {
                 response.fail(&error)?;
-                SseWriter(stream).done()
+                sse.done()
             }
             Err(BackendFailure::Aborted(error)) => Err(error),
         }
@@ -446,7 +529,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            handle_connection(&stream, &mut backend).unwrap();
+            handle_connection(&stream, &mut backend, None).unwrap();
         });
         let mut client = TcpStream::connect(addr).unwrap();
         client.write_all(request.as_bytes()).unwrap();
@@ -465,6 +548,128 @@ mod tests {
 
     fn body_of(response: &str) -> &str {
         response.split("\r\n\r\n").nth(1).unwrap()
+    }
+
+    #[test]
+    fn trace_log_writes_one_json_object_per_line() {
+        let path = std::env::temp_dir().join(format!(
+            "serve_trace_{}_{}.jsonl",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut trace = TraceLog::open(&path).expect("open trace");
+            trace
+                .line(json!({"kind": "request", "body": {"model": "m"}}))
+                .unwrap();
+            trace
+                .line(json!({"kind": "event", "event": "response.created"}))
+                .unwrap();
+            trace.line(json!({"kind": "done"})).unwrap();
+        }
+        let contents = std::fs::read_to_string(&path).expect("read trace");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 3, "one object per line");
+        for line in &lines {
+            serde_json::from_str::<Value>(line).expect("each line is standalone JSON");
+        }
+        assert_eq!(
+            serde_json::from_str::<Value>(lines[0]).unwrap()["body"]["model"],
+            "m"
+        );
+        // Appends rather than truncating, so a restart keeps history.
+        {
+            let mut trace = TraceLog::open(&path).expect("reopen trace");
+            trace.line(json!({"kind": "heartbeat"})).unwrap();
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap().lines().count(),
+            4,
+            "reopen must append"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn tracing_does_not_alter_the_wire_bytes() {
+        // The trace tees; a traced stream must be byte-identical to an
+        // untraced one, or debugging output would change what clients see.
+        let request = post(
+            "/v1/responses",
+            r#"{"model":"qwen-test","input":"hi","stream":true}"#,
+        );
+        let untraced = roundtrip(
+            MockBackend::new(&["<think>\np\n</think>\n\nanswer"], StopReason::Eos),
+            &request,
+        );
+        let path =
+            std::env::temp_dir().join(format!("serve_trace_wire_{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let traced = roundtrip_traced(
+            MockBackend::new(&["<think>\np\n</think>\n\nanswer"], StopReason::Eos),
+            &request,
+            &path,
+        );
+        let strip_ids = |text: &str| regex_lite_replace(text);
+        assert_eq!(
+            strip_ids(&untraced),
+            strip_ids(&traced),
+            "trace changed the response bytes"
+        );
+        let traced_lines = std::fs::read_to_string(&path).unwrap();
+        assert!(traced_lines.lines().count() > 3, "trace captured events");
+        assert!(traced_lines.contains("\"kind\":\"request\""));
+        assert!(traced_lines.contains("response.output_text.delta"));
+        assert!(traced_lines.contains("\"kind\":\"done\""));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Response ids and timestamps differ per request; blank them so the
+    /// comparison is about framing, not identity.
+    fn regex_lite_replace(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(index) = rest.find("resp_") {
+            out.push_str(&rest[..index]);
+            out.push_str("resp_X");
+            rest = &rest[index + 5..];
+            let skip = rest
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(rest.len());
+            rest = &rest[skip..];
+        }
+        out.push_str(rest);
+        let mut deadline = String::with_capacity(out.len());
+        let mut rest = out.as_str();
+        while let Some(index) = rest.find("\"created_at\":") {
+            deadline.push_str(&rest[..index]);
+            deadline.push_str("\"created_at\":0");
+            rest = &rest[index + 13..];
+            let skip = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            rest = &rest[skip..];
+        }
+        deadline.push_str(rest);
+        deadline
+    }
+
+    fn roundtrip_traced(mut backend: MockBackend, request: &str, trace_path: &Path) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let trace_path = trace_path.to_path_buf();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut trace = TraceLog::open(&trace_path).expect("open trace");
+            handle_connection(&stream, &mut backend, Some(&mut trace)).unwrap();
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        response
     }
 
     #[test]
@@ -519,6 +724,49 @@ mod tests {
         let created_index = payload.find("response.created").unwrap();
         let completed_index = payload.find("response.completed").unwrap();
         assert!(created_index < completed_index);
+    }
+
+    #[test]
+    fn stream_trace_records_request_events_and_done() {
+        let path = std::env::temp_dir().join(format!("qwen-trace-{}.jsonl", next_response_id()));
+        let trace_path = path.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut backend = MockBackend::new(&["answer"], StopReason::Eos);
+            let mut trace = TraceLog::open(&trace_path).unwrap();
+            handle_connection(&stream, &mut backend, Some(&mut trace)).unwrap();
+        });
+        let mut client = TcpStream::connect(addr).unwrap();
+        client
+            .write_all(
+                post(
+                    "/v1/responses",
+                    r#"{"model":"qwen-test","input":"hi","stream":true}"#,
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+
+        let lines = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(lines[0]["kind"], "request");
+        assert_eq!(lines[0]["body"]["stream"], true);
+        assert!(
+            lines
+                .iter()
+                .any(|line| { line["kind"] == "event" && line["event"] == "response.created" })
+        );
+        assert_eq!(lines.last().unwrap()["kind"], "done");
+        assert!(response.ends_with("data: [DONE]\n\n"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

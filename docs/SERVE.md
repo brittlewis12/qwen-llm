@@ -29,6 +29,8 @@ One new subcommand:
 
 ```sh
 qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] [--drafter GGUF]
+# Optional wire trace: request JSON and streamed SSE events as JSONL.
+qwen serve -m MODEL --trace-sse /tmp/qwen.sse.jsonl
 # DeepSeek V4 additionally requires --max-context-tokens (startup-fixed forward budget)
 ```
 
@@ -74,6 +76,11 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] [--drafter GGUF]
   tracing surface; per-request `qwen_diag` stats line retained and
   extended with `matched_tokens` and `restore_ms` (the S2/S3 gates are
   defined on this log, never on "the session completed").
+- **Opt-in SSE trace:** `--trace-sse PATH` appends one JSON object per line
+  for each `/v1/responses` request, plus each streamed response's heartbeat,
+  event (including its exact JSON `data` payload), and terminal `[DONE]` marker.
+  It is disabled by default and may contain prompts, tool definitions, and
+  generated text.
 
 ## Wire subset (Open Responses)
 

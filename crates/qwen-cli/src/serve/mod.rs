@@ -33,6 +33,12 @@ use std::time::Instant;
 
 /// `qwen serve` entry: resident model, serial accept loop.
 pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
+    let mut trace = invocation
+        .trace_sse
+        .as_deref()
+        .map(http::TraceLog::open)
+        .transpose()
+        .context("open --trace-sse log")?;
     let gguf = GgufFile::open(&invocation.model)
         .with_context(|| format!("open model {}", invocation.model.display()))?;
     let family = ModelFamily::detect(&gguf);
@@ -71,7 +77,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
             forward_limit,
             crate::DeepSeekV4MultigroupSelectorArg::Auto,
         )?;
-        return accept_loop(&invocation.addr, &model_id, 0.0, &mut backend);
+        return accept_loop(&invocation.addr, &model_id, 0.0, &mut backend, &mut trace);
     }
     // Resolve the rendering family once, from the loaded identity — the
     // same gate `qwen run` applies. Without this a Qwen3.8 model renders
@@ -99,7 +105,13 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         template,
     )?;
 
-    accept_loop(&invocation.addr, &model_id, load_ms, &mut backend)
+    accept_loop(
+        &invocation.addr,
+        &model_id,
+        load_ms,
+        &mut backend,
+        &mut trace,
+    )
 }
 
 /// Serial accept loop shared by every family backend.
@@ -108,6 +120,7 @@ fn accept_loop(
     model_id: &str,
     load_ms: f64,
     backend: &mut dyn http::GenerationBackend,
+    trace: &mut Option<http::TraceLog>,
 ) -> Result<()> {
     let listener = TcpListener::bind(addr).with_context(|| format!("bind {addr}"))?;
     tracing::info!(
@@ -123,7 +136,7 @@ fn accept_loop(
         crate::shutdown::checkpoint()?;
         match stream {
             Ok(stream) => {
-                if let Err(error) = http::handle_connection(&stream, backend) {
+                if let Err(error) = http::handle_connection(&stream, backend, trace.as_mut()) {
                     tracing::info!(target: "qwen_diag", "serve: connection aborted: {error}");
                 }
             }

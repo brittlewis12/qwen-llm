@@ -13,7 +13,7 @@ pub(crate) enum Command {
     Run(RunArgs),
     /// Serve the Open Responses subset over loopback HTTP (docs/SERVE.md).
     #[command(
-        after_help = "Examples:\n  qwen serve -m MODEL\n  qwen serve -m MODEL --addr 127.0.0.1:8737 --max-tokens 4096\n\nEndpoints: POST /v1/responses (stream and non-stream), GET /v1/models.\nSerial: one request in flight; stateless (store:false only)."
+        after_help = "Examples:\n  qwen serve -m MODEL\n  qwen serve -m MODEL --addr 127.0.0.1:8737 --max-tokens 65536\n  qwen serve -m MODEL --trace-sse /tmp/qwen.sse.jsonl\n\nEndpoints: POST /v1/responses (stream and non-stream), GET /v1/models.\nSerial: one request in flight; stateless (store:false only)."
     )]
     Serve(ServeArgs),
 }
@@ -29,7 +29,7 @@ pub(crate) struct ServeArgs {
     addr: String,
 
     /// Default max_output_tokens when a request omits it.
-    #[arg(long = "max-tokens", default_value_t = 4096)]
+    #[arg(long = "max-tokens", default_value_t = 65_536)]
     max_tokens: usize,
 
     /// Fixed sequence capacity; default sizes per request (prompt + generation + slack).
@@ -46,6 +46,10 @@ pub(crate) struct ServeArgs {
     /// ran via `decode_path=dflash|serial`.
     #[arg(long, value_name = "GGUF")]
     drafter: Option<PathBuf>,
+
+    /// Append request and streamed SSE events as JSONL for wire debugging.
+    #[arg(long, value_name = "PATH")]
+    trace_sse: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -62,6 +66,7 @@ pub(crate) struct ServeInvocation {
     pub(crate) max_tokens: usize,
     pub(crate) max_context_tokens: Option<usize>,
     pub(crate) drafter: Option<PathBuf>,
+    pub(crate) trace_sse: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -302,6 +307,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
             max_tokens: serve.max_tokens,
             max_context_tokens: serve.max_context_tokens,
             drafter: serve.drafter,
+            trace_sse: serve.trace_sse,
         }),
         Command::Run(run) => {
             let input = match (run.user, run.messages, run.raw_prompt) {

@@ -6,6 +6,116 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-20 — Break-Even Ctx Term Was Cross-Session Noise; Refit Within-Session
+
+### Why
+
+The V1 chunked-verify falsification (`6e06a36`) traced its projected
+-21 ms to a phantom "+24 ms/8.8K verify ctx slope" produced by comparing
+absolute rows ACROSS bench sessions. That same invalid comparison also
+produced the adaptive-policy break-even ctx term `2.9 + ctx/8000`, which
+shipped in `qwen-bench dflash` and in `qwen run --drafter`. This entry
+repairs the second victim.
+
+### Method
+
+`--n-policy cycle` extended to record the KV position with every verify
+and single-token sample, and to report a least-squares ms-vs-ctx slope
+fit WITHIN the process (guarded: >= 8 samples and >= 256 ctx span).
+Single 1600-token generation, Qwen3.8-27B Q4_K_M + DFlash2 Q8_0,
+140+ samples per cell, ctx 464 -> 2062.
+
+### Results (within-session slopes)
+
+| series | median ms | slope ms/1K ctx | relative |
+| --- | --- | --- | --- |
+| packed_verify n=8 | 111.9 | **+0.81** | +0.73%/1K |
+| packed_verify n=1 | 41.9 | +0.28 | +0.67%/1K |
+| single_token | 40.2 | **+0.40** | +1.00%/1K |
+
+- Break-even = (draft + verify) / single. Serial decode's cost grows
+  *faster in relative terms* than packed verify's, because verify
+  amortizes one KV stream across 8 rows while serial re-reads it per
+  token.
+- With the drafter's SWA window plateaued (>= 2048 so draft' ~ 0),
+  `d(break-even)/d(1K ctx) = -0.011`. Evaluated at the band ends:
+  3.12 (ctx 464) and 3.10 (ctx 2062) — **flat to slightly declining**.
+- The shipped term claimed +0.125 per 1K, i.e. a spurious **+1.00**
+  mean_emitted demanded at ctx 8K, biasing the policy toward Off exactly
+  where the measurement says speculation is marginally *easier*.
+
+### Change
+
+Both policy sites (`qwen-bench` `dflash2_n8_breakeven`, `qwen run`
+`dflash_breakeven`) drop the ctx term and use a flat `3.1`. The hard
+`*_OFF_CTX` guard and the content-aware α-backoff remain the safety
+nets. Equivalence re-gated after the change: 128/128 identical, adaptive
+holds Spec(8) for the whole generation, decode-only 1.718x.
+
+### Owed
+
+The within-session slope is measured only over 0.5K-2K. A long-band
+(8K+) single-process confirmation is outstanding; until it lands, do not
+re-introduce a ctx term in either direction. Attempts to run the 8K band
+were blocked by concurrent-session tree churn, not by any result.
+
+## 2026-08-20 — Packed-Verify Marginal Attribution: Checkpoints Are Not The Lever
+
+### Method
+
+Zero-code ablation using the existing `QWEN_MTP_SKIP_FINAL_CKPT` gate
+(default-on; skips exactly the final row's GDN/conv checkpoint publication,
+which cannot be a partial-restore source). Toggling it prices exactly ONE
+checkpoint set — at n=1 the arms are 0 vs 1 set, which is the cleanest
+contrast available without touching the verify encoder. Counterbalanced
+A/B/A via `qwen-bench dflash --n-policy cycle` (18 samples per n_eff per
+arm, ±1 ms medians), Qwen3.8-27B Q4_K_M + DFlash2 Q8_0, ctx ~460.
+
+### Results (median ms)
+
+| n_eff | A (skip=1) | B (skip=0) | delta = 1 ckpt set |
+| --- | --- | --- | --- |
+| 8 | 107.05 | 107.90 | 0.85 |
+| 1 | 41.00 | 42.50 | 1.50 |
+| single_token ref | 39.35 | 39.35 | — |
+
+- Per-token marginal at n=8: (107.0 − 41.0) / 7 = **9.44 ms/token**.
+- Checkpoint publication is **0.85–1.50 ms/token = 9–16%** of that
+  marginal (6–10.5 ms of the 107 ms verify(8) pass).
+- `verify(1) − single_token = 1.65 ms`: the whole packed-verify apparatus
+  (hidden capture, batched argmax, scratch views) is nearly free, and at
+  n=1 it publishes no checkpoints at all.
+- Checkpoint effective bandwidth: 157 MB (48 layers × 2 tensors × 3.27 MB
+  gdn_state + gdn_conv) in ~1.5 ms = **~105 GB/s**, well under the ~400
+  GB/s blit ceiling — the blits are themselves encoder/latency-bound, not
+  bandwidth-bound (96 blit-encoder switches per set).
+
+### Interpretation
+
+- **Checkpoints are not the lever.** ~85–91% of the per-token marginal is
+  elsewhere: 48 sequential `gdn_tail` recurrence dispatches, 16 attention
+  decode calls, and 16 KV scatters per row. This retires the standing
+  hypothesis that per-token GDN state publication dominates packed verify
+  (first raised in the 2026-08-19 leverage map, already once falsified by
+  the interleaved microbench for *fixed* overhead).
+- Combined with the 2026-08-20 Q8 alpha/beta promotion (measured −1.9%),
+  two of the three cheap structural suspects are now priced and small.
+  The remaining term is the **48-layer sequential GDN recurrence**, which
+  is consistent with the marginal being roughly quant-independent
+  (Q4_K_M ~9.4-11 ms/token vs Q8_0 ~7.9 ms/token despite 1.7× the weight
+  bytes) — i.e. per-token latency, not weight traffic.
+- Corollary: the alpha/beta batching arm is dtype-gated to `Q8_0`
+  (`beta_proj`/`alpha_proj` dtype check). Q4_K_M carries F32 alpha/beta
+  projections and does not get the sidecar today; extending the gate is a
+  small (~2%, by analogy to the measured Q8 win) low-risk Q4 follow-up.
+
+### Decision
+
+Do not invest in checkpoint elimination/ring-buffering. Point the next
+verify packet at recurrence fusion, and treat the ~9.4 ms/token marginal
+as the ctx-independent ceiling term it is: at n=8 it is ~66 ms of every
+verify pass, worth more than any remaining mat-mul tuning.
+
 ## 2026-08-20 — Qwen3.8 Q8 DFlash Alpha/Beta Sidecar GO
 
 Status: Qwen3.8-27B-Q8_0 packed-verifier alpha/beta scheduling is default-on for
@@ -129,6 +239,53 @@ was tested rather than assumed.
 Decision: Program T stays closed, now on DFlash-2-era evidence. Cost of knowing
 was one bench run and no engine changes. Evidence:
 `/tmp/dflash2-sweep/rank-9k.jsonl`.
+
+## 2026-08-19 — DFlash Speculative Decode In Production (`qwen run --drafter`)
+
+### What Changed
+
+- `qwen run --drafter <GGUF>` wires the DFlash/DFlash2 drafter into the
+  production CLI (previously bench-only). Drafter load + residency-gated
+  prefetch after the target load; `prefill_span_with_capture` seeds the
+  drafter cross-context from the prompt; `generate_dflash` runs the
+  draft → packed-verify → greedy accept-prefix → hidden-append → restore
+  loop with the calibrated ctx break-even + trailing-α backoff.
+- Admission gates: greedy only (T>0 awaits the maximal-coupling sampler);
+  exclusive with prompt-lookup, durable prefix cache, JSONL, attribution
+  and structural sampling (each either owns the draft source or advances
+  target KV without hidden capture).
+- Per-request `dflash:` diagnostic line (spec/off steps, accepted,
+  mean_emitted, α-backoff, per-step draft/verify/append/restore ms).
+- DFlash bench paths now apply the runtime prefetch policy to both GGUFs
+  (the H5-era path predated the prefetch subsystem): 6.8 GB/s warm-up vs
+  ~0.8 GB/s cold mmap demand-paging on a 29 GB target.
+
+### Results (M4 Max, 128 tok, code-writing prompt, end-to-end `decode_tps`
+### including stdout streaming; output byte-identical to no-drafter runs)
+
+| target | plain | + DFlash2 | speedup |
+| --- | --- | --- | --- |
+| Qwen3.8-27B Q4_K_M | 25.5 t/s | **37.8 t/s** | 1.48× |
+| Qwen3.8-27B Q8_0 | 17.2 t/s | **35.0 t/s** | 2.04× |
+
+Production per-step accounting matches the bench harness exactly (draft
+13.5 ms, verify 101.2 ms, mean_emitted 4.41), confirming the port is
+faithful. Equivalence verified byte-for-byte on both token-limit and
+EOS-terminating requests.
+
+### Interpretation
+
+- Q8_0 + DFlash2 (35.0 t/s) now beats Q4_K_M *plain* (25.5 t/s) by 37%:
+  speculation converts a quantization-quality upgrade into a free one,
+  because draft cost is fixed while verify amortizes the heavier target
+  weight sweep over ~4.4 emitted tokens.
+- Gap audit vs the modernized target loader: prefetch was the real miss
+  (now closed). `dequantize-into-final-storage` is a no-op for DFlash2
+  (Q8_0 weights are kept native; only ~100 KB of F32 norms take the
+  dequant path). Remaining: drafter K/V cross-context caches are F32
+  where the target's KV is F16 (320 MB at 8K ctx, 2× the scan bytes) —
+  bundle with the D1 split-K drafter-attention work since both touch the
+  same kernels.
 
 ## 2026-08-19 — Q5_K And Q8_0 mma8v N=8 Tier GO
 
@@ -25181,161 +25338,4 @@ Interpretation:
   contributes little by 16K.
 - The combined branch is still a stronger overall decode checkpoint than either
   attention-only or pipelined submission.
-
-## 2026-08-19 — DFlash Speculative Decode In Production (`qwen run --drafter`)
-
-### What Changed
-
-- `qwen run --drafter <GGUF>` wires the DFlash/DFlash2 drafter into the
-  production CLI (previously bench-only). Drafter load + residency-gated
-  prefetch after the target load; `prefill_span_with_capture` seeds the
-  drafter cross-context from the prompt; `generate_dflash` runs the
-  draft → packed-verify → greedy accept-prefix → hidden-append → restore
-  loop with the calibrated ctx break-even + trailing-α backoff.
-- Admission gates: greedy only (T>0 awaits the maximal-coupling sampler);
-  exclusive with prompt-lookup, durable prefix cache, JSONL, attribution
-  and structural sampling (each either owns the draft source or advances
-  target KV without hidden capture).
-- Per-request `dflash:` diagnostic line (spec/off steps, accepted,
-  mean_emitted, α-backoff, per-step draft/verify/append/restore ms).
-- DFlash bench paths now apply the runtime prefetch policy to both GGUFs
-  (the H5-era path predated the prefetch subsystem): 6.8 GB/s warm-up vs
-  ~0.8 GB/s cold mmap demand-paging on a 29 GB target.
-
-### Results (M4 Max, 128 tok, code-writing prompt, end-to-end `decode_tps`
-### including stdout streaming; output byte-identical to no-drafter runs)
-
-| target | plain | + DFlash2 | speedup |
-| --- | --- | --- | --- |
-| Qwen3.8-27B Q4_K_M | 25.5 t/s | **37.8 t/s** | 1.48× |
-| Qwen3.8-27B Q8_0 | 17.2 t/s | **35.0 t/s** | 2.04× |
-
-Production per-step accounting matches the bench harness exactly (draft
-13.5 ms, verify 101.2 ms, mean_emitted 4.41), confirming the port is
-faithful. Equivalence verified byte-for-byte on both token-limit and
-EOS-terminating requests.
-
-### Interpretation
-
-- Q8_0 + DFlash2 (35.0 t/s) now beats Q4_K_M *plain* (25.5 t/s) by 37%:
-  speculation converts a quantization-quality upgrade into a free one,
-  because draft cost is fixed while verify amortizes the heavier target
-  weight sweep over ~4.4 emitted tokens.
-- Gap audit vs the modernized target loader: prefetch was the real miss
-  (now closed). `dequantize-into-final-storage` is a no-op for DFlash2
-  (Q8_0 weights are kept native; only ~100 KB of F32 norms take the
-  dequant path). Remaining: drafter K/V cross-context caches are F32
-  where the target's KV is F16 (320 MB at 8K ctx, 2× the scan bytes) —
-  bundle with the D1 split-K drafter-attention work since both touch the
-  same kernels.
-
-## 2026-08-20 — Packed-Verify Marginal Attribution: Checkpoints Are Not The Lever
-
-### Method
-
-Zero-code ablation using the existing `QWEN_MTP_SKIP_FINAL_CKPT` gate
-(default-on; skips exactly the final row's GDN/conv checkpoint publication,
-which cannot be a partial-restore source). Toggling it prices exactly ONE
-checkpoint set — at n=1 the arms are 0 vs 1 set, which is the cleanest
-contrast available without touching the verify encoder. Counterbalanced
-A/B/A via `qwen-bench dflash --n-policy cycle` (18 samples per n_eff per
-arm, ±1 ms medians), Qwen3.8-27B Q4_K_M + DFlash2 Q8_0, ctx ~460.
-
-### Results (median ms)
-
-| n_eff | A (skip=1) | B (skip=0) | delta = 1 ckpt set |
-| --- | --- | --- | --- |
-| 8 | 107.05 | 107.90 | 0.85 |
-| 1 | 41.00 | 42.50 | 1.50 |
-| single_token ref | 39.35 | 39.35 | — |
-
-- Per-token marginal at n=8: (107.0 − 41.0) / 7 = **9.44 ms/token**.
-- Checkpoint publication is **0.85–1.50 ms/token = 9–16%** of that
-  marginal (6–10.5 ms of the 107 ms verify(8) pass).
-- `verify(1) − single_token = 1.65 ms`: the whole packed-verify apparatus
-  (hidden capture, batched argmax, scratch views) is nearly free, and at
-  n=1 it publishes no checkpoints at all.
-- Checkpoint effective bandwidth: 157 MB (48 layers × 2 tensors × 3.27 MB
-  gdn_state + gdn_conv) in ~1.5 ms = **~105 GB/s**, well under the ~400
-  GB/s blit ceiling — the blits are themselves encoder/latency-bound, not
-  bandwidth-bound (96 blit-encoder switches per set).
-
-### Interpretation
-
-- **Checkpoints are not the lever.** ~85–91% of the per-token marginal is
-  elsewhere: 48 sequential `gdn_tail` recurrence dispatches, 16 attention
-  decode calls, and 16 KV scatters per row. This retires the standing
-  hypothesis that per-token GDN state publication dominates packed verify
-  (first raised in the 2026-08-19 leverage map, already once falsified by
-  the interleaved microbench for *fixed* overhead).
-- Combined with the 2026-08-20 Q8 alpha/beta promotion (measured −1.9%),
-  two of the three cheap structural suspects are now priced and small.
-  The remaining term is the **48-layer sequential GDN recurrence**, which
-  is consistent with the marginal being roughly quant-independent
-  (Q4_K_M ~9.4-11 ms/token vs Q8_0 ~7.9 ms/token despite 1.7× the weight
-  bytes) — i.e. per-token latency, not weight traffic.
-- Corollary: the alpha/beta batching arm is dtype-gated to `Q8_0`
-  (`beta_proj`/`alpha_proj` dtype check). Q4_K_M carries F32 alpha/beta
-  projections and does not get the sidecar today; extending the gate is a
-  small (~2%, by analogy to the measured Q8 win) low-risk Q4 follow-up.
-
-### Decision
-
-Do not invest in checkpoint elimination/ring-buffering. Point the next
-verify packet at recurrence fusion, and treat the ~9.4 ms/token marginal
-as the ctx-independent ceiling term it is: at n=8 it is ~66 ms of every
-verify pass, worth more than any remaining mat-mul tuning.
-
-## 2026-08-20 — Break-Even Ctx Term Was Cross-Session Noise; Refit Within-Session
-
-### Why
-
-The V1 chunked-verify falsification (`6e06a36`) traced its projected
--21 ms to a phantom "+24 ms/8.8K verify ctx slope" produced by comparing
-absolute rows ACROSS bench sessions. That same invalid comparison also
-produced the adaptive-policy break-even ctx term `2.9 + ctx/8000`, which
-shipped in `qwen-bench dflash` and in `qwen run --drafter`. This entry
-repairs the second victim.
-
-### Method
-
-`--n-policy cycle` extended to record the KV position with every verify
-and single-token sample, and to report a least-squares ms-vs-ctx slope
-fit WITHIN the process (guarded: >= 8 samples and >= 256 ctx span).
-Single 1600-token generation, Qwen3.8-27B Q4_K_M + DFlash2 Q8_0,
-140+ samples per cell, ctx 464 -> 2062.
-
-### Results (within-session slopes)
-
-| series | median ms | slope ms/1K ctx | relative |
-| --- | --- | --- | --- |
-| packed_verify n=8 | 111.9 | **+0.81** | +0.73%/1K |
-| packed_verify n=1 | 41.9 | +0.28 | +0.67%/1K |
-| single_token | 40.2 | **+0.40** | +1.00%/1K |
-
-- Break-even = (draft + verify) / single. Serial decode's cost grows
-  *faster in relative terms* than packed verify's, because verify
-  amortizes one KV stream across 8 rows while serial re-reads it per
-  token.
-- With the drafter's SWA window plateaued (>= 2048 so draft' ~ 0),
-  `d(break-even)/d(1K ctx) = -0.011`. Evaluated at the band ends:
-  3.12 (ctx 464) and 3.10 (ctx 2062) — **flat to slightly declining**.
-- The shipped term claimed +0.125 per 1K, i.e. a spurious **+1.00**
-  mean_emitted demanded at ctx 8K, biasing the policy toward Off exactly
-  where the measurement says speculation is marginally *easier*.
-
-### Change
-
-Both policy sites (`qwen-bench` `dflash2_n8_breakeven`, `qwen run`
-`dflash_breakeven`) drop the ctx term and use a flat `3.1`. The hard
-`*_OFF_CTX` guard and the content-aware α-backoff remain the safety
-nets. Equivalence re-gated after the change: 128/128 identical, adaptive
-holds Spec(8) for the whole generation, decode-only 1.718x.
-
-### Owed
-
-The within-session slope is measured only over 0.5K-2K. A long-band
-(8K+) single-process confirmation is outstanding; until it lands, do not
-re-introduce a ctx term in either direction. Attempts to run the 8K band
-were blocked by concurrent-session tree churn, not by any result.
 

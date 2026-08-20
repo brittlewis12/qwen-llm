@@ -185,6 +185,12 @@ struct GenerationOverrides {
     /// Override Qwen sequence capacity; DeepSeek single-turn rejects this option.
     #[arg(long)]
     max_context_tokens: Option<usize>,
+
+    /// DFlash drafter GGUF for speculative decode (greedy only). Output is
+    /// identical to non-speculative decoding: the drafter only proposes
+    /// tokens, and every one is verified by the target model.
+    #[arg(long, value_name = "GGUF")]
+    drafter: Option<PathBuf>,
 }
 
 impl Invocation {
@@ -240,6 +246,9 @@ impl GenerationOverrides {
         }
         if let Some(value) = self.max_context_tokens {
             args.max_context_tokens = Some(value);
+        }
+        if let Some(value) = self.drafter.as_ref() {
+            args.drafter = Some(value.clone());
         }
     }
 }

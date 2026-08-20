@@ -45,14 +45,16 @@ use qwen_llm::deepseek_v4_metal::{
 };
 use qwen_llm::dense_batch8::DENSE_BATCH8_WIDTH;
 use qwen_llm::gguf::GgufFile;
+use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{
     MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
-    MetalPipelineCacheMetrics, evaluate_metal_memory_admission,
+    MetalPipelineCacheMetrics, MetalTensor, evaluate_metal_memory_admission,
     evaluate_metal_memory_admission_with_cpu_bytes,
 };
 use qwen_llm::metal_dflash::{
-    MetalDFlashLayerMajorScratch, MetalDFlashVerifyScratch, PrefillScratchConfig,
-    PrefillScratchOverlayStats, PrefillScratchPlan, ensure_prompt_lookup_n8_supported,
+    DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
+    MetalDFlashVerifyScratch, PrefillScratchConfig, PrefillScratchOverlayStats,
+    PrefillScratchPlan, ensure_prompt_lookup_n8_supported,
     plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
 };
 use qwen_llm::metal_forward::{
@@ -501,6 +503,12 @@ struct Args {
     /// Enable experimental dense-27B Q4_K_M prompt-lookup decode.
     #[arg(long, hide_short_help = true)]
     prompt_lookup: bool,
+
+    /// DFlash drafter GGUF for speculative decode (greedy only). Output is
+    /// identical to non-speculative decoding: the drafter only proposes
+    /// tokens, and every one is verified by the target model.
+    #[arg(long, value_name = "GGUF")]
+    drafter: Option<PathBuf>,
 
     /// Prompt prefill chunk size, or `auto` for the bounded MoE allowlist.
     #[arg(long, hide_short_help = true, default_value = "1024")]
@@ -2657,6 +2665,7 @@ fn validate_request_before_model_open(args: &Args) -> Result<()> {
     if args.requests_jsonl.is_none() {
         validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
     }
+    validate_drafter_decode_policy(args, sampling)?;
     Ok(())
 }
 
@@ -5112,6 +5121,47 @@ fn validate_sampling_decode_policy(config: SamplingConfig, prompt_lookup: bool) 
     Ok(())
 }
 
+/// **v0.77** admission gate for `--drafter` (DFlash speculative decode).
+///
+/// Greedy-only for now: lossless speculative sampling at T>0 needs the
+/// maximal-coupling rejection sampler over the drafter's proposal
+/// distribution (the DFlash 2 selector already produces the sparse dists
+/// it would consume — see llama.cpp PR 27342). Until that lands, refuse
+/// rather than silently changing the output distribution.
+///
+/// The remaining exclusions are all about the drafter's append-only
+/// cross-context: it conditions on captured target hidden states for
+/// every committed position, so any path that advances the target KV
+/// without hidden capture (durable-prefix restore, JSONL prefix-cache
+/// reuse) would leave an unfillable hole.
+fn validate_drafter_decode_policy(args: &Args, config: SamplingConfig) -> Result<()> {
+    if args.drafter.is_none() {
+        return Ok(());
+    }
+    ensure!(
+        config.temperature == 0.0,
+        "--drafter currently requires greedy decoding (--temp 0)"
+    );
+    ensure!(
+        !args.prompt_lookup,
+        "--drafter and --prompt-lookup are mutually exclusive draft sources"
+    );
+    ensure!(
+        args.durable_prefix_cache.is_none(),
+        "--drafter is incompatible with --durable-prefix-cache (restored positions \
+         carry no captured target hidden states for the drafter's cross-context)"
+    );
+    ensure!(
+        args.requests_jsonl.is_none(),
+        "--drafter is single-turn only; JSONL request mode is not supported yet"
+    );
+    ensure!(
+        !args.sampling_attribution && !args.sampled_structural,
+        "--drafter is incompatible with sampling attribution and structural sampling"
+    );
+    Ok(())
+}
+
 fn decode_policy_label(
     config: SamplingConfig,
     prompt_lookup: bool,
@@ -5899,6 +5949,35 @@ fn run_single_turn(
     if args.prompt_lookup {
         ensure_prompt_lookup_n8_supported(loaded.metal_model()).map_err(anyhow::Error::msg)?;
     }
+    // v0.77 DFlash speculative decode. The drafter GGUF is opened, bound
+    // against the target arch, and copied to the GPU here; both the CPU
+    // `Model` view and the drafter mmap drop afterwards because
+    // `MetalDFlashHead` owns every weight it needs (plus `config` and
+    // `target_layer_ids`).
+    let dflash_head = match args.drafter.as_ref() {
+        Some(path) => {
+            let t0 = Instant::now();
+            let drafter_gguf = GgufFile::open(path)
+                .with_context(|| format!("open drafter {}", path.display()))?;
+            qwen_llm::runtime::prefetch_opened_gguf(&drafter_gguf, &LoadedModelConfig::default());
+            let target_model = Model::from_gguf(loaded.gguf())
+                .context("parse target arch for drafter binding")?;
+            let bound = open_dflash_drafter(&drafter_gguf, &target_model)
+                .with_context(|| format!("bind drafter {}", path.display()))?;
+            let head = MetalDFlashHead::load(loaded.context(), &drafter_gguf, &bound)
+                .context("metal-load drafter")?;
+            tracing::info!(
+                target: "qwen_diag",
+                drafter = %path.display(),
+                block_size = head.config.block_size,
+                dflash2 = head.config.selector_top_k > 0,
+                load_ms = t0.elapsed().as_secs_f64() * 1e3,
+                "dflash drafter loaded",
+            );
+            Some(head)
+        }
+        None => None,
+    };
     if args.sampling_attribution {
         let arch = loaded.arch();
         let lm_head = &loaded.metal_model().lm_head;
@@ -6025,6 +6104,7 @@ fn run_single_turn(
         durable_store.as_ref(),
         durable_max_record_bytes,
         sampling_clock_probe.as_ref(),
+        dflash_head.as_ref(),
     )?;
     let mut results = vec![first];
 
@@ -6088,6 +6168,7 @@ fn run_single_turn(
             durable_store.as_ref(),
             durable_max_record_bytes,
             sampling_clock_probe.as_ref(),
+            dflash_head.as_ref(),
         )?;
         let first_stop = results[0].row.as_ref().map(|row| row.stop_reason);
         let warm_stop = warm.row.as_ref().map(|row| row.stop_reason);
@@ -6182,6 +6263,7 @@ fn execute_single_turn_request(
     durable_store: Option<&DurableCheckpointStore>,
     durable_max_record_bytes: u64,
     sampling_clock_probe: Option<&SamplingClockProbe>,
+    dflash_head: Option<&MetalDFlashHead>,
 ) -> Result<SingleTurnResult> {
     let PreparedRequest {
         request_start_unix_ms,
@@ -6357,15 +6439,42 @@ fn execute_single_turn_request(
         durable_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
         prompt_logits = Some(logits);
     }
+    // v0.77: with a drafter loaded, the prompt prefill must also capture
+    // the K target hidden layers the drafter conditions on. Allocated for
+    // the full remaining span; consumed into the drafter session below.
+    let mut dflash_prefill_capture: Option<(MetalTensor, usize, usize)> = None;
     if sequence.position() < prompt_ids.len() {
         let position = sequence.position();
-        let (logits, ms) = prefill_span(
-            &forward,
-            &mut sequence,
-            &mut scratch,
-            &prompt_ids[position..],
-            position,
-        )?;
+        let (logits, ms) = match dflash_head {
+            Some(head) => {
+                let k_layers = head.target_layer_ids.len();
+                let n_features = k_layers * loaded.arch().hidden_size as usize;
+                let span = prompt_ids.len() - position;
+                let dst = MetalTensor::zeros_f32(
+                    loaded.context(),
+                    vec![(span * n_features) as u64],
+                )
+                .context("allocate drafter prefill hidden capture")?;
+                let out = prefill_span_with_capture(
+                    &forward,
+                    &mut sequence,
+                    &mut scratch,
+                    &prompt_ids[position..],
+                    position,
+                    &head.target_layer_ids,
+                    &dst,
+                )?;
+                dflash_prefill_capture = Some((dst, span, n_features));
+                out
+            }
+            None => prefill_span(
+                &forward,
+                &mut sequence,
+                &mut scratch,
+                &prompt_ids[position..],
+                position,
+            )?,
+        };
         prefill_ms += ms;
         prompt_logits = Some(logits);
     }
@@ -6405,9 +6514,60 @@ fn execute_single_turn_request(
     let greedy_gpu_decision =
         resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
     let use_gpu_greedy = greedy_gpu_decision.enabled;
-    let (generation, prompt_lookup_stats, sampling_attribution, sampled_structural) = if args
-        .prompt_lookup
+    let mut dflash_stats: Option<DflashDecodeStats> = None;
+    let (generation, prompt_lookup_stats, sampling_attribution, sampled_structural) = if let Some(
+        head,
+    ) = dflash_head
     {
+        // v0.77 DFlash speculative decode. Seed the drafter's cross-context
+        // with the captured prompt hiddens, then run the greedy
+        // accept-prefix loop; output is identical to serial greedy.
+        let capacity = sequence.position() + args.tokens + 16;
+        let mut dsess = MetalDFlashSession::fresh(
+            loaded.context(),
+            head,
+            loaded.arch().hidden_size as u64,
+            loaded.arch().vocab_size as u64,
+            capacity,
+        )
+        .context("allocate dflash drafter session")?;
+        if let Some((dst, span, n_features)) = dflash_prefill_capture.as_ref() {
+            dsess
+                .append_target_ctx_columns_contiguous_now(
+                    loaded.context(),
+                    dst,
+                    (sequence.position() - span) as u32,
+                    *span,
+                    *n_features,
+                )
+                .context("seed drafter cross-context from prompt prefill")?;
+        }
+        let result = generate_dflash(
+            loaded,
+            &forward,
+            head,
+            dsess,
+            sequence,
+            logits,
+            args.tokens,
+            &stop_tokens,
+            |token| {
+                let callback_t0 = Instant::now();
+                write!(stdout, "{}", tokenizer.decode_piece(token))?;
+                stdout.flush().context("flush generated token")?;
+                if first_delivery_ms.is_none() {
+                    first_delivery_ms = Some(request_t0.elapsed().as_secs_f64() * 1e3);
+                    first_callback_duration_ms = Some(callback_t0.elapsed().as_secs_f64() * 1e3);
+                    first_delivery_allocated =
+                        timing_enabled.then(|| loaded.context().current_allocated_size());
+                }
+                Ok(())
+            },
+        )?;
+        sequence = result.sequence;
+        dflash_stats = Some(result.stats);
+        (result.generation, None, None, None)
+    } else if args.prompt_lookup {
         let result = generate_prompt_lookup(
             loaded,
             &forward,
@@ -7857,6 +8017,41 @@ fn thinking_partition_from_pieces(pieces: &[String]) -> Option<GeneratedThinking
     })
 }
 
+/// **v0.77** capture-aware prefill for DFlash speculative decode.
+///
+/// Identical to [`prefill_span`] except it asks the target to snapshot the
+/// K drafter-conditioning layers for every prompt position into `hidden_dst`
+/// (`[n_tokens, K*H]` contiguous). The drafter's cross-context is
+/// append-only over committed positions, so the prompt must be captured
+/// here or the drafter starts blind.
+fn prefill_span_with_capture(
+    forward: &MetalForward<'_>,
+    sequence: &mut Sequence,
+    scratch: &mut MetalDFlashLayerMajorScratch,
+    token_ids: &[i32],
+    start_position: usize,
+    target_layer_ids: &[u32],
+    hidden_dst: &MetalTensor,
+) -> Result<(Vec<f32>, f64)> {
+    shutdown::checkpoint()?;
+    ensure!(!token_ids.is_empty(), "cannot prefill an empty token span");
+    sequence.check_position(start_position)?;
+    let t0 = Instant::now();
+    let logits = prefill_tokens_with_multi_hidden(
+        forward,
+        token_ids,
+        u32::try_from(start_position).context("position does not fit u32")?,
+        unsafe { sequence.metal_session_mut() },
+        scratch,
+        target_layer_ids,
+        Some(hidden_dst),
+    )
+    .context("prefill prompt span with drafter hidden capture")?;
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    sequence.advance_by(token_ids.len())?;
+    Ok((logits, ms))
+}
+
 fn prefill_span(
     forward: &MetalForward<'_>,
     sequence: &mut Sequence,
@@ -8342,6 +8537,315 @@ where
         on_token,
         transition,
     )
+}
+
+/// **v0.77** DFlash adaptive-policy constants for `qwen run --drafter`.
+///
+/// Calibrated 2026-08-19 on M4 Max + Qwen3.8-27B Q4_K_M + incoai DFlash2
+/// Q8_0 (block size 8); see the sweep tables in `qwen-bench`'s
+/// `DFLASH2_ALPHA_WINDOW` doc comment and docs/PERF-LOG.md. Speculation
+/// wins whenever mean emitted tokens/step exceeds the ctx-keyed
+/// (draft + verify) / single_token premium; the trailing-α window is the
+/// content-aware guard, since acceptance varies 2.5-5.8 at fixed ctx.
+const DFLASH_ALPHA_WINDOW: usize = 16;
+const DFLASH_BREAKEVEN_BASE: f64 = 2.9;
+const DFLASH_BREAKEVEN_CTX_DIV: f64 = 8000.0;
+/// Trigger margin below break-even, sized ≈ 1 SE of the window mean.
+const DFLASH_ALPHA_OFF_MARGIN: f64 = 0.6;
+/// Hard ctx guard past the calibrated range.
+const DFLASH_OFF_CTX: usize = 16384;
+
+/// Ctx-keyed spec-vs-serial break-even in mean emitted tokens/step.
+fn dflash_breakeven(kv_n_pos: usize) -> f64 {
+    DFLASH_BREAKEVEN_BASE + kv_n_pos as f64 / DFLASH_BREAKEVEN_CTX_DIV
+}
+
+/// **v0.77** DFlash speculative-decode statistics for one request.
+#[derive(Clone, Debug, Default, Serialize)]
+struct DflashDecodeStats {
+    draft_ms: f64,
+    draft_first_call_ms: f64,
+    verify_ms: f64,
+    append_ms: f64,
+    restore_ms: f64,
+    serial_ms: f64,
+    scratch_allocation_ms: f64,
+    drafter_calls: usize,
+    verify_calls: usize,
+    restore_calls: usize,
+    spec_steps: usize,
+    off_steps: usize,
+    accepted_drafts: usize,
+    drafts_scored: usize,
+    physical_target_positions: usize,
+    alpha_backoff: bool,
+}
+
+struct DflashGeneration {
+    generation: GenerationResult,
+    stats: DflashDecodeStats,
+    sequence: Sequence,
+}
+
+/// **v0.77** DFlash speculative decode for `qwen run --drafter`.
+///
+/// Same contract as [`generate_prompt_lookup`] — greedy accept-prefix over
+/// a packed target verify, so the emitted token sequence is identical to
+/// non-speculative greedy decoding — but the proposals come from the
+/// DFlash drafter instead of a prompt n-gram index. Ported from the
+/// `qwen-bench dflash` production loop (bench.rs `run_dflash`), including
+/// the ctx-keyed break-even + trailing-α backoff policy.
+///
+/// The drafter conditions on captured target hidden states for every
+/// committed position: the caller must have prefilled with capture and
+/// seeded `dsess` with the prompt columns.
+#[allow(clippy::too_many_arguments)]
+fn generate_dflash<OnToken>(
+    loaded: &LoadedModel,
+    forward: &MetalForward<'_>,
+    head: &MetalDFlashHead,
+    dsess: MetalDFlashSession,
+    mut sequence: Sequence,
+    logits: Vec<f32>,
+    max_tokens: usize,
+    stop_tokens: &[i32],
+    mut on_token: OnToken,
+) -> Result<DflashGeneration>
+where
+    OnToken: FnMut(i32) -> Result<()>,
+{
+    ensure!(max_tokens > 0, "max_tokens must be >= 1");
+    let wall_t0 = Instant::now();
+    let selection_t0 = Instant::now();
+    let mut carry = argmax_i32(&logits);
+    let first_token_selection_ms = selection_t0.elapsed().as_secs_f64() * 1e3;
+    let first_token_ready_ms = Some(wall_t0.elapsed().as_secs_f64() * 1e3);
+    let mut first_token_callback_ms = None;
+    let mut first_transition_ms = None;
+    let mut tokens = Vec::with_capacity(max_tokens);
+    let mut transitions = 0usize;
+    let mut transition_wall_ms = 0.0;
+    let mut stats = DflashDecodeStats::default();
+
+    let cfg = head.config;
+    let n_block = cfg.block_size as usize;
+    let k_layers = head.target_layer_ids.len();
+    let n_target_features = k_layers * loaded.arch().hidden_size as usize;
+
+    let scratch_t0 = Instant::now();
+    let mut verify_scratch = MetalDFlashVerifyScratch::fresh(
+        loaded.context(),
+        loaded.metal_model(),
+        cfg.block_size,
+        k_layers as u32,
+    )
+    .context("allocate dflash verify scratch")?;
+    let mut layer_scratch =
+        MetalDFlashLayerMajorScratch::fresh(loaded.context(), loaded.metal_model(), cfg.block_size)
+            .context("allocate dflash layer scratch")?;
+    stats.scratch_allocation_ms = scratch_t0.elapsed().as_secs_f64() * 1e3;
+
+    let mut decoder = DFlashDecoder::new(forward, head, dsess);
+
+    // Adaptive-N policy state (mirrors bench `run_dflash`): terminal Off
+    // once trailing acceptance can't cover the draft+verify premium.
+    let mut spec_disabled = false;
+    let mut alpha_window: Vec<usize> = Vec::with_capacity(DFLASH_ALPHA_WINDOW + 1);
+
+    let stop_reason = 'outer: loop {
+        shutdown::checkpoint()?;
+        tokens.push(carry);
+        if stop_tokens.contains(&carry) {
+            break StopReason::Eos;
+        }
+        on_token(carry)?;
+        first_token_callback_ms.get_or_insert_with(|| wall_t0.elapsed().as_secs_f64() * 1e3);
+        if tokens.len() == max_tokens {
+            break StopReason::TokenLimit;
+        }
+
+        let transition_t0 = Instant::now();
+        let position = sequence.position();
+        let spec_enabled = !spec_disabled && position < DFLASH_OFF_CTX;
+
+        if !spec_enabled {
+            // Off: plain single-token decode. Terminal — the drafter's
+            // cross-context stops being fed, so it cannot resume.
+            spec_disabled = true;
+            stats.off_steps += 1;
+            sequence.ensure_can_append(1)?;
+            let serial_t0 = Instant::now();
+            let next = forward
+                .single_token(carry, position as u32, unsafe {
+                    sequence.metal_session_mut()
+                })
+                .context("dflash off-mode single_token")?;
+            stats.serial_ms += serial_t0.elapsed().as_secs_f64() * 1e3;
+            sequence.advance_by(1)?;
+            transitions += 1;
+            let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
+            transition_wall_ms += elapsed_ms;
+            first_transition_ms.get_or_insert(elapsed_ms);
+            carry = argmax_i32(&next);
+            continue;
+        }
+
+        // ---- Draft ----
+        let drafter_pos = position as u32;
+        let draft_t0 = Instant::now();
+        let argmaxes = decoder
+            .draft_block(carry, drafter_pos)
+            .context("dflash draft_block")?;
+        let draft_ms = draft_t0.elapsed().as_secs_f64() * 1e3;
+        if stats.drafter_calls == 0 {
+            // One-time prompt projection through the drafter caches.
+            stats.draft_first_call_ms = draft_ms;
+        } else {
+            stats.draft_ms += draft_ms;
+        }
+        stats.drafter_calls += 1;
+        stats.spec_steps += 1;
+
+        // ---- Packed verify: [carry, drafts...] ----
+        let mut verify_input = Vec::with_capacity(n_block);
+        verify_input.push(carry);
+        verify_input.extend_from_slice(&argmaxes[1..n_block]);
+        let n_eff = verify_input.len();
+        let n_drafts_scored = n_eff - 1;
+        sequence.ensure_can_append(n_eff)?;
+
+        let verify_t0 = Instant::now();
+        let verify_argmax = qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
+            forward,
+            &head.target_layer_ids,
+            &verify_input,
+            drafter_pos,
+            &mut verify_scratch,
+            &mut layer_scratch,
+            unsafe { sequence.metal_session_mut() },
+            None,
+            Some(n_eff as u32),
+        )
+        .context("dflash packed verify")?;
+        stats.verify_ms += verify_t0.elapsed().as_secs_f64() * 1e3;
+        stats.verify_calls += 1;
+        stats.drafts_scored += n_drafts_scored;
+        stats.physical_target_positions += n_eff;
+
+        // ---- Greedy accept-prefix ----
+        let mut accepted = Vec::with_capacity(n_drafts_scored);
+        let mut terminal = None;
+        for (&draft, &target) in verify_input[1..].iter().zip(&verify_argmax) {
+            if draft != target {
+                break;
+            }
+            accepted.push(draft);
+            if stop_tokens.contains(&draft) {
+                terminal = Some(StopReason::Eos);
+                break;
+            }
+            if tokens.len() + accepted.len() == max_tokens {
+                terminal = Some(StopReason::TokenLimit);
+                break;
+            }
+        }
+        let n_accepted = accepted.len();
+        let n_keep = if terminal.is_some() {
+            n_accepted
+        } else {
+            n_accepted + 1
+        };
+
+        // ---- Append captured hiddens for committed positions ----
+        // Columns 0..=n_accepted are carry + accepted drafts. The bonus
+        // position is committed on the NEXT iteration, when it is carry.
+        if n_keep > 0 {
+            let append_t0 = Instant::now();
+            let columns: Vec<(MetalTensor, u32)> = (0..n_keep)
+                .map(|i| {
+                    (
+                        verify_scratch.hidden_capture_n_slot(i as u32),
+                        drafter_pos + i as u32,
+                    )
+                })
+                .collect();
+            let column_refs: Vec<(&MetalTensor, u32)> =
+                columns.iter().map(|(t, p)| (t, *p)).collect();
+            decoder
+                .session
+                .append_target_ctx_columns_now(loaded.context(), &column_refs, n_target_features)
+                .context("append dflash ctx columns")?;
+            stats.append_ms += append_t0.elapsed().as_secs_f64() * 1e3;
+        }
+
+        // ---- Restore target state on partial accept ----
+        if n_keep < n_eff {
+            let restore_t0 = Instant::now();
+            qwen_llm::metal_dflash::encode_restore_after_partial_accept_inner(
+                forward,
+                &verify_scratch,
+                n_keep as u32,
+                drafter_pos,
+                unsafe { sequence.metal_session_mut() },
+                Some(n_eff as u32),
+            )
+            .context("dflash restore after partial accept")?;
+            stats.restore_ms += restore_t0.elapsed().as_secs_f64() * 1e3;
+            stats.restore_calls += 1;
+        }
+        sequence.advance_by(n_keep)?;
+        transitions += n_keep;
+        stats.accepted_drafts += n_accepted;
+        let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
+        transition_wall_ms += elapsed_ms;
+        first_transition_ms.get_or_insert(elapsed_ms);
+
+        for token in accepted {
+            tokens.push(token);
+            if !stop_tokens.contains(&token) {
+                on_token(token)?;
+            }
+        }
+        if let Some(reason) = terminal {
+            break 'outer reason;
+        }
+
+        // ---- Trailing-α backoff ----
+        alpha_window.push(n_accepted);
+        if alpha_window.len() > DFLASH_ALPHA_WINDOW {
+            alpha_window.remove(0);
+        }
+        if alpha_window.len() == DFLASH_ALPHA_WINDOW {
+            let mean_emitted =
+                1.0 + alpha_window.iter().sum::<usize>() as f64 / DFLASH_ALPHA_WINDOW as f64;
+            if mean_emitted < dflash_breakeven(sequence.position()) - DFLASH_ALPHA_OFF_MARGIN {
+                spec_disabled = true;
+                stats.alpha_backoff = true;
+            }
+        }
+
+        carry = verify_argmax[n_accepted];
+    };
+
+    ensure!(
+        transitions.checked_add(1) == Some(tokens.len()),
+        "dflash generation violated N-1 transition semantics"
+    );
+    Ok(DflashGeneration {
+        generation: GenerationResult {
+            tokens,
+            wall_ms: wall_t0.elapsed().as_secs_f64() * 1e3,
+            first_token_selection_ms,
+            first_token_ready_ms,
+            first_token_callback_ms,
+            transitions,
+            transition_ms: transition_wall_ms,
+            first_transition_ms,
+            stop_reason,
+        },
+        stats,
+        sequence,
+    })
 }
 
 struct PromptLookupGeneration {

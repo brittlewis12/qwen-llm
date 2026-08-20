@@ -13122,8 +13122,13 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
     // v0.77 verify-microbench samples: (n_eff, wall ms) per packed_verify
     // call, plus Off-step single_token wall times. Cheap to collect
     // unconditionally; reported only under `--n-policy cycle`.
-    let mut verify_samples: Vec<(usize, f64)> = Vec::new();
-    let mut off_single_ms: Vec<f64> = Vec::new();
+    // v0.77: (n_eff, wall ms, kv position at the call). The ctx term is
+    // recorded per sample so the ctx SLOPE can be fit WITHIN one process.
+    // Comparing absolute rows across sessions is forbidden by PERF-TOOLS
+    // and produced a phantom +24 ms/8.8K verify slope that survived into
+    // the adaptive-policy break-even constant until 2026-08-20.
+    let mut verify_samples: Vec<(usize, f64, usize)> = Vec::new();
+    let mut off_single_ms: Vec<(f64, usize)> = Vec::new();
 
     let t_decode = Instant::now();
     'outer: loop {
@@ -13178,7 +13183,10 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             let logits = mf
                 .single_token(carry_tok, single_pos, &mut target_session)
                 .context("off-mode single_token")?;
-            off_single_ms.push(t_single.elapsed().as_secs_f64() * 1e3);
+            off_single_ms.push((
+                t_single.elapsed().as_secs_f64() * 1e3,
+                single_pos as usize,
+            ));
             let next_tok = argmax_i32(&logits);
             // Advance cursors. carry_tok was already emitted at top of
             // the loop; next iter's carry is `next_tok`.
@@ -13255,7 +13263,7 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
         .context("packed_verify")?;
         let verify_elapsed_ms = t_acct.elapsed().as_secs_f64() * 1e3;
         acct_verify_ms += verify_elapsed_ms;
-        verify_samples.push((n_eff, verify_elapsed_ms));
+        verify_samples.push((n_eff, verify_elapsed_ms, drafter_pos as usize));
         verify_calls += 1;
         debug_assert_eq!(verify_argmax.len(), n_eff);
 
@@ -13488,28 +13496,65 @@ fn run_dflash(args: DflashArgs) -> Result<()> {
             let min = xs.first().copied().unwrap_or(0.0);
             (n, mean, med, min)
         };
+        // Least-squares slope of ms vs kv position, fit WITHIN this
+        // process. Only valid where the samples actually span a ctx
+        // range, so the span is reported alongside.
+        let slope = |pts: &[(f64, usize)]| -> Option<(f64, f64, usize, usize)> {
+            if pts.len() < 8 {
+                return None;
+            }
+            let lo = pts.iter().map(|(_, c)| *c).min()?;
+            let hi = pts.iter().map(|(_, c)| *c).max()?;
+            if hi.saturating_sub(lo) < 256 {
+                return None;
+            }
+            let n = pts.len() as f64;
+            let mean_x = pts.iter().map(|(_, c)| *c as f64).sum::<f64>() / n;
+            let mean_y = pts.iter().map(|(m, _)| *m).sum::<f64>() / n;
+            let mut num = 0.0;
+            let mut den = 0.0;
+            for (m, c) in pts {
+                let dx = *c as f64 - mean_x;
+                num += dx * (*m - mean_y);
+                den += dx * dx;
+            }
+            (den > 0.0).then(|| (num / den, mean_y, lo, hi))
+        };
         eprintln!();
         eprintln!("[dflash] === verify microbench (--n-policy cycle) ===");
         for target_n in [8usize, 4, 2, 1] {
-            let mut xs: Vec<f64> = verify_samples
+            let pts: Vec<(f64, usize)> = verify_samples
                 .iter()
-                .filter(|(ne, _)| *ne == target_n)
-                .map(|(_, ms)| *ms)
+                .filter(|(ne, _, _)| *ne == target_n)
+                .map(|(_, ms, ctx)| (*ms, *ctx))
                 .collect();
-            if xs.is_empty() {
+            if pts.is_empty() {
                 continue;
             }
+            let mut xs: Vec<f64> = pts.iter().map(|(m, _)| *m).collect();
             let (n, mean, med, min) = stats(&mut xs);
             eprintln!(
                 "[dflash] packed_verify n_eff={target_n}: samples={n} mean {mean:.1} ms | median {med:.1} | min {min:.1}"
             );
+            if let Some((k, _, lo, hi)) = slope(&pts) {
+                eprintln!(
+                    "[dflash]   within-session ctx slope: {:+.2} ms/1K ctx over [{lo}, {hi}]",
+                    k * 1000.0
+                );
+            }
         }
         if !off_single_ms.is_empty() {
-            let mut xs = off_single_ms.clone();
+            let mut xs: Vec<f64> = off_single_ms.iter().map(|(m, _)| *m).collect();
             let (n, mean, med, min) = stats(&mut xs);
             eprintln!(
                 "[dflash] single_token (interleaved ref): samples={n} mean {mean:.1} ms | median {med:.1} | min {min:.1}"
             );
+            if let Some((k, _, lo, hi)) = slope(&off_single_ms) {
+                eprintln!(
+                    "[dflash]   within-session ctx slope: {:+.2} ms/1K ctx over [{lo}, {hi}]",
+                    k * 1000.0
+                );
+            }
         }
     }
 
@@ -17384,22 +17429,41 @@ const DFLASH2_N8_OFF_CTX: usize = 16384;
 ///   margin 0.6 (≈ 1 SE) puts a +0.5 winner at z ≈ 1.9 ⇒ ~3%/window.
 ///   Terminal-Off re-probe remains future work.
 const DFLASH2_ALPHA_WINDOW: usize = 16;
-/// Break-even fit intercept / inverse slope (see table + corrections).
+/// Break-even fit (mean emitted tokens/step at which Spec ties serial).
 ///
-/// v0.77 kernel round (Q5_K/Q8_0 mma8v arms + Q4_K down-shape routing):
-/// draft 23.0 -> 13.5 ms, verify(8) 113 -> 101 ms at short ctx, so the
-/// intercept drops 3.3 -> 2.9 ((13.5+101.3)/39.3). Measured flip: the
-/// α≈3.56 content that sat at 1.00× now wins 1.15×; the α≈4.6
-/// instruction workload went 1.49× -> 1.76×. Slope retained (both draft
-/// and verify improvements are ctx-independent kernel-efficiency terms).
-const DFLASH2_N8_BREAKEVEN_BASE: f64 = 2.9;
-const DFLASH2_N8_BREAKEVEN_CTX_DIV: f64 = 8000.0;
+/// **2026-08-20 recalibration.** The previous form was
+/// `2.9 + ctx/8000`, whose ctx term was fit on ABSOLUTE verify rows
+/// compared ACROSS bench sessions — the exact procedure PERF-TOOLS
+/// forbids, and the same phantom slope that produced (and then failed)
+/// the V1 chunked-verify projection. Refit from a single-process
+/// `--n-policy cycle` run (140+ samples per cell, ctx 464 -> 2062):
+///
+///   verify(8)    111.5 ms, within-session slope +0.81 ms/1K ctx (+0.73%/1K)
+///   single_token  40.2 ms, within-session slope +0.40 ms/1K ctx (+1.00%/1K)
+///   verify(1)     41.8 ms, within-session slope +0.28 ms/1K ctx
+///
+/// Break-even = (draft + verify) / single. Single-token cost grows
+/// FASTER in relative terms than verify(8) does, because verify
+/// amortizes one KV stream over 8 rows while serial decode re-reads it
+/// every token. With the drafter's SWA window plateaued (>= 2048), the
+/// derivative is `d(break-even)/d(1K ctx) = -0.011` — flat to slightly
+/// DECLINING. Evaluated at both band ends the value is 3.12 / 3.10.
+///
+/// So the ctx term is dropped, not merely reduced: speculation does not
+/// get harder with context on this architecture, it gets marginally
+/// easier. The hard `*_OFF_CTX` guard and the content-aware α-backoff
+/// remain the safety nets.
+///
+/// Owed: the within-session slope is only measured over 0.5K-2K. A
+/// long-band (8K+) single-process confirmation is still outstanding;
+/// until it lands, do not re-introduce a ctx term in either direction.
+const DFLASH2_N8_BREAKEVEN_BASE: f64 = 3.1;
 /// Trigger margin below break-even, sized ≈ 1 SE of the window mean.
 const DFLASH2_ALPHA_OFF_MARGIN: f64 = 0.6;
 
 /// Ctx-keyed Spec(8)-vs-Off break-even in mean emitted tokens/step.
-fn dflash2_n8_breakeven(kv_n_pos: usize) -> f64 {
-    DFLASH2_N8_BREAKEVEN_BASE + kv_n_pos as f64 / DFLASH2_N8_BREAKEVEN_CTX_DIV
+fn dflash2_n8_breakeven(_kv_n_pos: usize) -> f64 {
+    DFLASH2_N8_BREAKEVEN_BASE
 }
 
 /// **v0.76**: verify-chain length policy as selected by `--n-policy`.

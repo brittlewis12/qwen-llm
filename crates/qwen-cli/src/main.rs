@@ -8576,16 +8576,43 @@ where
 /// (draft + verify) / single_token premium; the trailing-α window is the
 /// content-aware guard, since acceptance varies 2.5-5.8 at fixed ctx.
 const DFLASH_ALPHA_WINDOW: usize = 16;
-const DFLASH_BREAKEVEN_BASE: f64 = 2.9;
-const DFLASH_BREAKEVEN_CTX_DIV: f64 = 8000.0;
+/// Break-even fit (mean emitted tokens/step at which Spec ties serial).
+///
+/// **2026-08-20 recalibration.** The previous form was
+/// `2.9 + ctx/8000`, whose ctx term was fit on ABSOLUTE verify rows
+/// compared ACROSS bench sessions — the exact procedure PERF-TOOLS
+/// forbids, and the same phantom slope that produced (and then failed)
+/// the V1 chunked-verify projection. Refit from a single-process
+/// `--n-policy cycle` run (140+ samples per cell, ctx 464 -> 2062):
+///
+///   verify(8)    111.5 ms, within-session slope +0.81 ms/1K ctx (+0.73%/1K)
+///   single_token  40.2 ms, within-session slope +0.40 ms/1K ctx (+1.00%/1K)
+///   verify(1)     41.8 ms, within-session slope +0.28 ms/1K ctx
+///
+/// Break-even = (draft + verify) / single. Single-token cost grows
+/// FASTER in relative terms than verify(8) does, because verify
+/// amortizes one KV stream over 8 rows while serial decode re-reads it
+/// every token. With the drafter's SWA window plateaued (>= 2048), the
+/// derivative is `d(break-even)/d(1K ctx) = -0.011` — flat to slightly
+/// DECLINING. Evaluated at both band ends the value is 3.12 / 3.10.
+///
+/// So the ctx term is dropped, not merely reduced: speculation does not
+/// get harder with context on this architecture, it gets marginally
+/// easier. The hard `*_OFF_CTX` guard and the content-aware α-backoff
+/// remain the safety nets.
+///
+/// Owed: the within-session slope is only measured over 0.5K-2K. A
+/// long-band (8K+) single-process confirmation is still outstanding;
+/// until it lands, do not re-introduce a ctx term in either direction.
+const DFLASH_BREAKEVEN_BASE: f64 = 3.1;
 /// Trigger margin below break-even, sized ≈ 1 SE of the window mean.
 const DFLASH_ALPHA_OFF_MARGIN: f64 = 0.6;
 /// Hard ctx guard past the calibrated range.
 const DFLASH_OFF_CTX: usize = 16384;
 
 /// Ctx-keyed spec-vs-serial break-even in mean emitted tokens/step.
-fn dflash_breakeven(kv_n_pos: usize) -> f64 {
-    DFLASH_BREAKEVEN_BASE + kv_n_pos as f64 / DFLASH_BREAKEVEN_CTX_DIV
+fn dflash_breakeven(_kv_n_pos: usize) -> f64 {
+    DFLASH_BREAKEVEN_BASE
 }
 
 /// **v0.77** DFlash speculative-decode statistics for one request.

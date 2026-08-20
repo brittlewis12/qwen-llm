@@ -25285,3 +25285,56 @@ WITHIN-session verify ctx-slope measurement (e.g. cycle-mode with the flag
 A/B'd in one process) shows a real per-row KV cost. D1 (drafter split-K)
 is suspended for the same reason - its +24 ms motivation shares the
 cross-session defect and needs a paired re-measure first.
+
+## 2026-08-20 — Break-Even Ctx Term Was Cross-Session Noise; Refit Within-Session
+
+### Why
+
+The V1 chunked-verify falsification (`6e06a36`) traced its projected
+-21 ms to a phantom "+24 ms/8.8K verify ctx slope" produced by comparing
+absolute rows ACROSS bench sessions. That same invalid comparison also
+produced the adaptive-policy break-even ctx term `2.9 + ctx/8000`, which
+shipped in `qwen-bench dflash` and in `qwen run --drafter`. This entry
+repairs the second victim.
+
+### Method
+
+`--n-policy cycle` extended to record the KV position with every verify
+and single-token sample, and to report a least-squares ms-vs-ctx slope
+fit WITHIN the process (guarded: >= 8 samples and >= 256 ctx span).
+Single 1600-token generation, Qwen3.8-27B Q4_K_M + DFlash2 Q8_0,
+140+ samples per cell, ctx 464 -> 2062.
+
+### Results (within-session slopes)
+
+| series | median ms | slope ms/1K ctx | relative |
+| --- | --- | --- | --- |
+| packed_verify n=8 | 111.9 | **+0.81** | +0.73%/1K |
+| packed_verify n=1 | 41.9 | +0.28 | +0.67%/1K |
+| single_token | 40.2 | **+0.40** | +1.00%/1K |
+
+- Break-even = (draft + verify) / single. Serial decode's cost grows
+  *faster in relative terms* than packed verify's, because verify
+  amortizes one KV stream across 8 rows while serial re-reads it per
+  token.
+- With the drafter's SWA window plateaued (>= 2048 so draft' ~ 0),
+  `d(break-even)/d(1K ctx) = -0.011`. Evaluated at the band ends:
+  3.12 (ctx 464) and 3.10 (ctx 2062) — **flat to slightly declining**.
+- The shipped term claimed +0.125 per 1K, i.e. a spurious **+1.00**
+  mean_emitted demanded at ctx 8K, biasing the policy toward Off exactly
+  where the measurement says speculation is marginally *easier*.
+
+### Change
+
+Both policy sites (`qwen-bench` `dflash2_n8_breakeven`, `qwen run`
+`dflash_breakeven`) drop the ctx term and use a flat `3.1`. The hard
+`*_OFF_CTX` guard and the content-aware α-backoff remain the safety
+nets. Equivalence re-gated after the change: 128/128 identical, adaptive
+holds Spec(8) for the whole generation, decode-only 1.718x.
+
+### Owed
+
+The within-session slope is measured only over 0.5K-2K. A long-band
+(8K+) single-process confirmation is outstanding; until it lands, do not
+re-introduce a ctx term in either direction. Attempts to run the 8K band
+were blocked by concurrent-session tree churn, not by any result.

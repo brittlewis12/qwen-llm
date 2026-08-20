@@ -19486,6 +19486,151 @@ pub fn encode_dflash_attn_full_gqa_split4_f32(
     Ok(())
 }
 
+/// SWA two-range split-K drafter attention. Same shape
+/// contract as [`encode_dflash_attn_online_two_range_scan_f32`] (Q from the
+/// noise block, K/V from the per-layer ctx cache plus the noise block,
+/// `pos_ctx` for the SWA mask) but partitions the visible window across 4
+/// simdgroups per (kv_head, query) and combines with the split4 reduce
+/// shape. Fixed geometry: 32 Q heads / 8 KV heads / head_dim 128 (both
+/// released drafters); `n` up to 16.
+///
+/// Partials borrow caller-provided scratch sized
+/// `n * N_KV * SPLIT * GROUP * head_dim` (o) and `... * 2` (ml).
+#[allow(clippy::too_many_arguments)]
+pub fn encode_dflash_attn_swa_split4_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    q: &MetalTensor,
+    k_ctx: &MetalTensor,
+    v_ctx: &MetalTensor,
+    k_noise: &MetalTensor,
+    v_noise: &MetalTensor,
+    pos_ctx: &MetalTensor,
+    o_partial: &MetalTensor,
+    ml_partial: &MetalTensor,
+    o: &MetalTensor,
+    n: usize,
+    ctx_len: usize,
+    noise_start_pos: u32,
+    swa_window: u32,
+    ctx_scan_start: usize,
+) -> Result<(), MetalError> {
+    const KERNEL: &str = "dflash_attn_swa_split4";
+    const N_Q: usize = 32;
+    const N_KV: usize = 8;
+    const GROUP: usize = 4;
+    const HEAD_DIM: usize = 128;
+    const SPLIT: usize = 4;
+    if n == 0 || n > 16 {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_swa_split4",
+            detail: format!("n={n} outside 1..=16"),
+        });
+    }
+    if q.n_elements() as usize != n * N_Q * HEAD_DIM
+        || o.n_elements() as usize != n * N_Q * HEAD_DIM
+    {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_swa_split4",
+            detail: format!(
+                "q/o elements {}/{} != n*32*128={}",
+                q.n_elements(),
+                o.n_elements(),
+                n * N_Q * HEAD_DIM
+            ),
+        });
+    }
+    let partial_groups = n * N_KV * SPLIT * GROUP;
+    if (o_partial.n_elements() as usize) < partial_groups * HEAD_DIM
+        || (ml_partial.n_elements() as usize) < partial_groups * 2
+    {
+        return Err(MetalError::BadShape {
+            kernel: "dflash_attn_swa_split4",
+            detail: format!(
+                "partials too small: o={} ml={} need {}/{}",
+                o_partial.n_elements(),
+                ml_partial.n_elements(),
+                partial_groups * HEAD_DIM,
+                partial_groups * 2
+            ),
+        });
+    }
+    let _ = KERNEL;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n_q_heads: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        n_kv_total: u32,
+        ctx_len: u32,
+        n_rows: u32,
+        noise_start_pos: u32,
+        swa_window: u32,
+        ctx_scan_start: u32,
+        scale: f32,
+        noncausal_noise: u32,
+    }
+    let args = Args {
+        n_q_heads: N_Q as u32,
+        n_kv_heads: N_KV as u32,
+        head_dim: HEAD_DIM as u32,
+        n_kv_total: (ctx_len + n) as u32,
+        ctx_len: ctx_len as u32,
+        n_rows: n as u32,
+        noise_start_pos,
+        swa_window,
+        ctx_scan_start: ctx_scan_start as u32,
+        scale: 1.0 / (HEAD_DIM as f32).sqrt(),
+        noncausal_noise: dflash_noncausal_noise_enabled() as u32,
+    };
+
+    let main = ctx.pipeline("kernel_dflash_attn_swa_split4_main_f32")?;
+    enc.set_pipeline(&main);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, q);
+    enc.set_tensor(2, k_ctx);
+    enc.set_tensor(3, v_ctx);
+    enc.set_tensor(4, k_noise);
+    enc.set_tensor(5, v_noise);
+    enc.set_tensor(6, pos_ctx);
+    enc.set_tensor(7, o_partial);
+    enc.set_tensor(8, ml_partial);
+    enc.dispatch(
+        MTLSize {
+            width: N_KV,
+            height: n,
+            depth: SPLIT,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+
+    let reduce = ctx.pipeline("kernel_dflash_attn_swa_split4_reduce_f32")?;
+    enc.set_pipeline(&reduce);
+    enc.set_bytes(0, &args);
+    enc.set_tensor(1, o_partial);
+    enc.set_tensor(2, ml_partial);
+    enc.set_tensor(3, o);
+    enc.dispatch(
+        MTLSize {
+            width: N_Q,
+            height: n,
+            depth: 1,
+        },
+        MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Per-head L2-norm: `y[h, :] = x[h, :] / max(||x[h, :]||, eps)` for
 /// `h ∈ [0, n_heads)`. One dispatch covers all heads. Used in the GDN
 /// front-end where Q and K are l2-normed per K-head before the

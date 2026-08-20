@@ -25338,3 +25338,60 @@ The within-session slope is measured only over 0.5K-2K. A long-band
 (8K+) single-process confirmation is outstanding; until it lands, do not
 re-introduce a ctx term in either direction. Attempts to run the 8K band
 were blocked by concurrent-session tree churn, not by any result.
+
+## 2026-08-19 — D1: SWA Split-K Drafter Attention
+
+### Finding That Redirected the Work
+
+Within-session ratios (session-normalized, so thermal state cancels;
+absolute cross-session ms comparisons are what produced the bogus V1
+rationale) at ctx 8853 vs ~460, post-kernel-round:
+
+| component | short ctx | 8.8K | slope |
+| --- | --- | --- | --- |
+| verify(8) / single | 3.01 | 3.09 | +0.08 (~5 ms) |
+| draft / single      | 0.35 | 1.01 | **+0.66 (~25 ms)** |
+
+The long-context cost sits in the DRAFTER, not verify. V1 (chunked verify
+attention) was aimed at a ~5 ms prize and captured ~2 ms of it; D1 is
+aimed at the ~25 ms one. Mechanism: the drafter's attention moves ~84 MB
+of K/V in ~24 ms = 3.5 GB/s, ~1% of stream, i.e. latency-bound serial
+scan (one simdgroup per (head, query) over the 2048-key SWA window), not
+bandwidth-bound.
+
+### What Shipped (default ON)
+
+`kernel_dflash_attn_swa_split4_{main,reduce}_f32`: the existing
+`full_gqa_split4` template (one simdgroup serves a KV head's 4 sibling Q
+heads; SPLIT=4 context partitions; shared m/l partial combine) with three
+changes — partitions cover the VISIBLE window `[ctx_scan_start, ctx_len)`
+rather than `[0, ctx_len)` (otherwise nearly all partitions are dead once
+ctx exceeds the 2048 SWA window), ctx keys carry the SWA mask from
+`pos_ctx`, and `n_rows` is dynamic (8 for DFlash 2, 16 for DFlash 1).
+Fully-masked partitions write `m=-inf, l=0`; the reduce's `l>0` guards
+already handle them. Fires for 32Q/8KV/head_dim 128 (both released
+drafters). Rollback: `QWEN_DFLASH_ATTN_SWA_SPLIT4=0`.
+
+### Measurement (paired A/B, one session, ctx 8853, code content)
+
+| arm | draft ms/step | decode t/s |
+| --- | --- | --- |
+| A1 (off) | 39.2 | 24.07 |
+| B1 (on)  | **14.5** | **27.20** |
+
+-24.7 ms draft (-63%), +13% decode — ~7x the ~9% run-to-run band.
+Reproduced standalone at 14.7 ms with greedy equivalence PASS. Batch was
+cut short at B2 by the GPU lease (concurrent session), so 1 sample/arm;
+the effect size and the understood mechanism carry it.
+
+alpha 3.879 -> 3.840, within noise. Correctness is structural here: the
+drafter only proposes; every emitted token is gated by verification, so a
+drafter FP reassociation cannot change output — unlike V1, which touched
+verify math and needed the tie-witness gate.
+
+### Effect on the Long-Ctx Picture
+
+Break-even at 8.8K was (1.01 + 3.09) = 4.10 emitted/step against measured
+alpha 3.88-4.17 (parity). With D1: (0.35 + 3.09) = ~3.44, so the same
+content clears break-even. draft/single at 8.8K is now 0.35 — identical
+to short ctx, i.e. the drafter's context slope is gone.

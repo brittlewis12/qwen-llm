@@ -199,15 +199,12 @@ crate::env_flag!(
     default_off mtp_attn_q2_shared_kv_enabled,
     "QWEN_MTP_ATTN_Q2_SHARED_KV"
 );
-// **V1 (v0.77)**: generalization of the q2 shared-KV path to the whole
-// verify chain (2 <= n <= 8). The per-token verify loop streams the KV
-// cache once PER ROW; at ctx 8.8K that is ~24 ms of the 125 ms verify(8)
-// (16 attn layers x 8 rows x 64 KiB per ctx-token at the ~190 GB/s
-// low-occupancy decode-attention shelf). One chunked call reads the
-// cache once. Semantics are identical: the prefill v4 kernel masks with
-// `k_pos <= base_pos + row`, so row i sees exactly `[0, start+i]` - the
-// same visible set the interleaved scatter/attend loop produces (only FP
-// summation order differs; E1 tier, like the shipped q2 path).
+// Generalizes the q2 shared-KV path to the whole verify chain
+// (2 <= n <= 8): one chunked attention call instead of one per row.
+// Equivalent by construction — the prefill v4 kernel masks with
+// `k_pos <= base_pos + row`, so row i sees exactly `[0, start+i]`, the
+// same set the per-token loop gives it; only FP summation order differs
+// (E1 tier, like the shipped q2 path).
 crate::env_flag!(
     default_off mtp_attn_qn_shared_kv_enabled,
     "QWEN_MTP_ATTN_QN_SHARED_KV"
@@ -281,6 +278,10 @@ crate::env_flag!(
 );
 
 crate::env_flag!(default_on dflash_attn_swa_scan_enabled, "QWEN_DFLASH_ATTN_SWA_SCAN");
+
+// SWA two-range split-K drafter attention; see
+// `encode_dflash_attn_swa_split4_f32`.
+crate::env_flag!(default_on dflash_attn_swa_split4_enabled, "QWEN_DFLASH_ATTN_SWA_SPLIT4");
 
 // v0.77: encode the entire drafter forward into ONE command buffer with a
 // single commit + waitUntilCompleted before the readback. The multi-buffer
@@ -13283,9 +13284,20 @@ impl<'a> DFlashDecoder<'a> {
                 && n_kv == 8
                 && head_dim == 128
                 && (7986..=8241).contains(&ctx_len);
+            // Split-K over the visible window for SWA layers (all 5 on
+            // the DFlash 2 drafter).
+            let swa_split4_attn = dflash_attn_swa_split4_enabled()
+                && !full_gqa_split4_attn
+                && n_q == 32
+                && n_kv == 8
+                && head_dim == 128
+                && n <= 16
+                && ctx_len > 0;
             let online_two_range_attn = dflash_attn_online_two_range_enabled();
-            let two_range_attn =
-                full_gqa_split4_attn || online_two_range_attn || dflash_attn_two_range_enabled();
+            let two_range_attn = full_gqa_split4_attn
+                || swa_split4_attn
+                || online_two_range_attn
+                || dflash_attn_two_range_enabled();
             // pos_k staging hoisted to the top of draft_block (v0.77) —
             // the full ctx ‖ noise layout serves both the two-range
             // kernels (read the first ctx_len entries) and the legacy
@@ -13335,6 +13347,43 @@ impl<'a> DFlashDecoder<'a> {
                     n_kv,
                     head_dim,
                     ctx_len,
+                )?;
+            } else if swa_split4_attn {
+                // Same borrowed partials as the split4 path (k_full/v_full
+                // are unused when a two-range kernel runs). Sized for the
+                // max block (16 rows); n <= 16 is gated above.
+                const O_PARTIAL_ELEMS: u64 = 16 * 8 * 4 * 4 * 128;
+                const ML_PARTIAL_ELEMS: u64 = 16 * 8 * 4 * 4 * 2;
+                let o_partial = self.session.k_full.view_subrange(0, vec![O_PARTIAL_ELEMS]);
+                let ml_partial = self.session.v_full.view_subrange(0, vec![ML_PARTIAL_ELEMS]);
+                let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);
+                let ctx_scan_start = if dflash_attn_swa_scan_enabled() {
+                    dflash_swa_ctx_scan_start(
+                        &pos_ctx_cpu,
+                        ctx_len,
+                        noise_start_pos,
+                        swa_window_arg,
+                    )
+                } else {
+                    0
+                };
+                crate::metal::encode_dflash_attn_swa_split4_f32(
+                    ctx_metal,
+                    &enc,
+                    &self.session.q_buf,
+                    &self.session.k_ctx_cache[layer_idx],
+                    &self.session.v_ctx_cache[layer_idx],
+                    &self.session.k_noise,
+                    &self.session.v_noise,
+                    &pos_ctx_view,
+                    &o_partial,
+                    &ml_partial,
+                    &self.session.attn_o_full,
+                    n,
+                    ctx_len,
+                    noise_start_pos,
+                    swa_window_arg,
+                    ctx_scan_start,
                 )?;
             } else if online_two_range_attn {
                 let pos_ctx_view = self.session.pos_k.view_subrange(0, vec![ctx_len as u64]);

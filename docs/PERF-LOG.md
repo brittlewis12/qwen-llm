@@ -25395,3 +25395,82 @@ Break-even at 8.8K was (1.01 + 3.09) = 4.10 emitted/step against measured
 alpha 3.88-4.17 (parity). With D1: (0.35 + 3.09) = ~3.44, so the same
 content clears break-even. draft/single at 8.8K is now 0.35 — identical
 to short ctx, i.e. the drafter's context slope is gone.
+
+## 2026-08-19 — Program T Reopen Condition Repriced Under DFlash 2: STAYS CLOSED
+
+### Why This Was Run
+
+PERF-ROADMAP closes Program T (tree speculation) at T0 and records the
+reopen recipe: "DFlash/tree needs a larger-block or stronger-shallow
+drafter (the `--tree-sim` harness prices any candidate in minutes, no
+engine work)". DFlash 2 is a materially stronger drafter (p1 0.75-region
+-> 0.93), so the condition was tested rather than assumed.
+
+Kill line pre-registered BEFORE the run, from a hand model at the
+measured 8 ms marginal verify-token cost: kill unless tree shows
+>= +0.8 emitted/step at <= +2 extra nodes.
+
+### Measurement
+
+`qwen-bench dflash-lazy --rank-topk --tree-sim`, ctx 8853, code content,
+256 tokens, topology D=5 chain + sibling sets at the first 2 depths with
+B=2 (7 of 15 nodes):
+
+| arm | emitted/step |
+| --- | --- |
+| chain (D=5) | 4.167 |
+| tree (7 nodes) | 4.267 |
+
+**+0.10 emitted/step for +2 nodes — 8x below the kill line.** Rescues
+fired 6 times in 60 steps; post-rescue chain continuation 5/10 = 0.50.
+
+### Interpretation
+
+The reopen recipe's letter was met but not its spirit. T0's rescue
+economics assumed p1 in the 0.75 region, where 25% of positions carry
+recoverable miss mass. DFlash 2 raised p1 to 0.93, so the stronger
+drafter CONSUMED the rescue mass that trees were meant to harvest: only
+7-9% of positions miss at all, and half of those do not continue after
+rescue. At 8 ms/node the arithmetic is a straight loss (+2 nodes = +16 ms
+to buy +0.1 tokens).
+
+Note also that V1's falsification removes the other half of the tree
+case: the 8 ms marginal is the ctx-INDEPENDENT part (GDN tail, checkpoint
+blits, kernel c-factors), so no attention-side work makes tree nodes
+cheaper. Trees need ~2-3 ms nodes; nothing on the board delivers that.
+
+Program T stays closed, now on DFlash-2-era evidence. Cost of knowing:
+one bench run, zero engine changes.
+
+## 2026-08-19 — Acceptance Survives Long Context (alpha(ctx) Capture)
+
+### Question
+
+The N=8 adaptive schedule and the whole long-context plan assume alpha is
+roughly ctx-invariant. The drafter's attention window is SWA-2048, so
+past that its only long-range conditioning is the captured target
+hiddens — a mechanism that could plausibly starve at 8K+.
+
+### Measurement
+
+`qwen-bench dflash-lazy` (sequential verify, no packed kernels), ctx
+8853, code content, 256 tokens:
+
+- alpha_pos1 = **0.933**
+- alpha_chain = 3.167, mean emitted/step = 4.167 (D=5 cap)
+- per-position alpha: 0.933 / 0.828 / 0.692 / 0.778 / 0.786
+- greedy equivalence vs no-spec: PASS
+
+Short-ctx code reference on the packed path: mean emitted 4.571.
+
+### Interpretation
+
+Mild decay only (4.57 -> 4.17), no collapse: the SWA-2048 drafter is not
+starving on long context, and the captured-hidden conditioning carries
+it. This is the premise the D1 break-even analysis rests on — with D1
+landed, break-even at 8.8K is ~3.44 emitted/step against measured alpha
+3.88-4.17, so code content clears it.
+
+Caveat on the record: this is a single run per point. It is reported as
+an alpha measurement (token-deterministic, unaffected by thermal state or
+GPU-lease queuing), NOT as a timing claim.

@@ -1,13 +1,11 @@
 {
   "name": "provider-capture",
-  "module": "index.ts",
-  "type": "module",
   "private": true,
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
+  "type": "module",
+  "description": "Serve-lane harnesses: hermetic capture of stock @ai-sdk/open-responses wire traffic (capture.ts) and the live agent-loop gate against qwen serve (agent_gate.ts).",
+  "scripts": {
+    "capture": "bun run capture.ts",
+    "gate": "bun run agent_gate.ts"
   },
   "dependencies": {
     "@ai-sdk/open-responses": "^2.0.29",

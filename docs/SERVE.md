@@ -16,7 +16,7 @@ jam positions are not.
 | S0 | Prefix-stability falsifier | measurement | DONE — see packet RESULTS |
 | **S1 (this doc)** | Resident serial server, Open Responses subset, no tools | the game (thin HTTP client) | below |
 | S2 ✅ | Tool items (XML-parameter form from the template oracle), `allowed_tools`, continuation rendering | opencode via stock `@ai-sdk/open-responses` | **PASS: 10/10 requests checkpoint-hit** (94–100 % restored), 5/5 turns tool-called — docs/bench/2026-08-19-s2-agent-gate/ |
-| S3 (in progress) | Pre-opened (headless) reasoning support, DeepSeek V4 family backend, DFlash drafter integration. `encrypted_content` opaque round-trip is **not** built — the S2 capture showed plain reasoning content already replays verbatim, so it demoted from necessity to hardening. | opencode, DS4 clients | DS4 live gate (pending): warm snapshot hit rate, byte identity vs CLI, headless partition conformance |
+| S3 ✅ | Pre-opened (headless) reasoning support, DeepSeek V4 family backend, DFlash drafter integration. `encrypted_content` opaque round-trip is **not** built — the S2 capture showed plain reasoning content already replays verbatim, so it demoted from necessity to hardening. | opencode, DS4 clients | **PASS: 5/5 gate cells** — warm snapshot hits every continuation, byte identity vs CLI incl. CJK/emoji, verbatim reasoning round-trip restores 91%, headless partition clean, fail-closed intact — docs/bench/2026-08-19-s3-ds4-gate/ |
 | S4 | Public v0: CC shim, install, memory admission UX, bench repro, compliance claim | the world | sub-100 ms turn-2 TTFT demo, resident @32k |
 
 Parked: items npm provider (stock AI SDK provider exists), WS

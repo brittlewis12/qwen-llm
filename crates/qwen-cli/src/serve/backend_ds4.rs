@@ -142,16 +142,17 @@ impl DeepSeekV4Backend {
             session_capacity.forward_limit(),
             load_t0.elapsed().as_secs_f64() * 1e3,
         );
+        // Process-unique, never published: pid + start nanos + a tag.
         let mut ephemeral = [0u8; 32];
-        ephemeral[..8].copy_from_slice(&std::process::id().to_le_bytes()[..4].repeat(2));
-        ephemeral[8..16].copy_from_slice(
+        ephemeral[..4].copy_from_slice(&std::process::id().to_le_bytes());
+        ephemeral[4..12].copy_from_slice(
             &std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
+                .map(|elapsed| elapsed.as_nanos() as u64)
                 .unwrap_or(0)
                 .to_le_bytes(),
         );
-        ephemeral[16..].copy_from_slice(b"qwen-serve-ephemeral-ds4-cache..");
+        ephemeral[12..32].copy_from_slice(b"qwen-serve-ephemeral");
         let model_content_id = DeepSeekV4ModelContentId::new(ephemeral);
         Ok(Self {
             ctx,
@@ -540,6 +541,18 @@ mod tests {
 
     fn snapshot_stub() -> Option<DeepSeekV4CausalSnapshot> {
         None // constructing a real snapshot needs a resident model
+    }
+
+    #[test]
+    fn ephemeral_identity_fills_exactly_32_bytes() {
+        // The startup panic this replaces (source 32 vs destination 16) only
+        // surfaced when a 97 GB model finished loading.
+        let mut ephemeral = [0u8; 32];
+        ephemeral[..4].copy_from_slice(&std::process::id().to_le_bytes());
+        ephemeral[4..12].copy_from_slice(&0u64.to_le_bytes());
+        ephemeral[12..32].copy_from_slice(b"qwen-serve-ephemeral");
+        assert_eq!(b"qwen-serve-ephemeral".len(), 20);
+        assert_eq!(ephemeral.len(), 32);
     }
 
     #[test]

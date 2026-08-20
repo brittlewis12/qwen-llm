@@ -158,86 +158,54 @@ Default-on for 32Q/8KV/head_dim-128 drafters; rollback
 - Within-session ratios put the long-context slope in the drafter, not the
   verifier: at ctx `8853` vs `~460`, `verify(8)/single` moves `3.01 -> 3.09`
   while `draft/single` moves `0.35 -> 1.01`.
-- The incumbent path is latency-bound, not bandwidth-bound: ~84 MB of K/V in
-  ~24 ms is `3.5 GB/s`, ~1% of stream, from one simdgroup per (head, query)
-  walking the 2048-key window serially.
+- The incumbent path is latency-bound: ~84 MB of K/V in ~24 ms is `3.5 GB/s`,
+  ~1% of stream, from one simdgroup per (head, query) walking the 2048-key
+  window serially.
 - `kernel_dflash_attn_swa_split4_{main,reduce}_f32` reuses the
-  `full_gqa_split4` template with three changes: partitions over
-  `[ctx_scan_start, ctx_len)` instead of `[0, ctx_len)`, SWA mask from
-  `pos_ctx` on ctx keys, and dynamic `n_rows` (8 for DFlash 2, 16 for
-  DFlash 1). Fully-masked partitions write `m=-inf, l=0`; the reduce's `l>0`
-  guards already skip them.
+  `full_gqa_split4` template with partitions over `[ctx_scan_start, ctx_len)`,
+  the SWA mask from `pos_ctx` on ctx keys, and dynamic `n_rows` (8 for
+  DFlash 2, 16 for DFlash 1). Fully-masked partitions write `m=-inf, l=0`,
+  which the reduce's `l>0` guards already skip.
 - Paired A/B at ctx `8853` on code content: draft `39.2 -> 14.5 ms/step`,
   decode `24.07 -> 27.20 t/s`, alpha `3.879 -> 3.840`, greedy equivalence PASS.
-  `draft/single` returns to `0.35`, i.e. ctx-flat. One sample per arm; the
-  batch was cut short by the GPU lease.
+  `draft/single` returns to `0.35`, i.e. ctx-flat. One sample per arm; the batch
+  was cut short by the GPU lease.
 
-Decision: retain default-on. Correctness is structural here — the drafter only
+Decision: retain default-on. Correctness is structural — the drafter only
 proposes and every emitted token is verified, so FP reassociation cannot change
 output. Re-run to four samples per arm on a quiet box. Evidence:
 `/tmp/dflash2-sweep/d1-abba.txt`.
 
-## 2026-08-19 — Chunked Packed-Verify Attention KILL
+## 2026-08-19 — Long-Context Verify Levers: Chunked Attention And Program T Both KILL
 
-Status: `QWEN_MTP_ATTN_QN_SHARED_KV` generalizes the n==2 shared-KV verify path
-to the whole chain (`2 <= n <= 8`) and ships default-off after measuring inside
-the noise band.
+Status: the two candidate ways to buy long-context throughput on the verify side
+both measured out. Chunked packed-verify attention ships default-off behind
+`QWEN_MTP_ATTN_QN_SHARED_KV`; Program T stays closed. Acceptance itself is fine,
+so the remaining lever was the drafter (see the split-K entry above).
 
-- Counterbalanced A/B/B/A at ctx `8853`: verify `130.8 ms` off versus
-  `128.2/128.8 ms` on, a `-2.3 ms` delta against a `~9%` run-to-run band.
-  Greedy equivalence PASS with alpha bit-identical (`3.879`).
-- The `+24 ms` premise was an artifact of comparing absolute rows across
-  sessions (`101 ms` and `125 ms` measured in different thermal states).
-  Within-session the verify ctx slope is `+0.08` singles (`~5 ms`), and this
-  path captures about 2 ms of it.
-- Noise floor for the record: single-token decode at one ctx measured
-  `44.8/48.9/45.9 ms` across clean runs and `63.1 ms` in a batch row.
-- Semantics are equivalent by construction: the prefill v4 kernel masks
-  `k_pos <= base_pos + row`, so row i sees `[0, start+i]`, the same set the
-  per-token loop gives it; only FP summation order differs.
+- Acceptance survives long context: `dflash-lazy` at ctx `8853` on code gives
+  `alpha_pos1 = 0.933` and mean emitted `4.167` against a `4.571` short-ctx
+  reference — mild decay, no collapse, despite the SWA-2048 drafter window.
+  Per-position alpha `0.933 / 0.828 / 0.692 / 0.778 / 0.786`; equivalence PASS.
+- Chunked verify attention (generalizing the n==2 shared-KV path to
+  `2 <= n <= 8`) moves verify `130.8 -> 128.5 ms` under counterbalanced
+  A/B/B/A — inside the `~9%` run-to-run band. Its `+24 ms` premise came from
+  comparing absolute rows across sessions; within-session the verify ctx slope
+  is `+0.08` singles (`~5 ms`) and this path captures about 2 ms. Equivalence
+  PASS with alpha bit-identical. The same cross-session defect also produced
+  the policy break-even ctx term, repaired separately (see the 08-20 refit).
+- Program T reprice: PERF-ROADMAP's closure records "stronger drafter ->
+  reprice trees", and DFlash 2 qualifies. Kill line pre-registered from the
+  `8 ms` verify marginal: `>= +0.8` emitted/step at `<= +2` nodes. `--tree-sim`
+  at ctx `8853` (D=5 chain plus sibling sets at the first two depths, B=2)
+  gives chain `4.167` vs tree `4.267` — `+0.10`, 8x below the line. DFlash 2's
+  `p1 = 0.933` consumed the rescue mass trees exist to harvest, and the `8 ms`
+  marginal is ctx-independent, so no attention work makes nodes cheaper.
 
-Decision: keep default-off. Reopen only if a within-session verify ctx-slope
-measurement shows a real per-row KV cost. Evidence:
-`/tmp/dflash2-sweep/v1-abba2.txt`.
-
-## 2026-08-19 — Acceptance Survives Long Context
-
-Status: measurement only. DFlash 2 acceptance at ctx `8853` decays mildly
-against the short-context reference rather than collapsing, which is the premise
-the N=8 adaptive schedule and the long-context work rest on.
-
-- `dflash-lazy` at ctx `8853`, code content, 256 tokens: `alpha_pos1 = 0.933`,
-  `alpha_chain = 3.167`, mean emitted `4.167` under a D=5 cap; the short-ctx
-  packed reference is `4.571`.
-- Per-position alpha `0.933 / 0.828 / 0.692 / 0.778 / 0.786`; greedy
-  equivalence versus no-spec PASS.
-- The drafter's SWA-2048 window is not starving at this length; the captured
-  target hiddens carry conditioning past the window.
-
-Decision: treat alpha as roughly ctx-stable for policy purposes. Reported as an
-alpha measurement (token-deterministic, unaffected by thermal state or lease
-queuing), not a timing claim; single run per point. Evidence:
-`/tmp/dflash2-sweep/log6-lazy-9k.txt`.
-
-## 2026-08-19 — Program T Reopen Repriced Under DFlash 2: STAYS CLOSED
-
-Status: measurement only. PERF-ROADMAP's Program T closure records the reopen
-recipe "stronger drafter -> reprice trees"; DFlash 2 qualifies, so the condition
-was tested rather than assumed.
-
-- Kill line pre-registered from the measured `8 ms` verify marginal: kill unless
-  the tree shows `>= +0.8` emitted/step at `<= +2` extra nodes.
-- `--tree-sim` at ctx `8853`, D=5 chain plus sibling sets at the first two
-  depths with B=2 (7 of 15 nodes): chain `4.167` versus tree `4.267`
-  emitted/step, `+0.10` for `+2` nodes, 8x below the line. Rescues fired 6
-  times in 60 steps; post-rescue continuation `5/10`.
-- DFlash 2's `p1 = 0.933` consumed the rescue mass trees exist to harvest,
-  leaving 7-9% miss mass of which about half does not continue.
-- The `8 ms` verify marginal is ctx-independent (GDN tail, checkpoint blits,
-  kernel c-factors), so no attention-side work makes tree nodes cheaper.
-
-Decision: Program T stays closed, now on DFlash-2-era evidence. Cost of knowing
-was one bench run and no engine changes. Evidence:
+Decision: keep chunked verify default-off, reopen only if a within-session
+verify ctx-slope measurement shows a real per-row KV cost. Program T stays
+closed on DFlash-2-era evidence, priced in one bench run with no engine
+changes. Evidence: `/tmp/dflash2-sweep/v1-abba2.txt`,
 `/tmp/dflash2-sweep/rank-9k.jsonl`.
 
 ## 2026-08-19 — DFlash Speculative Decode In Production (`qwen run --drafter`)

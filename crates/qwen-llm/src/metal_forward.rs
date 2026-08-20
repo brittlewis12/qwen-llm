@@ -12718,11 +12718,10 @@ impl<'a> MetalForward<'a> {
     ///
     /// The `_qkv_in` / `z_in` arguments alias rows of the layer-major
     /// pack buffers (`gdn_qkv_pack`, `gdn_z_pack`); `alpha_in` /
-    /// `beta_in` come from the per-token session scratch (`s.gdn_alpha`,
-    /// `s.gdn_beta`) populated by per-token alpha/beta mat-vec +
-    /// sigmoid + decay-chain because production beta_proj/alpha_proj
-    /// are F32 (small, mat-mat dispatch overhead > BW savings; see
-    /// docs/H5-DFLASH.md rev 10).
+    /// `beta_in` come from either the per-token session scratch
+    /// (`s.gdn_alpha`, `s.gdn_beta`) or packed row views populated by the
+    /// Q8 verifier alpha/beta sidecar. The recurrent tail remains sequential
+    /// in both cases.
     ///
     /// Caller's responsibility: per-token sequencing of `s.gdn_conv[gdn_i]`
     /// and `s.gdn_state[gdn_i]` (the recurrence is inherently

@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-20 — Qwen3.8 Q8 DFlash Alpha/Beta Sidecar GO
+
+Status: Qwen3.8-27B-Q8_0 packed-verifier alpha/beta scheduling is default-on for
+Q8 targets. The sidecar batches the existing exact Q8 mat-vec projections across
+N rows, then batches sigmoid and alpha decay transforms; recurrent state updates,
+checkpoint publication, and rollback remain unchanged.
+
+- Real Q8 target N=8 matmat sweep found the existing table routing already wins
+  or ties every target family, including the Q8 lm_head; no dispatch-table change
+  was retained. N-policy cycle measured verify medians of `113.9 ms` at N=8,
+  `222.4 ms` at N=4, `214.0 ms` at N=2, and `58.6 ms` at N=1 versus `58.1 ms`
+  single-token. Keep Q8 adaptive policy on N=8/Off; do not add N=2/N=4 routing.
+- Initial equivalence-gated Q8 code-prompt A/B moves verify `112.9 -> 110.8 ms`,
+  step `128.6 -> 126.4 ms`, and decode-only `35.56 -> 36.17 t/s`, with identical
+  `100/28` acceptance and `128/128` greedy equivalence.
+- Counterbalanced `A B B A / B A A B` timing at 256 generated tokens wins all
+  four paired comparisons. Medians move verify `113.7 -> 111.55 ms` (`1.89%`),
+  step `130.1 -> 127.9 ms` (`1.69%`), decode `37.12 -> 37.77 t/s`, and total
+  `34.73 -> 35.28 t/s`; prefill and alpha acceptance remain stationary.
+- Three additional 256-token candidate runs (code, game, explanation) all pass
+  greedy equivalence. The code row remains the positive performance regime;
+  adaptive policy correctly backs off to Off on low-acceptance game/explanation
+  content.
+- `cargo check -p qwen-llm`, an isolated release build, and `git diff --check`
+  pass. Timing was exploratory dirty-tree evidence; clean-source confirmation
+  remains a release hygiene step, not a reason to disable the Q8-local default.
+
+Decision: retain the Q8 alpha/beta sidecar default-on. Keep recurrence fusion,
+packed causal N=8 attention, and Q8 N=2/N=4 kernels closed until a new phase or
+long-context packet clears their separate gates. Evidence:
+`target/profiles/q8-dflash-investigation/`.
+
 ## 2026-08-17 — Direct Converted-F32 Destination GO
 
 Status: converted-F32 Qwen weights now dequantize directly into their final

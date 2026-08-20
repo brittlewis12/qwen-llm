@@ -310,6 +310,13 @@ fn dflash_swa_ctx_scan_start(
 
 crate::env_flag!(default_on prefill_gdn_batched_enabled, "QWEN_PREFILL_GDN_BATCHED");
 
+// Qwen3.8 Q8 verifier arm: batch alpha/beta scheduling across the N rows
+// while leaving recurrence and checkpoint semantics unchanged.
+crate::env_flag!(
+    default_on mtp_verify_q8_gdn_alpha_beta_batched_enabled,
+    "QWEN_MTP_VERIFY_Q8_GDN_ALPHA_BETA_BATCHED"
+);
+
 fn prefill_gdn_proj_oracle_layer_enabled(layer_idx: usize) -> bool {
     static LAYERS: OnceLock<Option<Vec<usize>>> = OnceLock::new();
     let layers = LAYERS.get_or_init(|| {
@@ -6464,54 +6471,121 @@ pub fn encode_packed_verify_layer_major_inner(
                     }
                     emit_mtp_verify_count_phase(trace_counts, il as isize, "gdn", "front");
 
+                    // Optional Q8 arm: keep the exact Q8 mat-vec projection
+                    // kernels, but schedule alpha/beta for all rows before
+                    // entering the sequential recurrence loop. This deletes
+                    // repeated projection/transform encoder structure while
+                    // leaving recurrence and rollback unchanged.
+                    let q8_alpha_beta_batched = mtp_verify_q8_gdn_alpha_beta_batched_enabled()
+                        && n > 1
+                        && g.beta_proj.dtype == GgmlType::Q8_0
+                        && g.alpha_proj.dtype == GgmlType::Q8_0;
+                    let gdn_beta_pack = layer_scratch
+                        .gdn_beta_pack
+                        .view_subrange(0, vec![(n * n_v) as u64]);
+                    let gdn_alpha_pack = layer_scratch
+                        .gdn_alpha_pack
+                        .view_subrange(0, vec![(n * n_v) as u64]);
+                    if q8_alpha_beta_batched {
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_packed_matvec_projection(
+                                base.ctx,
+                                &enc,
+                                &g.beta_proj,
+                                &h_pack,
+                                &gdn_beta_pack,
+                                h,
+                                n_v,
+                                n,
+                            )?;
+                            encode_packed_matvec_projection(
+                                base.ctx,
+                                &enc,
+                                &g.alpha_proj,
+                                &h_pack,
+                                &gdn_alpha_pack,
+                                h,
+                                n_v,
+                                n,
+                            )?;
+                            enc.end();
+                        }
+                        {
+                            let enc = KernelEncoder::begin(&cmd_buf);
+                            encode_sigmoid_f32(base.ctx, &enc, &gdn_beta_pack, &gdn_beta_pack)?;
+                            encode_gdn_decay_chain_batched_f32(
+                                base.ctx,
+                                &enc,
+                                &gdn_alpha_pack,
+                                &g.dt_bias,
+                                &g.a_log,
+                                &gdn_alpha_pack,
+                                n,
+                                n_v,
+                            )?;
+                            enc.end();
+                        }
+                    }
+
                     // Per-token loop (recurrence is inherently sequential).
-                    // Step B: per-token alpha/beta (F32 mat-vec; small) +
-                    // post-projection recurrence body (encode_gdn_tail) +
+                    // Step B: alpha/beta (per-token by default, or packed Q8
+                    // views above) + post-projection recurrence body +
                     // checkpoint blit.
-                    let alpha_handle = target_session.gdn_alpha.clone();
-                    let beta_handle = target_session.gdn_beta.clone();
                     for n_idx in 0..n {
                         // Compute pass.
                         {
                             let enc = KernelEncoder::begin(&cmd_buf);
-                            // Per-row view of h_pack for the F32 beta/alpha mat-vecs.
-                            let h_n = layer_scratch
-                                .h_pack
-                                .view_subrange((n_idx * h) as u64, vec![h as u64]);
-                            // beta_proj (F32) -> sigmoid -> s.gdn_beta.
-                            encode_mat_vec_dispatch(
-                                base.ctx,
-                                &enc,
-                                &g.beta_proj,
-                                &h_n,
-                                &target_session.gdn_b,
-                                h,
-                                n_v,
-                            )?;
-                            encode_sigmoid_f32(
-                                base.ctx,
-                                &enc,
-                                &target_session.gdn_b,
-                                &target_session.gdn_beta,
-                            )?;
-                            // alpha_proj (F32) -> fused exp(softplus(a+dt_bias)*a_log).
-                            encode_mat_vec_dispatch(
-                                base.ctx,
-                                &enc,
-                                &g.alpha_proj,
-                                &h_n,
-                                &target_session.gdn_a,
-                                h,
-                                n_v,
-                            )?;
-                            encode_gdn_decay_chain_f32(
-                                base.ctx,
-                                &enc,
-                                &target_session.gdn_a,
-                                &g.dt_bias,
-                                &g.a_log,
-                                &target_session.gdn_alpha,
-                            )?;
+                            let (alpha_n, beta_n) = if q8_alpha_beta_batched {
+                                (
+                                    gdn_alpha_pack
+                                        .view_subrange((n_idx * n_v) as u64, vec![n_v as u64]),
+                                    gdn_beta_pack
+                                        .view_subrange((n_idx * n_v) as u64, vec![n_v as u64]),
+                                )
+                            } else {
+                                // Per-row view of h_pack for the default
+                                // alpha/beta mat-vecs.
+                                let h_n = layer_scratch
+                                    .h_pack
+                                    .view_subrange((n_idx * h) as u64, vec![h as u64]);
+                                encode_mat_vec_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &g.beta_proj,
+                                    &h_n,
+                                    &target_session.gdn_b,
+                                    h,
+                                    n_v,
+                                )?;
+                                encode_sigmoid_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &target_session.gdn_b,
+                                    &target_session.gdn_beta,
+                                )?;
+                                encode_mat_vec_dispatch(
+                                    base.ctx,
+                                    &enc,
+                                    &g.alpha_proj,
+                                    &h_n,
+                                    &target_session.gdn_a,
+                                    h,
+                                    n_v,
+                                )?;
+                                encode_gdn_decay_chain_f32(
+                                    base.ctx,
+                                    &enc,
+                                    &target_session.gdn_a,
+                                    &g.dt_bias,
+                                    &g.a_log,
+                                    &target_session.gdn_alpha,
+                                )?;
+                                (
+                                    target_session.gdn_alpha.clone(),
+                                    target_session.gdn_beta.clone(),
+                                )
+                            };
                             // Per-row views of the batched pack buffers (zero-copy
                             // F32 view_subrange — F32 is supported, no super-block
                             // alignment needed).
@@ -6531,8 +6605,8 @@ pub fn encode_packed_verify_layer_major_inner(
                                 target_session,
                                 &qkv_n,
                                 &z_n,
-                                &alpha_handle,
-                                &beta_handle,
+                                &alpha_n,
+                                &beta_n,
                                 &normed_n,
                             )?;
                             enc.end();

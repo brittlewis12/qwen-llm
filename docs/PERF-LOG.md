@@ -25231,3 +25231,57 @@ Do not invest in checkpoint elimination/ring-buffering. Point the next
 verify packet at recurrence fusion, and treat the ~9.4 ms/token marginal
 as the ctx-independent ceiling term it is: at n=8 it is ~66 ms of every
 verify pass, worth more than any remaining mat-mul tuning.
+
+## 2026-08-19 — V1 Chunked Verify Attention: FALSIFIED at 8.8K (paired ABBA)
+
+### Hypothesis (now falsified)
+
+Packed verify runs the 16 full-attention layers per-token, streaming the KV
+cache once per row. Cross-session rows suggested verify(8) grew 101 ms
+(short ctx) -> 125 ms (ctx 8.8K), attributed to 8x KV re-reads; chunking
+the 8 causal queries into one KV stream was projected to recover ~21 ms.
+
+### What Shipped (default OFF)
+
+`QWEN_MTP_ATTN_QN_SHARED_KV=1` generalizes the existing n==2 shared-KV
+path (`packed_q2`) to the whole verify chain (2 <= n <= 8) via the
+existing `kernel_attn_prefill_v4_g6_q2_c32_f32` (n_rows is a runtime arg;
+the "q2" is the query tile, not a cap). Scatter-all-then-attend is
+semantically identical to the interleaved loop: the kernel masks
+`k_pos <= base_pos + row`, so row i sees exactly `[0, start+i]`.
+
+### Measurement (house A/B/B/A discipline, one session, quiet box)
+
+ctx 8853, code content, static-8, 64-token gens; A = off, B = on:
+
+| arm | verify ms/step | decode t/s |
+| --- | --- | --- |
+| A1  | 130.8 | 23.96 |
+| B1  | 128.2 | 24.48 |
+| B2  | 128.8 | 24.38 |
+
+Paired delta: **-2.3 ms (-1.8%)**, inside the measured run-to-run band
+(~9%). Batch aborted at A2 on a source-identity collision (concurrent
+session committing to the same worktree), so 1A/2B rather than 4/4.
+
+Greedy equivalence PASS with the path enabled; alpha bit-identical
+(3.879), confirming the semantic-equivalence argument.
+
+### Correction to the Record
+
+The +24 ms "ctx slope" that motivated V1 was an artifact of comparing
+absolute rows ACROSS sessions (101 ms and 125 ms measured in different
+thermal/residency states) - exactly the comparison PERF-TOOLS forbids
+("interpret paired block deltas first"). Same defect infects the
+break-even fit (2.9 + ctx/8000) and the "0.99x at 8.8K" headline, both
+fit on single unpaired runs. Independent evidence of the noise floor:
+single-token decode at the same ctx measured 44.8 / 48.9 / 45.9 ms in
+three clean runs and 63.1 ms in a batch run (a 40% outlier).
+
+### Status
+
+V1 kept default-off: correct, equivalence-gated, ~2 ms. Reopen only if a
+WITHIN-session verify ctx-slope measurement (e.g. cycle-mode with the flag
+A/B'd in one process) shows a real per-row KV cost. D1 (drafter split-K)
+is suspended for the same reason - its +24 ms motivation shares the
+cross-session defect and needs a paired re-measure first.

@@ -199,6 +199,19 @@ crate::env_flag!(
     default_off mtp_attn_q2_shared_kv_enabled,
     "QWEN_MTP_ATTN_Q2_SHARED_KV"
 );
+// **V1 (v0.77)**: generalization of the q2 shared-KV path to the whole
+// verify chain (2 <= n <= 8). The per-token verify loop streams the KV
+// cache once PER ROW; at ctx 8.8K that is ~24 ms of the 125 ms verify(8)
+// (16 attn layers x 8 rows x 64 KiB per ctx-token at the ~190 GB/s
+// low-occupancy decode-attention shelf). One chunked call reads the
+// cache once. Semantics are identical: the prefill v4 kernel masks with
+// `k_pos <= base_pos + row`, so row i sees exactly `[0, start+i]` - the
+// same visible set the interleaved scatter/attend loop produces (only FP
+// summation order differs; E1 tier, like the shipped q2 path).
+crate::env_flag!(
+    default_off mtp_attn_qn_shared_kv_enabled,
+    "QWEN_MTP_ATTN_QN_SHARED_KV"
+);
 crate::env_flag!(
     default_on prefill_attn_gdn_scratch_overlay_enabled,
     "QWEN_PREFILL_ATTN_GDN_SCRATCH_OVERLAY"
@@ -4016,7 +4029,14 @@ fn resolve_prefill_scratch_plan_modes(
             && block_size == 2
             && head_dim == 256
             && attn_group == 6
-            && mtp_attn_q2_shared_kv_enabled());
+            && mtp_attn_q2_shared_kv_enabled())
+        // V1: same packs, any verify chain length up to the pack's row
+        // capacity (ATTN_PREFILL_V4_PACKED_ROWS = 8, which is what the
+        // non-`block_size == 2` sizing branch already allocates).
+        || (include_spec_packs
+            && head_dim == 256
+            && attn_group == 6
+            && mtp_attn_qn_shared_kv_enabled());
     let enable_attn_fused_qkv_g8 = matches!(
         std::env::var("QWEN_PREFILL_ATTN_FUSED_QKV_G8").as_deref(),
         Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
@@ -6801,14 +6821,19 @@ pub fn encode_packed_verify_layer_major_inner(
                     }
                     emit_mtp_verify_count_phase(trace_counts, il as isize, "attn", "front");
 
-                    let packed_q2_nwg = if mtp_attn_q2_shared_kv_enabled()
-                        && n == 2
-                        && start_position as usize + n >= 16_384
-                        && head_dim == 256
+                    // V1 (v0.77): shared-KV chunk path, via either the
+                    // legacy n==2 gate or the generalized 2..=8 chain.
+                    // Both resolve to one `nwg` for a single chunked call
+                    // over `[0, start_position + n)`.
+                    let shared_kv_shape_ok = head_dim == 256
                         && n_q == 24
                         && n_kv == 4
                         && target_session.kv_k[ai].dtype == GgmlType::F16
-                        && target_session.kv_v[ai].dtype == GgmlType::F16
+                        && target_session.kv_v[ai].dtype == GgmlType::F16;
+                    let packed_q2_nwg = if mtp_attn_q2_shared_kv_enabled()
+                        && n == 2
+                        && start_position as usize + n >= 16_384
+                        && shared_kv_shape_ok
                     {
                         let n_pos0 = start_position as usize + 1;
                         let n_pos1 = start_position as usize + 2;
@@ -6821,6 +6846,18 @@ pub fn encode_packed_verify_layer_major_inner(
                             && tile0 == 32
                             && tile1 == 32)
                             .then_some(nwg1)
+                    } else if mtp_attn_qn_shared_kv_enabled()
+                        && (2..=ATTN_PREFILL_V4_PACKED_ROWS).contains(&n)
+                        && shared_kv_shape_ok
+                    {
+                        // One call covers every row, so only the final
+                        // extent's schedule matters. The c32 kernel is a
+                        // fixed template: require the heuristic to agree
+                        // that 32 is the right tile (same guard the q2
+                        // path uses), and cap nwg at the g6 encoder's 64.
+                        let n_pos = start_position as usize + n;
+                        (crate::metal::attn_v4_choose_tile_c(n_pos, 6) == 32)
+                            .then(|| crate::metal::attn_v4_choose_nwg(n_pos, 6).min(64))
                     } else {
                         None
                     };

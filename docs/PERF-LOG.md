@@ -38,6 +38,58 @@ packed causal N=8 attention, and Q8 N=2/N=4 kernels closed until a new phase or
 long-context packet clears their separate gates. Evidence:
 `target/profiles/q8-dflash-investigation/`.
 
+## 2026-08-19 — DFlash 2 GO, Split-K Drafter GO, Program T And Packed-Verify Attention KILL
+
+Status: DFlash 2 drafters (`incoai/Qwen3.8-27B-DFlash2-GGUF`, block 8) load and
+run alongside DFlash 1; two-tap dynamic conv, top-16 path selector, and SWA
+split-K drafter attention are default-on. Greedy equivalence PASS on every
+configuration measured, including the DFlash 1 (3.6) regression.
+
+- DFlash 2 support: v2 `dflash` GGUF arch (llama.cpp PR 27342 conventions)
+  beside v1 `dflash-draft`; `kernels/dflash2.metal` two-tap conv + top-16;
+  CPU lattice walk over Q8_0 selector codebooks. Selector ablation is worth
+  `+0.16-0.25` emitted/step (upstream reports `+0.34` under other eval
+  conditions). Short-ctx code decode `1.33x -> 1.76x` across the session.
+- Small-N kernel routing: `n_query == 1` fell through the v0.501 table to the
+  generic 32-wide tile; routing it to mat-vec moves `packed_verify(n_eff=1)`
+  from `202.5 -> 40.3 ms` against `39.0 ms` single-token, i.e. packed verify
+  has no meaningful fixed overhead. Q5_K/Q8_0 gained mma8v `r1c1k128` arms
+  (`0.336 -> 0.105 ms` per Q5_K GDN out_proj dispatch; Q8_0 drafter shapes
+  `-49%` to `-75%`). New `qwen-bench matmat-smalln-micro` prices variants per
+  (family, dtype) on production shapes.
+- Long-context slope is the DRAFTER, not verify. Within-session ratios at ctx
+  `8853` vs `~460`: `verify(8)/single` moves `3.01 -> 3.09`, `draft/single`
+  moves `0.35 -> 1.01`. SWA split-K drafter attention (visible-window
+  partitions, `pos_ctx` mask, dynamic `n_rows`) restores `draft/single` to
+  `0.35`: paired A/B measures draft `39.2 -> 14.5 ms/step`, decode
+  `24.07 -> 27.20 t/s`, alpha `3.879 -> 3.840`.
+- KILL, packed-verify chunked attention (`QWEN_MTP_ATTN_QN_SHARED_KV`, kept
+  default-off): counterbalanced A/B/B/A moves verify `130.8 -> 128.5 ms`,
+  inside the measured `~9%` run-to-run band. Its `+24 ms` premise came from
+  comparing absolute rows across sessions; the same defect infected the
+  break-even fit and the "parity at 8.8K" headline. Single-token decode at one
+  ctx measured `44.8/48.9/45.9 ms` clean and `63.1 ms` in a batch row.
+- KILL, Program T reopen (PERF-ROADMAP records "stronger drafter -> reprice
+  trees"): `--tree-sim` at ctx `8853` gives `4.167 -> 4.267` emitted/step for
+  `+2` nodes against a pre-registered `>= +0.8` line. DFlash 2's higher `p1`
+  (`0.933`) consumed the rescue mass trees exist to harvest, and the `8 ms`
+  verify marginal is ctx-independent, so no attention work makes nodes cheaper.
+- Acceptance survives long context: `alpha_pos1 = 0.933`, mean emitted `4.167`
+  at ctx `8853` on code (short-ctx reference `4.571`) — mild decay, no collapse,
+  despite the SWA-2048 drafter window. Break-even there is now `~3.44`.
+- N=8 adaptive policy is block-size-aware with a trailing-alpha backoff (window
+  16, margin `0.6` ~= 1 SE); worst-case content is bounded near baseline instead
+  of `-39%`. Capture-shift and non-causal-noise A/Bs were both within noise, so
+  the drafter's capture convention and block-causal mask are cleared.
+
+Decision: retain DFlash 2, the small-N routing arms, and split-K drafting
+default-on. Program T stays closed on DFlash-2-era evidence. Chunked verify
+attention stays default-off pending a within-session verify ctx-slope
+measurement. Re-run the split-K A/B to four samples per arm and re-fit the
+adaptive break-even constant now that `draft/single` is ctx-flat. Evidence:
+`/tmp/dflash2-sweep/` (session artifacts), `QWEN_DFLASH_ATTN_SWA_SPLIT4=0` and
+`QWEN_MATMAT_N1_MATVEC=0` roll back the two default-on kernel changes.
+
 ## 2026-08-17 — Direct Converted-F32 Destination GO
 
 Status: converted-F32 Qwen weights now dequantize directly into their final
@@ -25025,109 +25077,6 @@ Interpretation:
 - The combined branch is still a stronger overall decode checkpoint than either
   attention-only or pipelined submission.
 
-## 2026-08-19 — DFlash 2 Support, N=8 Policy Calibration, Verify Microbench
-
-### What Changed
-
-- **DFlash 2 drafter support** (`incoai/Qwen3.8-27B-DFlash2-GGUF`, llama.cpp
-  PR 27342 semantics): v2 (`dflash` arch) GGUF loading alongside v1
-  (`dflash-draft`); two-tap dynamic depthwise conv around each drafter
-  sublayer (`kernels/dflash2.metal`); top-16 path selector
-  (`kernel_topk16_f32` + CPU lattice walk over Q8_0 codebooks). Block size 8.
-- **N=8 adaptive policy**: block-size-aware `NPolicy` with ctx-keyed
-  break-even (`3.3 + ctx/8000`) and trailing-α backoff (window 16, margin
-  0.6 ≈ 1 SE); Off remains terminal.
-- **Verify microbench**: `--n-policy cycle` interleaves Spec(8/4/2/1) with
-  Off single_token reference steps in one process.
-- **Kernel routing fixes**: `encode_mat_mat_dispatch` n=1 now routes to
-  mat-vec (was: generic 32-wide tile, c 5.1–8.3); Q5_K sequential arm
-  extended n=2 → n∈2..=4.
-- **Draft single-cmd mode** (`QWEN_DFLASH_DRAFT_SINGLE_CMD`, default on):
-  draft_block's 13 commit+wait round-trips collapse to 1; pos_k staging
-  hoisted (layer-invariant); watermarks advance only after the final wait.
-- A/B gates from the adversarial review, retained default-off:
-  `QWEN_DFLASH2_CAPTURE_SHIFT`, `QWEN_DFLASH_NONCAUSAL_NOISE`,
-  `QWEN_DFLASH2_NO_SELECTOR`.
-
-### Validation
-
-- Greedy equivalence PASS on every configuration touched: 3.8-27B + DFlash2
-  (static-8 and adaptive, 64–256 tok) and 3.6-27B + DFlash1 regression.
-- Factorial A/B (capture-shift × noncausal-noise, 3 prompts): all effects
-  within single-run noise (±0.4 emitted/step, no consistent sign) — both
-  suspected reference divergences are immaterial; implementation cleared.
-- Selector ablation: +0.16–0.25 emitted/step (reference implementation
-  reports +0.34 under different eval conditions).
-
-### Results (M4 Max, Qwen3.8-27B Q4_K_M target, DFlash2 Q8_0 drafter)
-
-- Acceptance: mean emitted/step 2.5–5.8, strongly content-dependent
-  (chat/code-writing 3.6–5.8; raw continuation / explain ~1.6–2.9).
-- Decode speedup: 1.49× (adaptive, code-writing instruction prompt, 128
-  tok); worst-case content bounded at −9% by α-backoff (was −39% static).
-- Verify microbench (interleaved, ±1 ms medians), ctx≈460:
-  - before: n=1 202.5 ms | n=2 66.5 | n=4 133.1 | n=8 115.8 | single 38.8
-  - after:  n=1 **40.3** | n=2 67.3 | n=4 130.2 | n=8 117.2 | single 39.0
-- Draft steady-state: 24.6 → 23.0 ms/step (single-cmd); first call reported
-  separately (prompt-projection amortization polluted earlier sweeps).
-
-### Interpretation
-
-- Packed verify has **no meaningful fixed overhead**: at n=1 it costs 1.3 ms
-  over a bare forward (checkpoints + hidden capture + argmax ≈ free). The
-  entire verify premium is per-dispatch kernel efficiency c(n) on the ~17 GB
-  weight sweep; the non-monotone curve was kernel-table selection, not
-  physics. The GDN-checkpointing hypothesis is dead.
-- Remaining lever: c(8) ≈ 2.4–3.0 (Q4_K mma8 2.25–2.78, Q6_K 1.6–1.8).
-  Reaching ~1.8 ⇒ verify ≈ 95 ms ⇒ break-even ≈ 3.0, flipping parity-α chat
-  content into wins. Same disease bounds drafter phase 3 (Q8_0 mat-mat).
-- n=4 remains anomalous (nc4 band tops at c≈3.3); fix is pad-to-8 routing —
-  parked, off the production path.
-
-## 2026-08-19 — Q5_K + Q8_0 mma8v N=8 Tier, Small-N Variant Sweep Harness
-
-### What Changed
-
-- New `qwen-bench matmat-smalln-micro`: per-(family, dtype) kernel-variant
-  sweep at N=8 on production weight tensors (GDN qkv/z/out, attn q/o, FFN
-  gate/down, lm_head) plus synthetic Q8_0 tensors at the DFlash 2 drafter's
-  shapes. Candidates: table pick, generic tile, seq mat-vec, nc8, all five
-  ct=1 mma8v variants.
-- `mma8_dequantize_q5_K_half` (ported from mat_mat_q5_k.metal) and
-  `mma8_dequantize_q8_0_half` (8×34-byte sub-blocks per 256-elem
-  superblock) + ct=1 kernel instantiations for both dtypes.
-- `encode_mat_mat_dispatch` table: Q5_K/Q8_0 N=8 → mma8v `r1c1k128`;
-  Q4_K N=8 down-projections (n_in > n_out) → `r1c1k128` (sg2 retained for
-  up/square); N=16 arm guarded to Q4_K/Q6_K (the v1 drafter's Q8_0 N=16
-  mat-mats must keep the tuned n16 kernel, not a nonexistent ct=2 variant).
-
-### Sweep Results (per-dispatch GPU ms, M4 Max)
-
-- Q5_K [6144,5120] (48× GDN out_proj in packed verify): generic 0.336
-  (64 GB/s) → r1c1k128 **0.105** (206 GB/s)
-- Q8_0 drafter shapes: generic → r1c1k128 −49% to −75% (e.g. ffn_down
-  [17408,5120] 0.852 → 0.316; conv_proj [5120,1280] 0.144 → 0.036)
-- Q4_K [17408,5120]: sg2 0.311 → r1c1k128 0.268; [6144,5120] 0.103 → 0.094
-- Everything else already within noise of its best variant; lm_head at
-  344 GB/s ≈ roofline.
-
-### End-to-End (Qwen3.8-27B Q4_K_M + DFlash2 Q8_0, adaptive, 128 tok)
-
-- draft 23.0 → **13.5 ms** steady-state; verify(8) 113 → **101 ms**
-- decode 38.8 → **46.0 t/s**; speedup 1.49× → **1.763×**
-- break-even intercept 3.3 → 2.9 (policy constant recalibrated): the
-  α≈3.56 parity content flipped 1.00× → **1.15×** and adaptive no longer
-  backs off on it; v1 (3.6 + DFlash1) regression PASS
-- greedy equivalence PASS on every configuration (the new arms are E1
-  like the incumbent mma8v tier)
-
-### Interpretation
-
-- c(8) after this round: verify 101 ms ≈ 2.6× a single forward; remaining
-  headroom is the Q4_K/Q6_K mma8v kernels themselves (190-290 GB/s vs 344
-  roofline-ish on lm_head) and per-token mixer work — diminishing returns
-  territory. The n=4 nc4 anomaly still stands (off production path).
-
 ## 2026-08-19 — DFlash Speculative Decode In Production (`qwen run --drafter`)
 
 ### What Changed
@@ -25232,139 +25181,6 @@ verify packet at recurrence fusion, and treat the ~9.4 ms/token marginal
 as the ctx-independent ceiling term it is: at n=8 it is ~66 ms of every
 verify pass, worth more than any remaining mat-mul tuning.
 
-## 2026-08-19 — Program T Reopen Condition Repriced Under DFlash 2: STAYS CLOSED
-
-### Why This Was Run
-
-PERF-ROADMAP closes Program T (tree speculation) at T0 and records the
-reopen recipe: "DFlash/tree needs a larger-block or stronger-shallow
-drafter (the `--tree-sim` harness prices any candidate in minutes, no
-engine work)". DFlash 2 is a materially stronger drafter (p1 0.75-region
--> 0.93), so the condition was tested rather than assumed.
-
-Kill line pre-registered BEFORE the run, from a hand model at the
-measured 8 ms marginal verify-token cost: kill unless tree shows
->= +0.8 emitted/step at <= +2 extra nodes.
-
-### Measurement
-
-`qwen-bench dflash-lazy --rank-topk --tree-sim`, ctx 8853, code content,
-256 tokens, topology D=5 chain + sibling sets at the first 2 depths with
-B=2 (7 of 15 nodes):
-
-| arm | emitted/step |
-| --- | --- |
-| chain (D=5) | 4.167 |
-| tree (7 nodes) | 4.267 |
-
-**+0.10 emitted/step for +2 nodes — 8x below the kill line.** Rescues
-fired 6 times in 60 steps; post-rescue chain continuation 5/10 = 0.50.
-
-### Interpretation
-
-The reopen recipe's letter was met but not its spirit. T0's rescue
-economics assumed p1 in the 0.75 region, where 25% of positions carry
-recoverable miss mass. DFlash 2 raised p1 to 0.93, so the stronger
-drafter CONSUMED the rescue mass that trees were meant to harvest: only
-7-9% of positions miss at all, and half of those do not continue after
-rescue. At 8 ms/node the arithmetic is a straight loss (+2 nodes = +16 ms
-to buy +0.1 tokens).
-
-Note also that V1's falsification removes the other half of the tree
-case: the 8 ms marginal is the ctx-INDEPENDENT part (GDN tail, checkpoint
-blits, kernel c-factors), so no attention-side work makes tree nodes
-cheaper. Trees need ~2-3 ms nodes; nothing on the board delivers that.
-
-Program T stays closed, now on DFlash-2-era evidence. Cost of knowing:
-one bench run, zero engine changes.
-
-## 2026-08-19 — Acceptance Survives Long Context (alpha(ctx) Capture)
-
-### Question
-
-The N=8 adaptive schedule and the whole long-context plan assume alpha is
-roughly ctx-invariant. The drafter's attention window is SWA-2048, so
-past that its only long-range conditioning is the captured target
-hiddens — a mechanism that could plausibly starve at 8K+.
-
-### Measurement
-
-`qwen-bench dflash-lazy` (sequential verify, no packed kernels), ctx
-8853, code content, 256 tokens:
-
-- alpha_pos1 = **0.933**
-- alpha_chain = 3.167, mean emitted/step = 4.167 (D=5 cap)
-- per-position alpha: 0.933 / 0.828 / 0.692 / 0.778 / 0.786
-- greedy equivalence vs no-spec: PASS
-
-Short-ctx code reference on the packed path: mean emitted 4.571.
-
-### Interpretation
-
-Mild decay only (4.57 -> 4.17), no collapse: the SWA-2048 drafter is not
-starving on long context, and the captured-hidden conditioning carries
-it. This is the premise the D1 break-even analysis rests on — with D1
-landed, break-even at 8.8K is ~3.44 emitted/step against measured alpha
-3.88-4.17, so code content clears it.
-
-Caveat on the record: this is a single run per point. It is reported as
-an alpha measurement (token-deterministic, unaffected by thermal state or
-GPU-lease queuing), NOT as a timing claim.
-
-## 2026-08-19 — V1 Chunked Verify Attention: FALSIFIED at 8.8K (paired ABBA)
-
-### Hypothesis (now falsified)
-
-Packed verify runs the 16 full-attention layers per-token, streaming the KV
-cache once per row. Cross-session rows suggested verify(8) grew 101 ms
-(short ctx) -> 125 ms (ctx 8.8K), attributed to 8x KV re-reads; chunking
-the 8 causal queries into one KV stream was projected to recover ~21 ms.
-
-### What Shipped (default OFF)
-
-`QWEN_MTP_ATTN_QN_SHARED_KV=1` generalizes the existing n==2 shared-KV
-path (`packed_q2`) to the whole verify chain (2 <= n <= 8) via the
-existing `kernel_attn_prefill_v4_g6_q2_c32_f32` (n_rows is a runtime arg;
-the "q2" is the query tile, not a cap). Scatter-all-then-attend is
-semantically identical to the interleaved loop: the kernel masks
-`k_pos <= base_pos + row`, so row i sees exactly `[0, start+i]`.
-
-### Measurement (house A/B/B/A discipline, one session, quiet box)
-
-ctx 8853, code content, static-8, 64-token gens; A = off, B = on:
-
-| arm | verify ms/step | decode t/s |
-| --- | --- | --- |
-| A1  | 130.8 | 23.96 |
-| B1  | 128.2 | 24.48 |
-| B2  | 128.8 | 24.38 |
-
-Paired delta: **-2.3 ms (-1.8%)**, inside the measured run-to-run band
-(~9%). Batch aborted at A2 on a source-identity collision (concurrent
-session committing to the same worktree), so 1A/2B rather than 4/4.
-
-Greedy equivalence PASS with the path enabled; alpha bit-identical
-(3.879), confirming the semantic-equivalence argument.
-
-### Correction to the Record
-
-The +24 ms "ctx slope" that motivated V1 was an artifact of comparing
-absolute rows ACROSS sessions (101 ms and 125 ms measured in different
-thermal/residency states) - exactly the comparison PERF-TOOLS forbids
-("interpret paired block deltas first"). Same defect infects the
-break-even fit (2.9 + ctx/8000) and the "0.99x at 8.8K" headline, both
-fit on single unpaired runs. Independent evidence of the noise floor:
-single-token decode at the same ctx measured 44.8 / 48.9 / 45.9 ms in
-three clean runs and 63.1 ms in a batch run (a 40% outlier).
-
-### Status
-
-V1 kept default-off: correct, equivalence-gated, ~2 ms. Reopen only if a
-WITHIN-session verify ctx-slope measurement (e.g. cycle-mode with the flag
-A/B'd in one process) shows a real per-row KV cost. D1 (drafter split-K)
-is suspended for the same reason - its +24 ms motivation shares the
-cross-session defect and needs a paired re-measure first.
-
 ## 2026-08-20 — Break-Even Ctx Term Was Cross-Session Noise; Refit Within-Session
 
 ### Why
@@ -25418,59 +25234,3 @@ The within-session slope is measured only over 0.5K-2K. A long-band
 re-introduce a ctx term in either direction. Attempts to run the 8K band
 were blocked by concurrent-session tree churn, not by any result.
 
-## 2026-08-19 — D1: SWA Split-K Drafter Attention
-
-### Finding That Redirected the Work
-
-Within-session ratios (session-normalized, so thermal state cancels;
-absolute cross-session ms comparisons are what produced the bogus V1
-rationale) at ctx 8853 vs ~460, post-kernel-round:
-
-| component | short ctx | 8.8K | slope |
-| --- | --- | --- | --- |
-| verify(8) / single | 3.01 | 3.09 | +0.08 (~5 ms) |
-| draft / single      | 0.35 | 1.01 | **+0.66 (~25 ms)** |
-
-The long-context cost sits in the DRAFTER, not verify. V1 (chunked verify
-attention) was aimed at a ~5 ms prize and captured ~2 ms of it; D1 is
-aimed at the ~25 ms one. Mechanism: the drafter's attention moves ~84 MB
-of K/V in ~24 ms = 3.5 GB/s, ~1% of stream, i.e. latency-bound serial
-scan (one simdgroup per (head, query) over the 2048-key SWA window), not
-bandwidth-bound.
-
-### What Shipped (default ON)
-
-`kernel_dflash_attn_swa_split4_{main,reduce}_f32`: the existing
-`full_gqa_split4` template (one simdgroup serves a KV head's 4 sibling Q
-heads; SPLIT=4 context partitions; shared m/l partial combine) with three
-changes — partitions cover the VISIBLE window `[ctx_scan_start, ctx_len)`
-rather than `[0, ctx_len)` (otherwise nearly all partitions are dead once
-ctx exceeds the 2048 SWA window), ctx keys carry the SWA mask from
-`pos_ctx`, and `n_rows` is dynamic (8 for DFlash 2, 16 for DFlash 1).
-Fully-masked partitions write `m=-inf, l=0`; the reduce's `l>0` guards
-already handle them. Fires for 32Q/8KV/head_dim 128 (both released
-drafters). Rollback: `QWEN_DFLASH_ATTN_SWA_SPLIT4=0`.
-
-### Measurement (paired A/B, one session, ctx 8853, code content)
-
-| arm | draft ms/step | decode t/s |
-| --- | --- | --- |
-| A1 (off) | 39.2 | 24.07 |
-| B1 (on)  | **14.5** | **27.20** |
-
--24.7 ms draft (-63%), +13% decode — ~7x the ~9% run-to-run band.
-Reproduced standalone at 14.7 ms with greedy equivalence PASS. Batch was
-cut short at B2 by the GPU lease (concurrent session), so 1 sample/arm;
-the effect size and the understood mechanism carry it.
-
-alpha 3.879 -> 3.840, within noise. Correctness is structural here: the
-drafter only proposes; every emitted token is gated by verification, so a
-drafter FP reassociation cannot change output — unlike V1, which touched
-verify math and needed the tie-witness gate.
-
-### Effect on the Long-Ctx Picture
-
-Break-even at 8.8K was (1.01 + 3.09) = 4.10 emitted/step against measured
-alpha 3.88-4.17 (parity). With D1: (0.35 + 3.09) = ~3.44, so the same
-content clears break-even. draft/single at 8.8K is now 0.35 — identical
-to short ctx, i.e. the drafter's context slope is gone.

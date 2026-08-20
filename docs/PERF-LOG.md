@@ -25095,3 +25095,50 @@ Interpretation:
   headroom is the Q4_K/Q6_K mma8v kernels themselves (190-290 GB/s vs 344
   roofline-ish on lm_head) and per-token mixer work — diminishing returns
   territory. The n=4 nc4 anomaly still stands (off production path).
+
+## 2026-08-19 — DFlash Speculative Decode In Production (`qwen run --drafter`)
+
+### What Changed
+
+- `qwen run --drafter <GGUF>` wires the DFlash/DFlash2 drafter into the
+  production CLI (previously bench-only). Drafter load + residency-gated
+  prefetch after the target load; `prefill_span_with_capture` seeds the
+  drafter cross-context from the prompt; `generate_dflash` runs the
+  draft → packed-verify → greedy accept-prefix → hidden-append → restore
+  loop with the calibrated ctx break-even + trailing-α backoff.
+- Admission gates: greedy only (T>0 awaits the maximal-coupling sampler);
+  exclusive with prompt-lookup, durable prefix cache, JSONL, attribution
+  and structural sampling (each either owns the draft source or advances
+  target KV without hidden capture).
+- Per-request `dflash:` diagnostic line (spec/off steps, accepted,
+  mean_emitted, α-backoff, per-step draft/verify/append/restore ms).
+- DFlash bench paths now apply the runtime prefetch policy to both GGUFs
+  (the H5-era path predated the prefetch subsystem): 6.8 GB/s warm-up vs
+  ~0.8 GB/s cold mmap demand-paging on a 29 GB target.
+
+### Results (M4 Max, 128 tok, code-writing prompt, end-to-end `decode_tps`
+### including stdout streaming; output byte-identical to no-drafter runs)
+
+| target | plain | + DFlash2 | speedup |
+| --- | --- | --- | --- |
+| Qwen3.8-27B Q4_K_M | 25.5 t/s | **37.8 t/s** | 1.48× |
+| Qwen3.8-27B Q8_0 | 17.2 t/s | **35.0 t/s** | 2.04× |
+
+Production per-step accounting matches the bench harness exactly (draft
+13.5 ms, verify 101.2 ms, mean_emitted 4.41), confirming the port is
+faithful. Equivalence verified byte-for-byte on both token-limit and
+EOS-terminating requests.
+
+### Interpretation
+
+- Q8_0 + DFlash2 (35.0 t/s) now beats Q4_K_M *plain* (25.5 t/s) by 37%:
+  speculation converts a quantization-quality upgrade into a free one,
+  because draft cost is fixed while verify amortizes the heavier target
+  weight sweep over ~4.4 emitted tokens.
+- Gap audit vs the modernized target loader: prefetch was the real miss
+  (now closed). `dequantize-into-final-storage` is a no-op for DFlash2
+  (Q8_0 weights are kept native; only ~100 KB of F32 norms take the
+  dequant path). Remaining: drafter K/V cross-context caches are F32
+  where the target's KV is F16 (320 MB at 8K ctx, 2× the scan bytes) —
+  bundle with the D1 split-K drafter-attention work since both touch the
+  same kernels.

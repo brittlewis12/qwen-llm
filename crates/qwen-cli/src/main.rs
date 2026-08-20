@@ -6514,6 +6514,7 @@ fn execute_single_turn_request(
     let greedy_gpu_decision =
         resolve_greedy_gpu_decision(greedy_gpu_mode, sampling_config, args.prompt_lookup);
     let use_gpu_greedy = greedy_gpu_decision.enabled;
+    #[allow(unused_assignments)]
     let mut dflash_stats: Option<DflashDecodeStats> = None;
     let (generation, prompt_lookup_stats, sampling_attribution, sampled_structural) = if let Some(
         head,
@@ -6565,6 +6566,32 @@ fn execute_single_turn_request(
             },
         )?;
         sequence = result.sequence;
+        let s = &result.stats;
+        let steps = s.spec_steps.max(1) as f64;
+        // Emitted tokens per verify step = 1 bonus + accepted drafts; the
+        // economics of the whole mode reduce to this number vs the
+        // ctx-keyed break-even.
+        tracing::info!(
+            target: "qwen_diag",
+            concat!(
+                "dflash: spec_steps={} off_steps={} accepted={}/{} ",
+                "mean_emitted={:.2} alpha_backoff={} ",
+                "draft_ms={:.1} draft_first_ms={:.1} verify_ms={:.1} ",
+                "append_ms={:.1} restore_ms={:.1} serial_ms={:.1}",
+            ),
+            s.spec_steps,
+            s.off_steps,
+            s.accepted_drafts,
+            s.drafts_scored,
+            1.0 + s.accepted_drafts as f64 / steps,
+            s.alpha_backoff,
+            s.draft_ms / steps,
+            s.draft_first_call_ms,
+            s.verify_ms / steps,
+            s.append_ms / steps,
+            s.restore_ms / steps,
+            s.serial_ms,
+        );
         dflash_stats = Some(result.stats);
         (result.generation, None, None, None)
     } else if args.prompt_lookup {
@@ -6944,6 +6971,7 @@ fn execute_single_turn_request(
                 .current_allocated_sampled_max_bytes
                 .max(stats.scratch_peak_allocated_bytes);
         }
+        let _ = dflash_stats.as_ref();
         RequestTimingRow {
             schema_version: request_schema_version(
                 args.prefill_chunk,

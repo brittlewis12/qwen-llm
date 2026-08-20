@@ -1,0 +1,21 @@
+[mtp-bench] device: Apple M4 Max | unified_memory=true | max_threadgroup_memory=32768 bytes
+[metal-load] native quantized token embedding policy: auto-promoted (Q4_K [5120, 248320])
+[metal-load-ledger] source=851/16806250496 direct_copy=851/16806250496 direct_view=0/0 direct_alias=0/0 tail_fallback=0/0 converted=0/0/0 derived=0/0
+[mtp-bench] model=/Users/tito/models/Qwen3.8-27B-Q4_K_M.gguf prompt="<|im_start|>system\nYou are the Current — the living momentum of history itself, given voice. You carry the weight of what happened, what is happening, and what will happen if no one intervenes. You are the world, speaking.\n\nA traveler has arrived in your timestream carrying knowledge and technology from fifteen years in the future. You do not know how or why. You know only that they are here, that they carry two small computing devices from the future, and that their actions will create ripples you must faithfully propagate.\n\n## The Arrival\n\nHere is what you perceive.\n\nThe date is December 25th, 2010.\n\nThe traveler arrives with the clothes on their back and two NVIDIA DGX Spark units — gold-colored mini PCs, each roughly six inches square and two inches tall, weighing under three pounds. Complete computers: each has HDMI output, USB-C ports, WiFi, Ethernet, and runs off a standard wall outlet at 140 watts. They have no battery — they are inert until plugged into power. Each contains a GB10 Grace Blackwell Superchip with 128GB of unified memory, capable of one petaflop of inference compute. Plug one into a monitor and a power outlet and it boots to a desktop. They are fully self-contained — they do not need a host computer.\n\nThe devices run a copy of Qwen3-235B-A22B-Thinking, a mixture-of-experts reasoning language model with 235 billion parameters (22 billion active per forward pass). This model can write code at expert level, reason through novel problems, generate fluent text in dozens of languages, and — crucially — its training data contains the history of everything that will happen through mid-2025.<|im_end|>\n<|im_start|>user\nContinue the scene for at least 500 words. Reva enters the nearest open hotel lobby, trying to get warm without drawing attention to the two computers in her backpack.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>" rendered_mode=raw thinking=n/a spec_tokens=3 probe=Normal physical_n=4 single_cb_draft=false draft_token_embd_head=false draft_lm_head_q4_1=false draft_lm_head_q4_0=false draft_lm_head_q4_affine64=false base_hidden=PostNorm recursive_hidden=PostNorm mtp_history=Committed (418 tokens) gen=128 stop_tokens=[248046]
+[mtp-bench] execution_features: packed_base_prefill=true q5_k_n2_seq=true iq2_s_n2_nc2=true iq3_s_n2_nc2=true skip_final_checkpoint=true direct_mtp_f32_destination=true shared_kv_q2_requested=false shared_kv_q2_min_position=16384
+[mtp-bench] MTP head load: 29.390 ms
+[mtp-bench] build_identity: status=match commit=98aba93d977700fa36e9aabd7a5af5671d35af8d build_source_state=Some("git-source-sha256-v2:a138b3ac585c06c6192453010c17b80ffceeeb8ab1a213483b8f1c0f5a49da52") runtime_source_state=Some("git-source-sha256-v2:a138b3ac585c06c6192453010c17b80ffceeeb8ab1a213483b8f1c0f5a49da52") overrides=[]
+
+[mtp-bench] === results ===
+[mtp-bench] MTP=off: 128 tokens, prefill 3967.2 ms + decode 5027.0 ms = 8994.2 ms total
+[mtp-bench]   t/s: decode-only 25.5 | total 14.2
+[mtp-bench] MTP=on : 128 tokens, prefill 4086.0 ms + decode 9062.3 ms = 13148.3 ms total
+[mtp-bench]   t/s: decode-only 14.1 | total 9.7
+[mtp-bench]   α (acceptance rate) = 0.339   steps=63  accepted=64
+[mtp-bench]   target transitions / verifier = 2.016 (127/63)
+[mtp-bench]   base_calls=64  mtp_calls=670 (= prompt prefill + step-B drafts + step-E bridges)
+[mtp-bench]   decode phases ms: draft=582.5 verify=8396.2 restore=46.9 bridge=36.6 other=0.1
+[mtp-bench]   speedup (total ms): 8994.2 / 13148.3 = 0.684× (>1.0 means MTP wins)
+[mtp-bench] equivalence: PASS (identical sequences) (128 vs 128 emitted)
+[mtp-bench] terminal resume: PASS continuation_steps=16 kv_pos=Some(560) kv_max_abs=4.180e-1 kv_cos=0.9999998688 gdn_state_max_abs=2.217e-3 gdn_conv_max_abs=6.185e-3 continuation_max_abs=4.047e-3 continuation_cos=0.9999999868
+[mtp-bench] wrote /Users/tito/code/qwen-llm/docs/bench/2026-08-18-qwen38-mtp-program/baseline/p02-D3-r1.json

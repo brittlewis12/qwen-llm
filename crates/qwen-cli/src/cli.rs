@@ -35,6 +35,17 @@ pub(crate) struct ServeArgs {
     /// Fixed sequence capacity; default sizes per request (prompt + generation + slack).
     #[arg(long)]
     max_context_tokens: Option<usize>,
+
+    /// DFlash drafter GGUF for speculative decode (greedy requests only).
+    ///
+    /// Output is identical to non-speculative decoding. Speculation needs
+    /// captured target hidden states for every context position, which
+    /// restored checkpoints do not carry, so a request speculates only
+    /// when it cold-prefills its whole prompt; restored requests decode
+    /// serially. The per-request `serve phases:` line reports which path
+    /// ran via `decode_path=dflash|serial`.
+    #[arg(long, value_name = "GGUF")]
+    drafter: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -50,6 +61,7 @@ pub(crate) struct ServeInvocation {
     pub(crate) addr: String,
     pub(crate) max_tokens: usize,
     pub(crate) max_context_tokens: Option<usize>,
+    pub(crate) drafter: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -289,6 +301,7 @@ pub(crate) fn normalize(args: &mut Args) -> Invocation {
             addr: serve.addr,
             max_tokens: serve.max_tokens,
             max_context_tokens: serve.max_context_tokens,
+            drafter: serve.drafter,
         }),
         Command::Run(run) => {
             let input = match (run.user, run.messages, run.raw_prompt) {

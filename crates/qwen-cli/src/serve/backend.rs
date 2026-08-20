@@ -11,6 +11,10 @@ use super::events::{ServeStats, StopReason, Usage};
 use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, GenerationSink};
 use super::items::{ServeError, ServeRequest};
 use anyhow::Context as _;
+use qwen_llm::gguf::GgufFile;
+use qwen_llm::loader::{Model, open_dflash_drafter};
+use qwen_llm::metal::MetalTensor;
+use qwen_llm::metal_dflash::{MetalDFlashHead, MetalDFlashSession};
 use qwen_llm::runtime::LoadedModel;
 use qwen_llm::sampling::{Sampler, SamplingConfig};
 use qwen_llm::tokenizer::Tokenizer;
@@ -35,6 +39,12 @@ pub(crate) struct EngineBackend {
     model_id: String,
     default_max_tokens: usize,
     max_context_tokens: Option<usize>,
+    /// DFlash drafter (v0.77 speculative decode). Speculation requires
+    /// captured target hidden states for every context position, which
+    /// restored checkpoints do not carry — so a request uses the drafter
+    /// only when it cold-prefills the whole prompt. Output is identical
+    /// either way (greedy accept-prefix over an exact target verify).
+    dflash_head: Option<MetalDFlashHead>,
 }
 
 impl EngineBackend {
@@ -43,14 +53,43 @@ impl EngineBackend {
         model_id: String,
         default_max_tokens: usize,
         max_context_tokens: Option<usize>,
+        drafter: Option<&std::path::Path>,
     ) -> anyhow::Result<Self> {
         let tokenizer = loaded.tokenizer().context("initialize serve tokenizer")?;
+        let dflash_head = match drafter {
+            Some(path) => {
+                let t0 = Instant::now();
+                let drafter_gguf = GgufFile::open(path)
+                    .with_context(|| format!("open drafter {}", path.display()))?;
+                qwen_llm::runtime::prefetch_opened_gguf(
+                    &drafter_gguf,
+                    &qwen_llm::runtime::LoadedModelConfig::default(),
+                );
+                let target_model = Model::from_gguf(loaded.gguf())
+                    .context("parse target arch for drafter binding")?;
+                let bound = open_dflash_drafter(&drafter_gguf, &target_model)
+                    .with_context(|| format!("bind drafter {}", path.display()))?;
+                let head = MetalDFlashHead::load(loaded.context(), &drafter_gguf, &bound)
+                    .context("metal-load drafter")?;
+                tracing::info!(
+                    target: "qwen_diag",
+                    "serve: dflash drafter loaded path={} block_size={} dflash2={} load_ms={:.1}",
+                    path.display(),
+                    head.config.block_size,
+                    head.config.selector_top_k > 0,
+                    t0.elapsed().as_secs_f64() * 1e3,
+                );
+                Some(head)
+            }
+            None => None,
+        };
         Ok(Self {
             loaded,
             tokenizer,
             model_id,
             default_max_tokens,
             max_context_tokens,
+            dflash_head,
         })
     }
 }
@@ -145,6 +184,17 @@ impl GenerationBackend for EngineBackend {
         // (gate-2 phase measurement), while single_token runs ~10 ms/token.
         // Same determinism class as chunk-boundary choice (F7).
         const SERIAL_TAIL_THRESHOLD: usize = 48;
+        // Speculation needs captured hiddens for the whole context; a
+        // restore leaves earlier positions uncaptured, so the drafter only
+        // runs on cold-prefilled requests (CLI parity: --drafter excludes
+        // --durable-prefix-cache for the same reason).
+        // Greedy-only (CLI parity: T>0 needs the maximal-coupling
+        // rejection sampler), and cold-prefill-only. Decided before the
+        // capture buffer is allocated so sampled requests pay nothing.
+        let speculate = self.dflash_head.is_some()
+            && matched_tokens == 0
+            && request.temperature.unwrap_or(0.0) == 0.0;
+        let mut dflash_capture: Option<(MetalTensor, usize, usize)> = None;
         let prefill_t0 = Instant::now();
         while sequence.position() < prompt_ids.len() {
             sink.tick().map_err(BackendFailure::Aborted)?;
@@ -171,14 +221,44 @@ impl GenerationBackend for EngineBackend {
                 break;
             }
             let end = prompt_ids.len().min(start + chunk);
-            let (logits, _span_ms) = crate::prefill_span(
-                &forward,
-                &mut sequence,
-                &mut scratch,
-                &prompt_ids[start..end],
-                start,
-            )
-            .map_err(|error| ServeError::server_error(format!("prefill: {error:#}")))?;
+            let (logits, _span_ms) = match self.dflash_head.as_ref().filter(|_| speculate) {
+                Some(head) => {
+                    // One capture buffer for the whole remaining span; the
+                    // drafter session consumes it below.
+                    let k_layers = head.target_layer_ids.len();
+                    let n_features = k_layers * self.loaded.arch().hidden_size as usize;
+                    let span = prompt_ids.len() - start;
+                    let dst = MetalTensor::zeros_f32(
+                        self.loaded.context(),
+                        vec![(span * n_features) as u64],
+                    )
+                    .map_err(|error| {
+                        ServeError::server_error(format!("allocate drafter capture: {error:#}"))
+                    })?;
+                    let out = crate::prefill_span_with_capture(
+                        &forward,
+                        &mut sequence,
+                        &mut scratch,
+                        &prompt_ids[start..],
+                        start,
+                        &head.target_layer_ids,
+                        &dst,
+                    )
+                    .map_err(|error| {
+                        ServeError::server_error(format!("capture prefill: {error:#}"))
+                    })?;
+                    dflash_capture = Some((dst, span, n_features));
+                    out
+                }
+                None => crate::prefill_span(
+                    &forward,
+                    &mut sequence,
+                    &mut scratch,
+                    &prompt_ids[start..end],
+                    start,
+                )
+                .map_err(|error| ServeError::server_error(format!("prefill: {error:#}")))?,
+            };
             prompt_logits = Some(logits);
         }
         let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
@@ -224,6 +304,78 @@ impl GenerationBackend for EngineBackend {
 
         let mut abort: Option<io::Error> = None;
         let tokenizer = &self.tokenizer;
+        // Speculative path: seed the drafter cross-context from the captured
+        // prompt hiddens, then greedy accept-prefix over an exact target
+        // verify — emitted tokens are identical to serial greedy.
+        if let Some(head) = self.dflash_head.as_ref().filter(|_| speculate) {
+            let capacity = sequence.position() + max_tokens + 16;
+            let mut dsess = MetalDFlashSession::fresh(
+                self.loaded.context(),
+                head,
+                self.loaded.arch().hidden_size as u64,
+                self.loaded.arch().vocab_size as u64,
+                capacity,
+            )
+            .map_err(|error| {
+                ServeError::server_error(format!("allocate drafter session: {error:#}"))
+            })?;
+            if let Some((dst, span, n_features)) = dflash_capture.as_ref() {
+                dsess
+                    .append_target_ctx_columns_contiguous_now(
+                        self.loaded.context(),
+                        dst,
+                        (sequence.position() - span) as u32,
+                        *span,
+                        *n_features,
+                    )
+                    .map_err(|error| {
+                        ServeError::server_error(format!("seed drafter context: {error:#}"))
+                    })?;
+            }
+            let result = {
+                let abort = &mut abort;
+                crate::generate_dflash(
+                    &self.loaded,
+                    &forward,
+                    head,
+                    dsess,
+                    sequence,
+                    logits,
+                    max_tokens,
+                    &stop_tokens,
+                    |token| {
+                        let piece = tokenizer.decode_piece(token);
+                        sink.piece(&piece).map_err(|error| {
+                            *abort = Some(error);
+                            anyhow::anyhow!("client disconnected during decode")
+                        })
+                    },
+                )
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) => {
+                    return Err(match abort {
+                        Some(io_error) => BackendFailure::Aborted(io_error),
+                        None => ServeError::server_error(format!("dflash decode: {error:#}")).into(),
+                    });
+                }
+            };
+            let generation = result.generation;
+            let sequence = result.sequence;
+            let stats = result.stats;
+            return self.finish_generation(
+                generation,
+                Some(stats),
+                sequence,
+                prompt_ids,
+                matched_tokens,
+                restore_ms,
+                format!(
+                    "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=dflash"
+                ),
+            );
+        }
         let generation = {
             let abort = &mut abort;
             crate::generate_serial(
@@ -262,10 +414,32 @@ impl GenerationBackend for EngineBackend {
             }
         };
 
-        // Completed-turn capture into the RAM cache (valid for both stop
-        // reasons; a truncated-reasoning echo won't reproduce these bytes —
-        // S0 F4 caveat — but the entry is harmless and prompt-boundary
-        // remains available).
+        self.finish_generation(
+            generation,
+            None,
+            sequence,
+            prompt_ids,
+            matched_tokens,
+            restore_ms,
+            format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=serial"),
+        )
+    }
+}
+
+impl EngineBackend {
+    /// Shared completion for both decode paths: completed-turn capture,
+    /// phase/stats lines, and the outcome.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_generation(
+        &self,
+        generation: crate::GenerationResult,
+        dflash: Option<crate::DflashDecodeStats>,
+        sequence: qwen_llm::runtime::Sequence,
+        prompt_ids: Vec<i32>,
+        matched_tokens: usize,
+        restore_ms: f64,
+        phases: String,
+    ) -> Result<GenerationOutcome, BackendFailure> {
         match crate::derive_completed_checkpoint_boundary(
             prompt_ids.len(),
             &generation.tokens,
@@ -286,9 +460,7 @@ impl GenerationBackend for EngineBackend {
                             tracing::warn!("serve: completed cache insert failed: {error}");
                         }
                     }
-                    Err(error) => {
-                        tracing::warn!("serve: completed capture failed: {error}");
-                    }
+                    Err(error) => tracing::warn!("serve: completed capture failed: {error}"),
                 }
             }
             Err(error) => tracing::warn!("serve: completed boundary derivation failed: {error}"),
@@ -298,10 +470,12 @@ impl GenerationBackend for EngineBackend {
             crate::StopReason::Eos => StopReason::Eos,
             crate::StopReason::TokenLimit => StopReason::TokenLimit,
         };
-        tracing::info!(
-            target: "qwen_diag",
-            "serve phases: tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1}",
-        );
+        let decode_tps = if generation.wall_ms > 0.0 {
+            generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
+        } else {
+            0.0
+        };
+        tracing::info!(target: "qwen_diag", "serve phases: {phases}");
         tracing::info!(
             target: "qwen_diag",
             "serve stats: version=serve_stats_v1 prompt_tokens={} generated_tokens={} stop_reason={} matched_tokens={} restore_ms={:.1} decode_tps={:.2}",
@@ -313,12 +487,21 @@ impl GenerationBackend for EngineBackend {
             },
             matched_tokens,
             restore_ms,
-            if generation.wall_ms > 0.0 {
-                generation.tokens.len() as f64 / (generation.wall_ms / 1e3)
-            } else {
-                0.0
-            },
+            decode_tps,
         );
+        if let Some(stats) = dflash {
+            tracing::info!(
+                target: "qwen_diag",
+                "serve dflash: spec_steps={} off_steps={} accepted={}/{} alpha_backoff={} draft_ms={:.1} verify_ms={:.1}",
+                stats.spec_steps,
+                stats.off_steps,
+                stats.accepted_drafts,
+                stats.drafts_scored,
+                stats.alpha_backoff,
+                stats.draft_ms,
+                stats.verify_ms,
+            );
+        }
         Ok(GenerationOutcome {
             stop_reason,
             usage: Usage {

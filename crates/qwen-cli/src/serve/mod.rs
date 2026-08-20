@@ -57,6 +57,7 @@ pub(crate) fn run_serve(invocation: crate::cli::ServeInvocation) -> Result<()> {
         model_id.clone(),
         invocation.max_tokens,
         invocation.max_context_tokens,
+        invocation.drafter.as_deref(),
     )?;
 
     let listener =

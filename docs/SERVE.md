@@ -28,7 +28,7 @@ connection-local continuation (post-S4, measurement-gated),
 One new subcommand:
 
 ```sh
-qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N]
+qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N] [--drafter GGUF]
 ```
 
 - **Residency:** model loads once; the process is the warm tier. S0's F2
@@ -38,6 +38,21 @@ qwen serve -m MODEL [--addr 127.0.0.1:8737] [--max-tokens N]
   publication/restore is not wired into serve and lands S2+;
   cross-restart warmth currently re-prefills (closing k3 review, D3).
   Durable checkpoints remain the intended cross-restart substrate.
+- **Speculative decode (`--drafter`, v0.77 DFlash):** a request
+  speculates only when it cold-prefills its whole prompt and decodes
+  greedily. Restored checkpoint positions carry no captured target hidden
+  states, so seeding the drafter's cross-context from them is impossible
+  (same reason the CLI excludes `--durable-prefix-cache`); restored
+  requests decode serially. Output is identical either way — greedy
+  accept-prefix over an exact target verify — and the per-request
+  `serve phases:` line reports `decode_path=dflash|serial`, with a
+  `serve dflash:` line carrying acceptance and backoff counters.
+  Measured on Qwen3.8-27B + DFlash2-Q8_0 (25-token prompt, 200 tokens
+  out): cold/dflash 25.3 tok/s vs warm/serial 24.7 tok/s with
+  acceptance 56/203 and alpha-backoff engaged — i.e. the policy
+  correctly detected weak acceptance on this prompt and stopped
+  speculating rather than losing time. Byte-identical outputs across
+  both paths were verified live.
 - **Determinism scope (F7):** no serve surface promises temp-0 byte
   identity across differing checkpoint-restore topologies; transcripts
   are byte-deterministic conditional on restore partitioning.

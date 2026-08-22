@@ -8656,6 +8656,10 @@ const DFLASH_BREAKEVEN_BASE: f64 = 3.1;
 const DFLASH_ALPHA_OFF_MARGIN: f64 = 0.6;
 /// Hard ctx guard past the calibrated range.
 const DFLASH_OFF_CTX: usize = 16384;
+/// Off-steps between content-aware re-probe spec steps while in
+/// trailing-alpha backoff. One probe = one draft+verify step (~125 ms),
+/// so the steady backoff tax is bounded at ~16 ms/token above serial.
+const DFLASH_REPROBE_INTERVAL: usize = 8;
 
 /// Default margin for the batched-verify exact fallback: a committed row
 /// whose (top1 - top2) argmax gap is below this is re-evaluated through the
@@ -8809,9 +8813,16 @@ where
 
     let mut decoder = DFlashDecoder::new(forward, head, dsess);
 
-    // Adaptive-N policy state (mirrors bench `run_dflash`): terminal Off
-    // once trailing acceptance can't cover the draft+verify premium.
+    // Adaptive policy state: `spec_disabled` is the hard OFF_CTX stop
+    // (terminal); `backoff_active` is the content-aware trailing-alpha
+    // backoff, which re-probes one spec step every
+    // DFLASH_REPROBE_INTERVAL off-steps and re-enters when the window
+    // mean clears the break-even. Off steps feed the drafter cross-context
+    // and the caller's capture ring, so speculation can always resume
+    // below OFF_CTX.
     let mut spec_disabled = false;
+    let mut backoff_active = false;
+    let mut off_steps_since_backoff = 0usize;
     let mut alpha_window: Vec<usize> = Vec::with_capacity(DFLASH_ALPHA_WINDOW + 1);
 
     let stop_reason = 'outer: loop {
@@ -8828,20 +8839,62 @@ where
 
         let transition_t0 = Instant::now();
         let position = sequence.position();
-        let spec_enabled = !spec_disabled && position < DFLASH_OFF_CTX;
+        let backoff_probe_due = backoff_active
+            && off_steps_since_backoff > 0
+            && off_steps_since_backoff.is_multiple_of(DFLASH_REPROBE_INTERVAL);
+        let spec_enabled =
+            !spec_disabled && position < DFLASH_OFF_CTX && (!backoff_active || backoff_probe_due);
 
         if !spec_enabled {
-            // Off: plain single-token decode. Terminal — the drafter's
-            // cross-context stops being fed, so it cannot resume.
-            spec_disabled = true;
+            // Off step: exact single-token decode with multi-hidden
+            // capture, so the drafter cross-context and the capture ring
+            // stay fed. The hard OFF_CTX guard remains terminal.
+            if position >= DFLASH_OFF_CTX {
+                spec_disabled = true;
+            }
             stats.off_steps += 1;
+            off_steps_since_backoff += 1;
             sequence.ensure_can_append(1)?;
             let serial_t0 = Instant::now();
+            let hidden_dst = verify_scratch.hidden_capture_n_slot(0);
             let next = forward
-                .single_token(carry, position as u32, unsafe {
-                    sequence.metal_session_mut()
-                })
-                .context("dflash off-mode single_token")?;
+                .single_token_with_multi_hidden(
+                    carry,
+                    position as u32,
+                    unsafe { sequence.metal_session_mut() },
+                    &head.target_layer_ids,
+                    &hidden_dst,
+                )
+                .context("dflash off-mode capture single_token")?;
+            decoder
+                .session
+                .append_target_ctx_columns_now(
+                    loaded.context(),
+                    std::slice::from_ref(&(&hidden_dst, position as u32)),
+                    n_target_features,
+                )
+                .context("dflash off-mode ctx append")?;
+            if let Some((ring, wstart, features)) = capture_ring
+                .as_ref()
+                .filter(|(_, wstart, _)| position >= *wstart)
+            {
+                let offset = (position - *wstart) % qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW;
+                let view = ring.view_subrange((offset * *features) as u64, vec![*features as u64]);
+                let ring_encoder = loaded.context().queue.commandBuffer().expect("cmd");
+                let ring_enc = KernelEncoder::begin(&ring_encoder);
+                encode_scatter_offset_f32(
+                    loaded.context(),
+                    &ring_enc,
+                    &hidden_dst,
+                    &view,
+                    0,
+                    *features,
+                )
+                .context("off-mode ring scatter")?;
+                ring_enc.end();
+                ring_encoder.commit();
+                ring_encoder.waitUntilCompleted();
+            }
             stats.serial_ms += serial_t0.elapsed().as_secs_f64() * 1e3;
             sequence.advance_by(1)?;
             transitions += 1;
@@ -8851,6 +8904,7 @@ where
             carry = argmax_i32(&next);
             continue;
         }
+        off_steps_since_backoff = 0;
 
         // ---- Draft ----
         let drafter_pos = position as u32;
@@ -9167,7 +9221,9 @@ where
             break 'outer reason;
         }
 
-        // ---- Trailing-α backoff ----
+        // ---- Trailing-α backoff / re-entry ----
+        // Re-probe spec steps push their acceptance into the same window,
+        // so a content recovery clears the backoff after enough probes.
         alpha_window.push(n_accepted);
         if alpha_window.len() > DFLASH_ALPHA_WINDOW {
             alpha_window.remove(0);
@@ -9176,8 +9232,11 @@ where
             let mean_emitted =
                 1.0 + alpha_window.iter().sum::<usize>() as f64 / DFLASH_ALPHA_WINDOW as f64;
             if mean_emitted < dflash_breakeven(sequence.position()) - DFLASH_ALPHA_OFF_MARGIN {
-                spec_disabled = true;
+                backoff_active = true;
+                off_steps_since_backoff = 0;
                 stats.alpha_backoff = true;
+            } else if backoff_active {
+                backoff_active = false;
             }
         }
 

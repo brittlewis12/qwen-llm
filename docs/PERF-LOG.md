@@ -6,6 +6,50 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-22 — Second k3 Adversarial Audit: Four Fixes, Re-Framed Long-Context Queue
+
+### Audit outcome (fixes committed fc5edc6)
+
+The second review verified the watermark invariant across Off/re-probe,
+margin-guard coverage completeness (the bonus row IS gap-checked),
+fallback hidden-slot hygiene, ring wrap arithmetic, codec v2, and the
+serial ring feed's output-neutrality. It found four real defects, all
+fixed and gated byte-identical on the divergent and backoff prompts:
+
+- A1 terminal-fallback off-by-one (session one row ahead of n_keep;
+  completed-boundary checkpoints silently dropped via KvPosition
+  mismatch) — terminal checks now precede the replay row.
+- A2 unvalidated capture-tail slice across drafter revisions — now
+  detected and ignored.
+- A3 kernel_argmax_f32_greedy still tied HIGHEST — flipped to lowest
+  (the tie-inversion class is now closed across all four surfaces).
+- A7 terminal-Off appended to a dead cross-context — the append is
+  gated on non-terminal status (ring feed retained).
+- A5/A6 hardenings: explicit dense gate at plan time; ring window
+  threaded through instead of the const.
+- A4 prompt-lookup's unguarded verify is annotated honestly in code.
+
+### Long-context framing (review's part B)
+
+Re-ranked toward the 66-133K agentic band with a new lever: the verify
+attention slope (~103 ms of a ~215 ms verify pass at 130K, moving ~8.3
+GB of KV per pass at ~80 GB/s against the 474 GB/s stream) is the
+dominant long-ctx term; a packed-N8 verify attention reader (one
+dispatch per layer, KV read once) attacks the slope itself and reopens
+the named "packed causal N=8 attention" lane through its own written
+reopen condition. Also: F3 must run on the served Q8_0 asset (the Owed
+slopes are Q4_K_M ≤2K fits), and the re-probe cadence must become
+ctx-aware before OFF_CTX lifts (a flat 8-step probe at 130K costs ~29
+ms/token during backoff — worse than serial).
+
+Preregistered probes (P1-P4): P1 = F3-amended (Q8_0, 8K-64K, phase
+split, break-even ≤ 3.4 and attention slope ≥ 60% of verify slope);
+P2 = packed-N8 attention pre-pricing (dispatch/KV-byte census, slope
+projection ≤ 0.40 ms/1K); P3 = F4-amended (alpha census + fallback
+rate + ctx-aware probe tax ≤ 5%); P4 = coverage gates (wrapped
+generation, restored wstart>0 seed, fallback-terminal boundary
+publish, recovering-content re-entry).
+
 ## 2026-08-22 — Non-Terminal DFlash Backoff With Capture-Fed Off And Re-Probe
 
 ### Change (committed 1ab937f)

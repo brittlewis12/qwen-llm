@@ -175,23 +175,38 @@ is all-SWA-2048 and F1 (2026-08-20) proved bit-identical drafts from a
   byte-identical with the guard on. **Rank 2 CLOSED** (1ab937f): Off-mode is
   non-terminal — capture-fed Off keeps the drafter cross-context and the
   ring alive, and a 1-in-8 re-probe policy re-enters speculation when the
-  trailing-alpha window clears the break-even. Updated ranked queue:
+  trailing-alpha window clears the break-even. **Second audit fixes landed**
+  (fc5edc6): A1-A7. Updated ranked queue (long-context goal per the review):
 
-1. **Guard tuning/robustness follow-up.** The margin (0.2) covers ~2x the
-   observed 9.5e-2 outlier delta; source-level attribution of that outlier
-   row (which batched kernel produced a 1e-1 delta) would let the margin
-   tighten or the kernel be fixed. Also: extend the fallback coverage to
-   MoE verify paths when MoE speculation reopens.
-2. **DFLASH_OFF_CTX removal: HOLD behind F3+F4.** Doc-blocked by the "Owed"
-   8K+ slope measurement (no ctx term in either direction until it lands);
-   break-even at 130K is ~2.1 — real but thin. With 1a/1b and the re-probe
-   landed, this is the last gate on the 66-133K agentic band.
-3. **GDN wavefront verify: KEEP (sanctioned packet).** Reprice: targets the
-   48-layer sequential recurrence latency of the 9.44 ms/token marginal;
-   checkpoint blits are already priced at 9-16% and are not the lever.
-5. **Warm small-tail TTFT: KEEP.** 186 vs 150 ms gate, orthogonal to
+1. **P4 coverage gates (byte-identity, cheap):** >2048-token speculative
+   generation vs serial (ring wrap during speculation), restored prefix
+   > 2048 (seed skip > 0), fallback-terminal boundary publication, a
+   recovering-content fixture pinning a real backoff -> re-entry.
+2. **P2 packed-N8 verify attention pre-pricing (counts only).** The
+   dominant long-ctx lever: ~103 ms of a ~215 ms verify pass at 130K
+   moves ~8.3 GB of KV per pass at ~80 GB/s (474 GB/s stream). Gate:
+   projected slope <= 0.40 ms/1K. Reopens "packed causal N=8 attention"
+   through its own written reopen condition.
+3. **P1 = F3-amended (timed, one packet):** within-session verify(8)/
+   single_token slope at 8K-64K on the served Q8_0 asset with
+   attention/GDN phase split. Pass to lift OFF_CTX: break-even <= 3.4
+   across the band AND attention slope >= 60% of the verify slope.
+4. **P3 = F4-amended (counts):** alpha census at 60-133K plus fallback
+   rate plus the ctx-aware re-probe tax model (flat 8-step probing at
+   130K costs ~29 ms/token during backoff — worse than serial; the
+   cadence must scale with ctx before OFF_CTX lifts). Pass: mean
+   emitted >= 3.1 AND backoff-regime tax <= 5%.
+5. **Guard tuning/robustness follow-up.** Attribute the 9.5e-2 outlier
+   delta to its batched kernel; extend fallback coverage to MoE verify
+   paths when MoE speculation reopens; port the guard to
+   generate_prompt_lookup (currently annotated, not guarded).
+6. **GDN wavefront verify: REPRICED.** At <=16K the 48-layer recurrence
+   latency (9.44 ms/token marginal) stays the top verify term; at 130K
+   the ~103 ms attention slope overtakes it — order by which band the
+   product goal is.
+7. **Warm small-tail TTFT: KEEP.** 186 vs 150 ms gate, orthogonal to
    speculation; phase-localize before designing the 49-256-token path.
-6. **Q4_K_M alpha/beta sidecar: demoted to cleanup.** ~2%, Q4-only; live
+8. **Q4_K_M alpha/beta sidecar: demoted to cleanup.** ~2%, Q4-only; live
    server is Q8_0.
 7. **Residue: mma8v N=8 Q4/Q6 KEEP-small; drafter KV F32->F16 merge into 1a
    follow-on; MoE B16 ragged KILL (1.0998x < 1.10x reopen); DSpark N2 HOLD.**

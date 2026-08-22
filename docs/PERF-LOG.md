@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-22 — P2 Census And P4 Coverage Gates: Long-Context Lever Priced
+
+### P2 census (counts only)
+
+Arch facts (target GGUF): 13 attention layers (block_count 65, interval
+4), 4 KV heads x 256 dim, KV F16 -> 4KB per token per layer. The
+verify(8) tail dispatches attention per row per layer (104 dispatches
+per pass), each reading the full KV: **416KB per ctx token** -> 54.1GB
+at 130K / 3.3GB at 8K. Bandwidth floor at 130K is ~114ms at the 474GB/s
+stream — the whole measured slope; the packed-N8 single-read floor is
+~14.3ms (8x reuse), with the score compute (8 rows x 24 heads) the new
+binding constraint that requires the matrix-score formulation.
+
+### P4 gates (byte-identity)
+
+- 2,600-token speculative essay generation: byte-identical to serial;
+  full ring wrap exercised; mixed re-probe regime (640 spec / 728 off
+  steps / 101 fallbacks) stayed exact.
+- Restored 2,276-token prefix (wstart 250, seed skip > 0):
+  decode_path=dflash, byte-identical to the serial control.
+- Fallback-heavy completed boundary published (86-fallback request's
+  checkpoint restored by the next turn).
+- Recovering-content re-entry transition remains unpinned; the re-probe
+  cadence is structurally exercised.
+
+### Queue
+
+Next: packed-N8 verify attention pre-pricing packet (dispatch/byte/compute
+floors from the census above) and the P1/F3-amended Q8_0 long-band slope
+measurement; OFF_CTX removal behind both. GDN wavefront verify repriced
+by band (second to the attention slope at 130K, first at <=16K).
+
 ## 2026-08-22 — Second k3 Adversarial Audit: Four Fixes, Re-Framed Long-Context Queue
 
 ### Audit outcome (fixes committed fc5edc6)

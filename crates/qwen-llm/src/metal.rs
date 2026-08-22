@@ -15328,7 +15328,15 @@ pub fn attn_v4_choose_nwg(n_pos: usize, group: usize) -> usize {
     } else if (matches!(group, 8 | 16) && n_pos >= attn_v4_subgroup_min_pos())
         || (matches!(group, 4 | 6) && n_pos >= 4096)
     {
-        64
+        // 2026-08-22 audit: for group 4|6 the old 64 partitions
+        // under-parallelize at depth (56 GB/s at 130K against the 474
+        // GB/s stream). The synthetic sweep picked 128 at 8-64K and
+        // 512 at 130K (1.6-2.1x); groups 8|16 keep their table.
+        if matches!(group, 4 | 6) {
+            if n_pos >= 98_304 { 512 } else { 128 }
+        } else {
+            64
+        }
     } else if n_pos < 256 {
         16
     } else {
@@ -35842,6 +35850,83 @@ mod tests {
                 assert_eq!(gap, vec![0.0], "boundary width {width} gap");
             }
         }
+    }
+
+    /// Attn-v4 decode bandwidth audit (2026-08-22): synthetic session at a
+    /// large kv_n_pos, one `encode_attn_decode_v4_f32` call, kernel timing
+    /// only. Reports achieved GB/s against the 474 GB/s stream so the
+    /// long-context attention anomaly (serial ~130 GB/s, verify ~80 GB/s at
+    /// 130K) can be attributed. Sweep with env:
+    /// QWEN_ATTN_AUDIT_CTX (default 131072), QWEN_ATTN_AUDIT_MODEL
+    /// (default Qwen3.8-27B-Q8_0), QWEN_ATTN_V4_NWG, QWEN_ATTN_V4_TILE_C.
+    #[test]
+    #[ignore = "slow real-model GPU audit; run explicitly"]
+    fn attn_decode_v4_bandwidth_audit_130k() {
+        let model_path = std::env::var("QWEN_ATTN_AUDIT_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.8-27B-Q8_0.gguf".into());
+        if !std::path::Path::new(&model_path).exists() {
+            eprintln!("[attn-audit] skipped — model missing");
+            return;
+        }
+        let n_pos: usize = std::env::var("QWEN_ATTN_AUDIT_CTX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(131_072);
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&model_path).expect("open model");
+        let m = crate::loader::Model::from_gguf(&g).expect("load model");
+        let mm = crate::metal_forward::MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mut sess =
+            crate::metal_forward::MetalSession::fresh(&ctx, &mm, n_pos + 16).expect("session");
+        for kp in sess.kv_n_pos.iter_mut() {
+            *kp = n_pos;
+        }
+        let arch = &m.arch;
+        let head_dim = arch.attn_head_dim as usize;
+        let n_q = arch.n_q_heads as usize;
+        let n_kv = arch.n_kv_heads as usize;
+        let group = n_q / n_kv;
+        if head_dim != 256 || !matches!(group, 4 | 6 | 8 | 16) {
+            eprintln!("[attn-audit] skipped — unsupported shape");
+            return;
+        }
+        let nwg = crate::metal::attn_v4_choose_nwg(n_pos, group);
+        let tile_c = crate::metal::attn_v4_choose_tile_c(n_pos, group);
+        let q = MetalTensor::zeros_f32(&ctx, vec![(n_q * head_dim) as u64]).expect("q");
+        let attn_o = MetalTensor::zeros_f32(&ctx, vec![(n_q * head_dim) as u64]).expect("o");
+        let cmd = ctx.queue.commandBuffer().expect("cmd");
+        let enc = KernelEncoder::begin(&cmd);
+        encode_attn_decode_v4_f32(
+            &ctx,
+            &enc,
+            &q,
+            &sess.kv_k[0],
+            &sess.kv_v[0],
+            &sess.attn_v4_o_partial,
+            &sess.attn_v4_ml_partial,
+            &attn_o,
+            n_q,
+            n_kv,
+            head_dim,
+            n_pos,
+            nwg,
+            tile_c,
+        )
+        .expect("encode attn v4");
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+        let bytes = n_pos as f64 * (n_kv * head_dim * 2) as f64 * 2.0;
+        let gbps = bytes / 1e9 / (ms / 1e3);
+        eprintln!(
+            "[attn-audit] ctx={n_pos} group={group} nwg={nwg} tile_c={tile_c} gpu_ms={ms:.3} gb={:.2} gbps={gbps:.1}",
+            bytes / 1e9
+        );
     }
 
     /// H5.3a foundation: verify `BlitEncoder` actually copies device-side

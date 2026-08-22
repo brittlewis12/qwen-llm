@@ -292,3 +292,26 @@ already banked the 1.6-2.1x single-row win).
 - Register pressure: 12 streams per simdgroup with C=32 may exceed the
   register budget; fallback Q4 rows per simdgroup (2 TGs per kv head).
 - F16 staging of Q (scores in F32) matches the scorer lineage.
+
+## P5 implementation update (2026-08-22) — no new kernel needed
+
+Scouting closed the "new kernel" premise: the promoted prefill matrix
+attention pipeline (kernel_attn_matrix_transpose_v_f16 ->
+kernel_attn_matrix_kq_f32 -> softmax -> kernel_attn_matrix_kqv_norm_f32,
+metal_dflash.rs ~9850-10400) is shape-general and already implements
+per-row causal masking via `max_visible = min(n_pos, base_pos +
+row_last + 1)` — exactly the nested visibility of 8 decode rows at
+pos..pos+7. The packed-N8 reader reduces to a rewire:
+
+1. Hoist the verify tail's per-row Q (projection + norm + RoPE) into a
+   batched 8-row front, packed [8, 24, 256].
+2. Call the existing matrix pipeline with n_rows=8, base_pos=pos,
+   causal masks on; scores scratch [192, n_pos] F32 = 100MB at 130K
+   (session-owned, admitted).
+3. Scatter per-row O back into the existing attn_o slots; reuse the
+   existing partial/reduce contract.
+
+Floors unchanged (14.3ms bytes / 28-40ms compute vs ~500ms). Remaining
+work: the Q-hoist restructure in encode_packed_verify_layer_major_inner,
+scores scratch allocation + admission, and gates G1-G3. Rollback
+QWEN_ATTN_V4_PACKED_N8=0.

@@ -1890,6 +1890,37 @@ mod tests {
         assert_eq!(l0.ffn_down.shape, vec![17408, 5120]);
     }
 
+    #[test]
+    #[ignore = "requires local Qwen3.8 target and Q4 DFlash2 GGUF fixtures"]
+    fn loads_dflash2_q4_selector_codebooks() {
+        let target_path = "/Users/tito/models/Qwen3.8-27B-Q4_K_M.gguf";
+        let drafter_path = "/Users/tito/models/incoai-dflash2/Qwen3.8-27B-DFlash2-Q4_K_M.gguf";
+        assert!(
+            std::path::Path::new(target_path).exists(),
+            "missing target fixture"
+        );
+        assert!(
+            std::path::Path::new(drafter_path).exists(),
+            "missing drafter fixture"
+        );
+
+        let target_g = GgufFile::open(target_path).expect("open target");
+        let target_m = Model::from_gguf(&target_g).expect("load target");
+        let drafter_g = GgufFile::open(drafter_path).expect("open drafter");
+        let head = open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
+        let selector = head.selector.as_ref().expect("DFlash2 selector");
+
+        assert_eq!(head.config.block_size, 8);
+        assert_eq!(head.config.selector_rank, 256);
+        assert_eq!(head.config.selector_top_k, 16);
+        assert_eq!(selector.predecessor.dtype, GgmlType::Q4_K);
+        assert_eq!(selector.successor.dtype, GgmlType::Q4_K);
+        assert_eq!(selector.hidden.dtype, GgmlType::Q4_K);
+        assert_eq!(selector.predecessor.shape, vec![256, 248320]);
+        assert_eq!(selector.successor.shape, vec![256, 248320]);
+        assert_eq!(selector.hidden.shape, vec![5120, 256]);
+    }
+
     /// H4.0 27B smoke test: validates the loader bind on the
     /// MTP-aware Q4_K_M GGUF at brittlewis12/Qwen3.6-27B-MTP-GGUF.
     /// Skipped if the file isn't present locally.

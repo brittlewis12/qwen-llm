@@ -202,6 +202,23 @@ pub(crate) fn dequant_to_f32_into(
     dequant_validated_into(desc, bytes, plan, output)
 }
 
+/// Overwrite an initialized F32 destination from an exactly-sized tensor
+/// payload without allocating an intermediate vector.
+pub(crate) fn dequant_to_f32_in_place(
+    desc: &TensorDesc,
+    bytes: &[u8],
+    output: &mut [f32],
+) -> Result<(), CodecError> {
+    let plan = validate_dequant(desc, bytes)?;
+    let output = unsafe {
+        std::slice::from_raw_parts_mut(
+            output.as_mut_ptr().cast::<std::mem::MaybeUninit<f32>>(),
+            output.len(),
+        )
+    };
+    dequant_validated_into(desc, bytes, plan, output)
+}
+
 /// Dequantize the raw `bytes` of a `desc` tensor into a fresh `Vec<f32>`.
 ///
 /// This calls `ggml_get_type_traits(dtype).to_float(bytes, dst, n)`, which
@@ -293,6 +310,70 @@ mod tests {
                 expected: 32
             })
         ));
+    }
+
+    #[test]
+    fn q8_0_dequant_in_place_overwrites_exact_destination() {
+        let scale = half::f16::from_f32(0.125).to_bits().to_le_bytes();
+        let mut block = [0u8; 34];
+        block[..2].copy_from_slice(&scale);
+        for (index, byte) in block[2..].iter_mut().enumerate() {
+            *byte = (index as i8 - 4) as u8;
+        }
+        let tensor = desc("q8-in-place", vec![32], GgmlType::Q8_0, block.len());
+        let mut output = [f32::NAN; 32];
+        dequant_to_f32_in_place(&tensor, &block, &mut output).unwrap();
+        for (index, value) in output.iter().enumerate() {
+            assert_eq!(value.to_bits(), ((index as f32 - 4.0) * 0.125).to_bits());
+        }
+
+        let mut short = [0.0f32; 31];
+        assert!(matches!(
+            dequant_to_f32_in_place(&tensor, &block, &mut short),
+            Err(CodecError::OutputLengthMismatch {
+                got: 31,
+                expected: 32
+            })
+        ));
+    }
+
+    #[test]
+    fn q4_k_known_block_matches_reference_formula() {
+        let scales = [1u8, 3, 5, 7, 9, 17, 33, 49];
+        let mins = [2u8, 4, 6, 8, 10, 18, 34, 50];
+        let mut words = [0u32; 36];
+        let block = bytemuck::cast_slice_mut::<u32, u8>(&mut words);
+        block[..2].copy_from_slice(&half::f16::from_f32(0.5).to_bits().to_le_bytes());
+        block[2..4].copy_from_slice(&half::f16::from_f32(0.25).to_bits().to_le_bytes());
+        for j in 0..4 {
+            block[4 + j] = scales[j] | ((scales[j + 4] >> 4) << 6);
+            block[8 + j] = mins[j] | ((mins[j + 4] >> 4) << 6);
+            block[12 + j] = (scales[j + 4] & 0x0f) | ((mins[j + 4] & 0x0f) << 4);
+        }
+        let mut expected = [0.0f32; 256];
+        for chunk in 0..4 {
+            let even_group = chunk * 2;
+            let odd_group = even_group + 1;
+            for lane in 0..32 {
+                let low = ((chunk * 3 + lane) & 0x0f) as u8;
+                let high = ((15 + chunk * 5 - (lane & 0x0f)) & 0x0f) as u8;
+                block[16 + chunk * 32 + lane] = low | (high << 4);
+                expected[chunk * 64 + lane] =
+                    0.5 * scales[even_group] as f32 * low as f32 - 0.25 * mins[even_group] as f32;
+                expected[chunk * 64 + 32 + lane] =
+                    0.5 * scales[odd_group] as f32 * high as f32 - 0.25 * mins[odd_group] as f32;
+            }
+        }
+
+        let tensor = desc("q4-k-known", vec![256], GgmlType::Q4_K, block.len());
+        let mut actual = [f32::NAN; 256];
+        dequant_to_f32_in_place(&tensor, block, &mut actual).unwrap();
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| actual.to_bits() == expected.to_bits())
+        );
     }
 
     #[test]

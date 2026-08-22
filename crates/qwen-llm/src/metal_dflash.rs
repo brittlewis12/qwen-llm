@@ -26,7 +26,7 @@
 //! CPU fallback steps are identical bytes between Metal and CPU paths,
 //! so they don't bias the cosine.
 
-use crate::codec::dequant_to_f32;
+use crate::codec::{dequant_to_f32, dequant_to_f32_in_place};
 use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
@@ -2173,10 +2173,15 @@ pub struct MetalDFlash2Selector {
 /// CPU-side row-dequantizable copy of a selector codebook tensor
 /// (`[rank, n_rows]` GGUF layout — one `rank`-wide row per token id).
 pub struct DFlash2Codebook {
-    raw: Vec<u8>,
+    /// Four-byte-aligned owned storage. Q4_K's reference dequantizer reads
+    /// typed blocks, and every validated Q4_K row starts at a 4-byte boundary.
+    raw_words: Vec<u32>,
+    raw_len: usize,
     dtype: GgmlType,
     rank: usize,
     n_rows: usize,
+    row_bytes: usize,
+    row_desc: TensorDesc,
 }
 
 impl DFlash2Codebook {
@@ -2184,52 +2189,125 @@ impl DFlash2Codebook {
         let &[rank, n_rows] = desc.shape.as_slice() else {
             return Err(DFlashError::BadDrafter("selector codebook must be 2-D"));
         };
-        let (rank, n_rows) = (rank as usize, n_rows as usize);
+        if rank == 0 || n_rows == 0 {
+            return Err(DFlashError::BadDrafter(
+                "selector codebook dimensions must be nonzero",
+            ));
+        }
+        let rank = usize::try_from(rank)
+            .map_err(|_| DFlashError::BadDrafter("selector codebook rank overflows usize"))?;
+        let n_rows = usize::try_from(n_rows)
+            .map_err(|_| DFlashError::BadDrafter("selector codebook row count overflows usize"))?;
         match desc.dtype {
-            GgmlType::Q8_0 => {
-                if !rank.is_multiple_of(32) {
-                    return Err(DFlashError::BadDrafter(
-                        "Q8_0 selector codebook rank must be a multiple of 32",
-                    ));
-                }
-                let expect = n_rows * (rank / 32) * 34;
-                if bytes.len() < expect {
-                    return Err(DFlashError::BadDrafter("selector codebook truncated"));
-                }
-            }
-            GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 => {
-                let elem = if desc.dtype == GgmlType::F32 { 4 } else { 2 };
-                if bytes.len() < n_rows * rank * elem {
-                    return Err(DFlashError::BadDrafter("selector codebook truncated"));
-                }
-            }
+            GgmlType::Q4_K | GgmlType::Q8_0 | GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 => {}
             _ => {
                 return Err(DFlashError::BadDrafter(
-                    "selector codebook dtype must be Q8_0/F32/F16/BF16",
+                    "selector codebook dtype must be Q4_K/Q8_0/F32/F16/BF16",
                 ));
             }
         }
+
+        let (block_elements, block_bytes) = desc.dtype.storage_layout().ok_or(
+            DFlashError::BadDrafter("selector codebook dtype has no storage layout"),
+        )?;
+        let rank_u64 = u64::try_from(rank)
+            .map_err(|_| DFlashError::BadDrafter("selector codebook rank overflows u64"))?;
+        if !rank_u64.is_multiple_of(block_elements) {
+            return Err(DFlashError::BadDrafter(
+                "selector codebook rank is not block-aligned",
+            ));
+        }
+        if desc.dtype == GgmlType::Q4_K && rank != 256 {
+            return Err(DFlashError::BadDrafter(
+                "Q4_K selector codebook rank must be 256",
+            ));
+        }
+        let row_bytes_u64 = rank_u64
+            .checked_div(block_elements)
+            .and_then(|blocks| blocks.checked_mul(block_bytes))
+            .ok_or(DFlashError::BadDrafter(
+                "selector codebook row size overflows",
+            ))?;
+        let expected_u64 = row_bytes_u64
+            .checked_mul(u64::try_from(n_rows).map_err(|_| {
+                DFlashError::BadDrafter("selector codebook row count overflows u64")
+            })?)
+            .ok_or(DFlashError::BadDrafter(
+                "selector codebook payload size overflows",
+            ))?;
+        let row_bytes = usize::try_from(row_bytes_u64)
+            .map_err(|_| DFlashError::BadDrafter("selector codebook row size overflows usize"))?;
+        let expected = usize::try_from(expected_u64).map_err(|_| {
+            DFlashError::BadDrafter("selector codebook payload size overflows usize")
+        })?;
+        if bytes.len() != expected {
+            return Err(DFlashError::BadDrafter(
+                "selector codebook payload size mismatch",
+            ));
+        }
+        if desc.dtype == GgmlType::Q4_K && !row_bytes.is_multiple_of(4) {
+            return Err(DFlashError::BadDrafter(
+                "Q4_K selector codebook rows must be 4-byte aligned",
+            ));
+        }
+
+        let word_count = bytes.len().checked_add(3).ok_or(DFlashError::BadDrafter(
+            "selector codebook aligned storage size overflows",
+        ))? / 4;
+        let mut raw_words = vec![0u32; word_count];
+        bytemuck::cast_slice_mut::<u32, u8>(&mut raw_words)[..bytes.len()].copy_from_slice(bytes);
+        let row_desc = TensorDesc {
+            name: format!("{}.selector_row", desc.name),
+            shape: vec![rank_u64],
+            dtype: desc.dtype,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: row_bytes_u64,
+        };
         Ok(Self {
-            raw: bytes.to_vec(),
+            raw_words,
+            raw_len: bytes.len(),
             dtype: desc.dtype,
             rank,
             n_rows,
+            row_bytes,
+            row_desc,
         })
     }
 
     /// Dequantize one token's embedding row into `out` (`len == rank`).
     fn dequant_row(&self, row: usize, out: &mut [f32]) -> Result<(), DFlashError> {
-        debug_assert_eq!(out.len(), self.rank);
+        if out.len() != self.rank {
+            return Err(DFlashError::BadDrafter(
+                "selector codebook output rank mismatch",
+            ));
+        }
         if row >= self.n_rows {
             return Err(DFlashError::BadDrafter(
                 "selector codebook row out of range",
             ));
         }
+        let base = row
+            .checked_mul(self.row_bytes)
+            .ok_or(DFlashError::BadDrafter(
+                "selector codebook row offset overflows",
+            ))?;
+        let end = base
+            .checked_add(self.row_bytes)
+            .ok_or(DFlashError::BadDrafter(
+                "selector codebook row end overflows",
+            ))?;
+        let raw = &bytemuck::cast_slice::<u32, u8>(&self.raw_words)[..self.raw_len];
+        let row_bytes = raw.get(base..end).ok_or(DFlashError::BadDrafter(
+            "selector codebook row exceeds payload",
+        ))?;
         match self.dtype {
+            GgmlType::Q4_K => {
+                dequant_to_f32_in_place(&self.row_desc, row_bytes, out)?;
+            }
             GgmlType::Q8_0 => {
                 // block_q8_0: f16 scale + 32 * i8, 34 bytes / 32 elems.
                 let blocks_per_row = self.rank / 32;
-                let row_bytes = &self.raw[row * blocks_per_row * 34..];
                 for b in 0..blocks_per_row {
                     let blk = &row_bytes[b * 34..b * 34 + 34];
                     let d = half::f16::from_le_bytes([blk[0], blk[1]]).to_f32();
@@ -2239,30 +2317,27 @@ impl DFlash2Codebook {
                 }
             }
             GgmlType::F32 => {
-                let base = row * self.rank * 4;
                 for (j, slot) in out.iter_mut().enumerate() {
-                    let o = base + j * 4;
+                    let o = j * 4;
                     *slot = f32::from_le_bytes([
-                        self.raw[o],
-                        self.raw[o + 1],
-                        self.raw[o + 2],
-                        self.raw[o + 3],
+                        row_bytes[o],
+                        row_bytes[o + 1],
+                        row_bytes[o + 2],
+                        row_bytes[o + 3],
                     ]);
                 }
             }
             GgmlType::F16 => {
-                let base = row * self.rank * 2;
                 for (j, slot) in out.iter_mut().enumerate() {
-                    let o = base + j * 2;
-                    *slot = half::f16::from_le_bytes([self.raw[o], self.raw[o + 1]]).to_f32();
+                    let o = j * 2;
+                    *slot = half::f16::from_le_bytes([row_bytes[o], row_bytes[o + 1]]).to_f32();
                 }
             }
             GgmlType::BF16 => {
-                let base = row * self.rank * 2;
                 for (j, slot) in out.iter_mut().enumerate() {
-                    let o = base + j * 2;
+                    let o = j * 2;
                     *slot = f32::from_bits(
-                        (u16::from_le_bytes([self.raw[o], self.raw[o + 1]]) as u32) << 16,
+                        (u16::from_le_bytes([row_bytes[o], row_bytes[o + 1]]) as u32) << 16,
                     );
                 }
             }
@@ -14679,6 +14754,189 @@ mod tests {
             conv_group_size: 0,
             selector_rank: 0,
             selector_top_k: 0,
+        }
+    }
+
+    fn synthetic_q4_k_codebook_bytes(n_rows: usize) -> Vec<u32> {
+        let mut words = vec![0u32; n_rows * 144 / 4];
+        let bytes = bytemuck::cast_slice_mut::<u32, u8>(&mut words);
+        for row in 0..n_rows {
+            let block = &mut bytes[row * 144..(row + 1) * 144];
+            block[..2].copy_from_slice(
+                &half::f16::from_f32(0.25 + row as f32 * 0.125)
+                    .to_bits()
+                    .to_le_bytes(),
+            );
+            block[2..4].copy_from_slice(
+                &half::f16::from_f32(0.0625 + row as f32 * 0.03125)
+                    .to_bits()
+                    .to_le_bytes(),
+            );
+            for (index, byte) in block[4..].iter_mut().enumerate() {
+                *byte = (row.wrapping_mul(37).wrapping_add(index * 13) & 0xff) as u8;
+            }
+        }
+        words
+    }
+
+    #[test]
+    fn dflash2_q4_k_codebook_rows_match_whole_tensor_dequant() {
+        let words = synthetic_q4_k_codebook_bytes(3);
+        let bytes = bytemuck::cast_slice::<u32, u8>(&words);
+        let desc = TensorDesc {
+            name: "selector_q4_k_test".into(),
+            shape: vec![256, 3],
+            dtype: GgmlType::Q4_K,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: bytes.len() as u64,
+        };
+        let expected = dequant_to_f32(&desc, bytes).unwrap();
+        let codebook = DFlash2Codebook::from_gguf(&desc, bytes).unwrap();
+        assert_eq!((codebook.raw_words.as_ptr() as usize) % 4, 0);
+
+        for row in 0..3 {
+            let mut actual = vec![f32::NAN; 256];
+            codebook.dequant_row(row, &mut actual).unwrap();
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected[row * 256..(row + 1) * 256])
+                    .all(|(actual, expected)| actual.to_bits() == expected.to_bits())
+            );
+        }
+    }
+
+    #[test]
+    fn dflash2_q4_k_codebook_rejects_bad_geometry_and_payloads() {
+        let bad_rank = TensorDesc {
+            name: "selector_q4_k_bad_rank".into(),
+            shape: vec![128, 2],
+            dtype: GgmlType::Q4_K,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: 144,
+        };
+        assert!(matches!(
+            DFlash2Codebook::from_gguf(&bad_rank, &[0u8; 144]),
+            Err(DFlashError::BadDrafter(
+                "selector codebook rank is not block-aligned"
+            ))
+        ));
+
+        let words = synthetic_q4_k_codebook_bytes(2);
+        let bytes = bytemuck::cast_slice::<u32, u8>(&words);
+        let desc = TensorDesc {
+            name: "selector_q4_k_bad_payload".into(),
+            shape: vec![256, 2],
+            dtype: GgmlType::Q4_K,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: bytes.len() as u64,
+        };
+        assert!(DFlash2Codebook::from_gguf(&desc, &bytes[..bytes.len() - 1]).is_err());
+        let mut trailing = bytes.to_vec();
+        trailing.push(0);
+        assert!(DFlash2Codebook::from_gguf(&desc, &trailing).is_err());
+
+        let codebook = DFlash2Codebook::from_gguf(&desc, bytes).unwrap();
+        assert!(codebook.dequant_row(0, &mut [0.0; 255]).is_err());
+        assert!(codebook.dequant_row(2, &mut [0.0; 256]).is_err());
+    }
+
+    #[test]
+    fn dflash2_legacy_codebook_formats_preserve_row_boundaries() {
+        let f32_values = [1.0f32, -2.0, 3.5, 4.25, -5.5, 6.75];
+        let f32_bytes = bytemuck::cast_slice::<f32, u8>(&f32_values);
+        let f32_desc = TensorDesc {
+            name: "selector_f32_test".into(),
+            shape: vec![3, 2],
+            dtype: GgmlType::F32,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: f32_bytes.len() as u64,
+        };
+        let f32_codebook = DFlash2Codebook::from_gguf(&f32_desc, f32_bytes).unwrap();
+        let mut f32_row = [0.0; 3];
+        f32_codebook.dequant_row(1, &mut f32_row).unwrap();
+        assert_eq!(
+            f32_row.map(f32::to_bits),
+            [f32_values[3], f32_values[4], f32_values[5]].map(f32::to_bits)
+        );
+
+        let f16_values = [
+            half::f16::from_f32(1.0).to_bits(),
+            half::f16::from_f32(-2.0).to_bits(),
+            half::f16::from_f32(3.5).to_bits(),
+            half::f16::from_f32(4.25).to_bits(),
+            half::f16::from_f32(-5.5).to_bits(),
+            half::f16::from_f32(6.75).to_bits(),
+        ];
+        let f16_bytes = bytemuck::cast_slice::<u16, u8>(&f16_values);
+        let f16_desc = TensorDesc {
+            name: "selector_f16_test".into(),
+            shape: vec![3, 2],
+            dtype: GgmlType::F16,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: f16_bytes.len() as u64,
+        };
+        let f16_codebook = DFlash2Codebook::from_gguf(&f16_desc, f16_bytes).unwrap();
+        let mut f16_row = [0.0; 3];
+        f16_codebook.dequant_row(1, &mut f16_row).unwrap();
+        let f16_expected = [f16_values[3], f16_values[4], f16_values[5]]
+            .map(|bits| half::f16::from_bits(bits).to_f32());
+        assert_eq!(f16_row.map(f32::to_bits), f16_expected.map(f32::to_bits));
+
+        let bf16_values = [
+            (1.0f32.to_bits() >> 16) as u16,
+            ((-2.0f32).to_bits() >> 16) as u16,
+            (3.5f32.to_bits() >> 16) as u16,
+            (4.25f32.to_bits() >> 16) as u16,
+            ((-5.5f32).to_bits() >> 16) as u16,
+            (6.75f32.to_bits() >> 16) as u16,
+        ];
+        let bf16_bytes = bytemuck::cast_slice::<u16, u8>(&bf16_values);
+        let bf16_desc = TensorDesc {
+            name: "selector_bf16_test".into(),
+            shape: vec![3, 2],
+            dtype: GgmlType::BF16,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: bf16_bytes.len() as u64,
+        };
+        let bf16_codebook = DFlash2Codebook::from_gguf(&bf16_desc, bf16_bytes).unwrap();
+        let mut bf16_row = [0.0; 3];
+        bf16_codebook.dequant_row(1, &mut bf16_row).unwrap();
+        let bf16_expected = [bf16_values[3], bf16_values[4], bf16_values[5]]
+            .map(|bits| f32::from_bits((bits as u32) << 16));
+        assert_eq!(bf16_row.map(f32::to_bits), bf16_expected.map(f32::to_bits));
+
+        let mut q8_bytes = [0u8; 68];
+        for row in 0..2 {
+            let block = &mut q8_bytes[row * 34..(row + 1) * 34];
+            block[..2].copy_from_slice(
+                &half::f16::from_f32(0.25 * (row + 1) as f32)
+                    .to_bits()
+                    .to_le_bytes(),
+            );
+            for (index, value) in block[2..].iter_mut().enumerate() {
+                *value = (index as i8 - 12 + row as i8) as u8;
+            }
+        }
+        let q8_desc = TensorDesc {
+            name: "selector_q8_test".into(),
+            shape: vec![32, 2],
+            dtype: GgmlType::Q8_0,
+            shard_idx: 0,
+            data_offset: 0,
+            n_bytes: q8_bytes.len() as u64,
+        };
+        let q8_codebook = DFlash2Codebook::from_gguf(&q8_desc, &q8_bytes).unwrap();
+        let mut q8_row = [0.0; 32];
+        q8_codebook.dequant_row(1, &mut q8_row).unwrap();
+        for (index, value) in q8_row.iter().enumerate() {
+            assert_eq!(value.to_bits(), (0.5 * (index as f32 - 11.0)).to_bits());
         }
     }
 

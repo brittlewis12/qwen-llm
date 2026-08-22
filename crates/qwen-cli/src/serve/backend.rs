@@ -153,7 +153,7 @@ fn should_plan_dflash(
     has_restore_tail: bool,
     dense: bool,
 ) -> bool {
-    has_head && temperature == 0.0 && (matched_tokens == 0 || (has_restore_tail && dense))
+    has_head && dense && temperature == 0.0 && (matched_tokens == 0 || has_restore_tail)
 }
 
 fn request_capacity(
@@ -561,23 +561,37 @@ impl GenerationBackend for EngineBackend {
                         let mut seeded = 0usize;
                         if let Some(tail) = restore_tail.as_ref() {
                             let tail_src_cols = restored_prefix_len.min(window);
-                            let tail_wstart = restored_prefix_len - tail_src_cols;
-                            let seed_start = wstart.max(tail_wstart);
-                            let seed_end = matched_tokens.min(restored_prefix_len);
-                            if seed_end > seed_start {
-                                let skip = seed_start - tail_wstart;
-                                let count = seed_end - seed_start;
-                                let dst_off = seed_start - wstart;
-                                let src = &tail[skip * n_features..(skip + count) * n_features];
-                                unsafe {
-                                    let dst_ptr = dst.buffer.contents().as_ptr() as *mut f32;
-                                    std::ptr::copy_nonoverlapping(
-                                        src.as_ptr(),
-                                        dst_ptr.add(dst_off * n_features),
-                                        count * n_features,
-                                    );
+                            // Fail closed on a wrong-length tail: the drafter
+                            // is not part of the snapshot identity, so a
+                            // durable store shared across drafter revisions
+                            // can serve a tail whose feature width differs.
+                            // Treat it as absent rather than slicing/panicking.
+                            if tail.len() != tail_src_cols * n_features {
+                                tracing::warn!(
+                                    "serve: checkpoint capture tail length {} != {} features x {} columns; ignoring tail",
+                                    tail.len(),
+                                    n_features,
+                                    tail_src_cols,
+                                );
+                            } else {
+                                let tail_wstart = restored_prefix_len - tail_src_cols;
+                                let seed_start = wstart.max(tail_wstart);
+                                let seed_end = matched_tokens.min(restored_prefix_len);
+                                if seed_end > seed_start {
+                                    let skip = seed_start - tail_wstart;
+                                    let count = seed_end - seed_start;
+                                    let dst_off = seed_start - wstart;
+                                    let src = &tail[skip * n_features..(skip + count) * n_features];
+                                    unsafe {
+                                        let dst_ptr = dst.buffer.contents().as_ptr() as *mut f32;
+                                        std::ptr::copy_nonoverlapping(
+                                            src.as_ptr(),
+                                            dst_ptr.add(dst_off * n_features),
+                                            count * n_features,
+                                        );
+                                    }
+                                    seeded = count;
                                 }
-                                seeded = count;
                             }
                         }
                         Some((dst, wstart, seeded, n_features, ring_columns))
@@ -766,7 +780,9 @@ impl GenerationBackend for EngineBackend {
         if !restore.as_ref().is_some_and(|restore| restore.exact) {
             let (tail, features) = match dflash_capture.as_ref() {
                 Some((dst, wstart, _, n_features, ring)) => (
-                    ring.map(|_| read_window_tail(dst, *n_features, prompt_ids.len(), *wstart)),
+                    ring.map(|window| {
+                        read_window_tail(dst, *n_features, prompt_ids.len(), *wstart, window)
+                    }),
                     *n_features,
                 ),
                 None => (None, 0),
@@ -877,7 +893,7 @@ impl GenerationBackend for EngineBackend {
                         dflash_capture
                             .as_ref()
                             .and_then(|(dst, wstart, _, n_features, ring)| {
-                                ring.map(|_| (dst.clone(), *wstart, *n_features))
+                                ring.map(|window| (dst.clone(), *wstart, *n_features, window))
                             }),
                         None,
                         |token| {
@@ -923,7 +939,7 @@ impl GenerationBackend for EngineBackend {
                     dflash_capture
                         .as_ref()
                         .and_then(|(dst, wstart, _, n_features, ring)| {
-                            ring.map(|_| (dst.clone(), *wstart, *n_features))
+                            ring.map(|window| (dst.clone(), *wstart, *n_features, window))
                         }),
                     format!(
                         "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=dflash"
@@ -957,7 +973,9 @@ impl GenerationBackend for EngineBackend {
                 |token| {
                     let position = sequence.position();
                     let next = match dflash_capture.as_ref() {
-                        Some((dst, wstart, _, n_features, Some(_ring))) if position >= *wstart => {
+                        Some((dst, wstart, _, n_features, Some(ring_window)))
+                            if position >= *wstart =>
+                        {
                             let offset = (position - *wstart)
                                 % qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW;
                             let view = dst.view_subrange(
@@ -1015,7 +1033,7 @@ impl GenerationBackend for EngineBackend {
             dflash_capture
                 .as_ref()
                 .and_then(|(dst, wstart, _, n_features, ring)| {
-                    ring.map(|_| (dst.clone(), *wstart, *n_features))
+                    ring.map(|window| (dst.clone(), *wstart, *n_features, window))
                 }),
             format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=serial"),
         )
@@ -1030,8 +1048,8 @@ fn read_window_tail(
     features: usize,
     consumed: usize,
     wstart: usize,
+    window: usize,
 ) -> Vec<f32> {
-    let window = qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW;
     let start = consumed.saturating_sub(window);
     let count = consumed - start;
     let mut tail: Vec<f32> = Vec::with_capacity(count * features);
@@ -1125,7 +1143,7 @@ impl EngineBackend {
         prompt_ids: Vec<i32>,
         matched_tokens: usize,
         restore_ms: f64,
-        capture_ring: Option<(MetalTensor, usize, usize)>,
+        capture_ring: Option<(MetalTensor, usize, usize, usize)>,
         phases: String,
     ) -> Result<GenerationOutcome, BackendFailure> {
         match crate::derive_completed_checkpoint_boundary(
@@ -1138,8 +1156,14 @@ impl EngineBackend {
                 let pending_token = boundary.pending_token;
                 let consumed = boundary.consumed_tokens(&prompt_ids, &generation.tokens);
                 let (tail, features) = match capture_ring.as_ref() {
-                    Some((dst, wstart, n_features)) => (
-                        Some(read_window_tail(dst, *n_features, consumed.len(), *wstart)),
+                    Some((dst, wstart, n_features, ring_window)) => (
+                        Some(read_window_tail(
+                            dst,
+                            *n_features,
+                            consumed.len(),
+                            *wstart,
+                            *ring_window,
+                        )),
                         *n_features,
                     ),
                     None => (None, 0),
@@ -1252,6 +1276,7 @@ mod tests {
         assert!(!use_serial_tail(48, 48, true, false));
         assert!(use_serial_tail(48, 48, false, false));
         assert!(should_plan_dflash(true, 0, 0.0, false, true));
+        assert!(!should_plan_dflash(true, 0, 0.0, false, false));
         assert!(!should_plan_dflash(true, 1, 0.0, false, true));
         assert!(!should_plan_dflash(true, 0, 0.1, false, true));
         assert!(should_plan_dflash(true, 5, 0.0, true, true));

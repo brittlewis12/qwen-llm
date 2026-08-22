@@ -8765,7 +8765,7 @@ fn generate_dflash<OnToken>(
     logits: Vec<f32>,
     max_tokens: usize,
     stop_tokens: &[i32],
-    capture_ring: Option<(MetalTensor, usize, usize)>,
+    capture_ring: Option<(MetalTensor, usize, usize, usize)>,
     mut shadow_probe: Option<&mut Sequence>,
     mut on_token: OnToken,
 ) -> Result<DflashGeneration>
@@ -8847,8 +8847,9 @@ where
 
         if !spec_enabled {
             // Off step: exact single-token decode with multi-hidden
-            // capture, so the drafter cross-context and the capture ring
-            // stay fed. The hard OFF_CTX guard remains terminal.
+            // capture so the caller's capture ring stays fed. The drafter
+            // cross-context is appended only while re-entry is possible
+            // (below the hard OFF_CTX guard, which is terminal).
             if position >= DFLASH_OFF_CTX {
                 spec_disabled = true;
             }
@@ -8866,19 +8867,21 @@ where
                     &hidden_dst,
                 )
                 .context("dflash off-mode capture single_token")?;
-            decoder
-                .session
-                .append_target_ctx_columns_now(
-                    loaded.context(),
-                    std::slice::from_ref(&(&hidden_dst, position as u32)),
-                    n_target_features,
-                )
-                .context("dflash off-mode ctx append")?;
-            if let Some((ring, wstart, features)) = capture_ring
+            if !spec_disabled {
+                decoder
+                    .session
+                    .append_target_ctx_columns_now(
+                        loaded.context(),
+                        std::slice::from_ref(&(&hidden_dst, position as u32)),
+                        n_target_features,
+                    )
+                    .context("dflash off-mode ctx append")?;
+            }
+            if let Some((ring, wstart, features, ring_window)) = capture_ring
                 .as_ref()
-                .filter(|(_, wstart, _)| position >= *wstart)
+                .filter(|(_, wstart, _, _)| position >= *wstart)
             {
-                let offset = (position - *wstart) % qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW;
+                let offset = (position - *wstart) % *ring_window;
                 let view = ring.view_subrange((offset * *features) as u64, vec![*features as u64]);
                 let ring_encoder = loaded.context().queue.commandBuffer().expect("cmd");
                 let ring_enc = KernelEncoder::begin(&ring_encoder);
@@ -9025,13 +9028,11 @@ where
                                 &hidden_dst,
                             )
                             .context("verify fallback exact row")?;
-                        if let Some((ring, wstart, features)) = capture_ring
+                        if let Some((ring, wstart, features, ring_window)) = capture_ring
                             .as_ref()
-                            .filter(|(_, wstart, _)| (pos as usize) >= *wstart)
+                            .filter(|(_, wstart, _, _)| (pos as usize) >= *wstart)
                         {
-                            let offset = ((pos as usize - *wstart)
-                                % qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW)
-                                * *features;
+                            let offset = ((pos as usize - *wstart) % *ring_window) * *features;
                             let view = ring.view_subrange(offset as u64, vec![*features as u64]);
                             let ring_encoder = loaded.context().queue.commandBuffer().expect("cmd");
                             let ring_enc = KernelEncoder::begin(&ring_encoder);
@@ -9057,8 +9058,11 @@ where
                             break;
                         }
                         accepted.push(draft);
-                        let target = replay_row(i + 1, draft)?;
-                        fallback_targets.push(target);
+                        // Terminal checks BEFORE replaying the next row: the
+                        // terminal token is emitted but never consumed, and
+                        // the session must end exactly n_keep rows ahead of
+                        // the pre-block state or the completed-boundary
+                        // checkpoint fails KvPosition validation.
                         if stop_tokens.contains(&draft) {
                             terminal = Some(StopReason::Eos);
                             break;
@@ -9067,6 +9071,8 @@ where
                             terminal = Some(StopReason::TokenLimit);
                             break;
                         }
+                        let target = replay_row(i + 1, draft)?;
+                        fallback_targets.push(target);
                     }
                 }
                 n_accepted = accepted.len();
@@ -9103,7 +9109,7 @@ where
             // Optional windowed capture-ring feed: scatter the same committed
             // hidden columns into the caller's ring at windowed offsets so
             // completed-boundary capture tails stay fresh during speculation.
-            if let Some((ring, wstart, features)) = capture_ring.as_ref() {
+            if let Some((ring, wstart, features, ring_window)) = capture_ring.as_ref() {
                 let ring_encoder = loaded.context().queue.commandBuffer().expect("cmd");
                 let ring_enc = KernelEncoder::begin(&ring_encoder);
                 for i in 0..n_keep {
@@ -9111,9 +9117,7 @@ where
                     if (position as usize) < *wstart {
                         continue;
                     }
-                    let offset = ((position as usize - *wstart)
-                        % qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW)
-                        * *features;
+                    let offset = ((position as usize - *wstart) % *ring_window) * *features;
                     let view = ring.view_subrange(offset as u64, vec![*features as u64]);
                     encode_scatter_offset_f32(
                         loaded.context(),
@@ -9268,6 +9272,13 @@ where
     })
 }
 
+// NOTE (2026-08-22): generate_prompt_lookup shares the batched packed
+// verify with generate_dflash but does NOT run the margin-guarded exact
+// fallback, so its emitted stream can diverge from serial greedy on
+// near-tie transitions (the class the shadow probe pinned: batched
+// delta ~4.5e-3 vs reference gap 9.3e-4). The DFlash path is guarded
+// and byte-identical; prompt-lookup is experimental and honest about
+// this gap until the guard is ported.
 struct PromptLookupGeneration {
     generation: GenerationResult,
     stats: PromptLookupDecodeStats,

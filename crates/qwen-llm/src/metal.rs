@@ -14597,8 +14597,9 @@ pub fn encode_topk16_f32(
 }
 
 /// GPU-side greedy selection matching the sampler's `f32::total_cmp` order.
-/// Equal bit patterns choose the highest token id. Any NaN is encoded as the
-/// negative value `~token_id`, with the lowest NaN token taking precedence.
+/// Equal bit patterns choose the LOWEST token id (2026-08-22 tie-inversion
+/// unification). Any NaN is encoded as the negative value `~token_id`, with
+/// the lowest NaN token taking precedence.
 pub fn encode_argmax_f32_greedy(
     ctx: &MetalContext,
     enc: &KernelEncoder,
@@ -35497,7 +35498,7 @@ mod tests {
             }
             let mut best = 0usize;
             for token in 1..row.len() {
-                if row[token].total_cmp(&row[best]) != std::cmp::Ordering::Less {
+                if row[token].total_cmp(&row[best]) == std::cmp::Ordering::Greater {
                     best = token;
                 }
             }
@@ -35536,9 +35537,9 @@ mod tests {
         let got = run(&ctx, &flat, rows.len(), rows[0].len());
         let expected: Vec<i32> = flat.chunks(rows[0].len()).map(cpu).collect();
         assert_eq!(got, expected);
-        assert_eq!(got[1], 6, "finite ties choose the highest token id");
+        assert_eq!(got[1], 0, "finite ties choose the lowest token id");
         assert_eq!(got[2], 1, "+0 outranks -0 under total_cmp");
-        assert_eq!(got[4], 7, "equal -inf chooses the highest token id");
+        assert_eq!(got[4], 0, "equal -inf chooses the lowest token id");
         assert_eq!(got[5], !1, "lowest NaN token is encoded");
         assert_eq!(got[6], !0, "all-NaN row reports token zero");
 
@@ -35548,7 +35549,7 @@ mod tests {
             row[n - 1] = 3.0;
             assert_eq!(
                 run(&ctx, &row, 1, n),
-                vec![(n - 1) as i32],
+                vec![(n / 2) as i32],
                 "boundary row length {n}"
             );
         }
@@ -35557,7 +35558,7 @@ mod tests {
         wide[100] = 9.0;
         wide[2500] = 9.0;
         wide[3999] = 9.0;
-        assert_eq!(run(&ctx, &wide, 1, wide.len()), vec![3999]);
+        assert_eq!(run(&ctx, &wide, 1, wide.len()), vec![100]);
         wide[2500] = f32::NAN;
         wide[100] = f32::NAN;
         assert_eq!(run(&ctx, &wide, 1, wide.len()), vec![!100]);

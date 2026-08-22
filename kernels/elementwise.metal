@@ -1123,10 +1123,11 @@ kernel void kernel_argmax_top2_f32(
 }
 
 // Production-greedy argmax matching Rust f32::total_cmp for every non-NaN
-// bit pattern. Any NaN wins over a token result and is encoded as ~token_id,
-// allowing the host to report the lowest offending index without reading the
-// logits row. The input is intentionally loaded as uint so -ffast-math cannot
-// weaken NaN detection or signed-zero ordering.
+// bit pattern, with lowest-index tie breaks (2026-08-22 unification). Any
+// NaN wins over a token result and is encoded as ~token_id, allowing the
+// host to report the lowest offending index without reading the logits row.
+// The input is intentionally loaded as uint so -ffast-math cannot weaken
+// NaN detection or signed-zero ordering.
 struct greedy_argmax_args {
     uint n;
     uint stride_x;
@@ -1160,14 +1161,18 @@ kernel void kernel_argmax_f32_greedy(
         }
 
         const uint key = (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
-        if (key > best_key || (key == best_key && i > best_idx)) {
+        // Lowest-index tie break: matches the CPU greedy sites
+        // (total_cmp strict-Greater scan) after the 2026-08-22
+        // tie-inversion unification. The old `i > best_idx` kept the
+        // highest index and diverged from the packed-verify kernel.
+        if (key > best_key || (key == best_key && i < best_idx)) {
             best_key = key;
             best_idx = i;
         }
     }
 
     const uint lane_key = simd_max(best_key);
-    const uint lane_idx = simd_max(best_key == lane_key ? best_idx : 0u);
+    const uint lane_idx = simd_min(best_key == lane_key ? best_idx : UINT_MAX);
     const uint lane_nan = simd_min(first_nan);
     if (tiisg == 0) {
         sh_key[sgitg] = lane_key;
@@ -1179,10 +1184,10 @@ kernel void kernel_argmax_f32_greedy(
     if (sgitg == 0) {
         const bool active = tiisg < args.n_simdgroups;
         const uint group_key = active ? sh_key[tiisg] : 0u;
-        const uint group_idx = active ? sh_idx[tiisg] : 0u;
+        const uint group_idx = active ? sh_idx[tiisg] : UINT_MAX;
         const uint group_nan = active ? sh_nan[tiisg] : UINT_MAX;
         const uint global_key = simd_max(group_key);
-        const uint global_idx = simd_max(group_key == global_key ? group_idx : 0u);
+        const uint global_idx = simd_min(group_key == global_key ? group_idx : UINT_MAX);
         const uint global_nan = simd_min(group_nan);
         if (tiisg == 0) {
             out_idx[row] = global_nan == UINT_MAX ? int(global_idx) : ~int(global_nan);

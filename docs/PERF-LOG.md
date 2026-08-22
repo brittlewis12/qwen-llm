@@ -6,6 +6,139 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-21 — Windowed DFlash Capture Tail (1b) Landed; Restored-Request Speculation E2E PASS
+
+### Why
+
+F1 proved the all-SWA drafter only reads the last 2,048 columns, and 1a
+windowed the cold capture. 1b closes the serving loop: publish a capture
+tail at each checkpoint boundary and seed the drafter window from it on
+restore, so cached/restored requests (the dominant agentic workload,
+measured at 8.35-12.4 tps serial) can speculate.
+
+### Change
+
+- Codec v2: FLAG_CAPTURE_TAIL + OFF_CAPTURE_TAIL_BYTES in the former
+  reserved header area; legacy records byte-identical (canonical test
+  updated); unknown flags fail closed. F5 round-trip tests pass.
+- Runtime: prepare_checkpoint_boundary takes (capture_tail, features) and
+  validates exact length; estimate_checkpoint_boundary_sizes prices the
+  tail; restore structs carry capture_tail. Non-serve callers pass
+  None/0.
+- Serve: fixed 2,048-column capture window buffer doubles as the serial
+  decode ring; restore-tail seeds the window's leading columns; serial
+  decode feeds the ring via single_token_with_multi_hidden; spec decode
+  feeds it via generate_dflash's optional ring param; prompt + completed
+  boundaries publish the tail; should_plan_dflash admits restored
+  requests with a tail (dense + greedy).
+- Live E2E (lease-free window, sequential serves): turn 2 restores 257
+  matched tokens with tail=true and runs decode_path=dflash; outputs
+  byte-identical to the serial control serve on both turns.
+
+### Findings recorded (both pre-existing at HEAD, stash-verified)
+
+1. Serve spec-vs-serial greedy divergence on one reasoning-none prompt:
+   both paths individually deterministic, but the speculative serve and
+   serial serve diverge at output char 497. Pre-change binary reproduces
+   the identical divergence; this packet's changes are behavior-neutral
+   on that cell (pre == post). Consistent with the open item "CPU/GPU
+   argmax tie semantics remain separate work"; needs its own packet and
+   gates which prompts may serve as equivalence fixtures.
+2. Five deepseek_v4_metal::prefill packed_grouped_* N=1 unit tests fail
+   at HEAD (stash-verified on the clean tree); unrelated to this packet.
+
+Evidence: `docs/bench/2026-08-20-windowed-dflash-pre-gates/README.md`.
+
+## 2026-08-20 — Windowed DFlash Cold Capture (1a) Landed, Bitwise Primitive Gates PASS
+
+### Why
+
+F1 (same day) proved the all-SWA drafter is bit-identical on a 2,048-column
+window, so cold prefill no longer needs to capture the full prompt. Today's
+capture allocation is `prompt_len x 25,600 x 4B` = 13.3 GB at 130K ctx and
+the multi-hidden capture path runs through every prefill chunk.
+
+### Change
+
+- `qwen_llm::metal_dflash` gains `dflash_capture_window_limit` (all-SWA head
+  -> `swa_window`; any full-attention layer -> `usize::MAX`, preserving legacy
+  full-span capture), `dflash_capture_window_span`, and
+  `dflash_capture_window_complete`, with unit tests.
+- Serve (`crates/qwen-cli/src/serve/backend.rs`): windowed admission pricing
+  and capture allocation (window = min(prompt, limit)); prefill_remaining
+  splits each chunk at the window boundary into a plain prefix span and a
+  capture suffix span; window-aware completeness check; dsess capacity =
+  window + max_tokens + 16 (was prompt_len + max_tokens + 16).
+- CLI (`crates/qwen-cli/src/main.rs`): windowed capture buffer, plain-prefix
+  + capture-suffix split, windowed dsess capacity, absolute window start
+  carried through seeding.
+- New in-lib GPU gate `windowed_split_capture_equals_full_capture` (#[ignore]):
+  on the real Q8_0 + DFlash2 assets at a 3,076-token prompt, the split capture
+  buffer equals the full-capture suffix bitwise (max|Δ| = 0.000e0) and the
+  windowed session drafts bit-identically to the full session (max|Δ| =
+  0.000e0), 36.57s. Run alongside the production daemon via the per-PID test
+  lease directory; untimed, correctness-only.
+
+### Owed
+
+- End-to-end CLI/serve greedy-equivalence run and the F2(a) dispatch census
+  (QWEN_PREFILL_TRACE_COUNTS: zero capture dispatches outside the final
+  window) — both need a qwen binary run, blocked by the live server's
+  process-exclusive Metal lease; run at the next lease window.
+- 1b (checkpoint capture tail for restored-request speculation) is the next
+  packet: codec v2 flag + section (checkpoint_codec.rs flags word, fail-closed
+  unknown-flag rejection at :423), SessionSnapshot field, capture ring during
+  decode via single_token_with_multi_hidden, restore-side drafter seeding,
+  then the F5 round-trip gate. Snapshot identity machinery is unchanged
+  (tail is payload, not identity).
+
+Evidence: `docs/bench/2026-08-20-windowed-dflash-pre-gates/README.md`.
+
+## 2026-08-20 — Windowed Drafter Bit-Identity Oracle (F1) PASS
+
+### Why
+
+Nine hours of live serve production (/tmp/serve_38-dflash.log, Qwen3.8-27B-Q8_0
++ DFlash2, 67 requests) showed 33 serial requests at 66K-133K ctx running
+8.35-12.4 tps while speculation is structurally disabled for restored requests
+(matched_tokens==0 gate) and above 16K ctx (DFLASH_OFF_CTX). The leverage map
+reviewed by k3 (adversarial, 2026-08-20) re-ranked a "windowed drafter context"
+design first: the served drafter GGUF declares all 5 layers SWA-2048
+(sliding_window_pattern all-true, target layers [6,20,34,48,62], block 8), so
+the drafter only ever reads the last 2,048 cross-context columns. If a session
+seeded with only that window produces bit-identical drafts to a full-context
+session, capture can be windowed (13.3 GB full-prompt capture at 130K ctx ->
+210 MB tail), restored requests can seed from a checkpoint tail, and Off-mode
+can stay fed for non-terminal speculation.
+
+### Method
+
+In-lib #[ignore] test `metal_dflash::tests::windowed_dflash_bit_identity_3076`
+(the per-PID test lease dir lets it run beside the production daemon; untimed,
+correctness-only). Metal prefill of 3,076 tokens with multi-hidden capture on
+the real Q8_0 target, then three drafter sessions from the same capture:
+A = full 3,076 columns (positions 0..3075), B = windowed last 2,048 (positions
+1028..3075), C = truncated last 2,047 (positions 1029..3075) as the negative
+control. Same carry token and noise_start_pos=3076; draft_block_with_logits
+compared bitwise.
+
+### Results
+
+- A vs B: max|Δ| = 0.000e0 over all 8 draft rows, 8/8 argmaxes identical.
+- A vs C: max|Δ| = 8.254e-3 — the harness is sensitive and the SWA-2048
+  boundary is inclusive, exactly as the kernel mask code claims.
+- Drafter premise re-confirmed: 5/5 SWA layers, block 8. Total runtime 19.86s.
+
+### Decision
+
+F1 PASS. The windowed-drafter premise is kernel-verified with the real
+production assets. Authorize implementation of 1a (windowed cold capture,
+final-chunk-only) and 1b (checkpoint capture tail, +210 MB/snapshot); next
+gates are F2 (dispatch census, trace-count only) and F5 (codec v2 round-trip).
+F3 (long-band slope) and F4 (alpha census at 60-130K) remain hard
+prerequisites before touching DFLASH_OFF_CTX. Packet:
+`docs/bench/2026-08-20-windowed-dflash-pre-gates/README.md`.
+
 ## 2026-08-20 — Serve DFlash Short-Prompt Capture Repair Correctness PASS
 
 Correctness-only validation of the repaired all-position target-hidden capture

@@ -155,11 +155,56 @@ Decision rules:
 
 ## Serve Follow-ups — 2026-08-20
 
-1. **Small-span warm-tail TTFT:** design and test a path that beats the current
-   serial-tail strategy for longer small uncached tails without changing output.
-   Do not assume fixed matrix setup is the current limiter: tails up to 48 tokens
-   bypass that path. Require a named warm-8k TTFT packet below the original 150 ms
-   target before promotion.
+Live-production measurement (/tmp/serve_38-dflash.log, 9h, 67 requests) and a
+k3 adversarial review produced a new force-ranked serve queue. The measured
+fact: 33 serial requests at 66K-133K ctx run 8.35-12.4 tps because speculation
+is gated off for restored requests and above 16K ctx, while the served drafter
+is all-SWA-2048 and F1 (2026-08-20) proved bit-identical drafts from a
+2,048-column windowed cache. Status 2026-08-21:
+
+- 1a (windowed cold capture) and 1b (checkpoint capture tail + restored-request
+  speculation) are LANDED with F1/F2-split/F5/E2E gates passing (byte-identical
+  two-turn serve outputs vs serial control). Remaining serve-repo work: port
+  the admission/fallback from the main repo (the deployed checkout still lacks
+  it). Updated ranked queue:
+
+1. **Spec-vs-serial tie-equivalence packet (NEW, rank 1).** A reasoning-none
+   turn-1 prompt diverges between the speculative and serial serves at output
+   char 497, deterministically on both paths, reproduced on a pre-change
+   binary. Consistent with the open "CPU/GPU argmax tie semantics" item;
+   blocks using that prompt class as an equivalence fixture and is a
+   product-correctness risk for greedy serving.
+2. **Off-mode capture feed + re-probe policy.** The capture ring now exists
+   (1b); Off-mode still stops feeding the drafter (terminal Off). Needs the
+   priced periodic re-probe (the named open policy item) before non-terminal
+   Off ships.
+3. **DFLASH_OFF_CTX removal: HOLD behind F3+F4.** Doc-blocked by the "Owed"
+   8K+ slope measurement (no ctx term in either direction until it lands);
+   break-even at 130K is ~2.1 — real but thin. With 1b landed, the 12-16K
+   restored-request band now speculates; the 66-133K band still needs this.
+4. **GDN wavefront verify: KEEP (sanctioned packet).** Reprice: targets the
+   48-layer sequential recurrence latency of the 9.44 ms/token marginal;
+   checkpoint blits are already priced at 9-16% and are not the lever.
+5. **Warm small-tail TTFT: KEEP.** 186 vs 150 ms gate, orthogonal to
+   speculation; phase-localize before designing the 49-256-token path.
+6. **Q4_K_M alpha/beta sidecar: demoted to cleanup.** ~2%, Q4-only; live
+   server is Q8_0.
+7. **Residue: mma8v N=8 Q4/Q6 KEEP-small; drafter KV F32->F16 merge into 1a
+   follow-on; MoE B16 ragged KILL (1.0998x < 1.10x reopen); DSpark N2 HOLD.**
+
+Also recorded: the Metal process lease is an exclusive process-lifetime flock
+with no idle yield — a long-lived serve daemon blocks every other qwen binary
+for its whole life (WAIT=1 blocks until exit). In-lib #[cfg(test)] tests use a
+per-PID lease dir and are the designed lane for daemon-adjacent correctness
+runs; integration-test binaries take the production lease path.
+
+Evidence: `docs/bench/2026-08-20-windowed-dflash-pre-gates/`.
+
+Note: the old "small-span warm-tail TTFT" follow-up is retained as item 5 of
+the re-ranked queue above (186 vs 150 ms gate; design a path for longer small
+uncached tails without changing output, tails up to 48 tokens already bypass
+matrix setup; require a named warm-8K TTFT packet below 150 ms before
+promotion).
 
 ## Qwen3.8 27B Launch Lane — 2026-08-14
 

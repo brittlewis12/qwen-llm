@@ -1042,6 +1042,86 @@ kernel void kernel_argmax_f32(
     }
 }
 
+// =============================================================================
+// kernel_argmax_top2_f32 — argmax index plus (top1 - top2) gap for one row
+// of length `n`.
+//
+// Same lowest-index tie contract as kernel_argmax_f32. The gap is the
+// difference between the largest and second-largest values; 0 when the
+// maximum value appears at two or more positions; +inf when n == 1.
+// NaNs never become top candidates (production rows contain none; the
+// greedy NaN-detecting variant remains separate).
+//
+// Reduction: each lane tracks (v1, i1, v2) over its strided slice; after a
+// threadgroup barrier one thread serial-scans every lane's (v1, v2) pair.
+// That scan is exact top-2 for the row, deterministic, and O(threads).
+//
+// Consumers: the speculative packed verify writes the gap per row so the
+// host can fall back to exact token-major decode when the batched-verify
+// arithmetic error could flip the argmax (margin-guarded fallback).
+// =============================================================================
+struct argmax_top2_args {
+    uint n;
+    uint stride_x;
+};
+
+kernel void kernel_argmax_top2_f32(
+        constant argmax_top2_args & args [[buffer(0)]],
+        device const float   * x        [[buffer(1)]],
+        device       int     * out_idx  [[buffer(2)]],
+        device       float   * out_gap  [[buffer(3)]],
+        threadgroup  float   * sh_v1    [[threadgroup(0)]],
+        threadgroup  uint    * sh_i1    [[threadgroup(1)]],
+        threadgroup  float   * sh_v2    [[threadgroup(2)]],
+        uint   tgpig [[threadgroup_position_in_grid]],
+        uint   tpitg [[thread_position_in_threadgroup]],
+        uint   ntg   [[threads_per_threadgroup]]) {
+    const uint row = tgpig;
+    device const float * x_row = x + (ulong)row * args.stride_x;
+
+    float v1 = -INFINITY;
+    uint  i1 = UINT_MAX;
+    float v2 = -INFINITY;
+    for (uint i = tpitg; i < args.n; i += ntg) {
+        const float v = x_row[i];
+        if (v > v1) {
+            v2 = v1;
+            v1 = v;
+            i1 = i;
+        } else if (v == v1 && i < i1) {
+            v2 = v1;
+            i1 = i;
+        } else if (v > v2) {
+            v2 = v;
+        }
+    }
+
+    sh_v1[tpitg] = v1;
+    sh_i1[tpitg] = i1;
+    sh_v2[tpitg] = v2;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tpitg == 0) {
+        float s1 = -INFINITY;
+        uint  s1i = UINT_MAX;
+        float s2 = -INFINITY;
+        for (uint l = 0; l < ntg; l++) {
+            const float a = sh_v1[l];
+            const uint  ai = sh_i1[l];
+            const float b = sh_v2[l];
+            if (a > s1 || (a == s1 && ai < s1i)) {
+                s2 = max(s1, b);
+                s1 = a;
+                s1i = ai;
+            } else {
+                s2 = max(s2, max(a, b));
+            }
+        }
+        out_idx[row] = (int)s1i;
+        out_gap[row] = s1 - s2;
+    }
+}
+
 // Production-greedy argmax matching Rust f32::total_cmp for every non-NaN
 // bit pattern. Any NaN wins over a token result and is encoded as ~token_id,
 // allowing the host to report the lowest offending index without reading the

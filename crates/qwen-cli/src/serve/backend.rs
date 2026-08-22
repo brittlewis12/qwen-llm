@@ -1183,12 +1183,13 @@ impl EngineBackend {
         if let Some(stats) = dflash {
             tracing::info!(
                 target: "qwen_diag",
-                "serve dflash: spec_steps={} off_steps={} accepted={}/{} alpha_backoff={} draft_ms={:.1} verify_ms={:.1}",
+                "serve dflash: spec_steps={} off_steps={} accepted={}/{} alpha_backoff={} fallback={} draft_ms={:.1} verify_ms={:.1}",
                 stats.spec_steps,
                 stats.off_steps,
                 stats.accepted_drafts,
                 stats.drafts_scored,
                 stats.alpha_backoff,
+                stats.fallback_calls,
                 stats.draft_ms,
                 stats.verify_ms,
             );

@@ -31,8 +31,8 @@ use crate::gguf::GgufFile;
 use crate::loader::{DFlashHead, DFlashLayer};
 use crate::metal::{
     BlitEncoder, KernelEncoder, MetalContext, MetalError, MetalTensor, MetalTimestampSampleBuffer,
-    encode_add_inplace_f32, encode_argmax_f32, encode_axpy_rowwise_f32, encode_copy_offset_f32,
-    encode_dflash_attn_f32, encode_dflash_attn_full_gqa_split4_f32,
+    encode_add_inplace_f32, encode_argmax_f32, encode_argmax_top2_f32, encode_axpy_rowwise_f32,
+    encode_copy_offset_f32, encode_dflash_attn_f32, encode_dflash_attn_full_gqa_split4_f32,
     encode_dflash_attn_online_two_range_scan_f32, encode_dflash_attn_two_range_f32,
     encode_dflash2_conv_f32, encode_fill_f32, encode_gdn_decay_chain_batched_f32,
     encode_gdn_decay_chain_f32, encode_gdn_prep_packed_f32, encode_gdn_step_decay_packed_f32,
@@ -3191,6 +3191,11 @@ pub struct MetalDFlashVerifyScratch {
     /// Written into via `encode_argmax_f32` after each block's lm_head.
     pub verify_argmax: MetalTensor,
 
+    /// `[N]` F32 — per-row (top1 - top2) argmax gap, written alongside
+    /// `verify_argmax` by `encode_argmax_top2_f32`. Drives the
+    /// margin-guarded exact fallback in the speculative loop.
+    pub verify_gap: MetalTensor,
+
     /// `[K, N, H]` F32 — multi-layer hidden capture. Layer `target_layer_ids[k]`
     /// after token n in the packed batch lives at offset `(k * N + n) * H`.
     pub hidden_capture: MetalTensor,
@@ -3203,6 +3208,14 @@ pub struct MetalDFlashVerifyScratch {
     /// `[n_gdn, N, conv_state_elems]` F32 — per-GDN-layer per-token conv
     /// state checkpoint. `conv_ckpt_slot(layer, n)` returns the view.
     pub conv_ckpt: MetalTensor,
+
+    /// `[n_gdn, ssm_state_elems]` F32 — pre-block GDN SSM state capture,
+    /// blitted before the per-row loop so a margin-guarded fallback can
+    /// roll the whole block back to its start.
+    pub pre_gdn_ckpt: MetalTensor,
+
+    /// `[n_gdn, conv_state_elems]` F32 — pre-block GDN conv state capture.
+    pub pre_conv_ckpt: MetalTensor,
 
     // -- Cached dimensions (so slot helpers don't have to take a model ref) --
     pub n: u32,
@@ -3265,6 +3278,7 @@ impl MetalDFlashVerifyScratch {
         let allocations = [
             n,
             n,
+            n,
             checked_u64_mul3(n, k, h, "dflash verify hidden capture overflow")?,
             checked_u64_mul3(
                 n_gdn_layers,
@@ -3277,6 +3291,18 @@ impl MetalDFlashVerifyScratch {
                 n,
                 conv_state_elems,
                 "dflash verify conv checkpoint overflow",
+            )?,
+            checked_u64_mul3(
+                n_gdn_layers,
+                1,
+                ssm_state_elems,
+                "dflash verify pre-block GDN checkpoint overflow",
+            )?,
+            checked_u64_mul3(
+                n_gdn_layers,
+                1,
+                conv_state_elems,
+                "dflash verify pre-block conv checkpoint overflow",
             )?,
         ];
         allocations.into_iter().try_fold(0u64, |total, elements| {
@@ -3346,6 +3372,7 @@ impl MetalDFlashVerifyScratch {
         Ok(Self {
             packed_ids_buf: MetalTensor::zeros_i32(ctx, vec![n])?,
             verify_argmax: MetalTensor::zeros_i32(ctx, vec![n])?,
+            verify_gap: MetalTensor::zeros_f32(ctx, vec![n])?,
             // Layout: [N, K, H] (NOT [K, N, H] as in v0.57). Each per-N
             // slot is `K * H` contiguous floats — exactly what
             // `MetalDFlashSession::append_target_ctx_column_now` expects
@@ -3358,6 +3385,8 @@ impl MetalDFlashVerifyScratch {
             hidden_capture: MetalTensor::zeros_f32(ctx, vec![n, k, h])?,
             gdn_ckpt: MetalTensor::zeros_f32(ctx, vec![n_gdn_layers, n, ssm_state_elems])?,
             conv_ckpt: MetalTensor::zeros_f32(ctx, vec![n_gdn_layers, n, conv_state_elems])?,
+            pre_gdn_ckpt: MetalTensor::zeros_f32(ctx, vec![n_gdn_layers, ssm_state_elems])?,
+            pre_conv_ckpt: MetalTensor::zeros_f32(ctx, vec![n_gdn_layers, conv_state_elems])?,
             n: block_size,
             k_target_layers,
             n_gdn_layers: n_gdn_layers as u32,
@@ -3470,6 +3499,38 @@ impl MetalDFlashVerifyScratch {
     pub fn argmax_slot(&self, n: u32) -> MetalTensor {
         assert!(n < self.n, "argmax_slot OOB: n={n} >= scratch.n={}", self.n);
         self.verify_argmax.view_subrange(n as u64, vec![1])
+    }
+
+    /// Zero-copy view of `verify_gap[n..n+1]`.
+    pub fn gap_slot(&self, n: u32) -> MetalTensor {
+        assert!(n < self.n, "gap_slot OOB: n={n} >= scratch.n={}", self.n);
+        self.verify_gap.view_subrange(n as u64, vec![1])
+    }
+
+    /// Zero-copy view of the pre-block GDN SSM capture for `layer`.
+    pub fn pre_gdn_slot(&self, layer: u32) -> MetalTensor {
+        assert!(
+            layer < self.n_gdn_layers,
+            "pre_gdn_slot OOB: layer={layer} >= n_gdn_layers={}",
+            self.n_gdn_layers
+        );
+        self.pre_gdn_ckpt.view_subrange(
+            (layer as u64) * self.ssm_state_elems,
+            vec![self.ssm_state_elems],
+        )
+    }
+
+    /// Zero-copy view of the pre-block GDN conv capture for `layer`.
+    pub fn pre_conv_slot(&self, layer: u32) -> MetalTensor {
+        assert!(
+            layer < self.n_gdn_layers,
+            "pre_conv_slot OOB: layer={layer} >= n_gdn_layers={}",
+            self.n_gdn_layers
+        );
+        self.pre_conv_ckpt.view_subrange(
+            (layer as u64) * self.conv_state_elems,
+            vec![self.conv_state_elems],
+        )
     }
 }
 
@@ -6102,11 +6163,13 @@ fn encode_packed_verify_inner_impl(
         // Codex-Q5: this MUST run before token n+1's lm_head writes
         // session.logits.
         let argmax_dst = scratch.argmax_slot(n_idx as u32);
-        encode_argmax_f32(
+        let gap_dst = scratch.gap_slot(n_idx as u32);
+        encode_argmax_top2_f32(
             base.ctx,
             &enc,
             &target_session.logits,
             &argmax_dst,
+            &gap_dst,
             1,
             arch.vocab_size as usize,
         )?;
@@ -6649,11 +6712,33 @@ pub fn encode_packed_verify_layer_major_inner(
     let verify_argmax_view = verify_scratch
         .verify_argmax
         .view_subrange(0, vec![n as u64]);
+    let verify_gap_view = verify_scratch.verify_gap.view_subrange(0, vec![n as u64]);
 
     let trace_counts = mtp_verify_trace_counts_enabled();
     let _kernel_trace_guard = trace_counts.then(kernel_trace_begin);
 
     let cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
+
+    // === Phase 0: pre-block GDN state capture (one blit pass). ===
+    // Lets the margin-guarded fallback roll the whole block back to its
+    // start (encode_restore_to_pre_block). Cost is one checkpoint set
+    // per verify step.
+    {
+        let n_gdn_actual = base
+            .model
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, MetalBlock::Gdn(_)))
+            .count() as u32;
+        let blit = BlitEncoder::begin(&cmd_buf);
+        for k in 0..n_gdn_actual {
+            let pre_ssm = verify_scratch.pre_gdn_slot(k);
+            blit.copy_tensor(&target_session.gdn_state[k as usize], &pre_ssm);
+            let pre_conv = verify_scratch.pre_conv_slot(k);
+            blit.copy_tensor(&target_session.gdn_conv[k as usize], &pre_conv);
+        }
+        blit.end();
+    }
 
     // === Phase 1: batched embed of all N tokens into x_pack [N, H]. ===
     {
@@ -7947,8 +8032,17 @@ pub fn encode_packed_verify_layer_major_inner(
                 v,
                 n,
             )?;
-            // Batched argmax across all N rows in ONE dispatch.
-            encode_argmax_f32(base.ctx, &enc, logits_dst, &verify_argmax_view, n, v)?;
+            // Batched argmax across all N rows in ONE dispatch, plus the
+            // per-row (top1 - top2) gap for the margin-guarded fallback.
+            encode_argmax_top2_f32(
+                base.ctx,
+                &enc,
+                logits_dst,
+                &verify_argmax_view,
+                &verify_gap_view,
+                n,
+                v,
+            )?;
         } else {
             // F32 / unsupported lm_head: per-token mat-vec fallback
             // (the original layer-major tail). Layer-major still wins
@@ -7984,7 +8078,16 @@ pub fn encode_packed_verify_layer_major_inner(
                     )?;
                 }
                 let argmax_dst = verify_scratch.argmax_slot(n_idx as u32);
-                encode_argmax_f32(base.ctx, &enc, &target_session.logits, &argmax_dst, 1, v)?;
+                let gap_dst = verify_scratch.gap_slot(n_idx as u32);
+                encode_argmax_top2_f32(
+                    base.ctx,
+                    &enc,
+                    &target_session.logits,
+                    &argmax_dst,
+                    &gap_dst,
+                    1,
+                    v,
+                )?;
             }
         }
         enc.end();
@@ -13095,6 +13198,89 @@ pub fn encode_restore_after_partial_accept_inner(
     let new_kv_pos = (start_position as usize) + (n_keep as usize);
     for i in 0..target_session.kv_n_pos.len() {
         target_session.kv_n_pos[i] = new_kv_pos;
+    }
+
+    Ok(())
+}
+
+/// Roll a just-executed packed verify back to its PRE-BLOCK state using the
+/// phase-0 capture. Used by the margin-guarded exact fallback: when a
+/// committed row's argmax gap is too small to trust the batched arithmetic,
+/// the whole block is replayed through token-major forwards.
+///
+/// Contract mirrors [`encode_restore_after_partial_accept_inner`]: call
+/// immediately after `encode_packed_verify_layer_major_inner(..,
+/// start_position, .., n_eff_override)` on the same session; kv_n_pos must
+/// still be `start_position + n`. KV bytes at `[start_position, ..)` remain
+/// physically but become unreachable and are overwritten by the replay.
+pub fn encode_restore_to_pre_block(
+    base: &MetalForward<'_>,
+    scratch: &MetalDFlashVerifyScratch,
+    start_position: u32,
+    target_session: &mut MetalSession,
+    n_eff_override: Option<u32>,
+) -> Result<(), DFlashError> {
+    let n_block = scratch.n;
+    let n = n_eff_override.unwrap_or(n_block);
+    if n == 0 || n > n_block {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "restore_to_pre_block",
+            detail: format!(
+                "n_eff_override={:?} resolves to n={n} which must be in [1, n_block={n_block}]",
+                n_eff_override
+            ),
+        }));
+    }
+    let n_gdn_actual = base
+        .model
+        .blocks
+        .iter()
+        .filter(|b| matches!(b, MetalBlock::Gdn(_)))
+        .count() as u32;
+    if scratch.n_gdn_layers != n_gdn_actual {
+        return Err(DFlashError::Metal(MetalError::BadShape {
+            kernel: "restore_to_pre_block",
+            detail: format!(
+                "scratch.n_gdn_layers={} != model n_gdn={n_gdn_actual} \
+                 (scratch allocated for different layer schedule)",
+                scratch.n_gdn_layers
+            ),
+        }));
+    }
+    let expected_kv_pre = (start_position as usize)
+        .checked_add(n as usize)
+        .ok_or_else(|| {
+            DFlashError::Metal(MetalError::BadShape {
+                kernel: "restore_to_pre_block",
+                detail: format!("start_position={start_position} + N={n} overflows usize"),
+            })
+        })?;
+    for (i, &kp) in target_session.kv_n_pos.iter().enumerate() {
+        if kp != expected_kv_pre {
+            return Err(DFlashError::Metal(MetalError::BadShape {
+                kernel: "restore_to_pre_block",
+                detail: format!(
+                    "kv_n_pos[{i}]={kp} != start_position + N = {expected_kv_pre}; \
+                     restore must be called immediately after packed_verify(.., \
+                     start_position) on the same session"
+                ),
+            }));
+        }
+    }
+
+    let cmd_buf = base.ctx.queue.commandBuffer().expect("command buffer");
+    let blit = BlitEncoder::begin(&cmd_buf);
+    for k in 0..n_gdn_actual {
+        let ssm_src = scratch.pre_gdn_slot(k);
+        blit.copy_tensor(&ssm_src, &target_session.gdn_state[k as usize]);
+        let conv_src = scratch.pre_conv_slot(k);
+        blit.copy_tensor(&conv_src, &target_session.gdn_conv[k as usize]);
+    }
+    blit.end();
+    cmd_buf.commit();
+    cmd_buf.waitUntilCompleted();
+    for i in 0..target_session.kv_n_pos.len() {
+        target_session.kv_n_pos[i] = start_position as usize;
     }
 
     Ok(())

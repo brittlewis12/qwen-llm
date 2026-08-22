@@ -14346,6 +14346,76 @@ pub fn encode_argmax_f32(
     Ok(())
 }
 
+/// Argmax index plus (top1 - top2) gap per row via `kernel_argmax_top2_f32`.
+/// Same lowest-index tie contract as [`encode_argmax_f32`]. The gap is 0 when
+/// the maximum appears twice, +inf for single-element rows, and ignores NaNs
+/// (production logits contain none; the greedy NaN variant stays separate).
+pub fn encode_argmax_top2_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    x: &MetalTensor,
+    out_idx: &MetalTensor,
+    out_gap: &MetalTensor,
+    n_rows: usize,
+    n: usize,
+) -> Result<(), MetalError> {
+    if x.n_elements() as usize != n_rows * n {
+        return Err(MetalError::BadShape {
+            kernel: "argmax_top2",
+            detail: format!("x.n_elements={} != n_rows*n={}", x.n_elements(), n_rows * n),
+        });
+    }
+    validate_i32_output("argmax_top2", out_idx, n_rows)?;
+    if out_gap.n_elements() as usize != n_rows {
+        return Err(MetalError::BadShape {
+            kernel: "argmax_top2",
+            detail: format!(
+                "out_gap.n_elements={} != n_rows={}",
+                out_gap.n_elements(),
+                n_rows
+            ),
+        });
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    struct Args {
+        n: u32,
+        stride_x: u32,
+    }
+    let pso = ctx.pipeline("kernel_argmax_top2_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &Args {
+            n: n as u32,
+            stride_x: n as u32,
+        },
+    );
+    enc.set_tensor(1, x);
+    enc.set_tensor(2, out_idx);
+    enc.set_tensor(3, out_gap);
+
+    let tg_threads = pso.maxTotalThreadsPerThreadgroup().min(1024);
+    let shmem = (tg_threads * std::mem::size_of::<f32>()).max(32);
+    enc.set_threadgroup_memory(0, shmem);
+    enc.set_threadgroup_memory(1, (tg_threads * std::mem::size_of::<u32>()).max(32));
+    enc.set_threadgroup_memory(2, shmem);
+
+    enc.dispatch(
+        MTLSize {
+            width: n_rows,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width: tg_threads,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// DFlash 2 two-tap dynamic depthwise convolution over the noise block
 /// (kernels/dflash2.metal). `y[t][c] = Σ_tap (base[side][tap][c] +
 /// dyn[t][side][tap][group(c)]) · x[t-tap][c]`, zero-padded before the
@@ -35671,6 +35741,105 @@ mod tests {
                 vec![-1],
                 "all-NaN: kernel returns -1 (UINT_MAX cast); document only — production should never see this"
             );
+        }
+    }
+
+    #[test]
+    fn argmax_top2_matches_lowest_index_and_reports_exact_gap() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+
+        fn run(ctx: &MetalContext, x: &[f32], n_rows: usize, n: usize) -> (Vec<i32>, Vec<f32>) {
+            assert_eq!(x.len(), n_rows * n);
+            let xb = ctx.buffer_from(x).expect("xb");
+            let xt = MetalTensor {
+                buffer: xb,
+                offset: 0,
+                shape: vec![n_rows as u64, n as u64],
+                dtype: crate::tensor::GgmlType::F32,
+                provenance: MetalTensorProvenance::OwnedWritable,
+            };
+            let ot = MetalTensor::zeros_i32(ctx, vec![n_rows as u64]).expect("ob");
+            let gt = MetalTensor::zeros_f32(ctx, vec![n_rows as u64]).expect("gb");
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_argmax_top2_f32(ctx, &enc, &xt, &ot, &gt, n_rows, n)
+                .expect("encode argmax top2");
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+            unsafe {
+                let pi = ot.buffer.contents().as_ptr() as *const i32;
+                let pg = gt.buffer.contents().as_ptr() as *const f32;
+                let idx = (0..n_rows).map(|i| *pi.add(i)).collect();
+                let gap = (0..n_rows).map(|i| *pg.add(i)).collect();
+                (idx, gap)
+            }
+        }
+
+        fn cpu_top2(row: &[f32]) -> (i32, f32) {
+            let mut v1 = f32::NEG_INFINITY;
+            let mut i1 = 0usize;
+            let mut v2 = f32::NEG_INFINITY;
+            for (i, &v) in row.iter().enumerate() {
+                if v > v1 {
+                    v2 = v1;
+                    v1 = v;
+                    i1 = i;
+                } else if v > v2 {
+                    v2 = v;
+                }
+            }
+            (i1 as i32, v1 - v2)
+        }
+
+        // Distinct max, duplicate max (gap 0), single element (+inf),
+        // all-equal (gap 0), negative max, signed zero, boundary widths.
+        let rows: Vec<Vec<f32>> = vec![
+            vec![1.0, 4.0, 2.0, 3.0, -1.0, -2.0, -3.0, -4.0],
+            vec![5.0, 1.0, 5.0, 0.0, 5.0, 2.0, 5.0, 3.0],
+            vec![7.0],
+            vec![2.0, 2.0, 2.0, 2.0],
+            vec![-8.0, -9.0, -7.0, -9.5],
+            vec![-0.0, 0.0, -0.0, -1.0],
+        ];
+        let n_rows = rows.len();
+        let n = 8;
+        let mut flat = Vec::with_capacity(n_rows * n);
+        let mut expected = Vec::with_capacity(n_rows);
+        for row in &rows {
+            assert!(row.len() <= n);
+            let mut padded = row.clone();
+            padded.resize(n, f32::NEG_INFINITY);
+            flat.extend_from_slice(&padded);
+            expected.push(cpu_top2(&padded));
+        }
+        let (idx, gap) = run(&ctx, &flat, n_rows, n);
+        for (r, &(ei, eg)) in expected.iter().enumerate() {
+            assert_eq!(idx[r], ei, "row {r} idx");
+            if eg.is_finite() {
+                assert_eq!(gap[r], eg, "row {r} gap");
+            } else {
+                assert!(gap[r].is_infinite() && gap[r] > 0.0, "row {r} +inf gap");
+            }
+        }
+
+        // Boundary widths with a duplicated max: lowest index wins, gap 0
+        // (width 1 collapses to a single element: gap +inf).
+        for width in [1usize, 31, 32, 33, 1023, 1025] {
+            let mut row = vec![-1.0f32; width];
+            row[width / 2] = 3.0;
+            row[width - 1] = 3.0;
+            let (idx, gap) = run(&ctx, &row, 1, width);
+            assert_eq!(idx, vec![(width / 2) as i32], "boundary width {width} idx");
+            if width == 1 {
+                assert!(gap[0].is_infinite() && gap[0] > 0.0, "boundary width 1 gap");
+            } else {
+                assert_eq!(gap, vec![0.0], "boundary width {width} gap");
+            }
         }
     }
 

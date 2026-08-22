@@ -6615,7 +6615,7 @@ fn execute_single_turn_request(
                 target: "qwen_diag",
                 concat!(
                     "dflash: spec_steps={} off_steps={} accepted={}/{} ",
-                    "mean_emitted={:.2} alpha_backoff={} ",
+                    "mean_emitted={:.2} alpha_backoff={} fallback={} ",
                     "draft_ms={:.1} draft_first_ms={:.1} verify_ms={:.1} ",
                     "append_ms={:.1} restore_ms={:.1} serial_ms={:.1}",
                 ),
@@ -6625,6 +6625,7 @@ fn execute_single_turn_request(
                 s.drafts_scored,
                 1.0 + s.accepted_drafts as f64 / steps,
                 s.alpha_backoff,
+                s.fallback_calls,
                 s.draft_ms / steps,
                 s.draft_first_call_ms,
                 s.verify_ms / steps,
@@ -8656,6 +8657,23 @@ const DFLASH_ALPHA_OFF_MARGIN: f64 = 0.6;
 /// Hard ctx guard past the calibrated range.
 const DFLASH_OFF_CTX: usize = 16384;
 
+/// Default margin for the batched-verify exact fallback: a committed row
+/// whose (top1 - top2) argmax gap is below this is re-evaluated through the
+/// token-major path. Sized at ~2x the max batched-vs-token-major logit
+/// delta observed by the shadow probe (9.5e-2, 2026-08-21).
+const DFLASH_VERIFY_FALLBACK_MARGIN_DEFAULT: f32 = 0.2;
+
+fn verify_fallback_margin() -> f32 {
+    std::env::var("QWEN_DFLASH_VERIFY_MARGIN")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DFLASH_VERIFY_FALLBACK_MARGIN_DEFAULT)
+}
+
+fn verify_fallback_enabled() -> bool {
+    std::env::var("QWEN_DFLASH_VERIFY_FALLBACK").map_or(true, |value| value != "0")
+}
+
 /// Ctx-keyed spec-vs-serial break-even in mean emitted tokens/step.
 fn dflash_breakeven(_kv_n_pos: usize) -> f64 {
     DFLASH_BREAKEVEN_BASE
@@ -8679,6 +8697,7 @@ struct DflashDecodeStats {
     accepted_drafts: usize,
     drafts_scored: usize,
     physical_target_positions: usize,
+    fallback_calls: usize,
     alpha_backoff: bool,
 }
 
@@ -8892,12 +8911,121 @@ where
                 break;
             }
         }
-        let n_accepted = accepted.len();
-        let n_keep = if terminal.is_some() {
+        let mut n_accepted = accepted.len();
+        let mut n_keep = if terminal.is_some() {
             n_accepted
         } else {
             n_accepted + 1
         };
+
+        // ---- Margin-guarded exact fallback ----
+        // The batched verify arithmetic diverges from token-major by up to
+        // ~1e-1 absolute on low-confidence rows (shadow probe, 2026-08-21).
+        // When any committed row's (top1 - top2) gap is below the margin the
+        // batched argmax could flip, so replay the block through exact
+        // token-major forwards and re-accept against their argmaxes.
+        let mut fallback_ran = false;
+        let mut fallback_targets: Vec<i32> = Vec::new();
+        if verify_fallback_enabled() {
+            let margin = verify_fallback_margin();
+            let gaps = unsafe {
+                let src = verify_scratch.verify_gap.buffer.contents().as_ptr() as *const f32;
+                std::slice::from_raw_parts(src, n_eff)
+            };
+            let flagged = (0..=n_accepted).any(|i| !(gaps[i].is_finite() && gaps[i] >= margin));
+            if std::env::var_os("QWEN_DFLASH_VERIFY_FALLBACK_DIAG").is_some() {
+                eprintln!(
+                    "[fallback-diag] step_pos={drafter_pos} n_eff={n_eff} n_accepted={n_accepted} gaps={:?} flagged={flagged}",
+                    &gaps[..n_eff]
+                );
+            }
+            if flagged {
+                fallback_ran = true;
+                stats.fallback_calls += 1;
+                qwen_llm::metal_dflash::encode_restore_to_pre_block(
+                    forward,
+                    &verify_scratch,
+                    drafter_pos,
+                    unsafe { sequence.metal_session_mut() },
+                    Some(n_eff as u32),
+                )
+                .context("verify fallback restore to pre-block state")?;
+                // Exact replay with adaptive stop: row 0 is the carry; each
+                // further row replays a draft only while the reference stream
+                // keeps accepting it. The replay stops at the first mismatch,
+                // so the session advances exactly the committed-row count.
+                fallback_targets.clear();
+                fallback_targets.reserve(n_eff);
+                accepted.clear();
+                terminal = None;
+                {
+                    let mut replay_row = |row: usize, token: i32| -> Result<i32> {
+                        let pos = drafter_pos + row as u32;
+                        let hidden_dst = verify_scratch.hidden_capture_n_slot(row as u32);
+                        let ref_logits = forward
+                            .single_token_with_multi_hidden(
+                                token,
+                                pos,
+                                unsafe { sequence.metal_session_mut() },
+                                &head.target_layer_ids,
+                                &hidden_dst,
+                            )
+                            .context("verify fallback exact row")?;
+                        if let Some((ring, wstart, features)) = capture_ring
+                            .as_ref()
+                            .filter(|(_, wstart, _)| (pos as usize) >= *wstart)
+                        {
+                            let offset = ((pos as usize - *wstart)
+                                % qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW)
+                                * *features;
+                            let view = ring.view_subrange(offset as u64, vec![*features as u64]);
+                            let ring_encoder = loaded.context().queue.commandBuffer().expect("cmd");
+                            let ring_enc = KernelEncoder::begin(&ring_encoder);
+                            encode_scatter_offset_f32(
+                                loaded.context(),
+                                &ring_enc,
+                                &hidden_dst,
+                                &view,
+                                0,
+                                *features,
+                            )
+                            .context("fallback ring scatter")?;
+                            ring_enc.end();
+                            ring_encoder.commit();
+                            ring_encoder.waitUntilCompleted();
+                        }
+                        Ok(argmax_i32(&ref_logits))
+                    };
+                    let row0_target = replay_row(0, verify_input[0])?;
+                    fallback_targets.push(row0_target);
+                    for (i, &draft) in verify_input[1..].iter().enumerate() {
+                        if draft != fallback_targets[i] {
+                            break;
+                        }
+                        accepted.push(draft);
+                        let target = replay_row(i + 1, draft)?;
+                        fallback_targets.push(target);
+                        if stop_tokens.contains(&draft) {
+                            terminal = Some(StopReason::Eos);
+                            break;
+                        }
+                        if tokens.len() + accepted.len() == max_tokens {
+                            terminal = Some(StopReason::TokenLimit);
+                            break;
+                        }
+                    }
+                }
+                n_accepted = accepted.len();
+                n_keep = if terminal.is_some() {
+                    n_accepted
+                } else {
+                    n_accepted + 1
+                };
+                if fallback_targets.len() < n_keep {
+                    fallback_targets.resize(n_keep, 0);
+                }
+            }
+        }
 
         // ---- Append captured hiddens for committed positions ----
         // Columns 0..=n_accepted are carry + accepted drafts. The bonus
@@ -8951,7 +9079,11 @@ where
         }
 
         // ---- Restore target state on partial accept ----
-        if n_keep < n_eff {
+        // Skipped when the margin fallback ran: the exact replay already
+        // left the session at the committed-row state (and the
+        // kv_n_pos contract the partial-accept restore validates no
+        // longer holds).
+        if !fallback_ran && n_keep < n_eff {
             let restore_t0 = Instant::now();
             qwen_llm::metal_dflash::encode_restore_after_partial_accept_inner(
                 forward,
@@ -8986,7 +9118,11 @@ where
                     .context("shadow probe single_token")?;
                 shadow.advance_by(1)?;
                 let ref_tok = argmax_i32(&ref_logits);
-                let spec_tok = verify_argmax[i];
+                let spec_tok = if fallback_ran {
+                    fallback_targets[i]
+                } else {
+                    verify_argmax[i]
+                };
                 let mut top1 = ref_logits[0];
                 let mut top2 = f32::NEG_INFINITY;
                 for &v in &ref_logits[1..] {
@@ -9003,8 +9139,8 @@ where
                         let src = debug.debug_logits.buffer.contents().as_ptr() as *const f32;
                         let v = loaded.arch().vocab_size as usize;
                         let mut max_delta = 0.0f32;
-                        for j in 0..v {
-                            let d = unsafe { (*src.add(i * v + j) - ref_logits[j]).abs() };
+                        for (j, &r) in ref_logits.iter().enumerate() {
+                            let d = unsafe { (*src.add(i * v + j) - r).abs() };
                             if d > max_delta {
                                 max_delta = d;
                             }
@@ -9045,7 +9181,11 @@ where
             }
         }
 
-        carry = verify_argmax[n_accepted];
+        carry = if fallback_ran {
+            fallback_targets[n_accepted]
+        } else {
+            verify_argmax[n_accepted]
+        };
     };
 
     ensure!(

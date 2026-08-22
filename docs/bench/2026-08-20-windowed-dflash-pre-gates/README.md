@@ -237,3 +237,58 @@ attn layers; head_count_kv 4, key/value length 256, KV F16.
 
 P2 census recorded above; P1 (Q8_0 long-band slope) and P3 (alpha census
 + ctx-aware probe tax) remain the timed gates for OFF_CTX removal.
+
+## P5 preregistered — packed-N8 verify attention (the flagship lever, 2026-08-22)
+
+### Problem
+
+The verify(8) tail dispatches per-row attention (8 rows x 13 layers = 104
+dispatches), each reading the full KV: at 130K post-retune that is 62.5ms
+per row, ~500ms of a ~615ms verify pass. Serial is ~120ms/token, so
+speculation at depth needs byte reuse, not more partitioning (nwg retune
+already banked the 1.6-2.1x single-row win).
+
+### Design
+
+- One dispatch per attention layer: TG = (kv_head, partition); 4
+  simdgroups per TG, each owning 2 query rows x 6 grouped heads = 12
+  (row, head) streams. K tile C=32 staged once per TG in shmem (16KB),
+  shared across all 8 query rows.
+- Q for all 8 rows is precomputed: the verify tail restructure hoists
+  the attention layer's Q projection + norm + RoPE into a batched
+  8-row front (mat-mat lineage already exists), then one packed
+  attention, then the existing batched gate/o_proj back.
+- Causal mask: rows at pos..pos+7 have nested visibility; only the
+  final <= 8 KV rows need per-row masking — passed as a per-row
+  visible bound (pos + i). Non-final tiles are unmasked.
+- Output: 8 per-row O buffers (existing attn_o slots per row) plus
+  per-row m/l partials per partition, combined by the existing reduce
+  lineage.
+
+### Floors (from the P2 census + retuned audit)
+
+- Bytes: 6.8GB/pass at 130K / 474GB/s = 14.3ms (vs ~500ms today).
+- Compute: 8 rows x 24 heads x 130K scores x 2 (QK + PV) ~= 330 GFLOP;
+  needs the matrix/MMA formulation; at 8-12 TFLOP/s effective that is
+  28-40ms -> projected packed attention ~35-45ms per pass, ~14x.
+- Projected verify(8) at 130K: 615 -> ~160ms; break-even at alpha=0.3
+  drops from ~3.5 to ~1.3. N=16 becomes a width-parameterized follow-up
+  of the same kernel (chained drafting + Q8 N=16 table arms).
+
+### Gates
+
+- G1 correctness: packed reader vs per-row kernel bitwise at small ctx
+  (same partition count), cosine >= 0.9999 at 32K; per-row causal
+  boundary probes at the last-8 mask edge.
+- G2 equivalence: divergent + 10.8K + backoff cells byte-identical with
+  the packed reader default-on; shadow-probe max delta re-measured and
+  inside the 0.2 margin; acceptance parity (alpha within noise).
+- G3 perf: verify attention phase at 130K <= 60ms (synthetic audit
+  harness extended to the packed reader).
+- Rollback: QWEN_ATTN_V4_PACKED_N8=0.
+
+### Open design decisions
+
+- Register pressure: 12 streams per simdgroup with C=32 may exceed the
+  register budget; fallback Q4 rows per simdgroup (2 TGs per kv head).
+- F16 staging of Q (scores in F32) matches the scorer lineage.

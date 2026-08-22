@@ -178,24 +178,23 @@ is all-SWA-2048 and F1 (2026-08-20) proved bit-identical drafts from a
   trailing-alpha window clears the break-even. **Second audit fixes landed**
   (fc5edc6): A1-A7. Updated ranked queue (long-context goal per the review):
 
-1. **P4 coverage gates (byte-identity, cheap):** >2048-token speculative
-   generation vs serial (ring wrap during speculation), restored prefix
-   > 2048 (seed skip > 0), fallback-terminal boundary publication, a
-   recovering-content fixture pinning a real backoff -> re-entry.
-2. **P2 packed-N8 verify attention pre-pricing (counts only).** The
-   dominant long-ctx lever: ~103 ms of a ~215 ms verify pass at 130K
-   moves ~8.3 GB of KV per pass at ~80 GB/s (474 GB/s stream). Gate:
-   projected slope <= 0.40 ms/1K. Reopens "packed causal N=8 attention"
-   through its own written reopen condition.
+1. **P4 coverage gates (byte-identity, cheap):** DONE except the
+   recovering-content re-entry fixture — 2,600-token wrapped generation,
+   restored 2,276-token wstart>0 seed, and fallback-heavy boundary
+   publication all byte-identical. The re-entry fixture stays unpinned.
+2. **Serial/verify attention bandwidth audit (NEW, partially DONE):**
+   the group 4|6 split-K under-partitioning is root-caused and retuned
+   (3cd4751: 128/512 tiers, 1.6-2.1x on the kernel). The residual
+   ~4x gap to stream (111 vs 474 GB/s at 130K) is a limiter-capture
+   follow-up. The packed-N8 verify reader (8x reuse) remains the
+   larger lever; pre-pricing per the P2 census.
 3. **P1 = F3-amended (timed, one packet):** within-session verify(8)/
    single_token slope at 8K-64K on the served Q8_0 asset with
    attention/GDN phase split. Pass to lift OFF_CTX: break-even <= 3.4
    across the band AND attention slope >= 60% of the verify slope.
 4. **P3 = F4-amended (counts):** alpha census at 60-133K plus fallback
-   rate plus the ctx-aware re-probe tax model (flat 8-step probing at
-   130K costs ~29 ms/token during backoff — worse than serial; the
-   cadence must scale with ctx before OFF_CTX lifts). Pass: mean
-   emitted >= 3.1 AND backoff-regime tax <= 5%.
+   rate plus the ctx-aware re-probe tax model. Pass: mean emitted >= 3.1
+   AND backoff-regime tax <= 5%.
 5. **Guard tuning/robustness follow-up.** Attribute the 9.5e-2 outlier
    delta to its batched kernel; extend fallback coverage to MoE verify
    paths when MoE speculation reopens; port the guard to

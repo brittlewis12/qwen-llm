@@ -6,6 +6,49 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-22 — Attn-V4 Split-K Under-Partitioning: Root Cause, Retuned, Committed
+
+### Why
+
+The serial-attention bandwidth anomaly raised in the leverage-map
+reconsideration (why ~130 GB/s at 130K against the 474 GB/s stream) was
+probed with a new in-lib synthetic audit test
+(`attn_decode_v4_bandwidth_audit_130k`, kernel-timing only, env
+sweepable). The measured truth was worse than the slope estimate: the
+group 4|6 selector's 64 partitions run at a FLAT ~47-57 GB/s across
+8K-130K (no cliff — a constant structural inefficiency, not a TLB
+effect), 56.8 GB/s at 130K.
+
+### Sweep (synthetic, ms per attention layer)
+
+nwg=64 (old default): 0.68/1.54/2.84/5.33/9.45 ms at 8/16/32/64/130K.
+nwg=128: 0.42/1.06/1.72/2.56/5.07 (1.6-2.1x). nwg=256: worse than 128
+below 64K. nwg=512: wins at 130K (4.81 ms, 1.96x). tile_c 16/64 flat or
+worse.
+
+### Change (committed 3cd4751)
+
+group 4|6: n_pos >= 98,304 -> 512 partitions, 4,096..98,304 -> 128
+(was 64 everywhere); groups 8|16 table unchanged. Rollback
+QWEN_ATTN_V4_NWG.
+
+### Gates
+
+Full lib suite green (same five pre-existing DS4 failures). Divergent
+prompt byte-identical; shadow-probe max delta re-measured at 9.27e-2
+(slightly DOWN from 9.53e-2; guarded flips only). A 10.8K-ctx cell is
+byte-identical spec-vs-serial and decodes 48.6 tps (3.03x serial);
+serial A/B at 10.8K moves 15.66 -> 16.03 tps (+2.4% — the attention
+win is diluted by the GDN/FFN share at that depth and compounds toward
+64K-130K where attention dominates).
+
+### Next
+
+The packed-N8 verify attention reader remains the larger lever (8x byte
+reuse on the verify side); the residual ~4x gap between nwg=512's
+111 GB/s and stream is a candidate for the limiter capture as a
+follow-up, not a blocker.
+
 ## 2026-08-22 — P2 Census And P4 Coverage Gates: Long-Context Lever Priced
 
 ### P2 census (counts only)

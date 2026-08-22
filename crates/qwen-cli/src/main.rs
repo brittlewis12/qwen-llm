@@ -22,7 +22,7 @@ use messages::{
     render_qwen_messages_prompt_with_generation, render_qwen_single_turn_prompt,
     render_qwen38_messages_prompt_with_generation, render_qwen38_single_turn_prompt,
 };
-use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLDevice};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use qwen_llm::checkpoint_identity::{
     CheckpointIdentityCache, IdentityCacheOutcome, checkpoint_content_identity,
 };
@@ -52,10 +52,10 @@ use qwen_llm::metal::{
     evaluate_metal_memory_admission_with_cpu_bytes,
 };
 use qwen_llm::metal_dflash::{
-    DFlashDecoder, MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession,
-    MetalDFlashVerifyScratch, PrefillScratchConfig, PrefillScratchOverlayStats, PrefillScratchPlan,
-    ensure_prompt_lookup_n8_supported, plan_prefill_scratch_with_matrix_max_pos_configured,
-    prefill_tokens_with_multi_hidden,
+    DFlashDecoder, MetalDFlashDebugScratch, MetalDFlashHead, MetalDFlashLayerMajorScratch,
+    MetalDFlashSession, MetalDFlashVerifyScratch, PrefillScratchConfig, PrefillScratchOverlayStats,
+    PrefillScratchPlan, ensure_prompt_lookup_n8_supported,
+    plan_prefill_scratch_with_matrix_max_pos_configured, prefill_tokens_with_multi_hidden,
 };
 use qwen_llm::metal_forward::{
     LogitsReadbackProfile, MetalForward, MfError, SnapshotValidationError, StructuralRowEvidence,
@@ -6563,6 +6563,22 @@ fn execute_single_turn_request(
                     .context("seed drafter cross-context from prompt prefill")?;
             }
             let dflash_scratch = allocate_dflash_decode_scratch(loaded, head)?;
+            // Shadow-reference probe (QWEN_DFLASH_SHADOW_PROBE=1): a second
+            // sequence prefilled through the plain serial path replays every
+            // committed token alongside the speculative loop and compares the
+            // reference argmax against the packed-verify row-0 argmax. Costs
+            // a full serial decode on top of speculation; diagnostics only.
+            let shadow_probe = std::env::var_os("QWEN_DFLASH_SHADOW_PROBE").is_some();
+            let mut shadow = if shadow_probe {
+                let mut shadow_sequence = loaded
+                    .create_sequence(SequenceConfig::new(capacity))
+                    .context("allocate shadow probe sequence")?;
+                crate::prefill_span(&forward, &mut shadow_sequence, &mut scratch, &prompt_ids, 0)
+                    .context("shadow probe prefill")?;
+                Some(shadow_sequence)
+            } else {
+                None
+            };
             let result = generate_dflash(
                 loaded,
                 &forward,
@@ -6574,6 +6590,7 @@ fn execute_single_turn_request(
                 args.tokens,
                 &stop_tokens,
                 None,
+                shadow.as_mut(),
                 |token| {
                     let callback_t0 = Instant::now();
                     write!(stdout, "{}", tokenizer.decode_piece(token))?;
@@ -8726,6 +8743,7 @@ fn generate_dflash<OnToken>(
     max_tokens: usize,
     stop_tokens: &[i32],
     capture_ring: Option<(MetalTensor, usize, usize)>,
+    mut shadow_probe: Option<&mut Sequence>,
     mut on_token: OnToken,
 ) -> Result<DflashGeneration>
 where
@@ -8755,6 +8773,20 @@ where
         allocation_ms,
     } = scratch;
     stats.scratch_allocation_ms = allocation_ms;
+
+    let debug_scratch = if shadow_probe.is_some() {
+        Some(
+            MetalDFlashDebugScratch::fresh(
+                loaded.context(),
+                loaded.metal_model(),
+                n_block as u32,
+                k_layers as u32,
+            )
+            .context("allocate shadow probe debug scratch")?,
+        )
+    } else {
+        None
+    };
 
     let mut decoder = DFlashDecoder::new(forward, head, dsess);
 
@@ -8834,7 +8866,7 @@ where
             &mut verify_scratch,
             &mut layer_scratch,
             unsafe { sequence.metal_session_mut() },
-            None,
+            debug_scratch.as_ref().map(|d| &d.debug_logits),
             Some(n_eff as u32),
         )
         .context("dflash packed verify")?;
@@ -8940,6 +8972,55 @@ where
         transition_wall_ms += elapsed_ms;
         first_transition_ms.get_or_insert(elapsed_ms);
 
+        // ---- Shadow-reference divergence probe ----
+        // Replay the committed prefix through a separately prefilled
+        // serial-reference session and compare the reference argmax against
+        // the packed-verify row-0 argmax. Emits per-step evidence; the fork
+        // step is the one where spec != ref.
+        if let Some(shadow) = shadow_probe.as_deref_mut() {
+            let committed = &verify_input[..n_keep];
+            for (i, &tok) in committed.iter().enumerate() {
+                let pos = drafter_pos + i as u32;
+                let ref_logits = forward
+                    .single_token(tok, pos, unsafe { shadow.metal_session_mut() })
+                    .context("shadow probe single_token")?;
+                shadow.advance_by(1)?;
+                let ref_tok = argmax_i32(&ref_logits);
+                let spec_tok = verify_argmax[i];
+                let mut top1 = ref_logits[0];
+                let mut top2 = f32::NEG_INFINITY;
+                for &v in &ref_logits[1..] {
+                    if v > top1 {
+                        top2 = top1;
+                        top1 = v;
+                    } else if v > top2 {
+                        top2 = v;
+                    }
+                }
+                let ref_gap = top1 - top2;
+                let max_delta = match debug_scratch.as_ref() {
+                    Some(debug) => {
+                        let src = debug.debug_logits.buffer.contents().as_ptr() as *const f32;
+                        let v = loaded.arch().vocab_size as usize;
+                        let mut max_delta = 0.0f32;
+                        for j in 0..v {
+                            let d = unsafe { (*src.add(i * v + j) - ref_logits[j]).abs() };
+                            if d > max_delta {
+                                max_delta = d;
+                            }
+                        }
+                        max_delta
+                    }
+                    None => f32::NAN,
+                };
+                if spec_tok != ref_tok {
+                    eprintln!(
+                        "[shadow-probe] FLIP pos={pos} spec={spec_tok} ref={ref_tok} ref_gap={ref_gap:.6e} max_delta={max_delta:.6e}"
+                    );
+                }
+                eprintln!("[shadow-probe] row pos={pos} gap={ref_gap:.6e} delta={max_delta:.6e}");
+            }
+        }
         for token in accepted {
             tokens.push(token);
             if !stop_tokens.contains(&token) {

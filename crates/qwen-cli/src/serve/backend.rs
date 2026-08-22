@@ -879,6 +879,7 @@ impl GenerationBackend for EngineBackend {
                             .and_then(|(dst, wstart, _, n_features, ring)| {
                                 ring.map(|_| (dst.clone(), *wstart, *n_features))
                             }),
+                        None,
                         |token| {
                             let bytes = tokenizer
                                 .try_decode_piece_bytes_exact(token)

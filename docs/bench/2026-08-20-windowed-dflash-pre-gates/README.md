@@ -198,3 +198,42 @@ Checkpoint capture tail + restored-request speculation implemented and gated:
    stash; unrelated to this packet.
 
 
+
+## P2 census — verify attention bytes and the packed-N8 lever (2026-08-22)
+
+Arch facts (target GGUF): block_count 65, full_attention_interval 4 -> 13
+attn layers; head_count_kv 4, key/value length 256, KV F16.
+
+- KV per token per layer: K 2KB + V 2KB = 4KB. Per verify(8) pass the
+  per-row tail dispatches attn per row per layer (104 dispatches/pass),
+  each reading the full KV: **416KB per ctx token** -> 54.1GB at 130K,
+  3.3GB at 8K.
+- Bandwidth floor at 130K: ~114ms at the 474GB/s stream — the current
+  slope extrapolation (~103ms) under-predicts slightly (fit was
+  L2-resident at 0.5-2K ctx), so the attention body is the whole slope.
+- Packed-N8 single-read floor: 14.3ms at stream (8x byte reuse).
+  Constraint: the 8-row x 24-Q-head score work (~50 GFLOP/layer) is
+  compute-bound under scalar replay; the packed reader must use the
+  matrix-score formulation (existing attn matrix kernel lineage).
+- P2 gate: projected slope <= 0.40 ms/1K. The single-read floor is
+  ~0.11 ms/1K; the compute floor is the real gate and needs the
+  pre-pricing packet before kernel work.
+
+## P4 coverage gates — executed (2026-08-22)
+
+- P4a >2K-token generation: a 2,600-token essay (token_limit) through the
+  speculative path is byte-identical to serial; the run exercised full ring
+  wrap during speculation (2,600 generated >> 2,048 ring), 640 spec steps /
+  728 off steps / 101 fallbacks in a mixed re-probe regime.
+- P4b restored prefix > 2048: turn 2 restored 2,276 matched tokens
+  (prompt 2,298, wstart 250, seed skip > 0) and ran decode_path=dflash;
+  byte-identical to the serial control on both turns.
+- P4c fallback-heavy completed boundary: the essay turn 1 (fallback=86)
+  published its completed checkpoint, proven by turn 2 restoring from it.
+  A strictly terminal-during-fallback-replay cell remains unpinned.
+- P4d recovering-content re-entry transition: still unpinned (content
+  dependent); the re-probe cadence is structurally exercised by P4a's
+  mixed regime.
+
+P2 census recorded above; P1 (Q8_0 long-band slope) and P3 (alpha census
++ ctx-aware probe tax) remain the timed gates for OFF_CTX removal.

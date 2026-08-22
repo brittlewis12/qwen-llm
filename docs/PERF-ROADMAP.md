@@ -172,22 +172,21 @@ is all-SWA-2048 and F1 (2026-08-20) proved bit-identical drafts from a
   fixed — an argmax tie inversion (three CPU sites vs the GPU kernel's
   lowest-index contract) plus a batched-verify near-tie flip, now guarded by
   the margin-based exact fallback (a490444). The divergent prompt is
-  byte-identical with the guard on. Updated ranked queue:
+  byte-identical with the guard on. **Rank 2 CLOSED** (1ab937f): Off-mode is
+  non-terminal — capture-fed Off keeps the drafter cross-context and the
+  ring alive, and a 1-in-8 re-probe policy re-enters speculation when the
+  trailing-alpha window clears the break-even. Updated ranked queue:
 
 1. **Guard tuning/robustness follow-up.** The margin (0.2) covers ~2x the
    observed 9.5e-2 outlier delta; source-level attribution of that outlier
    row (which batched kernel produced a 1e-1 delta) would let the margin
    tighten or the kernel be fixed. Also: extend the fallback coverage to
    MoE verify paths when MoE speculation reopens.
-2. **Off-mode capture feed + re-probe policy.** The capture ring now exists
-   (1b); Off-mode still stops feeding the drafter (terminal Off). Needs the
-   priced periodic re-probe (the named open policy item) before non-terminal
-   Off ships.
-3. **DFLASH_OFF_CTX removal: HOLD behind F3+F4.** Doc-blocked by the "Owed"
+2. **DFLASH_OFF_CTX removal: HOLD behind F3+F4.** Doc-blocked by the "Owed"
    8K+ slope measurement (no ctx term in either direction until it lands);
-   break-even at 130K is ~2.1 — real but thin. With 1b landed, the 12-16K
-   restored-request band now speculates; the 66-133K band still needs this.
-4. **GDN wavefront verify: KEEP (sanctioned packet).** Reprice: targets the
+   break-even at 130K is ~2.1 — real but thin. With 1a/1b and the re-probe
+   landed, this is the last gate on the 66-133K agentic band.
+3. **GDN wavefront verify: KEEP (sanctioned packet).** Reprice: targets the
    48-layer sequential recurrence latency of the 9.44 ms/token marginal;
    checkpoint blits are already priced at 9-16% and are not the lever.
 5. **Warm small-tail TTFT: KEEP.** 186 vs 150 ms gate, orthogonal to

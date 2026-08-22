@@ -6,6 +6,38 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-22 — Non-Terminal DFlash Backoff With Capture-Fed Off And Re-Probe
+
+### Change (committed 1ab937f)
+
+The trailing-alpha backoff no longer disables speculation terminally.
+Off steps decode through `single_token_with_multi_hidden`, appending the
+committed hidden into the drafter cross-context and scattering into the
+caller's capture ring, so completed-boundary tails stay complete through
+backoff and speculation can resume. The hard `DFLASH_OFF_CTX` stop
+remains terminal. While in backoff, one spec step re-probes every
+`DFLASH_REPROBE_INTERVAL = 8` off-steps and pushes its acceptance into
+the same trailing-alpha window; the window mean clearing the break-even
+re-enters speculation.
+
+### Gates
+
+- Low-acceptance prose prompt (lighthouse/cat story, 256 tokens): backs
+  off (mean emitted 2.29, 152 off steps, 45 spec steps including
+  probes, fallback 9) and stays byte-identical to serial.
+- The two maintained regression prompts (code prompt, 2.2K-ctx prompt)
+  remain byte-identical with re-probe and margin guard on.
+- qwen-cli suite green (300 passed); clippy clean.
+
+### Owed
+
+- An explicit backoff->re-entry transition has not been captured on a
+  natural prompt yet (the prose cell stays below break-even throughout);
+  the probe cadence is structurally exercised. A recovering-content
+  fixture would pin the re-entry branch.
+- F3/F4 (long-band slope + alpha census) remain the gates for removing
+  DFLASH_OFF_CTX; the 66-133K serial band is unchanged until then.
+
 ## 2026-08-22 — Spec-Vs-Serial Tie And Near-Tie Divergence: Root Causes Fixed
 
 ### Tie inversion (committed d5a6d5c)

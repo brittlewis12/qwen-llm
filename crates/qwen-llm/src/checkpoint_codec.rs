@@ -18,7 +18,12 @@ const DIGEST_BYTES: usize = 32;
 pub const SNAPSHOT_RECORD_FIXED_BYTES: u64 = (PAYLOAD_OFFSET + DIGEST_BYTES) as u64;
 const FLAG_PENDING_TOKEN: u64 = 1 << 0;
 const FLAG_FINAL_LOGITS: u64 = 1 << 1;
-const KNOWN_FLAGS: u64 = FLAG_PENDING_TOKEN | FLAG_FINAL_LOGITS;
+/// Optional trailing drafter capture section: the last
+/// `min(prefix_count, DFLASH_CAPTURE_WINDOW)` target columns as F32,
+/// `capture_tail_features` elements per column. Opt-in per record; records
+/// without the flag keep the legacy layout byte-for-byte.
+const FLAG_CAPTURE_TAIL: u64 = 1 << 2;
+const KNOWN_FLAGS: u64 = FLAG_PENDING_TOKEN | FLAG_FINAL_LOGITS | FLAG_CAPTURE_TAIL;
 
 const OFF_MAGIC: usize = 0x00;
 const OFF_VERSION: usize = 0x08;
@@ -48,7 +53,8 @@ const OFF_GDN_CONV_BYTES: usize = 0x90;
 const OFF_GDN_STATE_BYTES: usize = 0x98;
 const OFF_LOGITS_BYTES: usize = 0xa0;
 const OFF_COMPATIBILITY_ID: usize = 0xa8;
-const OFF_RESERVED: usize = 0xc8;
+const OFF_CAPTURE_TAIL_BYTES: usize = 0xc8;
+const OFF_RESERVED: usize = 0xd0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SnapshotCodecConstraints<'a> {
@@ -117,6 +123,7 @@ struct WireLayout {
     gdn_conv_bytes: u64,
     gdn_state_bytes: u64,
     logits_bytes: u64,
+    capture_tail_bytes: u64,
     payload_bytes: u64,
     record_bytes: u64,
 }
@@ -126,6 +133,8 @@ impl WireLayout {
         prefix_count: u64,
         pending_token: Option<i32>,
         has_logits: bool,
+        has_capture_tail: bool,
+        tail_bytes: u64,
         constraints: SnapshotCodecConstraints<'_>,
     ) -> Result<Self, SnapshotCodecError> {
         if prefix_count > constraints.max_context_tokens as u64 {
@@ -133,6 +142,11 @@ impl WireLayout {
                 prefix_len: prefix_count,
                 max_context_tokens: constraints.max_context_tokens,
             });
+        }
+        if has_capture_tail && tail_bytes == 0 {
+            return Err(SnapshotCodecError::InvalidHeader(
+                "capture tail flag with empty section",
+            ));
         }
         let identity = constraints.expected_identity;
         let prefix_bytes = checked_mul("prefix_bytes", prefix_count, 4)?;
@@ -160,6 +174,7 @@ impl WireLayout {
         } else {
             0
         };
+        let tail_bytes = if has_capture_tail { tail_bytes } else { 0 };
         let payload_bytes = checked_sum(
             "payload_bytes",
             &[
@@ -170,6 +185,7 @@ impl WireLayout {
                 prefix_bytes,
                 kv_position_bytes,
                 logits_bytes,
+                tail_bytes,
             ],
         )?;
         let record_bytes = checked_sum(
@@ -184,7 +200,8 @@ impl WireLayout {
         }
         Ok(Self {
             flags: (u64::from(pending_token.is_some()) * FLAG_PENDING_TOKEN)
-                | (u64::from(has_logits) * FLAG_FINAL_LOGITS),
+                | (u64::from(has_logits) * FLAG_FINAL_LOGITS)
+                | (u64::from(has_capture_tail) * FLAG_CAPTURE_TAIL),
             prefix_count,
             pending_token: pending_token.unwrap_or(0),
             prefix_bytes,
@@ -194,6 +211,7 @@ impl WireLayout {
             gdn_conv_bytes,
             gdn_state_bytes,
             logits_bytes,
+            capture_tail_bytes: tail_bytes,
             payload_bytes,
             record_bytes,
         })
@@ -218,6 +236,11 @@ pub fn encode_snapshot<W: Write>(
         snapshot.prefix_len() as u64,
         snapshot.pending_token,
         snapshot.final_logits.is_some(),
+        snapshot.capture_tail.is_some(),
+        snapshot
+            .capture_tail
+            .as_ref()
+            .map_or(0, |t| (t.len() * 4) as u64),
         constraints,
     )?;
     require_len(
@@ -245,6 +268,9 @@ pub fn encode_snapshot<W: Write>(
     if let Some(logits) = snapshot.final_logits.as_ref() {
         require_len("logits", logits.len(), layout.logits_bytes / 4)?;
     }
+    if let Some(tail) = snapshot.capture_tail.as_ref() {
+        require_len("capture_tail", tail.len() * 4, layout.capture_tail_bytes)?;
+    }
 
     let header = build_header(snapshot, layout, constraints.expected_compatibility_id);
     let mut hasher = blake3::Hasher::new();
@@ -264,6 +290,9 @@ pub fn encode_snapshot<W: Write>(
     }
     if let Some(logits) = snapshot.final_logits.as_ref() {
         write_hashed(dst, &mut hasher, bytemuck::cast_slice(logits))?;
+    }
+    if let Some(tail) = snapshot.capture_tail.as_ref() {
+        write_hashed(dst, &mut hasher, bytemuck::cast_slice(tail))?;
     }
     let digest = *hasher.finalize().as_bytes();
     dst.write_all(&digest)?;
@@ -292,6 +321,8 @@ pub fn decode_snapshot<R: Read>(
     let prefix_raw = read_hashed_vec(src, &mut hasher, "prefix", layout.prefix_bytes)?;
     let position_raw = read_hashed_vec(src, &mut hasher, "kv_positions", layout.kv_position_bytes)?;
     let logits_raw = read_hashed_vec(src, &mut hasher, "logits", layout.logits_bytes)?;
+    let capture_tail_raw =
+        read_hashed_vec(src, &mut hasher, "capture_tail", layout.capture_tail_bytes)?;
 
     let mut expected_digest = [0u8; DIGEST_BYTES];
     src.read_exact(&mut expected_digest)?;
@@ -322,6 +353,11 @@ pub fn decode_snapshot<R: Read>(
     } else {
         None
     };
+    let capture_tail = if layout.flags & FLAG_CAPTURE_TAIL != 0 {
+        Some(parse_f32_le("capture_tail", &capture_tail_raw)?)
+    } else {
+        None
+    };
     let snapshot = SessionSnapshot {
         identity: constraints.expected_identity.clone(),
         prefix_tokens,
@@ -332,6 +368,7 @@ pub fn decode_snapshot<R: Read>(
         gdn_conv_arena,
         gdn_state_arena,
         final_logits,
+        capture_tail,
     };
     snapshot.validate_for_restore(
         constraints.expected_identity,
@@ -402,6 +439,11 @@ fn build_header(
     put_u64(&mut header, OFF_GDN_CONV_BYTES, layout.gdn_conv_bytes);
     put_u64(&mut header, OFF_GDN_STATE_BYTES, layout.gdn_state_bytes);
     put_u64(&mut header, OFF_LOGITS_BYTES, layout.logits_bytes);
+    put_u64(
+        &mut header,
+        OFF_CAPTURE_TAIL_BYTES,
+        layout.capture_tail_bytes,
+    );
     header[OFF_COMPATIBILITY_ID..OFF_COMPATIBILITY_ID + 32].copy_from_slice(compatibility_id);
     header
 }
@@ -474,6 +516,8 @@ fn parse_and_validate_header(
         get_u64(header, OFF_PREFIX_COUNT),
         (flags & FLAG_PENDING_TOKEN != 0).then_some(pending_token),
         flags & FLAG_FINAL_LOGITS != 0,
+        flags & FLAG_CAPTURE_TAIL != 0,
+        get_u64(header, OFF_CAPTURE_TAIL_BYTES),
         constraints,
     )?;
     require_header_u64(header, OFF_RECORD_BYTES, "record", derived.record_bytes)?;
@@ -500,6 +544,12 @@ fn parse_and_validate_header(
         derived.gdn_state_bytes,
     )?;
     require_header_u64(header, OFF_LOGITS_BYTES, "logits", derived.logits_bytes)?;
+    require_header_u64(
+        header,
+        OFF_CAPTURE_TAIL_BYTES,
+        "capture_tail",
+        derived.capture_tail_bytes,
+    )?;
     Ok(derived)
 }
 
@@ -750,6 +800,7 @@ mod tests {
                 -3.5,
                 9.0,
             ]),
+            capture_tail: None,
         }
     }
 
@@ -798,12 +849,71 @@ mod tests {
                 .collect::<Vec<_>>()
         });
         assert_eq!(a_logits, b_logits);
+        let a_tail = a.capture_tail.as_ref().map(|values| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        });
+        let b_tail = b.capture_tail.as_ref().map(|values| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(a_tail, b_tail);
     }
 
     fn refresh_digest(record: &mut [u8]) {
         let digest_offset = record.len() - DIGEST_BYTES;
         let digest = blake3::hash(&record[..digest_offset]);
         record[digest_offset..].copy_from_slice(digest.as_bytes());
+    }
+
+    #[test]
+    fn capture_tail_round_trips_bits_and_sets_flag() {
+        let mut snapshot = snapshot(identity());
+        snapshot.capture_tail = Some(vec![0.25, -1.5, f32::INFINITY, 7.0]);
+        let record = encode(&snapshot);
+        assert_eq!(
+            get_u64(&record, OFF_FLAGS) & FLAG_CAPTURE_TAIL,
+            FLAG_CAPTURE_TAIL
+        );
+        assert_eq!(get_u64(&record, OFF_CAPTURE_TAIL_BYTES), 16);
+        let decoded = decode(&record, &identity());
+        assert_snapshot_bits_eq(&snapshot, &decoded);
+        assert_eq!(decoded.capture_tail.as_ref().map(Vec::len), Some(4));
+    }
+
+    #[test]
+    fn legacy_record_without_tail_is_unchanged() {
+        let snapshot = snapshot(identity());
+        let record = encode(&snapshot);
+        assert_eq!(get_u64(&record, OFF_FLAGS), 3);
+        assert_eq!(get_u64(&record, OFF_CAPTURE_TAIL_BYTES), 0);
+        let decoded = decode(&record, &identity());
+        assert!(decoded.capture_tail.is_none());
+        assert_snapshot_bits_eq(&snapshot, &decoded);
+    }
+
+    #[test]
+    fn unknown_flags_fail_closed_and_empty_tail_is_rejected() {
+        let base = snapshot(identity());
+        let mut record = encode(&base);
+        put_u64(&mut record, OFF_FLAGS, 1 << 7);
+        refresh_digest(&mut record);
+        assert!(matches!(
+            decode_snapshot(&mut Cursor::new(&record), constraints(&identity())),
+            Err(SnapshotCodecError::InvalidHeader("unknown flags"))
+        ));
+        let mut tail = snapshot(identity());
+        tail.capture_tail = Some(Vec::new());
+        assert!(matches!(
+            encode_snapshot(&mut Vec::new(), &tail, constraints(&identity())),
+            Err(SnapshotCodecError::InvalidHeader(
+                "capture tail flag with empty section"
+            ))
+        ));
     }
 
     #[test]
@@ -829,9 +939,10 @@ mod tests {
         assert_eq!(get_u64(&first, OFF_KV_POSITION_BYTES), 16);
         assert_eq!(get_u64(&first, OFF_KV_K_BYTES), 16);
         assert_eq!(
-            &first[OFF_COMPATIBILITY_ID..OFF_RESERVED],
+            &first[OFF_COMPATIBILITY_ID..OFF_CAPTURE_TAIL_BYTES],
             &COMPATIBILITY_ID
         );
+        assert_eq!(get_u64(&first, OFF_CAPTURE_TAIL_BYTES), 0);
         assert!(
             first[OFF_RESERVED..HEADER_BYTES]
                 .iter()

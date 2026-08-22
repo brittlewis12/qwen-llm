@@ -14003,6 +14003,13 @@ pub struct SessionSnapshot {
     /// subsequent exact-hit (request == cached prefix) sample directly
     /// without a forward pass. None if not stored at snapshot time.
     pub final_logits: Option<Vec<f32>>,
+    /// Optional drafter capture tail: the last
+    /// `min(prefix_len, DFLASH_CAPTURE_WINDOW)` target columns as F32,
+    /// `capture_tail_features` elements per column, column-major over
+    /// positions. Lets a restored request seed a windowed DFlash drafter
+    /// without replaying the matched prefix. None for legacy snapshots and
+    /// when no drafter head is loaded.
+    pub capture_tail: Option<Vec<f32>>,
 }
 
 #[derive(Clone, Debug, thiserror::Error, Eq, PartialEq)]
@@ -14055,6 +14062,7 @@ impl SessionSnapshot {
             + self.gdn_conv_arena.len()
             + self.gdn_state_arena.len()
             + self.final_logits.as_ref().map_or(0, |v| v.len() * 4)
+            + self.capture_tail.as_ref().map_or(0, |v| v.len() * 4)
             + self.prefix_tokens.len() * 4
             + self.pending_token.map_or(0, |_| 4)
             + self.kv_n_pos.len() * 8) as u64
@@ -14458,6 +14466,7 @@ impl MetalSession {
             gdn_conv_arena,
             gdn_state_arena,
             final_logits,
+            capture_tail: None,
         })
     }
 
@@ -14578,6 +14587,7 @@ mod tests {
             gdn_conv_arena: vec![0; 72],
             gdn_state_arena: vec![0; 60],
             final_logits: Some(vec![0.0; 4]),
+            capture_tail: None,
         }
     }
 
@@ -21847,6 +21857,7 @@ mod tests {
                 gdn_conv_arena: vec![],
                 gdn_state_arena: vec![],
                 final_logits: None,
+                capture_tail: None,
             };
             let mut s2 = sess;
             assert!(

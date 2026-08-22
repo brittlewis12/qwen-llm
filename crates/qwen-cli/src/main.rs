@@ -22,7 +22,7 @@ use messages::{
     render_qwen_messages_prompt_with_generation, render_qwen_single_turn_prompt,
     render_qwen38_messages_prompt_with_generation, render_qwen38_single_turn_prompt,
 };
-use objc2_metal::MTLDevice;
+use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLDevice};
 use qwen_llm::checkpoint_identity::{
     CheckpointIdentityCache, IdentityCacheOutcome, checkpoint_content_identity,
 };
@@ -47,7 +47,7 @@ use qwen_llm::dense_batch8::DENSE_BATCH8_WIDTH;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{
-    MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
+    KernelEncoder, MetalBufferSizeAndAlign, MetalContext, MetalMemoryAdmission, MetalMemorySignals,
     MetalPipelineCacheMetrics, MetalTensor, evaluate_metal_memory_admission,
     evaluate_metal_memory_admission_with_cpu_bytes,
 };
@@ -59,7 +59,7 @@ use qwen_llm::metal_dflash::{
 };
 use qwen_llm::metal_forward::{
     LogitsReadbackProfile, MetalForward, MfError, SnapshotValidationError, StructuralRowEvidence,
-    TokenProfile,
+    TokenProfile, encode_scatter_offset_f32,
 };
 use qwen_llm::model::{Arch, ArchKind};
 use qwen_llm::model_family::ModelFamily;
@@ -6408,7 +6408,7 @@ fn execute_single_turn_request(
         prefill_ms += ms;
         let capture_t0 = Instant::now();
         let estimated =
-            loaded.estimate_checkpoint_boundary_sizes(&sequence, prefix_len, false, true)?;
+            loaded.estimate_checkpoint_boundary_sizes(&sequence, prefix_len, false, true, 0)?;
         if estimated.record_bytes > durable_max_record_bytes {
             eprintln!(
                 concat!(
@@ -6423,6 +6423,8 @@ fn execute_single_turn_request(
                 prompt_ids[..prefix_len].to_vec(),
                 None,
                 Some(logits.clone()),
+                None,
+                0,
             ) {
                 Ok(prepared) => {
                     durable_prepared = Some(prepared);
@@ -6440,9 +6442,11 @@ fn execute_single_turn_request(
         prompt_logits = Some(logits);
     }
     // v0.77: with a drafter loaded, the prompt prefill must also capture
-    // the K target hidden layers the drafter conditions on. Allocated for
-    // the full remaining span; consumed into the drafter session below.
-    let mut dflash_prefill_capture: Option<(MetalTensor, usize, usize)> = None;
+    // the K target hidden layers the drafter conditions on. Windowed: an
+    // all-SWA drafter observes only its SWA suffix, so only that window is
+    // captured and seeded (F1 oracle, 2026-08-20); full-attention drafters
+    // keep full-span capture via usize::MAX.
+    let mut dflash_prefill_capture: Option<(MetalTensor, usize, usize, usize)> = None;
     if sequence.position() < prompt_ids.len() {
         let position = sequence.position();
         let (logits, ms) = match dflash_head {
@@ -6450,19 +6454,33 @@ fn execute_single_turn_request(
                 let k_layers = head.target_layer_ids.len();
                 let n_features = k_layers * loaded.arch().hidden_size as usize;
                 let span = prompt_ids.len() - position;
+                let window_limit = qwen_llm::metal_dflash::dflash_capture_window_limit(head);
+                let (wstart_rel, window) =
+                    qwen_llm::metal_dflash::dflash_capture_window_span(span, window_limit);
                 let dst =
-                    MetalTensor::zeros_f32(loaded.context(), vec![(span * n_features) as u64])
+                    MetalTensor::zeros_f32(loaded.context(), vec![(window * n_features) as u64])
                         .context("allocate drafter prefill hidden capture")?;
+                if wstart_rel > 0 {
+                    let (_, plain_ms) = prefill_span(
+                        &forward,
+                        &mut sequence,
+                        &mut scratch,
+                        &prompt_ids[position..position + wstart_rel],
+                        position,
+                    )?;
+                    prefill_ms += plain_ms;
+                }
+                let wstart_abs = position + wstart_rel;
                 let out = prefill_span_with_capture(
                     &forward,
                     &mut sequence,
                     &mut scratch,
-                    &prompt_ids[position..],
-                    position,
+                    &prompt_ids[wstart_abs..],
+                    wstart_abs,
                     &head.target_layer_ids,
                     &dst,
                 )?;
-                dflash_prefill_capture = Some((dst, span, n_features));
+                dflash_prefill_capture = Some((dst, wstart_abs, window, n_features));
                 out
             }
             None => prefill_span(
@@ -6519,7 +6537,12 @@ fn execute_single_turn_request(
             // v0.77 DFlash speculative decode. Seed the drafter's cross-context
             // with the captured prompt hiddens, then run the greedy
             // accept-prefix loop; output is identical to serial greedy.
-            let capacity = sequence.position() + args.tokens + 16;
+            // Windowed (2026-08-20): capacity covers the captured window plus
+            // generated columns, not the whole prompt.
+            let window_len = dflash_prefill_capture
+                .as_ref()
+                .map_or(0, |(_, _, window, _)| *window);
+            let capacity = window_len + args.tokens + 16;
             let mut dsess = MetalDFlashSession::fresh(
                 loaded.context(),
                 head,
@@ -6528,13 +6551,13 @@ fn execute_single_turn_request(
                 capacity,
             )
             .context("allocate dflash drafter session")?;
-            if let Some((dst, span, n_features)) = dflash_prefill_capture.as_ref() {
+            if let Some((dst, start_pos, window, n_features)) = dflash_prefill_capture.as_ref() {
                 dsess
                     .append_target_ctx_columns_contiguous_now(
                         loaded.context(),
                         dst,
-                        (sequence.position() - span) as u32,
-                        *span,
+                        *start_pos as u32,
+                        *window,
                         *n_features,
                     )
                     .context("seed drafter cross-context from prompt prefill")?;
@@ -6550,6 +6573,7 @@ fn execute_single_turn_request(
                 logits,
                 args.tokens,
                 &stop_tokens,
+                None,
                 |token| {
                     let callback_t0 = Instant::now();
                     write!(stdout, "{}", tokenizer.decode_piece(token))?;
@@ -6790,6 +6814,7 @@ fn execute_single_turn_request(
             boundary.consumed_prefix_len,
             true,
             false,
+            0,
         )?;
         if estimated.record_bytes > durable_max_record_bytes {
             eprintln!(
@@ -6806,6 +6831,8 @@ fn execute_single_turn_request(
                 consumed,
                 Some(boundary.pending_token),
                 None,
+                None,
+                0,
             ) {
                 Ok(prepared) => {
                     durable_prepared = Some(prepared);
@@ -8698,6 +8725,7 @@ fn generate_dflash<OnToken>(
     logits: Vec<f32>,
     max_tokens: usize,
     stop_tokens: &[i32],
+    capture_ring: Option<(MetalTensor, usize, usize)>,
     mut on_token: OnToken,
 ) -> Result<DflashGeneration>
 where
@@ -8858,6 +8886,35 @@ where
                 .session
                 .append_target_ctx_columns_now(loaded.context(), &column_refs, n_target_features)
                 .context("append dflash ctx columns")?;
+            // Optional windowed capture-ring feed: scatter the same committed
+            // hidden columns into the caller's ring at windowed offsets so
+            // completed-boundary capture tails stay fresh during speculation.
+            if let Some((ring, wstart, features)) = capture_ring.as_ref() {
+                let ring_encoder = loaded.context().queue.commandBuffer().expect("cmd");
+                let ring_enc = KernelEncoder::begin(&ring_encoder);
+                for i in 0..n_keep {
+                    let position = drafter_pos + i as u32;
+                    if (position as usize) < *wstart {
+                        continue;
+                    }
+                    let offset = ((position as usize - *wstart)
+                        % qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW)
+                        * *features;
+                    let view = ring.view_subrange(offset as u64, vec![*features as u64]);
+                    encode_scatter_offset_f32(
+                        loaded.context(),
+                        &ring_enc,
+                        &verify_scratch.hidden_capture_n_slot(i as u32),
+                        &view,
+                        0,
+                        *features,
+                    )
+                    .context("ring scatter dflash ctx column")?;
+                }
+                ring_enc.end();
+                ring_encoder.commit();
+                ring_encoder.waitUntilCompleted();
+            }
             stats.append_ms += append_t0.elapsed().as_secs_f64() * 1e3;
         }
 

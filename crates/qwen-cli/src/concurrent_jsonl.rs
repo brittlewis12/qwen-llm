@@ -1322,7 +1322,7 @@ fn prepare_pair(
     let pair_snapshot_needed = prefix_len > file_root_tokens;
     let prefix_snapshot_required_bytes = if pair_snapshot_needed {
         loaded
-            .estimate_checkpoint_boundary_sizes(&sequences[0], prefix_len, false, false)
+            .estimate_checkpoint_boundary_sizes(&sequences[0], prefix_len, false, false, 0)
             .context("estimate concurrent shared-prefix snapshot")?
             .snapshot_bytes
     } else {
@@ -1454,6 +1454,8 @@ fn prepare_pair(
                 requests[0].prompt_ids[..prefix_len].to_vec(),
                 None,
                 None,
+                None,
+                0,
             )
             .context("capture concurrent shared prefix")?;
         prefix_snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;

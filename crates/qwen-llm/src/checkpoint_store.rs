@@ -971,6 +971,7 @@ mod tests {
             gdn_conv_arena: vec![0x33; 12],
             gdn_state_arena: vec![0x44; 16],
             final_logits: logits.then(|| vec![0.0, 1.0, 2.0, 3.0, 4.0]),
+            capture_tail: None,
         }
     }
 

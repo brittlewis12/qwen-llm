@@ -3092,6 +3092,7 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                     prefix_fanout.selected_prefix_tokens,
                     false,
                     false,
+                    0,
                 )
                 .with_context(|| format!("estimate {} prefix fanout snapshot", E::DISPLAY_NAME))?
                 .snapshot_bytes
@@ -3214,6 +3215,8 @@ fn run_cohort<const WIDTH: usize, E: FixedCohortExecutor<WIDTH>>(
                     requests[0].prompt_ids[..prefix_len].to_vec(),
                     None,
                     None,
+                    None,
+                    0,
                 )
                 .with_context(|| format!("capture {} shared prefix", E::DISPLAY_NAME))?;
             prefix_snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;

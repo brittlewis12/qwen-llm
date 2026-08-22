@@ -79,6 +79,45 @@ pub struct AttentionCaptureProvenance {
     pub matrix_causal_skip: bool,
 }
 
+/// Maximum number of cross-context columns an all-SWA drafter can observe.
+/// The served Qwen3.8-27B-DFlash2 head is all-SWA with `sliding_window = 2048`
+/// (5/5 layers), and the F1 oracle (2026-08-20) proved bit-identical drafts
+/// between a full-context session and one seeded with only the last 2,048
+/// columns. Callers capture and store only this suffix.
+pub const DFLASH_CAPTURE_WINDOW: usize = 2048;
+
+/// Capture-window limit for a loaded head: the SWA window when every drafter
+/// layer is SWA, else `usize::MAX` (full-context capture — any full-attention
+/// layer can observe the whole history, so windowing would change drafts).
+pub fn dflash_capture_window_limit(head: &MetalDFlashHead) -> usize {
+    if head.layers.iter().all(|l| l.is_swa) && head.config.swa_window > 0 {
+        head.config.swa_window as usize
+    } else {
+        usize::MAX
+    }
+}
+
+/// Absolute start and length of the drafter capture window for a prompt of
+/// `prompt_len` positions under `window_limit`. The window is the trailing
+/// suffix; short prompts capture in full and return `(0, prompt_len)`.
+pub fn dflash_capture_window_span(prompt_len: usize, window_limit: usize) -> (usize, usize) {
+    let window = prompt_len.min(window_limit);
+    (prompt_len - window, window)
+}
+
+/// Window-aware completeness predicate: the capture covers exactly
+/// `[wstart, prompt_len)` with `captured` columns. Supersedes the old
+/// `start == 0 && captured == prompt_len` invariant.
+pub fn dflash_capture_window_complete(
+    prompt_len: usize,
+    capture_start: usize,
+    captured: usize,
+    window_limit: usize,
+) -> bool {
+    let (wstart, wlen) = dflash_capture_window_span(prompt_len, window_limit);
+    capture_start == wstart && captured == wlen
+}
+
 pub struct AttentionCapture {
     pub blocks: Vec<usize>,
     pub positions: Vec<usize>,
@@ -14477,6 +14516,42 @@ mod tests {
     }
 
     #[test]
+    fn dflash_capture_window_span_and_complete_edges() {
+        assert_eq!(
+            dflash_capture_window_span(100, DFLASH_CAPTURE_WINDOW),
+            (0, 100)
+        );
+        assert_eq!(
+            dflash_capture_window_span(DFLASH_CAPTURE_WINDOW, DFLASH_CAPTURE_WINDOW),
+            (0, DFLASH_CAPTURE_WINDOW)
+        );
+        assert_eq!(
+            dflash_capture_window_span(3076, DFLASH_CAPTURE_WINDOW),
+            (1028, DFLASH_CAPTURE_WINDOW)
+        );
+        assert_eq!(dflash_capture_window_span(3076, usize::MAX), (0, 3076));
+        assert!(dflash_capture_window_complete(
+            3076,
+            1028,
+            2048,
+            DFLASH_CAPTURE_WINDOW
+        ));
+        assert!(!dflash_capture_window_complete(
+            3076,
+            0,
+            2048,
+            DFLASH_CAPTURE_WINDOW
+        ));
+        assert!(!dflash_capture_window_complete(
+            3076,
+            1028,
+            2047,
+            DFLASH_CAPTURE_WINDOW
+        ));
+        assert!(dflash_capture_window_complete(3076, 0, 3076, usize::MAX));
+    }
+
+    #[test]
     fn dflash_swa_split4_scope_matches_measured_product_cell() {
         assert!(dflash_swa_split4_eligible(
             true, 8, 32, 8, 128, 2048, 0, true, 2048, 16
@@ -26095,5 +26170,348 @@ mod tests {
         let fused_elems = (fused.len() / Q4K_BYTES) * 256;
         MetalTensor::from_bytes(ctx, &fused, vec![fused_elems as u64], GgmlType::Q4_K)
             .expect("fused q4k gate/up")
+    }
+
+    /// F1 — windowed drafter-context bit-identity oracle (2026-08-20).
+    ///
+    /// Preregistered gate; see
+    /// `docs/bench/2026-08-20-windowed-dflash-pre-gates/README.md`. Lives
+    /// in-lib so it uses the per-PID test lease directory and can run
+    /// alongside the production serve daemon without contending its
+    /// process-exclusive lease.
+    ///
+    /// Run:
+    /// ```bash
+    /// cargo test --release -p qwen-llm windowed_dflash_bit_identity_3076 \
+    ///   -- --ignored --nocapture --test-threads=1
+    /// ```
+    #[test]
+    #[ignore = "slow real-model GPU gate; run explicitly"]
+    fn windowed_dflash_bit_identity_3076() {
+        use crate::loader::open_dflash_drafter;
+        use crate::metal::MetalError;
+        use crate::tokenizer::Tokenizer;
+
+        const PROMPT_TOKENS: usize = 3076;
+        const WINDOW: usize = 2048;
+        const SLACK: usize = 64;
+        const TARGET_GGUF: &str = "/Users/tito/models/Qwen3.8-27B-Q8_0.gguf";
+        const DRAFTER_GGUF: &str =
+            "/Users/tito/models/incoai-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf";
+        const FIXTURE_TEXT: &str = "The quick brown fox jumps over the lazy dog while the \
+            server quietly processes a long agentic conversation about software \
+            engineering, performance analysis, and the correct way to serve large \
+            language models on Apple silicon without disturbing the production queue. ";
+
+        if !std::path::Path::new(TARGET_GGUF).exists()
+            || !std::path::Path::new(DRAFTER_GGUF).exists()
+        {
+            eprintln!("[f1] skipped — fixtures missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("[f1] metal init: {e}"),
+        };
+
+        eprintln!("[f1] loading target + drafter…");
+        let target_g = GgufFile::open(TARGET_GGUF).expect("open target");
+        let target_m = Model::from_gguf(&target_g).expect("load target");
+        let drafter_g = GgufFile::open(DRAFTER_GGUF).expect("open drafter");
+        let head = open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
+
+        eprintln!(
+            "[f1] drafter: layers={} swa_all={} block={} target_layers={:?}",
+            head.config.n_layer,
+            head.layers.iter().all(|l| l.is_swa),
+            head.config.block_size,
+            head.target_layer_ids,
+        );
+        assert!(
+            head.layers.iter().all(|l| l.is_swa),
+            "premise requires an all-SWA drafter"
+        );
+
+        let h = target_m.arch.hidden_size as usize;
+        let v = target_m.arch.vocab_size as usize;
+        let n_features = head.target_layer_ids.len() * h;
+
+        let tok = Tokenizer::open(TARGET_GGUF).expect("tokenizer");
+        let mut text = String::new();
+        while tok.encode(&text, false).map(|ids| ids.len()).unwrap_or(0) < PROMPT_TOKENS {
+            text.push_str(FIXTURE_TEXT);
+        }
+        let mut prompt_ids = tok.encode(&text, false).expect("encode prompt");
+        prompt_ids.truncate(PROMPT_TOKENS);
+        eprintln!("[f1] prompt {PROMPT_TOKENS} tokens");
+
+        let mm = MetalModel::load(&ctx, &target_g, &target_m).expect("metal target load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let mhead = MetalDFlashHead::load(&ctx, &drafter_g, &head).expect("metal drafter load");
+
+        let capture = MetalTensor::zeros_f32(&ctx, vec![(PROMPT_TOKENS * n_features) as u64])
+            .expect("capture buffer");
+        let mut layer_scratch =
+            MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, PROMPT_TOKENS as u32)
+                .expect("prefill layer scratch");
+        let mut target_session =
+            MetalSession::fresh(&ctx, &mm, PROMPT_TOKENS + SLACK).expect("target session");
+
+        eprintln!("[f1] metal prefill with multi-hidden capture…");
+        prefill_tokens_with_multi_hidden(
+            &mf,
+            &prompt_ids,
+            0,
+            &mut target_session,
+            &mut layer_scratch,
+            &head.target_layer_ids,
+            Some(&capture),
+        )
+        .expect("capture prefill");
+
+        let carry = prompt_ids[PROMPT_TOKENS - 1];
+        let noise_start_pos = PROMPT_TOKENS as u32;
+        let n = head.config.block_size as usize;
+
+        let seed = |count: usize, start_pos: u32| -> DFlashDecoder<'_> {
+            let capacity = count + n + 32;
+            let mut dsess = MetalDFlashSession::fresh(&ctx, &mhead, h as u64, v as u64, capacity)
+                .expect("drafter session");
+            let offset = (PROMPT_TOKENS - count) * n_features;
+            let view = capture.view_subrange(offset as u64, vec![(count * n_features) as u64]);
+            dsess
+                .append_target_ctx_columns_contiguous_now(&ctx, &view, start_pos, count, n_features)
+                .expect("seed ctx columns");
+            DFlashDecoder::new(&mf, &mhead, dsess)
+        };
+
+        let mut dec_a = seed(PROMPT_TOKENS, 0);
+        let mut dec_b = seed(WINDOW, (PROMPT_TOKENS - WINDOW) as u32);
+        let mut dec_c = seed(WINDOW - 1, (PROMPT_TOKENS - (WINDOW - 1)) as u32);
+
+        let logits_a = dec_a
+            .draft_block_with_logits(carry, noise_start_pos)
+            .expect("draft A");
+        let logits_b = dec_b
+            .draft_block_with_logits(carry, noise_start_pos)
+            .expect("draft B");
+        let logits_c = dec_c
+            .draft_block_with_logits(carry, noise_start_pos)
+            .expect("draft C");
+
+        assert_eq!(logits_a.len(), n * v);
+        assert_eq!(logits_b.len(), n * v);
+        assert_eq!(logits_c.len(), n * v);
+
+        let argmaxes = |logits: &[f32]| -> Vec<usize> {
+            (0..n)
+                .map(|row| {
+                    let slice = &logits[row * v..(row + 1) * v];
+                    slice
+                        .iter()
+                        .enumerate()
+                        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                        .unwrap()
+                        .0
+                })
+                .collect()
+        };
+        let arg_a = argmaxes(&logits_a);
+        let arg_b = argmaxes(&logits_b);
+        let arg_c = argmaxes(&logits_c);
+
+        let mut max_ab = 0.0f32;
+        let mut max_ac = 0.0f32;
+        for row in 0..n {
+            for j in 0..v {
+                let a = logits_a[row * v + j];
+                let b = logits_b[row * v + j];
+                let c = logits_c[row * v + j];
+                max_ab = max_ab.max((a - b).abs());
+                max_ac = max_ac.max((a - c).abs());
+            }
+            eprintln!(
+                "[f1] row {row}: argmax A={} B={} C={}",
+                arg_a[row], arg_b[row], arg_c[row]
+            );
+        }
+        eprintln!("[f1] max|A-B|={max_ab:.3e} max|A-C|={max_ac:.3e}");
+
+        assert_eq!(
+            max_ab, 0.0,
+            "windowed session B diverges from full session A (max|A-B|={max_ab})"
+        );
+        assert_eq!(
+            arg_a, arg_b,
+            "argmax mismatch between full (A) and windowed (B) sessions"
+        );
+        assert!(
+            max_ac > 0.0,
+            "negative control C equals full session A — harness is insensitive to window truncation"
+        );
+        eprintln!("[f1] PASS: windowed == full bitwise; truncated control diverges");
+    }
+
+    /// F2-adjacent split-capture equivalence: the 1a production mechanics
+    /// (plain prefill outside the capture window, capture sub-span inside)
+    /// must produce a window buffer bit-identical to the suffix of a
+    /// full-span capture, and the resulting windowed session must draft
+    /// bit-identically to the full session.
+    #[test]
+    #[ignore = "slow real-model GPU gate; run explicitly"]
+    fn windowed_split_capture_equals_full_capture() {
+        use crate::loader::open_dflash_drafter;
+        use crate::metal::MetalError;
+        use crate::tokenizer::Tokenizer;
+
+        const PROMPT_TOKENS: usize = 3076;
+        const WINDOW: usize = DFLASH_CAPTURE_WINDOW;
+        const SLACK: usize = 64;
+        const TARGET_GGUF: &str = "/Users/tito/models/Qwen3.8-27B-Q8_0.gguf";
+        const DRAFTER_GGUF: &str =
+            "/Users/tito/models/incoai-dflash2/Qwen3.8-27B-DFlash2-Q8_0.gguf";
+        const FIXTURE_TEXT: &str = "The quick brown fox jumps over the lazy dog while the \
+            server quietly processes a long agentic conversation about software \
+            engineering, performance analysis, and the correct way to serve large \
+            language models on Apple silicon without disturbing the production queue. ";
+
+        if !std::path::Path::new(TARGET_GGUF).exists()
+            || !std::path::Path::new(DRAFTER_GGUF).exists()
+        {
+            eprintln!("[f2-split] skipped — fixtures missing");
+            return;
+        }
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("[f2-split] metal init: {e}"),
+        };
+
+        eprintln!("[f2-split] loading target + drafter…");
+        let target_g = GgufFile::open(TARGET_GGUF).expect("open target");
+        let target_m = Model::from_gguf(&target_g).expect("load target");
+        let drafter_g = GgufFile::open(DRAFTER_GGUF).expect("open drafter");
+        let head = open_dflash_drafter(&drafter_g, &target_m).expect("bind drafter");
+        assert_eq!(
+            dflash_capture_window_limit(
+                &MetalDFlashHead::load(&ctx, &drafter_g, &head).expect("metal head")
+            ),
+            WINDOW,
+            "premise requires the all-SWA head to window at 2048"
+        );
+
+        let h = target_m.arch.hidden_size as usize;
+        let v = target_m.arch.vocab_size as usize;
+        let n_features = head.target_layer_ids.len() * h;
+
+        let tok = Tokenizer::open(TARGET_GGUF).expect("tokenizer");
+        let mut text = String::new();
+        while tok.encode(&text, false).map(|ids| ids.len()).unwrap_or(0) < PROMPT_TOKENS {
+            text.push_str(FIXTURE_TEXT);
+        }
+        let mut prompt_ids = tok.encode(&text, false).expect("encode prompt");
+        prompt_ids.truncate(PROMPT_TOKENS);
+        eprintln!("[f2-split] prompt {PROMPT_TOKENS} tokens");
+
+        let mm = MetalModel::load(&ctx, &target_g, &target_m).expect("metal target load");
+        let mf = MetalForward::new(&ctx, &mm);
+        let mhead = MetalDFlashHead::load(&ctx, &drafter_g, &head).expect("metal drafter load");
+
+        // Full-span capture (reference).
+        let capture_full = MetalTensor::zeros_f32(&ctx, vec![(PROMPT_TOKENS * n_features) as u64])
+            .expect("full capture buffer");
+        let mut scratch_full = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, PROMPT_TOKENS as u32)
+            .expect("full layer scratch");
+        let mut sess_full =
+            MetalSession::fresh(&ctx, &mm, PROMPT_TOKENS + SLACK).expect("full target session");
+        prefill_tokens_with_multi_hidden(
+            &mf,
+            &prompt_ids,
+            0,
+            &mut sess_full,
+            &mut scratch_full,
+            &head.target_layer_ids,
+            Some(&capture_full),
+        )
+        .expect("full capture prefill");
+
+        // Windowed split: plain [0, wstart) + capture [wstart, PROMPT_TOKENS).
+        let wstart = PROMPT_TOKENS - WINDOW;
+        let capture_win = MetalTensor::zeros_f32(&ctx, vec![(WINDOW * n_features) as u64])
+            .expect("window capture buffer");
+        let mut scratch_win = MetalDFlashLayerMajorScratch::fresh(&ctx, &mm, PROMPT_TOKENS as u32)
+            .expect("window layer scratch");
+        let mut sess_win =
+            MetalSession::fresh(&ctx, &mm, PROMPT_TOKENS + SLACK).expect("window target session");
+        prefill_tokens_with_multi_hidden(
+            &mf,
+            &prompt_ids[..wstart],
+            0,
+            &mut sess_win,
+            &mut scratch_win,
+            &[],
+            None,
+        )
+        .expect("plain prefix prefill");
+        prefill_tokens_with_multi_hidden(
+            &mf,
+            &prompt_ids[wstart..],
+            wstart as u32,
+            &mut sess_win,
+            &mut scratch_win,
+            &head.target_layer_ids,
+            Some(&capture_win),
+        )
+        .expect("window capture prefill");
+
+        // Bitwise: window buffer == suffix of full buffer.
+        let full = read_tensor_f32(&capture_full);
+        let win = read_tensor_f32(&capture_win);
+        let suffix = &full[wstart * n_features..];
+        assert_eq!(win.len(), suffix.len());
+        let mut max_delta = 0.0f32;
+        for (a, b) in win.iter().zip(suffix) {
+            max_delta = max_delta.max((a - b).abs());
+        }
+        eprintln!("[f2-split] max|capture_win - full_suffix|={max_delta:.3e}");
+        assert_eq!(
+            max_delta, 0.0,
+            "windowed split capture diverges from full-capture suffix"
+        );
+
+        // Draft bit-identity: windowed session vs full session.
+        let carry = prompt_ids[PROMPT_TOKENS - 1];
+        let noise_start_pos = PROMPT_TOKENS as u32;
+        let n = head.config.block_size as usize;
+        let seed = |count: usize, start_pos: u32, src: &MetalTensor| -> DFlashDecoder<'_> {
+            let capacity = count + n + 32;
+            let mut dsess = MetalDFlashSession::fresh(&ctx, &mhead, h as u64, v as u64, capacity)
+                .expect("drafter session");
+            let offset = (PROMPT_TOKENS - count) * n_features;
+            let view = src.view_subrange(offset as u64, vec![(count * n_features) as u64]);
+            dsess
+                .append_target_ctx_columns_contiguous_now(&ctx, &view, start_pos, count, n_features)
+                .expect("seed ctx columns");
+            DFlashDecoder::new(&mf, &mhead, dsess)
+        };
+        let mut dec_full = seed(PROMPT_TOKENS, 0, &capture_full);
+        let mut dec_win = seed(WINDOW, wstart as u32, &capture_full);
+        let logits_full = dec_full
+            .draft_block_with_logits(carry, noise_start_pos)
+            .expect("draft full");
+        let logits_win = dec_win
+            .draft_block_with_logits(carry, noise_start_pos)
+            .expect("draft windowed");
+        let mut max_delta = 0.0f32;
+        for (a, b) in logits_full.iter().zip(&logits_win) {
+            max_delta = max_delta.max((a - b).abs());
+        }
+        eprintln!("[f2-split] max|draft_full - draft_windowed|={max_delta:.3e}");
+        assert_eq!(
+            max_delta, 0.0,
+            "windowed-split session drafts diverge from full session"
+        );
+        eprintln!("[f2-split] PASS: split capture == full suffix; drafts bit-identical");
     }
 }

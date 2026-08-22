@@ -429,6 +429,7 @@ mod tests {
             gdn_conv_arena: vec![3; 8],
             gdn_state_arena: vec![4; 12],
             final_logits: Some(vec![0.1, 0.2, 0.3]),
+            capture_tail: None,
         }
     }
 

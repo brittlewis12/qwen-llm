@@ -590,7 +590,7 @@ mod tests {
             gdn_conv_elements_per_layer: 7,
         };
         let estimate =
-            estimate_checkpoint_boundary_sizes_from_abi(abi, 11, 13, true, true).unwrap();
+            estimate_checkpoint_boundary_sizes_from_abi(abi, 11, 13, true, true, 0).unwrap();
         let expected_snapshot = 2 * 2 * 13 * 16 + 4 * 3 * (5 + 7) + 4 * 13 + 4 + 8 * 2 + 4 * 11;
         assert_eq!(estimate.snapshot_bytes, expected_snapshot);
         assert_eq!(
@@ -1025,6 +1025,10 @@ pub struct PrefixCacheRestore {
     pub restored_prefix_len: usize,
     pub exact: bool,
     pub exact_final_logits: Option<Vec<f32>>,
+    /// Drafter capture tail from the restored checkpoint, if the snapshot
+    /// carried one. Covers the last `min(prefix_len, DFLASH_CAPTURE_WINDOW)`
+    /// matched positions.
+    pub capture_tail: Option<Vec<f32>>,
     /// Cache-index accounting captured at lookup, before the unlocked restore.
     pub stats_at_lookup: PrefixCacheStats,
 }
@@ -1060,6 +1064,7 @@ pub struct PreparedCheckpointRestore {
     pub restored_prefix_len: usize,
     pub exact: bool,
     pub exact_final_logits: Option<Vec<f32>>,
+    pub capture_tail: Option<Vec<f32>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1074,6 +1079,7 @@ fn estimate_checkpoint_boundary_sizes_from_abi(
     prefix_len: usize,
     has_pending_token: bool,
     has_final_logits: bool,
+    capture_tail_features: usize,
 ) -> Result<CheckpointBoundarySizeEstimate, RuntimeError> {
     let prefix_len = prefix_len as u128;
     let n_attn = abi.n_attn_layers as u128;
@@ -1089,9 +1095,17 @@ fn estimate_checkpoint_boundary_sizes_from_abi(
     } else {
         0
     };
-    let snapshot_bytes =
-        u64::try_from(kv_bytes + gdn_bytes + token_bytes + position_bytes + logits_bytes)
-            .map_err(|_| RuntimeError::CheckpointSizeOverflow)?;
+    let capture_tail_bytes = if capture_tail_features > 0 {
+        4u128
+            * prefix_len.min(crate::metal_dflash::DFLASH_CAPTURE_WINDOW as u128)
+            * capture_tail_features as u128
+    } else {
+        0
+    };
+    let snapshot_bytes = u64::try_from(
+        kv_bytes + gdn_bytes + token_bytes + position_bytes + logits_bytes + capture_tail_bytes,
+    )
+    .map_err(|_| RuntimeError::CheckpointSizeOverflow)?;
     let pending_memory_bytes = 4 * u64::from(has_pending_token);
     let record_bytes = snapshot_bytes
         .checked_sub(pending_memory_bytes)
@@ -1474,8 +1488,14 @@ impl LoadedModel {
         pending_token: Option<i32>,
         final_logits: Option<Vec<f32>>,
     ) -> Result<PrefixCacheInsert, RuntimeError> {
-        let prepared =
-            self.prepare_checkpoint_boundary(sequence, prefix_tokens, pending_token, final_logits)?;
+        let prepared = self.prepare_checkpoint_boundary(
+            sequence,
+            prefix_tokens,
+            pending_token,
+            final_logits,
+            None,
+            0,
+        )?;
         self.cache_prepared_checkpoint(&prepared)
     }
 
@@ -1488,6 +1508,8 @@ impl LoadedModel {
         prefix_tokens: Vec<i32>,
         pending_token: Option<i32>,
         final_logits: Option<Vec<f32>>,
+        capture_tail: Option<Vec<f32>>,
+        capture_tail_features: usize,
     ) -> Result<PreparedCheckpoint, RuntimeError> {
         self.ensure_owns(sequence)?;
         sequence.check_position(prefix_tokens.len())?;
@@ -1500,9 +1522,27 @@ impl LoadedModel {
                 });
             }
         }
+        if let Some(tail) = capture_tail.as_ref() {
+            let expected = prefix_tokens
+                .len()
+                .min(crate::metal_dflash::DFLASH_CAPTURE_WINDOW)
+                .checked_mul(capture_tail_features)
+                .ok_or(SnapshotValidationError::LengthOverflow {
+                    section: "capture_tail",
+                })?;
+            if tail.len() != expected || capture_tail_features == 0 {
+                return Err(SnapshotValidationError::SectionLength {
+                    section: "capture_tail",
+                    actual: tail.len(),
+                    expected,
+                }
+                .into());
+            }
+        }
         let identity = self.snapshot_identity(sequence)?;
         let mut snap = sequence.snapshot(identity.clone(), prefix_tokens, final_logits)?;
         snap.pending_token = pending_token;
+        snap.capture_tail = capture_tail;
         snap.validate_for_restore(
             &identity,
             sequence.max_context_tokens(),
@@ -1525,6 +1565,7 @@ impl LoadedModel {
         prefix_len: usize,
         has_pending_token: bool,
         has_final_logits: bool,
+        capture_tail_features: usize,
     ) -> Result<CheckpointBoundarySizeEstimate, RuntimeError> {
         self.ensure_owns(sequence)?;
         if prefix_len > sequence.max_context_tokens() {
@@ -1540,6 +1581,7 @@ impl LoadedModel {
             prefix_len,
             has_pending_token,
             has_final_logits,
+            capture_tail_features,
         )
     }
 
@@ -1563,6 +1605,7 @@ impl LoadedModel {
             prefix_len,
             has_pending_token,
             has_final_logits,
+            0,
         )
     }
 
@@ -1647,6 +1690,7 @@ impl LoadedModel {
             restored_prefix_len,
             exact,
             exact_final_logits,
+            capture_tail: prepared.snapshot.capture_tail.clone(),
         })
     }
 
@@ -1821,6 +1865,7 @@ impl LoadedModel {
             restored_prefix_len: restored.restored_prefix_len,
             exact: restored.exact,
             exact_final_logits: restored.exact_final_logits,
+            capture_tail: restored.capture_tail,
             stats_at_lookup: lookup.stats_at_lookup,
         })
     }

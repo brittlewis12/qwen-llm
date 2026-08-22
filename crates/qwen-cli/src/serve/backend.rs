@@ -12,12 +12,14 @@ use super::http::{BackendFailure, GenerationBackend, GenerationOutcome, Generati
 use super::items::{QwenTemplate, ServeError, ServeRequest};
 use super::utf8::Utf8Assembler;
 use anyhow::Context as _;
+use objc2_metal::MTLBuffer;
 use qwen_llm::gguf::GgufFile;
 use qwen_llm::loader::{Model, open_dflash_drafter};
 use qwen_llm::metal::{MetalTensor, evaluate_metal_memory_admission};
 use qwen_llm::metal_dflash::{
     MetalDFlashHead, MetalDFlashLayerMajorScratch, MetalDFlashSession, MetalDFlashVerifyScratch,
-    PrefillScratchConfig, plan_prefill_scratch_with_matrix_max_pos_configured,
+    PrefillScratchConfig, dflash_capture_window_complete, dflash_capture_window_limit,
+    dflash_capture_window_span, plan_prefill_scratch_with_matrix_max_pos_configured,
 };
 use qwen_llm::metal_forward::MetalForward;
 use qwen_llm::runtime::{LoadedModel, Sequence, SequenceConfig};
@@ -28,7 +30,7 @@ use std::time::Instant;
 
 const DFLASH_FIXED_SCRATCH_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 const SERIAL_TAIL_THRESHOLD: usize = 48;
-type DflashPromptCapture = (MetalTensor, usize, usize, usize);
+type DflashPromptCapture = (MetalTensor, usize, usize, usize, Option<usize>);
 
 impl ServeError {
     pub(crate) fn server_error(message: impl Into<String>) -> Self {
@@ -126,8 +128,13 @@ fn request_sampler(request: &ServeRequest) -> Result<Sampler, ServeError> {
     .map_err(|error| ServeError::invalid_request(None, format!("sampling: {error}")))
 }
 
-fn complete_dflash_capture(start: usize, captured: usize, prompt_len: usize) -> bool {
-    start == 0 && captured == prompt_len
+fn complete_dflash_capture(
+    start: usize,
+    captured: usize,
+    prompt_len: usize,
+    window_limit: usize,
+) -> bool {
+    dflash_capture_window_complete(prompt_len, start, captured, window_limit)
 }
 
 fn use_serial_tail(
@@ -139,8 +146,14 @@ fn use_serial_tail(
     remaining <= threshold && (!speculate || capture_supported)
 }
 
-fn should_plan_dflash(has_head: bool, matched_tokens: usize, temperature: f32) -> bool {
-    has_head && matched_tokens == 0 && temperature == 0.0
+fn should_plan_dflash(
+    has_head: bool,
+    matched_tokens: usize,
+    temperature: f32,
+    has_restore_tail: bool,
+    dense: bool,
+) -> bool {
+    has_head && temperature == 0.0 && (matched_tokens == 0 || (has_restore_tail && dense))
 }
 
 fn request_capacity(
@@ -162,8 +175,13 @@ fn request_capacity(
     }
 }
 
-fn dflash_capture_elements(prompt_tokens: usize, features: usize) -> Result<usize, ServeError> {
-    prompt_tokens.checked_mul(features).ok_or_else(|| {
+fn dflash_capture_elements(
+    prompt_tokens: usize,
+    features: usize,
+    window_limit: usize,
+) -> Result<usize, ServeError> {
+    let (_, window) = dflash_capture_window_span(prompt_tokens, window_limit);
+    window.checked_mul(features).ok_or_else(|| {
         ServeError::invalid_request(
             Some("input"),
             "DFlash prompt capture element count overflow",
@@ -176,7 +194,7 @@ fn prefill_remaining(
     loaded: &LoadedModel,
     forward: &MetalForward<'_>,
     dflash_head: Option<&MetalDFlashHead>,
-    speculate: bool,
+    _speculate: bool,
     prompt_ids: &[i32],
     chunk: usize,
     sequence: &mut Sequence,
@@ -196,7 +214,7 @@ fn prefill_remaining(
         if use_serial_tail(
             remaining,
             SERIAL_TAIL_THRESHOLD,
-            speculate,
+            dflash_capture.is_some(),
             serial_capture_supported,
         ) {
             for (offset, &token) in prompt_ids[start..].iter().enumerate() {
@@ -204,7 +222,7 @@ fn prefill_remaining(
                 let position_u32 = u32::try_from(position)
                     .map_err(|_| ServeError::server_error("position overflow"))?;
                 let logits = match (dflash_head, dflash_capture.as_mut()) {
-                    (Some(head), Some((dst, capture_start, captured, n_features))) => {
+                    (Some(head), Some((dst, capture_start, captured, n_features, _ring))) => {
                         let capture_offset =
                             position.checked_sub(*capture_start).ok_or_else(|| {
                                 ServeError::server_error("drafter capture position underflow")
@@ -243,29 +261,49 @@ fn prefill_remaining(
             break;
         }
         let end = prompt_ids.len().min(start + chunk);
-        let (logits, _span_ms) = match dflash_head.filter(|_| speculate) {
-            Some(head) => {
-                let span = prompt_ids.len() - start;
+        let (logits, _span_ms) = match dflash_capture.as_mut() {
+            Some((dst, capture_start, captured, n_features, _ring)) => {
+                let head = dflash_head.expect("capture window buffer implies a drafter head");
+                let window_limit = dflash_capture_window_limit(head);
+                let (wstart, _window) = dflash_capture_window_span(prompt_ids.len(), window_limit);
                 let scratch = scratch.as_mut().ok_or_else(|| {
                     ServeError::server_error("uncached prefill has no scratch allocation")
                 })?;
-                let (dst, capture_start, captured, _) =
-                    dflash_capture.as_mut().ok_or_else(|| {
-                        ServeError::server_error("speculative prefill has no capture buffer")
+                if end <= wstart {
+                    crate::prefill_span(forward, sequence, scratch, &prompt_ids[start..end], start)
+                        .map_err(|error| ServeError::server_error(format!("prefill: {error:#}")))?
+                } else {
+                    let cstart = start.max(wstart);
+                    if cstart > start {
+                        crate::prefill_span(
+                            forward,
+                            sequence,
+                            scratch,
+                            &prompt_ids[start..cstart],
+                            start,
+                        )
+                        .map_err(|error| ServeError::server_error(format!("prefill: {error:#}")))?;
+                    }
+                    let view = dst.view_subrange(
+                        ((cstart - wstart) * *n_features) as u64,
+                        vec![((end - cstart) * *n_features) as u64],
+                    );
+                    *capture_start = wstart;
+                    let out = crate::prefill_span_with_capture(
+                        forward,
+                        sequence,
+                        scratch,
+                        &prompt_ids[cstart..end],
+                        cstart,
+                        &head.target_layer_ids,
+                        &view,
+                    )
+                    .map_err(|error| {
+                        ServeError::server_error(format!("capture prefill: {error:#}"))
                     })?;
-                let out = crate::prefill_span_with_capture(
-                    forward,
-                    sequence,
-                    scratch,
-                    &prompt_ids[start..],
-                    start,
-                    &head.target_layer_ids,
-                    dst,
-                )
-                .map_err(|error| ServeError::server_error(format!("capture prefill: {error:#}")))?;
-                *capture_start = start;
-                *captured = span;
-                out
+                    *captured += end - cstart;
+                    out
+                }
             }
             None => {
                 let scratch = scratch.as_mut().ok_or_else(|| {
@@ -474,33 +512,118 @@ impl GenerationBackend for EngineBackend {
             .filter(|restore| restore.exact)
             .and_then(|restore| restore.exact_final_logits.clone());
 
-        // Chunked prefill of whatever the restore left; tick between chunks
-        // carries heartbeats and surfaces client disconnects (cancellation).
-        // Tails at or below SERIAL_TAIL_THRESHOLD decode token-by-token.
-        // Speculation needs captured hiddens for the whole context; a
-        // restore leaves earlier positions uncaptured, so the drafter only
-        // runs on cold-prefilled requests (CLI parity: --drafter excludes
-        // --durable-prefix-cache for the same reason).
-        // Greedy-only (CLI parity: T>0 needs the maximal-coupling
-        // rejection sampler), and cold-prefill-only. Decided before the
-        // capture buffer is allocated so sampled requests pay nothing.
+        // Windowed capture window for dense requests with a drafter head.
+        // Doubles as (a) the drafter seed source on speculative requests and
+        // (b) the rolling capture ring that keeps completed-boundary tails
+        // fresh during serial decode. Allocated before the speculate decision
+        // so restored requests can publish a tail for the NEXT turn even when
+        // this one stays serial.
+        let dense = self.loaded.arch().kind == qwen_llm::model::ArchKind::Dense;
+        let restore_tail = restore
+            .as_ref()
+            .and_then(|restore| restore.capture_tail.clone());
+        let restored_prefix_len = restore
+            .as_ref()
+            .map_or(0, |restore| restore.restored_prefix_len);
+        let mut dflash_capture: Option<DflashPromptCapture> = match self
+            .dflash_head
+            .as_ref()
+            .filter(|_| dense)
+        {
+            Some(head) => {
+                let n_features = head
+                    .target_layer_ids
+                    .len()
+                    .checked_mul(self.loaded.arch().hidden_size as usize)
+                    .ok_or_else(|| ServeError::server_error("DFlash feature count overflow"))?;
+                let window_limit = dflash_capture_window_limit(head);
+                let (wstart, window) = dflash_capture_window_span(prompt_ids.len(), window_limit);
+                // Ring capacity: a fixed window for all-SWA heads (the ring
+                // wraps through decode, so it must hold a full window even
+                // for short prompts); legacy full-attn heads keep a
+                // prompt-sized buffer and no ring.
+                let ring_columns = if window_limit == usize::MAX {
+                    None
+                } else {
+                    Some(window_limit)
+                };
+                let capture_columns = ring_columns.unwrap_or(prompt_ids.len());
+                let capture_elements =
+                    capture_columns.checked_mul(n_features).ok_or_else(|| {
+                        ServeError::server_error("DFlash capture element count overflow")
+                    })?;
+                match MetalTensor::zeros_f32(self.loaded.context(), vec![capture_elements as u64]) {
+                    Ok(dst) => {
+                        // Seed the leading part of the window from the
+                        // checkpoint's capture tail (restored-request
+                        // speculation): columns [seed_start, seed_end) are
+                        // already captured by the previous turn.
+                        let mut seeded = 0usize;
+                        if let Some(tail) = restore_tail.as_ref() {
+                            let tail_src_cols = restored_prefix_len.min(window);
+                            let tail_wstart = restored_prefix_len - tail_src_cols;
+                            let seed_start = wstart.max(tail_wstart);
+                            let seed_end = matched_tokens.min(restored_prefix_len);
+                            if seed_end > seed_start {
+                                let skip = seed_start - tail_wstart;
+                                let count = seed_end - seed_start;
+                                let dst_off = seed_start - wstart;
+                                let src = &tail[skip * n_features..(skip + count) * n_features];
+                                unsafe {
+                                    let dst_ptr = dst.buffer.contents().as_ptr() as *mut f32;
+                                    std::ptr::copy_nonoverlapping(
+                                        src.as_ptr(),
+                                        dst_ptr.add(dst_off * n_features),
+                                        count * n_features,
+                                    );
+                                }
+                                seeded = count;
+                            }
+                        }
+                        Some((dst, wstart, seeded, n_features, ring_columns))
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "serve: optional DFlash capture allocation failed; continuing without capture: {error:#}"
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+
+        // Speculation needs captured hiddens covering the whole window: cold
+        // requests capture via prefill; restored requests need the capture
+        // tail from the checkpoint they restored. Greedy-only (CLI parity:
+        // T>0 needs the maximal-coupling rejection sampler). Decided after
+        // the capture buffer so restored requests pay nothing extra.
         let speculate_candidate = should_plan_dflash(
             self.dflash_head.is_some(),
             matched_tokens,
             sampler.config().temperature,
-        );
+            restore_tail.is_some(),
+            dense,
+        ) && dflash_capture.is_some();
         // Optional DFlash state is admitted only after restore establishes
         // that this is a cold request. Denial disables speculation rather than
         // rejecting an otherwise viable serial request.
         let mut dflash_plan = match self.dflash_head.as_ref().filter(|_| speculate_candidate) {
             Some(head) => (|| -> anyhow::Result<(usize, usize)> {
+                let window_limit = dflash_capture_window_limit(head);
+                let (_, capture_window) =
+                    dflash_capture_window_span(prompt_ids.len(), window_limit);
+                let capture_columns = if window_limit == usize::MAX {
+                    prompt_ids.len()
+                } else {
+                    window_limit
+                };
                 let n_features = head
                     .target_layer_ids
                     .len()
                     .checked_mul(self.loaded.arch().hidden_size as usize)
                     .context("DFlash feature count overflow")?;
-                let capture_elements = prompt_ids
-                    .len()
+                let capture_elements = capture_columns
                     .checked_mul(n_features)
                     .context("DFlash prompt capture element count overflow")?;
                 let capture_logical_bytes = u64::try_from(capture_elements)
@@ -513,8 +636,7 @@ impl GenerationBackend for EngineBackend {
                     .shared_buffer_size_and_align(capture_logical_bytes)
                     .context("price DFlash capture allocation")?
                     .size;
-                let session_capacity = prompt_ids
-                    .len()
+                let session_capacity = capture_window
                     .checked_add(max_tokens)
                     .and_then(|value| value.checked_add(16))
                     .context("DFlash session capacity overflow")?;
@@ -571,30 +693,6 @@ impl GenerationBackend for EngineBackend {
             None => None,
         };
         let mut speculate = dflash_plan.is_some();
-        // (buffer, start position, captured positions, features per position)
-        let mut dflash_capture: Option<DflashPromptCapture> = match self
-            .dflash_head
-            .as_ref()
-            .filter(|_| speculate)
-        {
-            Some(_head) => {
-                let (n_features, _) =
-                    dflash_plan.expect("speculative requests have an admitted DFlash plan");
-                let capture_elements = dflash_capture_elements(prompt_ids.len(), n_features)?;
-                match MetalTensor::zeros_f32(self.loaded.context(), vec![capture_elements as u64]) {
-                    Ok(dst) => Some((dst, sequence.position(), 0, n_features)),
-                    Err(error) => {
-                        tracing::warn!(
-                            "serve: optional DFlash capture allocation failed; falling back to serial decode: {error:#}"
-                        );
-                        dflash_plan = None;
-                        speculate = false;
-                        None
-                    }
-                }
-            }
-            None => None,
-        };
         let prefill_t0 = Instant::now();
         let prefill_result = prefill_remaining(
             &self.loaded,
@@ -662,10 +760,26 @@ impl GenerationBackend for EngineBackend {
             .ok_or_else(|| ServeError::server_error("prefill produced no prompt logits"))?;
 
         // Prompt-boundary capture into the RAM cache (skip when this exact
-        // prompt was already an exact hit).
+        // prompt was already an exact hit). The capture window buffer holds
+        // the prompt's trailing columns; publish them as the drafter tail.
         let capture_t0 = Instant::now();
         if !restore.as_ref().is_some_and(|restore| restore.exact) {
-            self.try_cache_boundary(&sequence, &prompt_ids, None, Some(&logits), "prompt");
+            let (tail, features) = match dflash_capture.as_ref() {
+                Some((dst, wstart, _, n_features, ring)) => (
+                    ring.map(|_| read_window_tail(dst, *n_features, prompt_ids.len(), *wstart)),
+                    *n_features,
+                ),
+                None => (None, 0),
+            };
+            self.try_cache_boundary(
+                &sequence,
+                &prompt_ids,
+                None,
+                Some(&logits),
+                tail,
+                features,
+                "prompt",
+            );
         }
 
         let prompt_capture_ms = capture_t0.elapsed().as_secs_f64() * 1e3;
@@ -682,12 +796,16 @@ impl GenerationBackend for EngineBackend {
         // prompt hiddens, then greedy accept-prefix over an exact target
         // verify — emitted tokens are identical to serial greedy.
         if let Some(head) = self.dflash_head.as_ref().filter(|_| speculate) {
-            let (dst, capture_start, captured, n_features) =
+            let (dst, capture_start, captured, n_features, _ring) =
                 dflash_capture.as_ref().ok_or_else(|| {
                     ServeError::server_error("speculative decode has no prompt hidden capture")
                 })?;
-            if !complete_dflash_capture(*capture_start, *captured, prompt_ids.len())
-                || sequence.position() != prompt_ids.len()
+            if !complete_dflash_capture(
+                *capture_start,
+                *captured,
+                prompt_ids.len(),
+                dflash_capture_window_limit(head),
+            ) || sequence.position() != prompt_ids.len()
             {
                 return Err(ServeError::server_error(format!(
                     "refusing speculative decode with incomplete prompt capture: start={} captured={} prompt={} sequence={}",
@@ -756,6 +874,11 @@ impl GenerationBackend for EngineBackend {
                         logits,
                         max_tokens,
                         &stop_tokens,
+                        dflash_capture
+                            .as_ref()
+                            .and_then(|(dst, wstart, _, n_features, ring)| {
+                                ring.map(|_| (dst.clone(), *wstart, *n_features))
+                            }),
                         |token| {
                             let bytes = tokenizer
                                 .try_decode_piece_bytes_exact(token)
@@ -796,6 +919,11 @@ impl GenerationBackend for EngineBackend {
                     prompt_ids,
                     matched_tokens,
                     restore_ms,
+                    dflash_capture
+                        .as_ref()
+                        .and_then(|(dst, wstart, _, n_features, ring)| {
+                            ring.map(|_| (dst.clone(), *wstart, *n_features))
+                        }),
                     format!(
                         "tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=dflash"
                     ),
@@ -827,13 +955,36 @@ impl GenerationBackend for EngineBackend {
                 },
                 |token| {
                     let position = sequence.position();
-                    let next = forward
-                        .single_token(
-                            token,
-                            u32::try_from(position).context("position does not fit u32")?,
-                            unsafe { sequence.metal_session_mut() },
-                        )
-                        .context("decode token")?;
+                    let next = match dflash_capture.as_ref() {
+                        Some((dst, wstart, _, n_features, Some(_ring))) if position >= *wstart => {
+                            let offset = (position - *wstart)
+                                % qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW;
+                            let view = dst.view_subrange(
+                                (offset * *n_features) as u64,
+                                vec![*n_features as u64],
+                            );
+                            forward
+                                .single_token_with_multi_hidden(
+                                    token,
+                                    u32::try_from(position).context("position does not fit u32")?,
+                                    unsafe { sequence.metal_session_mut() },
+                                    &self
+                                        .dflash_head
+                                        .as_ref()
+                                        .expect("capture window buffer implies a drafter head")
+                                        .target_layer_ids,
+                                    &view,
+                                )
+                                .context("decode token")?
+                        }
+                        _ => forward
+                            .single_token(
+                                token,
+                                u32::try_from(position).context("position does not fit u32")?,
+                                unsafe { sequence.metal_session_mut() },
+                            )
+                            .context("decode token")?,
+                    };
                     sequence.advance_by(1)?;
                     Ok(next)
                 },
@@ -860,9 +1011,40 @@ impl GenerationBackend for EngineBackend {
             prompt_ids,
             matched_tokens,
             restore_ms,
+            dflash_capture
+                .as_ref()
+                .and_then(|(dst, wstart, _, n_features, ring)| {
+                    ring.map(|_| (dst.clone(), *wstart, *n_features))
+                }),
             format!("tokenize_ms={tokenize_ms:.1} alloc_ms={alloc_ms:.1} restore_ms={restore_ms:.1} prefill_ms={prefill_ms:.1} prompt_capture_ms={prompt_capture_ms:.1} decode_path=serial"),
         )
     }
+}
+
+/// Read the trailing capture window for `consumed` committed positions from
+/// the windowed ring: columns `[consumed - window, consumed)` in order,
+/// wrapped at the ring boundary.
+fn read_window_tail(
+    dst: &MetalTensor,
+    features: usize,
+    consumed: usize,
+    wstart: usize,
+) -> Vec<f32> {
+    let window = qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW;
+    let start = consumed.saturating_sub(window);
+    let count = consumed - start;
+    let mut tail: Vec<f32> = Vec::with_capacity(count * features);
+    unsafe {
+        let src = dst.buffer.contents().as_ptr() as *const f32;
+        for p in start..consumed {
+            let offset = (p - wstart) % window;
+            let column = src.add(offset * features);
+            let column_dst = tail.as_mut_ptr().add((p - start) * features);
+            std::ptr::copy_nonoverlapping(column, column_dst, features);
+        }
+        tail.set_len(count * features);
+    }
+    tail
 }
 
 impl EngineBackend {
@@ -872,6 +1054,8 @@ impl EngineBackend {
         prefix_tokens: &[i32],
         pending_token: Option<i32>,
         final_logits: Option<&[f32]>,
+        capture_tail: Option<Vec<f32>>,
+        capture_tail_features: usize,
         boundary: &'static str,
     ) {
         let estimate = match self.loaded.estimate_checkpoint_boundary_sizes(
@@ -879,6 +1063,7 @@ impl EngineBackend {
             prefix_tokens.len(),
             pending_token.is_some(),
             final_logits.is_some(),
+            capture_tail_features,
         ) {
             Ok(estimate) => estimate.snapshot_bytes,
             Err(error) => {
@@ -910,6 +1095,8 @@ impl EngineBackend {
             prefix_tokens.to_vec(),
             pending_token,
             final_logits.map(<[f32]>::to_vec),
+            capture_tail,
+            capture_tail_features,
         ) {
             Ok(prepared) => match self.loaded.cache_prepared_checkpoint_strict(&prepared) {
                 Ok(Some(_)) => {}
@@ -937,6 +1124,7 @@ impl EngineBackend {
         prompt_ids: Vec<i32>,
         matched_tokens: usize,
         restore_ms: f64,
+        capture_ring: Option<(MetalTensor, usize, usize)>,
         phases: String,
     ) -> Result<GenerationOutcome, BackendFailure> {
         match crate::derive_completed_checkpoint_boundary(
@@ -948,11 +1136,20 @@ impl EngineBackend {
             Ok(boundary) => {
                 let pending_token = boundary.pending_token;
                 let consumed = boundary.consumed_tokens(&prompt_ids, &generation.tokens);
+                let (tail, features) = match capture_ring.as_ref() {
+                    Some((dst, wstart, n_features)) => (
+                        Some(read_window_tail(dst, *n_features, consumed.len(), *wstart)),
+                        *n_features,
+                    ),
+                    None => (None, 0),
+                };
                 self.try_cache_boundary(
                     &sequence,
                     &consumed,
                     Some(pending_token),
                     None,
+                    tail,
+                    features,
                     "completed",
                 );
             }
@@ -1037,17 +1234,29 @@ mod tests {
     }
 
     #[test]
-    fn dflash_requires_capture_from_zero_through_entire_prompt() {
-        assert!(complete_dflash_capture(0, 1, 1));
-        assert!(complete_dflash_capture(0, 48, 48));
-        assert!(!complete_dflash_capture(1, 47, 48));
-        assert!(!complete_dflash_capture(0, 47, 48));
+    fn dflash_requires_capture_window_through_entire_prompt() {
+        let lim = usize::MAX;
+        assert!(complete_dflash_capture(0, 1, 1, lim));
+        assert!(complete_dflash_capture(0, 48, 48, lim));
+        assert!(!complete_dflash_capture(1, 47, 48, lim));
+        assert!(!complete_dflash_capture(0, 47, 48, lim));
+        let w = qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW;
+        assert!(complete_dflash_capture(0, 100, 100, w));
+        assert!(complete_dflash_capture(1028, 2048, 3076, w));
+        assert!(!complete_dflash_capture(0, 3076, 3076, w));
+        assert!(!complete_dflash_capture(1028, 2047, 3076, w));
+        assert!(!complete_dflash_capture(1029, 2048, 3076, w));
         assert!(use_serial_tail(48, 48, true, true));
         assert!(!use_serial_tail(48, 48, true, false));
         assert!(use_serial_tail(48, 48, false, false));
-        assert!(should_plan_dflash(true, 0, 0.0));
-        assert!(!should_plan_dflash(true, 1, 0.0));
-        assert!(!should_plan_dflash(true, 0, 0.1));
+        assert!(should_plan_dflash(true, 0, 0.0, false, true));
+        assert!(!should_plan_dflash(true, 1, 0.0, false, true));
+        assert!(!should_plan_dflash(true, 0, 0.1, false, true));
+        assert!(should_plan_dflash(true, 5, 0.0, true, true));
+        assert!(!should_plan_dflash(true, 5, 0.0, true, false));
+        assert!(!should_plan_dflash(true, 5, 0.0, false, true));
+        assert!(!should_plan_dflash(true, 5, 0.1, true, true));
+        assert!(!should_plan_dflash(false, 0, 0.0, true, true));
     }
 
     #[test]
@@ -1061,8 +1270,10 @@ mod tests {
 
     #[test]
     fn dflash_capture_size_is_checked() {
-        assert_eq!(dflash_capture_elements(48, 32), Ok(1536));
-        assert!(dflash_capture_elements(usize::MAX, 2).is_err());
+        assert_eq!(dflash_capture_elements(48, 32, usize::MAX), Ok(1536));
+        let w = qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW;
+        assert_eq!(dflash_capture_elements(3076, 32, w), Ok(2048 * 32));
+        assert!(dflash_capture_elements(usize::MAX, 2, usize::MAX).is_err());
     }
 
     #[test]

@@ -132,6 +132,8 @@ pub(super) fn prepare(
             root_prompt[..prefix_len].to_vec(),
             None,
             Some(prefix_logits),
+            None,
+            0,
         )
         .context("capture file-scoped shared root")?;
     let snapshot_ms = snapshot_t0.elapsed().as_secs_f64() * 1e3;

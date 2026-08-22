@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-22 — Spec-Vs-Serial Tie And Near-Tie Divergence: Root Causes Fixed
+
+### Tie inversion (committed d5a6d5c)
+
+Three CPU argmax sites resolved exact ties to the HIGHEST index
+(sampling::greedy_token, main.rs argmax_i32, and the metal_forward test
+helper) while the GPU argmax kernel that packed-verify decode uses
+implements the tested lowest-index contract. On exact ties the
+speculative and serial paths could select different tokens. All CPU
+sites now use a strict total_cmp Greater update (lowest-index, first-max
+wins including signed-zero ordering), pinned by unit tests; one legacy
+sampling test codified the inverted behavior and was corrected.
+
+### Near-tie flip (committed a490444)
+
+The tie fix alone did not clear the known-divergent prompt: the shadow
+probe (QWEN_DFLASH_SHADOW_PROBE=1, committed 6330589) pinned the
+mechanism — at position 154 the reference top-2 gap is 9.3e-4 while the
+batched-verify-vs-token-major logit delta is 4.5e-3, so the batched
+argmax flips. The 320-row distribution shows max delta 9.5e-2 and gaps
+below 5e-2 on 0.6% of rows.
+
+Fix: kernel_argmax_top2_f32 emits the per-row (top1 - top2) gap; the
+packed verify publishes gaps; generate_dflash falls back when a
+committed row's gap is below the margin (default 0.2, ~2x max observed
+delta): pre-block GDN capture (phase 0, ~1.2% of verify wall) enables
+encode_restore_to_pre_block, then the committed prefix replays through
+exact token-major forwards with adaptive accept-stop.
+
+Gates: divergent prompt byte-identical (41.2 tps, 5 fallbacks vs 47.8
+tps divergent unguarded vs 16.9 tps serial); two regression prompts
+byte-identical; top-2 kernel oracle passes; serve smoke intact.
+Rollback QWEN_DFLASH_VERIFY_FALLBACK=0; margin QWEN_DFLASH_VERIFY_MARGIN.
+
+### Remaining queue deltas
+
+- The batched-vs-token-major divergence class is now guarded, not
+  removed; the 9.5e-2 outlier delta deserves a source-level look if the
+  margin ever needs tightening.
+- OFF_CTX removal remains behind the F3 long-band slope measurement.
+- Off-mode re-probe policy and the GDN wavefront verify are unchanged.
+
 ## 2026-08-21 — Windowed DFlash Capture Tail (1b) Landed; Restored-Request Speculation E2E PASS
 
 ### Why

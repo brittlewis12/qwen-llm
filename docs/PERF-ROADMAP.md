@@ -166,14 +166,19 @@ is all-SWA-2048 and F1 (2026-08-20) proved bit-identical drafts from a
   speculation) are LANDED with F1/F2-split/F5/E2E gates passing (byte-identical
   two-turn serve outputs vs serial control). Remaining serve-repo work: port
   the admission/fallback from the main repo (the deployed checkout still lacks
-  it). Updated ranked queue:
+  it). Status 2026-08-22:
 
-1. **Spec-vs-serial tie-equivalence packet (NEW, rank 1).** A reasoning-none
-   turn-1 prompt diverges between the speculative and serial serves at output
-   char 497, deterministically on both paths, reproduced on a pre-change
-   binary. Consistent with the open "CPU/GPU argmax tie semantics" item;
-   blocks using that prompt class as an equivalence fixture and is a
-   product-correctness risk for greedy serving.
+- **Rank 1 CLOSED**: the spec-vs-serial divergence class is root-caused and
+  fixed — an argmax tie inversion (three CPU sites vs the GPU kernel's
+  lowest-index contract) plus a batched-verify near-tie flip, now guarded by
+  the margin-based exact fallback (a490444). The divergent prompt is
+  byte-identical with the guard on. Updated ranked queue:
+
+1. **Guard tuning/robustness follow-up.** The margin (0.2) covers ~2x the
+   observed 9.5e-2 outlier delta; source-level attribution of that outlier
+   row (which batched kernel produced a 1e-1 delta) would let the margin
+   tighten or the kernel be fixed. Also: extend the fallback coverage to
+   MoE verify paths when MoE speculation reopens.
 2. **Off-mode capture feed + re-probe policy.** The capture ring now exists
    (1b); Off-mode still stops feeding the drafter (terminal Off). Needs the
    priced periodic re-probe (the named open policy item) before non-terminal

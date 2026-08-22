@@ -17324,11 +17324,13 @@ mod tests {
     }
 
     fn argmax_i32_local(xs: &[f32]) -> i32 {
-        xs.iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i as i32)
-            .unwrap_or(0)
+        let mut best = (0usize, xs[0]);
+        for (i, &v) in xs.iter().enumerate().skip(1) {
+            if v.total_cmp(&best.1) == std::cmp::Ordering::Greater {
+                best = (i, v);
+            }
+        }
+        best.0 as i32
     }
 
     fn run_argmax_chain_equivalence(model_path: &str, label: &str, cos_floor: f64) {

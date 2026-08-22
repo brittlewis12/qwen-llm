@@ -9953,11 +9953,30 @@ fn append_request_trace(
 }
 
 fn argmax_i32(xs: &[f32]) -> i32 {
-    xs.iter()
-        .enumerate()
-        .max_by(|a, b| a.1.total_cmp(b.1))
-        .map(|(i, _)| i as i32)
-        .unwrap_or(0)
+    // Ties resolve to the LOWEST index, matching the GPU argmax kernel
+    // contract that packed-verify decode uses (`kernel_argmax_f32`). The
+    // old max_by(total_cmp) kept the LAST element on ties, inverting the
+    // two decode paths' tie semantics.
+    let mut best = (0usize, xs[0]);
+    for (i, &v) in xs.iter().enumerate().skip(1) {
+        if v.total_cmp(&best.1) == std::cmp::Ordering::Greater {
+            best = (i, v);
+        }
+    }
+    best.0 as i32
+}
+
+#[cfg(test)]
+mod argmax_tie_tests {
+    use super::argmax_i32;
+
+    #[test]
+    fn ties_resolve_to_lowest_index() {
+        assert_eq!(argmax_i32(&[1.0, 5.0, 5.0, 3.0]), 1);
+        assert_eq!(argmax_i32(&[2.0, 2.0, 2.0]), 0);
+        assert_eq!(argmax_i32(&[-0.0, 0.0, -0.0]), 1);
+        assert_eq!(argmax_i32(&[0.0, -0.0, 0.0]), 0);
+    }
 }
 
 fn print_model_info(model_path: &Path) -> Result<()> {

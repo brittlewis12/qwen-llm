@@ -651,7 +651,12 @@ fn greedy_token(logits: &[f32]) -> Result<i32, SamplingError> {
         if logit.is_nan() {
             return Err(SamplingError::NanLogit { token });
         }
-        if logit.total_cmp(&best_logit) != Ordering::Less {
+        // Ties resolve to the LOWEST index — the same contract as the GPU
+        // argmax kernel (`kernel_argmax_f32`, "tie policy: lowest index
+        // wins") that the speculative packed-verify path uses. The old
+        // `!= Less` update took the HIGHEST index on exact ties, which
+        // made CPU-greedy and GPU-verified decode diverge on tied logits.
+        if logit.total_cmp(&best_logit) == Ordering::Greater {
             best_token = token;
             best_logit = logit;
         }
@@ -873,12 +878,12 @@ mod tests {
     }
 
     #[test]
-    fn greedy_preserves_highest_token_id_tie_break() {
+    fn greedy_preserves_lowest_token_id_tie_break() {
         let mut sampler = sampler(SamplingConfig {
             temperature: 0.0,
             ..SamplingConfig::default()
         });
-        assert_eq!(sampler.sample(&[1.0, 3.0, 3.0]).unwrap().token, 2);
+        assert_eq!(sampler.sample(&[1.0, 3.0, 3.0]).unwrap().token, 1);
     }
 
     #[test]
@@ -984,6 +989,14 @@ mod tests {
                 resumed.sample(&logits).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn greedy_token_ties_resolve_to_lowest_index() {
+        assert_eq!(greedy_token(&[1.0, 5.0, 5.0, 3.0]).unwrap(), 1);
+        assert_eq!(greedy_token(&[2.0, 2.0, 2.0]).unwrap(), 0);
+        assert_eq!(greedy_token(&[-0.0, 0.0, -0.0]).unwrap(), 1);
+        assert_eq!(greedy_token(&[0.0, -0.0, 0.0]).unwrap(), 0);
     }
 
     #[test]

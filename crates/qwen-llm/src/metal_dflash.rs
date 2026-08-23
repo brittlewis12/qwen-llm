@@ -2132,6 +2132,11 @@ pub enum DFlashError {
     #[cfg(feature = "dflash-k0s-diagnostics")]
     #[error("dflash K0-S diagnostic: {0}")]
     K0sDiagnostic(String),
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[error(
+        "dflash K0-S observation event {event_sequence} is still live; extract or finish it before another draft"
+    )]
+    K0sObservationLive { event_sequence: u64 },
 }
 
 /// All DFlash drafter weights resident on Metal. Loaded once at session
@@ -2215,6 +2220,19 @@ pub const DFLASH_K0S_LATTICE_ROWS: usize = 97;
 pub const DFLASH_K0S_DISPATCH_CENSUS_MAX: usize = 256;
 #[cfg(feature = "dflash-k0s-diagnostics")]
 const DFLASH_K0S_SELECTOR_DISPATCH_TAG: &str = "dflash_k0s.selector_hidden_projection.v1";
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub fn dflash_k0s_embedded_metallib_bytes() -> &'static [u8] {
+    crate::KERNELS_METALLIB
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub fn dflash_k0s_embedded_metallib_identity() -> DFlashK0sEmbeddedMetallibIdentity {
+    DFlashK0sEmbeddedMetallibIdentity {
+        byte_count: crate::KERNELS_METALLIB.len(),
+        sha256: Sha256::digest(crate::KERNELS_METALLIB).into(),
+    }
+}
 
 #[cfg(feature = "dflash-k0s-diagnostics")]
 #[derive(Clone, Debug)]
@@ -2424,6 +2442,72 @@ pub struct DFlashK0sCapture {
     pub kernel_trace: crate::metal::KernelTraceCounters,
     pub state_identity: DFlashK0sStateIdentity,
     pub capture_sha256: [u8; 32],
+    pub content_sha256: [u8; 32],
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DFlashK0sSelectorInputIdentity {
+    pub full_logits_count: usize,
+    pub full_logits_sha256_f32le: [u8; 32],
+    pub top_k_ids_count: usize,
+    pub top_k_ids_sha256_i32le: [u8; 32],
+    pub unary_count: usize,
+    pub unary_sha256_f32le: [u8; 32],
+    pub selector_hidden_count: usize,
+    pub selector_hidden_sha256_f32le: [u8; 32],
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DFlashK0sSelectorDispatchIdentity {
+    pub weight_dtype: GgmlType,
+    pub input_dtype: GgmlType,
+    pub output_dtype: GgmlType,
+    pub block_size: usize,
+    pub hidden_size: usize,
+    pub selector_rank: usize,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DFlashK0sEmbeddedMetallibIdentity {
+    pub byte_count: usize,
+    pub sha256: [u8; 32],
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DFlashK0sParitySummary {
+    pub draft_tokens: Vec<i32>,
+    pub dispatch_census: Vec<DFlashK0sDispatchCensusRow>,
+    pub kernel_trace: [u64; 3],
+    pub selector_inputs: DFlashK0sSelectorInputIdentity,
+    pub selector_dispatch: DFlashK0sSelectorDispatchIdentity,
+    pub diagnostic_state_sha256: [u8; 32],
+    pub carry_token: i32,
+    pub noise_start_position: u32,
+    pub session_binding_sha256: [u8; 32],
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DFlashK0sObservationSummary {
+    pub parity: DFlashK0sParitySummary,
+    pub event_sequence: u64,
+    pub event_envelope_sha256: [u8; 32],
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub struct DFlashK0sProductionObservation {
+    summary: DFlashK0sObservationSummary,
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+impl DFlashK0sProductionObservation {
+    pub fn summary(&self) -> &DFlashK0sObservationSummary {
+        &self.summary
+    }
 }
 
 /// Read-only evidence from one DFlash 2 greedy selector walk.
@@ -2934,6 +3018,14 @@ fn diagnose_dflash2_selector_walk(
 #[cfg(feature = "dflash-k0s-diagnostics")]
 fn dflash_k0s_error(detail: impl Into<String>) -> DFlashError {
     DFlashError::K0sDiagnostic(detail.into())
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_require_no_live_event(live_event: Option<u64>) -> Result<(), DFlashError> {
+    match live_event {
+        Some(event_sequence) => Err(DFlashError::K0sObservationLive { event_sequence }),
+        None => Ok(()),
+    }
 }
 
 #[cfg(feature = "dflash-k0s-diagnostics")]
@@ -3463,10 +3555,27 @@ fn dflash_k0s_hash_dispatch(hash: &mut Sha256, row: &DFlashK0sDispatchCensusRow)
 /// and retain capture order. `capture_sha256` itself is not hashed.
 #[cfg(feature = "dflash-k0s-diagnostics")]
 pub fn dflash_k0s_capture_sha256(capture: &DFlashK0sCapture) -> [u8; 32] {
+    dflash_k0s_capture_digest(capture, true)
+}
+
+/// Internal binary material digest excluding the carry/position and synchronized
+/// event-envelope digest. This is not the reducer's canonical JSON projection;
+/// the CLI/reducer constructs and validates that separately.
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub fn dflash_k0s_capture_content_sha256(capture: &DFlashK0sCapture) -> [u8; 32] {
+    dflash_k0s_capture_digest(capture, false)
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_capture_digest(capture: &DFlashK0sCapture, include_event_envelope: bool) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(b"qwen.dflash_k0s.capture.v1");
-    hash.update(capture.state_identity.carry_token.to_le_bytes());
-    hash.update(capture.state_identity.noise_start_position.to_le_bytes());
+    if include_event_envelope {
+        hash.update(b"qwen.dflash_k0s.capture.v1");
+        hash.update(capture.state_identity.carry_token.to_le_bytes());
+        hash.update(capture.state_identity.noise_start_position.to_le_bytes());
+    } else {
+        hash.update(b"qwen.dflash_k0s.capture_content.v1");
+    }
     for value in [
         capture.state_identity.target_context_len,
         capture.state_identity.context_hidden_watermark,
@@ -3476,7 +3585,9 @@ pub fn dflash_k0s_capture_sha256(capture: &DFlashK0sCapture) -> [u8; 32] {
     }
     hash.update(capture.state_identity.draft_tokens_sha256);
     hash.update(capture.state_identity.noise_input_sha256);
-    hash.update(capture.state_identity.synchronized_event_sha256);
+    if include_event_envelope {
+        hash.update(capture.state_identity.synchronized_event_sha256);
+    }
     hash.update(capture.state_identity.diagnostic_state_sha256);
     hash.update((capture.draft_token_bits.len() as u64).to_le_bytes());
     for bits in &capture.draft_token_bits {
@@ -3677,6 +3788,345 @@ fn dflash_k0s_state_sha256(session: &MetalDFlashSession) -> Result<[u8; 32], DFl
         }
     }
     Ok(hash.finalize().into())
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_session_binding_sha256(
+    session: &MetalDFlashSession,
+) -> Result<[u8; 32], DFlashError> {
+    let mut hash = Sha256::new();
+    hash.update(b"qwen.dflash_k0s.session_binding.v2");
+    hash.update(session.k0s_session_sequence.to_le_bytes());
+    let topk_ids = session
+        .topk_ids
+        .as_ref()
+        .ok_or_else(|| dflash_k0s_error("K0-S top-k IDs buffer is absent"))?;
+    let topk_vals = session
+        .topk_vals
+        .as_ref()
+        .ok_or_else(|| dflash_k0s_error("K0-S unary buffer is absent"))?;
+    let sel_h = session
+        .sel_h
+        .as_ref()
+        .ok_or_else(|| dflash_k0s_error("K0-S selector-hidden buffer is absent"))?;
+    for tensor in [
+        &session.draft_logits,
+        topk_ids,
+        topk_vals,
+        sel_h,
+        &session.noise_ids,
+    ] {
+        let identity = Retained::as_ptr(&tensor.buffer) as *const () as usize as u64;
+        hash.update(identity.to_le_bytes());
+        hash.update(tensor.offset.to_le_bytes());
+    }
+    Ok(hash.finalize().into())
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_allocate_session_sequence_from(
+    next: &std::sync::atomic::AtomicU64,
+) -> Result<u64, DFlashError> {
+    next.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |value| {
+            if value == 0 {
+                None
+            } else {
+                value.checked_add(1)
+            }
+        },
+    )
+    .map_err(|_| dflash_k0s_error("K0-S session sequence overflow"))
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_allocate_session_sequence() -> Result<u64, DFlashError> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    dflash_k0s_allocate_session_sequence_from(&NEXT)
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_hash_f32le(domain: &[u8], values: &[f32]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(domain);
+    hash.update((values.len() as u64).to_le_bytes());
+    for value in values {
+        hash.update(value.to_bits().to_le_bytes());
+    }
+    hash.finalize().into()
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_hash_i32le(domain: &[u8], values: &[i32]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(domain);
+    hash.update((values.len() as u64).to_le_bytes());
+    for value in values {
+        hash.update(value.to_le_bytes());
+    }
+    hash.finalize().into()
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub fn dflash_k0s_hash_full_logits_f32le(values: &[f32]) -> [u8; 32] {
+    dflash_k0s_hash_f32le(b"qwen.dflash_k0s.full_logits.f32le.v1", values)
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub fn dflash_k0s_hash_top_k_ids_i32le(values: &[i32]) -> [u8; 32] {
+    dflash_k0s_hash_i32le(b"qwen.dflash_k0s.top_k_ids.i32le.v1", values)
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub fn dflash_k0s_hash_unary_f32le(values: &[f32]) -> [u8; 32] {
+    dflash_k0s_hash_f32le(b"qwen.dflash_k0s.unary.f32le.v1", values)
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+pub fn dflash_k0s_hash_selector_hidden_f32le(values: &[f32]) -> [u8; 32] {
+    dflash_k0s_hash_f32le(b"qwen.dflash_k0s.selector_hidden.f32le.v1", values)
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_selector_input_identity(
+    session: &MetalDFlashSession,
+) -> Result<DFlashK0sSelectorInputIdentity, DFlashError> {
+    let active_logits = (DFLASH_K0S_BLOCK_SIZE - 1) * DFLASH_K0S_VOCAB;
+    let active_candidates = (DFLASH_K0S_BLOCK_SIZE - 1) * DFLASH_K0S_TOP_K;
+    let active_hidden = (DFLASH_K0S_BLOCK_SIZE - 1) * DFLASH_K0S_RANK;
+    let logits = read_shared_selector_tensor::<f32>(
+        &session
+            .draft_logits
+            .view_subrange(DFLASH_K0S_VOCAB as u64, vec![active_logits as u64]),
+        GgmlType::F32,
+        active_logits,
+        "k0s_observation_full_logits",
+    )?;
+    let ids = read_shared_selector_tensor::<i32>(
+        &session
+            .topk_ids
+            .as_ref()
+            .ok_or_else(|| dflash_k0s_error("K0-S top-k IDs buffer is absent"))?
+            .view_subrange(DFLASH_K0S_TOP_K as u64, vec![active_candidates as u64]),
+        GgmlType::I32,
+        active_candidates,
+        "k0s_observation_topk_ids",
+    )?;
+    let unary = read_shared_selector_tensor::<f32>(
+        &session
+            .topk_vals
+            .as_ref()
+            .ok_or_else(|| dflash_k0s_error("K0-S unary buffer is absent"))?
+            .view_subrange(DFLASH_K0S_TOP_K as u64, vec![active_candidates as u64]),
+        GgmlType::F32,
+        active_candidates,
+        "k0s_observation_unary",
+    )?;
+    let selector_hidden = read_shared_selector_tensor::<f32>(
+        &session
+            .sel_h
+            .as_ref()
+            .ok_or_else(|| dflash_k0s_error("K0-S selector-hidden buffer is absent"))?
+            .view_subrange(DFLASH_K0S_RANK as u64, vec![active_hidden as u64]),
+        GgmlType::F32,
+        active_hidden,
+        "k0s_observation_selector_hidden",
+    )?;
+    Ok(DFlashK0sSelectorInputIdentity {
+        full_logits_count: logits.len(),
+        full_logits_sha256_f32le: dflash_k0s_hash_full_logits_f32le(&logits),
+        top_k_ids_count: ids.len(),
+        top_k_ids_sha256_i32le: dflash_k0s_hash_top_k_ids_i32le(&ids),
+        unary_count: unary.len(),
+        unary_sha256_f32le: dflash_k0s_hash_unary_f32le(&unary),
+        selector_hidden_count: selector_hidden.len(),
+        selector_hidden_sha256_f32le: dflash_k0s_hash_selector_hidden_f32le(&selector_hidden),
+    })
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_selector_dispatch_identity(
+    head: &MetalDFlashHead,
+    session: &MetalDFlashSession,
+) -> Result<DFlashK0sSelectorDispatchIdentity, DFlashError> {
+    let selector = head
+        .selector
+        .as_ref()
+        .ok_or_else(|| dflash_k0s_error("K0-S selector is absent"))?;
+    let output = session
+        .sel_h
+        .as_ref()
+        .ok_or_else(|| dflash_k0s_error("K0-S selector-hidden buffer is absent"))?;
+    Ok(DFlashK0sSelectorDispatchIdentity {
+        weight_dtype: selector.hidden.dtype,
+        input_dtype: session.h.dtype,
+        output_dtype: output.dtype,
+        block_size: head.config.block_size as usize,
+        hidden_size: head.config.hidden_size as usize,
+        selector_rank: selector.rank,
+    })
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_parity_summary_from_parts(
+    head: &MetalDFlashHead,
+    session: &MetalDFlashSession,
+    carry_token: i32,
+    noise_start_position: u32,
+    draft_tokens: &[i32],
+    dispatch_census: &[DFlashK0sDispatchCensusRow],
+    kernel_trace: crate::metal::KernelTraceCounters,
+) -> Result<DFlashK0sParitySummary, DFlashError> {
+    dflash_k0s_positions(noise_start_position)?;
+    dflash_k0s_check_dispatch_census_len(dispatch_census.len())?;
+    Ok(DFlashK0sParitySummary {
+        draft_tokens: draft_tokens.to_vec(),
+        dispatch_census: dispatch_census.to_vec(),
+        kernel_trace: [
+            kernel_trace.encoders,
+            kernel_trace.concurrent_encoders,
+            kernel_trace.dispatches,
+        ],
+        selector_inputs: dflash_k0s_selector_input_identity(session)?,
+        selector_dispatch: dflash_k0s_selector_dispatch_identity(head, session)?,
+        diagnostic_state_sha256: dflash_k0s_state_sha256(session)?,
+        carry_token,
+        noise_start_position,
+        session_binding_sha256: dflash_k0s_session_binding_sha256(session)?,
+    })
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+/// SHA-256 over `qwen.dflash_k0s.event_envelope.v1`, followed by sequence,
+/// session binding, carry, position, length-prefixed draft tokens and dispatch
+/// rows, counters, selector dtypes/N/H/R, selector-input counts/hashes, and
+/// state digest. Integers are fixed-width little-endian; strings use the same
+/// u64-length framing as [`dflash_k0s_capture_sha256`]; option/bool tags are one
+/// byte. Dispatch and vector order are preserved exactly.
+pub fn dflash_k0s_event_envelope_sha256(
+    parity: &DFlashK0sParitySummary,
+    sequence: u64,
+) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"qwen.dflash_k0s.event_envelope.v1");
+    hash.update(sequence.to_le_bytes());
+    hash.update(parity.session_binding_sha256);
+    hash.update(parity.carry_token.to_le_bytes());
+    hash.update(parity.noise_start_position.to_le_bytes());
+    hash.update((parity.draft_tokens.len() as u64).to_le_bytes());
+    for token in &parity.draft_tokens {
+        hash.update(token.to_le_bytes());
+    }
+    hash.update((parity.dispatch_census.len() as u64).to_le_bytes());
+    for row in &parity.dispatch_census {
+        dflash_k0s_hash_dispatch(&mut hash, row);
+    }
+    for counter in parity.kernel_trace {
+        hash.update(counter.to_le_bytes());
+    }
+    hash.update((parity.selector_dispatch.weight_dtype as u32).to_le_bytes());
+    hash.update((parity.selector_dispatch.input_dtype as u32).to_le_bytes());
+    hash.update((parity.selector_dispatch.output_dtype as u32).to_le_bytes());
+    hash.update((parity.selector_dispatch.block_size as u64).to_le_bytes());
+    hash.update((parity.selector_dispatch.hidden_size as u64).to_le_bytes());
+    hash.update((parity.selector_dispatch.selector_rank as u64).to_le_bytes());
+    hash.update((parity.selector_inputs.full_logits_count as u64).to_le_bytes());
+    hash.update(parity.selector_inputs.full_logits_sha256_f32le);
+    hash.update((parity.selector_inputs.top_k_ids_count as u64).to_le_bytes());
+    hash.update(parity.selector_inputs.top_k_ids_sha256_i32le);
+    hash.update((parity.selector_inputs.unary_count as u64).to_le_bytes());
+    hash.update(parity.selector_inputs.unary_sha256_f32le);
+    hash.update((parity.selector_inputs.selector_hidden_count as u64).to_le_bytes());
+    hash.update(parity.selector_inputs.selector_hidden_sha256_f32le);
+    hash.update(parity.diagnostic_state_sha256);
+    hash.finalize().into()
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_next_event_sequence() -> Result<u64, DFlashError> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_update(
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+        |value| value.checked_add(1),
+    )
+    .map_err(|_| dflash_k0s_error("K0-S event sequence overflow"))
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_consume_observation(
+    head: &MetalDFlashHead,
+    session: &MetalDFlashSession,
+    vocab: usize,
+    live_event: &mut Option<u64>,
+    observation: DFlashK0sProductionObservation,
+) -> Result<DFlashK0sCapture, DFlashError> {
+    let summary = dflash_k0s_finish_observation(head, session, live_event, observation)?;
+    let parity = summary.parity;
+    let counters = crate::metal::KernelTraceCounters {
+        encoders: parity.kernel_trace[0],
+        concurrent_encoders: parity.kernel_trace[1],
+        dispatches: parity.kernel_trace[2],
+    };
+    DFlashDecoder::extract_k0s_post_sync(
+        head,
+        session,
+        vocab,
+        parity.carry_token,
+        parity.noise_start_position,
+        parity.draft_tokens,
+        parity.dispatch_census,
+        counters,
+    )
+}
+
+#[cfg(feature = "dflash-k0s-diagnostics")]
+fn dflash_k0s_finish_observation(
+    head: &MetalDFlashHead,
+    session: &MetalDFlashSession,
+    live_event: &mut Option<u64>,
+    observation: DFlashK0sProductionObservation,
+) -> Result<DFlashK0sObservationSummary, DFlashError> {
+    let DFlashK0sObservationSummary {
+        parity,
+        event_sequence,
+        event_envelope_sha256,
+    } = observation.summary;
+    if *live_event != Some(event_sequence) {
+        return Err(dflash_k0s_error(
+            "stale or already-consumed K0-S observation",
+        ));
+    }
+    *live_event = None;
+    if dflash_k0s_event_envelope_sha256(&parity, event_sequence) != event_envelope_sha256 {
+        return Err(dflash_k0s_error("K0-S observation event envelope mismatch"));
+    }
+    let counters = crate::metal::KernelTraceCounters {
+        encoders: parity.kernel_trace[0],
+        concurrent_encoders: parity.kernel_trace[1],
+        dispatches: parity.kernel_trace[2],
+    };
+    let current = dflash_k0s_parity_summary_from_parts(
+        head,
+        session,
+        parity.carry_token,
+        parity.noise_start_position,
+        &parity.draft_tokens,
+        &parity.dispatch_census,
+        counters,
+    )?;
+    if current != parity {
+        return Err(dflash_k0s_error(
+            "K0-S observation is stale or bound to a different session/state",
+        ));
+    }
+    Ok(DFlashK0sObservationSummary {
+        parity,
+        event_sequence,
+        event_envelope_sha256,
+    })
 }
 
 /// Executes the compiled rank-256 scalar graph used by K0-S: first `A * z`
@@ -3891,6 +4341,9 @@ impl MetalDFlashHead {
 
 /// Per-step DFlash session state.
 pub struct MetalDFlashSession {
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    k0s_session_sequence: u64,
+
     /// Cross-context K-target-layer hiddens stacked: `[K · H_target, ctx_capacity]`,
     /// row-major. Each column holds K target hiddens at one committed
     /// sequence position.
@@ -4435,6 +4888,8 @@ impl MetalDFlashSession {
             ffn_out_buf: MetalTensor::zeros_f32(ctx, vec![x_elems])?,
             enable_phase_timers: false,
             phase_timings: Vec::new(),
+            #[cfg(feature = "dflash-k0s-diagnostics")]
+            k0s_session_sequence: dflash_k0s_allocate_session_sequence()?,
         })
     }
 
@@ -7108,6 +7563,8 @@ pub struct DFlashDecoder<'a> {
     pub base: &'a MetalForward<'a>,
     pub head: &'a MetalDFlashHead,
     pub session: MetalDFlashSession,
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    k0s_live_event: Option<u64>,
 }
 
 impl<'a> DFlashDecoder<'a> {
@@ -7120,6 +7577,8 @@ impl<'a> DFlashDecoder<'a> {
             base,
             head,
             session,
+            #[cfg(feature = "dflash-k0s-diagnostics")]
+            k0s_live_event: None,
         }
     }
 
@@ -14879,6 +15338,10 @@ impl<'a> DFlashDecoder<'a> {
         carry_tok: i32,
         noise_start_pos: u32,
     ) -> Result<Vec<i32>, DFlashError> {
+        #[cfg(feature = "dflash-k0s-diagnostics")]
+        {
+            dflash_k0s_require_no_live_event(self.k0s_live_event)?;
+        }
         let arch = &self.base.model.arch;
         let cfg = self.head.config;
         if carry_tok < 0 || (carry_tok as u32) >= arch.vocab_size {
@@ -16305,6 +16768,16 @@ impl<'a> DFlashDecoder<'a> {
         carry_tok: i32,
         noise_start_pos: u32,
     ) -> Result<DFlashK0sCapture, DFlashError> {
+        let observation = self.draft_block_with_k0s_observation(carry_tok, noise_start_pos)?;
+        self.extract_k0s_observation(observation)
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    pub fn draft_block_with_k0s_observation(
+        &mut self,
+        carry_tok: i32,
+        noise_start_pos: u32,
+    ) -> Result<DFlashK0sProductionObservation, DFlashError> {
         dflash_k0s_positions(noise_start_pos)?;
         if dflash2_selector_disabled() {
             return Err(DFlashError::SelectorDiagnosticDisabled);
@@ -16345,12 +16818,68 @@ impl<'a> DFlashDecoder<'a> {
         }
         let (draft_tokens, dispatch_census, kernel_trace) =
             self.observe_k0s_production_draft(carry_tok, noise_start_pos)?;
-        Self::extract_k0s_post_sync(
+        let parity = dflash_k0s_parity_summary_from_parts(
             self.head,
             &self.session,
-            vocab,
             carry_tok,
             noise_start_pos,
+            &draft_tokens,
+            &dispatch_census,
+            kernel_trace,
+        )?;
+        let event_sequence = dflash_k0s_next_event_sequence()?;
+        self.k0s_live_event = Some(event_sequence);
+        let event_envelope_sha256 = dflash_k0s_event_envelope_sha256(&parity, event_sequence);
+        Ok(DFlashK0sProductionObservation {
+            summary: DFlashK0sObservationSummary {
+                parity,
+                event_sequence,
+                event_envelope_sha256,
+            },
+        })
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    pub fn extract_k0s_observation(
+        &mut self,
+        observation: DFlashK0sProductionObservation,
+    ) -> Result<DFlashK0sCapture, DFlashError> {
+        dflash_k0s_consume_observation(
+            self.head,
+            &self.session,
+            self.base.model.arch.vocab_size as usize,
+            &mut self.k0s_live_event,
+            observation,
+        )
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    pub fn finish_k0s_observation_without_extraction(
+        &mut self,
+        observation: DFlashK0sProductionObservation,
+    ) -> Result<DFlashK0sObservationSummary, DFlashError> {
+        dflash_k0s_finish_observation(
+            self.head,
+            &self.session,
+            &mut self.k0s_live_event,
+            observation,
+        )
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    pub fn dflash_k0s_parity_summary(
+        &self,
+        carry_token: i32,
+        noise_start_position: u32,
+        draft_tokens: &[i32],
+        dispatch_census: &[DFlashK0sDispatchCensusRow],
+        kernel_trace: crate::metal::KernelTraceCounters,
+    ) -> Result<DFlashK0sParitySummary, DFlashError> {
+        dflash_k0s_parity_summary_from_parts(
+            self.head,
+            &self.session,
+            carry_token,
+            noise_start_position,
             draft_tokens,
             dispatch_census,
             kernel_trace,
@@ -16601,7 +17130,9 @@ impl<'a> DFlashDecoder<'a> {
                 diagnostic_state_sha256,
             },
             capture_sha256: [0; 32],
+            content_sha256: [0; 32],
         };
+        capture.content_sha256 = dflash_k0s_capture_content_sha256(&capture);
         capture.capture_sha256 = dflash_k0s_capture_sha256(&capture);
         Ok(capture)
     }
@@ -16797,7 +17328,9 @@ mod tests {
                 diagnostic_state_sha256: [8; 32],
             },
             capture_sha256: [0; 32],
+            content_sha256: [0; 32],
         };
+        capture.content_sha256 = dflash_k0s_capture_content_sha256(&capture);
         capture.capture_sha256 = dflash_k0s_capture_sha256(&capture);
         capture
     }
@@ -17219,6 +17752,102 @@ mod tests {
 
     #[cfg(feature = "dflash-k0s-diagnostics")]
     #[test]
+    fn k0s_live_observation_blocks_draft_before_any_work() {
+        assert!(dflash_k0s_require_no_live_event(None).is_ok());
+        let error = dflash_k0s_require_no_live_event(Some(77)).unwrap_err();
+        assert!(matches!(
+            &error,
+            DFlashError::K0sObservationLive { event_sequence: 77 }
+        ));
+        assert_eq!(
+            error.to_string(),
+            "dflash K0-S observation event 77 is still live; extract or finish it before another draft"
+        );
+        let source = include_str!("metal_dflash.rs");
+        let draft = source
+            .split("pub fn draft_block(")
+            .nth(1)
+            .unwrap()
+            .split("fn select_draft_path")
+            .next()
+            .unwrap();
+        let guard = draft.find("dflash_k0s_require_no_live_event").unwrap();
+        assert!(guard < draft.find("let arch =").unwrap());
+        for work in ["commandBuffer()", "KernelEncoder::begin", "encode_"] {
+            assert!(draft[..guard].find(work).is_none());
+        }
+        assert!(!draft[..guard].contains("k0s_live_event = None"));
+        let drop_impl = ["impl Drop for ", "DFlashK0sProductionObservation"].concat();
+        assert!(!source.contains(&drop_impl));
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_session_sequence_is_nonzero_monotonic_and_fails_closed() {
+        let next = std::sync::atomic::AtomicU64::new(1);
+        assert_eq!(dflash_k0s_allocate_session_sequence_from(&next).unwrap(), 1);
+        assert_eq!(dflash_k0s_allocate_session_sequence_from(&next).unwrap(), 2);
+
+        let exhausted = std::sync::atomic::AtomicU64::new(u64::MAX);
+        assert!(dflash_k0s_allocate_session_sequence_from(&exhausted).is_err());
+        assert_eq!(
+            exhausted.load(std::sync::atomic::Ordering::Relaxed),
+            u64::MAX
+        );
+        assert!(dflash_k0s_allocate_session_sequence_from(&exhausted).is_err());
+
+        let zero = std::sync::atomic::AtomicU64::new(0);
+        assert!(dflash_k0s_allocate_session_sequence_from(&zero).is_err());
+        assert_eq!(zero.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_session_sequence_is_private_and_assigned_once_by_fresh() {
+        let source = include_str!("metal_dflash.rs");
+        let session_struct = source
+            .split("pub struct MetalDFlashSession {")
+            .nth(1)
+            .unwrap()
+            .split("struct DFlashSessionGeometry")
+            .next()
+            .unwrap();
+        assert!(session_struct.contains("k0s_session_sequence: u64"));
+        assert!(!session_struct.contains("pub k0s_session_sequence"));
+
+        let fresh = source
+            .split("impl MetalDFlashSession {")
+            .nth(1)
+            .unwrap()
+            .split("pub fn fresh(")
+            .nth(1)
+            .unwrap()
+            .split("pub fn enable_phase_timers")
+            .next()
+            .unwrap();
+        assert_eq!(
+            fresh
+                .matches("dflash_k0s_allocate_session_sequence()?")
+                .count(),
+            1
+        );
+        assert!(
+            fresh.find("phase_timings: Vec::new()")
+                < fresh.find("k0s_session_sequence: dflash_k0s_allocate_session_sequence()?")
+        );
+
+        let binding = source
+            .split("fn dflash_k0s_session_binding_sha256")
+            .nth(1)
+            .unwrap()
+            .split("fn dflash_k0s_hash_f32le")
+            .next()
+            .unwrap();
+        assert!(binding.find("session.k0s_session_sequence") < binding.find("for tensor in"));
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
     fn k0s_dispatch_census_v1_cap_is_inclusive_at_256() {
         assert!(dflash_k0s_check_dispatch_census_len(256).is_ok());
         assert!(dflash_k0s_check_dispatch_census_len(257).is_err());
@@ -17230,11 +17859,30 @@ mod tests {
     fn k0s_capture_hash_commits_every_synchronized_input_family() {
         let capture = k0s_synthetic_capture();
         assert_eq!(capture.capture_sha256, dflash_k0s_capture_sha256(&capture));
+        assert_eq!(
+            capture.content_sha256,
+            dflash_k0s_capture_content_sha256(&capture)
+        );
         let original = capture.capture_sha256;
+        let original_content = capture.content_sha256;
+
+        let mut envelope_mutation = capture.clone();
+        envelope_mutation.state_identity.carry_token ^= 1;
+        envelope_mutation.state_identity.noise_start_position ^= 1;
+        envelope_mutation.state_identity.synchronized_event_sha256[0] ^= 1;
+        assert_ne!(dflash_k0s_capture_sha256(&envelope_mutation), original);
+        assert_eq!(
+            dflash_k0s_capture_content_sha256(&envelope_mutation),
+            original_content
+        );
 
         let mut mutated = capture.clone();
         mutated.depths[0].full_logits_bits[0] ^= 1;
         assert_ne!(dflash_k0s_capture_sha256(&mutated), original);
+        assert_ne!(
+            dflash_k0s_capture_content_sha256(&mutated),
+            original_content
+        );
         let mut mutated = capture.clone();
         mutated.depths[0].top_k_ids[0] ^= 1;
         assert_ne!(dflash_k0s_capture_sha256(&mutated), original);
@@ -17466,6 +18114,109 @@ mod tests {
                 K0sMetalLeaseDecision::FailRequired
             );
         }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_embedded_metallib_identity_is_context_free_and_feature_gated() {
+        let bytes = dflash_k0s_embedded_metallib_bytes();
+        let identity = dflash_k0s_embedded_metallib_identity();
+        assert_eq!(bytes, crate::KERNELS_METALLIB);
+        assert_eq!(identity.byte_count, crate::KERNELS_METALLIB.len());
+        assert_eq!(
+            identity.sha256,
+            <[u8; 32]>::from(Sha256::digest(crate::KERNELS_METALLIB))
+        );
+        let source = include_str!("metal_dflash.rs");
+        for name in [
+            "pub fn dflash_k0s_embedded_metallib_bytes",
+            "pub fn dflash_k0s_embedded_metallib_identity",
+        ] {
+            let prefix = source.split(name).next().unwrap();
+            assert!(prefix.ends_with("#[cfg(feature = \"dflash-k0s-diagnostics\")]\n"));
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_selector_input_and_event_envelope_known_vectors() {
+        let hex = |digest: [u8; 32]| {
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let logits = [1.0, -0.0, f32::from_bits(0x7fc0_1234)];
+        let ids = [-1, 0, i32::MAX];
+        let unary = [f32::INFINITY, f32::from_bits(1)];
+        let selector_hidden = [0.5, -2.25];
+        let logits_hash = dflash_k0s_hash_full_logits_f32le(&logits);
+        let ids_hash = dflash_k0s_hash_top_k_ids_i32le(&ids);
+        let unary_hash = dflash_k0s_hash_unary_f32le(&unary);
+        let selector_hidden_hash = dflash_k0s_hash_selector_hidden_f32le(&selector_hidden);
+        assert_eq!(
+            hex(logits_hash),
+            "d7ce69baed8e4e54815db4d1b3da7a63f11a4b7c0753fd3b1402d8868d356929"
+        );
+        assert_eq!(
+            hex(ids_hash),
+            "f724f45be88aed244e4a8db9f36c03527834b23dd8d759667b8b3ae611fa909d"
+        );
+        assert_eq!(
+            hex(unary_hash),
+            "d6df90d4352ae14812cd7012e834670c8b0d61bf845605f4bb840bb413c28ae5"
+        );
+        assert_eq!(
+            hex(selector_hidden_hash),
+            "d68fdd6c4295f556a433846a741fd499700782fd88afcac690687cfb5c710f8d"
+        );
+        let parity = DFlashK0sParitySummary {
+            draft_tokens: vec![1, -2],
+            dispatch_census: vec![DFlashK0sDispatchCensusRow {
+                family: "fam".into(),
+                tag: Some("tag".into()),
+                encoder_ordinal: 9,
+                encoder_concurrent: true,
+                kernel: "k".into(),
+                grid: [1, 2, 3],
+                threads: [4, 5, 6],
+                grid_threadgroups: 7,
+                threadgroup_threads: 8,
+            }],
+            kernel_trace: [10, 11, 12],
+            selector_inputs: DFlashK0sSelectorInputIdentity {
+                full_logits_count: logits.len(),
+                full_logits_sha256_f32le: logits_hash,
+                top_k_ids_count: ids.len(),
+                top_k_ids_sha256_i32le: ids_hash,
+                unary_count: unary.len(),
+                unary_sha256_f32le: unary_hash,
+                selector_hidden_count: selector_hidden.len(),
+                selector_hidden_sha256_f32le: selector_hidden_hash,
+            },
+            selector_dispatch: DFlashK0sSelectorDispatchIdentity {
+                weight_dtype: GgmlType::F32,
+                input_dtype: GgmlType::F32,
+                output_dtype: GgmlType::F32,
+                block_size: 8,
+                hidden_size: 5120,
+                selector_rank: 256,
+            },
+            diagnostic_state_sha256: [5; 32],
+            carry_token: -7,
+            noise_start_position: 42,
+            session_binding_sha256: [6; 32],
+        };
+        assert_eq!(
+            hex(dflash_k0s_event_envelope_sha256(&parity, 99)),
+            "9ecf1a2f54c9608fbc5110838bf93544d02f68f3fe1c69da6849492dcf0ca39d"
+        );
+        let mut mutation = parity.clone();
+        mutation.selector_dispatch.selector_rank ^= 1;
+        assert_ne!(
+            dflash_k0s_event_envelope_sha256(&mutation, 99),
+            dflash_k0s_event_envelope_sha256(&parity, 99)
+        );
     }
 
     #[cfg(feature = "dflash-k0s-diagnostics")]
@@ -17701,6 +18452,7 @@ mod tests {
             ffn_out_buf: k0s_synthetic_f32_tensor(ctx, "ffn_out_buf", 127),
             enable_phase_timers: false,
             phase_timings: Vec::new(),
+            k0s_session_sequence: dflash_k0s_allocate_session_sequence().unwrap(),
         }
     }
 
@@ -18044,6 +18796,10 @@ mod tests {
             capture.provenance.embedded_metallib_sha256,
             <[u8; 32]>::from(Sha256::digest(crate::KERNELS_METALLIB))
         );
+        assert_eq!(
+            capture.content_sha256,
+            dflash_k0s_capture_content_sha256(capture)
+        );
         assert_eq!(capture.capture_sha256, dflash_k0s_capture_sha256(capture));
     }
 
@@ -18065,7 +18821,24 @@ mod tests {
         final_state: [u8; 32],
         final_target: [u8; 32],
         capture_sha256: Option<[u8; 32]>,
+        content_sha256: Option<[u8; 32]>,
+        event_envelope_sha256: Option<[u8; 32]>,
         rng_draws: u64,
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_forge_observation(
+        parity: DFlashK0sParitySummary,
+        event_sequence: u64,
+    ) -> DFlashK0sProductionObservation {
+        let event_envelope_sha256 = dflash_k0s_event_envelope_sha256(&parity, event_sequence);
+        DFlashK0sProductionObservation {
+            summary: DFlashK0sObservationSummary {
+                parity,
+                event_sequence,
+                event_envelope_sha256,
+            },
+        }
     }
 
     #[cfg(feature = "dflash-k0s-diagnostics")]
@@ -18073,6 +18846,7 @@ mod tests {
         ctx: &MetalContext,
         head: &MetalDFlashHead,
         diagnostic_on: bool,
+        event_sequence: u64,
     ) -> K0sSyntheticArmSummary {
         let baseline = crate::metal::diagnostics_observer_active_counts();
         let session = k0s_synthetic_session(ctx);
@@ -18093,8 +18867,80 @@ mod tests {
         let synchronized_inputs = k0s_synchronized_inputs_sha256(&session, &draft);
         let state_before_extraction = dflash_k0s_state_sha256(&session).unwrap();
         let target_before = k0s_synthetic_tensor_sha256(&target_state);
+        let parity = dflash_k0s_parity_summary_from_parts(
+            head,
+            &session,
+            7,
+            200,
+            &draft,
+            &first_rows,
+            first_trace,
+        )
+        .unwrap();
+        assert_eq!(
+            parity.selector_inputs.full_logits_count,
+            7 * DFLASH_K0S_VOCAB
+        );
+        assert_eq!(parity.selector_inputs.top_k_ids_count, 7 * DFLASH_K0S_TOP_K);
+        assert_eq!(parity.selector_inputs.unary_count, 7 * DFLASH_K0S_TOP_K);
+        assert_eq!(
+            parity.selector_inputs.selector_hidden_count,
+            7 * DFLASH_K0S_RANK
+        );
+        assert_eq!(
+            parity.selector_dispatch,
+            DFlashK0sSelectorDispatchIdentity {
+                weight_dtype: GgmlType::F32,
+                input_dtype: GgmlType::F32,
+                output_dtype: GgmlType::F32,
+                block_size: DFLASH_K0S_BLOCK_SIZE,
+                hidden_size: DFLASH_K0S_HIDDEN,
+                selector_rank: DFLASH_K0S_RANK,
+            }
+        );
         let capture = diagnostic_on.then(|| {
-            DFlashDecoder::extract_k0s_post_sync(
+            let state_before_finish = dflash_k0s_state_sha256(&session).unwrap();
+            let finish_sequence = event_sequence + 100;
+            let finish_observation = k0s_forge_observation(parity.clone(), finish_sequence);
+            let finish_reuse = k0s_forge_observation(parity.clone(), finish_sequence);
+            let mut finish_live = Some(finish_sequence);
+            let finished =
+                dflash_k0s_finish_observation(head, &session, &mut finish_live, finish_observation)
+                    .unwrap();
+            assert_eq!(finished.parity, parity);
+            assert_eq!(finish_live, None);
+            assert_eq!(
+                dflash_k0s_state_sha256(&session).unwrap(),
+                state_before_finish
+            );
+            assert!(
+                dflash_k0s_finish_observation(head, &session, &mut finish_live, finish_reuse,)
+                    .is_err()
+            );
+            let observation = k0s_forge_observation(parity.clone(), event_sequence);
+            assert_eq!(observation.summary().parity, parity);
+            let forged_reuse = k0s_forge_observation(parity.clone(), event_sequence);
+            let mut live_event = Some(event_sequence);
+            let staged = dflash_k0s_consume_observation(
+                head,
+                &session,
+                DFLASH_K0S_VOCAB,
+                &mut live_event,
+                observation,
+            )
+            .unwrap();
+            assert_eq!(live_event, None);
+            assert!(
+                dflash_k0s_consume_observation(
+                    head,
+                    &session,
+                    DFLASH_K0S_VOCAB,
+                    &mut live_event,
+                    forged_reuse,
+                )
+                .is_err()
+            );
+            let composed = DFlashDecoder::extract_k0s_post_sync(
                 head,
                 &session,
                 DFLASH_K0S_VOCAB,
@@ -18104,7 +18950,10 @@ mod tests {
                 first_rows.clone(),
                 first_trace,
             )
-            .unwrap()
+            .unwrap();
+            assert_eq!(staged.capture_sha256, composed.capture_sha256);
+            assert_eq!(staged.content_sha256, composed.content_sha256);
+            staged
         });
         let state_after_extraction = dflash_k0s_state_sha256(&session).unwrap();
         let target_after = k0s_synthetic_tensor_sha256(&target_state);
@@ -18125,6 +18974,9 @@ mod tests {
         let final_state = dflash_k0s_state_sha256(&session).unwrap();
         let final_target = k0s_synthetic_tensor_sha256(&target_state);
         let capture_sha256 = capture.as_ref().map(|capture| capture.capture_sha256);
+        let content_sha256 = capture.as_ref().map(|capture| capture.content_sha256);
+        let event_envelope_sha256 =
+            diagnostic_on.then(|| dflash_k0s_event_envelope_sha256(&parity, event_sequence));
         drop(capture);
         K0sSyntheticArmSummary {
             draft,
@@ -18150,8 +19002,51 @@ mod tests {
             final_state,
             final_target,
             capture_sha256,
+            content_sha256,
+            event_envelope_sha256,
             rng_draws: 0,
         }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_mutate_tensor_u32(tensor: &MetalTensor, element: usize) {
+        assert!(matches!(tensor.dtype, GgmlType::F32 | GgmlType::I32));
+        assert!(element < tensor.n_elements() as usize);
+        unsafe {
+            let ptr = (tensor.buffer.contents().as_ptr() as *mut u8)
+                .add(tensor.offset as usize)
+                .cast::<u32>()
+                .add(element);
+            *ptr ^= 1;
+        }
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    fn k0s_assert_observation_mutation_rejected(
+        ctx: &MetalContext,
+        head: &MetalDFlashHead,
+        mutate: impl FnOnce(&MetalDFlashSession),
+    ) {
+        let session = k0s_synthetic_session(ctx);
+        let draft = vec![0; DFLASH_K0S_BLOCK_SIZE];
+        let (rows, counters) = k0s_synthetic_dispatch(ctx, head, &session);
+        let parity =
+            dflash_k0s_parity_summary_from_parts(head, &session, 7, 200, &draft, &rows, counters)
+                .unwrap();
+        let observation = k0s_forge_observation(parity, 11);
+        mutate(&session);
+        let mut live = Some(11);
+        assert!(
+            dflash_k0s_consume_observation(
+                head,
+                &session,
+                DFLASH_K0S_VOCAB,
+                &mut live,
+                observation,
+            )
+            .is_err()
+        );
+        assert_eq!(live, None);
     }
 
     #[cfg(feature = "dflash-k0s-diagnostics")]
@@ -18163,13 +19058,15 @@ mod tests {
         let baseline = crate::metal::diagnostics_observer_active_counts();
         let head = k0s_synthetic_head(&ctx);
 
-        let off_a = k0s_run_synthetic_arm(&ctx, &head, false);
-        let on_a = k0s_run_synthetic_arm(&ctx, &head, true);
-        let on_b = k0s_run_synthetic_arm(&ctx, &head, true);
-        let off_b = k0s_run_synthetic_arm(&ctx, &head, false);
+        let off_a = k0s_run_synthetic_arm(&ctx, &head, false, 1);
+        let on_a = k0s_run_synthetic_arm(&ctx, &head, true, 2);
+        let on_b = k0s_run_synthetic_arm(&ctx, &head, true, 3);
+        let off_b = k0s_run_synthetic_arm(&ctx, &head, false, 4);
 
         let without_capture = |mut summary: K0sSyntheticArmSummary| {
             summary.capture_sha256 = None;
+            summary.content_sha256 = None;
+            summary.event_envelope_sha256 = None;
             summary
         };
         assert_eq!(
@@ -18186,6 +19083,9 @@ mod tests {
         );
         assert_eq!(without_capture(on_a.clone()), without_capture(on_b.clone()));
         assert_eq!(on_a.capture_sha256, on_b.capture_sha256);
+        assert_eq!(on_a.content_sha256, on_b.content_sha256);
+        assert!(on_a.content_sha256.is_some());
+        assert_ne!(on_a.event_envelope_sha256, on_b.event_envelope_sha256);
         assert!(on_a.capture_sha256.is_some());
         assert!(off_a.capture_sha256.is_none());
         assert!(off_b.capture_sha256.is_none());
@@ -18218,6 +19118,121 @@ mod tests {
                 (2.0f32.to_bits() % DFLASH_K0S_VOCAB as u32) as i32
             );
         }
+
+        k0s_assert_observation_mutation_rejected(&ctx, &head, |session| {
+            k0s_mutate_tensor_u32(&session.draft_logits, DFLASH_K0S_VOCAB)
+        });
+        k0s_assert_observation_mutation_rejected(&ctx, &head, |session| {
+            k0s_mutate_tensor_u32(session.topk_ids.as_ref().unwrap(), DFLASH_K0S_TOP_K)
+        });
+        k0s_assert_observation_mutation_rejected(&ctx, &head, |session| {
+            k0s_mutate_tensor_u32(session.topk_vals.as_ref().unwrap(), DFLASH_K0S_TOP_K)
+        });
+        k0s_assert_observation_mutation_rejected(&ctx, &head, |session| {
+            k0s_mutate_tensor_u32(session.sel_h.as_ref().unwrap(), DFLASH_K0S_RANK)
+        });
+        k0s_assert_observation_mutation_rejected(&ctx, &head, |session| {
+            k0s_mutate_tensor_u32(&session.x, 0)
+        });
+
+        let draft = vec![0; DFLASH_K0S_BLOCK_SIZE];
+        let first_session = k0s_synthetic_session(&ctx);
+        let (rows, counters) = k0s_synthetic_dispatch(&ctx, &head, &first_session);
+        let parity = dflash_k0s_parity_summary_from_parts(
+            &head,
+            &first_session,
+            7,
+            200,
+            &draft,
+            &rows,
+            counters,
+        )
+        .unwrap();
+        let first_sequence = first_session.k0s_session_sequence;
+        drop(first_session);
+        let second_session = k0s_synthetic_session(&ctx);
+        let (second_rows, second_counters) = k0s_synthetic_dispatch(&ctx, &head, &second_session);
+        let second_parity = dflash_k0s_parity_summary_from_parts(
+            &head,
+            &second_session,
+            7,
+            200,
+            &draft,
+            &second_rows,
+            second_counters,
+        )
+        .unwrap();
+        assert_ne!(first_sequence, second_session.k0s_session_sequence);
+        assert_ne!(
+            parity.session_binding_sha256,
+            second_parity.session_binding_sha256
+        );
+        let mut first_semantic = parity.clone();
+        first_semantic.session_binding_sha256 = [0; 32];
+        let mut second_semantic = second_parity;
+        second_semantic.session_binding_sha256 = [0; 32];
+        assert_eq!(first_semantic, second_semantic);
+
+        let first_session = k0s_synthetic_session(&ctx);
+        let (rows, counters) = k0s_synthetic_dispatch(&ctx, &head, &first_session);
+        let parity = dflash_k0s_parity_summary_from_parts(
+            &head,
+            &first_session,
+            7,
+            200,
+            &draft,
+            &rows,
+            counters,
+        )
+        .unwrap();
+        let mut live = Some(21);
+        assert!(
+            dflash_k0s_consume_observation(
+                &head,
+                &second_session,
+                DFLASH_K0S_VOCAB,
+                &mut live,
+                k0s_forge_observation(parity.clone(), 21),
+            )
+            .is_err()
+        );
+        assert_eq!(live, None);
+        let mut stale = None;
+        assert!(
+            dflash_k0s_consume_observation(
+                &head,
+                &first_session,
+                DFLASH_K0S_VOCAB,
+                &mut stale,
+                k0s_forge_observation(parity.clone(), 21),
+            )
+            .is_err()
+        );
+        let mut wrong_dispatch = parity.clone();
+        wrong_dispatch.selector_dispatch.selector_rank ^= 1;
+        let mut live = Some(23);
+        assert!(
+            dflash_k0s_finish_observation(
+                &head,
+                &first_session,
+                &mut live,
+                k0s_forge_observation(wrong_dispatch, 23),
+            )
+            .is_err()
+        );
+        let mut bad_envelope = k0s_forge_observation(parity, 22);
+        bad_envelope.summary.event_envelope_sha256[0] ^= 1;
+        let mut live = Some(22);
+        assert!(
+            dflash_k0s_consume_observation(
+                &head,
+                &first_session,
+                DFLASH_K0S_VOCAB,
+                &mut live,
+                bad_envelope,
+            )
+            .is_err()
+        );
         assert_eq!(crate::metal::diagnostics_observer_active_counts(), baseline);
     }
 
@@ -18229,11 +19244,28 @@ mod tests {
             .split("pub fn draft_block_with_k0s_diagnostic")
             .nth(1)
             .unwrap()
-            .split("fn observe_k0s_production_draft")
+            .split("pub fn draft_block_with_k0s_observation")
             .next()
             .unwrap();
-        assert_eq!(wrapper.matches("observe_k0s_production_draft(").count(), 1);
+        assert_eq!(
+            wrapper.matches("draft_block_with_k0s_observation(").count(),
+            1
+        );
+        assert_eq!(wrapper.matches("extract_k0s_observation(").count(), 1);
         assert_eq!(wrapper.matches("self.draft_block(").count(), 0);
+        let staged_observation = source
+            .split("pub fn draft_block_with_k0s_observation")
+            .nth(1)
+            .unwrap()
+            .split("pub fn extract_k0s_observation")
+            .next()
+            .unwrap();
+        assert_eq!(
+            staged_observation
+                .matches("observe_k0s_production_draft(")
+                .count(),
+            1
+        );
         let observation = source
             .split("fn observe_k0s_production_draft")
             .nth(1)
@@ -18265,6 +19297,51 @@ mod tests {
                 "extraction contains {forbidden}"
             );
         }
+        let staged_consumer = source
+            .split("fn dflash_k0s_consume_observation")
+            .nth(1)
+            .unwrap()
+            .split("pub fn dflash_k0s_scalar_contract_fixture")
+            .next()
+            .unwrap();
+        for forbidden in [
+            ".commit()",
+            "waitUntilCompleted",
+            "KernelEncoder::begin",
+            "commandBuffer()",
+            "draft_block(",
+            "encode_",
+            "Sampler",
+            "rng",
+        ] {
+            assert!(
+                !staged_consumer.contains(forbidden),
+                "staged consumer contains {forbidden}"
+            );
+        }
+        let finish_only = source
+            .split("fn dflash_k0s_finish_observation")
+            .nth(1)
+            .unwrap()
+            .split("pub fn dflash_k0s_scalar_contract_fixture")
+            .next()
+            .unwrap();
+        for forbidden in [
+            "extract_k0s_post_sync",
+            ".commit()",
+            "waitUntilCompleted",
+            "KernelEncoder::begin",
+            "commandBuffer()",
+            "draft_block(",
+            "encode_",
+            "Sampler",
+            "rng",
+        ] {
+            assert!(
+                !finish_only.contains(forbidden),
+                "finish-only validation contains {forbidden}"
+            );
+        }
         assert!(
             observation
                 .find("dflash_k0s_check_dispatch_census_len")
@@ -18273,6 +19350,54 @@ mod tests {
         );
         assert!(source.contains("DFLASH_K0S_SELECTOR_DISPATCH_TAG.to_owned()"));
         assert!(source.contains("let observer_guard = DFlashK0sObserverGuard::begin()?"));
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn k0s_four_arm_model_head_contract_is_shared_immutable_session_local_state() {
+        let source = include_str!("metal_dflash.rs");
+        let decoder = source
+            .split("pub struct DFlashDecoder<'a>")
+            .nth(1)
+            .unwrap()
+            .split("impl<'a> DFlashDecoder<'a>")
+            .next()
+            .unwrap();
+        assert!(decoder.contains("pub base: &'a MetalForward<'a>"));
+        assert!(decoder.contains("pub head: &'a MetalDFlashHead"));
+        assert!(decoder.contains("pub session: MetalDFlashSession"));
+
+        let forward_source = include_str!("metal_forward.rs");
+        let forward = forward_source
+            .split("pub struct MetalForward<'a>")
+            .nth(1)
+            .unwrap()
+            .split("impl<'a> MetalForward<'a>")
+            .next()
+            .unwrap();
+        assert!(forward.contains("pub model: &'a MetalModel"));
+
+        let draft = source
+            .split("pub fn draft_block(")
+            .nth(1)
+            .unwrap()
+            .split("fn select_draft_path")
+            .next()
+            .unwrap();
+        assert!(draft.contains("if let Some(sel) = self.head.selector.as_ref()"));
+        assert!(draft.contains("&sel.hidden"));
+        assert!(draft.contains("&self.session.h"));
+        assert!(draft.contains("self.session.sel_h.as_ref()"));
+        for forbidden in [
+            "&mut self.head",
+            "self.head.selector.as_mut()",
+            "self.head =",
+            "self.base =",
+        ] {
+            assert!(!draft.contains(forbidden));
+        }
+        assert!(draft.contains("self.session.ctx_h_ready_n = ctx_len"));
+        assert!(draft.contains("self.session.kv_ctx_ready_n = ctx_len"));
     }
 
     fn memory_estimate_config() -> crate::loader::DFlashConfig {

@@ -2,9 +2,10 @@
 
 Status: development diagnostics only. Post-incident Q4 E0 sentinels now pass the
 strict lockstep reducer under both execution orders on one narrow computational
-fixture. K0 remains a local reference diagnostic without cross-implementation
-parity, and no G1, product, serve, default-selection, model-wide, or held-out
-authority exists.
+fixture, and a serial-first four-token fixture passes with three intermediate
+generated target transitions. K0 remains a local reference diagnostic without
+cross-implementation parity, and no G1, product, serve, default-selection,
+model-wide, or held-out authority exists.
 
 ## What The Development Runs Establish
 
@@ -131,6 +132,14 @@ observed under either execution order on this same fixture. V3 is an informed
 order diagnostic, not an independent replicate, and these two rows do not rule
 out order effects generally. See `E0-Q4-V3-REVERSE-RESULT.md`.
 
+V4 added schema-v3 machine binding of the entire prompt/config object and
+requested four emitted tokens under `serial_then_capture`. Its reduction passed
+with four emissions, three intermediate generated target transitions, five
+validated transitions total, and exact authenticated coverage of the expected
+1,885,208,576-byte state sidecar. This buys generated-history depth on the same
+already exposed `Hello` fixture, not prompt/seed diversity or independent
+evidence. See `E0-Q4-V4-GENERATED-RESULT.md`.
+
 ## Development Recommendation
 
 Keep Q4_K_M in the prospective drafter matrix. It is materially smaller, loads
@@ -139,8 +148,8 @@ chosen as a default from these clusters.
 
 The next go/no-go boundary is now:
 
-1. Broaden E0 to generated lengths that exercise intermediate target
-   transitions and sustained histories, then add multiple prompts and seeds.
+1. Reverse arm order on the four-token generated-history fixture, then add a
+   distinct development prompt before increasing length or seeds.
 2. Freeze separate Q4 and Q8 drafter arms, fixtures, hashes, and request-cluster
    analysis before acquiring comparison or economics evidence.
 3. Pin and cross-check the actual causal sparse-q contract before E1b; the

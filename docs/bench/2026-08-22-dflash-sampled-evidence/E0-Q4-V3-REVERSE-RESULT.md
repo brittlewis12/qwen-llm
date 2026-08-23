@@ -11,8 +11,10 @@ held-out, performance, packed-verifier, serving, or product authority.
 - **NO-GO:** do not call this an independent replication, rule out order effects
   generally, authorize a sampled verifier, change serve policy, or infer
   quantization-wide/model-wide E0 closure.
-- **Next gate:** exercise intermediate generated target transitions and sustained
-  histories before spending on broader seeds/quantizations or authoritative K0.
+- **Next gate at acquisition time:** exercise intermediate generated target
+  transitions. The subsequent serial-first v4 fixture passed three such
+  transitions. Reverse generated-history order and prompt diversity remain the
+  next E0 gaps; authoritative K0 remains independently open.
 
 ## Frozen Run
 
@@ -90,3 +92,11 @@ and no intermediate generated transition. Exact hidden bytes do not establish
 the intended residual semantics. Packed/layer-major verification, rollback,
 sparse-q/K0 correctness, acceptance, speed, memory economics, longer histories,
 Q8/BF16, held-out prompts, serving, and product integration remain untested.
+
+## Subsequent Generated-History Diagnostic
+
+The schema-v3, four-token v4 fixture subsequently passed under
+`serial_then_capture`, including three intermediate generated target transitions.
+This extends depth on the same exposed prompt but does not supply reverse-order
+generated-history coverage or prompt diversity. See
+`E0-Q4-V4-GENERATED-RESULT.md`.

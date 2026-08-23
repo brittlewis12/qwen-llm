@@ -18427,6 +18427,107 @@ pub fn encode_attn_matrix_kqv_f32(
     Ok(())
 }
 
+/// Direct-V KQV (`kernel_attn_matrix_kqv_direct_v_f32`): the probs x V GEMM
+/// reading the V cache directly (strided column-major staging) instead of a
+/// pre-transposed v_t, deleting the transpose pass for the decode verify
+/// reader. Same grid, staging, and MMA shape as the v_t variant.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_attn_matrix_kqv_direct_v_f32(
+    ctx: &MetalContext,
+    enc: &KernelEncoder,
+    probs: &MetalTensor,
+    v_cache: &MetalTensor,
+    out: &MetalTensor,
+    n_rows: usize,
+    base_pos: usize,
+    n_pos: usize,
+    kv_stride: usize,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    group: usize,
+    head_dim: usize,
+    causal_skip: bool,
+) -> Result<(), MetalError> {
+    validate_attn_matrix_common(
+        "attn_matrix_kqv_direct_v",
+        n_rows,
+        n_pos,
+        base_pos,
+        n_q_heads,
+        n_kv_heads,
+        group,
+        head_dim,
+    )?;
+    if kv_stride < n_kv_heads * head_dim {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_kqv_direct_v",
+            detail: format!("kv_stride={kv_stride} < n_kv_heads*head_dim"),
+        });
+    }
+    let want_probs = n_rows * n_q_heads * n_pos;
+    let want_v = n_pos * kv_stride;
+    let want_out = n_rows * n_q_heads * head_dim;
+    if probs.dtype != GgmlType::F32 || out.dtype != GgmlType::F32 || v_cache.dtype != GgmlType::F16
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_kqv_direct_v",
+            detail: format!(
+                "expected probs/out F32 and v_cache F16, got {:?}/{:?}/{:?}",
+                probs.dtype, out.dtype, v_cache.dtype
+            ),
+        });
+    }
+    if probs.n_elements() < want_probs as u64
+        || v_cache.n_elements() < want_v as u64
+        || out.n_elements() != want_out as u64
+    {
+        return Err(MetalError::BadShape {
+            kernel: "attn_matrix_kqv_direct_v",
+            detail: format!(
+                "bad sizes: probs {} need >= {want_probs}, v_cache {} need >= {want_v}, out {} need {want_out}",
+                probs.n_elements(),
+                v_cache.n_elements(),
+                out.n_elements()
+            ),
+        });
+    }
+    let pso = ctx.pipeline("kernel_attn_matrix_kqv_direct_v_f32")?;
+    enc.set_pipeline(&pso);
+    enc.set_bytes(
+        0,
+        &AttnMatrixArgs {
+            n_rows: n_rows as u32,
+            n_pos: n_pos as u32,
+            base_pos: base_pos as u32,
+            kv_stride: kv_stride as u32,
+            vt_stride: 0,
+            n_q_heads: n_q_heads as u32,
+            n_kv_heads: n_kv_heads as u32,
+            group: group as u32,
+            head_dim: head_dim as u32,
+            scale: 0.0,
+            causal_skip: causal_skip as u32,
+        },
+    );
+    enc.set_tensor(1, probs);
+    enc.set_tensor(2, v_cache);
+    enc.set_tensor(3, out);
+    enc.set_threadgroup_memory(0, 8192);
+    enc.dispatch(
+        MTLSize {
+            width: (n_rows * group).div_ceil(32),
+            height: head_dim.div_ceil(64),
+            depth: n_kv_heads,
+        },
+        MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        },
+    );
+    Ok(())
+}
+
 /// Scatter F32 source bytes into a F16 destination buffer at offset.
 /// Used for KV cache append when the cache is F16. Counterpart of
 /// `encode_scatter_offset_f32` (F32 → F32).
@@ -36180,6 +36281,57 @@ mod tests {
         eprintln!(
             "[packed-audit] ctx={n_pos} nwg={nwg} gpu_ms={ms:.3} gb={:.2} gbps={gbps:.1} (per-row baseline ~38.5 ms/layer at 130K)",
             bytes / 1e9
+        );
+
+        // Tier-3 matrix reader timing: KQ (MMA) -> softmax -> direct-V KQV.
+        let scores =
+            MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * n_q * n_pos) as u64]).expect("scores");
+        let cmd = ctx.queue.commandBuffer().expect("cmd");
+        let enc = KernelEncoder::begin(&cmd);
+        encode_attn_matrix_kq_f32(
+            &ctx,
+            &enc,
+            &q,
+            &sess.kv_k[0],
+            &scores,
+            N_ROWS,
+            base_pos,
+            n_pos,
+            n_kv * head_dim,
+            n_q,
+            n_kv,
+            group,
+            head_dim,
+            true,
+        )
+        .expect("matrix kq");
+        encode_attn_matrix_softmax_f32(
+            &ctx, &enc, &scores, N_ROWS, base_pos, n_pos, n_q, n_kv, group, head_dim,
+        )
+        .expect("matrix softmax");
+        encode_attn_matrix_kqv_direct_v_f32(
+            &ctx,
+            &enc,
+            &scores,
+            &sess.kv_v[0],
+            &o,
+            N_ROWS,
+            base_pos,
+            n_pos,
+            n_kv * head_dim,
+            n_q,
+            n_kv,
+            group,
+            head_dim,
+            true,
+        )
+        .expect("matrix kqv direct v");
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+        eprintln!(
+            "[matrix-audit] ctx={n_pos} gpu_ms={ms:.3} (per-row baseline ~38.5 ms/layer at 130K)"
         );
     }
 

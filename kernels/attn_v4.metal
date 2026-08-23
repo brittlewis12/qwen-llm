@@ -2512,6 +2512,131 @@ kernel void kernel_attn_matrix_kqv_f32(
 }
 
 [[max_total_threads_per_threadgroup(128)]]
+kernel void kernel_attn_matrix_kqv_direct_v_f32(
+        constant attn_matrix_args & args [[buffer(0)]],
+        device const float * probs [[buffer(1)]],
+        device const half  * v_cache [[buffer(2)]],
+        device       float * out   [[buffer(3)]],
+        threadgroup  uchar * shmem [[threadgroup(0)]],
+        uint3  tgpig [[threadgroup_position_in_grid]],
+        ushort tiitg [[thread_index_in_threadgroup]],
+        ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half * sa = (threadgroup half *)(shmem);
+    threadgroup half * sb = (threadgroup half *)(shmem + 4096);
+
+    const uint kvh = tgpig.z;
+    const int M = (int)args.head_dim;
+    const int N = (int)(args.n_rows * args.group);
+    const int K = (int)args.n_pos;
+    const int r0 = (int)tgpig.y * AM_NR0;
+    const int r1 = (int)tgpig.x * AM_NR1;
+    const short nr0 = (M - r0 < AM_NR0) ? (short)(M - r0) : AM_NR0;
+    const short nr1 = (N - r1 < AM_NR1) ? (short)(N - r1) : AM_NR1;
+    const uint local_q_last = (uint)(r1 + nr1 - 1);
+    const uint row_last = local_q_last / args.group;
+    const uint max_visible = min(args.n_pos, args.base_pos + row_last + 1);
+    const short lr0 = ((short)tiitg / AM_NL0) < nr0 ? ((short)tiitg / AM_NL0) : nr0 - 1;
+    const short lr1 = ((short)tiitg / AM_NL1) < nr1 ? ((short)tiitg / AM_NL1) : nr1 - 1;
+    const short il0 = tiitg % AM_NL0;
+    const short iy = 8 * (tiitg % AM_NL1);
+    const uint d_thread = (uint)(r0 + lr0);
+    const uint safe_d = min(d_thread, args.head_dim - 1u);
+    const uint local_q_thread = (uint)(r1 + lr1);
+    const uint safe_local_q = min(local_q_thread, (uint)(N - 1));
+    // Direct V reads: cache layout is [pos, kvh*head_dim + d], so the
+    // column-major staging strides by kv_stride. Deletes the v_t
+    // transpose pass entirely (Tier-3 decode reader).
+    device const half * v_base = v_cache + (ulong)kvh * args.head_dim + safe_d;
+    device const float * probs_base =
+        probs + ((ulong)kvh * (ulong)N + (ulong)safe_local_q) * args.n_pos;
+
+    simdgroup_half8x8  ma[4];
+    simdgroup_half8x8  mb[2];
+    simdgroup_float8x8 mc[8];
+    for (short i = 0; i < 8; ++i) {
+        mc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+    }
+
+    for (uint loop_k = 0; loop_k < args.n_pos; loop_k += AM_NK) {
+        if (args.causal_skip != 0u && loop_k >= max_visible) continue;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (short i = 0; i < 16; ++i) {
+            const short sx = 2 * il0 + i / 8;
+            const short sy = (tiitg / AM_NL0) / 8;
+            const short lx = (tiitg / AM_NL0) % 8;
+            const short ly = i % 8;
+            const short ib = 8 * sx + sy;
+            const uint kk = loop_k + 16 * il0 + i;
+            sa[64 * ib + 8 * ly + lx] = (d_thread < args.head_dim && kk < args.n_pos)
+                ? v_base[(ulong)kk * args.kv_stride]
+                : (half)0.0f;
+        }
+
+        {
+            const short sx = tiitg % AM_NL1;
+            const short sy = (tiitg / AM_NL1) / 8;
+            const short ly = (tiitg / AM_NL1) % 8;
+            const short ib = 4 * sx + sy;
+            const uint kk = loop_k + iy;
+            threadgroup half * dst = sb + 64 * ib + 8 * ly;
+            const bool aligned_scores = (args.n_pos & 7u) == 0u;
+            if (aligned_scores && local_q_thread < (uint)N && kk + 7 < args.n_pos) {
+                device const float * p_ptr = probs_base + kk;
+                *(threadgroup half2x4 *)dst = (half2x4)(*((device const float2x4 *)p_ptr));
+            } else {
+                for (short i = 0; i < 8; ++i) {
+                    const uint kki = kk + i;
+                    dst[i] = (local_q_thread < (uint)N && kki < args.n_pos)
+                        ? half(probs_base[kki])
+                        : (half)0.0f;
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        threadgroup const half * lsma = sa + 4 * 64 * (sgitg % 2);
+        threadgroup const half * lsmb = sb + 2 * 64 * (sgitg / 2);
+        for (short ik = 0; ik < AM_NK / 8; ++ik) {
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 4; ++i) {
+                simdgroup_load(ma[i], lsma + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 2; ++i) {
+                simdgroup_load(mb[i], lsmb + 64 * i, 8, 0, false);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            for (short i = 0; i < 8; ++i) {
+                simdgroup_multiply_accumulate(mc[i], mb[i / 4], ma[i % 4], mc[i]);
+            }
+            lsma += 8 * 64;
+            lsmb += 4 * 64;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    threadgroup float * temp = ((threadgroup float *)shmem)
+        + 32 * (sgitg & 1) + (16 * (sgitg >> 1)) * AM_NR0;
+    for (short i = 0; i < 8; ++i) {
+        simdgroup_store(mc[i], temp + 8 * (i % 4) + 8 * AM_NR0 * (i / 4), AM_NR0, 0, false);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgitg == 0) {
+        for (int j = tiitg; j < nr1; j += AM_NR1) {
+            const uint local_q = (uint)(r1 + j);
+            const uint row = local_q / args.group;
+            const uint g = local_q % args.group;
+            device float * Dst = out + ((ulong)row * args.n_q_heads + (ulong)kvh * args.group + g) * args.head_dim + r0;
+            threadgroup float * Src = temp + j * AM_NR0;
+            for (int i = 0; i < nr0; ++i) {
+                Dst[i] = Src[i];
+            }
+        }
+    }
+}
+
+[[max_total_threads_per_threadgroup(128)]]
 kernel void kernel_attn_matrix_kqv_f32_full_tiles(
         constant attn_matrix_args & args [[buffer(0)]],
         device const float * probs [[buffer(1)]],

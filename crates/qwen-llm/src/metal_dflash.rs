@@ -249,6 +249,10 @@ crate::env_flag!(
     "QWEN_MTP_ATTN_QN_SHARED_KV"
 );
 crate::env_flag!(
+    default_off mtp_attn_qn_matrix_enabled,
+    "QWEN_MTP_ATTN_QN_MATRIX"
+);
+crate::env_flag!(
     default_on prefill_attn_gdn_scratch_overlay_enabled,
     "QWEN_PREFILL_ATTN_GDN_SCRATCH_OVERLAY"
 );
@@ -7466,20 +7470,79 @@ pub fn encode_packed_verify_layer_major_inner(
                             n * kv_dim,
                         )?;
                         target_session.kv_n_pos[ai] = start_position as usize + n;
-                        crate::metal::encode_attn_prefill_v4_g6_q2_c32_f32(
-                            base.ctx,
-                            &enc,
-                            &attn_q_normed_pack,
-                            &target_session.kv_k[ai],
-                            &target_session.kv_v[ai],
-                            &layer_scratch.attn_prefill_v4_o_partial_pack,
-                            &layer_scratch.attn_prefill_v4_ml_partial_pack,
-                            &attn_o_pack,
-                            n,
-                            start_position as usize,
-                            nwg,
-                            true,
-                        )?;
+                        let group = n_q / n_kv;
+                        let matrix_mode = mtp_attn_qn_matrix_enabled()
+                            && layer_scratch.scratch_plan.modes.enable_attn_matrix
+                            && !layer_scratch.scratch_plan.modes.attn_matrix_online
+                            && layer_scratch.attn_matrix_max_pos as usize
+                                >= start_position as usize + n;
+                        if matrix_mode {
+                            // Tier-3 matrix reader: KQ (MMA, per-row causal)
+                            // -> softmax -> direct-V KQV. No V transpose.
+                            let n_pos = start_position as usize + n;
+                            let scores = layer_scratch
+                                .attn_matrix_scores_pack
+                                .view_subrange(0, vec![(n * n_q * n_pos) as u64]);
+                            crate::metal::encode_attn_matrix_kq_f32(
+                                base.ctx,
+                                &enc,
+                                &attn_q_normed_pack,
+                                &target_session.kv_k[ai],
+                                &scores,
+                                n,
+                                start_position as usize,
+                                n_pos,
+                                n_kv * head_dim,
+                                n_q,
+                                n_kv,
+                                group,
+                                head_dim,
+                                true,
+                            )?;
+                            crate::metal::encode_attn_matrix_softmax_f32(
+                                base.ctx,
+                                &enc,
+                                &scores,
+                                n,
+                                start_position as usize,
+                                n_pos,
+                                n_q,
+                                n_kv,
+                                group,
+                                head_dim,
+                            )?;
+                            crate::metal::encode_attn_matrix_kqv_direct_v_f32(
+                                base.ctx,
+                                &enc,
+                                &scores,
+                                &target_session.kv_v[ai],
+                                &attn_o_pack,
+                                n,
+                                start_position as usize,
+                                n_pos,
+                                n_kv * head_dim,
+                                n_q,
+                                n_kv,
+                                group,
+                                head_dim,
+                                true,
+                            )?;
+                        } else {
+                            crate::metal::encode_attn_prefill_v4_g6_q2_c32_f32(
+                                base.ctx,
+                                &enc,
+                                &attn_q_normed_pack,
+                                &target_session.kv_k[ai],
+                                &target_session.kv_v[ai],
+                                &layer_scratch.attn_prefill_v4_o_partial_pack,
+                                &layer_scratch.attn_prefill_v4_ml_partial_pack,
+                                &attn_o_pack,
+                                n,
+                                start_position as usize,
+                                nwg,
+                                true,
+                            )?;
+                        }
                         enc.end();
                     } else {
                         // The generic path appends and attends one causal row at

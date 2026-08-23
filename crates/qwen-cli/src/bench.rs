@@ -23,6 +23,8 @@ mod batch_probe;
 mod dense_block_batch;
 mod dense_whole_batch;
 mod dflash_e0_lockstep;
+#[cfg(feature = "dflash-k0s-diagnostics")]
+mod dflash_k0s;
 mod dflash_sampled_oracle;
 #[cfg(feature = "dsv4-diagnostics")]
 mod dsv4_mhc_delete;
@@ -627,6 +629,10 @@ enum Cmd {
     /// Exact token-major E0 lockstep development harness for ordinary target
     /// decode versus multi-hidden capture. Grants no product authority.
     DflashE0Lockstep(dflash_e0_lockstep::DflashE0LockstepArgs),
+    /// Emit one bounded DFlash K0-S selector lattice packet.
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[command(hide = true)]
+    DflashK0sLattice(dflash_k0s::DflashK0sArgs),
     /// **H5.5 production DFlash decode**: end-to-end DFlash speculative
     /// decode using the H5.3 packed_verify + H5.4 restore_after_partial_accept
     /// primitives. Greedy accept-prefix per plan §1.3.
@@ -1746,6 +1752,130 @@ mod stop_token_cli_tests {
         ])
         .expect("E0 lockstep command");
         assert!(matches!(parsed.cmd, Cmd::DflashE0Lockstep(_)));
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn bench_parses_hidden_dflash_k0s_lattice_subcommand() {
+        let parsed = Args::try_parse_from([
+            "qwen-bench",
+            "dflash-k0s-lattice",
+            "--model",
+            "target.gguf",
+            "--drafter",
+            "draft.gguf",
+            "--prompt",
+            "hello",
+            "--carry-token",
+            "42",
+            "--manifest",
+            "manifest.json",
+            "--manifest-sha256",
+            &"a".repeat(64),
+            "--command-manifest",
+            "command.json",
+            "--fixture",
+            "fixture.json",
+            "--temperature",
+            "0.7",
+            "--fixed-chain",
+            "alternate:42:0,1,2,3,4,5,6",
+            "--trace-output",
+            "trace.jsonl",
+            "--sidecar-output",
+            "rows.bin",
+        ])
+        .expect("K0-S lattice command");
+        assert!(matches!(parsed.cmd, Cmd::DflashK0sLattice(_)));
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn feature_on_links_hidden_dflash_k0s_parser_and_single_bench_call_site() {
+        assert!(std::mem::size_of::<dflash_k0s::DflashK0sArgs>() > 0);
+        let producer = include_str!("dflash_k0s.rs");
+        assert_eq!(
+            producer
+                .matches(&["draft_block_with_k0s", "_diagnostic("].concat())
+                .count(),
+            1
+        );
+        assert!(!include_str!("main.rs").contains(&["DFlash", "K0s"].concat()));
+    }
+
+    #[cfg(not(feature = "dflash-k0s-diagnostics"))]
+    #[test]
+    fn default_parser_has_no_dflash_k0s_lattice_subcommand() {
+        let error = Args::try_parse_from(["qwen-bench", "dflash-k0s-lattice"])
+            .expect_err("feature-off parser must reject K0-S");
+        assert!(error.to_string().contains("unrecognized subcommand"));
+    }
+
+    #[cfg(not(feature = "dflash-k0s-diagnostics"))]
+    #[test]
+    fn default_bench_source_gates_every_k0s_reference() {
+        let source = include_str!("bench.rs");
+        for line in source.lines().filter(|line| line.contains("dflash_k0s")) {
+            assert!(
+                line.contains("mod dflash_k0s")
+                    || line.contains("dflash_k0s::")
+                    || line.contains("filter(|line|")
+                    || line.contains("let producer = include_str!")
+                    || line.contains("feature_on_links_hidden")
+                    || line.contains("k0s_reference")
+                    || line.contains("k0s_lattice")
+                    || line.trim_start().starts_with("#[cfg(feature"),
+                "unexpected feature-off K0-S source reference: {line}"
+            );
+        }
+        assert!(!source.contains(&["draft_block_with_k0s", "_diagnostic("].concat()));
+        assert!(!source.contains(&["DFlash", "K0sCapture"].concat()));
+        let product_sources = [
+            ("main.rs", include_str!("main.rs")),
+            ("cli.rs", include_str!("cli.rs")),
+            (
+                "execution_selector.rs",
+                include_str!("execution_selector.rs"),
+            ),
+            (
+                "response_shape_runtime.rs",
+                include_str!("response_shape_runtime.rs"),
+            ),
+            (
+                "grammar_row_runtime.rs",
+                include_str!("grammar_row_runtime.rs"),
+            ),
+            ("serve/mod.rs", include_str!("serve/mod.rs")),
+            ("serve/backend.rs", include_str!("serve/backend.rs")),
+            ("serve/backend_ds4.rs", include_str!("serve/backend_ds4.rs")),
+            ("serve/events.rs", include_str!("serve/events.rs")),
+            ("serve/http.rs", include_str!("serve/http.rs")),
+            ("serve/items.rs", include_str!("serve/items.rs")),
+            ("serve/partition.rs", include_str!("serve/partition.rs")),
+            ("serve/render.rs", include_str!("serve/render.rs")),
+            ("serve/render_ds4.rs", include_str!("serve/render_ds4.rs")),
+            ("serve/tool_parse.rs", include_str!("serve/tool_parse.rs")),
+            ("serve/utf8.rs", include_str!("serve/utf8.rs")),
+            (
+                "qwen-llm/runtime.rs",
+                include_str!("../../qwen-llm/src/runtime.rs"),
+            ),
+            (
+                "qwen-llm/metal_mtp.rs",
+                include_str!("../../qwen-llm/src/metal_mtp.rs"),
+            ),
+            ("qwen-llm/lib.rs", include_str!("../../qwen-llm/src/lib.rs")),
+        ];
+        for (name, product) in product_sources {
+            assert!(
+                !product.contains(&["draft_block_with_k0s", "_diagnostic"].concat()),
+                "product source {name} links the diagnostic call"
+            );
+            assert!(
+                !product.contains(&["DFlash", "K0s"].concat()),
+                "product source {name} names a K0-S library type"
+            );
+        }
     }
 }
 
@@ -2959,6 +3089,10 @@ fn run() -> Result<()> {
             serde_json::to_value(recorded_build_identity())?,
             capture_qwen_env(),
         ),
+        #[cfg(feature = "dflash-k0s-diagnostics")]
+        Cmd::DflashK0sLattice(a) => {
+            dflash_k0s::run(a, serde_json::to_value(recorded_build_identity())?)
+        }
         Cmd::Dflash(a) => run_dflash(a),
         Cmd::Tok(a) => run_tok(a),
         Cmd::AttnPrefillMicro(a) => run_attn_prefill_micro(a),

@@ -31,6 +31,7 @@ workspace = true
 
 [features]
 default = []
+dflash-k0s-diagnostics = ["qwen-llm/dflash-k0s-diagnostics"]
 dsv4-diagnostics = ["qwen-llm/dsv4-diagnostics"]
 
 [dependencies]

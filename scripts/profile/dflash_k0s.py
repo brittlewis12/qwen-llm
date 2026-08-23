@@ -1179,13 +1179,51 @@ class OpenFile:
             os.close(self.parent_fd)
 
 
+def directory_custody_snapshot(value: os.stat_result) -> tuple[int, int, int, int]:
+    require(stat.S_ISDIR(value.st_mode), "custody snapshot is not a directory")
+    return (value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns)
+
+
+@dataclass(frozen=True)
+class ParentCustodyTransition:
+    path: Path
+    before: tuple[int, int, int, int]
+    after: tuple[int, int, int, int]
+
+    def __post_init__(self) -> None:
+        require(
+            self.path.is_absolute()
+            and self.path.resolve(strict=True) == self.path
+            and self.before[:2] == self.after[:2],
+            "authorized parent custody transition is invalid",
+        )
+
+    def snapshot_for(self, opened: OpenFile) -> tuple[int, int, int, int] | None:
+        parent = os.fstat(opened.parent_fd)
+        shares_parent = (
+            opened.parent_path == self.path
+            and (
+                parent.st_dev,
+                parent.st_ino,
+            )
+            == self.after[:2]
+        )
+        if not shares_parent:
+            return None
+        require(
+            opened.parent_snapshot == self.before,
+            f"input parent did not precede authorized transition: {opened.path}",
+        )
+        return self.after
+
+
 @dataclass
 class InventoryContext:
     inventory: dict[str, Any]
     opened: list[OpenFile]
     build_root_custody: dict[str, Any] | None = None
 
-    def final_check(self) -> None:
+    def final_check(self, transition: ParentCustodyTransition | None = None) -> None:
         if self.build_root_custody is not None:
             require(
                 measure_directory(
@@ -1196,7 +1234,9 @@ class InventoryContext:
                 "build root changed after inventory validation",
             )
         for item in self.opened:
-            final_custody_check(item)
+            final_custody_check(
+                item, transition.snapshot_for(item) if transition is not None else None
+            )
 
     def close(self) -> None:
         for item in self.opened:
@@ -1248,12 +1288,7 @@ def open_regular(path: Path, name: str, maximum: int | None = None) -> OpenFile:
             canonical,
             parent,
             parent_fd,
-            (
-                parent_info.st_dev,
-                parent_info.st_ino,
-                parent_info.st_mtime_ns,
-                parent_info.st_ctime_ns,
-            ),
+            directory_custody_snapshot(parent_info),
             handle,
             info.st_size,
             (info.st_dev, info.st_ino),
@@ -4578,6 +4613,61 @@ def open_directory_custody(path: Path, name: str) -> tuple[int, os.stat_result]:
     return descriptor, snapshot
 
 
+def directory_entry_custody_snapshot(
+    descriptor: int,
+) -> dict[str, tuple[int, int, int]]:
+    names = os.listdir(descriptor)
+    require(
+        len(names) == len(set(names)), "directory snapshot contains duplicate names"
+    )
+    result: dict[str, tuple[int, int, int]] = {}
+    for name in names:
+        require(name not in {"", ".", ".."} and "/" not in name, "bad directory entry")
+        info = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        result[name] = (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode))
+    return result
+
+
+def capture_exclusive_leaf_parent_transition(
+    parent_path: Path,
+    parent_fd: int,
+    before: os.stat_result,
+    before_entries: dict[str, tuple[int, int, int]],
+    leaf_path: Path,
+    leaf_fd: int,
+) -> ParentCustodyTransition:
+    after = os.fstat(parent_fd)
+    path_after = os.stat(parent_path, follow_symlinks=False)
+    require(
+        leaf_path.parent == parent_path
+        and parent_path.resolve(strict=True) == parent_path
+        and directory_custody_snapshot(after) == directory_custody_snapshot(path_after)
+        and (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino),
+        "exclusive leaf parent identity changed during reservation",
+    )
+    after_entries = directory_entry_custody_snapshot(parent_fd)
+    require(
+        set(after_entries) == set(before_entries) | {leaf_path.name}
+        and leaf_path.name not in before_entries
+        and all(after_entries[name] == value for name, value in before_entries.items()),
+        "exclusive leaf reservation changed unrelated directory entries",
+    )
+    leaf_info = os.fstat(leaf_fd)
+    require(
+        stat.S_ISREG(leaf_info.st_mode)
+        and leaf_info.st_nlink == 1
+        and leaf_info.st_size == 0
+        and after_entries[leaf_path.name]
+        == (leaf_info.st_dev, leaf_info.st_ino, stat.S_IFMT(leaf_info.st_mode)),
+        "exclusive leaf reservation identity mismatch",
+    )
+    return ParentCustodyTransition(
+        parent_path,
+        directory_custody_snapshot(before),
+        directory_custody_snapshot(after),
+    )
+
+
 def verify_directory_custody(
     descriptor: int,
     path: Path,
@@ -7060,6 +7150,7 @@ def observe_preparation_hashes(
     report_fd: int | None = None
     planner_fd: int | None = None
     planner_stat: os.stat_result | None = None
+    planner_entries: dict[str, tuple[int, int, int]] | None = None
     x_fd: int | None = None
     y_fd: int | None = None
     x_stat: os.stat_result | None = None
@@ -7124,6 +7215,7 @@ def observe_preparation_hashes(
             == (planner_stat.st_dev, planner_stat.st_ino),
             "planner P path/FD identity mismatch",
         )
+        planner_entries = directory_entry_custody_snapshot(planner_fd)
         preparation_claims = {
             "inventory": preparation_file_claim(
                 retained[inventory_path.resolve(strict=True)], MAX_TRACE_BYTES
@@ -7235,10 +7327,8 @@ def observe_preparation_hashes(
             expected_report: bytes | None = None,
             report_snapshot: os.stat_result | None = None,
             report_present: bool = True,
+            parent_transition: ParentCustodyTransition | None = None,
         ) -> str | None:
-            context.final_check()
-            final_custody_check(prep_file)
-            final_custody_check(choices_file)
             require(
                 planner_fd is not None
                 and planner_stat is not None
@@ -7249,6 +7339,28 @@ def observe_preparation_hashes(
                 and x_path is not None
                 and y_path is not None,
                 "observation terminal custody state absent",
+            )
+            if parent_transition is not None:
+                require(
+                    parent_transition.path == planner_path
+                    and parent_transition.before
+                    == directory_custody_snapshot(planner_stat)
+                    and parent_transition.after
+                    == directory_custody_snapshot(terminal_parent_stat),
+                    "observation parent transition binding mismatch",
+                )
+            context.final_check(parent_transition)
+            final_custody_check(
+                prep_file,
+                parent_transition.snapshot_for(prep_file)
+                if parent_transition is not None
+                else None,
+            )
+            final_custody_check(
+                choices_file,
+                parent_transition.snapshot_for(choices_file)
+                if parent_transition is not None
+                else None,
             )
             verify_directory_custody(
                 x_fd, x_path, x_stat, "observation worktree X", metadata_stable=True
@@ -7382,7 +7494,10 @@ def observe_preparation_hashes(
         context.final_check()
         final_custody_check(prep_file)
         final_custody_check(choices_file)
-        require(planner_stat is not None, "planner P custody snapshot absent")
+        require(
+            planner_stat is not None and planner_entries is not None,
+            "planner P custody snapshot absent",
+        )
         planner_before_write = os.fstat(planner_fd)
         require(
             (
@@ -7398,6 +7513,17 @@ def observe_preparation_hashes(
                 planner_stat.st_ctime_ns,
             ),
             "planner parent custody drifted before report reservation",
+        )
+        require(
+            directory_entry_custody_snapshot(planner_fd) == planner_entries,
+            "planner entries drifted before report reservation",
+        )
+        verify_directory_custody(
+            planner_fd,
+            planner_path,
+            planner_stat,
+            "observation planner P before report reservation",
+            metadata_stable=True,
         )
         try:
             report_fd = os.open(
@@ -7424,14 +7550,25 @@ def observe_preparation_hashes(
                 "reserved_empty_path": None,
                 "retry": False,
             }
+        report_parent_transition = capture_exclusive_leaf_parent_transition(
+            planner_path,
+            planner_fd,
+            planner_stat,
+            planner_entries,
+            report_path,
+            report_fd,
+        )
+        planner_after_report = os.fstat(planner_fd)
         try:
             os.fsync(planner_fd)
         except OSError as error:
             fsync_partial_evidence(report_fd, planner_fd, "observation report")
-            planner_after_report = os.fstat(planner_fd)
             report_stat = os.fstat(report_fd)
             report_digest = final_observation_custody(
-                planner_after_report, b"", report_stat
+                planner_after_report,
+                b"",
+                report_stat,
+                parent_transition=report_parent_transition,
             )
             return {
                 "result": "partial",
@@ -7441,7 +7578,11 @@ def observe_preparation_hashes(
                 "sha256": report_digest,
                 "retry": False,
             }
-        planner_after_report = os.fstat(planner_fd)
+        require(
+            directory_custody_snapshot(os.fstat(planner_fd))
+            == report_parent_transition.after,
+            "planner parent custody drifted after report reservation",
+        )
 
         def retained_report_bytes() -> tuple[bytes, os.stat_result]:
             require(report_fd is not None, "observation report FD is absent")
@@ -7478,7 +7619,10 @@ def observe_preparation_hashes(
             fsync_partial_evidence(report_fd, planner_fd, "observation report")
             actual_report, report_stat = retained_report_bytes()
             report_digest = final_observation_custody(
-                planner_after_report, actual_report, report_stat
+                planner_after_report,
+                actual_report,
+                report_stat,
+                parent_transition=report_parent_transition,
             )
             return {
                 "result": "partial",
@@ -7501,13 +7645,19 @@ def observe_preparation_hashes(
         )
         try:
             report_digest = final_observation_custody(
-                planner_after_report, report_bytes, report_stat
+                planner_after_report,
+                report_bytes,
+                report_stat,
+                parent_transition=report_parent_transition,
             )
         except (OSError, InvalidEvidence) as error:
             fsync_partial_evidence(report_fd, planner_fd, "observation report")
             actual_report, report_stat = retained_report_bytes()
             report_digest = final_observation_custody(
-                planner_after_report, actual_report, report_stat
+                planner_after_report,
+                actual_report,
+                report_stat,
+                parent_transition=report_parent_transition,
             )
             return {
                 "result": "partial",
@@ -10453,6 +10603,131 @@ def self_test() -> None:
             lambda: final_custody_check(transient_opened), "parent directory custody"
         )
         transient_opened.close()
+        pre_reservation_parent = root / "pre-reservation-parent-custody"
+        pre_reservation_parent.mkdir()
+        pre_reservation_fd, pre_reservation_stat = open_directory_custody(
+            pre_reservation_parent, "pre-reservation parent custody"
+        )
+        pre_reservation_entries = directory_entry_custody_snapshot(pre_reservation_fd)
+        ok(
+            directory_entry_custody_snapshot(pre_reservation_fd)
+            == pre_reservation_entries
+        )
+        pre_reservation_sibling = pre_reservation_parent / "transient"
+        pre_reservation_sibling.write_bytes(b"transient")
+        pre_reservation_sibling.unlink()
+        expect_error(
+            lambda: verify_directory_custody(
+                pre_reservation_fd,
+                pre_reservation_parent,
+                pre_reservation_stat,
+                "pre-reservation parent custody",
+                metadata_stable=True,
+            ),
+            "metadata custody changed",
+        )
+        os.close(pre_reservation_fd)
+        transition_parent = root / "authorized-parent-transition"
+        transition_parent.mkdir()
+        transition_leaf = transition_parent / "input"
+        transition_leaf.write_bytes(b"fixed")
+        transition_opened = open_regular(
+            transition_leaf, "authorized parent transition"
+        )
+        transition_report = transition_parent / "report"
+        transition_parent_before = os.fstat(transition_opened.parent_fd)
+        transition_entries_before = directory_entry_custody_snapshot(
+            transition_opened.parent_fd
+        )
+        transition_report_fd = os.open(
+            transition_report.name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=transition_opened.parent_fd,
+        )
+        transition = capture_exclusive_leaf_parent_transition(
+            transition_parent,
+            transition_opened.parent_fd,
+            transition_parent_before,
+            transition_entries_before,
+            transition_report,
+            transition_report_fd,
+        )
+        os.fsync(transition_opened.parent_fd)
+        os.close(transition_report_fd)
+        ok(transition.snapshot_for(transition_opened) == transition.after)
+        InventoryContext({}, [transition_opened]).final_check(transition)
+        tests += 1
+        wrong_transition = ParentCustodyTransition(
+            transition_parent,
+            (
+                transition.before[0],
+                transition.before[1],
+                transition.before[2] + 1,
+                transition.before[3],
+            ),
+            transition.after,
+        )
+        expect_error(
+            lambda: wrong_transition.snapshot_for(transition_opened),
+            "did not precede authorized transition",
+        )
+        post_transition_sibling = transition_parent / "post-transition-sibling"
+        post_transition_sibling.write_bytes(b"transient")
+        post_transition_sibling.unlink()
+        expect_error(
+            lambda: InventoryContext({}, [transition_opened]).final_check(transition),
+            "parent directory custody",
+        )
+        transition_opened.close()
+        unrelated_parent = root / "unrelated-transition-parent"
+        unrelated_parent.mkdir()
+        unrelated_leaf = unrelated_parent / "input"
+        unrelated_leaf.write_bytes(b"fixed")
+        unrelated_opened = open_regular(unrelated_leaf, "unrelated transition parent")
+        ok(transition.snapshot_for(unrelated_opened) is None)
+        unrelated_sibling = unrelated_parent / "transient"
+        unrelated_sibling.write_bytes(b"transient")
+        unrelated_sibling.unlink()
+        expect_error(
+            lambda: final_custody_check(
+                unrelated_opened, transition.snapshot_for(unrelated_opened)
+            ),
+            "parent directory custody",
+        )
+        unrelated_opened.close()
+        bad_transition_parent = root / "bad-authorized-parent-transition"
+        bad_transition_parent.mkdir()
+        bad_transition_input = bad_transition_parent / "input"
+        bad_transition_input.write_bytes(b"fixed")
+        bad_transition_opened = open_regular(
+            bad_transition_input, "bad authorized parent transition"
+        )
+        bad_transition_before = os.fstat(bad_transition_opened.parent_fd)
+        bad_transition_entries = directory_entry_custody_snapshot(
+            bad_transition_opened.parent_fd
+        )
+        bad_transition_report = bad_transition_parent / "report"
+        bad_transition_report_fd = os.open(
+            bad_transition_report.name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=bad_transition_opened.parent_fd,
+        )
+        (bad_transition_parent / "unauthorized").write_bytes(b"bad")
+        expect_error(
+            lambda: capture_exclusive_leaf_parent_transition(
+                bad_transition_parent,
+                bad_transition_opened.parent_fd,
+                bad_transition_before,
+                bad_transition_entries,
+                bad_transition_report,
+                bad_transition_report_fd,
+            ),
+            "unrelated directory entries",
+        )
+        os.close(bad_transition_report_fd)
+        bad_transition_opened.close()
         measured_root = root / "measured-build-root"
         measured_root.mkdir()
         (measured_root / "a").write_bytes(b"abc")

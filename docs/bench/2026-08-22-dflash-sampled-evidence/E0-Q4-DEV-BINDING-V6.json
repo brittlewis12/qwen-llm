@@ -1,0 +1,74 @@
+{
+  "allowed_arm_orders": [
+    "serial_then_capture",
+    "capture_then_serial"
+  ],
+  "drafter": {
+    "block_size": 8,
+    "conv_group_size": 16,
+    "conv_kernel_size": 2,
+    "hidden_size": 5120,
+    "n_layer": 5,
+    "selector_rank": 256,
+    "selector_top_k": 16,
+    "swa_window": 2048,
+    "target_layer_ids": [
+      6,
+      20,
+      34,
+      48,
+      62
+    ]
+  },
+  "drafter_arm": "dflash2-q4_k_m-post-prereg-development",
+  "drafter_asset_sha256": "51f00de02d311528ff23560395600804bb1d79af63b37e9f0f99c431f8d4ed62",
+  "evidence_role": "development",
+  "fixture_id": "e0-q4-def-generated-v6",
+  "fixture_role": "development-sentinel",
+  "required_arm_order": "serial_then_capture",
+  "required_fixture": {
+    "config": {
+      "arm_order": "serial_then_capture",
+      "context_capacity": 38,
+      "hidden_transfer_semantics": "poison_then_capture_exact_source_to_active_dflash_context_row",
+      "min_p_f32_bits": "0x3d4ccccd",
+      "no_warmup": false,
+      "sampler_algorithm_version": 1,
+      "seed": 0,
+      "semantics": "token_major_serial_vs_multi_hidden_lockstep_development_only",
+      "stop_tokens": [
+        248046
+      ],
+      "temperature_f32_bits": "0x3f333333",
+      "tokens": 4,
+      "top_k": 200,
+      "top_p_f32_bits": "0x3f800000"
+    },
+    "prompt": {
+      "token_count": 1,
+      "token_ids_sha256_i32le": "110a3fffafc92b01e8c967241e5bdf4651c93128160ae079e6b0a34a2a78f0f4",
+      "utf8_len": 3,
+      "utf8_sha256": "cb8379ac2098aa165029e3938a51da0bcecfc008fd6795f401178647f96c5b34"
+    }
+  },
+  "schema": "qwen.dflash_e0_binding_manifest",
+  "schema_version": 3,
+  "snapshot_abi": {
+    "gdn_conv_elements_per_layer": 30720,
+    "gdn_state_elements_per_layer": 786432,
+    "kv_bytes_per_token": 2048,
+    "kv_dim_elements": 1024,
+    "kv_storage_kind": "F16",
+    "layout_version": 4,
+    "n_attn_layers": 16,
+    "n_gdn_layers": 48
+  },
+  "target": {
+    "architecture": "qwen35",
+    "hidden_size": 5120,
+    "n_layer": 64,
+    "vocab_size": 248320
+  },
+  "target_arm": "qwen3.8-27b-q4_k_m",
+  "target_asset_sha256": "fb9bcd41434a7fc1c2ed3b2d19a4ceb6cd8adb9cc55b9363ff1042acc2b3e048"
+}

@@ -42,6 +42,7 @@ const HIDDEN_TRANSFER_SEMANTICS: &str =
 const BINDING_MANIFEST_SCHEMA: &str = "qwen.dflash_e0_binding_manifest";
 const BINDING_MANIFEST_VERSION_V1: u64 = 1;
 const BINDING_MANIFEST_VERSION_V2: u64 = 2;
+const BINDING_MANIFEST_VERSION_V3: u64 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum ArmOrder {
@@ -180,10 +181,29 @@ fn validate_binding_manifest_arm_order(
             && allowed.iter().any(|value| value == arm_order.as_str()),
         "E0 binding manifest arm-order contract mismatch"
     );
-    if version == BINDING_MANIFEST_VERSION_V2 {
+    if version >= BINDING_MANIFEST_VERSION_V2 {
         ensure!(
             manifest["required_arm_order"] == arm_order.as_str(),
             "E0 binding manifest required arm order mismatch"
+        );
+    }
+    Ok(())
+}
+
+fn validate_binding_manifest_fixture(
+    manifest: &Value,
+    version: u64,
+    prompt: &Value,
+    config: &Value,
+) -> Result<()> {
+    if version == BINDING_MANIFEST_VERSION_V3 {
+        ensure!(
+            manifest["required_fixture"]
+                == json!({
+                    "prompt": prompt,
+                    "config": config,
+                }),
+            "E0 binding manifest required fixture mismatch"
         );
     }
     Ok(())
@@ -197,6 +217,8 @@ fn validate_binding_manifest_static(
     target_m: &Model<'_>,
     head: &qwen_llm::loader::DFlashHead<'_>,
     args: &DflashE0LockstepArgs,
+    prompt: &Value,
+    config: &Value,
 ) -> Result<()> {
     let object = manifest
         .as_object()
@@ -207,7 +229,7 @@ fn validate_binding_manifest_static(
     ensure!(
         matches!(
             version,
-            BINDING_MANIFEST_VERSION_V1 | BINDING_MANIFEST_VERSION_V2
+            BINDING_MANIFEST_VERSION_V1 | BINDING_MANIFEST_VERSION_V2 | BINDING_MANIFEST_VERSION_V3
         ),
         "unsupported E0 binding manifest schema version"
     );
@@ -226,8 +248,11 @@ fn validate_binding_manifest_static(
         "snapshot_abi",
         "allowed_arm_orders",
     ];
-    if version == BINDING_MANIFEST_VERSION_V2 {
+    if version >= BINDING_MANIFEST_VERSION_V2 {
         expected_keys.push("required_arm_order");
+    }
+    if version == BINDING_MANIFEST_VERSION_V3 {
+        expected_keys.push("required_fixture");
     }
     ensure!(
         object.len() == expected_keys.len()
@@ -273,6 +298,7 @@ fn validate_binding_manifest_static(
         "E0 binding manifest target/drafter geometry mismatch"
     );
     validate_binding_manifest_arm_order(manifest, version, args.arm_order)?;
+    validate_binding_manifest_fixture(manifest, version, prompt, config)?;
     Ok(())
 }
 
@@ -1810,6 +1836,27 @@ pub fn run(
         "requested E0 capacity exceeds DFlash i32 position scope"
     );
     let prompt_digest = token_ids_sha256_i32le(&prompt_ids);
+    let config = json!({
+        "tokens": args.tokens,
+        "context_capacity": capacity,
+        "stop_tokens": stops,
+        "temperature_f32_bits": f32_bits(sampling.temperature),
+        "top_k": sampling.top_k,
+        "top_p_f32_bits": f32_bits(sampling.top_p),
+        "min_p_f32_bits": f32_bits(sampling.min_p),
+        "seed": sampling.seed,
+        "sampler_algorithm_version": SAMPLER_ALGORITHM_VERSION,
+        "no_warmup": args.no_warmup,
+        "arm_order": args.arm_order.as_str(),
+        "semantics": DEVELOPMENT_SEMANTICS,
+        "hidden_transfer_semantics": HIDDEN_TRANSFER_SEMANTICS,
+    });
+    let prompt = json!({
+        "utf8_len": args.prompt.len(),
+        "utf8_sha256": bytes_sha256(args.prompt.as_bytes()),
+        "token_count": prompt_ids.len(),
+        "token_ids_sha256_i32le": prompt_digest,
+    });
     let target_asset = gguf_asset_identity(&target_g);
     let drafter_asset = gguf_asset_identity(&drafter_g);
     bootstrap_try!(validate_binding_manifest_static(
@@ -1820,6 +1867,8 @@ pub fn run(
         &target_m,
         &head,
         &args,
+        &prompt,
+        &config,
     ));
     let snapshot_model_id = digest_identity_word(&target_asset.digest, 0);
     let snapshot_tokenizer_id = digest_identity_word(&target_asset.digest, 8);
@@ -1847,21 +1896,7 @@ pub fn run(
             "drafter_arm": args.drafter_arm,
             "authority": "development_only_no_product_authority",
         },
-        "config": {
-            "tokens": args.tokens,
-            "context_capacity": capacity,
-            "stop_tokens": stops,
-            "temperature_f32_bits": f32_bits(sampling.temperature),
-            "top_k": sampling.top_k,
-            "top_p_f32_bits": f32_bits(sampling.top_p),
-            "min_p_f32_bits": f32_bits(sampling.min_p),
-            "seed": sampling.seed,
-            "sampler_algorithm_version": SAMPLER_ALGORITHM_VERSION,
-            "no_warmup": args.no_warmup,
-            "arm_order": args.arm_order.as_str(),
-            "semantics": DEVELOPMENT_SEMANTICS,
-            "hidden_transfer_semantics": HIDDEN_TRANSFER_SEMANTICS,
-        },
+        "config": config,
         "assets": {
             "target": target_asset.json,
             "drafter": drafter_asset.json,
@@ -1895,12 +1930,7 @@ pub fn run(
             "metal_device": device,
         },
         "paths": evidence_paths,
-        "prompt": {
-            "utf8_len": args.prompt.len(),
-            "utf8_sha256": bytes_sha256(args.prompt.as_bytes()),
-            "token_count": prompt_ids.len(),
-            "token_ids_sha256_i32le": prompt_digest,
-        },
+        "prompt": prompt,
         "sessions": {
             "serial_target": format!("{run_id}/serial-target"),
             "capture_target": format!("{run_id}/capture-target"),
@@ -2114,6 +2144,36 @@ mod tests {
                 &manifest,
                 BINDING_MANIFEST_VERSION_V2,
                 ArmOrder::SerialThenCapture,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn binding_manifest_v3_requires_the_exact_fixture() {
+        let prompt = json!({"token_count": 1});
+        let config = json!({"tokens": 4});
+        let manifest = json!({
+            "required_fixture": {
+                "prompt": prompt.clone(),
+                "config": config.clone(),
+            },
+        });
+        assert!(
+            validate_binding_manifest_fixture(
+                &manifest,
+                BINDING_MANIFEST_VERSION_V3,
+                &prompt,
+                &config,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_binding_manifest_fixture(
+                &manifest,
+                BINDING_MANIFEST_VERSION_V3,
+                &prompt,
+                &json!({"tokens": 1}),
             )
             .is_err()
         );

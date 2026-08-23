@@ -34,6 +34,7 @@ AUTHORITY = "development_only_no_product_authority"
 BINDING_MANIFEST_SCHEMA = "qwen.dflash_e0_binding_manifest"
 BINDING_MANIFEST_VERSION_V1 = 1
 BINDING_MANIFEST_VERSION_V2 = 2
+BINDING_MANIFEST_VERSION_V3 = 3
 SCRIPT = Path(__file__).resolve()
 MASK64 = (1 << 64) - 1
 
@@ -825,7 +826,12 @@ def load_binding_manifest(common: dict[str, Any], run_id: str) -> dict[str, Any]
         1,
     )
     require(
-        version in {BINDING_MANIFEST_VERSION_V1, BINDING_MANIFEST_VERSION_V2},
+        version
+        in {
+            BINDING_MANIFEST_VERSION_V1,
+            BINDING_MANIFEST_VERSION_V2,
+            BINDING_MANIFEST_VERSION_V3,
+        },
         f"run {run_id} binding-manifest schema version unsupported",
     )
     expected_keys = {
@@ -843,8 +849,10 @@ def load_binding_manifest(common: dict[str, Any], run_id: str) -> dict[str, Any]
         "snapshot_abi",
         "allowed_arm_orders",
     }
-    if version == BINDING_MANIFEST_VERSION_V2:
+    if version >= BINDING_MANIFEST_VERSION_V2:
         expected_keys.add("required_arm_order")
+    if version == BINDING_MANIFEST_VERSION_V3:
+        expected_keys.add("required_fixture")
     manifest = keys(manifest, expected_keys, f"run {run_id} binding manifest")
     require(
         manifest["schema"] == BINDING_MANIFEST_SCHEMA
@@ -894,10 +902,21 @@ def load_binding_manifest(common: dict[str, Any], run_id: str) -> dict[str, Any]
         and common["config"]["arm_order"] in manifest["allowed_arm_orders"],
         f"run {run_id} binding-manifest arm-order mismatch",
     )
-    if version == BINDING_MANIFEST_VERSION_V2:
+    if version >= BINDING_MANIFEST_VERSION_V2:
         require(
             manifest["required_arm_order"] == common["config"]["arm_order"],
             f"run {run_id} binding-manifest required arm order mismatch",
+        )
+    if version == BINDING_MANIFEST_VERSION_V3:
+        required_fixture = keys(
+            manifest["required_fixture"],
+            {"prompt", "config"},
+            f"run {run_id} binding manifest required fixture",
+        )
+        require(
+            required_fixture
+            == {"prompt": common["prompt"], "config": common["config"]},
+            f"run {run_id} binding-manifest required fixture mismatch",
         )
     return manifest
 
@@ -2854,6 +2873,8 @@ def run_self_test() -> None:
             name: str,
             rows: list[dict[str, Any]],
             required_arm_order: str | None = None,
+            bind_fixture: bool = False,
+            fixture_tokens_delta: int = 0,
         ) -> Path:
             path = root / f"{name}.jsonl"
             output_identity = str(path.resolve())
@@ -2871,9 +2892,13 @@ def run_self_test() -> None:
                 manifest = {
                     "schema": BINDING_MANIFEST_SCHEMA,
                     "schema_version": (
-                        BINDING_MANIFEST_VERSION_V2
-                        if required_arm_order is not None
-                        else BINDING_MANIFEST_VERSION_V1
+                        BINDING_MANIFEST_VERSION_V3
+                        if bind_fixture
+                        else (
+                            BINDING_MANIFEST_VERSION_V2
+                            if required_arm_order is not None
+                            else BINDING_MANIFEST_VERSION_V1
+                        )
                     ),
                     "evidence_role": "development",
                     "fixture_id": run_start["classification"]["fixture_id"],
@@ -2902,6 +2927,17 @@ def run_self_test() -> None:
                 }
                 if required_arm_order is not None:
                     manifest["required_arm_order"] = required_arm_order
+                if bind_fixture:
+                    require(
+                        required_arm_order is not None,
+                        "synthetic schema-v3 manifest requires an arm order",
+                    )
+                    required_fixture = {
+                        "prompt": copy.deepcopy(run_start["prompt"]),
+                        "config": copy.deepcopy(run_start["config"]),
+                    }
+                    required_fixture["config"]["tokens"] += fixture_tokens_delta
+                    manifest["required_fixture"] = required_fixture
                 manifest_data = (
                     json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n"
                 ).encode()
@@ -2983,6 +3019,35 @@ def run_self_test() -> None:
             pass
         else:
             raise AssertionError("schema-v2 wrong arm order was accepted")
+        require(
+            reduce(
+                [
+                    write(
+                        "binding-v3",
+                        synthetic_rows("binding-v3"),
+                        required_arm_order="serial_then_capture",
+                        bind_fixture=True,
+                    )
+                ]
+            )["development_lockstep_passed"],
+            "schema-v3 exact fixture binding failed",
+        )
+        try:
+            reduce(
+                [
+                    write(
+                        "binding-v3-wrong-fixture",
+                        synthetic_rows("binding-v3-wrong-fixture"),
+                        required_arm_order="serial_then_capture",
+                        bind_fixture=True,
+                        fixture_tokens_delta=1,
+                    )
+                ]
+            )
+        except EvidenceError:
+            pass
+        else:
+            raise AssertionError("schema-v3 wrong fixture was accepted")
         first = write("single-input-a", synthetic_rows("single-input-a"))
         second = write("single-input-b", synthetic_rows("single-input-b"))
         try:

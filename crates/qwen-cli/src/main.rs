@@ -6570,8 +6570,11 @@ fn execute_single_turn_request(
             // a full serial decode on top of speculation; diagnostics only.
             let shadow_probe = std::env::var_os("QWEN_DFLASH_SHADOW_PROBE").is_some();
             let mut shadow = if shadow_probe {
+                // The shadow replays the full serial path, so it needs the
+                // whole prompt plus generation, not the windowed capacity.
+                let shadow_capacity = prompt_ids.len() + args.tokens + 16;
                 let mut shadow_sequence = loaded
-                    .create_sequence(SequenceConfig::new(capacity))
+                    .create_sequence(SequenceConfig::new(shadow_capacity))
                     .context("allocate shadow probe sequence")?;
                 crate::prefill_span(&forward, &mut shadow_sequence, &mut scratch, &prompt_ids, 0)
                     .context("shadow probe prefill")?;
@@ -8667,11 +8670,19 @@ const DFLASH_REPROBE_INTERVAL: usize = 8;
 /// delta observed by the shadow probe (9.5e-2, 2026-08-21).
 const DFLASH_VERIFY_FALLBACK_MARGIN_DEFAULT: f32 = 0.2;
 
-fn verify_fallback_margin() -> f32 {
+fn verify_fallback_margin(n_pos: usize) -> f32 {
     std::env::var("QWEN_DFLASH_VERIFY_MARGIN")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(DFLASH_VERIFY_FALLBACK_MARGIN_DEFAULT)
+        .unwrap_or(if n_pos >= 4096 {
+            // Ctx-aware: the batched-verify-vs-token-major divergence grows
+            // with context and content — 9.5e-2 at 42 tokens, ~3.65e-1 at
+            // 10.8K for BOTH the per-row and packed attention paths
+            // (2026-08-22 shadow probes). 2x the observed max per tier.
+            0.75
+        } else {
+            DFLASH_VERIFY_FALLBACK_MARGIN_DEFAULT
+        })
 }
 
 fn verify_fallback_enabled() -> bool {
@@ -8984,7 +8995,7 @@ where
         let mut fallback_ran = false;
         let mut fallback_targets: Vec<i32> = Vec::new();
         if verify_fallback_enabled() {
-            let margin = verify_fallback_margin();
+            let margin = verify_fallback_margin((drafter_pos as usize) + n_eff);
             let gaps = unsafe {
                 let src = verify_scratch.verify_gap.buffer.contents().as_ptr() as *const f32;
                 std::slice::from_raw_parts(src, n_eff)

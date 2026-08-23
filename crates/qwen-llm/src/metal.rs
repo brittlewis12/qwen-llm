@@ -16560,6 +16560,7 @@ pub fn encode_attn_prefill_v4_g6_q2_c32_f32(
     n_rows: usize,
     base_pos: usize,
     nwg: usize,
+    q_f32: bool,
 ) -> Result<(), MetalError> {
     const N_Q_HEADS: usize = 24;
     const N_KV_HEADS: usize = 4;
@@ -16634,10 +16635,11 @@ pub fn encode_attn_prefill_v4_g6_q2_c32_f32(
             });
         }
     }
-    if nwg == 0 || nwg > 64 {
+    let nwg_max = crate::metal_forward::ATTN_V4_MAX_NWG;
+    if nwg == 0 || nwg > nwg_max {
         return Err(MetalError::BadShape {
             kernel: "attn_prefill_v4_g6_q2_c32",
-            detail: format!("nwg={nwg} out of range [1, 64]"),
+            detail: format!("nwg={nwg} out of range [1, {nwg_max}]"),
         });
     }
     let checked_product = |factors: &[usize], label: &str| -> Result<u64, MetalError> {
@@ -16727,6 +16729,7 @@ pub fn encode_attn_prefill_v4_g6_q2_c32_f32(
         n_partitions: u32,
         rows_per_partition: u32,
         base_pos: u32,
+        q_f32: u32,
         scale: f32,
     }
     let main = ctx.pipeline("kernel_attn_prefill_v4_g6_q2_c32_f32")?;
@@ -16743,6 +16746,7 @@ pub fn encode_attn_prefill_v4_g6_q2_c32_f32(
             n_partitions: nwg as u32,
             rows_per_partition: rows_per_partition_u32,
             base_pos: base_pos_u32,
+            q_f32: u32::from(q_f32),
             scale,
         },
     );
@@ -16751,7 +16755,9 @@ pub fn encode_attn_prefill_v4_g6_q2_c32_f32(
     enc.set_tensor(3, v_cache);
     enc.set_tensor(4, o_partial);
     enc.set_tensor(5, ml_partial);
-    enc.set_threadgroup_memory(0, QT * GROUP * HEAD_DIM * 2);
+    // sq shmem: F16 (QT*GROUP*HEAD_DIM*2 bytes) or F32 (x2) depending on
+    // q_f32; size for the F32 case unconditionally (12KB).
+    enc.set_threadgroup_memory(0, QT * GROUP * HEAD_DIM * 4);
     enc.set_threadgroup_memory(1, QT * GROUP * TILE_C * std::mem::size_of::<f32>());
     enc.dispatch(
         MTLSize {
@@ -16790,9 +16796,9 @@ pub fn encode_attn_prefill_v4_g6_q2_c32_f32(
     enc.set_tensor(1, o_partial);
     enc.set_tensor(2, ml_partial);
     enc.set_tensor(3, out);
-    enc.set_threadgroup_memory(0, 64 * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(1, 64 * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(2, 64 * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(0, nwg * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, nwg * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(2, nwg * std::mem::size_of::<f32>());
     enc.dispatch(
         MTLSize {
             width: N_Q_HEADS,
@@ -16992,9 +16998,9 @@ pub fn encode_attn_prefill_v4_g8_t2_q2_c64_reduce_only_f32(
     enc.set_tensor(1, o_partial);
     enc.set_tensor(2, ml_partial);
     enc.set_tensor(3, out);
-    enc.set_threadgroup_memory(0, 64 * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(1, 64 * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(2, 64 * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(0, nwg * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, nwg * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(2, nwg * std::mem::size_of::<f32>());
     enc.dispatch(
         MTLSize {
             width: N_Q_HEADS,
@@ -17363,9 +17369,9 @@ pub fn encode_attn_prefill_v4_g16_t4_q2_c64_reduce_only_f32(
     enc.set_tensor(1, o_partial);
     enc.set_tensor(2, ml_partial);
     enc.set_tensor(3, out);
-    enc.set_threadgroup_memory(0, 64 * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(1, 64 * std::mem::size_of::<f32>());
-    enc.set_threadgroup_memory(2, 64 * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(0, nwg * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(1, nwg * std::mem::size_of::<f32>());
+    enc.set_threadgroup_memory(2, nwg * std::mem::size_of::<f32>());
     enc.dispatch(
         MTLSize {
             width: N_Q_HEADS,
@@ -35927,6 +35933,166 @@ mod tests {
             "[attn-audit] ctx={n_pos} group={group} nwg={nwg} tile_c={tile_c} gpu_ms={ms:.3} gb={:.2} gbps={gbps:.1}",
             bytes / 1e9
         );
+    }
+
+    /// Boundary oracle for the packed g6_q2 attention reduce (2026-08-22):
+    /// model-free comparison of `encode_attn_prefill_v4_g6_q2_c32_f32`
+    /// (n_rows=8, nwg=128 — above the historical 64-partition cap) against
+    /// eight per-row `encode_attn_decode_v4_f32` calls on the same synthetic
+    /// Q/KV. Two 64-partition couplings shipped behind the old cap — a
+    /// fixed-64 shmem sizing in the encoder and a two-pass staging loop in
+    /// the reduce — both silently corrupted at nwg > 64; a cosine gate here
+    /// discriminates that corruption from reorder noise (corruption moved
+    /// logits by 5-11 absolute, reorder stays < 1e-3 cosine distance).
+    #[test]
+    #[ignore = "slow GPU oracle; run explicitly"]
+    fn packed_q2_attention_matches_per_row_at_high_nwg() {
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        const N_ROWS: usize = 8;
+        const N_Q: usize = 24;
+        const N_KV: usize = 4;
+        const HEAD_DIM: usize = 256;
+        const GROUP: usize = 6;
+        let ctx_len: usize = std::env::var("QWEN_PACKED_Q2_ORACLE_CTX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(512);
+        let CTX: usize = ctx_len;
+        let BASE_POS: usize = CTX - N_ROWS;
+        const NWG: usize = 128;
+
+        let mut rng_state: u32 = 0x1234_5678;
+        let mut rand_f32 = move || {
+            rng_state = rng_state
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223);
+            ((rng_state >> 8) as f32) / ((1u32 << 24) as f32) - 0.5
+        };
+        let q: Vec<f32> = (0..N_ROWS * N_Q * HEAD_DIM).map(|_| rand_f32()).collect();
+        let kv_elems = CTX * N_KV * HEAD_DIM;
+        let k_f32: Vec<f32> = (0..kv_elems).map(|_| rand_f32()).collect();
+        let v_f32: Vec<f32> = (0..kv_elems).map(|_| rand_f32()).collect();
+        let k_half: Vec<half::f16> = k_f32.iter().map(|v| half::f16::from_f32(*v)).collect();
+        let v_half: Vec<half::f16> = v_f32.iter().map(|v| half::f16::from_f32(*v)).collect();
+
+        let q_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&q),
+            vec![(N_ROWS * N_Q * HEAD_DIM) as u64],
+            GgmlType::F32,
+        )
+        .expect("q");
+        let k_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&k_half),
+            vec![kv_elems as u64],
+            GgmlType::F16,
+        )
+        .expect("k");
+        let v_t = MetalTensor::from_bytes(
+            &ctx,
+            bytemuck::cast_slice(&v_half),
+            vec![kv_elems as u64],
+            GgmlType::F16,
+        )
+        .expect("v");
+        let o_packed =
+            MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * N_Q * HEAD_DIM) as u64]).expect("o packed");
+        let o_partial =
+            MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * N_KV * NWG * GROUP * HEAD_DIM) as u64])
+                .expect("o partial");
+        let ml_partial =
+            MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * N_KV * NWG * GROUP * 2) as u64])
+                .expect("ml partial");
+
+        {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            encode_attn_prefill_v4_g6_q2_c32_f32(
+                &ctx,
+                &enc,
+                &q_t,
+                &k_t,
+                &v_t,
+                &o_partial,
+                &ml_partial,
+                &o_packed,
+                N_ROWS,
+                BASE_POS,
+                NWG,
+                true,
+            )
+            .expect("packed encode");
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+        }
+
+        let o_per_row = MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * N_Q * HEAD_DIM) as u64])
+            .expect("o per row");
+        let o_partial_1 =
+            MetalTensor::zeros_f32(&ctx, vec![(N_KV * 1024 * GROUP * HEAD_DIM) as u64])
+                .expect("o partial 1");
+        let ml_partial_1 = MetalTensor::zeros_f32(&ctx, vec![(N_KV * 1024 * GROUP * 2) as u64])
+            .expect("ml partial 1");
+        {
+            let cmd = ctx.queue.commandBuffer().expect("cmd");
+            let enc = KernelEncoder::begin(&cmd);
+            for row in 0..N_ROWS {
+                let q_row =
+                    q_t.view_subrange((row * N_Q * HEAD_DIM) as u64, vec![(N_Q * HEAD_DIM) as u64]);
+                let o_row = o_per_row
+                    .view_subrange((row * N_Q * HEAD_DIM) as u64, vec![(N_Q * HEAD_DIM) as u64]);
+                encode_attn_decode_v4_f32(
+                    &ctx,
+                    &enc,
+                    &q_row,
+                    &k_t,
+                    &v_t,
+                    &o_partial_1,
+                    &ml_partial_1,
+                    &o_row,
+                    N_Q,
+                    N_KV,
+                    HEAD_DIM,
+                    BASE_POS + row + 1,
+                    NWG,
+                    32,
+                )
+                .expect("per-row encode");
+            }
+            enc.end();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+        }
+
+        unsafe {
+            let a = o_packed.buffer.contents().as_ptr() as *const f32;
+            let b = o_per_row.buffer.contents().as_ptr() as *const f32;
+            let n = N_ROWS * N_Q * HEAD_DIM;
+            let mut dot = 0.0f64;
+            let mut na = 0.0f64;
+            let mut nb = 0.0f64;
+            let mut max_abs = 0.0f32;
+            for i in 0..n {
+                let av = *a.add(i);
+                let bv = *b.add(i);
+                dot += (av as f64) * (bv as f64);
+                na += (av as f64).powi(2);
+                nb += (bv as f64).powi(2);
+                max_abs = max_abs.max((av - bv).abs());
+            }
+            let cos = dot / (na.sqrt() * nb.sqrt() + 1e-30);
+            eprintln!("[packed-q2-oracle] cos={cos:.6} max|delta|={max_abs:.3e} nwg={NWG}");
+            assert!(
+                cos > 0.9999,
+                "packed q2 attention diverges from per-row at nwg={NWG} (cos={cos})"
+            );
+        }
     }
 
     /// H5.3a foundation: verify `BlitEncoder` actually copies device-side

@@ -1770,6 +1770,7 @@ struct attn_v4_prefill_args {
     uint  n_partitions;
     uint  rows_per_partition;
     uint  base_pos;
+    uint  q_f32;             // 1 = stage Q in F32 (verify path); 0 = F16 (prefill)
     float scale;
 };
 
@@ -1800,6 +1801,7 @@ inline void attn_v4_prefill_main_subgroup_body(
     const uint p_end = p_end_raw < args.n_pos ? p_end_raw : args.n_pos;
 
     threadgroup half4 * sq4 = (threadgroup half4 *)sq;
+    threadgroup float4 * sqf4 = (threadgroup float4 *)sq;
     for (ushort qr = 0; qr < QT; ++qr) {
         const uint row = row_base + qr;
         const bool row_active = row < args.n_rows;
@@ -1810,7 +1812,11 @@ inline void attn_v4_prefill_main_subgroup_body(
             for (ushort ii = 0; ii < DK4_PER_LANE; ++ii) {
                 const ushort idx = (qr * GROUP_TILE + g) * DK4 + ii * NW + tiisg;
                 float4 qv = row_active ? q4_base[g * DK4 + ii * NW + tiisg] : float4(0.0f);
-                sq4[idx] = half4(qv * args.scale);
+                if (args.q_f32 != 0u) {
+                    sqf4[idx] = qv * args.scale;
+                } else {
+                    sq4[idx] = half4(qv * args.scale);
+                }
             }
         }
     }
@@ -1878,7 +1884,7 @@ inline void attn_v4_prefill_main_subgroup_body(
                     for (ushort qr = 0; qr < QT; ++qr) {
                         for (ushort g = 0; g < GROUP_TILE; ++g) {
                             const ushort idx = (qr * GROUP_TILE + g) * DK4 + ii * NW + tiisg;
-                            const float4 q_f32 = float4(sq4[idx]);
+                            const float4 q_f32 = args.q_f32 != 0u ? sqf4[idx] : float4(sq4[idx]);
                             partial[qr][g] += dot(k_f32, q_f32);
                         }
                     }
@@ -2636,14 +2642,15 @@ inline void attn_v4_prefill_reduce_rows_body(
     const uint g = qh % GROUP;
     const uint nwg = args.n_partitions;
 
-    for (ushort pass = 0; pass < 2; ++pass) {
-        const uint part = tiisg + pass * 32;
-        if (part < nwg) {
-            device const float * ml_base = ml_partial
-                + ((((ulong)row * args.n_kv_heads + kvh) * nwg + part) * GROUP + g) * 2;
-            sh_m[part] = ml_base[0];
-            sh_l[part] = ml_base[1];
-        }
+    // Staging pass: publish every partition's (m, l) into shmem. The old
+    // two-pass form (`part = tiisg + pass * 32`) silently covered only
+    // [0, 64) and read uninitialized shmem above it — the 2026-08-22
+    // 10.8K shadow probe caught the corruption at nwg > 64.
+    for (uint part = tiisg; part < nwg; part += 32) {
+        device const float * ml_base = ml_partial
+            + ((((ulong)row * args.n_kv_heads + kvh) * nwg + part) * GROUP + g) * 2;
+        sh_m[part] = ml_base[0];
+        sh_l[part] = ml_base[1];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 

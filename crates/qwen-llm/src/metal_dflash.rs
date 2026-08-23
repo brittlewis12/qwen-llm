@@ -7420,10 +7420,13 @@ pub fn encode_packed_verify_layer_major_inner(
                         // extent's schedule matters. The c32 kernel is a
                         // fixed template: require the heuristic to agree
                         // that 32 is the right tile (same guard the q2
-                        // path uses), and cap nwg at the g6 encoder's 64.
+                        // path uses). nwg follows the retuned selector
+                        // (2026-08-22: 128/512 tiers for group 4|6); the
+                        // encoder and partials support up to
+                        // ATTN_V4_MAX_NWG.
                         let n_pos = start_position as usize + n;
                         (crate::metal::attn_v4_choose_tile_c(n_pos, 6) == 32)
-                            .then(|| crate::metal::attn_v4_choose_nwg(n_pos, 6).min(64))
+                            .then(|| crate::metal::attn_v4_choose_nwg(n_pos, 6))
                     } else {
                         None
                     };
@@ -7475,6 +7478,7 @@ pub fn encode_packed_verify_layer_major_inner(
                             n,
                             start_position as usize,
                             nwg,
+                            true,
                         )?;
                         enc.end();
                     } else {

@@ -9907,6 +9907,7 @@ fn run_attn_prefill_micro(args: AttnPrefillMicroArgs) -> Result<()> {
                 rows,
                 base_pos,
                 nwg,
+                false,
             )?,
             (16, 2, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32(
                 &ctx,
@@ -10319,6 +10320,7 @@ fn run_attn_layer_micro(args: AttnLayerMicroArgs) -> Result<()> {
                 rows,
                 base_pos,
                 nwg,
+                false,
             )?,
             (16, 2, 2) => encode_attn_prefill_v4_g8_t2_q2_c64_f32(
                 &ctx,

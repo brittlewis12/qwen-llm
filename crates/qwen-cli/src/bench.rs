@@ -2741,6 +2741,9 @@ struct TokArgs {
     /// Pass add_special=true to both tokenizer backends.
     #[arg(long)]
     add_special: bool,
+    /// Print exact token IDs and their canonical i32le SHA-256 digest.
+    #[arg(long)]
+    print_token_ids: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -10517,6 +10520,7 @@ fn run_tok(args: TokArgs) -> Result<()> {
         messages_no_generation_prompt,
         iters,
         add_special,
+        print_token_ids,
     } = args;
     if iters == 0 {
         anyhow::bail!("--iters must be > 0");
@@ -10573,6 +10577,13 @@ fn run_tok(args: TokArgs) -> Result<()> {
             "native/ffi decode mismatch: ffi_len={} native_len={}",
             ffi_text.len(),
             native_text.len()
+        );
+    }
+    if print_token_ids {
+        println!("[tok] token_ids={}", serde_json::to_string(&native_ids)?);
+        println!(
+            "[tok] token_ids_sha256_i32le={}",
+            token_ids_sha256_i32le(&native_ids)
         );
     }
 
@@ -10744,6 +10755,24 @@ mod tok_tests {
         };
         assert!(args.include_token_ids);
         assert_eq!(args.output, Some(PathBuf::from("fixture.json")));
+    }
+
+    #[test]
+    fn tok_print_token_ids_is_explicit() {
+        let parsed = Args::try_parse_from([
+            "qwen-bench",
+            "tok",
+            "--model",
+            "model.gguf",
+            "--prompt",
+            "def",
+            "--print-token-ids",
+        ])
+        .expect("parse tokenizer fixture arguments");
+        let Cmd::Tok(args) = parsed.cmd else {
+            panic!("expected tok command");
+        };
+        assert!(args.print_token_ids);
     }
 
     #[test]

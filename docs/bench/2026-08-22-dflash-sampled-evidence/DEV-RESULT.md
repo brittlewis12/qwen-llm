@@ -1,8 +1,9 @@
 # DFlash Sampled Development Results - 2026-08-22
 
-Status: development diagnostics only. E0 is not measured, K0 remains a local
-reference diagnostic without cross-implementation parity, and no G1, product,
-serve, default-selection, or held-out authority exists.
+Status: development diagnostics only. One post-incident, protocol-frozen Q4 E0
+sentinel now passes the strict lockstep reducer. K0 remains a local reference
+diagnostic without cross-implementation parity, and no G1, product, serve,
+default-selection, model-wide, or held-out authority exists.
 
 ## What The Development Runs Establish
 
@@ -16,8 +17,8 @@ KV/GDN/conv state, stop boundary, and one-token continuation.
 This demonstrates that positive-temperature DFlash2 is not inherently
 incompatible with sampler-v1. It does not demonstrate an accelerated product:
 the oracle performs serial token-major target sampling and is intentionally
-slow. The separately preregistered E0 lockstep hidden-capture experiment was not
-implemented, so these runs must not be described as E0 passes.
+slow. E1a rows remain distinct from the E0 result below and must not be
+retroactively described as E0 passes.
 
 Schema v4 now records that boundary explicitly, hashes the target, drafter, and
 binary, records request/arm/cluster identities, verifies exact post-prefill draw
@@ -83,18 +84,58 @@ The older schema-v3 rows remain useful only for the exploratory comparisons in
 this document; their reducer's combined `e0_e1a` label was an overclaim corrected
 in schema v4.
 
+## Q4 E0 Lockstep Development Sentinel
+
+The first v1 acquisition was formally invalid because its run-common rows
+omitted the schema-required executable path. The frozen reducer rejected it;
+`E0-INCIDENT-001.md` preserves the error, hashes, quarantine, and zero-authority
+disposition. It is not counted as a pass, mismatch, retry, or replicate.
+
+After committing the schema-conformance repair and freezing a distinct v2
+evidence artifact, one clean Q4 run at commit `df5d5d7` passed the independent
+schema-v1 reducer. V2 reused the same computational inputs after v1 had exposed
+an internal producer success, so it is not an untouched prospective test or an
+independent replicate; prospectivity applies only to the corrected protocol,
+identities, command, and decision rule. The fixture used the one-token prompt
+`Hello`, sampler-v1 at temperature 0.7, top-k 200, top-p 1.0, min-p 0.05,
+seed 0, one emitted token, and
+`serial_then_capture` order. The reducer authenticated exactly one trace and one
+run, reconstructed the full prepared distribution and RNG transition from full
+logits, checked exact active KV/GDN/conv state bytes, verified poison-free finite
+hidden transfer and complete active DFlash context history, and checked the
+pending-token boundary plus a nonadvancing one-token continuation.
+
+The compact reduction reports `development_lockstep_passed=true`, one passed
+run, zero development failures, and zero invalid-pre-observation runs. Trace
+SHA-256 is
+`0a94e8d3eb6fdec24ae0ba8ec34c09c581de26fb0802c20c41bfca16e79b7e7d`;
+state-sidecar SHA-256 is
+`d198464ed1b46e62059ffee7e924ae279989e65202ff8dfdc3e204f304f61bd6`;
+reduction SHA-256 is
+`a99fa23526f78f216e2572f70f88aa7a64802db48d0caccd7ce4e43e1dc45f06`.
+See `E0-Q4-V2-RESULT.md` for exact scope and artifact identities.
+
+This passes only the development sentinel's one-emitted-token ordinary-decode
+versus multi-hidden-capture check. It contains prompt and continuation
+transitions but no intermediate generated target transition. It does not test
+packed verification, rollback, sparse-q correctness, acceptance, economics,
+performance, serving, longer contexts, reverse arm order, Q8/BF16 arms,
+model-wide equivalence, or held-out E0 closure.
+
 ## Development Recommendation
 
 Keep Q4_K_M in the prospective drafter matrix. It is materially smaller, loads
 faster, and has no observed systematic acceptance collapse, but it should not be
 chosen as a default from these clusters.
 
-The next go/no-go boundary is unchanged:
+The next go/no-go boundary is now:
 
-1. Implement and pass the preregistered E0 lockstep single-token versus
-   multi-hidden path, including per-step state and captured-hidden identity.
-2. Prospectively freeze separate Q4 and Q8 drafter arms, fixtures, seeds, hashes,
-   and request-cluster analysis before acquiring comparison evidence.
+1. Freeze and run `capture_then_serial` as the cheapest direct falsifier of
+   execution-order interference, then broaden E0 across longer prompts and
+   generations, multiple seeds, and separately frozen target/drafter
+   quantizations.
+2. Freeze separate Q4 and Q8 drafter arms, fixtures, hashes, and request-cluster
+   analysis before acquiring comparison or economics evidence.
 3. Pin and cross-check the actual causal sparse-q contract before E1b; the
    current selector softmax is local-reference-only.
 4. Authorize a row-stable exact verifier spike only after correctness gates and

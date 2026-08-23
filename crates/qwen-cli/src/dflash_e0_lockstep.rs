@@ -133,6 +133,24 @@ fn validate_distinct_artifact_paths(paths: &[(&str, &str)]) -> Result<()> {
     Ok(())
 }
 
+fn evidence_paths_json(
+    model: &str,
+    drafter: &str,
+    binding_manifest: &str,
+    output: &str,
+    state_sidecar: &str,
+    executable: &str,
+) -> Value {
+    json!({
+        "model": model,
+        "drafter": drafter,
+        "binding_manifest": binding_manifest,
+        "output": output,
+        "state_sidecar": state_sidecar,
+        "executable": executable,
+    })
+}
+
 fn load_binding_manifest(path: &std::path::Path) -> Result<(Value, Value)> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("read E0 binding manifest {}", path.display()))?;
@@ -1623,6 +1641,14 @@ pub fn run(
         ("state_sidecar", &sidecar_path_identity),
         ("executable", &executable_path_identity),
     ])?;
+    let evidence_paths = evidence_paths_json(
+        &model_path_identity,
+        &drafter_path_identity,
+        &manifest_path_identity,
+        &output_path_identity,
+        &sidecar_path_identity,
+        &executable_path_identity,
+    );
     let bootstrap_common = json!({
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
@@ -1630,14 +1656,7 @@ pub fn run(
         "build_identity": build_identity,
         "lease_env": lease_env,
         "command": command,
-        "paths": {
-            "model": model_path_identity,
-            "drafter": drafter_path_identity,
-            "binding_manifest": manifest_path_identity,
-            "output": output_path_identity,
-            "state_sidecar": sidecar_path_identity,
-            "executable": executable_path_identity,
-        },
+        "paths": evidence_paths.clone(),
     });
     let mut writer = JsonlAppender::create_exclusive(&args.output)?;
     writer.write(&event(
@@ -1848,13 +1867,7 @@ pub fn run(
             "arch": std::env::consts::ARCH,
             "metal_device": device,
         },
-        "paths": {
-            "model": model_path_identity,
-            "drafter": drafter_path_identity,
-            "binding_manifest": manifest_path_identity,
-            "output": output_path_identity,
-            "state_sidecar": sidecar_path_identity,
-        },
+        "paths": evidence_paths,
         "prompt": {
             "utf8_len": args.prompt.len(),
             "utf8_sha256": bytes_sha256(args.prompt.as_bytes()),
@@ -2036,5 +2049,22 @@ mod tests {
         writer.finish().unwrap();
         assert!(JsonlAppender::create_exclusive(&path).is_err());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_and_run_metadata_share_complete_artifact_paths() {
+        let paths = evidence_paths_json(
+            "/model",
+            "/drafter",
+            "/manifest",
+            "/trace",
+            "/state",
+            "/executable",
+        );
+        let bootstrap = json!({"paths": paths.clone()});
+        let run = json!({"paths": paths});
+        assert_eq!(bootstrap["paths"], run["paths"]);
+        assert_eq!(bootstrap["paths"].as_object().unwrap().len(), 6);
+        assert_eq!(bootstrap["paths"]["executable"], "/executable");
     }
 }

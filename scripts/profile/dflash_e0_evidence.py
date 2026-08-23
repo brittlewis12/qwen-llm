@@ -610,6 +610,10 @@ def validate_bootstrap_common(row: dict[str, Any], name: str) -> None:
     )
     for key, value in paths.items():
         text(value, f"{name}.paths.{key}")
+    require(
+        len(set(paths.values())) == len(paths),
+        f"{name}.paths contains aliased artifacts",
+    )
 
 
 def validate_common(row: dict[str, Any], run_id: str) -> dict[str, Any]:
@@ -1780,6 +1784,10 @@ def reduce_run(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 row[key] == rows[0][key],
                 f"run {run_id} bootstrap common metadata changed",
             )
+    require(
+        bootstrap["paths"]["output"] == rows[0]["__input"],
+        f"run {run_id} recorded output path does not identify its input trace",
+    )
     text(rows[0]["payload"]["started_utc"], "bootstrap timestamp")
     boot_end = rows[1]["payload"]
     if boot_end["status"] == "infrastructure_error":
@@ -2827,6 +2835,10 @@ def run_self_test() -> None:
         root = Path(directory)
 
         def write(name: str, rows: list[dict[str, Any]]) -> Path:
+            path = root / f"{name}.jsonl"
+            output_identity = str(path.resolve())
+            for row in rows:
+                row["paths"]["output"] = output_identity
             run_start = next((row for row in rows if row["event"] == "run_start"), None)
             manifest_path = root / f"{name}.binding.json"
             if run_start is not None:
@@ -2905,7 +2917,6 @@ def run_self_test() -> None:
                 row["paths"]["state_sidecar"] = sidecar_identity["path"]
                 if row["event"] == "run_end":
                     row["payload"]["state_sidecar"] = sidecar_identity
-            path = root / f"{name}.jsonl"
             path.write_text(
                 "".join(json.dumps(row, separators=(",", ":")) + "\n" for row in rows),
                 encoding="utf-8",
@@ -3102,6 +3113,22 @@ def run_self_test() -> None:
                 "logits_f32le_hex", "xx"
             ),
         )
+
+        def omit_run_executable(rows: list[dict[str, Any]]) -> None:
+            for row in rows[2:]:
+                row["paths"] = {
+                    key: value
+                    for key, value in row["paths"].items()
+                    if key != "executable"
+                }
+
+        reject("run-path-drift", omit_run_executable)
+
+        def alias_artifact_paths(rows: list[dict[str, Any]]) -> None:
+            for row in rows:
+                row["paths"]["drafter"] = row["paths"]["model"]
+
+        reject("aliased-artifact-paths", alias_artifact_paths)
         reject(
             "logit-mismatch",
             lambda r: first_transition(r)["capture"].__setitem__(

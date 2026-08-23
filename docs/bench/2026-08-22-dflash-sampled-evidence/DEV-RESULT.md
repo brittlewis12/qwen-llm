@@ -1,9 +1,10 @@
 # DFlash Sampled Development Results - 2026-08-22
 
-Status: development diagnostics only. One post-incident, protocol-frozen Q4 E0
-sentinel now passes the strict lockstep reducer. K0 remains a local reference
-diagnostic without cross-implementation parity, and no G1, product, serve,
-default-selection, model-wide, or held-out authority exists.
+Status: development diagnostics only. Post-incident Q4 E0 sentinels now pass the
+strict lockstep reducer under both execution orders on one narrow computational
+fixture. K0 remains a local reference diagnostic without cross-implementation
+parity, and no G1, product, serve, default-selection, model-wide, or held-out
+authority exists.
 
 ## What The Development Runs Establish
 
@@ -122,6 +123,14 @@ packed verification, rollback, sparse-q correctness, acceptance, economics,
 performance, serving, longer contexts, reverse arm order, Q8/BF16 arms,
 model-wide equivalence, or held-out E0 closure.
 
+A separately frozen v3 sentinel required `capture_then_serial` through a
+schema-v2 binding checked by both producer and reducer. Its strict reduction also
+passed exactly one run with zero failures or invalid-pre-observation rows. The
+v2 and v3 state sidecars are byte-identical, and no within-run parity failure was
+observed under either execution order on this same fixture. V3 is an informed
+order diagnostic, not an independent replicate, and these two rows do not rule
+out order effects generally. See `E0-Q4-V3-REVERSE-RESULT.md`.
+
 ## Development Recommendation
 
 Keep Q4_K_M in the prospective drafter matrix. It is materially smaller, loads
@@ -130,10 +139,8 @@ chosen as a default from these clusters.
 
 The next go/no-go boundary is now:
 
-1. Freeze and run `capture_then_serial` as the cheapest direct falsifier of
-   execution-order interference, then broaden E0 across longer prompts and
-   generations, multiple seeds, and separately frozen target/drafter
-   quantizations.
+1. Broaden E0 to generated lengths that exercise intermediate target
+   transitions and sustained histories, then add multiple prompts and seeds.
 2. Freeze separate Q4 and Q8 drafter arms, fixtures, hashes, and request-cluster
    analysis before acquiring comparison or economics evidence.
 3. Pin and cross-check the actual causal sparse-q contract before E1b; the

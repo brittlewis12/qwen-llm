@@ -10,9 +10,10 @@ held-out, packed-verifier, performance, serving, or product authority.
   found it bitwise non-interfering with ordinary `single_token` execution.
 - **NO-GO:** do not authorize a sampled product verifier, change serve from
   greedy-only, select Q4 as a default drafter, or infer model-wide E0 closure.
-- **Next gate:** reverse arm order as the cheapest direct interference falsifier,
-  then broaden E0 before closing authoritative sparse-q/K0 semantics and charged
-  request-cluster economics ahead of any row-stable verifier spike.
+- **Next gate at acquisition time:** reverse arm order as the cheapest direct
+  interference falsifier. The subsequently frozen v3 sentinel passed that
+  narrow check; generated-transition and sustained-history E0 coverage remain
+  open before authoritative sparse-q/K0 and verifier work.
 
 ## Frozen Run
 
@@ -111,3 +112,11 @@ order, Q8/BF16 quantizations, cross-implementation K0 parity, held-out prompts,
 serving, or product integration. Exact hidden transfer also does not independently
 prove that the captured values have the intended target-layer residual semantics;
 that remains a separate binding/correctness obligation.
+
+## Subsequent Order Diagnostic
+
+The separately frozen `capture_then_serial` v3 sentinel also passed its strict
+reducer. Together the two reductions report no observed within-run parity
+failure under either order on this same narrow, already exposed fixture. This is
+not an independent replication or a general exclusion of order effects. See
+`E0-Q4-V3-REVERSE-RESULT.md`.

@@ -58,6 +58,7 @@ use crate::metal_forward::{
     checked_u64_mul, checked_u64_mul3, checked_u64_mul4, encode_mat_mat_dispatch,
     encode_mat_vec_dispatch, encode_scatter_offset_f32, weight_dtype_kept_native,
 };
+use crate::sampling::{Sampler, SamplingError, SparseProposal, WeightedCandidate};
 use crate::tensor::{GgmlType, TensorDesc};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -2113,6 +2114,8 @@ pub enum DFlashError {
     MetalForward(#[from] crate::metal_forward::MfError),
     #[error("codec: {0}")]
     Codec(#[from] crate::codec::CodecError),
+    #[error("proposal sampling: {0}")]
+    Sampling(#[from] SamplingError),
     #[error("token {0} out of vocab range {1}")]
     BadToken(i32, u32),
     #[error("ctx_len {0} > capacity {1}")]
@@ -2517,6 +2520,15 @@ pub struct DFlash2SelectorDiagnostic {
     pub draft_tokens: Vec<i32>,
     /// One record for each causal selector row, `1..block_size`.
     pub depths: Vec<DFlash2SelectorDepthDiagnostic>,
+}
+
+/// One sampled DFlash 2 path plus the realized sparse proposal distribution
+/// for each draft token. `draft_tokens[0]` is the unused anchor slot, while
+/// `proposals[i]` generated `draft_tokens[i + 1]`.
+#[derive(Clone, Debug)]
+pub struct DFlash2SparseProposalBlock {
+    pub draft_tokens: Vec<i32>,
+    pub proposals: Vec<SparseProposal>,
 }
 
 /// Exact scalar inputs and outputs for one causal depth of the selector.
@@ -16667,6 +16679,158 @@ impl<'a> DFlashDecoder<'a> {
             sel.predecessor.dequant_row(chosen as usize, &mut pred)?;
         }
         Ok(out)
+    }
+
+    /// Run DFlash 2 and sample its predecessor-conditioned sparse selector
+    /// distribution at each draft position. The proposal sampler must apply
+    /// only positive temperature; target-side filters belong to verification.
+    pub fn draft_block_sampled(
+        &mut self,
+        carry_tok: i32,
+        noise_start_pos: u32,
+        proposal_sampler: &mut Sampler,
+    ) -> Result<DFlash2SparseProposalBlock, DFlashError> {
+        if self.head.selector.is_none() {
+            return Err(DFlashError::BadDrafter(
+                "sampled path requires a DFlash 2 selector",
+            ));
+        }
+        let proposal_config = proposal_sampler.config();
+        if proposal_config.temperature <= 0.0
+            || proposal_config.top_k != 0
+            || proposal_config.top_p != 1.0
+            || proposal_config.min_p != 0.0
+        {
+            return Err(DFlashError::BadDrafter(
+                "DFlash 2 proposal sampler must use temperature without target filters",
+            ));
+        }
+        if dflash2_selector_disabled() {
+            return Err(DFlashError::SelectorDiagnosticDisabled);
+        }
+
+        let _greedy_path = self.draft_block(carry_tok, noise_start_pos)?;
+        let selector = self.head.selector.as_ref().expect("selector checked above");
+        let n = self.head.config.block_size as usize;
+        let top_k = selector.top_k;
+        let rank = selector.rank;
+        let candidate_elements = n.checked_mul(top_k).ok_or_else(|| {
+            DFlashError::Metal(MetalError::BadShape {
+                kernel: "dflash2_sampled_selector_read",
+                detail: "candidate element count overflow".into(),
+            })
+        })?;
+        let gate_elements = n.checked_mul(rank).ok_or_else(|| {
+            DFlashError::Metal(MetalError::BadShape {
+                kernel: "dflash2_sampled_selector_read",
+                detail: "gate element count overflow".into(),
+            })
+        })?;
+        let ids = read_shared_selector_tensor::<i32>(
+            self.session
+                .topk_ids
+                .as_ref()
+                .ok_or(DFlashError::BadDrafter(
+                    "sampled selector missing topk_ids buffer",
+                ))?,
+            GgmlType::I32,
+            candidate_elements,
+            "topk_ids",
+        )?;
+        let vals = read_shared_selector_tensor::<f32>(
+            self.session
+                .topk_vals
+                .as_ref()
+                .ok_or(DFlashError::BadDrafter(
+                    "sampled selector missing topk_vals buffer",
+                ))?,
+            GgmlType::F32,
+            candidate_elements,
+            "topk_vals",
+        )?;
+        let selector_hidden = read_shared_selector_tensor::<f32>(
+            self.session.sel_h.as_ref().ok_or(DFlashError::BadDrafter(
+                "sampled selector missing sel_h buffer",
+            ))?,
+            GgmlType::F32,
+            gate_elements,
+            "sel_h",
+        )?;
+
+        let mut draft_tokens = vec![ids[0]; n];
+        let mut proposals = Vec::with_capacity(n.saturating_sub(1));
+        let mut predecessor = vec![0.0f32; rank];
+        let mut successor = vec![0.0f32; rank];
+        let mut gate = vec![0.0f32; rank];
+        selector
+            .predecessor
+            .dequant_row(carry_tok as usize, &mut predecessor)?;
+
+        for position in 1..n {
+            let hidden_row = &selector_hidden[position * rank..(position + 1) * rank];
+            for r in 0..rank {
+                gate[r] = predecessor[r] * hidden_row[r];
+            }
+
+            let candidate_ids = &ids[position * top_k..(position + 1) * top_k];
+            let unary_logits = &vals[position * top_k..(position + 1) * top_k];
+            let mut scores = vec![f32::NEG_INFINITY; top_k];
+            for (candidate_index, &token) in candidate_ids.iter().enumerate() {
+                if token < 0 || token as usize >= selector.successor.n_rows {
+                    continue;
+                }
+                selector
+                    .successor
+                    .dequant_row(token as usize, &mut successor)?;
+                let mut dot = 0.0f32;
+                for r in 0..rank {
+                    dot += gate[r] * successor[r];
+                }
+                scores[candidate_index] = unary_logits[candidate_index] + dot;
+            }
+
+            let distribution = proposal_sampler.sample_with_distribution(&scores)?;
+            let selected_index = usize::try_from(distribution.sampled.token).map_err(|_| {
+                DFlashError::BadDrafter("sampled selector returned a negative candidate index")
+            })?;
+            let selected_token =
+                *candidate_ids
+                    .get(selected_index)
+                    .ok_or(DFlashError::BadDrafter(
+                        "sampled selector candidate index is out of range",
+                    ))?;
+            if selected_token < 0 || selected_token as usize >= selector.predecessor.n_rows {
+                return Err(DFlashError::BadDrafter(
+                    "sampled selector returned an invalid token",
+                ));
+            }
+
+            let candidates = distribution
+                .candidates
+                .into_iter()
+                .filter(|candidate| candidate.weight > 0.0)
+                .map(|candidate| {
+                    let index = candidate.token as usize;
+                    WeightedCandidate {
+                        token: candidate_ids[index],
+                        weight: candidate.weight,
+                    }
+                })
+                .collect();
+            proposals.push(SparseProposal {
+                token: selected_token,
+                candidates,
+            });
+            draft_tokens[position] = selected_token;
+            selector
+                .predecessor
+                .dequant_row(selected_token as usize, &mut predecessor)?;
+        }
+
+        Ok(DFlash2SparseProposalBlock {
+            draft_tokens,
+            proposals,
+        })
     }
 
     /// Run the production DFlash 2 draft path, then re-read its synchronized

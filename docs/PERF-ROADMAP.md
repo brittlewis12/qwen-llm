@@ -3305,10 +3305,10 @@ for aggregate throughput.
   graphs/deep queues remain closed under the current per-token callback and terminal
   semantics; existing GPU argmax, single-CB, boundary, and pipeline evidence does
   not support a 3-6% central estimate.
-- Distribution-exact rejection sampling is a future sampler capability, not a
-  current greedy speed lever. Start with offline captured-logit probability replay;
-  a proposer union must define one causal aggregate distribution rather than pack
-  alternative branches into linear N8.
+- Rejection sampling is live for DFlash2's causal sparse selector distribution
+  against packed target logits. It is not a universal speed win and does not make
+  alternative branches a linear N8 proposer union; further work belongs in sampled
+  policy/backend numerics rather than the greedy speed queue.
 - RoPE-table/GDN-exp hygiene and the v0.646 algebraic decode leaves remain below
   the warm gate. Paired RoPE and beta fusion are bounded cleanup signals; the
   raw-Q middle state is closed and deleted, and the exact epsilon/attention

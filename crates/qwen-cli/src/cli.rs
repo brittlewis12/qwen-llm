@@ -40,16 +40,15 @@ pub(crate) struct ServeArgs {
     #[arg(long, default_value_t = crate::serve::DEFAULT_SNAPSHOT_CACHE_MIB)]
     snapshot_cache_mib: u64,
 
-    /// DFlash drafter GGUF for speculative decode (greedy requests only).
+    /// DFlash drafter GGUF for speculative decode.
     ///
-    /// Speculation is target-authoritative greedy accept-prefix. The corrected
-    /// all-position capture path is live-gated on a short cold Qwen3.8 request;
-    /// this is not a blanket performance or output-equivalence claim.
-    /// Speculation needs captured target hidden states for every context position, which
-    /// restored checkpoints do not carry, so a request speculates only
-    /// when it cold-prefills its whole prompt; restored requests decode
-    /// serially. The per-request `serve phases:` line reports which path
-    /// ran via `decode_path=dflash|serial`.
+    /// Greedy and sampled proposals are verified by the target model. Sampled
+    /// verification uses the packed target forward, whose floating-point
+    /// arithmetic can differ slightly from serial token-major decoding.
+    /// Speculation needs the relevant target-hidden window. Restored requests
+    /// speculate when the cache entry carries a compatible capture tail;
+    /// otherwise they decode serially while refreshing that tail. The
+    /// per-request `serve phases:` line reports `decode_path=dflash|serial`.
     #[arg(long, value_name = "GGUF")]
     drafter: Option<PathBuf>,
 
@@ -220,9 +219,8 @@ struct GenerationOverrides {
     #[arg(long)]
     max_context_tokens: Option<usize>,
 
-    /// DFlash drafter GGUF for speculative decode (greedy only). Output is
-    /// identical to non-speculative decoding: the drafter only proposes
-    /// tokens, and every one is verified by the target model.
+    /// DFlash drafter GGUF for speculative decode. Sampled DFlash2 proposals
+    /// use sparse rejection sampling against the packed target verifier.
     #[arg(long, value_name = "GGUF")]
     drafter: Option<PathBuf>,
 }

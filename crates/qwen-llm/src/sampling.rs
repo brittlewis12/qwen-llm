@@ -76,6 +76,12 @@ pub struct SampledToken {
     pub candidate_index: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SpeculativeSamplingDecision {
+    Accepted,
+    Rejected { correction: i32 },
+}
+
 /// A caller-supplied categorical draw in the same half-open interval produced
 /// by sampler-v1's request-local RNG.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -100,6 +106,13 @@ pub struct WeightedCandidate {
     pub token: i32,
     /// The unnormalized sampler-v1 categorical weight.
     pub weight: f64,
+}
+
+/// A sparse proposal distribution and the token sampled from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SparseProposal {
+    pub token: i32,
+    pub candidates: Vec<WeightedCandidate>,
 }
 
 /// Immutable diagnostic output for one supplied categorical draw.
@@ -204,6 +217,12 @@ pub enum SamplingError {
     VocabularyTooLarge(usize),
     #[error("sampling retained no finite-probability candidates")]
     NoCandidates,
+    #[error("proposal token {0} is outside the target vocabulary")]
+    ProposalTokenOutOfRange(i32),
+    #[error("proposal weight for token {token} must be finite and non-negative, got {weight}")]
+    InvalidProposalWeight { token: i32, weight: f64 },
+    #[error("sampled proposal token {0} has no positive proposal weight")]
+    MissingProposalToken(i32),
 }
 
 #[derive(Clone, Debug)]
@@ -292,6 +311,25 @@ impl Sampler {
                 unit_f64,
             }),
         ))
+    }
+
+    /// Sample while retaining the filtered categorical distribution used for
+    /// the draw. This is useful when the sampled token becomes a speculative
+    /// proposal whose probability must be available to the verifier.
+    pub fn sample_with_distribution(
+        &mut self,
+        logits: &[f32],
+    ) -> Result<SamplingDistribution, SamplingError> {
+        if self.config.temperature == 0.0 {
+            return self.diagnose(logits, SamplingUniform(0.0));
+        }
+
+        let mut next_rng = self.rng.clone();
+        let uniform = SamplingUniform(next_rng.next_unit_f64());
+        let distribution = self.diagnose(logits, uniform)?;
+        self.rng = next_rng;
+        self.draws += 1;
+        Ok(distribution)
     }
 
     /// Diagnose sampler-v1 using the same bounded top-k candidate construction
@@ -432,6 +470,110 @@ impl Sampler {
         Ok(SampledToken {
             token: candidates[candidate_index].token,
             candidate_index,
+        })
+    }
+
+    /// Couple a deterministic (one-hot) speculative proposal to the target
+    /// sampler. Drawing the proposal accepts it; any other target draw is the
+    /// exact residual correction. The RNG stream is therefore identical to
+    /// serial target sampling.
+    pub fn couple_deterministic_proposal(
+        &mut self,
+        logits: &[f32],
+        proposal: i32,
+    ) -> Result<SpeculativeSamplingDecision, SamplingError> {
+        let target = self.sample(logits)?.token;
+        Ok(if target == proposal {
+            SpeculativeSamplingDecision::Accepted
+        } else {
+            SpeculativeSamplingDecision::Rejected { correction: target }
+        })
+    }
+
+    /// Maximal coupling between the configured target distribution and a
+    /// sparse stochastic proposal. Acceptance uses `min(1, p(y) / q(y))`; a
+    /// rejection draws its correction from normalized `max(p - q, 0)`.
+    pub fn couple_sparse_proposal(
+        &mut self,
+        logits: &[f32],
+        proposal: &SparseProposal,
+    ) -> Result<SpeculativeSamplingDecision, SamplingError> {
+        if proposal.token < 0 || proposal.token as usize >= logits.len() {
+            return Err(SamplingError::ProposalTokenOutOfRange(proposal.token));
+        }
+        if proposal.candidates.is_empty() {
+            return Err(SamplingError::NoCandidates);
+        }
+
+        let mut proposal_total = 0.0;
+        let mut proposal_token_weight = 0.0;
+        for candidate in &proposal.candidates {
+            if candidate.token < 0 || candidate.token as usize >= logits.len() {
+                return Err(SamplingError::ProposalTokenOutOfRange(candidate.token));
+            }
+            if !candidate.weight.is_finite() || candidate.weight < 0.0 {
+                return Err(SamplingError::InvalidProposalWeight {
+                    token: candidate.token,
+                    weight: candidate.weight,
+                });
+            }
+            proposal_total += candidate.weight;
+            if candidate.token == proposal.token {
+                proposal_token_weight += candidate.weight;
+            }
+        }
+        if !(proposal_total.is_finite() && proposal_total > 0.0) {
+            return Err(SamplingError::NoCandidates);
+        }
+        if !(proposal_token_weight.is_finite() && proposal_token_weight > 0.0) {
+            return Err(SamplingError::MissingProposalToken(proposal.token));
+        }
+
+        let target = self.diagnose(logits, SamplingUniform(0.0))?;
+        let target_probability = target
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.token == proposal.token)
+            .map(|candidate| candidate.weight)
+            .sum::<f64>()
+            / target.total_weight;
+        let proposal_probability = proposal_token_weight / proposal_total;
+        let acceptance_probability = (target_probability / proposal_probability).min(1.0);
+        self.draws += 1;
+        if self.rng.next_unit_f64() < acceptance_probability {
+            return Ok(SpeculativeSamplingDecision::Accepted);
+        }
+
+        let mut residual = Vec::with_capacity(target.candidates.len());
+        let mut residual_total = 0.0;
+        for candidate in &target.candidates {
+            let target_probability = candidate.weight / target.total_weight;
+            let proposal_probability = proposal
+                .candidates
+                .iter()
+                .filter(|proposal_candidate| proposal_candidate.token == candidate.token)
+                .map(|proposal_candidate| proposal_candidate.weight)
+                .sum::<f64>()
+                / proposal_total;
+            let weight = (target_probability - proposal_probability).max(0.0);
+            residual_total += weight;
+            residual.push((candidate.token, weight));
+        }
+        if !(residual_total.is_finite() && residual_total > 0.0) {
+            return Err(SamplingError::NoCandidates);
+        }
+
+        self.draws += 1;
+        let threshold = self.rng.next_unit_f64() * residual_total;
+        let mut cumulative = 0.0;
+        for &(token, weight) in &residual {
+            cumulative += weight;
+            if threshold < cumulative {
+                return Ok(SpeculativeSamplingDecision::Rejected { correction: token });
+            }
+        }
+        Ok(SpeculativeSamplingDecision::Rejected {
+            correction: residual.last().expect("non-empty residual").0,
         })
     }
 
@@ -2084,5 +2226,216 @@ mod tests {
         );
         assert_eq!(sampler.draws(), 0);
         assert_eq!(sampler.rng.state, state_before);
+    }
+
+    #[test]
+    fn deterministic_proposal_coupling_preserves_serial_sampler_stream() {
+        let config = SamplingConfig {
+            temperature: 0.7,
+            top_k: 4,
+            top_p: 0.9,
+            min_p: 0.0,
+            seed: 0x5eed,
+        };
+        let logits = [3.0, 2.0, 1.0, 0.0];
+
+        let mut serial = sampler(config);
+        let expected = serial.sample(&logits).unwrap().token;
+        for proposal in [expected, (expected + 1) % logits.len() as i32] {
+            let mut speculative = sampler(config);
+            let decision = speculative
+                .couple_deterministic_proposal(&logits, proposal)
+                .unwrap();
+            let expected_decision = if proposal == expected {
+                SpeculativeSamplingDecision::Accepted
+            } else {
+                SpeculativeSamplingDecision::Rejected {
+                    correction: expected,
+                }
+            };
+            assert_eq!(decision, expected_decision);
+            assert_eq!(speculative.draws, serial.draws);
+            assert_eq!(speculative.rng.state, serial.rng.state);
+        }
+    }
+
+    #[test]
+    fn sample_with_distribution_matches_ordinary_sampling_state() {
+        let config = SamplingConfig {
+            temperature: 0.8,
+            top_k: 3,
+            top_p: 0.9,
+            min_p: 0.0,
+            seed: 1234,
+        };
+        let logits = [2.0, 1.5, 0.5, -1.0];
+        let mut ordinary = sampler(config);
+        let mut retained = sampler(config);
+
+        let expected = ordinary.sample(&logits).unwrap();
+        let distribution = retained.sample_with_distribution(&logits).unwrap();
+
+        assert_eq!(distribution.sampled, expected);
+        assert_eq!(retained.draws, ordinary.draws);
+        assert_eq!(retained.rng.state, ordinary.rng.state);
+    }
+
+    #[test]
+    fn sparse_maximal_coupling_preserves_target_distribution() {
+        let target_probabilities = [0.5f32, 0.3, 0.15, 0.05];
+        let proposal_probabilities = [0.1f32, 0.2, 0.3, 0.4];
+        let target_logits = target_probabilities.map(f32::ln);
+        let proposal_logits = proposal_probabilities.map(f32::ln);
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 17,
+        };
+        let mut target_sampler = sampler(config);
+        let mut proposal_sampler = sampler(SamplingConfig {
+            seed: 0xdffa_5202,
+            ..config
+        });
+        let mut counts = [0usize; 4];
+        let mut accepted = 0usize;
+        const TRIALS: usize = 20_000;
+
+        for _ in 0..TRIALS {
+            let distribution = proposal_sampler
+                .sample_with_distribution(&proposal_logits)
+                .unwrap();
+            let proposal = SparseProposal {
+                token: distribution.sampled.token,
+                candidates: distribution.candidates,
+            };
+            let token = match target_sampler
+                .couple_sparse_proposal(&target_logits, &proposal)
+                .unwrap()
+            {
+                SpeculativeSamplingDecision::Accepted => {
+                    accepted += 1;
+                    proposal.token
+                }
+                SpeculativeSamplingDecision::Rejected { correction } => correction,
+            };
+            counts[token as usize] += 1;
+        }
+
+        for (count, expected) in counts.into_iter().zip(target_probabilities) {
+            let observed = count as f64 / TRIALS as f64;
+            assert!((observed - f64::from(expected)).abs() < 0.015);
+        }
+        let acceptance_rate = accepted as f64 / TRIALS as f64;
+        assert!((acceptance_rate - 0.5).abs() < 0.015);
+    }
+
+    #[test]
+    fn sparse_coupling_pins_accept_and_filtered_rejection_draw_counts() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            top_k: 1,
+            top_p: 1.0,
+            min_p: 0.0,
+            seed: 99,
+        };
+        let logits = [4.0, 3.0];
+
+        let mut accepted_sampler = sampler(config);
+        let accepted = accepted_sampler
+            .couple_sparse_proposal(
+                &logits,
+                &SparseProposal {
+                    token: 0,
+                    candidates: vec![WeightedCandidate {
+                        token: 0,
+                        weight: 1.0,
+                    }],
+                },
+            )
+            .unwrap();
+        assert_eq!(accepted, SpeculativeSamplingDecision::Accepted);
+        assert_eq!(accepted_sampler.draws(), 1);
+
+        let mut rejected_sampler = sampler(config);
+        let rejected = rejected_sampler
+            .couple_sparse_proposal(
+                &logits,
+                &SparseProposal {
+                    token: 1,
+                    candidates: vec![WeightedCandidate {
+                        token: 1,
+                        weight: 1.0,
+                    }],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            rejected,
+            SpeculativeSamplingDecision::Rejected { correction: 0 }
+        );
+        assert_eq!(rejected_sampler.draws(), 2);
+    }
+
+    #[test]
+    fn sparse_coupling_rejects_invalid_proposals_without_advancing_rng() {
+        let config = SamplingConfig {
+            temperature: 1.0,
+            seed: 7,
+            ..SamplingConfig::default()
+        };
+        let logits = [1.0, 0.0];
+        for (proposal, expected) in [
+            (
+                SparseProposal {
+                    token: 2,
+                    candidates: vec![WeightedCandidate {
+                        token: 2,
+                        weight: 1.0,
+                    }],
+                },
+                SamplingError::ProposalTokenOutOfRange(2),
+            ),
+            (
+                SparseProposal {
+                    token: 0,
+                    candidates: vec![WeightedCandidate {
+                        token: 0,
+                        weight: f64::NAN,
+                    }],
+                },
+                SamplingError::InvalidProposalWeight {
+                    token: 0,
+                    weight: f64::NAN,
+                },
+            ),
+            (
+                SparseProposal {
+                    token: 1,
+                    candidates: vec![WeightedCandidate {
+                        token: 0,
+                        weight: 1.0,
+                    }],
+                },
+                SamplingError::MissingProposalToken(1),
+            ),
+        ] {
+            let mut sampler = sampler(config);
+            let state = sampler.rng.state;
+            let error = sampler
+                .couple_sparse_proposal(&logits, &proposal)
+                .unwrap_err();
+            if matches!(expected, SamplingError::InvalidProposalWeight { .. }) {
+                assert!(matches!(
+                    error,
+                    SamplingError::InvalidProposalWeight { token: 0, weight } if weight.is_nan()
+                ));
+            } else {
+                assert_eq!(error, expected);
+            }
+            assert_eq!(sampler.draws(), 0);
+            assert_eq!(sampler.rng.state, state);
+        }
     }
 }

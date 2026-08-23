@@ -135,17 +135,18 @@ qwen serve -m MODEL --trace-sse "$trace_dir/serve-$(date +%Y%m%d-%H%M%S).jsonl"
   default Qwen context ceiling is 262,144 tokens; an omitted limit sizes each
   request to need without making the ceiling unbounded.
 - **Speculative decode (`--drafter`, v0.77 DFlash):** a request
-  speculates only when it cold-prefills its whole prompt and decodes
-  greedily. Restored checkpoint positions carry no captured target hidden
-  states, so seeding the drafter's cross-context from them is impossible
-  (same reason the CLI excludes `--durable-prefix-cache`); restored
-  requests decode serially. The intended contract is target-authoritative
-  greedy output: accept-prefix uses an exact target verify. The per-request
+  speculates after a cold prefill or when a restored RAM-cache entry carries a
+  compatible target-hidden capture tail. Missing or malformed tails fall back
+  to serial decode while refreshing the tail for the next turn. Greedy requests
+  use target-verified accept-prefix;
+  sampled DFlash2 requests sample the selector's sparse top-16 distribution
+  and use maximal coupling against the packed target distribution. The packed
+  forward is numerically close to, but not bit-identical with, serial
+  token-major arithmetic. The per-request
   `serve phases:` line reports `decode_path=dflash|serial`, with a
   `serve dflash:` line carrying acceptance and backoff counters.
-  DFlash now starts only after the target hiddens for every prompt position have
-  been captured: `start == 0`, captured positions equal prompt length, and the
-  target sequence is at prompt length. The old 25-token performance run is
+  DFlash starts only after the required full-prompt or trailing SWA window has
+  been captured and the target sequence is at prompt length. The old 25-token performance run is
   retracted: its short-prompt serial-tail path did not seed prompt hiddens, so it
   cannot support a DFlash performance or output-equivalence claim. The corrected
   path has since passed scoped GPU validation: release 27B prefill and

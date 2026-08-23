@@ -5,7 +5,8 @@ drafter (~1.7 B params on Qwen3.6-27B) produces a block of `N-1` candidate
 tokens **in one parallel forward pass**, conditioned on hidden features
 extracted from the target model. The target model verifies the whole
 block in one packed forward; greedy accept-prefix logic emits anywhere
-from 1 to `N` tokens per outer step.
+from 1 to `N` tokens per outer step, while sampled DFlash2 uses sparse
+maximal coupling.
 
 **Target speedup on M4 Max (Qwen3.6-27B-Q4_K_M target + Q8_0 drafter):**
 ~2× tg per spiritbuun's tweet (M-series specifically). Public HF cards
@@ -19,7 +20,7 @@ max_new_tokens edge cases, `MetalForward::single_token_with_hidden`.
 New work: drafter forward graph (5 layers, cross+self attention, **SWA**),
 multi-layer target hidden capture, packed-N=16 base verify (mat-mat path),
 per-token GDN + conv state checkpointing for hybrid rollback, and
-optional probabilistic rejection sampling.
+probabilistic rejection sampling.
 
 **Non-goals (deferred):**
 - Continuous batching (single-stream first).
@@ -27,8 +28,7 @@ optional probabilistic rejection sampling.
 - Approximate / pollution-tolerant mode.
 - Multi-block drafting (N>16).
 
-`--dflash` fails closed if the drafter GGUF isn't present; pass
-`--dflash-drafter <path>`.
+Speculative decode is enabled explicitly with `--drafter <path>`.
 
 ## 1. Architecture
 
@@ -1156,9 +1156,11 @@ Phased:
 
 ### H5.7 — Probabilistic rejection sampling
 
-Optional. Only after greedy works and α is in expected range. One
-Metal kernel; one-hot draft fast path
-(`HAS_DRAFT_LOGITS=False`).
+Shipped 2026-08-23 for positive-temperature production decode. DFlash2
+samples its predecessor-conditioned sparse selector distribution and uses
+maximal coupling against the packed target distribution; deterministic
+drafters retain the one-hot target-first path. Packed-target floating-point
+arithmetic is not claimed bit-identical to serial token-major decode.
 
 ## 4. Validation plan
 
@@ -1318,8 +1320,8 @@ Lower priority / different product:
 - **Approximate / pollution-tolerant mode** — skip GDN rollback,
   accept drift. Quality-vs-throughput tradeoff. Would surface as an
   opt-in `--dflash-approximate` flag with perplexity-drift telemetry.
-- **Probabilistic rejection sampling** with retained drafter
-  probabilities — needs sampling temp > 0 path; H5.7 stub.
+- **Further sampled-policy tuning** — probabilistic rejection sampling is live;
+  low-acceptance content still relies on adaptive serial backoff.
 
 If H5.5 does NOT hit 1.5×, the next action depends on which arm of
 the failure:

@@ -6,6 +6,27 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-23 — Sampled DFlash2: Sparse Coupling Works; Q4 Wins, N=8 Stays
+
+- Positive-temperature DFlash is distribution-correct against the verifier via
+  maximal coupling. DFlash2 samples its realized predecessor-conditioned
+  top-16 selector row; deterministic drafters use target-first one-hot coupling.
+- Exact token-major verification preserved the serial stream but was a hard
+  performance loss (`9.97` vs `25.49` tok/s). The packed N=8 verifier restores
+  useful economics at ~`105` ms/step; its floating-point distribution is not
+  bit-identical to serial token-major arithmetic and is documented as such.
+- Before switching to sparse proposals, packed one-hot coupling matched serial
+  output in 9/9 seeded 64-token trials. Sparse Q4 improved code workloads to
+  `1.08-1.28x` serial. Across the final nine-cell matrix, mean/median were
+  `0.976x/0.888x`; low-acceptance prose remained `0.83-0.89x`. Sampled mode
+  uses an 8-step detection window and 32-token re-probes; on one 256-token
+  prose cell, the longer cadence improved `21.58 -> 23.37` tok/s, still below
+  serial's `25.14`.
+- Q8 did not buy acceptance (`23.4%` aggregate vs Q4 `27.5%`) and was slower;
+  Q4 is the sampled Pareto choice. Truncating packed verification to N=5 was
+  decisively wrong on this Metal backend: verify rose from ~`105` to ~`216` ms
+  and decode fell to `13.69` tok/s, so production retains the tuned N=8 shape.
+
 ## 2026-08-22 — Packed-Attention 64-Partition Couplings Slain; Fallback Margin Calibrated For Context
 
 ### Why

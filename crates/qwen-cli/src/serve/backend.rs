@@ -53,10 +53,11 @@ pub(crate) struct EngineBackend {
     template: super::items::QwenTemplate,
     no_thinking_supported: bool,
     /// DFlash drafter (v0.77 speculative decode). Speculation requires
-    /// captured target hidden states for every context position, which
-    /// restored checkpoints do not carry — so a request uses the drafter
-    /// only when it cold-prefills the whole prompt. Output is identical
-    /// either way (greedy accept-prefix over an exact target verify).
+    /// the drafter's relevant target-hidden window. Restored requests use the
+    /// drafter only when their cache entry carries a compatible capture tail.
+    /// Sampled requests use
+    /// rejection sampling against the packed target forward, whose numerics
+    /// can differ slightly from serial token-major decoding.
     dflash_head: Option<MetalDFlashHead>,
 }
 
@@ -149,11 +150,32 @@ fn use_serial_tail(
 fn should_plan_dflash(
     has_head: bool,
     matched_tokens: usize,
-    temperature: f32,
-    has_restore_tail: bool,
+    restore_capture_complete: bool,
     dense: bool,
 ) -> bool {
-    has_head && dense && temperature == 0.0 && (matched_tokens == 0 || has_restore_tail)
+    has_head && dense && (matched_tokens == 0 || restore_capture_complete)
+}
+
+fn restored_dflash_capture_complete(
+    matched_tokens: usize,
+    capture_start: usize,
+    captured: usize,
+) -> bool {
+    captured == matched_tokens.saturating_sub(capture_start)
+}
+
+fn dflash_ring_offset(position: usize, capture_start: usize, ring_window: usize) -> Option<usize> {
+    if ring_window == 0 {
+        None
+    } else {
+        position
+            .checked_sub(capture_start)
+            .map(|offset| offset % ring_window)
+    }
+}
+
+fn dflash_prompt_capture_offset(position: usize, capture_start: usize) -> Option<usize> {
+    position.checked_sub(capture_start)
 }
 
 fn request_capacity(
@@ -222,11 +244,11 @@ fn prefill_remaining(
                 let position_u32 = u32::try_from(position)
                     .map_err(|_| ServeError::server_error("position overflow"))?;
                 let logits = match (dflash_head, dflash_capture.as_mut()) {
-                    (Some(head), Some((dst, capture_start, captured, n_features, _ring))) => {
-                        let capture_offset =
-                            position.checked_sub(*capture_start).ok_or_else(|| {
-                                ServeError::server_error("drafter capture position underflow")
-                            })?;
+                    (Some(head), Some((dst, capture_start, captured, n_features, _ring)))
+                        if position >= *capture_start =>
+                    {
+                        let capture_offset = dflash_prompt_capture_offset(position, *capture_start)
+                            .expect("guarded prompt capture position");
                         let view = dst.view_subrange(
                             (capture_offset * *n_features) as u64,
                             vec![*n_features as u64],
@@ -609,18 +631,22 @@ impl GenerationBackend for EngineBackend {
 
         // Speculation needs captured hiddens covering the whole window: cold
         // requests capture via prefill; restored requests need the capture
-        // tail from the checkpoint they restored. Greedy-only (CLI parity:
-        // T>0 needs the maximal-coupling rejection sampler). Decided after
-        // the capture buffer so restored requests pay nothing extra.
+        // tail from the checkpoint they restored. Decided after the capture
+        // buffer so restored requests pay nothing extra.
+        let restore_capture_complete =
+            dflash_capture
+                .as_ref()
+                .is_some_and(|(_, capture_start, captured, _, _)| {
+                    restored_dflash_capture_complete(matched_tokens, *capture_start, *captured)
+                });
         let speculate_candidate = should_plan_dflash(
             self.dflash_head.is_some(),
             matched_tokens,
-            sampler.config().temperature,
-            restore_tail.is_some(),
+            restore_capture_complete,
             dense,
         ) && dflash_capture.is_some();
-        // Optional DFlash state is admitted only after restore establishes
-        // that this is a cold request. Denial disables speculation rather than
+        // Optional DFlash state is admitted only after restore establishes an
+        // eligible capture window. Denial disables speculation rather than
         // rejecting an otherwise viable serial request.
         let mut dflash_plan = match self.dflash_head.as_ref().filter(|_| speculate_candidate) {
             Some(head) => (|| -> anyhow::Result<(usize, usize)> {
@@ -677,10 +703,26 @@ impl GenerationBackend for EngineBackend {
                     head.config.block_size,
                 )
                 .context("price DFlash layer scratch")?;
+                let sampled_logits_bytes = if sampler.config().temperature > 0.0 {
+                    let elements = u64::from(head.config.block_size)
+                        .checked_mul(u64::from(self.loaded.arch().vocab_size))
+                        .context("DFlash sampled logits element count overflow")?;
+                    let logical_bytes = elements
+                        .checked_mul(size_of::<f32>() as u64)
+                        .context("DFlash sampled logits byte count overflow")?;
+                    self.loaded
+                        .context()
+                        .shared_buffer_size_and_align(logical_bytes)
+                        .context("price DFlash sampled logits allocation")?
+                        .size
+                } else {
+                    0
+                };
                 let optional_bytes = capture_bytes
                     .checked_add(session_bytes)
                     .and_then(|bytes| bytes.checked_add(verify_scratch_bytes))
                     .and_then(|bytes| bytes.checked_add(layer_scratch_bytes))
+                    .and_then(|bytes| bytes.checked_add(sampled_logits_bytes))
                     .context("DFlash optional byte total overflow")?;
                 let admission = evaluate_metal_memory_admission(
                     optional_bytes,
@@ -772,6 +814,27 @@ impl GenerationBackend for EngineBackend {
         let prefill_ms = prefill_t0.elapsed().as_secs_f64() * 1e3;
         let logits = prompt_logits
             .ok_or_else(|| ServeError::server_error("prefill produced no prompt logits"))?;
+        if speculate
+            && !dflash_capture
+                .as_ref()
+                .is_some_and(|(_, capture_start, captured, _, _)| {
+                    complete_dflash_capture(
+                        *capture_start,
+                        *captured,
+                        prompt_ids.len(),
+                        self.dflash_head
+                            .as_ref()
+                            .map(dflash_capture_window_limit)
+                            .unwrap_or(usize::MAX),
+                    )
+                })
+        {
+            tracing::warn!(
+                "serve: DFlash capture remained incomplete after prefill; falling back to serial decode"
+            );
+            dflash_plan = None;
+            speculate = false;
+        }
 
         // Prompt-boundary capture into the RAM cache (skip when this exact
         // prompt was already an exact hit). The capture window buffer holds
@@ -809,8 +872,8 @@ impl GenerationBackend for EngineBackend {
         let mut assembler = Utf8Assembler::new();
         let tokenizer = &self.tokenizer;
         // Speculative path: seed the drafter cross-context from the captured
-        // prompt hiddens, then greedy accept-prefix over an exact target
-        // verify — emitted tokens are identical to serial greedy.
+        // prompt hiddens, then verify greedy or sampled proposals with the
+        // packed target forward.
         if let Some(head) = self.dflash_head.as_ref().filter(|_| speculate) {
             let (dst, capture_start, captured, n_features, _ring) =
                 dflash_capture.as_ref().ok_or_else(|| {
@@ -865,7 +928,11 @@ impl GenerationBackend for EngineBackend {
                 dsess = None;
             }
             let dflash_scratch = if dsess.is_some() {
-                match crate::allocate_dflash_decode_scratch(&self.loaded, head) {
+                match crate::allocate_dflash_decode_scratch(
+                    &self.loaded,
+                    head,
+                    sampler.config().temperature > 0.0,
+                ) {
                     Ok(scratch) => Some(scratch),
                     Err(error) => {
                         tracing::warn!(
@@ -888,6 +955,7 @@ impl GenerationBackend for EngineBackend {
                         dflash_scratch,
                         sequence,
                         logits,
+                        &mut sampler,
                         max_tokens,
                         &stop_tokens,
                         dflash_capture
@@ -976,8 +1044,8 @@ impl GenerationBackend for EngineBackend {
                         Some((dst, wstart, _, n_features, Some(ring_window)))
                             if position >= *wstart =>
                         {
-                            let offset = (position - *wstart)
-                                % qwen_llm::metal_dflash::DFLASH_CAPTURE_WINDOW;
+                            let offset = dflash_ring_offset(position, *wstart, *ring_window)
+                                .expect("validated capture ring position and window");
                             let view = dst.view_subrange(
                                 (offset * *n_features) as u64,
                                 vec![*n_features as u64],
@@ -1275,15 +1343,28 @@ mod tests {
         assert!(use_serial_tail(48, 48, true, true));
         assert!(!use_serial_tail(48, 48, true, false));
         assert!(use_serial_tail(48, 48, false, false));
-        assert!(should_plan_dflash(true, 0, 0.0, false, true));
-        assert!(!should_plan_dflash(true, 0, 0.0, false, false));
-        assert!(!should_plan_dflash(true, 1, 0.0, false, true));
-        assert!(!should_plan_dflash(true, 0, 0.1, false, true));
-        assert!(should_plan_dflash(true, 5, 0.0, true, true));
-        assert!(!should_plan_dflash(true, 5, 0.0, true, false));
-        assert!(!should_plan_dflash(true, 5, 0.0, false, true));
-        assert!(!should_plan_dflash(true, 5, 0.1, true, true));
-        assert!(!should_plan_dflash(false, 0, 0.0, true, true));
+        assert!(should_plan_dflash(true, 0, false, true));
+        assert!(!should_plan_dflash(true, 0, false, false));
+        assert!(!should_plan_dflash(true, 1, false, true));
+        assert!(should_plan_dflash(true, 5, true, true));
+        assert!(!should_plan_dflash(true, 5, true, false));
+        assert!(!should_plan_dflash(true, 5, false, true));
+        assert!(!should_plan_dflash(false, 0, true, true));
+        assert!(restored_dflash_capture_complete(5, 0, 5));
+        assert!(!restored_dflash_capture_complete(5, 0, 0));
+        assert!(restored_dflash_capture_complete(5, 10, 0));
+        assert!(!restored_dflash_capture_complete(5, 0, 6));
+        assert_eq!(dflash_ring_offset(10, 8, 3), Some(2));
+        assert_eq!(dflash_ring_offset(11, 8, 3), Some(0));
+        assert_eq!(dflash_ring_offset(7, 8, 3), None);
+        assert_eq!(dflash_ring_offset(8, 8, 0), None);
+        let restored_extension_offsets: Vec<_> = (2..6)
+            .map(|position| dflash_prompt_capture_offset(position, 3))
+            .collect();
+        assert_eq!(
+            restored_extension_offsets,
+            [None, Some(0), Some(1), Some(2)]
+        );
     }
 
     #[test]

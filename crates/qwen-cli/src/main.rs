@@ -73,7 +73,7 @@ use qwen_llm::runtime::{
 };
 use qwen_llm::sampling::{
     BoundedTopKEvidence, GreedySelection, SAMPLER_ALGORITHM_VERSION, SampledToken, Sampler,
-    SamplingConfig, SamplingError, SamplingPhaseProfile,
+    SamplingConfig, SamplingError, SamplingPhaseProfile, SpeculativeSamplingDecision,
 };
 use qwen_llm::tensor::GgmlType;
 use qwen_llm::tokenizer::{Tokenizer, token_ids_sha256_i32le};
@@ -504,9 +504,8 @@ struct Args {
     #[arg(long, hide_short_help = true)]
     prompt_lookup: bool,
 
-    /// DFlash drafter GGUF for speculative decode (greedy only). Output is
-    /// identical to non-speculative decoding: the drafter only proposes
-    /// tokens, and every one is verified by the target model.
+    /// DFlash drafter GGUF for speculative decode. Sampled DFlash2 proposals
+    /// use sparse rejection sampling against the packed target verifier.
     #[arg(long, value_name = "GGUF")]
     drafter: Option<PathBuf>,
 
@@ -2665,7 +2664,7 @@ fn validate_request_before_model_open(args: &Args) -> Result<()> {
     if args.requests_jsonl.is_none() {
         validate_sampling_decode_policy(sampling, args.prompt_lookup)?;
     }
-    validate_drafter_decode_policy(args, sampling)?;
+    validate_drafter_decode_policy(args)?;
     Ok(())
 }
 
@@ -5123,25 +5122,15 @@ fn validate_sampling_decode_policy(config: SamplingConfig, prompt_lookup: bool) 
 
 /// **v0.77** admission gate for `--drafter` (DFlash speculative decode).
 ///
-/// Greedy-only for now: lossless speculative sampling at T>0 needs the
-/// maximal-coupling rejection sampler over the drafter's proposal
-/// distribution (the DFlash 2 selector already produces the sparse dists
-/// it would consume — see llama.cpp PR 27342). Until that lands, refuse
-/// rather than silently changing the output distribution.
-///
 /// The remaining exclusions are all about the drafter's append-only
 /// cross-context: it conditions on captured target hidden states for
 /// every committed position, so any path that advances the target KV
 /// without hidden capture (durable-prefix restore, JSONL prefix-cache
 /// reuse) would leave an unfillable hole.
-fn validate_drafter_decode_policy(args: &Args, config: SamplingConfig) -> Result<()> {
+fn validate_drafter_decode_policy(args: &Args) -> Result<()> {
     if args.drafter.is_none() {
         return Ok(());
     }
-    ensure!(
-        config.temperature == 0.0,
-        "--drafter currently requires greedy decoding (--temp 0)"
-    );
     ensure!(
         !args.prompt_lookup,
         "--drafter and --prompt-lookup are mutually exclusive draft sources"
@@ -6535,8 +6524,8 @@ fn execute_single_turn_request(
     let (generation, prompt_lookup_stats, sampling_attribution, sampled_structural) =
         if let Some(head) = dflash_head {
             // v0.77 DFlash speculative decode. Seed the drafter's cross-context
-            // with the captured prompt hiddens, then run the greedy
-            // accept-prefix loop; output is identical to serial greedy.
+            // with the captured prompt hiddens, then verify greedy or sampled
+            // proposals against the packed target forward.
             // Windowed (2026-08-20): capacity covers the captured window plus
             // generated columns, not the whole prompt.
             let window_len = dflash_prefill_capture
@@ -6562,7 +6551,8 @@ fn execute_single_turn_request(
                     )
                     .context("seed drafter cross-context from prompt prefill")?;
             }
-            let dflash_scratch = allocate_dflash_decode_scratch(loaded, head)?;
+            let dflash_scratch =
+                allocate_dflash_decode_scratch(loaded, head, sampling_config.temperature > 0.0)?;
             // Shadow-reference probe (QWEN_DFLASH_SHADOW_PROBE=1): a second
             // sequence prefilled through the plain serial path replays every
             // committed token alongside the speculative loop and compares the
@@ -6590,6 +6580,7 @@ fn execute_single_turn_request(
                 dflash_scratch,
                 sequence,
                 logits,
+                &mut sampler,
                 args.tokens,
                 &stop_tokens,
                 None,
@@ -6618,8 +6609,9 @@ fn execute_single_turn_request(
                 target: "qwen_diag",
                 concat!(
                     "dflash: spec_steps={} off_steps={} accepted={}/{} ",
-                    "mean_emitted={:.2} alpha_backoff={} fallback={} ",
+                     "mean_emitted={:.2} alpha_backoff={} fallback={} ",
                     "draft_ms={:.1} draft_first_ms={:.1} verify_ms={:.1} ",
+                    "read_ms={:.1} sample_ms={:.1} ",
                     "append_ms={:.1} restore_ms={:.1} serial_ms={:.1}",
                 ),
                 s.spec_steps,
@@ -6632,6 +6624,8 @@ fn execute_single_turn_request(
                 s.draft_ms / steps,
                 s.draft_first_call_ms,
                 s.verify_ms / steps,
+                s.sampled_logits_read_ms / steps,
+                s.sample_ms / steps,
                 s.append_ms / steps,
                 s.restore_ms / steps,
                 s.serial_ms,
@@ -8626,6 +8620,10 @@ where
 /// (draft + verify) / single_token premium; the trailing-α window is the
 /// content-aware guard, since acceptance varies 2.5-5.8 at fixed ctx.
 const DFLASH_ALPHA_WINDOW: usize = 16;
+/// Sampled acceptance is often materially lower than greedy acceptance, so a
+/// shorter observation window limits the cost of discovering a losing region.
+/// Re-probes still allow speculation to resume when content changes.
+const DFLASH_SAMPLED_ALPHA_WINDOW: usize = 8;
 /// Break-even fit (mean emitted tokens/step at which Spec ties serial).
 ///
 /// **2026-08-20 recalibration.** The previous form was
@@ -8645,6 +8643,9 @@ const DFLASH_ALPHA_WINDOW: usize = 16;
 /// every token. With the drafter's SWA window plateaued (>= 2048), the
 /// derivative is `d(break-even)/d(1K ctx) = -0.011` — flat to slightly
 /// DECLINING. Evaluated at both band ends the value is 3.12 / 3.10.
+/// Positive-temperature Q4 DFlash2 measures the same short-context threshold:
+/// draft ~12 ms + verify ~105 ms + read/sample/append/restore ~4 ms against
+/// ~39 ms serial decode, or ~3.1 emitted tokens per speculative step.
 ///
 /// So the ctx term is dropped, not merely reduced: speculation does not
 /// get harder with context on this architecture, it gets marginally
@@ -8663,6 +8664,12 @@ const DFLASH_OFF_CTX: usize = 16384;
 /// trailing-alpha backoff. One probe = one draft+verify step (~125 ms),
 /// so the steady backoff tax is bounded at ~16 ms/token above serial.
 const DFLASH_REPROBE_INTERVAL: usize = 8;
+/// Sampled probes have lower acceptance and include CPU distribution work;
+/// space them out after a losing region while retaining eventual re-entry.
+const DFLASH_SAMPLED_REPROBE_INTERVAL: usize = 32;
+/// Domain separation for DFlash proposal sampling. Target sampling keeps the
+/// request seed unchanged; stochastic proposals use this independent stream.
+const DFLASH_PROPOSAL_SEED_XOR: u64 = 0x4446_4c41_5348_3251;
 
 /// Default margin for the batched-verify exact fallback: a committed row
 /// whose (top1 - top2) argmax gap is below this is re-evaluated through the
@@ -8694,12 +8701,28 @@ fn dflash_breakeven(_kv_n_pos: usize) -> f64 {
     DFLASH_BREAKEVEN_BASE
 }
 
+fn dflash_speculation_enabled(
+    spec_disabled: bool,
+    position: usize,
+    remaining_context_tokens: usize,
+    block_size: usize,
+    backoff_active: bool,
+    backoff_probe_due: bool,
+) -> bool {
+    !spec_disabled
+        && position < DFLASH_OFF_CTX
+        && remaining_context_tokens >= block_size
+        && (!backoff_active || backoff_probe_due)
+}
+
 /// **v0.77** DFlash speculative-decode statistics for one request.
 #[derive(Clone, Debug, Default, Serialize)]
 struct DflashDecodeStats {
     draft_ms: f64,
     draft_first_call_ms: f64,
     verify_ms: f64,
+    sampled_logits_read_ms: f64,
+    sample_ms: f64,
     append_ms: f64,
     restore_ms: f64,
     serial_ms: f64,
@@ -8725,12 +8748,14 @@ struct DflashGeneration {
 struct DflashDecodeScratch {
     verify: MetalDFlashVerifyScratch,
     layer: MetalDFlashLayerMajorScratch,
+    sampled_logits: Option<MetalTensor>,
     allocation_ms: f64,
 }
 
 fn allocate_dflash_decode_scratch(
     loaded: &LoadedModel,
     head: &MetalDFlashHead,
+    sampled: bool,
 ) -> Result<DflashDecodeScratch> {
     let allocation_t0 = Instant::now();
     let verify = MetalDFlashVerifyScratch::fresh(
@@ -8746,21 +8771,33 @@ fn allocate_dflash_decode_scratch(
         head.config.block_size,
     )
     .context("allocate dflash layer scratch")?;
+    let sampled_logits = if sampled {
+        Some(
+            MetalTensor::zeros_f32(
+                loaded.context(),
+                vec![
+                    head.config.block_size as u64,
+                    loaded.arch().vocab_size as u64,
+                ],
+            )
+            .context("allocate sampled dflash target logits")?,
+        )
+    } else {
+        None
+    };
     Ok(DflashDecodeScratch {
         verify,
         layer,
+        sampled_logits,
         allocation_ms: allocation_t0.elapsed().as_secs_f64() * 1e3,
     })
 }
 
 /// **v0.77** DFlash speculative decode for `qwen run --drafter`.
 ///
-/// Same contract as [`generate_prompt_lookup`] — greedy accept-prefix over
-/// a packed target verify, so the emitted token sequence is identical to
-/// non-speculative greedy decoding — but the proposals come from the
-/// DFlash drafter instead of a prompt n-gram index. Ported from the
-/// `qwen-bench dflash` production loop (bench.rs `run_dflash`), including
-/// the ctx-keyed break-even + trailing-α backoff policy.
+/// Sampled DFlash 2 requests use maximal coupling against the selector's sparse
+/// proposal distribution. Other drafters fall back to deterministic target-first
+/// coupling. Both keep verification on the accelerated packed target path.
 ///
 /// The drafter conditions on captured target hidden states for every
 /// committed position: the caller must have prefilled with capture and
@@ -8774,6 +8811,7 @@ fn generate_dflash<OnToken>(
     scratch: DflashDecodeScratch,
     mut sequence: Sequence,
     logits: Vec<f32>,
+    sampler: &mut Sampler,
     max_tokens: usize,
     stop_tokens: &[i32],
     capture_ring: Option<(MetalTensor, usize, usize, usize)>,
@@ -8786,7 +8824,26 @@ where
     ensure!(max_tokens > 0, "max_tokens must be >= 1");
     let wall_t0 = Instant::now();
     let selection_t0 = Instant::now();
-    let mut carry = argmax_i32(&logits);
+    let sampled_mode = sampler.config().temperature > 0.0;
+    let mut proposal_sampler = if sampled_mode && head.selector.is_some() {
+        let target_config = sampler.config();
+        Some(
+            Sampler::new(SamplingConfig {
+                temperature: target_config.temperature,
+                top_k: 0,
+                top_p: 1.0,
+                min_p: 0.0,
+                seed: target_config.seed ^ DFLASH_PROPOSAL_SEED_XOR,
+            })
+            .context("initialize dflash proposal sampler")?,
+        )
+    } else {
+        None
+    };
+    let mut carry = sampler
+        .sample(&logits)
+        .context("sample dflash initial token")?
+        .token;
     let first_token_selection_ms = selection_t0.elapsed().as_secs_f64() * 1e3;
     let first_token_ready_ms = Some(wall_t0.elapsed().as_secs_f64() * 1e3);
     let mut first_token_callback_ms = None;
@@ -8804,11 +8861,12 @@ where
     let DflashDecodeScratch {
         verify: mut verify_scratch,
         layer: mut layer_scratch,
+        sampled_logits,
         allocation_ms,
     } = scratch;
     stats.scratch_allocation_ms = allocation_ms;
 
-    let debug_scratch = if shadow_probe.is_some() {
+    let debug_scratch = if shadow_probe.is_some() && !sampled_mode {
         Some(
             MetalDFlashDebugScratch::fresh(
                 loaded.context(),
@@ -8823,18 +8881,28 @@ where
     };
 
     let mut decoder = DFlashDecoder::new(forward, head, dsess);
+    let mut sampled_logits_cpu = Vec::<f32>::new();
 
     // Adaptive policy state: `spec_disabled` is the hard OFF_CTX stop
     // (terminal); `backoff_active` is the content-aware trailing-alpha
-    // backoff, which re-probes one spec step every
-    // DFLASH_REPROBE_INTERVAL off-steps and re-enters when the window
-    // mean clears the break-even. Off steps feed the drafter cross-context
+    // backoff, which periodically re-probes one spec step and re-enters when
+    // the window mean clears the break-even. Off steps feed the drafter cross-context
     // and the caller's capture ring, so speculation can always resume
     // below OFF_CTX.
     let mut spec_disabled = false;
     let mut backoff_active = false;
     let mut off_steps_since_backoff = 0usize;
-    let mut alpha_window: Vec<usize> = Vec::with_capacity(DFLASH_ALPHA_WINDOW + 1);
+    let alpha_window_size = if sampled_mode {
+        DFLASH_SAMPLED_ALPHA_WINDOW
+    } else {
+        DFLASH_ALPHA_WINDOW
+    };
+    let reprobe_interval = if sampled_mode {
+        DFLASH_SAMPLED_REPROBE_INTERVAL
+    } else {
+        DFLASH_REPROBE_INTERVAL
+    };
+    let mut alpha_window: Vec<usize> = Vec::with_capacity(alpha_window_size + 1);
 
     let stop_reason = 'outer: loop {
         shutdown::checkpoint()?;
@@ -8852,16 +8920,23 @@ where
         let position = sequence.position();
         let backoff_probe_due = backoff_active
             && off_steps_since_backoff > 0
-            && off_steps_since_backoff.is_multiple_of(DFLASH_REPROBE_INTERVAL);
-        let spec_enabled =
-            !spec_disabled && position < DFLASH_OFF_CTX && (!backoff_active || backoff_probe_due);
+            && off_steps_since_backoff.is_multiple_of(reprobe_interval);
+        let remaining_context_tokens = sequence.remaining_context_tokens();
+        let spec_enabled = dflash_speculation_enabled(
+            spec_disabled,
+            position,
+            remaining_context_tokens,
+            n_block,
+            backoff_active,
+            backoff_probe_due,
+        );
 
         if !spec_enabled {
             // Off step: exact single-token decode with multi-hidden
             // capture so the caller's capture ring stays fed. The drafter
             // cross-context is appended only while re-entry is possible
             // (below the hard OFF_CTX guard, which is terminal).
-            if position >= DFLASH_OFF_CTX {
+            if position >= DFLASH_OFF_CTX || remaining_context_tokens < n_block {
                 spec_disabled = true;
             }
             stats.off_steps += 1;
@@ -8915,7 +8990,10 @@ where
             let elapsed_ms = transition_t0.elapsed().as_secs_f64() * 1e3;
             transition_wall_ms += elapsed_ms;
             first_transition_ms.get_or_insert(elapsed_ms);
-            carry = argmax_i32(&next);
+            carry = sampler
+                .sample(&next)
+                .context("sample dflash off-mode token")?
+                .token;
             continue;
         }
         off_steps_since_backoff = 0;
@@ -8923,9 +9001,20 @@ where
         // ---- Draft ----
         let drafter_pos = position as u32;
         let draft_t0 = Instant::now();
-        let argmaxes = decoder
-            .draft_block(carry, drafter_pos)
-            .context("dflash draft_block")?;
+        let (draft_tokens, sparse_proposals) =
+            if let Some(proposal_sampler) = proposal_sampler.as_mut() {
+                let block = decoder
+                    .draft_block_sampled(carry, drafter_pos, proposal_sampler)
+                    .context("sample dflash2 proposal path")?;
+                (block.draft_tokens, Some(block.proposals))
+            } else {
+                (
+                    decoder
+                        .draft_block(carry, drafter_pos)
+                        .context("dflash draft_block")?,
+                    None,
+                )
+            };
         let draft_ms = draft_t0.elapsed().as_secs_f64() * 1e3;
         if stats.drafter_calls == 0 {
             // One-time prompt projection through the drafter caches.
@@ -8939,12 +9028,17 @@ where
         // ---- Packed verify: [carry, drafts...] ----
         let mut verify_input = Vec::with_capacity(n_block);
         verify_input.push(carry);
-        verify_input.extend_from_slice(&argmaxes[1..n_block]);
+        verify_input.extend_from_slice(&draft_tokens[1..n_block]);
         let n_eff = verify_input.len();
         let n_drafts_scored = n_eff - 1;
         sequence.ensure_can_append(n_eff)?;
 
         let verify_t0 = Instant::now();
+        let verify_logits = if sampled_mode {
+            sampled_logits.as_ref()
+        } else {
+            debug_scratch.as_ref().map(|debug| &debug.debug_logits)
+        };
         let verify_argmax = qwen_llm::metal_dflash::encode_packed_verify_layer_major_inner(
             forward,
             &head.target_layer_ids,
@@ -8953,7 +9047,7 @@ where
             &mut verify_scratch,
             &mut layer_scratch,
             unsafe { sequence.metal_session_mut() },
-            debug_scratch.as_ref().map(|d| &d.debug_logits),
+            verify_logits,
             Some(n_eff as u32),
         )
         .context("dflash packed verify")?;
@@ -8962,21 +9056,93 @@ where
         stats.drafts_scored += n_drafts_scored;
         stats.physical_target_positions += n_eff;
 
-        // ---- Greedy accept-prefix ----
+        // ---- Accept-prefix ----
         let mut accepted = Vec::with_capacity(n_drafts_scored);
+        let mut sampled_targets = Vec::with_capacity(n_eff);
         let mut terminal = None;
-        for (&draft, &target) in verify_input[1..].iter().zip(&verify_argmax) {
-            if draft != target {
-                break;
+        if sampled_mode {
+            let logits = sampled_logits
+                .as_ref()
+                .context("sampled dflash logits scratch is absent")?;
+            let vocab = loaded.arch().vocab_size as usize;
+            let read_t0 = Instant::now();
+            sampled_logits_cpu.resize(n_eff * vocab, 0.0);
+            unsafe {
+                let source = logits
+                    .buffer
+                    .contents()
+                    .as_ptr()
+                    .cast::<u8>()
+                    .add(logits.offset as usize)
+                    .cast::<f32>();
+                std::ptr::copy_nonoverlapping(
+                    source,
+                    sampled_logits_cpu.as_mut_ptr(),
+                    sampled_logits_cpu.len(),
+                );
             }
-            accepted.push(draft);
-            if stop_tokens.contains(&draft) {
-                terminal = Some(StopReason::Eos);
-                break;
+            stats.sampled_logits_read_ms += read_t0.elapsed().as_secs_f64() * 1e3;
+            let base = sampled_logits_cpu.as_ptr();
+            let sample_t0 = Instant::now();
+            for (row, &draft) in verify_input[1..].iter().enumerate() {
+                let target_logits =
+                    unsafe { std::slice::from_raw_parts(base.add(row * vocab), vocab) };
+                let decision = if let Some(proposals) = sparse_proposals.as_ref() {
+                    sampler
+                        .couple_sparse_proposal(
+                            target_logits,
+                            proposals
+                                .get(row)
+                                .context("dflash2 sparse proposal row is absent")?,
+                        )
+                        .context("couple sparse dflash2 proposal to target sampler")?
+                } else {
+                    sampler
+                        .couple_deterministic_proposal(target_logits, draft)
+                        .context("couple deterministic dflash proposal to target sampler")?
+                };
+                match decision {
+                    SpeculativeSamplingDecision::Accepted => sampled_targets.push(draft),
+                    SpeculativeSamplingDecision::Rejected { correction } => {
+                        sampled_targets.push(correction);
+                        break;
+                    }
+                }
+                accepted.push(draft);
+                if stop_tokens.contains(&draft) {
+                    terminal = Some(StopReason::Eos);
+                    break;
+                }
+                if tokens.len() + accepted.len() == max_tokens {
+                    terminal = Some(StopReason::TokenLimit);
+                    break;
+                }
             }
-            if tokens.len() + accepted.len() == max_tokens {
-                terminal = Some(StopReason::TokenLimit);
-                break;
+            if terminal.is_none() && accepted.len() == n_drafts_scored {
+                let bonus_logits =
+                    unsafe { std::slice::from_raw_parts(base.add(n_drafts_scored * vocab), vocab) };
+                sampled_targets.push(
+                    sampler
+                        .sample(bonus_logits)
+                        .context("sample dflash target bonus token")?
+                        .token,
+                );
+            }
+            stats.sample_ms += sample_t0.elapsed().as_secs_f64() * 1e3;
+        } else {
+            for (&draft, &target) in verify_input[1..].iter().zip(&verify_argmax) {
+                if draft != target {
+                    break;
+                }
+                accepted.push(draft);
+                if stop_tokens.contains(&draft) {
+                    terminal = Some(StopReason::Eos);
+                    break;
+                }
+                if tokens.len() + accepted.len() == max_tokens {
+                    terminal = Some(StopReason::TokenLimit);
+                    break;
+                }
             }
         }
         let mut n_accepted = accepted.len();
@@ -8994,7 +9160,7 @@ where
         // token-major forwards and re-accept against their argmaxes.
         let mut fallback_ran = false;
         let mut fallback_targets: Vec<i32> = Vec::new();
-        if verify_fallback_enabled() {
+        if !sampled_mode && verify_fallback_enabled() {
             let margin = verify_fallback_margin((drafter_pos as usize) + n_eff);
             let gaps = unsafe {
                 let src = verify_scratch.verify_gap.buffer.contents().as_ptr() as *const f32;
@@ -9203,9 +9369,12 @@ where
                     }
                 }
                 let ref_gap = top1 - top2;
-                let max_delta = match debug_scratch.as_ref() {
-                    Some(debug) => {
-                        let src = debug.debug_logits.buffer.contents().as_ptr() as *const f32;
+                let max_delta = match sampled_logits
+                    .as_ref()
+                    .or_else(|| debug_scratch.as_ref().map(|debug| &debug.debug_logits))
+                {
+                    Some(debug_logits) => {
+                        let src = debug_logits.buffer.contents().as_ptr() as *const f32;
                         let v = loaded.arch().vocab_size as usize;
                         let mut max_delta = 0.0f32;
                         for (j, &r) in ref_logits.iter().enumerate() {
@@ -9240,12 +9409,12 @@ where
         // Re-probe spec steps push their acceptance into the same window,
         // so a content recovery clears the backoff after enough probes.
         alpha_window.push(n_accepted);
-        if alpha_window.len() > DFLASH_ALPHA_WINDOW {
+        if alpha_window.len() > alpha_window_size {
             alpha_window.remove(0);
         }
-        if alpha_window.len() == DFLASH_ALPHA_WINDOW {
+        if alpha_window.len() == alpha_window_size {
             let mean_emitted =
-                1.0 + alpha_window.iter().sum::<usize>() as f64 / DFLASH_ALPHA_WINDOW as f64;
+                1.0 + alpha_window.iter().sum::<usize>() as f64 / alpha_window_size as f64;
             if mean_emitted < dflash_breakeven(sequence.position()) - DFLASH_ALPHA_OFF_MARGIN {
                 backoff_active = true;
                 off_steps_since_backoff = 0;
@@ -9255,7 +9424,11 @@ where
             }
         }
 
-        carry = if fallback_ran {
+        carry = if sampled_mode {
+            *sampled_targets
+                .get(n_accepted)
+                .context("sampled dflash target frontier is absent")?
+        } else if fallback_ran {
             fallback_targets[n_accepted]
         } else {
             verify_argmax[n_accepted]
@@ -10452,6 +10625,25 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn dflash_uses_serial_tail_when_a_full_verify_block_will_not_fit() {
+        const BLOCK: usize = 8;
+        for remaining in 0..BLOCK {
+            assert!(!dflash_speculation_enabled(
+                false, 100, remaining, BLOCK, false, false
+            ));
+        }
+        assert!(dflash_speculation_enabled(
+            false, 100, BLOCK, BLOCK, false, false
+        ));
+        assert!(!dflash_speculation_enabled(
+            false, 100, BLOCK, BLOCK, true, false
+        ));
+        assert!(dflash_speculation_enabled(
+            false, 100, BLOCK, BLOCK, true, true
+        ));
+    }
 
     #[test]
     fn qwen_model_prefetch_cli_is_explicit_and_jsonl_scoped() {

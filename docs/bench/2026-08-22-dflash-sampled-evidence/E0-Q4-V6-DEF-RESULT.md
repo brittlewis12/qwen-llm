@@ -81,3 +81,11 @@ or substantial prompt diversity. Reverse order on this trajectory, longer or
 multi-token contexts, additional seeds, Q8/BF16, independent hidden residual
 semantics, sparse-q/K0, packed verification, rollback, acceptance, economics,
 performance, serving, held-out behavior, and product integration remain open.
+
+## Subsequent Final Development Diagnostic
+
+The separately frozen v7 fixture used the two-token prompt `Write code` and also
+passed through three generated target transitions under serial-first order. It
+adds one short repeated-prompt-state trajectory, not meaningful code behavior or
+broad prompt evidence. The frozen v7 plan authorizes no further development E0
+acquisition in this phase. See `E0-Q4-V7-WRITE-CODE-RESULT.md`.

@@ -1,12 +1,13 @@
 # DFlash Sampled Development Results - 2026-08-22
 
-Status: development diagnostics only. Post-incident Q4 E0 sentinels now pass the
+Status: development diagnostics only. Post-incident Q4 E0 sentinels pass the
 strict lockstep reducer under both execution orders on one narrow computational
 fixture. Four-token fixtures also pass under both orders with three intermediate
-generated target transitions, plus one serial-first alternate one-token prompt.
-K0 remains a local reference diagnostic without cross-implementation parity,
-and no G1, product, serve, default-selection, model-wide, or held-out authority
-exists.
+generated target transitions, followed by serial-first alternate one-token and
+two-token prompts. The frozen v7 plan authorizes no further development E0
+acquisition in this phase. K0 remains a local reference diagnostic without
+cross-implementation parity, and no G1, product, serve, default-selection,
+model-wide, or held-out authority exists.
 
 ## What The Development Runs Establish
 
@@ -155,6 +156,14 @@ produced a different sampled stream. This is minimal token/trajectory diversity,
 not meaningful code-task, multi-token-prompt, reverse-order-on-`def`, or broad
 prompt evidence. See `E0-Q4-V6-DEF-RESULT.md`.
 
+V7 was the final incremental development E0 row. It changed the prompt to the
+two-token string `Write code`, passed two prompt transitions plus three generated
+target transitions under `serial_then_capture`, and produced another sampled
+stream. This is one short repeated-prompt-state trajectory, not meaningful code
+behavior, code coverage, instruction-following, reverse-order evidence, or E0
+closure. Its frozen plan prohibits further development E0 acquisition after any
+outcome. See `E0-Q4-V7-WRITE-CODE-RESULT.md`.
+
 ## Development Recommendation
 
 Keep Q4_K_M in the prospective drafter matrix. It is materially smaller, loads
@@ -163,13 +172,15 @@ chosen as a default from these clusters.
 
 The next go/no-go boundary is now:
 
-1. If buying more E0 breadth, use a meaningful short multi-token development
-   prompt rather than more one-token or `Hello` repetitions.
+1. Stop development E0 acquisition. If the one-hot lane proceeds, freeze a
+   distinct authoritative packet with held-out E0 and E1a request/seed clusters;
+   development rows cannot enter its reduction.
 2. Independently pin and cross-check the actual causal sparse-q contract before
-   E1b; the current selector softmax is local-reference-only. The one-hot lane
-   does not depend on K0.
-3. After the applicable correctness breadth, freeze separate Q4/Q8 arms and
-   lane-labeled request/seed clusters. Sparse-q economics requires K0; one-hot
-   economics still requires broader E0/E1a development exactness.
-4. Authorize a row-stable exact verifier spike only after correctness gates and
-   charged request-cluster economics pass. Until then, keep serve greedy-only.
+   E1b. The current selector softmax is local-reference-only, while the one-hot
+   lane does not depend on K0.
+3. Keep Q4/Q8 arms and one-hot/sparse-q decisions separate. Charge exact serial
+   p, draft, capture, correction/state work, synchronization, continuation, and
+   sparse-q incremental cost where applicable.
+4. Authorize one row-stable exact-verifier primitive spike only after the lane's
+   correctness gates and conservative request-cluster economics pass. Until
+   then, keep serve and product generation greedy-only.

@@ -6,6 +6,48 @@ from chat history. Keep entries short, factual, and tied to measurements.
 
 See also: `docs/PERF-ROADMAP.md` for the active force-ranked queue.
 
+## 2026-08-22 — Packed-Attention 64-Partition Couplings Slain; Fallback Margin Calibrated For Context
+
+### Why
+
+Raising the packed g6 q2 attention beyond its historical nwg=64 cap
+(needed for the retuned 128/512 tiers) produced raw-logit deltas of
+5-11 absolute at 10.8K. Two independent couplings were hiding behind
+the cap:
+
+1. The reduce encoder sized sh_m/sh_l/sh_ef at a fixed 64 floats while
+   the kernel indexes them by partition (0..nwg) — shmem overflow.
+2. The reduce staging loop used a two-pass `part = tiisg + pass*32`
+   form covering only [0, 64) — uninitialized shmem reads above it.
+
+### Fixes (committed 0e53813)
+
+- Encoder derives the shmem size from the same nwg it passes (drift
+  impossible); staging loop iterates all partitions; cap raised to
+  ATTN_V4_MAX_NWG.
+- Packed kernel gains an F32 Q-staging mode (q_f32 arg) for the verify
+  path; prefill numerics untouched.
+- New model-free boundary oracle: packed q2 vs eight per-row calls at
+  nwg=128 — cos=1.000000, max|delta| ~1e-6 FLAT across 512-16K ctx.
+  Codifies the "every cap gets a crossing oracle" rule.
+
+### The residual was not the packed path
+
+The 10.8K probe's ~3.64e-1 raw-logit delta is shared: the per-row path
+measures 3.65e-1 at the same cell. The batched-verify-vs-token-major
+divergence grows with context for BOTH paths (9.5e-2 at 42 tokens).
+The fallback margin is therefore ctx-aware — 0.2 below 4K, 0.75 above
+(2x observed max per tier) — and the divergent + 10.8K cells remain
+byte-identical.
+
+### Owed
+
+- Packed shared-KV attention stays default-off: its 10.8K verify_ms
+  (155) currently loses to the per-row path (~115); the depth synthetic
+  (64-130K) is the perf gate for default-on.
+- The shadow probe's own capacity bug (windowed instead of full-prompt)
+  is fixed.
+
 ## 2026-08-22 — Attn-V4 Split-K Under-Partitioning: Root Cause, Retuned, Committed
 
 ### Why

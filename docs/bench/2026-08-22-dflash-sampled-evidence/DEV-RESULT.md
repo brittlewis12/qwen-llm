@@ -172,15 +172,21 @@ chosen as a default from these clusters.
 
 The next go/no-go boundary is now:
 
-1. Stop development E0 acquisition. If the one-hot lane proceeds, freeze a
-   distinct authoritative packet with held-out E0 and E1a request/seed clusters;
-   development rows cannot enter its reduction.
-2. Independently pin and cross-check the actual causal sparse-q contract before
-   E1b. The current selector softmax is local-reference-only, while the one-hot
-   lane does not depend on K0.
-3. Keep Q4/Q8 arms and one-hot/sparse-q decisions separate. Charge exact serial
-   p, draft, capture, correction/state work, synchronization, continuation, and
-   sparse-q incremental cost where applicable.
-4. Authorize one row-stable exact-verifier primitive spike only after the lane's
-   correctness gates and conservative request-cluster economics pass. Until
-   then, keep serve and product generation greedy-only.
+1. Stop development E0 acquisition; development rows cannot enter an
+   authoritative reduction.
+2. Freeze an append-only sequencing amendment and exact evidence scope, then run
+   a conservative target-specific budget/value-of-information screen. It may
+   select one time-boxed critical verifier primitive; this is feasibility work,
+   not product or evidence authority.
+3. Independently pin and cross-check the actual causal sparse-q contract before
+   E1b. Upstream defines request-temperature sparse q, but the current local
+   softmax remains local-reference-only and upstream RNGs are backend-specific.
+   The one-hot lane does not depend on K0.
+4. Only after a target-only causal-block gate and full exact verifier pass their
+   frozen target-specific feasibility gates--without treating them as integrated
+   decoder correctness--acquire distinct authoritative lane-labeled
+   E0/E1a/K0/E1b request/seed clusters and charged economics. Keep Q4/Q8 and
+   one-hot/sparse-q decisions separate.
+5. Keep serve and product generation greedy-only. See
+   `NEXT-PHASE-DECISION.md` for the adversarially reviewed sequence and kill
+   criteria.

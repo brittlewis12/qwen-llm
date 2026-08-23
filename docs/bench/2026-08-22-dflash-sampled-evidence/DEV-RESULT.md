@@ -2,7 +2,7 @@
 
 Status: development diagnostics only. Post-incident Q4 E0 sentinels now pass the
 strict lockstep reducer under both execution orders on one narrow computational
-fixture, and a serial-first four-token fixture passes with three intermediate
+fixture. Four-token fixtures also pass under both orders with three intermediate
 generated target transitions. K0 remains a local reference diagnostic without
 cross-implementation parity, and no G1, product, serve, default-selection,
 model-wide, or held-out authority exists.
@@ -140,6 +140,14 @@ validated transitions total, and exact authenticated coverage of the expected
 already exposed `Hello` fixture, not prompt/seed diversity or independent
 evidence. See `E0-Q4-V4-GENERATED-RESULT.md`.
 
+V5 changed only the machine-bound computational order to
+`capture_then_serial`. It also passed four emissions, three generated target
+transitions, and five validated transitions, with a state sidecar byte-identical
+to v4. Thus no within-run parity failure was observed under either order at this
+generated-history depth on the same exposed fixture. This is paired development
+diagnostics, not independent replication or general order invariance. See
+`E0-Q4-V5-GENERATED-REVERSE-RESULT.md`.
+
 ## Development Recommendation
 
 Keep Q4_K_M in the prospective drafter matrix. It is materially smaller, loads
@@ -148,11 +156,13 @@ chosen as a default from these clusters.
 
 The next go/no-go boundary is now:
 
-1. Reverse arm order on the four-token generated-history fixture, then add a
-   distinct development prompt before increasing length or seeds.
-2. Freeze separate Q4 and Q8 drafter arms, fixtures, hashes, and request-cluster
-   analysis before acquiring comparison or economics evidence.
-3. Pin and cross-check the actual causal sparse-q contract before E1b; the
-   current selector softmax is local-reference-only.
+1. Add a distinct development prompt at four-token depth before increasing
+   length or seeds.
+2. Independently pin and cross-check the actual causal sparse-q contract before
+   E1b; the current selector softmax is local-reference-only. The one-hot lane
+   does not depend on K0.
+3. After the applicable correctness breadth, freeze separate Q4/Q8 arms and
+   lane-labeled request/seed clusters. Sparse-q economics requires K0; one-hot
+   economics still requires broader E0/E1a development exactness.
 4. Authorize a row-stable exact verifier spike only after correctness gates and
    charged request-cluster economics pass. Until then, keep serve greedy-only.

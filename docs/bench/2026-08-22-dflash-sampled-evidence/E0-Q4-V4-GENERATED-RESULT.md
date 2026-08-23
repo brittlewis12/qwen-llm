@@ -12,9 +12,10 @@ packed-verifier, serving, or product authority.
 - **NO-GO:** do not infer prompt/seed/model/quantization-wide E0 closure,
   authorize a sampled verifier, change serve policy, or treat this exposed
   fixture as independent evidence.
-- **Next gate:** bind and run the same four-token treatment under
-  `capture_then_serial`, then move to a distinct development prompt before
-  spending on longer histories or additional seeds.
+- **Next gate at acquisition time:** bind the same four-token treatment under
+  `capture_then_serial`. The subsequent v5 fixture passed that check; a distinct
+  development prompt is now higher-value than longer `Hello` histories or
+  additional seeds.
 
 ## Frozen Run
 
@@ -99,3 +100,11 @@ semantics or test reverse generated-history order, sustained/long contexts,
 prompt/seed diversity, Q8/BF16, sparse-q/K0, packed verification, rollback,
 acceptance, economics, performance, serving, held-out behavior, or product
 integration.
+
+## Subsequent Reverse-Order Diagnostic
+
+The separately frozen schema-v3 v5 fixture also passed four emissions and three
+generated target transitions under `capture_then_serial`. V4 and v5 sidecars are
+byte-identical, and neither run reported a within-run parity failure. This does
+not establish independent replication or general order invariance. See
+`E0-Q4-V5-GENERATED-REVERSE-RESULT.md`.

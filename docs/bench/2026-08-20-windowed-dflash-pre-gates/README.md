@@ -332,3 +332,28 @@ The real P5 lever remains the MMA matrix-pipeline decode reader
 KQV-norm), which replaces the scalar score loop with simdgroup matrix
 multiplies: floors 14.3ms bytes / 28-40ms compute at 130K. That is the
 next implementation packet.
+
+## P5 design refinement (2026-08-22) — the direct-V KQV requirement
+
+Three-tier economics for the packed verify attention at 130K (13 layers,
+KV 4KB/token/layer, 474 GB/s stream):
+
+- Tier 1, q2 shared-KV kernel (landed, quality-clean): 42.1ms/layer,
+  perf-negative vs the per-row 38.5ms — serial per-K-row score loop at
+  ~51 GB/s.
+- Tier 2, prefill matrix pipeline verbatim (transpose_v + KQ + softmax +
+  KQV on v_t): the transpose doubles V traffic (write v_t + read v_t),
+  ~1.8x at best — marginal.
+- Tier 3, matrix pipeline with a NEW direct-V KQV kernel (read v_cache
+  strided into shmem-staged MMA tiles, no v_t): KQ reads K once
+  (268MB/layer), KQV reads V once (268MB), scores round-trip 200MB —
+  ~736MB/layer ~ 1.6ms at stream, plus MMA compute (QK+PV ~ 2.2 GFLOP
+  per layer over 8 rows x 24 heads) — projected 50-60ms per verify pass
+  vs ~500ms today (8-10x).
+
+Tier 3 is the implementation target: `kernel_attn_matrix_kqv_direct_v_f32`
+(~150 lines, shmem-staged V tiles, F32 accumulation), scratch
+[scores: 8 x 24 x n_pos F32 = 100MB at 130K, session-owned + admitted],
+wired into the shared-KV branch behind QWEN_MTP_ATTN_QN_MATRIX. Gates
+unchanged (oracle vs per-row at all ctx, byte-identity cells, synthetic
+perf at 64-130K).

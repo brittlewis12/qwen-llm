@@ -315,3 +315,20 @@ Floors unchanged (14.3ms bytes / 28-40ms compute vs ~500ms). Remaining
 work: the Q-hoist restructure in encode_packed_verify_layer_major_inner,
 scores scratch allocation + admission, and gates G1-G3. Rollback
 QWEN_ATTN_V4_PACKED_N8=0.
+
+## P5 perf verdict (2026-08-22) — q2 kernel quality-clean, perf-negative
+
+The packed g6 q2 shared-KV attention, with both 64-partition couplings
+fixed and F32 Q staging, is numerically clean (boundary oracle:
+cos=1.000000, max|delta| ~1e-6 flat across 512-16K). But the synthetic
+perf audit at 130K/nwg=512 measures **42.1ms per layer vs 38.5ms for
+the per-row path** (8 rows x 4.81ms) — the 2x byte reduction is eaten
+by the kernel's serial per-K-row score loop at ~51 GB/s. Default-on is
+NOT warranted; the path stays behind QWEN_MTP_ATTN_QN_SHARED_KV with
+its quality fixes banked.
+
+The real P5 lever remains the MMA matrix-pipeline decode reader
+(transpose_v -> matrix KQ with max_visible causal masks -> softmax ->
+KQV-norm), which replaces the scalar score loop with simdgroup matrix
+multiplies: floors 14.3ms bytes / 28-40ms compute at 130K. That is the
+next implementation packet.

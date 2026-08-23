@@ -36095,6 +36095,94 @@ mod tests {
         }
     }
 
+    /// Perf audit for the packed g6 q2 shared-KV attention at depth
+    /// (2026-08-22): synthetic session at a large kv_n_pos, one
+    /// `encode_attn_prefill_v4_g6_q2_c32_f32` call over n_rows=8 with the
+    /// selector's nwg, kernel timing only. Reports ms and effective GB/s
+    /// (KV read once per row-pair = 4x the per-layer KV bytes). The per-row
+    /// baseline at 130K/nwg=512 is ~4.81ms per row (~38.5ms per layer for
+    /// 8 rows); the packed path is the default-on perf gate.
+    /// Env: QWEN_ATTN_AUDIT_CTX, QWEN_ATTN_AUDIT_MODEL.
+    #[test]
+    #[ignore = "slow real-model GPU audit; run explicitly"]
+    fn packed_q2_attention_perf_audit_130k() {
+        let model_path = std::env::var("QWEN_ATTN_AUDIT_MODEL")
+            .unwrap_or_else(|_| "/Users/tito/models/Qwen3.8-27B-Q8_0.gguf".into());
+        if !std::path::Path::new(&model_path).exists() {
+            eprintln!("[packed-audit] skipped — model missing");
+            return;
+        }
+        let n_pos: usize = std::env::var("QWEN_ATTN_AUDIT_CTX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(131_072);
+        let ctx = match MetalContext::new() {
+            Ok(c) => c,
+            Err(MetalError::EmptyLibrary) | Err(MetalError::NoDevice) => return,
+            Err(e) => panic!("init failed: {e}"),
+        };
+        let g = crate::gguf::GgufFile::open(&model_path).expect("open model");
+        let m = crate::loader::Model::from_gguf(&g).expect("load model");
+        let mm = crate::metal_forward::MetalModel::load(&ctx, &g, &m).expect("metal load");
+        let mut sess =
+            crate::metal_forward::MetalSession::fresh(&ctx, &mm, n_pos + 16).expect("session");
+        for kp in sess.kv_n_pos.iter_mut() {
+            *kp = n_pos;
+        }
+        let arch = &m.arch;
+        let head_dim = arch.attn_head_dim as usize;
+        let n_q = arch.n_q_heads as usize;
+        let n_kv = arch.n_kv_heads as usize;
+        let group = n_q / n_kv;
+        if head_dim != 256 || group != 6 {
+            eprintln!("[packed-audit] skipped — unsupported shape");
+            return;
+        }
+        const N_ROWS: usize = 8;
+        const NWG_MAX: usize = 1024;
+        let nwg = crate::metal::attn_v4_choose_nwg(n_pos, 6);
+        let base_pos = n_pos - N_ROWS;
+        let q = MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * n_q * head_dim) as u64]).expect("q");
+        let o = MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * n_q * head_dim) as u64]).expect("o");
+        let o_partial = MetalTensor::zeros_f32(
+            &ctx,
+            vec![(N_ROWS * n_kv * NWG_MAX * group * head_dim) as u64],
+        )
+        .expect("o partial");
+        let ml_partial =
+            MetalTensor::zeros_f32(&ctx, vec![(N_ROWS * n_kv * NWG_MAX * group * 2) as u64])
+                .expect("ml partial");
+        let cmd = ctx.queue.commandBuffer().expect("cmd");
+        let enc = KernelEncoder::begin(&cmd);
+        encode_attn_prefill_v4_g6_q2_c32_f32(
+            &ctx,
+            &enc,
+            &q,
+            &sess.kv_k[0],
+            &sess.kv_v[0],
+            &o_partial,
+            &ml_partial,
+            &o,
+            N_ROWS,
+            base_pos,
+            nwg,
+            true,
+        )
+        .expect("packed encode");
+        enc.end();
+        cmd.commit();
+        cmd.waitUntilCompleted();
+        let ms = (cmd.GPUEndTime() - cmd.GPUStartTime()) * 1e3;
+        // KV read once per row-pair: ceil(N_ROWS/2) passes over the layer KV.
+        let passes = N_ROWS.div_ceil(2) as f64;
+        let bytes = passes * n_pos as f64 * (n_kv * head_dim * 2 * 2) as f64;
+        let gbps = bytes / 1e9 / (ms / 1e3);
+        eprintln!(
+            "[packed-audit] ctx={n_pos} nwg={nwg} gpu_ms={ms:.3} gb={:.2} gbps={gbps:.1} (per-row baseline ~38.5 ms/layer at 130K)",
+            bytes / 1e9
+        );
+    }
+
     /// H5.3a foundation: verify `BlitEncoder` actually copies device-side
     /// buffers and that compute↔blit transitions on the same command
     /// buffer are visible. We write a known pattern via a compute kernel

@@ -291,6 +291,8 @@ PREPARATION_JOIN_FIELDS = (
 )
 MAX_BOOTSTRAP_SPEC_BYTES = 1 << 20
 MAX_PREPARATION_HASH_REPORT_BYTES = 65536
+MAX_GIT_STDOUT_BYTES = 64 << 20
+MAX_GIT_STDERR_BYTES = 1 << 20
 MAX_BUILD_ROOT_BYTES = 64 << 30
 MAX_COMPILER_BYTES = 1 << 30
 PREPARATION_HASH_REPORT_SCHEMA = "qwen.dflash_k0s_preparation_hash_observation"
@@ -311,6 +313,17 @@ PREPARATION_HASH_REPORT_KEYS = (
     "control_y",
     "report",
     "environment",
+)
+GIT_REPORT_IDENTITY_KEYS = (
+    "path",
+    "head",
+    "tree",
+    "status_bytes",
+    "status_sha256",
+    "ignored_bytes",
+    "ignored_sha256",
+    "common_git_dir",
+    "object_store",
 )
 INVENTORY_CHECKOUT_KEYS = ("path", "commit", "tree", "dirty")
 INVENTORY_GGUF_KEYS = ("role", "version", "tensor_count", "metadata_count")
@@ -4855,8 +4868,8 @@ def bounded_git(path: Path, *arguments: str) -> bytes:
             *arguments,
         ],
         environment,
-        stdout_cap=4 << 20,
-        stderr_cap=1 << 20,
+        stdout_cap=MAX_GIT_STDOUT_BYTES,
+        stderr_cap=MAX_GIT_STDERR_BYTES,
         timeout=5,
         name="bounded git inspection",
     )
@@ -6982,15 +6995,31 @@ def validate_preparation_input_binding(
 
 
 def git_report_identity(value: dict[str, Any]) -> dict[str, Any]:
-    return {
+    checkout = exact_keys(
+        value,
+        ("path", "head", "tree", "common", "objects", "status", "ignored"),
+        "Git report source identity",
+    )
+    require(
+        isinstance(checkout["status"], bytes)
+        and isinstance(checkout["ignored"], bytes),
+        "Git report status/ignored bindings must be bytes",
+    )
+    git_oid_text(checkout["head"], "Git report HEAD")
+    git_oid_text(checkout["tree"], "Git report tree")
+    identity = {
         "path": str(value["path"]),
         "head": value["head"],
         "tree": value["tree"],
-        "status_hex": value["status"].hex(),
-        "ignored_hex": value["ignored"].hex(),
+        "status_bytes": len(value["status"]),
+        "status_sha256": hashlib.sha256(value["status"]).hexdigest(),
+        "ignored_bytes": len(value["ignored"]),
+        "ignored_sha256": hashlib.sha256(value["ignored"]).hexdigest(),
         "common_git_dir": str(value["common"]),
         "object_store": str(value["objects"]),
     }
+    exact_keys(identity, GIT_REPORT_IDENTITY_KEYS, "Git report identity")
+    return identity
 
 
 def observe_preparation_hashes(
@@ -7333,6 +7362,16 @@ def observe_preparation_hashes(
         }
         exact_keys(
             report_object, PREPARATION_HASH_REPORT_KEYS, "preparation hash report"
+        )
+        exact_keys(
+            report_object["worktree_x"],
+            GIT_REPORT_IDENTITY_KEYS,
+            "preparation hash report worktree_x",
+        )
+        exact_keys(
+            report_object["control_y"],
+            GIT_REPORT_IDENTITY_KEYS,
+            "preparation hash report control_y",
         )
         report_bytes = (
             json.dumps(report_object, ensure_ascii=True, separators=(",", ":")) + "\n"
@@ -10053,7 +10092,7 @@ def self_test() -> None:
     )
     expect_error(
         lambda: bounded_subprocess(
-            [sys.executable, "-c", "import os;os.write(1,b'x'*1024)"],
+            [sys.executable, "-c", "import os;os.write(1,b'x'*65)"],
             bounded_test_environment,
             stdout_cap=64,
             stderr_cap=64,
@@ -12404,6 +12443,70 @@ def self_test() -> None:
             "environment",
         )
         and "sha256" not in {"path", "max_bytes"}
+    )
+    ok(
+        GIT_REPORT_IDENTITY_KEYS
+        == (
+            "path",
+            "head",
+            "tree",
+            "status_bytes",
+            "status_sha256",
+            "ignored_bytes",
+            "ignored_sha256",
+            "common_git_dir",
+            "object_store",
+        )
+        and MAX_GIT_STDOUT_BYTES == 64 << 20
+        and MAX_GIT_STDERR_BYTES == 1 << 20
+    )
+    synthetic_git_report_source = {
+        "path": Path("/tmp/k0s-x"),
+        "head": "a" * 40,
+        "tree": "b" * 40,
+        "common": Path("/tmp/k0s-common"),
+        "objects": Path("/tmp/k0s-common/objects"),
+        "status": b"?? x\0",
+        "ignored": b"ignored/path\0",
+    }
+    compact_git_identity = git_report_identity(synthetic_git_report_source)
+    ok(
+        tuple(compact_git_identity) == GIT_REPORT_IDENTITY_KEYS
+        and compact_git_identity["status_bytes"] == 5
+        and compact_git_identity["status_sha256"]
+        == "48a28470edd91aafa57cf13c56fae2cff6b5a96f4f0eb4d802241005a3332ef0"
+        and compact_git_identity["ignored_bytes"] == 13
+        and compact_git_identity["ignored_sha256"]
+        == "dc0aa908327d00962f4332b3bcb488bda5e576e51585a0efcf7d9c2895df8ec8"
+    )
+    empty_git_identity = git_report_identity(
+        {**synthetic_git_report_source, "status": b"", "ignored": b""}
+    )
+    ok(
+        empty_git_identity["status_sha256"]
+        == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        and empty_git_identity["status_sha256"] != compact_git_identity["status_sha256"]
+        and empty_git_identity["status_bytes"] == 0
+    )
+    observed_a4_ignored_bytes = 11_701_963
+    ignored_entry = b"target/dependency\0"
+    large_ignored = ignored_entry * (
+        observed_a4_ignored_bytes // len(ignored_entry) + 1
+    )
+    large_git_identity = git_report_identity(
+        {**synthetic_git_report_source, "status": b"", "ignored": large_ignored}
+    )
+    large_identity_bytes = json.dumps(
+        {"worktree_x": large_git_identity, "control_y": large_git_identity},
+        ensure_ascii=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+    ok(
+        large_git_identity["ignored_bytes"] > observed_a4_ignored_bytes
+        and large_ignored.endswith(b"\0")
+        and len(large_identity_bytes) < 2048
+        and b"target/dependency" not in large_identity_bytes
+        and large_ignored not in large_identity_bytes
     )
     build_checkout = {"commit": "a" * 40}
     build_claim = {"source_sha256": "b" * 64}

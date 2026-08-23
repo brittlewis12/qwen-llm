@@ -438,9 +438,24 @@ report,environment`.
 The four inputs and reducer use complete file claims; `report` has exact keys
 `path,max_bytes` and cannot contain its own bytes/hash. `rendered` has
 exact order `fixture,command,manifest,seal`, each with `bytes,sha256`;
-`worktree_x` and `control_y` bind canonical path, HEAD, tree, status, common Git
-directory and object-store identities. Authority is
+`worktree_x` and `control_y` each use the exact nested key order
+`path,head,tree,status_bytes,status_sha256,ignored_bytes,ignored_sha256,
+common_git_dir,object_store`. `status_sha256` and `ignored_sha256` are SHA-256
+over the exact raw Git command bytes, including all NUL separators, and their
+paired byte counts bind the exact lengths. The report must not embed raw status
+or ignored listings. This preserves exact status/ignored evidence bindings while
+keeping the identity representation constant-size apart from bounded decimal
+length fields, so a normal large ignored Cargo build tree cannot consume the
+65,536-byte report cap. Canonical path, HEAD, tree, common Git directory, and
+object-store identities remain directly bound. Authority is
 `development_k0s_preparation_hashes_only_no_asset_discovery_model_forward_or_acquisition_authority`.
+
+The bounded Git subprocess reader must independently cap raw stdout at exactly
+64 MiB, matching the Rust status cap, while retaining the 1 MiB stderr cap and
+five-second timeout. The raw listing is streamed only into the byte-count and
+SHA-256 binding above. This admits the observed 11,701,963-byte A4 ignored
+listing without making either the identity object or the preparation hash report
+proportional to that listing.
 
 The writing `--prepare` mode remains unchanged in principle: it requires all four
 independently supplied expected hashes, reserves exactly the four preparation

@@ -633,6 +633,9 @@ enum Cmd {
     #[cfg(feature = "dflash-k0s-diagnostics")]
     #[command(hide = true)]
     DflashK0sLattice(dflash_k0s::DflashK0sArgs),
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[command(hide = true)]
+    DflashK0sInventory(dflash_k0s::DflashK0sInventoryArgs),
     /// **H5.5 production DFlash decode**: end-to-end DFlash speculative
     /// decode using the H5.3 packed_verify + H5.4 restore_after_partial_accept
     /// primitives. Greedy accept-prefix per plan §1.3.
@@ -1760,6 +1763,8 @@ mod stop_token_cli_tests {
         let parsed = Args::try_parse_from([
             "qwen-bench",
             "dflash-k0s-lattice",
+            "--attempt-id",
+            "attempt-1",
             "--model",
             "target.gguf",
             "--drafter",
@@ -1768,6 +1773,8 @@ mod stop_token_cli_tests {
             "hello",
             "--carry-token",
             "42",
+            "--continuation-carry-token",
+            "43",
             "--manifest",
             "manifest.json",
             "--manifest-sha256",
@@ -1791,15 +1798,53 @@ mod stop_token_cli_tests {
 
     #[cfg(feature = "dflash-k0s-diagnostics")]
     #[test]
-    fn feature_on_links_hidden_dflash_k0s_parser_and_single_bench_call_site() {
+    fn bench_parses_hidden_dflash_k0s_inventory_subcommand() {
+        let parsed = Args::try_parse_from([
+            "qwen-bench",
+            "dflash-k0s-inventory",
+            "--model",
+            "target.gguf",
+            "--drafter",
+            "draft.gguf",
+            "--prompt",
+            "hello",
+            "--carry-token",
+            "42",
+            "--inventory-spec",
+            "inventory-spec.json",
+            "--inventory-spec-sha256",
+            &"a".repeat(64),
+            "--output",
+            "inventory.json",
+        ])
+        .expect("K0-S inventory command");
+        assert!(matches!(parsed.cmd, Cmd::DflashK0sInventory(_)));
+    }
+
+    #[cfg(feature = "dflash-k0s-diagnostics")]
+    #[test]
+    fn feature_on_links_hidden_dflash_k0s_staged_call_sites() {
         assert!(std::mem::size_of::<dflash_k0s::DflashK0sArgs>() > 0);
         let producer = include_str!("dflash_k0s.rs");
+        let runtime = producer
+            .split("fn run_arm(")
+            .nth(1)
+            .unwrap()
+            .split("fn projection_parts(")
+            .next()
+            .unwrap();
         assert_eq!(
-            producer
-                .matches(&["draft_block_with_k0s", "_diagnostic("].concat())
+            runtime.matches("draft_block_with_k0s_observation(").count(),
+            2
+        );
+        assert_eq!(runtime.matches("extract_k0s_observation(").count(), 1);
+        assert_eq!(
+            runtime
+                .matches("finish_k0s_observation_without_extraction(")
                 .count(),
             1
         );
+        assert!(!runtime.contains(&["draft_block_with_k0s", "_diagnostic("].concat()));
         assert!(!include_str!("main.rs").contains(&["DFlash", "K0s"].concat()));
     }
 
@@ -1808,6 +1853,9 @@ mod stop_token_cli_tests {
     fn default_parser_has_no_dflash_k0s_lattice_subcommand() {
         let error = Args::try_parse_from(["qwen-bench", "dflash-k0s-lattice"])
             .expect_err("feature-off parser must reject K0-S");
+        assert!(error.to_string().contains("unrecognized subcommand"));
+        let error = Args::try_parse_from(["qwen-bench", "dflash-k0s-inventory"])
+            .expect_err("feature-off parser must reject K0-S inventory");
         assert!(error.to_string().contains("unrecognized subcommand"));
     }
 
@@ -1822,6 +1870,7 @@ mod stop_token_cli_tests {
                     || line.contains("filter(|line|")
                     || line.contains("let producer = include_str!")
                     || line.contains("feature_on_links_hidden")
+                    || line.contains("bench_parses_hidden_dflash_k0s")
                     || line.contains("k0s_reference")
                     || line.contains("k0s_lattice")
                     || line.trim_start().starts_with("#[cfg(feature"),
@@ -3092,6 +3141,10 @@ fn run() -> Result<()> {
         #[cfg(feature = "dflash-k0s-diagnostics")]
         Cmd::DflashK0sLattice(a) => {
             dflash_k0s::run(a, serde_json::to_value(recorded_build_identity())?)
+        }
+        #[cfg(feature = "dflash-k0s-diagnostics")]
+        Cmd::DflashK0sInventory(a) => {
+            dflash_k0s::run_inventory(a, serde_json::to_value(recorded_build_identity())?)
         }
         Cmd::Dflash(a) => run_dflash(a),
         Cmd::Tok(a) => run_tok(a),

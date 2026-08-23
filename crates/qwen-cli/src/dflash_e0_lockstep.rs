@@ -40,7 +40,8 @@ const DEVELOPMENT_SEMANTICS: &str = "token_major_serial_vs_multi_hidden_lockstep
 const HIDDEN_TRANSFER_SEMANTICS: &str =
     "poison_then_capture_exact_source_to_active_dflash_context_row";
 const BINDING_MANIFEST_SCHEMA: &str = "qwen.dflash_e0_binding_manifest";
-const BINDING_MANIFEST_VERSION: u64 = 1;
+const BINDING_MANIFEST_VERSION_V1: u64 = 1;
+const BINDING_MANIFEST_VERSION_V2: u64 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum ArmOrder {
@@ -164,6 +165,30 @@ fn load_binding_manifest(path: &std::path::Path) -> Result<(Value, Value)> {
     Ok((manifest, identity))
 }
 
+fn validate_binding_manifest_arm_order(
+    manifest: &Value,
+    version: u64,
+    arm_order: ArmOrder,
+) -> Result<()> {
+    let allowed = manifest["allowed_arm_orders"]
+        .as_array()
+        .context("E0 binding manifest arm orders must be an array")?;
+    ensure!(
+        allowed.len() == 2
+            && allowed[0] == "serial_then_capture"
+            && allowed[1] == "capture_then_serial"
+            && allowed.iter().any(|value| value == arm_order.as_str()),
+        "E0 binding manifest arm-order contract mismatch"
+    );
+    if version == BINDING_MANIFEST_VERSION_V2 {
+        ensure!(
+            manifest["required_arm_order"] == arm_order.as_str(),
+            "E0 binding manifest required arm order mismatch"
+        );
+    }
+    Ok(())
+}
+
 fn validate_binding_manifest_static(
     manifest: &Value,
     target_asset: &Value,
@@ -176,7 +201,17 @@ fn validate_binding_manifest_static(
     let object = manifest
         .as_object()
         .context("E0 binding manifest must be an object")?;
-    let expected_keys = [
+    let version = manifest["schema_version"]
+        .as_u64()
+        .context("E0 binding manifest schema version must be an integer")?;
+    ensure!(
+        matches!(
+            version,
+            BINDING_MANIFEST_VERSION_V1 | BINDING_MANIFEST_VERSION_V2
+        ),
+        "unsupported E0 binding manifest schema version"
+    );
+    let mut expected_keys = vec![
         "schema",
         "schema_version",
         "evidence_role",
@@ -191,15 +226,16 @@ fn validate_binding_manifest_static(
         "snapshot_abi",
         "allowed_arm_orders",
     ];
+    if version == BINDING_MANIFEST_VERSION_V2 {
+        expected_keys.push("required_arm_order");
+    }
     ensure!(
         object.len() == expected_keys.len()
             && expected_keys.iter().all(|key| object.contains_key(*key)),
-        "E0 binding manifest keys do not match schema-v1"
+        "E0 binding manifest keys do not match its schema version"
     );
     ensure!(
-        manifest["schema"] == BINDING_MANIFEST_SCHEMA
-            && manifest["schema_version"] == BINDING_MANIFEST_VERSION
-            && manifest["evidence_role"] == "development",
+        manifest["schema"] == BINDING_MANIFEST_SCHEMA && manifest["evidence_role"] == "development",
         "E0 binding manifest schema or authority is invalid"
     );
     ensure!(
@@ -236,16 +272,7 @@ fn validate_binding_manifest_static(
         manifest["target"] == target && manifest["drafter"] == drafter,
         "E0 binding manifest target/drafter geometry mismatch"
     );
-    let allowed = manifest["allowed_arm_orders"]
-        .as_array()
-        .context("E0 binding manifest arm orders must be an array")?;
-    ensure!(
-        allowed.len() == 2
-            && allowed[0] == "serial_then_capture"
-            && allowed[1] == "capture_then_serial"
-            && allowed.iter().any(|value| value == args.arm_order.as_str()),
-        "E0 binding manifest arm-order contract mismatch"
-    );
+    validate_binding_manifest_arm_order(manifest, version, args.arm_order)?;
     Ok(())
 }
 
@@ -2066,5 +2093,29 @@ mod tests {
         assert_eq!(bootstrap["paths"], run["paths"]);
         assert_eq!(bootstrap["paths"].as_object().unwrap().len(), 6);
         assert_eq!(bootstrap["paths"]["executable"], "/executable");
+    }
+
+    #[test]
+    fn binding_manifest_v2_requires_the_exact_arm_order() {
+        let manifest = json!({
+            "allowed_arm_orders": ["serial_then_capture", "capture_then_serial"],
+            "required_arm_order": "capture_then_serial",
+        });
+        assert!(
+            validate_binding_manifest_arm_order(
+                &manifest,
+                BINDING_MANIFEST_VERSION_V2,
+                ArmOrder::CaptureThenSerial,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_binding_manifest_arm_order(
+                &manifest,
+                BINDING_MANIFEST_VERSION_V2,
+                ArmOrder::SerialThenCapture,
+            )
+            .is_err()
+        );
     }
 }

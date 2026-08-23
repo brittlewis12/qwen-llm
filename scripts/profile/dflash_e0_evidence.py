@@ -32,7 +32,8 @@ SEMANTICS = "token_major_serial_vs_multi_hidden_lockstep_development_only"
 HIDDEN_SEMANTICS = "poison_then_capture_exact_source_to_active_dflash_context_row"
 AUTHORITY = "development_only_no_product_authority"
 BINDING_MANIFEST_SCHEMA = "qwen.dflash_e0_binding_manifest"
-BINDING_MANIFEST_VERSION = 1
+BINDING_MANIFEST_VERSION_V1 = 1
+BINDING_MANIFEST_VERSION_V2 = 2
 SCRIPT = Path(__file__).resolve()
 MASK64 = (1 << 64) - 1
 
@@ -815,28 +816,38 @@ def load_binding_manifest(common: dict[str, Any], run_id: str) -> dict[str, Any]
             f"run {run_id} binding manifest is invalid JSON: {error}"
         ) from error
     finite_json(manifest, f"run {run_id} binding manifest")
-    manifest = keys(
-        manifest,
-        {
-            "schema",
-            "schema_version",
-            "evidence_role",
-            "fixture_id",
-            "fixture_role",
-            "target_asset_sha256",
-            "drafter_asset_sha256",
-            "target_arm",
-            "drafter_arm",
-            "target",
-            "drafter",
-            "snapshot_abi",
-            "allowed_arm_orders",
-        },
-        f"run {run_id} binding manifest",
+    require(
+        isinstance(manifest, dict), f"run {run_id} binding manifest must be an object"
+    )
+    version = integer(
+        manifest.get("schema_version"),
+        f"run {run_id} binding manifest schema version",
+        1,
     )
     require(
+        version in {BINDING_MANIFEST_VERSION_V1, BINDING_MANIFEST_VERSION_V2},
+        f"run {run_id} binding-manifest schema version unsupported",
+    )
+    expected_keys = {
+        "schema",
+        "schema_version",
+        "evidence_role",
+        "fixture_id",
+        "fixture_role",
+        "target_asset_sha256",
+        "drafter_asset_sha256",
+        "target_arm",
+        "drafter_arm",
+        "target",
+        "drafter",
+        "snapshot_abi",
+        "allowed_arm_orders",
+    }
+    if version == BINDING_MANIFEST_VERSION_V2:
+        expected_keys.add("required_arm_order")
+    manifest = keys(manifest, expected_keys, f"run {run_id} binding manifest")
+    require(
         manifest["schema"] == BINDING_MANIFEST_SCHEMA
-        and manifest["schema_version"] == BINDING_MANIFEST_VERSION
         and manifest["evidence_role"] == "development",
         f"run {run_id} binding-manifest schema/authority mismatch",
     )
@@ -883,6 +894,11 @@ def load_binding_manifest(common: dict[str, Any], run_id: str) -> dict[str, Any]
         and common["config"]["arm_order"] in manifest["allowed_arm_orders"],
         f"run {run_id} binding-manifest arm-order mismatch",
     )
+    if version == BINDING_MANIFEST_VERSION_V2:
+        require(
+            manifest["required_arm_order"] == common["config"]["arm_order"],
+            f"run {run_id} binding-manifest required arm order mismatch",
+        )
     return manifest
 
 
@@ -2834,7 +2850,11 @@ def run_self_test() -> None:
     with tempfile.TemporaryDirectory(prefix="dflash-e0-self-test-") as directory:
         root = Path(directory)
 
-        def write(name: str, rows: list[dict[str, Any]]) -> Path:
+        def write(
+            name: str,
+            rows: list[dict[str, Any]],
+            required_arm_order: str | None = None,
+        ) -> Path:
             path = root / f"{name}.jsonl"
             output_identity = str(path.resolve())
             for row in rows:
@@ -2850,7 +2870,11 @@ def run_self_test() -> None:
                 identity = first_state["identity"]
                 manifest = {
                     "schema": BINDING_MANIFEST_SCHEMA,
-                    "schema_version": BINDING_MANIFEST_VERSION,
+                    "schema_version": (
+                        BINDING_MANIFEST_VERSION_V2
+                        if required_arm_order is not None
+                        else BINDING_MANIFEST_VERSION_V1
+                    ),
                     "evidence_role": "development",
                     "fixture_id": run_start["classification"]["fixture_id"],
                     "fixture_role": run_start["classification"]["fixture_role"],
@@ -2876,6 +2900,8 @@ def run_self_test() -> None:
                         "capture_then_serial",
                     ],
                 }
+                if required_arm_order is not None:
+                    manifest["required_arm_order"] = required_arm_order
                 manifest_data = (
                     json.dumps(manifest, separators=(",", ":"), sort_keys=True) + "\n"
                 ).encode()
@@ -2931,6 +2957,32 @@ def run_self_test() -> None:
             reduce([write("one", synthetic_rows("one", 1))])["runs"][0]["emitted"] == 1,
             "one-token boundary failed",
         )
+        require(
+            reduce(
+                [
+                    write(
+                        "binding-v2",
+                        synthetic_rows("binding-v2"),
+                        required_arm_order="serial_then_capture",
+                    )
+                ]
+            )["development_lockstep_passed"],
+            "schema-v2 exact arm-order binding failed",
+        )
+        try:
+            reduce(
+                [
+                    write(
+                        "binding-v2-wrong-order",
+                        synthetic_rows("binding-v2-wrong-order"),
+                        required_arm_order="capture_then_serial",
+                    )
+                ]
+            )
+        except EvidenceError:
+            pass
+        else:
+            raise AssertionError("schema-v2 wrong arm order was accepted")
         first = write("single-input-a", synthetic_rows("single-input-a"))
         second = write("single-input-b", synthetic_rows("single-input-b"))
         try:
